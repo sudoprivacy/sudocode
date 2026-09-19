@@ -3845,6 +3845,78 @@ async fn acp_subagent_events_cancel() {
     workspace.cleanup();
 }
 
+/// Cancelling an agent interrupts the tool it is running. The child here is
+/// inside a 30s `bash` call when the cancel lands; the agent must end with
+/// `cancelled` long before that command would have finished on its own.
+#[tokio::test]
+async fn acp_subagent_cancel_interrupts_the_running_tool() {
+    const PROMPT_END: Duration = Duration::from_secs(15);
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = subagent_events_workspace("subagent-cancel-tool", &server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    initialize_with_subagent_events(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+    let (during, _) =
+        prompt_scenario(&mut client, &session_id, "subagent_events_cancel_tool").await;
+    let (agent, _) = during
+        .iter()
+        .find_map(lifecycle_of)
+        .expect("the background agent started inside the turn");
+
+    // Wait until the child's bash call is under way (it may already have
+    // been reported inside the turn), then cancel.
+    let sleep_call = format!("{agent}:toolu_child_sleep");
+    let is_sleep_call = |n: &Value| {
+        n["params"]["update"]["sessionUpdate"] == "tool_call"
+            && n["params"]["update"]["toolCallId"] == sleep_call.as_str()
+    };
+    let mut seen = Vec::new();
+    let call = if let Some(call) = during.iter().find(|n| is_sleep_call(n)) {
+        call.clone()
+    } else {
+        let (before, call) = client
+            .recv_until(Duration::from_secs(30), is_sleep_call)
+            .await
+            .unwrap_or_else(|seen| panic!("the child never started its bash call: {seen:#?}"));
+        seen.extend(before);
+        seen.push(call.clone());
+        call
+    };
+    assert_eq!(
+        call["params"]["update"]["rawInput"]["command"],
+        mock_anthropic_service::SUBAGENT_SLEEP_COMMAND
+    );
+    let cancelled_at = tokio::time::Instant::now();
+    let (early, resp) = client
+        .send_request(
+            "_sudocode/agent/cancel",
+            json!({ "sessionId": session_id, "agentId": agent }),
+        )
+        .await;
+    assert_eq!(resp["result"], json!({ "cancelled": true }), "{resp}");
+    seen.extend(early);
+
+    let (after_cancel, finished) = client
+        .recv_until(PROMPT_END, |n| {
+            lifecycle_of(n).is_some_and(|(id, phase)| id == agent && phase == "finished")
+        })
+        .await
+        .unwrap_or_else(|seen| {
+            panic!("the agent did not end within {PROMPT_END:?} of the cancel — the running tool was not interrupted: {seen:#?}")
+        });
+    assert!(cancelled_at.elapsed() < PROMPT_END);
+    seen.extend(after_cancel);
+    seen.push(finished);
+    let all: Vec<Value> = during.iter().chain(&seen).cloned().collect();
+    let traces = assert_subagent_invariants(&all);
+    assert_finished(&traces[&agent], "cancelled", None);
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
 /// Without the opt-in there is no cancel surface for a session.
 #[tokio::test]
 async fn acp_subagent_cancel_needs_the_opt_in() {

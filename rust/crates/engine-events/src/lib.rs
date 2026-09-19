@@ -61,6 +61,14 @@ pub use runtime::{
     QuestionPromptRequest,
     // What the HTTP transport is doing while it retries a failed request.
     RetryEvent,
+    // Live sub-agent activity (text / thinking / tool calls / lifecycle of a
+    // spawned agent), forwarded only when the renderer asked for it.
+    SubagentEvent,
+    SubagentIdentity,
+    SubagentLifecycle,
+    SubagentPhase,
+    SubagentStreamRef,
+    SubagentUpdate,
     // Incremental + cumulative token usage (AssistantEvent::Usage,
     // TurnSummary::{turn_usage,session_usage}).
     TokenUsage,
@@ -210,6 +218,11 @@ pub enum EngineEvent {
     /// The active permission mode changed (in response to
     /// [`EngineCommand::SetPermissionMode`]).
     PermissionModeChanged { mode: PermissionMode },
+    /// What a spawned sub-agent is doing (was invisible: the child runtime
+    /// had no observer). Only emitted when the renderer attached a
+    /// `SubagentRelay` to its observer; may arrive after the spawning turn
+    /// ended when the agent runs in the background.
+    Subagent(SubagentEvent),
     /// The turn finished (or was cancelled). Absorbs `runtime::TurnSummary`.
     TurnComplete(TurnComplete),
     /// A turn or command failed. `message` is renderer-facing text.

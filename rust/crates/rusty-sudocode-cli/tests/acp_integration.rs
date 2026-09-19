@@ -3539,6 +3539,13 @@ fn dump_subagent_events(label: &str, notifs: &[Value]) {
 ///
 /// Regenerate (only when an off-path change is intended) with
 /// `SUDOCODE_UPDATE_ACP_FIXTURES=1`.
+///
+/// Unix-only: the fixtures hold Unix paths, and on Windows the workspace
+/// path appears JSON-escaped, so the byte comparison cannot line up there.
+/// The Windows run still checks the off path through
+/// `acp_subagent_delegation_deterministic` (no `_meta` without the opt-in)
+/// and `scenario_initialize` (no `subagentEvents` advertised).
+#[cfg(unix)]
 #[tokio::test]
 async fn acp_subagent_events_off_matches_pre_contract_output() {
     let server = MockAnthropicService::spawn()
@@ -3607,6 +3614,7 @@ async fn acp_subagent_events_off_matches_pre_contract_output() {
 }
 
 /// Replace the number following `key` with `<N>`.
+#[cfg(unix)]
 fn normalize_number_after(line: &str, key: &str) -> String {
     let Some(at) = line.find(key) else {
         return line.to_string();
@@ -3620,6 +3628,7 @@ fn normalize_number_after(line: &str, key: &str) -> String {
 }
 
 /// Replace every run of ten or more ASCII digits with `<N>`.
+#[cfg(unix)]
 fn normalize_digit_runs(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut run = String::new();
@@ -3848,6 +3857,9 @@ async fn acp_subagent_events_cancel() {
 /// Cancelling an agent interrupts the tool it is running. The child here is
 /// inside a 30s `bash` call when the cancel lands; the agent must end with
 /// `cancelled` long before that command would have finished on its own.
+///
+/// Unix-only: the child's tool is a `sh -c` subprocess (`sleep 30`).
+#[cfg(unix)]
 #[tokio::test]
 async fn acp_subagent_cancel_interrupts_the_running_tool() {
     const PROMPT_END: Duration = Duration::from_secs(15);

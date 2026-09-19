@@ -737,6 +737,46 @@ pub(crate) fn slash_command_holds_cwd_lease(prompt: &str) -> bool {
 /// the turn's stop reason (`Cancelled` only when `/compact` honoured a
 /// `session/cancel`). Ports `AcpSdkDelegate::handle_slash_command`, now driving
 /// the seam (SessionEngine) + the shared `commands::reports` formatters.
+/// `!<command>` bash mode over ACP: run the command in the session's
+/// workspace, record the exchange in the transcript exactly as the REPL does
+/// (see [`commands::bash_mode`]), and return the plain-text rendering the
+/// client shows. No model turn runs.
+pub(crate) fn run_bang_command(
+    engine: &SessionEngine,
+    command: &str,
+) -> Result<String, crate::AcpError> {
+    let (text, blocks) = match commands::bash_mode::run(command) {
+        Ok(output) => (
+            commands::bash_mode::render_plain(
+                command,
+                &output.stdout,
+                &output.stderr,
+                output.return_code_interpretation.as_deref(),
+            ),
+            commands::bash_mode::history_blocks(command, &output.stdout, &output.stderr),
+        ),
+        Err(error) => {
+            let error = error.to_string();
+            (
+                commands::bash_mode::render_plain(
+                    command,
+                    "",
+                    &format!("Command failed: {error}"),
+                    None,
+                ),
+                commands::bash_mode::failure_blocks(command, &error),
+            )
+        }
+    };
+    engine.push_user_blocks(blocks).map_err(|e| {
+        crate::AcpError::internal(format!("failed to record ! command in the transcript: {e}"))
+    })?;
+    engine
+        .persist()
+        .map_err(|e| crate::AcpError::internal(format!("failed to persist session: {e}")))?;
+    Ok(text)
+}
+
 pub(crate) fn handle_slash_command(
     engine: &SessionEngine,
     config: &SdkAcpConfig,

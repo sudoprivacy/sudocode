@@ -12,6 +12,7 @@
     clippy::unnecessary_wraps,
     clippy::unused_self
 )]
+mod bash_mode;
 mod cancel;
 mod cli;
 mod init;
@@ -2170,6 +2171,12 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                     cli.persist_session()?;
                     break;
                 }
+                // `!<cmd>` bash mode: run it here, no model turn.
+                if let Some(command) = bash_mode::parse_bang_command(&trimmed) {
+                    println!("{}", bash_mode::render_input_line(command));
+                    cli.run_bash_mode(command);
+                    continue;
+                }
                 match SlashCommand::parse(&trimmed) {
                     Ok(Some(command)) => {
                         match cli.handle_repl_command(command) {
@@ -3163,6 +3170,26 @@ fn run_repl_iocraft_dispatch(
                             repl_output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
                         }
                         break;
+                    }
+
+                    // `!<cmd>` bash mode: run it here, no model turn. The
+                    // runner thread holds the `LiveCli` mutex for the whole
+                    // turn, so during a turn the line is declined rather than
+                    // blocking the dispatch loop behind the lock. The echo is
+                    // the coordinator's job (see `echo_submit_to_scrollback`),
+                    // in bash-mode dress, and only when the line actually runs.
+                    if let Some(command) = bash_mode::parse_bang_command(&text) {
+                        if turn_active {
+                            repl_output.println(&format!(
+                                "{DIM}(a turn is running; wait for it to finish before running ! commands){RESET}"
+                            ));
+                        } else {
+                            repl_output.println(&bash_mode::render_input_line(command));
+                            let mut cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                            cli_lock.run_bash_mode(command);
+                            repl_output.println("");
+                        }
+                        continue;
                     }
 
                     // Try slash command dispatch.
@@ -4699,6 +4726,53 @@ impl LiveCli {
 
     fn persist_session(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.lifecycle.persist().map_err(Into::into)
+    }
+
+    /// `!<command>` bash mode. Runs the command in the user's shell, prints
+    /// the result under the echoed input, and appends the exchange to the
+    /// transcript as user messages (CC's `<bash-input>` / `<bash-stdout>` /
+    /// `<bash-stderr>` shape) so the model sees it on the next prompt. No
+    /// model turn is started — the human ran the command, not the agent.
+    fn run_bash_mode(&mut self, command: &str) {
+        self.record_prompt_history(&format!("! {command}"));
+        let messages = match bash_mode::run(command) {
+            Ok(output) => {
+                self.out_println(bash_mode::render_output_block(
+                    &output.stdout,
+                    &output.stderr,
+                    output.return_code_interpretation.as_deref(),
+                ));
+                bash_mode::history_blocks(command, &output.stdout, &output.stderr)
+            }
+            Err(error) => {
+                let error = error.to_string();
+                self.out_println(bash_mode::render_output_block("", &error, None));
+                bash_mode::failure_blocks(command, &error)
+            }
+        };
+        let messages = bash_mode::messages_from_blocks(messages);
+        let mut pending = Some(messages);
+        let mut push_error: Option<String> = None;
+        self.lifecycle.with_session_mut(&mut |session| {
+            if let Some(messages) = pending.take() {
+                for message in messages {
+                    if let Err(error) = session.push_message(message) {
+                        push_error = Some(error.to_string());
+                        break;
+                    }
+                }
+            }
+        });
+        if let Some(error) = push_error {
+            self.out_println(format!(
+                "{}failed to record ! command in the transcript: {error}{}",
+                ansi_fg(theme().error),
+                RESET
+            ));
+        }
+        if let Err(error) = self.persist_session() {
+            self.out_println(format!("{}{error}{}", ansi_fg(theme().error), RESET));
+        }
     }
 
     fn print_status(&self) {

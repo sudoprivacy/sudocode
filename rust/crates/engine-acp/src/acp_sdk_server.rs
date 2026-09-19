@@ -1539,6 +1539,12 @@ pub(crate) async fn run_acp_on_transport(
                         let is_slash_command = prompt_text.starts_with('/');
                         let holds_cwd_lease = is_slash_command
                             && session_ops::slash_command_holds_cwd_lease(&prompt_text);
+                        // `!<cmd>` bash mode: runs in the session workspace, no
+                        // model turn — same contract as the REPL. Hosts may
+                        // prepend `<system-reminder>` notes to the user's text;
+                        // those are skipped before looking for the `!`.
+                        let bang_command =
+                            commands::bash_mode::parse_bang_prompt(&prompt_text).map(str::to_string);
 
                         // Permission-prompt + question bridge channels (ACP
                         // round-trips) and the engine event → notification bridge.
@@ -1610,6 +1616,13 @@ pub(crate) async fn run_acp_on_transport(
                             let turn_cwd = session_cwd_blocking
                                 .clone()
                                 .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+                            if let Some(command) = bang_command {
+                                let text =
+                                    session_ops::run_bang_command(&engine_blocking, &command)?;
+                                let _ = evt_tx.send(EngineEvent::TextDelta { text });
+                                return Ok::<_, AcpError>((AcpStopReason::EndTurn, None));
+                            }
 
                             if is_slash_command {
                                 let mut observer = ObserverAdapter::new(evt_tx.clone());

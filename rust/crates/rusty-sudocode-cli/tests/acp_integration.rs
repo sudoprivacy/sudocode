@@ -1394,6 +1394,111 @@ async fn acp_stdio_exits_on_stdin_close() {
 /// exit, then in a FRESH process B loads the same session id and runs another
 /// turn — asserting the upstream model request still carries process A's
 /// message (proving history was restored, not started fresh).
+/// `!<command>` over ACP: the prompt runs in the session workspace, the
+/// output streams back as agent text, no model request is made, and the
+/// exchange is persisted as `<bash-input>` / `<bash-stdout>` user messages
+/// that the next real turn carries to the model.
+#[tokio::test]
+async fn acp_stdio_bang_prompt_runs_shell_without_model_turn() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-bang");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+
+    let before = server.captured_requests().await.len();
+    let (notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": "! printf 'acp-bang-marker-%s' 7" }]
+            }),
+        )
+        .await;
+    assert_eq!(
+        resp["result"]["stopReason"].as_str(),
+        Some("end_turn"),
+        "! prompt should end the turn normally: {resp}"
+    );
+    let text = notifs
+        .iter()
+        .filter(|m| {
+            m["params"]["sessionId"].as_str() == Some(&session_id)
+                && m["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk")
+        })
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("$ printf 'acp-bang-marker-%s' 7") && text.contains("acp-bang-marker-7"),
+        "! output should stream back as agent text: {text:?}"
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        before,
+        "a ! prompt must not call the model"
+    );
+
+    let transcript = read_session_transcript(&workspace.root, &session_id);
+    assert!(
+        transcript.contains("<bash-input>printf 'acp-bang-marker-%s' 7</bash-input>"),
+        "transcript should record the bash input: {transcript}"
+    );
+    assert!(
+        transcript.contains("<bash-stdout>acp-bang-marker-7</bash-stdout>"),
+        "transcript should record the bash output: {transcript}"
+    );
+
+    // A host that prepends `<system-reminder>` notes to the user's text (apeiron
+    // does, on every prompt) still gets bash mode: the reminder is skipped.
+    let (notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": "<system-reminder>\nworkspace note\n</system-reminder>\n\n! printf 'acp-bang-after-note'" }]
+            }),
+        )
+        .await;
+    assert_eq!(
+        resp["result"]["stopReason"].as_str(),
+        Some("end_turn"),
+        "{resp}"
+    );
+    let text = notifs
+        .iter()
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("acp-bang-after-note"),
+        "reminder-prefixed ! prompt should run the command: {text:?}"
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        before,
+        "a reminder-prefixed ! prompt must not call the model"
+    );
+
+    // The next real turn carries the exchange to the model.
+    run_marked_turn(&mut client, &session_id, "after-bang").await;
+    let requests = server.captured_requests().await;
+    let body = &requests
+        .last()
+        .expect("the marked turn should reach the mock")
+        .raw_body;
+    assert!(
+        body.contains("<bash-input>") && body.contains("acp-bang-marker-7"),
+        "the model request should carry the ! exchange: {body}"
+    );
+
+    client.shutdown().await;
+}
+
 #[tokio::test]
 async fn acp_stdio_resume_restores_history_across_reconnect() {
     const HISTORY_MARKER: &str = "resume-marker-7f3a91c2";

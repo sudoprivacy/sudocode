@@ -30,6 +30,7 @@ use engine_core::{
 };
 use render_engine::{EngineEventRenderer, RenderOutcome};
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
@@ -38,6 +39,7 @@ use std::net::TcpListener;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -2082,8 +2084,15 @@ fn run_repl(
 /// sessions identically: banner → existing messages (if any) → prompt.
 fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     cli.is_repl = true;
-    let mut editor =
-        input::LineEditor::new("❯ ", cli.repl_completion_candidates().unwrap_or_default());
+    let editor = Rc::new(RefCell::new(input::LineEditor::new(
+        "❯ ",
+        cli.repl_completion_candidates().unwrap_or_default(),
+    )));
+    // Share the editor so mid-turn dialogs (write_plan approval) read their
+    // choice through this same rustyline instance — one owner of the terminal's
+    // raw-mode state. Thread-local because the sync REPL turn runs on this
+    // thread; `LiveCli` must stay `Send` for the iocraft path.
+    SYNC_REPL_EDITOR.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&editor)));
     println!("{}", cli.startup_banner());
 
     // The A2A receiver lives on the coordinator loop, and that loop exists only
@@ -2147,7 +2156,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !text.trim().is_empty() {
-                    editor.push_history(text);
+                    editor.borrow_mut().push_history(text);
                 }
             }
         }
@@ -2157,9 +2166,12 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     let session_start = Instant::now();
 
     loop {
-        editor.set_completions(cli.repl_completion_candidates().unwrap_or_default());
+        editor
+            .borrow_mut()
+            .set_completions(cli.repl_completion_candidates().unwrap_or_default());
         input_chrome::print_before_prompt(cli.lifecycle.current_permission_mode().as_str());
-        match editor.read_line()? {
+        let read = editor.borrow_mut().read_line()?;
+        match read {
             input::ReadOutcome::Submit(input) => {
                 // Clear the pre-printed bottom sep + footer. After
                 // readline, cursor is at the start of the bottom sep
@@ -2225,6 +2237,10 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    // Release the shared editor from the thread-local before this thread's frame
+    // unwinds.
+    SYNC_REPL_EDITOR.with(|cell| *cell.borrow_mut() = None);
 
     // Record token usage and session ended event
     let duration_ms = session_start.elapsed().as_millis() as u64;
@@ -3593,6 +3609,41 @@ impl runtime::QuestionPrompter for NoopQuestionPrompter {
 /// both cross the seam as `QuestionRequest`s.
 struct CliQuestionPrompter;
 
+thread_local! {
+    /// The sync REPL's line editor for the duration of the loop. Set by
+    /// `run_repl_loop` so a mid-turn dialog (write_plan approval) reads its
+    /// choice through the SAME rustyline editor that owns the terminal —
+    /// avoiding a throwaway second editor that perturbed terminal state on drop.
+    /// Thread-local (not a `LiveCli` field) because `LiveCli` must stay `Send`
+    /// for the iocraft path, while the sync REPL turn runs on the same thread
+    /// that owns the editor.
+    static SYNC_REPL_EDITOR: RefCell<Option<Rc<RefCell<input::LineEditor>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Read one choice line through the sync REPL's shared editor, so mid-turn
+/// prompts (write_plan approval, tool-permission y/N) never spawn a second
+/// terminal owner — a throwaway `rustyline::Editor` / `dialoguer::Select`
+/// toggles raw-mode on drop underneath the main editor and perturbs its re-arm.
+/// Falls back to a scoped editor only outside the sync REPL (e.g. iocraft path
+/// or tests), where there is no shared editor to collide with.
+#[inline]
+fn prompt_choice_via_shared_editor(prompt: &str) -> Result<String, String> {
+    let shared = SYNC_REPL_EDITOR.with(|cell| cell.borrow().as_ref().map(Rc::clone));
+    if let Some(editor) = shared {
+        editor
+            .borrow_mut()
+            .prompt_choice(prompt)
+            .map_err(|e| e.to_string())
+    } else {
+        let mut editor = rustyline::DefaultEditor::new().map_err(|e| e.to_string())?;
+        editor
+            .readline(prompt)
+            .map(|line| line.trim().to_string())
+            .map_err(|e| e.to_string())
+    }
+}
+
 impl runtime::QuestionPrompter for CliQuestionPrompter {
     fn ask(
         &mut self,
@@ -3616,11 +3667,8 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
             for (idx, option) in field.options.iter().enumerate() {
                 println!("  [{}] {}", idx + 1, option.label);
             }
-            let mut editor = rustyline::DefaultEditor::new().map_err(|e| e.to_string())?;
-            let line = editor
-                .readline("Your choice: ")
-                .map_err(|e| e.to_string())?;
-            let trimmed = line.trim();
+            let trimmed = prompt_choice_via_shared_editor("Your choice: ")?;
+            let trimmed = trimmed.as_str();
             // A 1-indexed digit picks the option's value; otherwise the raw text
             // (custom-input fields).
             let value = trimmed
@@ -5958,21 +6006,27 @@ impl runtime::PermissionPrompter for CliPermissionPrompter {
             };
         }
 
-        let items = &["Allow once", "Deny"];
-        let selection = Select::new()
-            .with_prompt("Approve this tool call?")
-            .items(items)
-            .default(0)
-            .interact_opt();
-
-        match selection {
-            Ok(Some(0)) => runtime::PermissionPromptDecision::Allow,
-            Ok(Some(_) | None) => runtime::PermissionPromptDecision::Deny {
-                reason: format!(
-                    "tool '{}' denied by user approval prompt",
-                    request.tool_name
-                ),
-            },
+        // Interactive approval: read y/N through the shared REPL editor so this
+        // mid-turn prompt does not spawn a second terminal owner (dialoguer's
+        // Select opened its own crossterm raw session, the same perturbation the
+        // write_plan dialog had). "1"/allow-ish answers allow; anything else denies.
+        println!("  [1] Allow once");
+        println!("  [2] Deny");
+        let deny = || runtime::PermissionPromptDecision::Deny {
+            reason: format!(
+                "tool '{}' denied by user approval prompt",
+                request.tool_name
+            ),
+        };
+        match prompt_choice_via_shared_editor("Approve this tool call? [1] Allow / [2] Deny: ") {
+            Ok(answer) => {
+                let a = answer.trim().to_ascii_lowercase();
+                if matches!(a.as_str(), "1" | "y" | "yes" | "allow") {
+                    runtime::PermissionPromptDecision::Allow
+                } else {
+                    deny()
+                }
+            }
             Err(error) => runtime::PermissionPromptDecision::Deny {
                 reason: format!("permission approval failed: {error}"),
             },

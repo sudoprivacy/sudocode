@@ -32,7 +32,7 @@ use agent_client_protocol_schema::{
     StopReason, TextContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields,
     UnstructuredCommandInput, Usage,
 };
-use engine_core::{AuthMode, EngineDelegate, EngineEvent, ObserverAdapter};
+use engine_core::{AuthMode, EngineDelegate, EngineEvent, ObserverAdapter, SubagentRelay};
 use engine_host::config::AllowedToolSet;
 use engine_host::{SessionEngine, SessionLifecycle};
 use runtime::config::{ConfigSource, McpServerConfig, McpStdioServerConfig, ScopedMcpServerConfig};
@@ -46,7 +46,8 @@ use runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 
 use crate::session_ops;
@@ -189,6 +190,138 @@ pub(crate) struct SetPermissionModeRequest {
 /// Response to a permission mode change.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
 pub(crate) struct SetPermissionModeResponse {}
+
+// ---------------------------------------------------------------------------
+// Custom extension: _sudocode/agent/cancel (sub-agent events contract)
+// ---------------------------------------------------------------------------
+
+/// Stop one running sub-agent of a session that opted into sub-agent events.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcRequest)]
+#[request(method = "_sudocode/agent/cancel", response = CancelSubagentResponse)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CancelSubagentRequest {
+    pub session_id: String,
+    pub agent_id: String,
+}
+
+/// `cancelled: false` means the agent had already finished.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
+pub(crate) struct CancelSubagentResponse {
+    pub cancelled: bool,
+}
+
+/// `_meta.sudocode` key a client sets in `clientCapabilities` (and scode
+/// echoes in the `initialize` result) to opt into sub-agent events.
+pub const SUBAGENT_EVENTS_META_KEY: &str = "subagentEvents";
+/// The contract version this build speaks.
+const SUBAGENT_EVENTS_VERSION: u64 = 1;
+
+/// The sub-agent events version a client asked for in
+/// `clientCapabilities._meta.sudocode.subagentEvents`, capped at ours.
+/// Anything malformed is "not asked": an extension field never fails
+/// `initialize`.
+fn subagent_events_version(meta: Option<&agent_client_protocol_schema::Meta>) -> Option<u64> {
+    let version = meta?
+        .get("sudocode")?
+        .get(SUBAGENT_EVENTS_META_KEY)?
+        .get("version")?
+        .as_u64()?;
+    (version >= 1).then_some(version.min(SUBAGENT_EVENTS_VERSION))
+}
+
+/// One session's sub-agent event route, present when the connection that
+/// created it opted in.
+///
+/// Sub-agent events reach the client two ways. While a turn of this session
+/// runs they ride that turn's event channel (the relay is attached to it), so
+/// they stay in order with the parent's own updates and land before the
+/// `session/prompt` response. Otherwise — a background agent still working
+/// after its turn ended — they come through the relay's session channel and go
+/// out on the connection that last prompted this session.
+pub struct SessionSubagents {
+    relay: SubagentRelay,
+    connection: Mutex<ConnectionTo<Client>>,
+    /// Agents this session has reported `started` for: what
+    /// `_sudocode/agent/cancel` may name.
+    agents: Mutex<HashSet<String>>,
+}
+
+impl SessionSubagents {
+    /// Must run inside the ACP server's Tokio runtime (it spawns the task that
+    /// writes background events to the connection).
+    fn start(session_id: String, connection: ConnectionTo<Client>) -> Arc<Self> {
+        let (relay, events) = SubagentRelay::new();
+        let subagents = Arc::new(Self {
+            relay,
+            connection: Mutex::new(connection),
+            agents: Mutex::new(HashSet::new()),
+        });
+        // Weak on both legs: the relay's session channel stays open while any
+        // spawned agent is alive, and a closed session must neither be kept
+        // alive by it nor keep talking to the client.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SessionNotification>();
+        let observed = Arc::downgrade(&subagents);
+        std::thread::Builder::new()
+            .name("acp-subagent-events".into())
+            .spawn(move || {
+                while let Ok(event) = events.recv() {
+                    let Some(subagents) = observed.upgrade() else {
+                        continue;
+                    };
+                    subagents.observe(&event);
+                    if let Some(notification) =
+                        session_ops::engine_event_to_session_update(&session_id, event, true)
+                    {
+                        if tx.send(notification).is_err() {
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("spawn acp-subagent-events thread");
+        let sender = Arc::downgrade(&subagents);
+        tokio::spawn(async move {
+            while let Some(notification) = rx.recv().await {
+                let Some(subagents) = sender.upgrade() else {
+                    continue;
+                };
+                let connection = subagents.connection();
+                let _ = connection.send_notification(notification);
+            }
+        });
+        subagents
+    }
+
+    fn connection(&self) -> ConnectionTo<Client> {
+        self.connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_connection(&self, connection: ConnectionTo<Client>) {
+        *self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = connection;
+    }
+
+    fn observe(&self, event: &EngineEvent) {
+        if let Some(agent_id) = session_ops::started_agent_id(event) {
+            self.agents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(agent_id.to_string());
+        }
+    }
+
+    fn knows(&self, agent_id: &str) -> bool {
+        self.agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(agent_id)
+    }
+}
 
 /// Convert the ACP `mcp_servers` carried by `session/new` / `session/load`
 /// into scode-internal scoped MCP configs, keyed by server name. The session
@@ -418,7 +551,7 @@ fn available_commands_notification(
 ///
 /// See [`runtime::image_registry::capability`] for the source of truth; design
 /// rationale in `docs/design/image-handling-non-user-facing.html`.
-fn initialize_meta() -> Map<String, serde_json::Value> {
+fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Value> {
     let cap = runtime::image_registry::capability();
     let mut sudocode_ns = Map::new();
     sudocode_ns.insert(
@@ -444,6 +577,14 @@ fn initialize_meta() -> Map<String, serde_json::Value> {
     // ("enabled" | "disabled"), the per-session memory switch (see
     // `memory_mode_from_meta`).
     sudocode_ns.insert("sessionMemory".to_string(), json!(true));
+    // Only echoed to a client that asked: advertising it unasked would
+    // change the `initialize` result every other client sees.
+    if let Some(version) = subagent_events {
+        sudocode_ns.insert(
+            SUBAGENT_EVENTS_META_KEY.to_string(),
+            json!({ "version": version, "cancel": true }),
+        );
+    }
     let mut meta = Map::new();
     meta.insert("sudocode".to_string(), json!(sudocode_ns));
     meta
@@ -789,6 +930,8 @@ struct SessionEntry {
     cwd: PathBuf,
     /// When the session was registered — for the `session/close` duration metric.
     started_at: std::time::Instant,
+    /// Present when the client opted into sub-agent events.
+    subagents: Option<Arc<SessionSubagents>>,
 }
 
 /// Async guard for a session lane; drop it to let the next request on the
@@ -805,7 +948,13 @@ impl SessionRegistry {
     /// Register (or re-register) a session's engine after `session/new` /
     /// `session/load`. The abort signal is taken from the engine so
     /// `session/cancel` needs no session lock.
-    pub fn register(&self, session_id: String, engine: Arc<SessionEngine>, cwd: PathBuf) {
+    pub fn register(
+        &self,
+        session_id: String,
+        engine: Arc<SessionEngine>,
+        cwd: PathBuf,
+        subagents: Option<Arc<SessionSubagents>>,
+    ) {
         let mut sessions = self.lock_sessions();
         // A reload of a session that is already live keeps its lane so that
         // requests already queued behind it stay ordered.
@@ -822,8 +971,17 @@ impl SessionRegistry {
                 lane,
                 cwd,
                 started_at: std::time::Instant::now(),
+                subagents,
             },
         );
+    }
+
+    /// The session's sub-agent event route, if its client opted in.
+    #[must_use]
+    pub fn subagents(&self, session_id: &str) -> Option<Arc<SessionSubagents>> {
+        self.lock_sessions()
+            .get(session_id)
+            .and_then(|e| e.subagents.clone())
     }
 
     /// The engine for a session; `None` for an unknown sessionId.
@@ -1195,6 +1353,9 @@ pub(crate) async fn run_acp_on_transport(
     transport: impl ConnectTo<Agent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let agent_version = config.agent_version.clone();
+    // Per connection: whether this client opted into sub-agent events at
+    // `initialize`. Sessions it creates or loads get a sub-agent route.
+    let subagent_events = Arc::new(AtomicBool::new(false));
 
     Agent
         .builder()
@@ -1203,9 +1364,13 @@ pub(crate) async fn run_acp_on_transport(
         .on_receive_request(
             {
                 let version = agent_version.clone();
+                let subagent_events = Arc::clone(&subagent_events);
                 async move |req: InitializeRequest,
                             responder: Responder<InitializeResponse>,
                             _cx: ConnectionTo<Client>| {
+                    let subagent_version =
+                        subagent_events_version(req.client_capabilities.meta.as_ref());
+                    subagent_events.store(subagent_version.is_some(), Ordering::SeqCst);
                     let resp = InitializeResponse::new(req.protocol_version)
                         .agent_info(Implementation::new("scode", &version))
                         .agent_capabilities(
@@ -1218,7 +1383,7 @@ pub(crate) async fn run_acp_on_transport(
                                         .list(SessionListCapabilities::new()),
                                 ),
                         )
-                        .meta(initialize_meta());
+                        .meta(initialize_meta(subagent_version));
                     responder.respond(resp)?;
                     Ok(())
                 }
@@ -1230,6 +1395,7 @@ pub(crate) async fn run_acp_on_transport(
             {
                 let registry = Arc::clone(&registry);
                 let config = config.clone();
+                let subagent_events = Arc::clone(&subagent_events);
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             cx: ConnectionTo<Client>| {
@@ -1259,6 +1425,7 @@ pub(crate) async fn run_acp_on_transport(
                     let config = config.clone();
                     let commands = session_ops::available_commands();
                     let cx_notify = cx.clone();
+                    let subagent_events = subagent_events.load(Ordering::SeqCst);
                     cx.spawn(async move {
                         let lease = registry.cwd_lease();
                         let build_registry = Arc::clone(&registry);
@@ -1300,7 +1467,10 @@ pub(crate) async fn run_acp_on_transport(
 
                         match result {
                             Ok((engine, session_id, cwd)) => {
-                                registry.register(session_id.clone(), engine, cwd);
+                                let subagents = subagent_events.then(|| {
+                                    SessionSubagents::start(session_id.clone(), cx_notify.clone())
+                                });
+                                registry.register(session_id.clone(), engine, cwd, subagents);
                                 responder.respond(NewSessionResponse::new(session_id.clone()))?;
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
@@ -1362,6 +1532,10 @@ pub(crate) async fn run_acp_on_transport(
                         };
                         let session_cwd = registry.cwd(&sid);
                         let cwd_lease = registry.cwd_lease();
+                        let subagents = registry.subagents(&sid);
+                        if let Some(subagents) = &subagents {
+                            subagents.set_connection(cx_inner.clone());
+                        }
                         let is_slash_command = prompt_text.starts_with('/');
                         let holds_cwd_lease = is_slash_command
                             && session_ops::slash_command_holds_cwd_lease(&prompt_text);
@@ -1389,14 +1563,19 @@ pub(crate) async fn run_acp_on_transport(
                         // pattern the in-process pump uses for its command channel.
                         let (evt_tx, evt_rx) = std_mpsc::channel::<EngineEvent>();
                         let sid_forward = sid.clone();
+                        let subagents_forward = subagents.clone();
                         std::thread::Builder::new()
                             .name("acp-engine-events".into())
                             .spawn(move || {
                                 while let Ok(event) = evt_rx.recv() {
+                                    if let Some(subagents) = &subagents_forward {
+                                        subagents.observe(&event);
+                                    }
                                     if let Some(notification) =
                                         session_ops::engine_event_to_session_update(
                                             &sid_forward,
                                             event,
+                                            subagents_forward.is_some(),
                                         )
                                     {
                                         if notif_tx.send(notification).is_err() {
@@ -1458,7 +1637,17 @@ pub(crate) async fn run_acp_on_transport(
                             engine_blocking.set_question_prompter(Box::new(AcpQuestionBridge {
                                 tx: question_tx,
                             }));
-                            let mut observer = ObserverAdapter::new(evt_tx);
+                            // While this turn runs, sub-agent events ride its
+                            // channel; the guard hands them back to the session
+                            // route when the turn ends.
+                            let _subagent_turn = subagents
+                                .as_ref()
+                                .map(|subagents| subagents.relay.attach_turn(evt_tx.clone()));
+                            let mut observer = match &subagents {
+                                Some(subagents) => ObserverAdapter::new(evt_tx)
+                                    .with_subagent_relay(subagents.relay.clone()),
+                                None => ObserverAdapter::new(evt_tx),
+                            };
                             let mut bridge = AcpPermissionBridge { tx: bridge_tx };
                             let blocks = vec![runtime::ContentBlock::Text {
                                 text: prompt_blocking,
@@ -1777,6 +1966,7 @@ pub(crate) async fn run_acp_on_transport(
             {
                 let registry = Arc::clone(&registry);
                 let config = config.clone();
+                let subagent_events = Arc::clone(&subagent_events);
                 async move |req: LoadSessionRequest,
                             responder: Responder<LoadSessionResponse>,
                             cx: ConnectionTo<Client>| {
@@ -1801,6 +1991,7 @@ pub(crate) async fn run_acp_on_transport(
                     let cx_notify = cx.clone();
                     let sid = req.session_id.to_string();
                     let cwd = req.cwd;
+                    let subagent_events = subagent_events.load(Ordering::SeqCst);
                     cx.spawn(async move {
                         let _lane = registry.enter_lane(&sid).await;
                         let lease = registry.cwd_lease();
@@ -1827,7 +2018,18 @@ pub(crate) async fn run_acp_on_transport(
 
                         match result {
                             Ok((engine, session_id, cwd)) => {
-                                registry.register(session_id.clone(), engine, cwd);
+                                // A reload of a live session keeps its route, so
+                                // background agents it already spawned still
+                                // reach the client.
+                                let subagents = subagent_events.then(|| {
+                                    registry.subagents(&session_id).unwrap_or_else(|| {
+                                        SessionSubagents::start(
+                                            session_id.clone(),
+                                            cx_notify.clone(),
+                                        )
+                                    })
+                                });
+                                registry.register(session_id.clone(), engine, cwd, subagents);
                                 responder.respond(LoadSessionResponse::new())?;
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
@@ -1888,6 +2090,38 @@ pub(crate) async fn run_acp_on_transport(
                         }
                         Ok(())
                     })?;
+                    Ok(())
+                }
+            },
+            on_receive_request!(),
+        )
+        // --- _sudocode/agent/cancel (sub-agent events extension) ---
+        .on_receive_request(
+            {
+                let registry = Arc::clone(&registry);
+                async move |req: CancelSubagentRequest,
+                            responder: Responder<CancelSubagentResponse>,
+                            _cx: ConnectionTo<Client>| {
+                    let Some(subagents) = registry.subagents(&req.session_id) else {
+                        responder.respond_with_error(acp_error_to_sdk(&AcpError::invalid_params(
+                            format!(
+                                "session {} is unknown or did not opt into sub-agent events",
+                                req.session_id
+                            ),
+                        )))?;
+                        return Ok(());
+                    };
+                    if !subagents.knows(&req.agent_id) {
+                        responder.respond_with_error(acp_error_to_sdk(&AcpError::invalid_params(
+                            format!(
+                                "agent {} was not spawned in session {}",
+                                req.agent_id, req.session_id
+                            ),
+                        )))?;
+                        return Ok(());
+                    }
+                    let cancelled = engine_host::abort_subagent(&req.agent_id);
+                    responder.respond(CancelSubagentResponse { cancelled })?;
                     Ok(())
                 }
             },

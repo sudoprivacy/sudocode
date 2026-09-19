@@ -25,7 +25,10 @@ use commands::{
     acp_slash_commands, format_acp_unsupported_slash_command, render_acp_slash_command_help,
     SlashCommand,
 };
-use engine_core::engine_events::CompactionStatus;
+use engine_core::engine_events::{
+    CompactionStatus, SubagentEvent, SubagentLifecycle, SubagentPhase, SubagentStreamRef,
+    SubagentUpdate,
+};
 use engine_core::{EngineEvent, ObserverAdapter, TurnComplete};
 use engine_host::config::{
     default_permission_mode, extract_sudorouter_credentials, load_sudocode_config_for_current_dir,
@@ -37,6 +40,7 @@ use engine_host::session::{
 };
 use engine_host::{SessionEngine, SessionLifecycle};
 use runtime::{ContentBlock, UsageTracker, WorkspaceRootScope};
+use serde_json::{json, Map, Value};
 
 use crate::acp_sdk_server::{
     AcpStopReason, CumulativeUsage, PromptUsage, SdkAcpConfig, SessionForkSource, SessionRegistry,
@@ -54,10 +58,16 @@ use crate::vlm_describe;
 /// The four streaming shapes map verbatim as the old `SdkSessionObserver` did:
 /// thinking → `AgentThoughtChunk`, text → `AgentMessageChunk`, tool-call →
 /// `ToolCall`, tool-result → `ToolCallUpdate{Completed|Failed}`.
+///
+/// `subagent_events` is whether the client opted into the sub-agent contract
+/// (`docs/acp.md` § Sub-agent events). Off, the output is exactly what it was
+/// before that contract existed; on, spawn calls carry
+/// `_meta.sudocode.agentSpawn` and [`EngineEvent::Subagent`] is forwarded.
 #[must_use]
 pub(crate) fn engine_event_to_session_update(
     session_id: &str,
     event: EngineEvent,
+    subagent_events: bool,
 ) -> Option<SessionNotification> {
     let update = match event {
         // ACP's standard operation lifecycle represents engine-owned
@@ -94,51 +104,265 @@ pub(crate) fn engine_event_to_session_update(
             AcpContentBlock::Text(TextContent::new(text)),
         )),
         EngineEvent::ToolCall { id, name, input } => {
-            let raw_input = serde_json::from_str(&input)
-                .unwrap_or_else(|_| serde_json::Value::String(input.clone()));
-            SessionUpdate::ToolCall(
-                ToolCall::new(id, name)
-                    .kind(ToolKind::Other)
-                    .status(ToolCallStatus::InProgress)
-                    .raw_input(raw_input),
-            )
+            tool_call_update(id, &name, &input, subagent_events, None)
         }
         EngineEvent::ToolResult {
             id,
-            name: _,
+            name,
             output,
             is_error,
-        } => {
-            let raw_output = serde_json::from_str(&output)
-                .unwrap_or_else(|_| serde_json::Value::String(output.clone()));
-            let status = if is_error {
-                ToolCallStatus::Failed
-            } else {
-                ToolCallStatus::Completed
-            };
-            // `content` carries the RAW output string (exactly what the model
-            // saw), never the re-serialized Value — re-serializing would reformat
-            // JSON and quote plain text. Empty output emits no content field
-            // (Some(vec![]) would tell the client to clear its rendering).
-            let content = (!output.is_empty()).then(|| {
-                vec![ToolCallContent::from(AcpContentBlock::Text(
-                    TextContent::new(output),
-                ))]
-            });
-            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                id,
-                ToolCallUpdateFields::new()
-                    .status(status)
-                    .content(content)
-                    .raw_output(raw_output),
-            ))
-        }
+        } => tool_result_update(id, &name, output, is_error, subagent_events, None),
+        EngineEvent::Subagent(event) if subagent_events => subagent_update(event),
         // Usage/ModelResolved/PromptCache/AutoCompaction/ToolProgress/HookProgress/
         // State/TurnStarted/Notice/etc. have no ACP session/update equivalent:
         // usage rides the prompt response `_meta`, the rest are REPL-only.
         _ => return None,
     };
     Some(SessionNotification::new(session_id.to_string(), update))
+}
+
+// ===========================================================================
+// Sub-agent events (the `subagentEvents` contract, docs/acp.md)
+// ===========================================================================
+
+/// `{"sudocode": entries}` as an ACP `_meta`, or `None` when there is nothing
+/// to say (so an update without sub-agent data serializes exactly as before).
+fn sudocode_meta(entries: Map<String, Value>) -> Option<Map<String, Value>> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut meta = Map::new();
+    meta.insert("sudocode".to_string(), Value::Object(entries));
+    Some(meta)
+}
+
+/// The tools that spawn a sub-agent, under any spelling the model uses.
+fn is_spawn_tool(name: &str) -> bool {
+    matches!(
+        runtime::tool_names::canonicalize_tool_name(name).as_str(),
+        "agent_spawn" | "pid_fork"
+    )
+}
+
+/// `agentSpawn` for the call as the model issued it: the agent does not exist
+/// yet, so only what its arguments say.
+fn spawn_meta_from_input(name: &str, input: &Value) -> Value {
+    let mut spawn = Map::new();
+    let str_field = |key: &str| input.get(key).and_then(Value::as_str);
+    if let Some(name) = str_field("name") {
+        spawn.insert("name".into(), json!(name));
+    }
+    if let Some(description) = str_field("description") {
+        spawn.insert("description".into(), json!(description));
+    }
+    let subagent_type = if runtime::tool_names::canonicalize_tool_name(name) == "pid_fork" {
+        Some("fork")
+    } else {
+        str_field("subagent_type").or_else(|| str_field("agent"))
+    };
+    if let Some(subagent_type) = subagent_type {
+        spawn.insert("subagentType".into(), json!(subagent_type));
+    }
+    let background = input
+        .get("run_in_background")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    spawn.insert("background".into(), json!(background));
+    Value::Object(spawn)
+}
+
+/// `agentSpawn` for the call's result, from the `AgentOutput` it returned.
+/// `None` when the agent never came to exist (the result is an error string).
+fn spawn_meta_from_output(output: &Value) -> Option<Value> {
+    output.get("agentId").and_then(Value::as_str)?;
+    let mut spawn = Map::new();
+    for key in [
+        "agentId",
+        "name",
+        "description",
+        "subagentType",
+        "model",
+        "color",
+    ] {
+        if let Some(value) = output.get(key).filter(|value| !value.is_null()) {
+            spawn.insert(key.into(), value.clone());
+        }
+    }
+    Some(Value::Object(spawn))
+}
+
+fn stream_meta(stream: &SubagentStreamRef) -> Value {
+    json!({
+        "parentToolCallId": stream.parent_tool_call_id,
+        "agentId": stream.agent_id,
+        "seq": stream.seq,
+    })
+}
+
+/// A model-issued tool call. `stream` is `_meta.sudocode.subagent` when the
+/// call belongs to a sub-agent's stream.
+fn tool_call_update(
+    id: String,
+    name: &str,
+    input: &str,
+    subagent_events: bool,
+    stream: Option<Value>,
+) -> SessionUpdate {
+    let raw_input =
+        serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()));
+    let mut sudocode = Map::new();
+    if let Some(stream) = stream {
+        sudocode.insert("subagent".into(), stream);
+    }
+    if subagent_events && is_spawn_tool(name) {
+        sudocode.insert("agentSpawn".into(), spawn_meta_from_input(name, &raw_input));
+    }
+    let mut call = ToolCall::new(id, name)
+        .kind(ToolKind::Other)
+        .status(ToolCallStatus::InProgress)
+        .raw_input(raw_input);
+    if let Some(meta) = sudocode_meta(sudocode) {
+        call = call.meta(meta);
+    }
+    SessionUpdate::ToolCall(call)
+}
+
+/// A tool call's result.
+fn tool_result_update(
+    id: String,
+    name: &str,
+    output: String,
+    is_error: bool,
+    subagent_events: bool,
+    stream: Option<Value>,
+) -> SessionUpdate {
+    let raw_output =
+        serde_json::from_str(&output).unwrap_or_else(|_| Value::String(output.clone()));
+    let status = if is_error {
+        ToolCallStatus::Failed
+    } else {
+        ToolCallStatus::Completed
+    };
+    let mut sudocode = Map::new();
+    if let Some(stream) = stream {
+        sudocode.insert("subagent".into(), stream);
+    }
+    if subagent_events && is_spawn_tool(name) {
+        if let Some(spawn) = spawn_meta_from_output(&raw_output) {
+            sudocode.insert("agentSpawn".into(), spawn);
+        }
+    }
+    // `content` carries the RAW output string (exactly what the model
+    // saw), never the re-serialized Value — re-serializing would reformat
+    // JSON and quote plain text. Empty output emits no content field
+    // (Some(vec![]) would tell the client to clear its rendering).
+    let content = (!output.is_empty()).then(|| {
+        vec![ToolCallContent::from(AcpContentBlock::Text(
+            TextContent::new(output),
+        ))]
+    });
+    let mut update = ToolCallUpdate::new(
+        id,
+        ToolCallUpdateFields::new()
+            .status(status)
+            .content(content)
+            .raw_output(raw_output),
+    );
+    if let Some(meta) = sudocode_meta(sudocode) {
+        update = update.meta(meta);
+    }
+    SessionUpdate::ToolCallUpdate(update)
+}
+
+/// One sub-agent event on the parent session's wire.
+fn subagent_update(event: SubagentEvent) -> SessionUpdate {
+    let stream = event.stream.as_ref().map(stream_meta);
+    let chunk = |text: String, stream: Option<Value>| {
+        let mut chunk = ContentChunk::new(AcpContentBlock::Text(TextContent::new(text)));
+        let mut sudocode = Map::new();
+        if let Some(stream) = stream {
+            sudocode.insert("subagent".into(), stream);
+        }
+        chunk.meta = sudocode_meta(sudocode);
+        chunk
+    };
+    match event.update {
+        SubagentUpdate::TextDelta { text } => SessionUpdate::AgentMessageChunk(chunk(text, stream)),
+        SubagentUpdate::ThinkingDelta { text } => {
+            SessionUpdate::AgentThoughtChunk(chunk(text, stream))
+        }
+        SubagentUpdate::ToolCall { id, name, input } => {
+            tool_call_update(id, &name, &input, true, stream)
+        }
+        SubagentUpdate::ToolResult {
+            id,
+            name,
+            output,
+            is_error,
+        } => tool_result_update(id, &name, output, is_error, true, stream),
+        SubagentUpdate::Lifecycle(lifecycle) => lifecycle_update(*lifecycle, stream),
+    }
+}
+
+/// `started` / `finished` of a spawned agent: a status-less update of the
+/// spawning call.
+fn lifecycle_update(lifecycle: SubagentLifecycle, stream: Option<Value>) -> SessionUpdate {
+    let agent = &lifecycle.agent;
+    let mut spawn = Map::new();
+    spawn.insert("agentId".into(), json!(agent.agent_id));
+    spawn.insert("name".into(), json!(agent.name));
+    spawn.insert("description".into(), json!(agent.description));
+    for (key, value) in [
+        ("subagentType", &agent.subagent_type),
+        ("model", &agent.model),
+        ("color", &agent.color),
+    ] {
+        if let Some(value) = value {
+            spawn.insert(key.into(), json!(value));
+        }
+    }
+    spawn.insert("background".into(), json!(agent.background));
+    let mut phase = Map::new();
+    phase.insert("phase".into(), json!(lifecycle.phase.as_str()));
+    phase.insert("seq".into(), json!(lifecycle.seq));
+    for (key, value) in [
+        ("status", &lifecycle.status),
+        ("startedAt", &lifecycle.started_at),
+        ("completedAt", &lifecycle.completed_at),
+    ] {
+        if let Some(value) = value {
+            phase.insert(key.into(), json!(value));
+        }
+    }
+    spawn.insert("lifecycle".into(), Value::Object(phase));
+
+    let mut sudocode = Map::new();
+    if let Some(stream) = stream {
+        sudocode.insert("subagent".into(), stream);
+    }
+    sudocode.insert("agentSpawn".into(), Value::Object(spawn));
+    let fields = match lifecycle.raw_output {
+        Some(raw_output) => ToolCallUpdateFields::new().raw_output(raw_output),
+        None => ToolCallUpdateFields::new(),
+    };
+    let mut update = ToolCallUpdate::new(lifecycle.tool_call_id, fields);
+    if let Some(meta) = sudocode_meta(sudocode) {
+        update = update.meta(meta);
+    }
+    SessionUpdate::ToolCallUpdate(update)
+}
+
+/// The `agentId` a lifecycle event starts, so the session can tell which
+/// agents a `_sudocode/agent/cancel` may name.
+#[must_use]
+pub(crate) fn started_agent_id(event: &EngineEvent) -> Option<&str> {
+    match event {
+        EngineEvent::Subagent(SubagentEvent {
+            update: SubagentUpdate::Lifecycle(lifecycle),
+            ..
+        }) if lifecycle.phase == SubagentPhase::Started => Some(&lifecycle.agent.agent_id),
+        _ => None,
+    }
 }
 
 // ===========================================================================

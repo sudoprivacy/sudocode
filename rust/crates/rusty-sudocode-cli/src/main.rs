@@ -65,12 +65,12 @@ use cli::format::{
     format_account_switch_report, format_acp_compact_report, format_auth_report,
     format_auth_switch_report, format_auto_compaction_notice, format_bughunter_report,
     format_commit_preflight_report, format_commit_skipped_report, format_compact_report,
-    format_cost_report, format_internal_prompt_progress_line, format_issue_report,
-    format_model_report, format_model_switch_report, format_permission_prompt_box,
-    format_permissions_report, format_permissions_switch_report, format_pr_report,
-    format_resume_report, format_sandbox_report, format_tool_call_start, format_tool_result,
-    format_turn_status_line, format_ultraplan_report, render_messages, render_resume_usage,
-    render_version_report, truncate_for_summary, TurnStatus,
+    format_context_report, format_cost_report, format_internal_prompt_progress_line,
+    format_issue_report, format_model_report, format_model_switch_report,
+    format_permission_prompt_box, format_permissions_report, format_permissions_switch_report,
+    format_pr_report, format_resume_report, format_sandbox_report, format_tool_call_start,
+    format_tool_result, format_turn_status_line, format_ultraplan_report, render_messages,
+    render_resume_usage, render_version_report, truncate_for_summary, TurnStatus,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
@@ -4675,6 +4675,10 @@ impl LiveCli {
                 self.out_println(format_cost_report(usage));
                 false
             }
+            SlashCommand::Context { action } => {
+                self.print_context(action.as_deref());
+                false
+            }
             SlashCommand::Login
             | SlashCommand::Logout
             | SlashCommand::Vim
@@ -4704,7 +4708,6 @@ impl LiveCli {
             | SlashCommand::Rename { .. }
             | SlashCommand::Copy { .. }
             | SlashCommand::Hooks { .. }
-            | SlashCommand::Context { .. }
             | SlashCommand::Color { .. }
             | SlashCommand::Effort { .. }
             | SlashCommand::Branch { .. }
@@ -5022,6 +5025,25 @@ impl LiveCli {
     fn print_cost(&self) {
         let cumulative = self.lifecycle.usage_snapshot().cumulative_usage();
         self.out_println(format_cost_report(cumulative));
+    }
+
+    /// `/context [all]`: the context-window occupancy grid. `all` expands the
+    /// per-source footer into one line per tool / agent type / file / skill.
+    fn print_context(&self, action: Option<&str>) {
+        let expand = match action.map(str::trim).filter(|arg| !arg.is_empty()) {
+            None => false,
+            Some("all") => true,
+            Some(other) => {
+                self.out_println(format!(
+                    "Context\n  Usage            /context [all]\n  Unknown argument {other}"
+                ));
+                return;
+            }
+        };
+        let usage = self.lifecycle.context_usage();
+        let width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
+        let color = crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
+        self.out_println(format_context_report(&usage, width, expand, color));
     }
 
     /// Load a session by reference (id, path, or "latest") — the engine loads
@@ -6031,7 +6053,6 @@ pub(crate) const STUB_COMMANDS: &[&str] = &[
     "rename",
     "copy",
     "hooks",
-    "context",
     "color",
     "effort",
     "branch",
@@ -6140,6 +6161,7 @@ fn slash_command_completion_candidates_with_sessions(
         "/config hooks",
         "/config model",
         "/config plugins",
+        "/context all",
         "/mcp ",
         "/mcp list",
         "/mcp show ",

@@ -24,6 +24,7 @@ use crate::config::{
     require_sudocode_config_for_cwd, resolve_auth_mode, resolve_model_alias_with_config,
     resolve_model_switch_auth_mode, resolve_repl_model, AllowedToolSet,
 };
+use crate::context_usage::{collect_context_usage, ContextUsage};
 use crate::prompt::build_acp_system_prompt;
 use crate::runtime_build::{build_engine_runtime, BuiltRuntime, RuntimeConfig};
 use crate::session::{
@@ -955,6 +956,10 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     fn usage_snapshot(&self) -> runtime::UsageTracker;
     /// Estimated token footprint of the current session (for `/status`).
     fn estimated_tokens(&self) -> usize;
+
+    /// What the next request would carry, by category — the data behind
+    /// `/context`. See [`crate::context_usage`].
+    fn context_usage(&self) -> ContextUsage;
     /// A clone of the session tracer, if telemetry is active. Returned owned
     /// (the tracer is `Arc`-backed and cheap to clone) so callers record events
     /// without holding the session lock.
@@ -1050,6 +1055,11 @@ impl SessionLifecycle for SessionEngine {
 
     fn estimated_tokens(&self) -> usize {
         self.lock_session().runtime.estimated_tokens()
+    }
+
+    fn context_usage(&self) -> ContextUsage {
+        let session = self.lock_session();
+        collect_context_usage(&session.cwd, &session.runtime)
     }
 
     fn session_tracer(&self) -> Option<telemetry::SessionTracer> {

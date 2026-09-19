@@ -344,3 +344,54 @@ empty strings) is `invalid_params`. The `initialize` response advertises
 `_meta.sudocode.sessionFork: true` so clients can feature-detect. Older
 agents ignore the key and start an empty session, which is the behaviour
 the flag lets a client avoid relying on.
+
+### Sub-agent events (`clientCapabilities._meta.sudocode.subagentEvents`)
+
+A sub-agent (`agent_spawn` / `Agent` / `pid_fork`) runs its own conversation
+inside the same `scode` process. By default the client sees only the
+spawning call (`tool_call` + one `tool_call_update`); in background mode that
+update arrives at once with `rawOutput.status: "running"` and no result. A
+client that wants to show what the sub-agent is doing opts in at
+`initialize`:
+
+```json
+{ "protocolVersion": 1,
+  "clientCapabilities": { "_meta": { "sudocode": { "subagentEvents": { "version": 1 } } } } }
+```
+
+scode then echoes `result._meta.sudocode.subagentEvents = {"version": 1,
+"cancel": true}`. **Without the opt-in nothing changes — the `initialize`
+result included** (`acp_subagent_events_off_matches_pre_contract_output`
+compares the wire against fixtures captured before this existed). The opt-in
+is per connection and applies to the sessions that connection creates or
+loads.
+
+With it, every sub-agent's text, thinking, tool calls and tool results are
+sent as ordinary `session/update`s **on the parent's `sessionId`**, and two
+keys under the update's own `_meta.sudocode` tell them apart:
+
+| Key | Meaning |
+|---|---|
+| `subagent: {parentToolCallId, agentId, seq}` | This update belongs to that agent's stream. `seq` runs from 0 per agent, without gaps, shared with the agent's lifecycle. |
+| `agentSpawn: {agentId?, name, description, subagentType, model, color, background, lifecycle?}` | This call spawns an agent. `agentId` is absent on the `tool_call` itself (the agent does not exist yet). |
+
+- A sub-agent's call ids are `<agentId>:<raw id>`, so they never collide with
+  the parent's or a sibling's.
+- A nested spawn (a sub-agent's own `agent_spawn`) carries both keys; its
+  grandchild's `parentToolCallId` is that namespaced call id.
+- Each agent gets two **lifecycle** updates on its spawning call — status-less
+  `tool_call_update`s with `agentSpawn.lifecycle.phase` `started` and
+  `finished`. `finished` carries `lifecycle.status` (`completed` / `failed` /
+  `cancelled`), `startedAt` / `completedAt` (the manifest's Unix-seconds
+  strings) and, as `rawOutput`, the final agent manifest with the result text.
+  A background agent's stream and `finished` may arrive after the
+  `session/prompt` response; they go out on the connection that last prompted
+  the session, and stop once the session is closed.
+- `_sudocode/agent/cancel {sessionId, agentId}` stops one running agent this
+  session reported `started` for (the same abort a
+  `SendMessage(shutdown_request)` fires; it does not cascade to agents it
+  spawned) and answers `{cancelled}`; its `finished` then says `cancelled`.
+  Any other agent id, or a session without the opt-in, is `invalid_params`.
+- Sub-agents never ask for permission: they run with a fixed
+  `DangerFullAccess` policy and no prompter, so no `session/request_permission`
+  comes from them.

@@ -309,9 +309,7 @@ async fn run_one_turn(
     let turn_tx = evt_tx.clone();
     let turn_table = table.clone();
     let mut handle = tokio::task::spawn_blocking(move || {
-        let mut observer = ObserverAdapter {
-            tx: turn_tx.clone(),
-        };
+        let mut observer = ObserverAdapter::new(turn_tx.clone());
         let mut prompter = PrompterAdapter {
             tx: turn_tx,
             table: turn_table,
@@ -395,6 +393,7 @@ fn turn_label(blocks: &[ContentBlock]) -> String {
 /// owns the receiving end of `tx` and maps the [`EngineEvent`]s onto its wire.
 pub struct ObserverAdapter {
     tx: std_mpsc::Sender<EngineEvent>,
+    subagents: Option<SubagentRelay>,
 }
 
 impl ObserverAdapter {
@@ -405,7 +404,94 @@ impl ObserverAdapter {
     /// same shape the pump uses for its command channel).
     #[must_use]
     pub fn new(tx: std_mpsc::Sender<EngineEvent>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            subagents: None,
+        }
+    }
+
+    /// Also report what spawned sub-agents do, as [`EngineEvent::Subagent`]
+    /// through `relay`. Without this, sub-agents run unobserved.
+    #[must_use]
+    pub fn with_subagent_relay(mut self, relay: SubagentRelay) -> Self {
+        self.subagents = Some(relay);
+        self
+    }
+}
+
+/// Session-lifetime route for [`EngineEvent::Subagent`].
+///
+/// A background sub-agent outlives the turn that spawned it, so its events
+/// cannot ride the turn's event channel alone: that channel has to close when
+/// the turn ends (the renderer answers the turn once it drains). The relay
+/// sends into the attached turn's channel while one is attached — keeping a
+/// synchronous child's events in order with the parent's — and into the
+/// session channel returned by [`SubagentRelay::new`] otherwise.
+#[derive(Clone)]
+pub struct SubagentRelay {
+    route: Arc<Mutex<SubagentRoute>>,
+}
+
+struct SubagentRoute {
+    turn: Option<std_mpsc::Sender<EngineEvent>>,
+    session: std_mpsc::Sender<EngineEvent>,
+}
+
+impl SubagentRelay {
+    /// A relay plus the receiving end of its session channel. The channel
+    /// stays open while the relay or any sub-agent it reaches is alive.
+    #[must_use]
+    pub fn new() -> (Self, std_mpsc::Receiver<EngineEvent>) {
+        let (session, rx) = std_mpsc::channel();
+        (
+            Self {
+                route: Arc::new(Mutex::new(SubagentRoute {
+                    turn: None,
+                    session,
+                })),
+            },
+            rx,
+        )
+    }
+
+    /// Route events into `turn` until the returned guard drops. Drop the guard
+    /// before waiting for `turn`'s channel to close.
+    #[must_use]
+    pub fn attach_turn(&self, turn: std_mpsc::Sender<EngineEvent>) -> SubagentTurnGuard {
+        self.lock().turn = Some(turn);
+        SubagentTurnGuard {
+            relay: self.clone(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, SubagentRoute> {
+        self.route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn emit(&self, event: runtime::SubagentEvent) {
+        let route = self.lock();
+        let event = EngineEvent::Subagent(event);
+        let event = match &route.turn {
+            Some(turn) => match turn.send(event) {
+                Ok(()) => return,
+                Err(std_mpsc::SendError(event)) => event,
+            },
+            None => event,
+        };
+        let _ = route.session.send(event);
+    }
+}
+
+/// Detaches the turn from a [`SubagentRelay`] on drop.
+pub struct SubagentTurnGuard {
+    relay: SubagentRelay,
+}
+
+impl Drop for SubagentTurnGuard {
+    fn drop(&mut self) {
+        self.relay.lock().turn = None;
     }
 }
 
@@ -506,6 +592,11 @@ impl RuntimeObserver for ObserverAdapter {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .send(EngineEvent::Retry(event));
         }))
+    }
+
+    fn subagent_sink(&self) -> Option<runtime::SubagentSink> {
+        let relay = self.subagents.clone()?;
+        Some(runtime::SubagentSink::new(move |event| relay.emit(event)))
     }
 }
 

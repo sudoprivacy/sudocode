@@ -198,7 +198,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use command_group::CommandGroup;
@@ -224,8 +224,9 @@ use runtime::{
     ConversationRuntime, FsBackend, GrepSearchInput, HookAbortSignal, LaneCommitProvenance,
     LaneEvent, LaneEventBlocker, LaneEventName, LaneEventStatus, LaneFailureClass,
     McpDegradedReport, MessageRole, PermissionMode, PermissionPolicy, PromptCacheEvent,
-    ProviderFallbackConfig, RuntimeError, Session, StdFsBackend, SystemPrompt, ToolDispatchContext,
-    ToolError, ToolExecutor, WorkspaceRootHandoff, FORK_BOILERPLATE_TAG,
+    ProviderFallbackConfig, RuntimeError, RuntimeObserver, Session, StdFsBackend, SubagentIdentity,
+    SubagentLifecycle, SubagentPhase, SubagentScope, SubagentSink, SubagentUpdate, SystemPrompt,
+    ToolDispatchContext, ToolError, ToolExecutor, WorkspaceRootHandoff, FORK_BOILERPLATE_TAG,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -3906,6 +3907,138 @@ struct AgentJob {
     /// `/a` writes its manifests, inbox and files under `/a` even while a
     /// sibling session's turn runs in `/b` on another thread.
     workspace: WorkspaceRootHandoff,
+    /// Where this agent reports what it does, when the renderer driving the
+    /// spawning turn asked for that. `None`: the child runs unobserved.
+    subagent: Option<SubagentLink>,
+}
+
+/// A spawned agent's connection to the renderer's sub-agent sink.
+#[derive(Debug, Clone)]
+struct SubagentLink {
+    /// The spawning side: the parent session, or the stream of the agent
+    /// that spawned this one.
+    spawner: SubagentSink,
+    /// This agent's own stream.
+    scope: Arc<SubagentScope>,
+    identity: SubagentIdentity,
+}
+
+impl SubagentLink {
+    fn from_dispatch(
+        ctx: Option<&ToolDispatchContext>,
+        manifest: &AgentOutput,
+        background: bool,
+    ) -> Option<Self> {
+        let ctx = ctx?;
+        let spawner = ctx.subagent_sink.clone()?;
+        let spawn_call_id = spawner.visible_tool_call_id(ctx.tool_use_id.as_deref()?);
+        Some(Self {
+            scope: Arc::new(SubagentScope::new(manifest.agent_id.clone(), spawn_call_id)),
+            spawner,
+            identity: SubagentIdentity {
+                agent_id: manifest.agent_id.clone(),
+                name: manifest.name.clone(),
+                description: manifest.description.clone(),
+                subagent_type: manifest.subagent_type.clone(),
+                model: manifest.model.clone(),
+                color: manifest.color.clone(),
+                background,
+            },
+        })
+    }
+
+    /// The observer the child runtime reports through.
+    fn observer(&self) -> SubagentForwarder {
+        SubagentForwarder {
+            sink: self.spawner.scoped(Arc::clone(&self.scope)),
+        }
+    }
+
+    fn emit_started(&self, manifest: &AgentOutput) {
+        self.spawner.emit_lifecycle(
+            &self.scope,
+            SubagentLifecycle {
+                tool_call_id: self.scope.parent_tool_call_id().to_string(),
+                phase: SubagentPhase::Started,
+                seq: 0,
+                agent: self.identity.clone(),
+                status: None,
+                started_at: manifest.started_at.clone(),
+                completed_at: None,
+                raw_output: None,
+            },
+        );
+    }
+
+    /// Report the end of the run from the manifest it persisted. `aborted`
+    /// means the agent was stopped from outside (cancel / shutdown request),
+    /// which the manifest itself does not record.
+    fn emit_finished(&self, fallback: &AgentOutput, aborted: bool) {
+        let manifest = std::fs::read_to_string(&fallback.manifest_file)
+            .ok()
+            .and_then(|text| serde_json::from_str::<AgentOutput>(&text).ok())
+            .unwrap_or_else(|| fallback.clone());
+        let status = if aborted {
+            String::from("cancelled")
+        } else {
+            manifest.status.clone()
+        };
+        self.spawner.emit_lifecycle(
+            &self.scope,
+            SubagentLifecycle {
+                tool_call_id: self.scope.parent_tool_call_id().to_string(),
+                phase: SubagentPhase::Finished,
+                seq: 0,
+                agent: self.identity.clone(),
+                status: Some(status),
+                started_at: manifest.started_at.clone(),
+                completed_at: manifest.completed_at.clone(),
+                raw_output: serde_json::to_value(&manifest).ok(),
+            },
+        );
+    }
+}
+
+/// The child runtime's observer: forwards the agent's stream into its sink.
+/// Tool call ids are namespaced with the agent id, and the agent's own sink is
+/// handed to its tool dispatch so agents it spawns report under it.
+struct SubagentForwarder {
+    sink: SubagentSink,
+}
+
+impl RuntimeObserver for SubagentForwarder {
+    fn on_text_delta(&mut self, delta: &str) {
+        self.sink.emit_in_scope(SubagentUpdate::TextDelta {
+            text: delta.to_string(),
+        });
+    }
+
+    fn on_thinking_delta(&mut self, delta: &str) {
+        self.sink.emit_in_scope(SubagentUpdate::ThinkingDelta {
+            text: delta.to_string(),
+        });
+    }
+
+    fn on_tool_use(&mut self, id: &str, name: &str, input: &str) {
+        self.sink.emit_in_scope(SubagentUpdate::ToolCall {
+            id: self.sink.visible_tool_call_id(id),
+            name: name.to_string(),
+            input: input.to_string(),
+        });
+    }
+
+    fn on_tool_result(&mut self, tool_use_id: &str, tool_name: &str, output: &str, is_error: bool) {
+        self.sink.emit_in_scope(SubagentUpdate::ToolResult {
+            id: self.sink.visible_tool_call_id(tool_use_id),
+            name: tool_name.to_string(),
+            output: output.to_string(),
+            is_error,
+        });
+    }
+
+    fn subagent_sink(&self) -> Option<SubagentSink> {
+        Some(self.sink.clone())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -4581,6 +4714,7 @@ fn prepare_agent_job(
 
     let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
     let is_fork = normalized_subagent_type == "fork";
+    let background = input.run_in_background.unwrap_or(true);
 
     // Verification-streak reset: whenever the model dispatches a
     // Verification sub-agent, zero the process-global streak counter
@@ -4722,6 +4856,7 @@ fn prepare_agent_job(
     let is_fork_child = !inherited_messages.is_empty();
     let execution = ParentExecution::from_dispatch(ctx).for_child(is_fork_child);
 
+    let subagent = SubagentLink::from_dispatch(ctx, &manifest, background);
     let job = AgentJob {
         manifest: manifest.clone(),
         prompt: prompt_body,
@@ -4734,7 +4869,11 @@ fn prepare_agent_job(
         execution,
         abort_signal: HookAbortSignal::default(),
         workspace: WorkspaceRootHandoff::capture(),
+        subagent,
     };
+    if let Some(link) = &job.subagent {
+        link.emit_started(&manifest);
+    }
     Ok(PreparedAgent { manifest, job })
 }
 
@@ -4767,9 +4906,15 @@ where
 {
     let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
     global_agent_registry().register(&manifest.agent_id);
+    let subagent = job.subagent.clone();
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
-        persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()))?;
+        let persisted =
+            persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()));
+        if let Some(link) = &subagent {
+            link.emit_finished(&manifest, false);
+        }
+        persisted?;
         return Err(error);
     }
     Ok(manifest)
@@ -4839,24 +4984,27 @@ where
     W: FnOnce(AgentJob) -> Result<String, String> + Send + 'static,
 {
     let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
+    let subagent = job.subagent.clone();
     let Some(threshold) = auto_background_threshold() else {
         // Auto-bg disabled — original fully-sync path.
-        return match work_fn(job) {
-            Ok(final_text) => {
-                persist_agent_terminal_state(
-                    &manifest,
-                    "completed",
-                    Some(final_text.as_str()),
-                    None,
-                )?;
-                reload_manifest_or_fallback(manifest)
-            }
+        let abort_signal = job.abort_signal.clone();
+        let outcome = match work_fn(job) {
+            Ok(final_text) => persist_agent_terminal_state(
+                &manifest,
+                "completed",
+                Some(final_text.as_str()),
+                None,
+            ),
             Err(error) => {
                 let _ =
                     persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()));
                 Err(format!("sub-agent failed: {error}"))
             }
         };
+        if let Some(link) = &subagent {
+            link.emit_finished(&manifest, abort_signal.is_aborted());
+        }
+        return outcome.and_then(|()| reload_manifest_or_fallback(manifest));
     };
 
     // Auto-bg enabled: run on a worker thread + await up to threshold.
@@ -4867,6 +5015,7 @@ where
     let bg_manifest = manifest.clone();
     let bg_agent_id = agent_id.clone();
     let workspace = job.workspace.clone();
+    let bg_abort_signal = job.abort_signal.clone();
     std::thread::spawn(move || {
         // Worker threads carry the parent turn's workspace root with them.
         let _workspace = workspace.enter();
@@ -4891,6 +5040,11 @@ where
                     Some(String::from("sub-agent thread panicked")),
                 );
             }
+        }
+        // Before the completion notice: that is what releases the waiting
+        // parent, whose own tool result must come after this agent's end.
+        if let Some(link) = &subagent {
+            link.emit_finished(&bg_manifest, bg_abort_signal.is_aborted());
         }
         notify_agent_completion(&bg_manifest);
         unregister_agent_abort_signal(&bg_agent_id);
@@ -4964,6 +5118,9 @@ fn run_spawned_agent_job(job: AgentJob) {
             );
         }
     }
+    if let Some(link) = &job.subagent {
+        link.emit_finished(&job.manifest, job.abort_signal.is_aborted());
+    }
     // Signal the completion registry so TaskOutput(agent_id, block=true) callers unblock.
     notify_agent_completion(&job.manifest);
     // Drop the abort-signal registration LAST — a
@@ -5018,6 +5175,7 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
     // long coordinator-driven conversation reports one aggregated
     // `<total_tokens>` / `<tool_uses>` count in the task-notification.
     let mut cumulative_telemetry = AgentRunTelemetry::default();
+    let mut forwarder = job.subagent.as_ref().map(SubagentLink::observer);
     let final_text = run_multi_turn_loop(
         &job.manifest.agent_id,
         &workspace_root,
@@ -5025,7 +5183,10 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
         job.prompt.clone(),
         subagent_max_multi_turns(),
         |prompt| {
-            let summary = run_single_turn(&mut conv_runtime, prompt)?;
+            let observer = forwarder
+                .as_mut()
+                .map(|forwarder| forwarder as &mut (dyn RuntimeObserver + Send));
+            let summary = run_single_turn(&mut conv_runtime, prompt, observer)?;
             let (turn_tokens, turn_tool_uses) = telemetry_from_turn(&summary);
             cumulative_telemetry.total_tokens = cumulative_telemetry
                 .total_tokens
@@ -5255,7 +5416,7 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
     let prompt = format!(
         "Summarize this agent's output for the parent coordinator in \u{2264}500 words:\n\n{final_text}"
     );
-    let summary = run_single_turn(&mut summarizer, prompt)?;
+    let summary = run_single_turn(&mut summarizer, prompt, None)?;
     Ok(final_assistant_text(&summary))
 }
 
@@ -5338,20 +5499,23 @@ where
 fn run_single_turn(
     conv_runtime: &mut ConversationRuntime<ProviderRuntimeClient, SubagentToolExecutor>,
     prompt: String,
+    observer: Option<&mut (dyn RuntimeObserver + Send)>,
 ) -> Result<runtime::TurnSummary, String> {
     if tokio::runtime::Handle::try_current().is_ok() {
         std::thread::scope(|s| {
             s.spawn(|| {
+                let observer = observer.map(|observer| observer as &mut dyn RuntimeObserver);
                 let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-                rt.block_on(conv_runtime.run_turn(prompt, None, None))
+                rt.block_on(conv_runtime.run_turn(prompt, None, observer))
                     .map_err(|e| e.to_string())
             })
             .join()
             .map_err(|_| String::from("sub-agent thread panicked"))?
         })
     } else {
+        let observer = observer.map(|observer| observer as &mut dyn RuntimeObserver);
         let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-        rt.block_on(conv_runtime.run_turn(prompt, None, None))
+        rt.block_on(conv_runtime.run_turn(prompt, None, observer))
             .map_err(|e| e.to_string())
     }
 }
@@ -6830,6 +6994,11 @@ async fn stream_with_provider(
 struct SubagentToolExecutor {
     allowed_tools: BTreeSet<String>,
     enforcer: Option<PermissionEnforcer>,
+    /// The sub-agent's abort signal, handed over by
+    /// `ConversationRuntime::with_hook_abort_signal`. Tools that honour one
+    /// (`bash`, `Sleep`, `grep_search`, `PowerShell`) stop when it fires;
+    /// without it a cancelled agent sat out whatever tool it was running.
+    abort_signal: Option<HookAbortSignal>,
 }
 
 impl SubagentToolExecutor {
@@ -6837,6 +7006,7 @@ impl SubagentToolExecutor {
         Self {
             allowed_tools,
             enforcer: None,
+            abort_signal: None,
         }
     }
 
@@ -6869,11 +7039,15 @@ impl ToolExecutor for SubagentToolExecutor {
             self.enforcer.as_ref(),
             tool_name,
             &value,
-            None,
+            self.abort_signal.as_ref(),
             Some(ctx),
             &StdFsBackend,
         )
         .map_err(ToolError::new)
+    }
+
+    fn set_abort_signal(&mut self, abort_signal: HookAbortSignal) {
+        self.abort_signal = Some(abort_signal);
     }
 }
 

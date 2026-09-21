@@ -390,6 +390,16 @@ fn with_no_session_mailbox_the_same_tool_writes_the_workspace() {
         r#"{"to":"worker","message":"local hand-off","summary":"local hand-off"}"#,
     );
 
+    // Ask the code under test where it would have written, BEFORE restoring the
+    // cwd. The ambient mailbox derives both its root and its identity from the
+    // current directory, so rebuilding that afterwards from `workspace.path()`
+    // is a second derivation that can disagree with the first — and on macOS it
+    // does: the temp dir is reached through a symlink (`/var` → `/private/var`),
+    // the two spellings hash to different agent names, and the test looks for
+    // the envelope in a conversation nothing ever wrote to.
+    let delivered =
+        std::path::PathBuf::from(runtime::mailbox::sending_mailbox().transcript_path("worker"));
+
     std::env::set_current_dir(previous).expect("restore cwd");
     let result = result.expect("workspace delivery must succeed");
     assert!(
@@ -402,14 +412,6 @@ fn with_no_session_mailbox_the_same_tool_writes_the_workspace() {
     // the dispatch thread, resolved to the ambient workspace and wrote real
     // envelopes into the crate directory while reporting success. A string check
     // alone is satisfied by that.
-    // The ambient fallback derives its identity from the workspace, the same
-    // way the host does when it builds a scoped mailbox — so the pair is
-    // (derived name, "worker") and the transcript is computed, never spelled.
-    let sender = runtime::mailbox::local_agent_name(None, workspace.path());
-    let delivered = std::path::PathBuf::from(
-        runtime::mailbox::InboxConvention::new(workspace.path().to_string_lossy().into_owned())
-            .transcript_path(&sender, "worker"),
-    );
     assert!(
         delivered.is_file(),
         "the envelope must be in the workspace that was current, expected {}",

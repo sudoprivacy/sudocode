@@ -124,13 +124,9 @@ where
         || format!("/proc/{}/workspace", desc.pid),
         |repo| repo.mount_path.clone(),
     );
-    let fs = KernelFsBackend::for_agent(
-        Arc::clone(kernel),
-        &desc.owner_id,
-        &desc.zone_id,
-        &desc.name,
-        workspace_root.clone(),
-    );
+    // Built from the complete planted descriptor so the agent's delegation
+    // reference participates in every target authorization the backend makes.
+    let fs = KernelFsBackend::for_agent_descriptor(Arc::clone(kernel), desc, workspace_root.clone());
     let fs: Arc<dyn FsBackend> = Arc::new(match &local_directory {
         Some(directory) => fs
             .with_local_workspace(directory)

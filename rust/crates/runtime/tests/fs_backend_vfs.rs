@@ -9,15 +9,20 @@
 //! rather than silently passing.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
-use kernel::kernel::{Kernel, OperationContext};
+use kernel::core::agents::registry::AgentDescriptor;
+use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::DT_LINK;
+use kernel::{Permission, PermissionProvider};
+use runtime::zone_context::{ContextSource, HostZoneContext, ENV_NEXUS_DELEGATION_REF};
 use runtime::{
     edit_file, glob_search, grep_search, read_file, write_file, FsBackend, GrepSearchInput,
     KernelFsBackend, Session, SessionStore,
 };
+use sudo_contracts::ResourceRef;
 
 /// Minimal in-memory content backend so a fresh `Kernel` can round-trip
 /// regular-file bytes (dirents fall through to the global metastore; only
@@ -25,6 +30,21 @@ use runtime::{
 #[derive(Default)]
 struct MemStore {
     blobs: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+struct CountingAllow(Arc<AtomicUsize>);
+
+impl PermissionProvider for CountingAllow {
+    fn check(
+        &self,
+        _path: &str,
+        _route: Option<&kernel::core::vfs_router::RouteResult>,
+        _permission: Permission,
+        _ctx: &OperationContext,
+    ) -> Result<(), KernelError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 impl ObjectStore for MemStore {
@@ -88,17 +108,110 @@ impl ObjectStore for MemStore {
 
 /// A fresh kernel with a content-capable root mount.
 fn kernel_with_root_backend() -> Arc<Kernel> {
+    kernel_with_backend("root")
+}
+
+fn kernel_with_backend(zone_id: &str) -> Arc<Kernel> {
     let kernel = Arc::new(Kernel::new());
     let backend: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
     kernel
         .vfs_router_arc()
-        .add_mount("/", "root", Some(backend), false);
+        .add_mount("/", zone_id, Some(backend), false);
     kernel
 }
 
 /// A `KernelFsBackend` rooted at `/ws`, over the given kernel.
 fn vfs_backend(kernel: &Arc<Kernel>) -> KernelFsBackend<Kernel> {
     KernelFsBackend::for_agent(Arc::clone(kernel), "test-owner", "root", "agent-x", "/ws")
+}
+
+#[test]
+fn p1a_resource_targets_require_the_same_delegated_zone_for_cohost_and_subprocess() {
+    let kernel = kernel_with_backend("tenant-zone");
+    let permission_checks = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<Box<dyn PermissionProvider>> =
+        Arc::new(Box::new(CountingAllow(Arc::clone(&permission_checks))));
+    kernel.set_permission_provider(provider);
+
+    let without_delegation = KernelFsBackend::for_agent(
+        Arc::clone(&kernel),
+        "test-owner",
+        "tenant-zone",
+        "agent-x",
+        "/ws",
+    );
+    let denied = without_delegation.write("/ws/denied.txt", b"denied");
+    assert_eq!(
+        denied
+            .expect_err("a non-root runtime without delegation must fail closed")
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+
+    let mut descriptor = AgentDescriptor {
+        pid: "pid-zone-p1a".to_string(),
+        name: "agent-zone-p1a".to_string(),
+        owner_id: "test-owner".to_string(),
+        zone_id: "tenant-zone".to_string(),
+        ..AgentDescriptor::default()
+    };
+    descriptor.labels.insert(
+        ENV_NEXUS_DELEGATION_REF.to_string(),
+        "dlg-short-lived".to_string(),
+    );
+    let cohost = HostZoneContext::from_planted_descriptor(&descriptor);
+    let subprocess = HostZoneContext::from_trusted_parts(
+        "tenant-zone",
+        Some("https://nexus.example/v2".to_string()),
+        Some("dlg-short-lived".to_string()),
+        ContextSource::HostEnvironment,
+    );
+    assert_eq!(cohost.delegation_ref(), Some("dlg-short-lived"));
+    assert_eq!(
+        subprocess.nexus_v2_base_url(),
+        Some("https://nexus.example/v2")
+    );
+    assert_eq!(subprocess.delegation_ref(), cohost.delegation_ref());
+    let own_ref = ResourceRef {
+        api_version: "common.sudo.dev/v1".to_string(),
+        kind: "ResourceRef".to_string(),
+        zone_id: "tenant-zone".to_string(),
+        path: "/ws/allowed.txt".to_string(),
+        version: None,
+        digest: None,
+        media_type: None,
+        size_bytes: None,
+    };
+    assert!(cohost.authorize_resource_ref(&own_ref).is_ok());
+    assert_eq!(
+        cohost.authorize_resource_ref(&own_ref),
+        subprocess.authorize_resource_ref(&own_ref),
+        "cohost and subprocess must make the same ResourceRef decision",
+    );
+
+    let backend = KernelFsBackend::for_agent_descriptor(Arc::clone(&kernel), &descriptor, "/ws");
+    backend
+        .write("/ws/allowed.txt", b"zone-scoped")
+        .expect("delegated cohost access should reach the VFS");
+    assert!(
+        permission_checks.load(Ordering::Relaxed) > 0,
+        "cohost access must not use an is_system bypass"
+    );
+
+    let foreign_ref = ResourceRef {
+        zone_id: "other-zone".to_string(),
+        ..own_ref
+    };
+    assert!(cohost.authorize_resource_ref(&foreign_ref).is_err());
+    assert!(subprocess.authorize_resource_ref(&foreign_ref).is_err());
+
+    let malformed_host = HostZoneContext::from_trusted_parts(
+        "INVALID ZONE",
+        Some("https://nexus.example/v2".to_string()),
+        Some("dlg-short-lived".to_string()),
+        ContextSource::HostEnvironment,
+    );
+    assert!(malformed_host.authorize_path("/ws/denied.txt").is_err());
 }
 
 fn grep_input(pattern: &str, path: &str) -> GrepSearchInput {

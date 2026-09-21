@@ -12,6 +12,8 @@ use std::io;
 use std::sync::Arc;
 
 use crate::workspace_root::current_workspace_root;
+use crate::zone_context::{ContextSource, HostZoneContext};
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::syscall::{KernelSyscall, ReaddirOpts};
 use kernel::kernel::OperationContext;
 use kernel::meta_store::{DT_LINK, DT_STREAM};
@@ -474,6 +476,7 @@ impl FsBackend for StdFsBackend {
 pub struct KernelFsBackend<K: KernelSyscall> {
     kernel: Arc<K>,
     ctx: OperationContext,
+    zone_context: Option<HostZoneContext>,
     /// Absolute VFS path that relative tool paths resolve against and that
     /// `glob` / `grep` default to (e.g. `/proc/{pid}/workspace`).
     workspace_root: String,
@@ -484,6 +487,7 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
         Self {
             kernel,
             ctx,
+            zone_context: None,
             workspace_root: workspace_root.into(),
         }
     }
@@ -501,8 +505,57 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
         agent_name: &str,
         workspace_root: impl Into<String>,
     ) -> Self {
-        let ctx = OperationContext::new(owner_id, zone_id, false, Some(agent_name), true);
-        Self::new(kernel, ctx, workspace_root)
+        let ctx = OperationContext::new(owner_id, zone_id, false, Some(agent_name), false);
+        let zone_context = HostZoneContext::from_trusted_parts(
+            zone_id,
+            None,
+            None,
+            ContextSource::PlantedDescriptor,
+        );
+        Self {
+            kernel,
+            ctx,
+            zone_context: Some(zone_context),
+            workspace_root: workspace_root.into(),
+        }
+    }
+
+    /// Build the co-host backend from the complete planted descriptor so its
+    /// delegation reference participates in every target authorization.
+    pub fn for_agent_descriptor(
+        kernel: Arc<K>,
+        desc: &AgentDescriptor,
+        workspace_root: impl Into<String>,
+    ) -> Self {
+        let ctx = OperationContext::new(
+            &desc.owner_id,
+            &desc.zone_id,
+            false,
+            Some(&desc.name),
+            false,
+        );
+        Self {
+            kernel,
+            ctx,
+            zone_context: Some(HostZoneContext::from_planted_descriptor(desc)),
+            workspace_root: workspace_root.into(),
+        }
+    }
+
+    fn authorize_target(&self, path: &str) -> io::Result<()> {
+        let Some(zone_context) = &self.zone_context else {
+            return Ok(());
+        };
+        let normalized = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            lexical_join(&self.workspace_root, path)
+        }
+        .replace('\\', "/");
+        zone_context
+            .authorize_path(&normalized)
+            .map(|_| ())
+            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))
     }
 
     /// True when the entry at `path` is a DT_STREAM (native append-log).
@@ -551,6 +604,7 @@ fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
 
 impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+        self.authorize_target(path)?;
         // A DT_STREAM is read by walking its framed records to the tail; a
         // single `sys_read` would return only the first record's payload.
         if self.is_stream_entry(path) {
@@ -567,6 +621,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.authorize_target(path)?;
         self.kernel
             .sys_write(path, &self.ctx, data, 0)
             .map_err(kernel_err)
@@ -574,6 +629,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.authorize_target(path)?;
         // A DT_STREAM appends `data` as one framed record in O(1): `sys_write`
         // pushes to the log tail (the offset arg is ignored for streams).
         // Regular files have no O(1) append, so fall back to read-concat-write
@@ -592,6 +648,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
+        self.authorize_target(path)?;
         // Idempotent: an existing entry (DT_STREAM to append to, or a DT_REG
         // from a prior degraded run) is left as-is.
         if self.kernel.sys_stat(path, &self.ctx.zone_id).is_some() {
@@ -643,6 +700,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
+        self.authorize_target(path)?;
         Ok(self.is_stream_entry(path))
     }
 
@@ -652,6 +710,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
+        self.authorize_target(path)?;
         let result = self
             .kernel
             .sys_read(path, &self.ctx, block_ms, cursor)
@@ -677,6 +736,8 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        self.authorize_target(alias)?;
+        self.authorize_target(target)?;
         // DT_LINK: a VFS-internal pointer alias → target (e.g. the
         // `/agents/{name}/sessions/<sid>` enum index → `/sessions/<sid>`).
         if let Some(parent) = std::path::Path::new(alias).parent() {
@@ -712,6 +773,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
+        self.authorize_target(path)?;
         self.kernel
             .sys_unlink(path, &self.ctx, false)
             .map_err(kernel_err)
@@ -719,6 +781,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {
+        self.authorize_target(path)?;
         self.kernel
             .sys_stat(path, &self.ctx.zone_id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path}: not found")))
@@ -734,6 +797,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
+        self.authorize_target(path)?;
         let zone = &self.ctx.zone_id;
         // `sys_readdir` returns `Vec<(child_GLOBAL_path, entry_type)>` —
         // full paths like `/ws/a.rs`, not basenames. The `FsBackend`
@@ -758,10 +822,12 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn exists(&self, path: &str) -> io::Result<bool> {
+        self.authorize_target(path)?;
         Ok(self.kernel.sys_stat(path, &self.ctx.zone_id).is_some())
     }
 
     fn create_dir_all(&self, path: &str) -> io::Result<()> {
+        self.authorize_target(path)?;
         // Writing `/ws/sub/c.rs` creates only the leaf's metastore entry —
         // the intermediate `/ws/sub` dirent is NOT auto-planted, so a later
         // `readdir("/ws")` would not see `sub` and a recursive walk could
@@ -816,6 +882,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {
+        self.authorize_target(path)?;
         // VFS paths are already canonical — no host symlinks to resolve.
         Ok(path.to_string())
     }
@@ -848,6 +915,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 pub struct NexusVfsFsBackend {
     client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
     auth_token: String,
+    zone_context: HostZoneContext,
 }
 
 impl NexusVfsFsBackend {
@@ -855,6 +923,7 @@ impl NexusVfsFsBackend {
         Self {
             client: std::sync::Arc::new(client),
             auth_token,
+            zone_context: HostZoneContext::from_host_env(),
         }
     }
 
@@ -862,20 +931,40 @@ impl NexusVfsFsBackend {
         client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
         auth_token: String,
     ) -> Self {
-        Self { client, auth_token }
+        Self {
+            client,
+            auth_token,
+            zone_context: HostZoneContext::from_host_env(),
+        }
+    }
+
+    fn authorize_target(&self, path: &str) -> io::Result<()> {
+        let normalized = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            lexical_join("/", path)
+        }
+        .replace('\\', "/");
+        self.zone_context
+            .authorize_path(&normalized)
+            .map(|_| ())
+            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))
     }
 }
 
 impl FsBackend for NexusVfsFsBackend {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+        self.authorize_target(path)?;
         self.client.read(path, &self.auth_token)
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.authorize_target(path)?;
         self.client.write(path, data.to_vec(), &self.auth_token)
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        self.authorize_target(path)?;
         if path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX) {
             self.client
                 .stream_write(path, data.to_vec(), &self.auth_token)
@@ -888,20 +977,24 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
+        self.authorize_target(path)?;
         self.client
             .ensure_stream(path, "wal,memory", retention, &self.auth_token)
             .map(|_| ())
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
+        self.authorize_target(path)?;
         Ok(path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
+        self.authorize_target(path)?;
         self.client.delete(path, &self.auth_token)
     }
 
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {
+        self.authorize_target(path)?;
         let stat = self.client.stat(path, &self.auth_token)?;
         Ok(FsMetadata {
             len: stat.size,
@@ -915,6 +1008,7 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
+        self.authorize_target(path)?;
         let entries = self.client.readdir(path, &self.auth_token)?;
         Ok(entries
             .into_iter()
@@ -929,7 +1023,8 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(self.client.stat(path, &self.auth_token).is_ok())
     }
 
-    fn create_dir_all(&self, _path: &str) -> io::Result<()> {
+    fn create_dir_all(&self, path: &str) -> io::Result<()> {
+        self.authorize_target(path)?;
         // VFS servers typically auto-create intermediate paths on write.
         Ok(())
     }
@@ -942,6 +1037,7 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {
+        self.authorize_target(path)?;
         // VFS paths are already canonical over gRPC — no host symlinks.
         Ok(path.to_string())
     }
@@ -957,6 +1053,7 @@ impl FsBackend for NexusVfsFsBackend {
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
+        self.authorize_target(path)?;
         self.client
             .stream_read_at(path, cursor, block_ms > 0, block_ms, &self.auth_token)
     }

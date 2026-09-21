@@ -391,13 +391,13 @@ impl Debug for SudoclawLogSink {
 }
 
 impl SudoclawLogSink {
-    /// Creates a new SudoclawLogSink with automatic path detection.
+    /// Creates a new [`SudoclawLogSink`] with automatic path detection.
     pub fn new() -> Result<Self, std::io::Error> {
         let path = Self::resolve_log_path()?;
         Self::with_path(&path)
     }
 
-    /// Creates a new SudoclawLogSink with a specific path.
+    /// Creates a new [`SudoclawLogSink`] with a specific path.
     pub fn with_path(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -449,7 +449,7 @@ impl SudoclawLogSink {
         &self.path
     }
 
-    /// Rotates the log file, keeping up to SUDOCLAW_LOG_MAX_ROTATED_FILES rotated files.
+    /// Rotates the log file, keeping up to [`SUDOCLAW_LOG_MAX_ROTATED_FILES`] rotated files.
     fn rotate_log_file(&self) -> Result<(), std::io::Error> {
         // Remove the oldest rotated file if it exists
         let oldest_rotated = format!("{}.{}", self.path.display(), SUDOCLAW_LOG_MAX_ROTATED_FILES);
@@ -458,7 +458,7 @@ impl SudoclawLogSink {
         }
 
         // Shift existing rotated files
-        for i in (1..=SUDOCLAW_LOG_MAX_ROTATED_FILES - 1).rev() {
+        for i in (1..SUDOCLAW_LOG_MAX_ROTATED_FILES).rev() {
             let current = format!("{}.{}", self.path.display(), i);
             let next = format!("{}.{}", self.path.display(), i + 1);
             if Path::new(&current).exists() {
@@ -508,7 +508,7 @@ impl TelemetrySink for SudoclawLogSink {
 
                 // Perform rotation
                 if let Err(e) = self.rotate_log_file() {
-                    eprintln!("[scode telemetry] Failed to rotate log: {}", e);
+                    eprintln!("[scode telemetry] Failed to rotate log: {e}");
                 }
 
                 // Re-acquire lock after rotation
@@ -520,15 +520,15 @@ impl TelemetrySink for SudoclawLogSink {
         }
 
         if let Err(e) = writeln!(file, "{json}") {
-            eprintln!("[scode telemetry] Failed to write log: {}", e);
+            eprintln!("[scode telemetry] Failed to write log: {e}");
         }
         if let Err(e) = file.flush() {
-            eprintln!("[scode telemetry] Failed to flush log: {}", e);
+            eprintln!("[scode telemetry] Failed to flush log: {e}");
         }
     }
 }
 
-/// Formats a TelemetryEvent into a structured log entry.
+/// Formats a [`TelemetryEvent`] into a structured log entry.
 fn format_log_entry(event: &TelemetryEvent) -> Map<String, Value> {
     let mut entry = Map::new();
 
@@ -536,8 +536,9 @@ fn format_log_entry(event: &TelemetryEvent) -> Map<String, Value> {
 
     // Set log level based on event type
     let level = match event {
-        TelemetryEvent::HttpRequestDebug { .. } => "debug",
-        TelemetryEvent::HttpResponseDebug { .. } => "debug",
+        TelemetryEvent::HttpRequestDebug { .. } | TelemetryEvent::HttpResponseDebug { .. } => {
+            "debug"
+        }
         TelemetryEvent::HttpRequestFailed { .. } => "warn",
         _ => "info",
     };
@@ -556,7 +557,8 @@ fn format_log_entry(event: &TelemetryEvent) -> Map<String, Value> {
     entry
 }
 
-/// Extracts event information from a TelemetryEvent.
+/// Extracts event information from a [`TelemetryEvent`].
+#[allow(clippy::too_many_lines)]
 fn extract_event_info(event: &TelemetryEvent) -> (String, String, Map<String, Value>) {
     match event {
         TelemetryEvent::HttpRequestStarted {
@@ -833,6 +835,7 @@ impl SessionTracer {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_http_request_succeeded(
         &self,
         request_id: impl Into<String>,
@@ -862,6 +865,7 @@ impl SessionTracer {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_http_request_failed(
         &self,
         request_id: impl Into<String>,
@@ -948,6 +952,7 @@ impl SessionTracer {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_usage_with_cost(
         &self,
         request_id: impl Into<String>,
@@ -1260,7 +1265,7 @@ mod tests {
         let sink = SudoclawLogSink::with_path(&log_path).expect("sink should create file");
         sink.record(TelemetryEvent::SessionStarted {
             session_id: "test-session".to_string(),
-            timestamp_ms: 1234567890,
+            timestamp_ms: 1_234_567_890,
             version: "0.1.0".to_string(),
             cwd: "/test".to_string(),
             mode: "standalone".to_string(),
@@ -1283,7 +1288,7 @@ mod tests {
             attempt: 1,
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
-            timestamp_ms: 1234567890,
+            timestamp_ms: 1_234_567_890,
             attributes: Map::new(),
         };
 

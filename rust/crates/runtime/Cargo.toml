@@ -6,6 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# P1a (§8.11 R6.1)：仅 common/auth 子集的派生 Rust 契约（zone-id/path owner
+# validators + ResourceRef）。Git exact pin 到 sudostack feat/contract-zone
+# assembly revision；本 crate 不引入 Moss business policy。
+sudo-contracts = { package = "sudo-contracts", git = "https://github.com/sudoprivacy/sudostack", rev = "f0c586477694f054c8a31fe682e7481593c16948" }
 agent-client-protocol = { workspace = true }
 agent-client-protocol-schema = { workspace = true }
 agent-client-protocol-tokio = { workspace = true }

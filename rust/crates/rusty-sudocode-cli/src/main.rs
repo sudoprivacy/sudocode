@@ -3995,20 +3995,13 @@ impl LiveCli {
         // The interactive paths draw the stream; the `--output-format` paths
         // collect silently (they print only the final text / JSON), so the
         // renderer is optional. Without it we still detect the same outcomes
-        // (Done / permission / question) straight from the event kinds.
-        // With an iocraft `ui` present, in-flight tool calls show as running
-        // cards in the staging overlay, so the renderer must not also append
-        // the command header (it would appear twice). The finished result card
-        // still appends through the renderer — the single ordered scrollback
-        // sink. Off the overlay (one-shot / `--print`) the header appends.
-        let mut renderer = render.then(|| {
-            let r = EngineEventRenderer::new(spinner_ref, output.cloned());
-            if ui.is_some() {
-                r.with_staging_overlay()
-            } else {
-                r
-            }
-        });
+        // (Done / permission / question) straight from the event kinds. The
+        // renderer commits exactly one card per tool call — the completed
+        // (green/red) result card. The in-flight running card is drawn only by
+        // the iocraft staging overlay (a live, self-clearing region); it is
+        // never committed to durable scrollback, so `Running` cannot outlive
+        // the call regardless of whether a `ui` overlay is present.
+        let mut renderer = render.then(|| EngineEventRenderer::new(spinner_ref, output.cloned()));
         let blocks = vec![runtime::ContentBlock::Text {
             text: input.to_string(),
         }];

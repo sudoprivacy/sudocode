@@ -16,7 +16,7 @@ use engine_events::{
     RetryEvent, ToolProgressEvent,
 };
 
-use crate::cli::format::{format_tool_call_start, format_tool_result};
+use crate::cli::format::format_tool_result;
 use crate::render::{
     query_terminal_width, MarkdownStreamState, ResponseGlyphState, SpinnerRef, TerminalRenderer,
     DIM, RESET,
@@ -53,12 +53,6 @@ pub(crate) struct EngineEventRenderer {
     /// `true` while inside a thinking block, so the "Reasoning…" spinner cue is
     /// raised once and lowered when real content resumes.
     thinking_active: bool,
-    /// `true` when a staging overlay (the iocraft REPL) shows in-flight tool
-    /// calls as running cards. In that mode the command header is NOT appended
-    /// to scrollback here — the overlay renders it — while the finished result
-    /// card still appends normally (the ordered scrollback sink). Off for
-    /// one-shot / `--print`, where there is no overlay and the header appends.
-    staging_overlay: bool,
     /// Tool-call arguments remembered from `ToolCall` and paired with the
     /// matching `ToolResult`, so the completed card can show what was requested
     /// — the result payload does not echo command/path/strings. Shared type
@@ -75,16 +69,8 @@ impl EngineEventRenderer {
             spinner,
             output_writer,
             thinking_active: false,
-            staging_overlay: false,
             tool_inputs: crate::cli::format::ToolInputRegistry::default(),
         }
-    }
-
-    /// Enable staging-overlay mode: suppress the command-header append (the
-    /// overlay shows in-flight calls); the finished result card still appends.
-    pub(crate) fn with_staging_overlay(mut self) -> Self {
-        self.staging_overlay = true;
-        self
     }
 
     fn write_out(&mut self, text: &str) {
@@ -194,18 +180,16 @@ impl EngineEventRenderer {
                 // the call's input.
                 self.tool_inputs.remember(&id, &input);
                 self.pause_spinner();
-                // Staging overlay owns the command header (as a running card),
-                // so suppress the scrollback append here to avoid showing it
-                // twice. The glyph reset and spinner pause/resume still run —
-                // they are streaming-cursor bookkeeping, independent of who
-                // renders the header. Without an overlay (one-shot / --print)
-                // the header appends as before.
-                if !self.staging_overlay {
-                    let line = format!("\n{}\n", format_tool_call_start(&name, &input));
-                    self.write_out(&line);
-                }
-                // The tool line reset column 0; the next assistant text starts a
-                // fresh ⏺-margined block.
+                // No card is committed here. `Running` (amber) is a live,
+                // self-clearing status that belongs only to the iocraft staging
+                // overlay; scrollback is durable and must carry exactly one card
+                // per call — the terminal-status (green/red) card committed on
+                // `ToolResult` below. Committing a `Running` header here froze an
+                // amber "in-flight" card permanently above the real result. The
+                // in-flight cue is the spinner + the tool's own streamed stdout.
+                //
+                // The glyph reset still runs: the tool line reset column 0, so
+                // the next assistant text starts a fresh ⏺-margined block.
                 self.glyph.visible_col = 0;
                 self.resume_spinner();
                 RenderOutcome::Continue

@@ -91,11 +91,6 @@ fn send_to(
 
 use runtime::mailbox::Mailbox;
 
-/// A counter, for names no other run and no sibling test can be using.
-///
-/// Not a clock: these tests are about the FIRST write to a path, and a
-/// timestamp coarse enough to repeat hands two runs the same name — after
-/// which the second proves nothing, because the path already exists.
 /// How long a test waits for a frame it has just sent to become readable.
 ///
 /// `send` returns once the write is accepted; the frame becomes readable when
@@ -111,14 +106,19 @@ use runtime::mailbox::Mailbox;
 /// `tail_read` blocking when `block_ms > 0` and returns the moment the frame
 /// lands, so this is a deadline rather than a delay. Keep it generous — it is
 /// only ever paid when something is genuinely wrong.
+const DELIVERY_WAIT_MS: u64 = 5_000;
+
 /// The counterpart name for probes that exercise the transport rather than a
 /// real exchange. A conversation needs two names even when only one side is
 /// under test, and a fixed one keeps those probes off any real agent's chat
 /// list.
 const PROBE_PEER: &str = "live-probe-peer";
 
-const DELIVERY_WAIT_MS: u64 = 5_000;
-
+/// A counter, for names no other run and no sibling test can be using.
+///
+/// Not a clock: these tests are about the FIRST write to a path, and a
+/// timestamp coarse enough to repeat hands two runs the same name — after
+/// which the second proves nothing, because the path already exists.
 fn fresh() -> u64 {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
@@ -160,7 +160,10 @@ fn live_inbox_roundtrip() {
     assert!(
         // Body, not `from`: auth-on stamps the sender. See the module rule.
         msgs.iter().any(|m| m.body == body),
-        "expected the sent envelope back, got {msgs:?}"
+        "expected the sent envelope back reading from {start}, got {msgs:?} \
+         (next={next}). A transcript this probe has written to before starts at \
+         a non-zero offset, so this also fails when the read position and the \
+         append disagree about what an offset counts."
     );
 }
 

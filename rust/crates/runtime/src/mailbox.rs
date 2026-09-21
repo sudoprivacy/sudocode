@@ -390,6 +390,23 @@ impl Mailbox {
     /// exist, and its receiver got `StreamNotFound` on every poll. Unit tests
     /// could not see it: the shape is right, the code runs, and only a real
     /// daemon has an opinion about whether the stream is there.
+    /// This agent's recorded position in its conversation with `peer`, or
+    /// `None` if it has never read that conversation.
+    ///
+    /// Readable rather than private because the position is a durable fact
+    /// ABOUT the conversation, not bookkeeping private to the receiver: an
+    /// operator asking "has this agent seen it yet?" and a test asserting that
+    /// a receiver advanced past what it surfaced are the same question, and
+    /// neither should have to reconstruct the register's path to ask it.
+    ///
+    /// # Errors
+    /// Returns an error when the register exists but cannot be read or parsed.
+    pub fn read_position(&self, peer: &str) -> Result<Option<u64>, String> {
+        self.conversation_reader(peer)
+            .load()
+            .map(|register| register.map(|r| r.read_offset))
+    }
+
     /// Make this agent discoverable before it has any conversations.
     ///
     /// Creates the agent's chat-list directory and nothing else. Without it a
@@ -437,9 +454,25 @@ impl Mailbox {
         }
         let root = self.convention.conversation_root(&self.self_id, peer);
         for (owner, other) in [(self.self_id.as_str(), peer), (peer, self.self_id.as_str())] {
+            let dir = self.convention.chat_list_dir(owner);
+            self.backend
+                .create_dir_all(&dir)
+                .map_err(|e| format!("create chat list {dir}: {e}"))?;
+            // A plain entry holding the conversation's root, NOT a link.
+            //
+            // A link would read better — it is what this is — but only one of
+            // the three backends can make one: the gRPC surface carries no link
+            // target on `Setattr`, so over that transport `link` falls to the
+            // trait's silent no-op and the entry never appears at all. A
+            // receiver finds its conversations by listing this directory, so an
+            // entry that never appears is a receiver that never hears anything.
+            //
+            // Every backend can write bytes. The NAME is what `readdir` needs,
+            // and putting the root in the body keeps `cat` able to answer
+            // "pointing at which conversation?".
             let alias = self.convention.chat_list_path(owner, other);
             self.backend
-                .link(&alias, &root)
+                .write(&alias, root.as_bytes())
                 .map_err(|e| format!("index conversation for {owner} at {alias}: {e}"))?;
         }
         let path = self.transcript_path(peer);

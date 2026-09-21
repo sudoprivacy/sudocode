@@ -33,15 +33,20 @@ use tools::GlobalToolRegistry;
 /// Every append this backend was asked to make, as `(path, bytes)`.
 type Appends = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
-/// Every inbox this backend was asked to create.
+/// Everything this backend was asked to CREATE for a send: the transcript it
+/// appends to, and the chat-list entry under each agent that makes the
+/// conversation discoverable.
 type Provisions = Arc<Mutex<Vec<String>>>;
 
 /// A backend that records what a send does and refuses everything else.
 ///
-/// `append`, `is_append_stream` and `create_append_log` are what a send
-/// reaches. The rest panic rather than return plausible defaults: a send that
-/// starts reading or renaming is doing something these tests do not describe,
-/// and a silent default would hide it.
+/// `append`, `write`, `create_dir_all`, `is_append_stream` and
+/// `create_append_log` are what a send reaches: the message itself, the
+/// chat-list entry that makes the conversation discoverable, the directory
+/// holding that entry, and the stream the message is appended to. The rest
+/// panic rather than return plausible defaults — a send that starts reading or
+/// renaming is doing something these tests do not describe, and a silent
+/// default would hide it.
 struct RecordingBackend {
     appends: Appends,
     provisions: Provisions,
@@ -83,8 +88,17 @@ impl FsBackend for RecordingBackend {
     fn read(&self, _: &str) -> io::Result<Vec<u8>> {
         unreachable!("a send does not read")
     }
-    fn write(&self, _: &str, _: &[u8]) -> io::Result<()> {
-        unreachable!("a send appends, it does not overwrite")
+    /// The chat-list ENTRY a send writes so the conversation is discoverable.
+    ///
+    /// Recorded next to the stream it provisions, because both answer "what did
+    /// this send create?" — and a test that cannot see the index cannot tell
+    /// whether the recipient would ever find the message.
+    fn write(&self, path: &str, _: &[u8]) -> io::Result<()> {
+        self.provisions
+            .lock()
+            .expect("provisions poisoned")
+            .push(path.to_string());
+        Ok(())
     }
     fn delete(&self, _: &str) -> io::Result<()> {
         unreachable!("a send does not delete")
@@ -98,8 +112,11 @@ impl FsBackend for RecordingBackend {
     fn exists(&self, _: &str) -> io::Result<bool> {
         unreachable!("a send does not probe existence")
     }
+    /// A chat list is a directory, and a send creates the one it indexes into.
+    /// Not recorded: the ENTRY is the observable fact, the directory only has
+    /// to exist for it.
     fn create_dir_all(&self, _: &str) -> io::Result<()> {
-        unreachable!("a stream inbox has no directory to create")
+        Ok(())
     }
     fn rename(&self, _: &str, _: &str) -> io::Result<()> {
         unreachable!("a send does not rename")
@@ -216,11 +233,22 @@ fn every_spelling_and_shape_reaches_the_same_inbox() {
         // that is not one does not fail — it leaves a plain entry there, tells
         // the sender it was delivered, and the inbox can never become a stream
         // again.
-        assert_eq!(
-            provisions.lock().expect("provisions poisoned").as_slice(),
-            [wrote[0].0.clone()],
-            "`{tool}` must create exactly the inbox it wrote to"
+        let provisioned = provisions.lock().expect("provisions poisoned").clone();
+        assert!(
+            provisioned.contains(&wrote[0].0),
+            "`{tool}` must create the transcript it wrote to, got {provisioned:?}"
         );
+        // Indexed under BOTH agents. Whichever side sends first provisions, and
+        // the side that has to DISCOVER the conversation is the other one — an
+        // entry filed only under the sender leaves the recipient deaf while
+        // every send still reports success.
+        for owner_peer in [("win-ai", "mac-ai"), ("mac-ai", "win-ai")] {
+            let entry = format!("/agents/{}/conversations/{}", owner_peer.0, owner_peer.1);
+            assert!(
+                provisioned.iter().any(|p| p == &entry),
+                "`{tool}` must index the conversation at {entry}, got {provisioned:?}"
+            );
+        }
 
         // `mailbox_path` is what a human reads to decide whether a message left
         // the host, so it has to be the path the convention resolved.

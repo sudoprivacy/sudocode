@@ -1040,7 +1040,8 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_else(|_| String::new());
     let parsed_error = serde_json::from_str::<AnthropicErrorEnvelope>(&body).ok();
-    let retryable = is_retryable_status(status) || is_retryable_400(status, &body);
+    let retryable =
+        crate::error::is_retryable_http_status(status.as_u16()) || is_retryable_400(status, &body);
 
     Err(ApiError::Api {
         status,
@@ -1056,10 +1057,6 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         suggested_action: None,
         retry_after,
     })
-}
-
-const fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 409 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Some gateways and proxies return HTTP 400 with a body like "HTTP 400 from
@@ -1799,19 +1796,6 @@ mod tests {
             Duration::from_millis(10)
         );
         assert_eq!(client.retry_policy.max_backoff, Duration::from_millis(25));
-    }
-
-    #[test]
-    fn retryable_statuses_are_detected() {
-        assert!(super::is_retryable_status(
-            reqwest::StatusCode::TOO_MANY_REQUESTS
-        ));
-        assert!(super::is_retryable_status(
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR
-        ));
-        assert!(!super::is_retryable_status(
-            reqwest::StatusCode::UNAUTHORIZED
-        ));
     }
 
     #[test]

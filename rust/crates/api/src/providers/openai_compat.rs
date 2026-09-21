@@ -2543,7 +2543,8 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
     let parsed_error = serde_json::from_str::<ErrorEnvelope>(&body).ok();
-    let retryable = is_retryable_status(status) || is_retryable_400(status, &body);
+    let retryable =
+        crate::error::is_retryable_http_status(status.as_u16()) || is_retryable_400(status, &body);
 
     let suggested_action = suggested_action_for_status(status);
 
@@ -2561,10 +2562,6 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         suggested_action,
         retry_after,
     })
-}
-
-const fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 409 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Some gateways and proxies return HTTP 400 with a body like "HTTP 400 from

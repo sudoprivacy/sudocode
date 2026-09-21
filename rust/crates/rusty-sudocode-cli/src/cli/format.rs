@@ -127,17 +127,17 @@ pub(crate) fn render_message(
                         }
                         out.push_str(&rendered);
                     }
-                    runtime::ContentBlock::ToolUse {
-                        id, name, input, ..
-                    } => {
-                        if !out.is_empty() {
-                            out.push('\n');
-                        }
-                        // Remember the call's input so the matching ToolResult
-                        // below can show the identity fields (command, path,
-                        // pattern) that the result payload never echoes.
+                    runtime::ContentBlock::ToolUse { id, input, .. } => {
+                        // Mirror the live render engine exactly: a ToolUse only
+                        // *remembers* its input so the matching ToolResult can
+                        // show the identity fields (command, path, pattern) the
+                        // result payload never echoes. It renders NO card here —
+                        // the single durable card per call is the completed
+                        // (green/red) one drawn by the ToolResult below. (A
+                        // running/amber card is a live overlay-only status and
+                        // must never be committed to scrollback; on replay a
+                        // resultless call is simply not shown, same as live.)
                         tool_inputs.remember(id, input);
-                        out.push_str(&format_tool_call_start(name, input));
                     }
                     _ => {}
                 }
@@ -791,6 +791,13 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
 /// frame. A thin shell over [`tool_card_content`] — the SSOT that guarantees a
 /// tool looks identical running and done, differing only in frame color and
 /// whether the result body is present.
+///
+/// **Invariant: overlay-only.** `Running` (amber) is a live status; the sole
+/// caller is the iocraft staging overlay ([`crate::repl_ui`]), a self-clearing
+/// region that removes the card on completion. It must NEVER be committed to
+/// durable scrollback — that would freeze an amber "in-flight" card above the
+/// real result forever. Scrollback carries exactly one card per call: the
+/// completed (green/red) [`format_tool_result`].
 pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
     let in_val: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
@@ -2805,6 +2812,39 @@ mod tests {
         assert!(
             plain.contains("Bash(cargo test --workspace)"),
             "replay must show the command from the call input: {plain}"
+        );
+        // Structural invariant: exactly ONE card per call — the completed one.
+        // The ToolUse must NOT also render a running/amber start card (that
+        // used to persist an "in-flight" card above the result on resume).
+        assert_eq!(
+            plain.matches('\u{256d}').count(),
+            1,
+            "replay must render exactly one card per call (no persisted running card): {plain}"
+        );
+    }
+
+    #[test]
+    fn replay_lone_tool_call_without_result_renders_no_card() {
+        // A ToolUse with no following ToolResult (interrupted turn, truncated
+        // session) must render NOTHING on replay — not a stranded amber running
+        // card. A resumed session is not "in flight"; only completed calls show.
+        let renderer = crate::render::TerminalRenderer::new();
+        let messages = vec![runtime::ConversationMessage {
+            role: runtime::MessageRole::Assistant,
+            blocks: vec![runtime::ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                input: r#"{"command":"sleep 30"}"#.to_string(),
+                thought_signature: None,
+            }],
+            usage: None,
+            model: None,
+            duration_ms: None,
+        }];
+        let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
+        assert!(
+            !plain.contains('\u{256d}'),
+            "a resultless call must render no card on replay: {plain:?}"
         );
     }
 

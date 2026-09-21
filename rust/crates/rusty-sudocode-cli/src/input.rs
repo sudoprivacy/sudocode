@@ -369,6 +369,38 @@ impl LineEditor {
         std::mem::take(&mut *map)
     }
 
+    /// Read a single choice line for a mid-turn dialog (e.g. the write_plan
+    /// approval), reusing THIS editor so there is exactly one owner of the
+    /// terminal's raw-mode / bracketed-paste state. A throwaway second
+    /// `rustyline::Editor` (the previous approach) toggled those modes on drop
+    /// underneath the main REPL editor, perturbing its re-arm. The slash-command
+    /// completions are blanked for the read so option digits don't trigger the
+    /// completer; the caller re-seeds them on the next loop iteration. The
+    /// answer is NOT pushed into prompt history.
+    pub fn prompt_choice(&mut self, prompt: &str) -> io::Result<String> {
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            let mut buffer = String::new();
+            if io::stdin().read_line(&mut buffer)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "stdin closed while awaiting choice",
+                ));
+            }
+            return Ok(buffer.trim().to_string());
+        }
+        if let Some(helper) = self.editor.helper_mut() {
+            helper.set_completions(Vec::new());
+        }
+        match self.editor.readline(prompt) {
+            Ok(line) => Ok(line.trim().to_string()),
+            Err(ReadlineError::Interrupted | ReadlineError::Eof) => Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "choice prompt cancelled",
+            )),
+            Err(error) => Err(io::Error::other(error)),
+        }
+    }
+
     pub fn read_line(&mut self) -> io::Result<ReadOutcome> {
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
             return self.read_line_fallback();

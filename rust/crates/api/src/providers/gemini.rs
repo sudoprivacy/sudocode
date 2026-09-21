@@ -405,7 +405,7 @@ async fn check_gemini_response(response: reqwest::Response) -> Result<reqwest::R
         message,
         request_id: None,
         body,
-        retryable: matches!(status.as_u16(), 429 | 500 | 502 | 503),
+        retryable: crate::error::is_retryable_http_status(status.as_u16()),
         suggested_action: None,
         retry_after,
     })

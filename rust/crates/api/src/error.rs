@@ -614,9 +614,53 @@ pub fn format_context_window_blocked_error(session_id: &str, error: &ApiError) -
     lines.join("\n")
 }
 
+/// SSOT for which HTTP status codes are worth retrying: transient server,
+/// gateway, and overload responses where the same request may succeed on a
+/// later attempt. Every provider's error mapper routes its status check
+/// through here so the retry set is defined in exactly one place.
+///
+/// Included:
+/// - `408` request timeout, `409` conflict, `429` rate limit
+/// - `500 502 503 504` server + gateway errors
+/// - `520 522 524` Cloudflare origin/gateway failures and timeouts (a 524 is
+///   the gateway giving up on a slow upstream; the request may or may not have
+///   been processed, but retrying matches every mainstream SDK and the win
+///   outweighs the rare duplicate-generation risk)
+/// - `529` Anthropic "Overloaded"
+///
+/// NOT included: `4xx` client errors (`400 401 403 404 413 422 …`) — a retry
+/// with the same request can never fix them. (`408/409/429` are the deliberate
+/// transient exceptions.) Gateway errors masquerading as `400` are handled
+/// separately per provider via their body-sniffing `is_retryable_400`.
+#[must_use]
+pub const fn is_retryable_http_status(status: u16) -> bool {
+    matches!(
+        status,
+        408 | 409 | 429 | 500 | 502 | 503 | 504 | 520 | 522 | 524 | 529
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{truncate_body_snippet, ApiError};
+    use super::{is_retryable_http_status, truncate_body_snippet, ApiError};
+
+    #[test]
+    fn retryable_http_status_covers_gateway_and_overload_codes() {
+        // Transient server / gateway / overload — retry may succeed.
+        for status in [408, 409, 429, 500, 502, 503, 504, 520, 522, 524, 529] {
+            assert!(
+                is_retryable_http_status(status),
+                "{status} should be retryable"
+            );
+        }
+        // Client errors — a retry with the same request can never fix them.
+        for status in [200, 400, 401, 403, 404, 413, 422, 501] {
+            assert!(
+                !is_retryable_http_status(status),
+                "{status} must not be retryable"
+            );
+        }
+    }
 
     #[test]
     fn json_deserialize_error_includes_provider_model_and_truncated_body_snippet() {

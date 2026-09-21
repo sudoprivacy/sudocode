@@ -915,7 +915,16 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        if path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX) {
+        // Ask the predicate rather than restating it. This branch spelled
+        // `ends_with(CHAT_WITH_ME_SUFFIX)` on its own, so when the mailbox moved
+        // to `…/transcript` it quietly took the read-modify-write path below:
+        // every append re-read the stream through `read` (which yields its FIRST
+        // frame), concatenated the new envelope onto that, and wrote the pair
+        // back as a single frame. Two JSON objects in one frame parse as
+        // neither, so every message after the first became unreadable — sends
+        // reporting success, a receiver seeing nothing, and only a real daemon
+        // able to show it.
+        if self.is_append_stream(path)? {
             self.client
                 .stream_write(path, data.to_vec(), &self.auth_token)
                 .map(|_offset| ())
@@ -958,7 +967,20 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(entries
             .into_iter()
             .map(|e| FsDirEntry {
-                name: e.name,
+                // The node answers with FULL paths; `FsDirEntry::name` is an
+                // entry name, which is what the other backends return and what
+                // callers join back onto the directory they listed. Passed
+                // through whole it is not a name at all: a receiver enumerating
+                // its chat list read `/agents/me/conversations/<peer>` as the
+                // peer's NAME, derived a conversation id from that string, and
+                // tailed a transcript nobody writes to — reporting
+                // `StreamNotFound` in a loop while messages waited elsewhere.
+                name: e
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(e.name.as_str())
+                    .to_string(),
                 is_dir: e.is_directory,
             })
             .collect())

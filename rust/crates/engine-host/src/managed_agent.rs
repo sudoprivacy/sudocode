@@ -110,11 +110,11 @@ where
     // reason to co-host: a write here passes the hooks, the audit trail and the
     // permission checks that a `std::fs` write never sees.
     let workspace_root = format!("/proc/{}/workspace", desc.pid);
-    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    // Built from the complete planted descriptor so the agent's delegation
+    // reference participates in every target authorization the backend makes.
+    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(kernel),
-        &desc.owner_id,
-        &desc.zone_id,
-        &desc.name,
+        desc,
         workspace_root.clone(),
     ));
 

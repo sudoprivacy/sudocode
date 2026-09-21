@@ -42,6 +42,8 @@ pub enum ContextSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostZoneContext {
     zone_id: Option<String>,
+    nexus_v2_base_url: Option<String>,
+    delegation_ref: Option<String>,
     source: ContextSource,
 }
 
@@ -50,20 +52,25 @@ impl HostZoneContext {
     /// [`ManagedAgentService`]; its `zone_id` is authority by construction.
     #[must_use]
     pub fn from_planted_descriptor(desc: &AgentDescriptor) -> Self {
+        let zone_id = validate_existing_zone_id_ref(&desc.zone_id).then(|| desc.zone_id.clone());
         Self {
-            zone_id: Some(desc.zone_id.clone()),
+            zone_id,
+            nexus_v2_base_url: desc.labels.get(ENV_NEXUS_V2_BASE_URL).cloned(),
+            delegation_ref: desc.labels.get(ENV_NEXUS_DELEGATION_REF).cloned(),
             source: ContextSource::PlantedDescriptor,
         }
     }
 
     /// Subprocess path (R6.2): the zone arrives via host-injected env.
-    /// A malformed id is rejected (recorded as absent with the source kept
-    /// visible) — never coerced, never defaulted to a guess.
+    /// A malformed id is rejected (recorded without a usable zone while the
+    /// attempted host source remains visible) — never coerced or guessed.
     #[must_use]
     pub fn from_host_env() -> Self {
         match std::env::var(ENV_NEXUS_ZONE_ID) {
             Ok(value) if validate_existing_zone_id_ref(&value) => Self {
                 zone_id: Some(value),
+                nexus_v2_base_url: std::env::var(ENV_NEXUS_V2_BASE_URL).ok(),
+                delegation_ref: std::env::var(ENV_NEXUS_DELEGATION_REF).ok(),
                 source: ContextSource::HostEnvironment,
             },
             Ok(invalid) => {
@@ -73,13 +80,35 @@ impl HostZoneContext {
                 tracing::debug!(zone_id = %invalid, "invalid NEXUS_ZONE_ID ignored");
                 Self {
                     zone_id: None,
-                    source: ContextSource::Absent,
+                    nexus_v2_base_url: None,
+                    delegation_ref: None,
+                    source: ContextSource::HostEnvironment,
                 }
             }
             Err(_) => Self {
                 zone_id: None,
+                nexus_v2_base_url: None,
+                delegation_ref: None,
                 source: ContextSource::Absent,
             },
+        }
+    }
+
+    /// Explicit constructor used by trusted host adapters and integration
+    /// tests without mutating process-global environment variables.
+    #[must_use]
+    pub fn from_trusted_parts(
+        zone_id: impl Into<String>,
+        nexus_v2_base_url: Option<String>,
+        delegation_ref: Option<String>,
+        source: ContextSource,
+    ) -> Self {
+        let zone_id = zone_id.into();
+        Self {
+            zone_id: validate_existing_zone_id_ref(&zone_id).then_some(zone_id),
+            nexus_v2_base_url,
+            delegation_ref: delegation_ref.filter(|value| !value.trim().is_empty()),
+            source,
         }
     }
 
@@ -92,6 +121,37 @@ impl HostZoneContext {
     #[must_use]
     pub fn source(&self) -> &ContextSource {
         &self.source
+    }
+
+    #[must_use]
+    pub fn nexus_v2_base_url(&self) -> Option<&str> {
+        self.nexus_v2_base_url.as_deref()
+    }
+
+    #[must_use]
+    pub fn delegation_ref(&self) -> Option<&str> {
+        self.delegation_ref.as_deref()
+    }
+
+    /// Build and validate the canonical [`ResourceRef`] for one target access.
+    pub fn authorize_path(&self, path: &str) -> Result<ResourceRef, ZoneAuthError> {
+        let zone_id = match (&self.zone_id, &self.source) {
+            (Some(zone_id), _) => zone_id.clone(),
+            (None, ContextSource::Absent) => "root".to_string(),
+            (None, _) => return Err(ZoneAuthError::NoZoneContext("invalid".to_string())),
+        };
+        let resource = ResourceRef {
+            api_version: "common.sudo.dev/v1".to_string(),
+            kind: "ResourceRef".to_string(),
+            zone_id,
+            path: path.to_string(),
+            version: None,
+            digest: None,
+            media_type: None,
+            size_bytes: None,
+        };
+        self.authorize_resource_ref(&resource)?;
+        Ok(resource)
     }
 
     /// R6.3 — re-validate a [`ResourceRef`] target against this context.
@@ -108,7 +168,9 @@ impl HostZoneContext {
             return Err(ZoneAuthError::InvalidPath(resource.path.clone()));
         }
         match (&self.zone_id, resource.zone_id.as_str()) {
-            (Some(own), z) if own == z => Ok(()),
+            (Some(own), z) if own == z && own == "root" => Ok(()),
+            (Some(own), z) if own == z && self.delegation_ref.is_some() => Ok(()),
+            (Some(own), z) if own == z => Err(ZoneAuthError::MissingDelegation(own.clone())),
             (Some(_), _) => Err(ZoneAuthError::CrossZoneRef {
                 own: self.zone_id.clone().unwrap_or_default(),
                 asked: resource.zone_id.clone(),
@@ -116,7 +178,7 @@ impl HostZoneContext {
             // No trusted zone context: this runtime is a root/local
             // standalone run; only the reserved root ref is permitted and
             // anything else is refused (fail closed, no implicit grant).
-            (None, "root") => Ok(()),
+            (None, "root") if self.source == ContextSource::Absent => Ok(()),
             (None, _) => Err(ZoneAuthError::NoZoneContext(resource.zone_id.clone())),
         }
     }
@@ -129,6 +191,7 @@ pub enum ZoneAuthError {
     InvalidPath(String),
     CrossZoneRef { own: String, asked: String },
     NoZoneContext(String),
+    MissingDelegation(String),
 }
 
 impl std::fmt::Display for ZoneAuthError {
@@ -141,6 +204,9 @@ impl std::fmt::Display for ZoneAuthError {
             }
             Self::NoZoneContext(z) => {
                 write!(f, "zone-less runtime cannot authorize ref to {z}")
+            }
+            Self::MissingDelegation(z) => {
+                write!(f, "runtime in zone {z} has no short-lived delegation")
             }
         }
     }

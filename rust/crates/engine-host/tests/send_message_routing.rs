@@ -33,15 +33,20 @@ use tools::GlobalToolRegistry;
 /// Every append this backend was asked to make, as `(path, bytes)`.
 type Appends = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
-/// Every inbox this backend was asked to create.
+/// Everything this backend was asked to CREATE for a send: the transcript it
+/// appends to, and the chat-list entry under each agent that makes the
+/// conversation discoverable.
 type Provisions = Arc<Mutex<Vec<String>>>;
 
 /// A backend that records what a send does and refuses everything else.
 ///
-/// `append`, `is_append_stream` and `create_append_log` are what a send
-/// reaches. The rest panic rather than return plausible defaults: a send that
-/// starts reading or renaming is doing something these tests do not describe,
-/// and a silent default would hide it.
+/// `append`, `write`, `create_dir_all`, `is_append_stream` and
+/// `create_append_log` are what a send reaches: the message itself, the
+/// chat-list entry that makes the conversation discoverable, the directory
+/// holding that entry, and the stream the message is appended to. The rest
+/// panic rather than return plausible defaults — a send that starts reading or
+/// renaming is doing something these tests do not describe, and a silent
+/// default would hide it.
 struct RecordingBackend {
     appends: Appends,
     provisions: Provisions,
@@ -70,17 +75,30 @@ impl FsBackend for RecordingBackend {
         Ok(())
     }
 
-    /// Mirrors `NexusVfsFsBackend`: the A2A leaf marks a framed stream, so an
-    /// envelope crosses as one record rather than a JSONL line.
+    /// Mirrors `NexusVfsFsBackend` by calling the SAME predicate it calls, not
+    /// by restating it. Both used to spell `ends_with(CHAT_WITH_ME_SUFFIX)`, so
+    /// when the mailbox moved to `…/transcript` the mock and the backend went
+    /// wrong together and agreed with each other about it — the envelope fell
+    /// to the JSONL branch and was written to the local filesystem while the
+    /// send reported success.
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(path.ends_with(runtime::mailbox::CHAT_WITH_ME_SUFFIX))
+        Ok(runtime::mailbox::is_mailbox_path(path))
     }
 
     fn read(&self, _: &str) -> io::Result<Vec<u8>> {
         unreachable!("a send does not read")
     }
-    fn write(&self, _: &str, _: &[u8]) -> io::Result<()> {
-        unreachable!("a send appends, it does not overwrite")
+    /// The chat-list ENTRY a send writes so the conversation is discoverable.
+    ///
+    /// Recorded next to the stream it provisions, because both answer "what did
+    /// this send create?" — and a test that cannot see the index cannot tell
+    /// whether the recipient would ever find the message.
+    fn write(&self, path: &str, _: &[u8]) -> io::Result<()> {
+        self.provisions
+            .lock()
+            .expect("provisions poisoned")
+            .push(path.to_string());
+        Ok(())
     }
     fn delete(&self, _: &str) -> io::Result<()> {
         unreachable!("a send does not delete")
@@ -94,8 +112,11 @@ impl FsBackend for RecordingBackend {
     fn exists(&self, _: &str) -> io::Result<bool> {
         unreachable!("a send does not probe existence")
     }
+    /// A chat list is a directory, and a send creates the one it indexes into.
+    /// Not recorded: the ENTRY is the observable fact, the directory only has
+    /// to exist for it.
     fn create_dir_all(&self, _: &str) -> io::Result<()> {
-        unreachable!("a stream inbox has no directory to create")
+        Ok(())
     }
     fn rename(&self, _: &str, _: &str) -> io::Result<()> {
         unreachable!("a send does not rename")
@@ -112,6 +133,16 @@ fn executor() -> CliToolExecutor {
     CliToolExecutor::new(None, GlobalToolRegistry::builtin(), None)
 }
 
+/// The agent identity the session mailbox runs as.
+const SESSION_AGENT: &str = "win-ai";
+
+/// The transcript the session agent shares with `peer`, derived the way the
+/// code under test derives it. A literal path here would assert against a
+/// location nothing writes to — which is how these assertions went stale.
+fn transcript_with(peer: &str) -> String {
+    InboxConvention::new(String::new()).transcript_path(SESSION_AGENT, peer)
+}
+
 /// An executor on a nexus-convention mailbox that records every write.
 ///
 /// Given to the dispatcher exactly as the host gives it the A2A session's
@@ -126,10 +157,8 @@ fn nexus_executor() -> (CliToolExecutor, Appends, Provisions) {
             appends: Arc::clone(&appends),
             provisions: Arc::clone(&provisions),
         }),
-        "win-ai".to_string(),
-        InboxConvention::PerRecipient {
-            root: String::new(),
-        },
+        SESSION_AGENT.to_string(),
+        InboxConvention::new(String::new()),
     )));
     (executor, appends, provisions)
 }
@@ -194,7 +223,8 @@ fn every_spelling_and_shape_reaches_the_same_inbox() {
             "`{tool}` must write exactly one envelope, got {wrote:?}"
         );
         assert_eq!(
-            wrote[0].0, "/agents/mac-ai/chat-with-me",
+            wrote[0].0,
+            transcript_with("mac-ai"),
             "`{tool}` addressed the wrong path"
         );
 
@@ -203,16 +233,27 @@ fn every_spelling_and_shape_reaches_the_same_inbox() {
         // that is not one does not fail — it leaves a plain entry there, tells
         // the sender it was delivered, and the inbox can never become a stream
         // again.
-        assert_eq!(
-            provisions.lock().expect("provisions poisoned").as_slice(),
-            [wrote[0].0.clone()],
-            "`{tool}` must create exactly the inbox it wrote to"
+        let provisioned = provisions.lock().expect("provisions poisoned").clone();
+        assert!(
+            provisioned.contains(&wrote[0].0),
+            "`{tool}` must create the transcript it wrote to, got {provisioned:?}"
         );
+        // Indexed under BOTH agents. Whichever side sends first provisions, and
+        // the side that has to DISCOVER the conversation is the other one — an
+        // entry filed only under the sender leaves the recipient deaf while
+        // every send still reports success.
+        for owner_peer in [("win-ai", "mac-ai"), ("mac-ai", "win-ai")] {
+            let entry = format!("/agents/{}/conversations/{}", owner_peer.0, owner_peer.1);
+            assert!(
+                provisioned.iter().any(|p| p == &entry),
+                "`{tool}` must index the conversation at {entry}, got {provisioned:?}"
+            );
+        }
 
         // `mailbox_path` is what a human reads to decide whether a message left
         // the host, so it has to be the path the convention resolved.
         assert!(
-            result.contains("/agents/mac-ai/chat-with-me"),
+            result.contains(&transcript_with("mac-ai")),
             "`{tool}` must report the path it wrote, got: {result}"
         );
         assert!(
@@ -274,7 +315,8 @@ fn a_local_looking_recipient_resolves_through_the_same_convention() {
     let wrote = appends.lock().expect("appends poisoned").clone();
     assert_eq!(wrote.len(), 1, "expected one envelope, got {wrote:?}");
     assert_eq!(
-        wrote[0].0, "/agents/sub-agent-1/chat-with-me",
+        wrote[0].0,
+        transcript_with("sub-agent-1"),
         "a recipient's name resolves through the session's convention like any other"
     );
 }
@@ -342,7 +384,8 @@ fn the_envelope_carries_a_send_time_over_nexus() {
     let wrote = appends.lock().expect("appends poisoned").clone();
     assert_eq!(wrote.len(), 1, "expected one envelope, got {wrote:?}");
     assert_eq!(
-        wrote[0].0, "/agents/mac-ai/chat-with-me",
+        wrote[0].0,
+        transcript_with("mac-ai"),
         "the framed A2A path is the one this pins"
     );
 
@@ -375,10 +418,20 @@ fn with_no_session_mailbox_the_same_tool_writes_the_workspace() {
         r#"{"to":"worker","message":"local hand-off","summary":"local hand-off"}"#,
     );
 
+    // Ask the code under test where it would have written, BEFORE restoring the
+    // cwd. The ambient mailbox derives both its root and its identity from the
+    // current directory, so rebuilding that afterwards from `workspace.path()`
+    // is a second derivation that can disagree with the first — and on macOS it
+    // does: the temp dir is reached through a symlink (`/var` → `/private/var`),
+    // the two spellings hash to different agent names, and the test looks for
+    // the envelope in a conversation nothing ever wrote to.
+    let delivered =
+        std::path::PathBuf::from(runtime::mailbox::sending_mailbox().transcript_path("worker"));
+
     std::env::set_current_dir(previous).expect("restore cwd");
     let result = result.expect("workspace delivery must succeed");
     assert!(
-        result.contains("chat-with-me"),
+        result.contains("/transcript"),
         "with no session mailbox the tool must write the workspace, got: {result}"
     );
     // Assert the envelope landed in THIS workspace, not just that the answer
@@ -387,7 +440,6 @@ fn with_no_session_mailbox_the_same_tool_writes_the_workspace() {
     // the dispatch thread, resolved to the ambient workspace and wrote real
     // envelopes into the crate directory while reporting success. A string check
     // alone is satisfied by that.
-    let delivered = runtime::agent_mailbox::inbox_path_under(workspace.path(), "worker");
     assert!(
         delivered.is_file(),
         "the envelope must be in the workspace that was current, expected {}",

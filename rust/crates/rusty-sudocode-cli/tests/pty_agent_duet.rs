@@ -162,27 +162,6 @@ fn receiver_mailbox(transport: &Transport, _config_home: &Path) -> Mailbox {
     }
 }
 
-/// Where the receiver records its read position, which is how the test knows it
-/// is listening rather than still seeking. Config home: an A2A identity outlives
-/// any one directory.
-fn receiver_cursor(_transport: &Transport, config_home: &Path) -> PathBuf {
-    config_home.join(format!("a2a-cursor-{RECEIVER}"))
-}
-
-/// Block until `path` exists.
-fn wait_for_file(path: &Path, what: &str) {
-    let deadline = Instant::now() + BUDGET;
-    while !path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "{what} never appeared at {} — the receiver is not listening, so anything \
-             sent now would be missed rather than delivered",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
 /// Poll the rendered screen for `needle`.
 ///
 /// Not `expect`: that matches the unconsumed byte stream, and iocraft redraws
@@ -222,14 +201,18 @@ fn run_duet(transport: &Transport) {
     let workspace = env.workspace_root().to_path_buf();
     std::fs::write(workspace.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
-    // ── 1. Provision the receiver's inbox ──────────────────────────────────
+    // ── 1. Provision the conversation ──────────────────────────────────
     // A send to a path that is not an append stream fails loudly rather than
-    // writing where nothing tails, so provision the receiver's stream first.
+    // writing where nothing tails, so provision the pair's transcript first.
+    // Either side may do it; here the test does, so the tail below has
+    // something to seek in even when the sender has not started.
     let inbox = receiver_mailbox(transport, env.config_home());
     inbox
-        .ensure_inbox()
-        .expect("provision the receiver's inbox");
-    let (_history, tail) = inbox.poll(0, 0).expect("seek the inbox to its tail");
+        .ensure_conversation(&sender_name)
+        .expect("provision the conversation");
+    let (_history, tail) = inbox
+        .poll_conversation(&sender_name, 0, 0)
+        .expect("seek the transcript to its tail");
 
     let mut receiver_env_vars = vec![("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
     if let Transport::OneNode { endpoint }
@@ -246,10 +229,12 @@ fn run_duet(transport: &Transport) {
     receiver
         .expect("❯")
         .expect("the receiver's REPL should start");
-    wait_for_file(
-        &receiver_cursor(transport, env.config_home()),
-        "the receiver's read position",
-    );
+    // No wait for a read position here. It used to block until the receiver
+    // had written its cursor file, because a first-ever read seeked to the
+    // tail and anything sent before that was skipped. A first read now starts
+    // at the beginning of the conversation, so a message sent before the
+    // receiver has discovered it is still delivered - and the file that wait
+    // watched for is gone, the position having moved into the conversation.
 
     // ── 3. The SENDER: another real scode, whose model calls `send` ────────
     // Locally it must share the receiver's workspace, because that is what the
@@ -334,12 +319,11 @@ fn run_duet(transport: &Transport) {
     // cursor, this one is the receiver's, and a receiver that surfaces a message
     // without recording it re-delivers the same message forever — which is how
     // a re-reply storm starts.
-    let cursor_file = receiver_cursor(transport, env.config_home());
     let deadline = Instant::now() + BUDGET;
     loop {
-        let recorded = std::fs::read_to_string(&cursor_file)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
+        let recorded = inbox
+            .read_position(&expected_from)
+            .expect("read the receiver's position")
             .unwrap_or(0);
         if recorded > tail {
             break;
@@ -348,7 +332,7 @@ fn run_duet(transport: &Transport) {
             Instant::now() < deadline,
             "[{}] the receiver surfaced the message but never advanced its own read              position past {tail} in {}",
             transport.label(),
-            cursor_file.display()
+            inbox.transcript_path(&expected_from)
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -356,7 +340,9 @@ fn run_duet(transport: &Transport) {
     // ── 5. Check what crossed ──────────────────────────────────────────────
     // The screen proves delivery; the mailbox proves the contents. Read from
     // the tail snapshot so this is about this run.
-    let (envelopes, next) = inbox.poll(tail, 0).expect("read the receiver's inbox");
+    let (envelopes, next) = inbox
+        .poll_conversation(&expected_from, tail, 0)
+        .expect("read the conversation");
     let delivered = envelopes
         .iter()
         .find(|e| e.from == expected_from)

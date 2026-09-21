@@ -4,8 +4,8 @@ pub mod proto {
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
 use proto::{
-    CallRequest, DeleteRequest, ReadRequest, SetattrRequest, StreamReadAtRequest,
-    StreamWriteRequest, WriteRequest,
+    CallRequest, DeleteRequest, ReadRequest, ReaddirRequest, SetattrRequest, StatRequest,
+    StreamReadAtRequest, StreamWriteRequest, WriteRequest,
 };
 use std::io;
 use std::sync::mpsc;
@@ -14,6 +14,9 @@ use std::time::Duration;
 /// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
 /// `Setattr` when provisioning a mailbox DT_STREAM.
 const DT_STREAM: i32 = 4;
+
+/// DT_DIR entry-type code, for reading `Readdir` results back.
+const DT_DIR: u32 = 1;
 
 enum VfsOp {
     Read {
@@ -65,6 +68,18 @@ enum VfsOp {
         capacity: u64,
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<bool>>,
+    },
+    /// `Stat` — the TYPED RPC, not the generic Call surface.
+    Stat {
+        path: String,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<VfsStat>>,
+    },
+    /// `Readdir` — the TYPED RPC, not the generic Call surface.
+    Readdir {
+        path: String,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<Vec<VfsDirEntry>>>,
     },
 }
 
@@ -382,6 +397,65 @@ impl NexusVfsClient {
                                         }
                                     }));
                                 }
+                                VfsOp::Stat {
+                                    path,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .stat(deadlined(
+                                            StatRequest {
+                                                path,
+                                                auth_token,
+                                                ..Default::default()
+                                            },
+                                            OP_DEADLINE,
+                                        ))
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.found {
+                                            Ok(VfsStat {
+                                                size: u64::try_from(r.size).unwrap_or(0),
+                                                is_directory: r.is_directory,
+                                                modified_at_ms: None,
+                                            })
+                                        } else {
+                                            Err(io::Error::new(
+                                                io::ErrorKind::NotFound,
+                                                format!("{}: not found", r.path),
+                                            ))
+                                        }
+                                    }));
+                                }
+                                VfsOp::Readdir {
+                                    path,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .readdir(deadlined(
+                                            ReaddirRequest {
+                                                path,
+                                                auth_token,
+                                                ..Default::default()
+                                            },
+                                            OP_DEADLINE,
+                                        ))
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(r.entries
+                                                .into_iter()
+                                                .map(|e| VfsDirEntry {
+                                                    name: e.name,
+                                                    is_directory: e.entry_type == DT_DIR,
+                                                })
+                                                .collect())
+                                        }
+                                    }));
+                                }
                             }
                         });
                     }
@@ -530,35 +604,36 @@ impl NexusVfsClient {
     ///
     /// Returns `(size, is_directory)` on success.
     pub fn stat(&self, path: &str, auth_token: &str) -> io::Result<VfsStat> {
-        let payload = serde_json::json!({ "path": path });
-        let resp = self.call("stat", payload.to_string().as_bytes(), auth_token)?;
-        let value: serde_json::Value = serde_json::from_slice(&resp)
-            .map_err(|e| io::Error::other(format!("stat response parse: {e}")))?;
-        Ok(VfsStat {
-            size: value["size"].as_u64().unwrap_or(0),
-            is_directory: value["is_directory"].as_bool().unwrap_or(false),
-            modified_at_ms: value["modified_at_ms"].as_i64(),
-        })
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::Stat {
+                path: path.to_owned(),
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
-    /// List directory entries via the generic Call RPC.
+    /// List directory entries.
+    ///
+    /// Over the TYPED `Readdir` RPC, like every other file operation here.
+    /// This and `stat` went through the generic `Call` surface, which the node
+    /// answers with `unknown Call method: readdir — … call those instead`:
+    /// Call carries registry and plugin dispatch, not file ops. Nothing noticed
+    /// while no caller listed a directory; a receiver that finds its
+    /// conversations by listing its chat list notices immediately, and what it
+    /// reports is "no conversations" rather than "this call is not supported".
     pub fn readdir(&self, path: &str, auth_token: &str) -> io::Result<Vec<VfsDirEntry>> {
-        let payload = serde_json::json!({ "path": path });
-        let resp = self.call("readdir", payload.to_string().as_bytes(), auth_token)?;
-        let value: serde_json::Value = serde_json::from_slice(&resp)
-            .map_err(|e| io::Error::other(format!("readdir response parse: {e}")))?;
-        let entries = value
-            .as_array()
-            .ok_or_else(|| io::Error::other("readdir: expected array"))?;
-        Ok(entries
-            .iter()
-            .filter_map(|entry| {
-                Some(VfsDirEntry {
-                    name: entry["name"].as_str()?.to_string(),
-                    is_directory: entry["is_directory"].as_bool().unwrap_or(false),
-                })
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::Readdir {
+                path: path.to_owned(),
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
             })
-            .collect())
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 }
 
@@ -587,8 +662,27 @@ where
     }
 }
 
+/// Map a node error payload to an `io::Error`, preserving "not found".
+///
+/// Callers BRANCH on that one: a receiver listing a chat list that does not
+/// exist yet has no conversations, which is not the same as a call that
+/// failed. Flattened to `Other`, the two are indistinguishable and the
+/// receiver reports an error where the honest answer is "none yet".
+///
+/// Every other code keeps its message and lands as `Other`, since nothing
+/// downstream tells them apart today.
 fn vfs_err(payload: &[u8]) -> io::Error {
-    io::Error::other(String::from_utf8_lossy(payload).into_owned())
+    /// `FileNotFound` on the node's error enum (`transport/src/grpc.rs`).
+    const FILE_NOT_FOUND: i64 = -32007;
+
+    let text = String::from_utf8_lossy(payload).into_owned();
+    let code = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("code").and_then(serde_json::Value::as_i64));
+    if code == Some(FILE_NOT_FOUND) {
+        return io::Error::new(io::ErrorKind::NotFound, text);
+    }
+    io::Error::other(text)
 }
 
 fn broken_pipe() -> io::Error {

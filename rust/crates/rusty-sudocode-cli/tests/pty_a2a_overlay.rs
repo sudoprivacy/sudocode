@@ -27,52 +27,62 @@ use std::time::{Duration, Instant};
 
 use common::TestEnv;
 use runtime::agent_mailbox::{self, MailboxEnvelope};
-use runtime::mailbox::local_pair_root_in;
+use runtime::mailbox::{local_pair_root_in, Mailbox};
 
 const BUDGET: Duration = Duration::from_secs(30);
 
-/// Wait until the receiver has registered under the pair root and started
-/// polling, then return its real inbox path — discovered from the filesystem so
-/// the test never has to reproduce the binary's cwd-derived name hash. The pair
-/// root itself is stable: `{config_home}/local-mailbox`, and the harness sets
+/// Wait until the receiver has announced itself under the pair root, then
+/// return its name - discovered from the filesystem so the test never has to
+/// reproduce the binary's cwd-derived name hash. The pair root itself is
+/// stable: `{config_home}/local-mailbox`, and the harness sets
 /// `SUDO_CODE_CONFIG_HOME` to the workspace config home the test knows.
-fn wait_for_receiver_inbox(env: &TestEnv) -> std::path::PathBuf {
+///
+/// The receiver announces by creating its chat list, which is also the
+/// signal that its poller is up. There is no cursor file to watch for any
+/// more: a read position now lives inside a conversation, and a receiver with
+/// no conversations yet has none to write.
+fn wait_for_receiver(env: &TestEnv) -> String {
     let agents = local_pair_root_in(env.config_home()).join("agents");
     let deadline = Instant::now() + BUDGET;
     loop {
         if let Ok(entries) = std::fs::read_dir(&agents) {
             for agent_dir in entries.flatten().map(|e| e.path()) {
-                let name = agent_dir
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                if agent_dir.join(format!(".cursor-{name}")).exists() {
-                    return agent_dir.join("chat-with-me");
+                if agent_dir.join("conversations").is_dir() {
+                    return agent_dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                 }
             }
         }
         assert!(
             Instant::now() < deadline,
-            "no receiver cursor appeared under {} — the receiver is not polling, \
-             so an injected message would be missed",
+            "no receiver announced itself under {} - the receiver is not \
+             polling, so an injected message would be missed",
             agents.display()
         );
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-fn inject(inbox: &std::path::Path, from: &str, body: &str) {
-    let env = MailboxEnvelope {
-        from: from.to_string(),
-        to: String::new(),
-        body: body.to_string(),
-        summary: Some("mock a2a".to_string()),
-        timestamp: 0,
-        color: None,
-        kind: agent_mailbox::kinds::MESSAGE.to_string(),
-        request_id: None,
-    };
-    agent_mailbox::append_envelope_to_path(&inbox.to_string_lossy(), env)
+/// Deliver a message the way a real peer does: through a Mailbox rooted at
+/// the same pair root, which provisions the conversation and appends to the
+/// shared transcript. Writing a path by hand is what let this test keep
+/// injecting into a file the receiver had stopped reading.
+fn inject(env: &TestEnv, receiver: &str, from: &str, body: &str) {
+    let mailbox =
+        Mailbox::workspace_local(&local_pair_root_in(env.config_home()), from.to_string());
+    mailbox
+        .send(MailboxEnvelope {
+            from: from.to_string(),
+            to: receiver.to_string(),
+            body: body.to_string(),
+            summary: Some("mock a2a".to_string()),
+            timestamp: 0,
+            color: None,
+            kind: agent_mailbox::kinds::MESSAGE.to_string(),
+            request_id: None,
+        })
         .expect("inject a2a envelope");
 }
 
@@ -90,8 +100,8 @@ fn a2a_received_while_idle_surfaces_in_scrollback() {
     sess.resize(50, 100).expect("resize pty");
     sess.expect("❯").expect("async REPL initial prompt");
 
-    let inbox = wait_for_receiver_inbox(&env);
-    inject(&inbox, "mac-ai", "A2A-IDLE-MARKER");
+    let receiver = wait_for_receiver(&env);
+    inject(&env, &receiver, "mac-ai", "A2A-IDLE-MARKER");
 
     // The `📨 A2A from mac-ai: …` line is the whole receive chain: poller woke,
     // coordinator took the message, it rendered with the peer marker.
@@ -118,7 +128,7 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     sess.resize(50, 100).expect("resize pty");
     sess.expect("❯").expect("async REPL initial prompt");
 
-    let inbox = wait_for_receiver_inbox(&env);
+    let receiver = wait_for_receiver(&env);
 
     // Put the receiver in a long-running turn so the injected a2a is queued.
     let prompt = env.prompt(
@@ -130,7 +140,7 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     sess.expect("interrupt-start")
         .expect("bash tool should start before we inject the a2a");
 
-    inject(&inbox, "mac-ai", "A2A-BUSY-MARKER");
+    inject(&env, &receiver, "mac-ai", "A2A-BUSY-MARKER");
 
     // Held in the overlay as a queued peer line, NOT committed to scrollback yet.
     sess.expect("\u{21b3} queued: \u{1f4e8} A2A from mac-ai")

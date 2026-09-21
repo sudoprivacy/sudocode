@@ -159,7 +159,7 @@ if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
   got=
   for i in $(seq 1 30); do
     out=$(NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_INBOX="${DUET_SELF:-operator}" \
-      "${CARGO_TEST[@]}" live_collect_inbox -- --ignored --nocapture 2>&1 || true)
+      "${CARGO_TEST[@]}" live_collect_conversations -- --ignored --nocapture 2>&1 || true)
     if echo "$out" | grep -q "from=\"$R\""; then
       echo "   >>> DUET REPLY:"; echo "$out" | grep "from="; got=1; break
     fi

@@ -40,15 +40,22 @@ fn main() {
     .connect()
     .unwrap_or_else(|e| panic!("{e}"));
 
-    // From the head, non-blocking: everything the inbox holds, right now.
-    let (msgs, next) = mailbox(&client, agent, "")
-        .poll(0, 0)
-        .unwrap_or_else(|e| panic!("read: {e}"));
-    println!(
-        "{agent} inbox: {} message(s), next offset {next}",
-        msgs.len()
-    );
-    for (i, m) in msgs.iter().enumerate() {
-        println!("  [{i}] from={} :: {}", m.from, m.body);
+    // Everything this agent is talking about, right now. There is no single
+    // "inbox" to dump any more: an agent has one conversation per peer, so the
+    // chat list comes first and each transcript after it. An empty chat list
+    // and an empty transcript are different answers, and both are worth seeing.
+    let mb = mailbox(&client, agent, "");
+    let peers = mb
+        .list_conversations()
+        .unwrap_or_else(|e| panic!("list conversations: {e}"));
+    println!("{agent}: {} conversation(s)", peers.len());
+    for peer in &peers {
+        let msgs = mb
+            .read_conversation(peer)
+            .unwrap_or_else(|e| panic!("read the conversation with {peer}: {e}"));
+        println!("  with {peer}: {} message(s)", msgs.len());
+        for (i, m) in msgs.iter().enumerate() {
+            println!("    [{i}] from={} :: {}", m.from, m.body);
+        }
     }
 }

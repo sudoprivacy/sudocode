@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 /// Left unsaid, a receiver treats every arrival as new — observed live, where a
 /// single re-read marker drew three replies. The decision stays with the model
 /// rather than becoming suppression in the poller: knowing what it had already
-/// forwarded would need a second durable fact beside [`crate::mailbox::InboxCursor`],
+/// forwarded would need a second durable fact beside [`crate::mailbox::ReaderRegister`],
 /// a new SSOT next to the one that exists to fix this very class of bug, while
 /// the model already holds the history that answers it.
 #[must_use]
@@ -269,7 +269,7 @@ pub fn mailbox_path(workspace_root: &Path, recipient: &str) -> PathBuf {
 
 /// The unified per-recipient inbox path under a root:
 /// `{root}/agents/{recipient}/chat-with-me`. The host-FS SSOT for the shape
-/// [`crate::mailbox::InboxConvention::PerRecipient`] resolves — used by the
+/// [`crate::mailbox::InboxConvention`] resolves — used by the
 /// coordinator queue (root = workspace) so it builds the same path a `Mailbox`
 /// would, rather than re-spelling it.
 #[must_use]

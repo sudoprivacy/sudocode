@@ -321,6 +321,26 @@ impl FsBackend for StdFsBackend {
         std::fs::read(path)
     }
 
+    /// A host FS has no VFS link, so the alias is recorded as a small file
+    /// holding the path it points at.
+    ///
+    /// Deliberately NOT the inherited no-op. An index built out of links is
+    /// read back by LISTING it — the chat list that tells a receiver which
+    /// conversations to tail is exactly that — so a backend that silently does
+    /// nothing here yields an empty index and a receiver that hears nothing,
+    /// with no error raised anywhere along the way.
+    ///
+    /// A plain file rather than a symlink: it needs no privilege on Windows,
+    /// and nothing resolves these by walking them — only the entry's NAME is
+    /// read. The target goes in the body so `cat` answers the same question
+    /// the VFS answers by following the link.
+    fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        if let Some(parent) = std::path::Path::new(alias).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(alias, target)
+    }
+
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
         std::fs::write(path, data)
     }
@@ -545,8 +565,30 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
 }
 
 /// Map a kernel error to an `io::Error`.
+///
+/// "Not found" is singled out because [`FsBackend`] callers BRANCH on it, and
+/// the two backends have to answer alike: `StdFsBackend` reports a missing file
+/// as [`io::ErrorKind::NotFound`], so a kernel-backed read that reported the
+/// same condition as `Other` turns "this reader has no position yet" into "this
+/// read failed". The receiver then never claims its seat and simply hears
+/// nothing, with the error scrolling past as a retry.
+///
+/// Only a missing ENTRY qualifies. An unmounted path is deliberately left as an
+/// error: "the namespace is not here" is not "there is nothing here", and
+/// collapsing them would have a reader start from zero — replaying a
+/// conversation — every time a mount was late.
+///
+/// The kernel's error type is opaque at this boundary (this is generic over
+/// `impl Debug` precisely so the backend does not depend on it), so the
+/// classification reads the debug text. That is load-bearing enough to be
+/// tested rather than trusted — see `a_missing_path_reports_not_found` in
+/// `runtime/tests/spawn_task.rs`, which fails if the variant is ever renamed.
 fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
-    io::Error::other(format!("{e:?}"))
+    let text = format!("{e:?}");
+    if text.contains("FileNotFound") {
+        return io::Error::new(io::ErrorKind::NotFound, text);
+    }
+    io::Error::other(text)
 }
 
 impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
@@ -873,7 +915,16 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        if path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX) {
+        // Ask the predicate rather than restating it. This branch spelled
+        // `ends_with(CHAT_WITH_ME_SUFFIX)` on its own, so when the mailbox moved
+        // to `…/transcript` it quietly took the read-modify-write path below:
+        // every append re-read the stream through `read` (which yields its FIRST
+        // frame), concatenated the new envelope onto that, and wrote the pair
+        // back as a single frame. Two JSON objects in one frame parse as
+        // neither, so every message after the first became unreadable — sends
+        // reporting success, a receiver seeing nothing, and only a real daemon
+        // able to show it.
+        if self.is_append_stream(path)? {
             self.client
                 .stream_write(path, data.to_vec(), &self.auth_token)
                 .map(|_offset| ())
@@ -891,7 +942,7 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX))
+        Ok(crate::mailbox::is_mailbox_path(path))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
@@ -916,7 +967,20 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(entries
             .into_iter()
             .map(|e| FsDirEntry {
-                name: e.name,
+                // The node answers with FULL paths; `FsDirEntry::name` is an
+                // entry name, which is what the other backends return and what
+                // callers join back onto the directory they listed. Passed
+                // through whole it is not a name at all: a receiver enumerating
+                // its chat list read `/agents/me/conversations/<peer>` as the
+                // peer's NAME, derived a conversation id from that string, and
+                // tailed a transcript nobody writes to — reporting
+                // `StreamNotFound` in a loop while messages waited elsewhere.
+                name: e
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(e.name.as_str())
+                    .to_string(),
                 is_dir: e.is_directory,
             })
             .collect())

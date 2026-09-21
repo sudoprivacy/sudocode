@@ -91,11 +91,6 @@ fn send_to(
 
 use runtime::mailbox::Mailbox;
 
-/// A counter, for names no other run and no sibling test can be using.
-///
-/// Not a clock: these tests are about the FIRST write to a path, and a
-/// timestamp coarse enough to repeat hands two runs the same name — after
-/// which the second proves nothing, because the path already exists.
 /// How long a test waits for a frame it has just sent to become readable.
 ///
 /// `send` returns once the write is accepted; the frame becomes readable when
@@ -113,6 +108,17 @@ use runtime::mailbox::Mailbox;
 /// only ever paid when something is genuinely wrong.
 const DELIVERY_WAIT_MS: u64 = 5_000;
 
+/// The counterpart name for probes that exercise the transport rather than a
+/// real exchange. A conversation needs two names even when only one side is
+/// under test, and a fixed one keeps those probes off any real agent's chat
+/// list.
+const PROBE_PEER: &str = "live-probe-peer";
+
+/// A counter, for names no other run and no sibling test can be using.
+///
+/// Not a clock: these tests are about the FIRST write to a path, and a
+/// timestamp coarse enough to repeat hands two runs the same name — after
+/// which the second proves nothing, because the path already exists.
 fn fresh() -> u64 {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
@@ -133,13 +139,13 @@ fn live_inbox_roundtrip() {
     let me = "scode-probe";
     // Provision our own inbox (idempotent) — the standalone self-provision path.
     mailbox(&client, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation("peer-x")
         .expect("ensure inbox");
 
     // Snapshot the tail so the assertion sees only the message we send below,
     // not any residue from a previous run of this probe.
     let (_history, start) = mailbox(&client, me, &auth)
-        .poll(0, 0)
+        .poll_conversation("peer-x", 0, 0)
         .expect("seek to tail");
 
     // A "peer" writes into our inbox (simulates the receive direction), then we
@@ -148,13 +154,16 @@ fn live_inbox_roundtrip() {
     send_to(&client, "peer-x", me, body, &auth).expect("send to inbox");
 
     let (msgs, next) = mailbox(&client, me, &auth)
-        .poll(start, DELIVERY_WAIT_MS)
+        .poll_conversation("peer-x", start, DELIVERY_WAIT_MS)
         .expect("poll new");
     assert!(next >= start, "cursor must not regress");
     assert!(
         // Body, not `from`: auth-on stamps the sender. See the module rule.
         msgs.iter().any(|m| m.body == body),
-        "expected the sent envelope back, got {msgs:?}"
+        "expected the sent envelope back reading from {start}, got {msgs:?} \
+         (next={next}). A transcript this probe has written to before starts at \
+         a non-zero offset, so this also fails when the read position and the \
+         append disagree about what an offset counts."
     );
 }
 
@@ -182,19 +191,19 @@ fn live_blocking_read_wakes_on_write() {
 
     let me = "scode-blocking-read-probe";
     mailbox(&client, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation("peer-block")
         .expect("ensure inbox");
     // Fix the cursor at the current tail so the assertions see only what we
     // write below, not residue from a previous run.
     let (_history, tail) = mailbox(&client, me, &auth)
-        .poll(0, 0)
+        .poll_conversation("peer-block", 0, 0)
         .expect("seek to tail");
 
     // Negative path: an idle inbox with no writer must block for the whole
     // timeout and return EMPTY at the deadline — never hang, never early-return.
     let t0 = Instant::now();
     let (idle_msgs, idle_next) = mailbox(&client, me, &auth)
-        .poll(tail, 800)
+        .poll_conversation("peer-block", tail, 800)
         .expect("idle blocking read");
     let idle_elapsed = t0.elapsed();
     assert!(
@@ -226,7 +235,7 @@ fn live_blocking_read_wakes_on_write() {
 
     let t1 = Instant::now();
     let (msgs, next) = mailbox(&client, me, &auth)
-        .poll(tail, 5_000)
+        .poll_conversation("peer-block", tail, 5_000)
         .expect("armed blocking read");
     let woke = t1.elapsed();
     writer.join().expect("writer thread");
@@ -296,7 +305,7 @@ fn live_cohost_reads_its_inbox_and_replies() {
     // From where the operator's inbox is NOW, so the reply found below is this
     // run's rather than a previous one's.
     let (_history, before) = mailbox(&client, &reply_to, &auth)
-        .poll(0, 0)
+        .poll_conversation(&agent, 0, 0)
         .expect("seek the operator's inbox to its tail");
 
     // The marker is what makes the agent's turn scripted. Without it the mock
@@ -310,7 +319,7 @@ fn live_cohost_reads_its_inbox_and_replies() {
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let (msgs, _next) = mailbox(&client, &reply_to, &auth)
-            .poll(before, 0)
+            .poll_conversation(&agent, before, 0)
             .expect("read the operator's inbox");
         if let Some(reply) = msgs.iter().find(|m| m.from == agent) {
             assert!(
@@ -361,7 +370,7 @@ fn live_send_provisions_an_inbox_that_never_existed() {
     // Blocking, not a bare read: see `DELIVERY_WAIT_MS`. Provisioning plus the
     // first append is the most apply-latency-sensitive path in this file.
     let (msgs, _next) = mailbox(&client, &never_ran, &auth)
-        .poll(0, DELIVERY_WAIT_MS)
+        .poll_conversation("offline-probe", 0, DELIVERY_WAIT_MS)
         .expect("the recipient must be able to read its own inbox");
     // Delivery is the claim; the SENDER's name deliberately is not. Under
     // auth-on the node overwrites the authored `from` with the authenticated
@@ -379,7 +388,7 @@ fn live_send_provisions_an_inbox_that_never_existed() {
     // write: provisioning it again is what failed with `entry_type immutable`
     // once a plain entry had been created at the path.
     mailbox(&client, &never_ran, &auth)
-        .ensure_inbox()
+        .ensure_conversation("offline-probe")
         .expect("the inbox must be a stream the recipient can still provision");
 }
 
@@ -428,7 +437,7 @@ fn live_authenticated_from_cannot_be_forged() {
 
     // Blocking, not a bare read: see `DELIVERY_WAIT_MS`.
     let (msgs, _next) = mailbox(&client, &recipient, "")
-        .poll(0, DELIVERY_WAIT_MS)
+        .poll_conversation(claimed, 0, DELIVERY_WAIT_MS)
         .expect("read the recipient's inbox");
     let delivered = msgs
         .iter()
@@ -483,10 +492,10 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
 
     let me = "scode-cross-node-probe";
     mailbox(&client, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation("peer-node")
         .expect("ensure inbox on this node");
     let (_history, tail) = mailbox(&client, me, &auth)
-        .poll(0, 0)
+        .poll_conversation("peer-node", 0, 0)
         .expect("seek to tail");
 
     // The inbox has to be visible from the peer node before a write there can
@@ -496,7 +505,10 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
     let peer = dial(&peer_endpoint);
     let replicated = Instant::now();
     loop {
-        if mailbox(&peer, me, &auth).poll(0, 0).is_ok() {
+        if mailbox(&peer, me, &auth)
+            .poll_conversation("peer-node", 0, 0)
+            .is_ok()
+        {
             break;
         }
         assert!(
@@ -512,7 +524,7 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
     // a read that never parked look identical.
     let t0 = Instant::now();
     let (idle_msgs, idle_next) = mailbox(&client, me, &auth)
-        .poll(tail, 800)
+        .poll_conversation("peer-node", tail, 800)
         .expect("idle blocking read");
     let idle_elapsed = t0.elapsed();
     assert!(
@@ -538,7 +550,7 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
 
     let t1 = Instant::now();
     let (msgs, next) = mailbox(&client, me, &auth)
-        .poll(tail, 8_000)
+        .poll_conversation("peer-node", tail, 8_000)
         .expect("armed blocking read");
     let woke = t1.elapsed();
     writer.join().expect("writer thread");
@@ -586,10 +598,10 @@ fn live_blocking_read_does_not_stall_shared_client() {
     let me = "scode-starve-probe";
     let shared = dial(&endpoint);
     mailbox(&shared, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation(PROBE_PEER)
         .expect("ensure inbox");
     let (_history, tail) = mailbox(&shared, me, &auth)
-        .poll(0, 0)
+        .poll_conversation(PROBE_PEER, 0, 0)
         .expect("seek to tail");
 
     // Park a 1.5s blocking read on the SHARED client (no writer → it holds its
@@ -598,7 +610,7 @@ fn live_blocking_read_does_not_stall_shared_client() {
         let shared = Arc::clone(&shared);
         let auth = auth.clone();
         thread::spawn(move || {
-            let _ = mailbox(&shared, me, &auth).poll(tail, 1_500);
+            let _ = mailbox(&shared, me, &auth).poll_conversation(PROBE_PEER, tail, 1_500);
         })
     };
     thread::sleep(Duration::from_millis(150)); // let the blocking read park
@@ -632,7 +644,7 @@ fn live_ensure_inbox() {
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
     let client = dial(&endpoint);
     mailbox(&client, &inbox, &auth)
-        .ensure_inbox()
+        .ensure_conversation(PROBE_PEER)
         .expect("ensure inbox");
     println!("ensured /agents/{inbox}/chat-with-me");
 }
@@ -706,7 +718,7 @@ fn live_peer_markup_is_inert_in_a_prompt() {
 
     // Blocking, not a bare read: see `DELIVERY_WAIT_MS`.
     let (msgs, _next) = mailbox(&client, &recipient, &auth)
-        .poll(0, DELIVERY_WAIT_MS)
+        .poll_conversation("markup-prober", 0, DELIVERY_WAIT_MS)
         .expect("read the recipient's inbox");
     let delivered = msgs
         .iter()
@@ -749,23 +761,27 @@ fn live_peer_markup_is_inert_in_a_prompt() {
 /// ```
 #[test]
 #[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_INBOX"]
-fn live_collect_inbox() {
+fn live_collect_conversations() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
-    let inbox = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
+    let agent = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
     let client = dial(&endpoint);
 
-    // poll_new reads inbox_path(self_agent), so pass the target inbox name.
-    // Its self-filter only drops the inbox owner's OWN writes (none here) —
-    // a peer's stamped envelope (e.g. from a real scode send) still surfaces.
-    let (msgs, next) = mailbox(&client, &inbox, &auth).poll(0, 0).expect("collect");
-    println!(
-        "inbox /agents/{inbox}/chat-with-me — {} message(s), tail={next}",
-        msgs.len()
-    );
-    for m in &msgs {
-        println!("  from={:?} body={:?}", m.from, m.body);
+    // Exactly what the receiver enumerates: the chat list first, then each
+    // transcript. "Read the inbox" is no longer one question - an agent has one
+    // conversation per peer, and WHICH peers those are is the first thing worth
+    // printing when a duet looks silent. An empty chat list and an empty
+    // transcript are different diagnoses.
+    let mb = mailbox(&client, &agent, &auth);
+    let peers = mb.list_conversations().expect("list conversations");
+    println!("{agent} has {} conversation(s): {peers:?}", peers.len());
+    for peer in &peers {
+        let msgs = mb.read_conversation(peer).expect("read conversation");
+        println!("  with {peer} - {} message(s)", msgs.len());
+        for m in &msgs {
+            println!("    from={:?} body={:?}", m.from, m.body);
+        }
     }
 }
 
@@ -804,10 +820,10 @@ fn live_a_silent_server_errors_and_then_recovers() {
     let me = "scode-silent-server-probe";
     let client = dial(&endpoint);
     mailbox(&client, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation(PROBE_PEER)
         .expect("ensure inbox");
     let (_history, tail) = mailbox(&client, me, &auth)
-        .poll(0, 0)
+        .poll_conversation(PROBE_PEER, 0, 0)
         .expect("seek to tail while the daemon still answers");
 
     // A short blocking wait: the deadline derives from it, so the bound under
@@ -816,7 +832,7 @@ fn live_a_silent_server_errors_and_then_recovers() {
 
     signal(pid, "STOP");
     let stopped_at = Instant::now();
-    let result = mailbox(&client, me, &auth).poll(tail, WAIT_MS);
+    let result = mailbox(&client, me, &auth).poll_conversation(PROBE_PEER, tail, WAIT_MS);
     let elapsed = stopped_at.elapsed();
     // Resume before asserting: a panic here must not leave the daemon stopped
     // for the rest of the harness run.
@@ -854,7 +870,7 @@ fn live_a_silent_server_errors_and_then_recovers() {
     // in-flight RPC it abandoned may still be draining.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        match mailbox(&client, me, &auth).poll(tail, WAIT_MS) {
+        match mailbox(&client, me, &auth).poll_conversation(PROBE_PEER, tail, WAIT_MS) {
             Ok((_msgs, next)) => {
                 assert_eq!(next, tail, "an idle poll must not move the cursor");
                 println!("recovered: a poll after SIGCONT succeeded at cursor {next}");

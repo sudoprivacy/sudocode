@@ -489,15 +489,12 @@ pub(crate) fn build_runtime_with_plugin_state(
                     .and_then(|v| v.as_str().map(str::to_string))
             });
         let self_name = runtime::mailbox::local_agent_name(configured.as_deref(), &cwd);
-        tool_executor.set_mailbox(std::sync::Arc::new(runtime::mailbox::Mailbox::new(
-            std::sync::Arc::new(runtime::fs_backend::StdFsBackend),
-            self_name,
-            runtime::mailbox::InboxConvention::PerRecipient {
-                root: runtime::mailbox::local_pair_root()
-                    .to_string_lossy()
-                    .into_owned(),
-            },
-        )));
+        tool_executor.set_mailbox(std::sync::Arc::new(
+            runtime::mailbox::Mailbox::workspace_local(
+                &runtime::mailbox::local_pair_root(),
+                self_name,
+            ),
+        ));
     }
     let runtime = ConversationRuntime::new_with_features(
         session,

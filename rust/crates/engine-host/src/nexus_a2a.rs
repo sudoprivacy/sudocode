@@ -4,36 +4,28 @@
 //! lazily dialed from [`runtime::nexus_mailbox::Config::from_env`]. The send
 //! half is the session's [`Mailbox`], handed to
 //! [`crate::tool_executor::CliToolExecutor`] so `send` resolves recipients
-//! through it; the receive half is a background poller that surfaces peer
+//! through it; the receive half is a background receiver that surfaces peer
 //! messages into the REPL as they arrive.
 //!
 //! Transport is the unified [`runtime::mailbox::Mailbox`] backed by
-//! [`NexusVfsFsBackend`] — the same abstraction the local JSONL path uses
-//! (with [`StdFsBackend`]), so standalone A2A and coordinator sub-agents
-//! share every line except the backend construction.
+//! [`NexusVfsFsBackend`]. This is the SAME mailbox a co-hosted agent runs on
+//! inside the daemon and the same one the workspace-local path runs on over
+//! `StdFsBackend`: identical conversations, addressing and receiver, differing
+//! only in the backend that reaches them. Running `scode` standalone and
+//! running it under the daemon's managed-agent service are two deployments of
+//! one contract, not two contracts.
 
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
 use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::fs_backend::NexusVfsFsBackend;
-use runtime::mailbox::{InboxConvention, InboxCursor, Mailbox};
+use runtime::mailbox::Mailbox;
 use runtime::nexus_mailbox::Config;
 use runtime::HookAbortSignal;
 
 /// Blocking-tail wait per receive iteration.
 const INBOX_WAIT_MS: u64 = 500;
-
-/// Where this agent's A2A read position lives.
-///
-/// The config home rather than the workspace: an A2A identity outlives any one
-/// checkout, and the same agent reached from two directories is still one
-/// receiver of one inbox.
-fn cursor_store_for(agent: &str) -> InboxCursor {
-    InboxCursor::at(
-        runtime::config::default_config_home().join(InboxCursor::file_name("a2a-cursor-", agent)),
-    )
-}
 
 /// The resolved, connected standalone A2A session.
 pub struct Session {
@@ -65,16 +57,10 @@ pub fn session() -> Result<Option<&'static Session>, String> {
             Some(config) => {
                 let client = config.connect()?;
                 let backend = NexusVfsFsBackend::from_arc(client, config.api_key.clone());
-                let mailbox = Arc::new(Mailbox::new(
+                let mailbox = Arc::new(Mailbox::daemon_absolute(
                     Arc::new(backend),
                     config.agent.clone(),
-                    InboxConvention::PerRecipient {
-                        root: String::new(),
-                    },
                 ));
-                mailbox
-                    .ensure_inbox()
-                    .map_err(|e| format!("ensure A2A inbox: {e}"))?;
                 Ok(Some(Session { config, mailbox }))
             }
         })
@@ -83,19 +69,25 @@ pub fn session() -> Result<Option<&'static Session>, String> {
         .map_err(Clone::clone)
 }
 
-/// Spawn the background A2A inbox receiver.
+/// Spawn the background A2A receiver.
 ///
 /// The loop itself is [`runtime::mailbox::spawn_inbox_poller`], shared with the
-/// local JSONL inbox. All that is A2A-specific is the mailbox (already built on
-/// the session's nexus-vfs backend) and where the cursor lives.
+/// co-hosted agent and the local JSONL inbox. All that is A2A-specific here is
+/// the mailbox, already built on the session's nexus-vfs backend.
+///
+/// Nothing is provisioned first, and the read position is not passed in. A
+/// receiver has no inbox of its own to create: a conversation is provisioned by
+/// whichever side sends first, indexed under BOTH names, and until that happens
+/// an empty chat list is the honest answer. The position then lives in the
+/// conversation rather than in this process's config home, so the same agent
+/// reached from another machine resumes where it left off instead of replaying.
 pub fn spawn_poller(
     session: &'static Session,
     abort: HookAbortSignal,
-    sink: impl Fn(&MailboxEnvelope) -> bool + Send + 'static,
+    sink: impl Fn(&MailboxEnvelope) -> bool + Send + Sync + 'static,
 ) -> JoinHandle<()> {
     runtime::mailbox::spawn_inbox_poller(
         Arc::clone(&session.mailbox),
-        cursor_store_for(&session.config.agent),
         INBOX_WAIT_MS,
         "nexus-a2a",
         abort,

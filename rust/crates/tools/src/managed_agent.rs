@@ -16,9 +16,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnTask};
+use runtime::mailbox::Mailbox;
 use runtime::spawn_task::{
-    cohost_a2a_prompt_section, handle_send_message, mailbox_sender, AgentDescriptor, AgentState,
-    CohostMailbox, KernelSyscall, MailboxSender, SpawnHandle,
+    cohost_a2a_prompt_section, handle_send_message, AgentDescriptor, AgentState, KernelSyscall,
+    MailboxSender, SpawnHandle,
 };
 use runtime::{
     FsBackend, KernelFsBackend, PermissionMode, PermissionPolicy, SystemPromptBuilder, ToolError,
@@ -43,17 +44,19 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 ///
 /// # Arguments
 ///
-/// * `kernel` 鈥?shared kernel handle (in-process, monomorphised)
-/// * `desc` 鈥?agent descriptor planted by `ManagedAgentService`
-/// * `mailbox` 鈥?where the loop reads inbound + writes replies: a
-///   node-local `/proc/{pid}` stream, or a raft-replicated A2A
-///   `/agents/<name>` per-recipient inbox for cross-machine conversation
-/// * `state_callback` 鈥?called on every state transition so the caller
+/// * `kernel` - shared kernel handle (in-process, monomorphised)
+/// * `desc` - agent descriptor planted by `ManagedAgentService`
+/// * `state_callback` - called on every state transition so the caller
 ///   can forward to `AgentRegistry::update_state`
+///
+/// The mailbox is NOT a parameter. A co-hosted agent's mailbox is its identity:
+/// its own name, over the same in-process VFS backend its file tools use,
+/// addressing the raft-replicated conversations it shares with its peers.
+/// Everything that determines it is already here, and accepting one only
+/// created the opportunity to be handed a mailbox that disagrees with `desc`.
 pub fn spawn_managed_agent<K, F>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
-    mailbox: CohostMailbox,
     state_callback: F,
 ) -> SpawnHandle
 where
@@ -89,19 +92,20 @@ where
         workspace_root,
     ));
 
-    // -- Mailbox sender: the co-host's deliberate-reply capability, built from
-    // this agent's kernel + mailbox + operation identity. Clone the mailbox and
-    // identity here because `spawn_task` below moves the originals. --
-    let send = mailbox_sender(
-        Arc::clone(&kernel),
-        mailbox.clone(),
-        desc.owner_id.clone(),
-        desc.zone_id.clone(),
-    );
+    // -- Mailbox: this agent's conversations, over the SAME backend as the file
+    // tools. An absolute A2A path bypasses the workspace root (`lexical_join`),
+    // so one backend serves both the agent's workspace and `/conversations`.
+    // It is also the one place a reply is written and the one place inbound is
+    // read from - sender and receiver are two views of this object, not two
+    // implementations that have to agree. --
+    let mailbox = Arc::new(Mailbox::daemon_absolute(Arc::clone(&fs), desc.name.clone()));
 
-    // -- ToolExecutor: file tools in-process via the VFS backend; `send`
-    // routes through the mailbox sender. --
-    let tool_executor = ManagedToolExecutor { fs, send };
+    // -- ToolExecutor: file tools in-process via the VFS backend; `send` routes
+    // through the mailbox. --
+    let tool_executor = ManagedToolExecutor {
+        fs,
+        send: mailbox.sender(),
+    };
 
     // -- SystemPrompt: base managed-agent prompt + the A2A reply contract, so
     // the co-hosted model addresses its reply to the message's `<sender>` via
@@ -119,8 +123,7 @@ where
     let permission_policy = PermissionPolicy::new(PermissionMode::Allow);
 
     runtime::spawn_task::spawn_task(
-        kernel,
-        desc,
+        &desc,
         mailbox,
         api_client,
         tool_executor,
@@ -207,8 +210,7 @@ where
         // The co-host agent's mailbox is its persistent, cross-machine A2A
         // inbox `/agents/<name>/chat-with-me`, so a duet partner on another
         // host addresses it by name; raft replicates the reply back.
-        let mailbox = CohostMailbox::a2a_inbox(desc.name.clone());
-        let handle = spawn_managed_agent(kernel, desc, mailbox, move |state, reason| {
+        let handle = spawn_managed_agent(kernel, desc, move |state, reason| {
             state_observer(state, reason)
         });
         Box::new(SudoCodeSpawnHandle { inner: handle })

@@ -2504,7 +2504,7 @@ fn write_envelope(
     // The path the convention resolved, not a reconstruction of it. It reaches
     // the model as `mailbox_path`, so it has to be where the envelope actually
     // went — under nexus that is a replicated stream, not a file.
-    let path = PathBuf::from(mailbox.inbox_path(&recipient_sanitized));
+    let path = PathBuf::from(mailbox.transcript_path(&recipient_sanitized));
     mailbox.send(envelope).map(|()| path)
 }
 

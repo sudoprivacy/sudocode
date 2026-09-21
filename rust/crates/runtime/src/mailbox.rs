@@ -16,6 +16,16 @@ use std::sync::Arc;
 use crate::agent_mailbox::MailboxEnvelope;
 use crate::fs_backend::FsBackend;
 
+/// Whether `path` is a mailbox a send APPENDS to — a conversation's transcript,
+/// or the node-local `chat-with-me` pipe.
+///
+/// Re-exported from the a2a substrate so that a backend deciding "is this
+/// framed?" and a test asserting the same thing cannot each answer it
+/// separately. They did: both spelled it `ends_with(CHAT_WITH_ME_SUFFIX)`, and
+/// when the mailbox moved to `…/transcript` both silently said "not a stream"
+/// — sending a JSONL line to the local filesystem instead of a record to the
+/// daemon, and reporting success.
+pub use a2a::is_mailbox_path;
 /// The leaf of an A2A inbox path, re-exported so scode spells it the same way
 /// the daemon's mailbox-stamping policy does.
 ///
@@ -91,61 +101,114 @@ pub fn local_agent_name(configured: Option<&str>, workspace_root: &std::path::Pa
     format!("{basename}-{:06x}", hash & 0xff_ffff)
 }
 
-/// How agent names map to inbox paths.
+/// Where a pair's conversation lives.
 ///
-/// The one place a mailbox path shape is defined. There were two such enums —
-/// this and a `Mailbox` in `spawn_task` for the co-host loop — each with its
-/// own path builder for shapes that overlapped, which is how the
-/// `/chat-with-me` leaf ended up spelled four different ways.
+/// A conversation is addressed by its PARTICIPANTS, not by a recipient: the id
+/// is derived from the unordered pair ([`a2a::conversation_id`]), so both sides
+/// compute the same path with no coordination and a 1:1 pair has exactly one
+/// thread. That is why every method here takes two names where the old
+/// per-recipient inbox took one.
+///
+/// `root` is the access/isolation prefix — the standalone analog of a Nexus
+/// zone:
+/// - `""` over nexus: daemon-absolute (the kernel prepends the real zone).
+/// - a shared per-machine dir for standalone same-machine pairs
+///   ([`local_pair_root`]), so two folders can converse.
+/// - the workspace root for coordinator↔sub-agent, so a sub-agent belongs to
+///   its parent scode and different scodes do not cross-talk.
+///
+/// Framing is the backend's concern, not the path's: `StdFsBackend` writes
+/// newline-delimited JSON at these paths, a DT_STREAM backend writes frames.
+///
+/// This used to be an enum whose second variant, `SharedStream`, described the
+/// co-host's single stream that both parties read and write while filtering
+/// their own writes. That IS a conversation — the variant was modelling the
+/// general case as a special one. It is gone. The node-local
+/// `/proc/{pid}/chat-with-me` pipe it served keeps its fixed path (nexus-vfs's
+/// `proc_entry` creates it and that contract did not change), but the path is
+/// now held directly by the co-host mailbox instead of masquerading as a
+/// naming convention.
 #[derive(Debug, Clone)]
-pub enum InboxConvention {
-    /// Per-recipient inbox: `{root}/agents/{name}/chat-with-me`.
-    ///
-    /// One shape for every addressed-by-name inbox. `root` is the access/
-    /// isolation prefix — the standalone analog of a Nexus zone:
-    /// - `""` over nexus: the daemon-absolute `/agents/{name}/chat-with-me`
-    ///   (the kernel prepends the real zone).
-    /// - a shared per-machine dir for standalone same-machine pairs
-    ///   ([`local_pair_root`]), so two folders can converse.
-    /// - the workspace root for coordinator↔sub-agent, so a sub-agent belongs
-    ///   to its parent scode and different scodes do not cross-talk.
-    ///
-    /// Framing is the backend's concern, not the path's: `StdFsBackend` writes
-    /// newline-delimited JSON at this path, a DT_STREAM backend writes frames.
-    PerRecipient { root: String },
-    /// One stream both parties read AND write, each filtering out its own
-    /// writes — the managed-agent `/proc/{pid}/chat-with-me` model.
-    ///
-    /// Node-local by construction: the path is not keyed by recipient, so
-    /// there is no per-agent inbox for a reply to be replicated to. Every name
-    /// resolves to the same path, which is what makes "where do I reply to
-    /// this sender" answer itself. NOT a `PerRecipient` with a fixed root —
-    /// folding it in would need a sentinel name and break the keyed-by-recipient
-    /// invariant that gives `PerRecipient` its meaning.
-    SharedStream { path: String },
+pub struct InboxConvention {
+    root: String,
 }
 
 impl InboxConvention {
-    /// Resolve the inbox path for an agent name.
-    ///
-    /// One function for both directions a caller needs: pass your own name for
-    /// the inbox you read, pass a sender's for the inbox you reply into. There
-    /// is nothing else to a "reply path".
+    /// A convention rooted at `root` (empty for the nexus daemon-absolute case).
     #[must_use]
+    pub fn new(root: impl Into<String>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// Root-safe join: an empty root yields a daemon-absolute path, a non-empty
+    /// one yields `{root}/…` with exactly one separator — never `//…`.
     #[inline]
-    pub fn inbox_path(&self, name: &str) -> String {
-        match self {
-            // Root-safe join: an empty root yields `/agents/...` (nexus
-            // daemon-absolute), a non-empty root yields `{root}/agents/...`
-            // with exactly one separator — never `//agents/...`.
-            InboxConvention::PerRecipient { root } => {
-                let root = root.trim_end_matches('/');
-                format!("{root}{A2A_INBOX_BASE}/{name}{CHAT_WITH_ME_SUFFIX}")
-            }
-            // Every name resolves to the one stream — so replying to a sender
-            // and reading your own inbox are the same path, by design.
-            InboxConvention::SharedStream { path } => path.clone(),
-        }
+    fn rooted(&self, absolute: &str) -> String {
+        format!("{}{absolute}", self.root.trim_end_matches('/'))
+    }
+
+    /// The directory holding one conversation — its transcript and its reader
+    /// registers.
+    ///
+    /// Order-free for the same reason [`Self::transcript_path`] is: the id is
+    /// derived from the pair, never allocated to it.
+    #[must_use]
+    pub fn conversation_root(&self, a: &str, b: &str) -> String {
+        self.rooted(&format!(
+            "{}/{}",
+            a2a::CONVERSATIONS_BASE,
+            a2a::conversation_id(a, b)
+        ))
+    }
+
+    /// The append-only transcript `a` and `b` both append to.
+    ///
+    /// Order-free: `transcript_path(a, b) == transcript_path(b, a)`, which is
+    /// what lets each side derive it from its own point of view and still land
+    /// on one shared log.
+    #[must_use]
+    pub fn transcript_path(&self, a: &str, b: &str) -> String {
+        self.rooted(&a2a::conversation_transcript_path(&a2a::conversation_id(
+            a, b,
+        )))
+    }
+
+    /// `reader`'s read-position register in the conversation between `a` and `b`.
+    #[must_use]
+    pub fn reader_path(&self, a: &str, b: &str, reader: &str) -> String {
+        self.rooted(&a2a::conversation_reader_path(
+            &a2a::conversation_id(a, b),
+            reader,
+        ))
+    }
+
+    /// `agent`'s chat-list entry for its conversation with `peer` — the DT_LINK
+    /// that makes `readdir` on the agent's presence list its conversations.
+    ///
+    /// The leaf is the PEER's name, not the cid: a BLAKE3 digest is one-way, so
+    /// a cid-named entry would tell a receiver that a conversation exists
+    /// without telling it with whom — and it could then derive no transcript
+    /// path from the listing at all.
+    #[must_use]
+    pub fn chat_list_path(&self, agent: &str, peer: &str) -> String {
+        self.rooted(&a2a::agent_conversation_link_path(agent, peer))
+    }
+
+    /// The directory every agent's presence hangs under — the namespace a
+    /// broadcast enumerates.
+    #[must_use]
+    pub fn agents_dir(&self) -> String {
+        self.rooted(a2a::A2A_INBOX_BASE)
+    }
+
+    /// The directory holding `agent`'s chat-list links, for enumeration.
+    #[must_use]
+    pub fn chat_list_dir(&self, agent: &str) -> String {
+        format!(
+            "{}/{agent}{}",
+            self.agents_dir(),
+            a2a::AGENT_CONVERSATIONS_SEGMENT
+        )
     }
 }
 
@@ -179,6 +242,41 @@ impl Mailbox {
         }
     }
 
+    /// A mailbox addressing the daemon's own path space: `self_id`'s
+    /// conversations at absolute `/conversations/...`, over whatever backend
+    /// reaches that daemon.
+    ///
+    /// Deliberately NOT named for a caller. Both ways of running an agent land
+    /// here — co-hosted in the daemon over the in-process VFS, and standalone
+    /// over the gRPC backend — because they differ in their BACKEND and in
+    /// nothing else. Naming it for one of them is how the other grows a second
+    /// spelling of the same thing.
+    ///
+    /// Having one constructor is also what keeps the pairing right. Assembling
+    /// a backend and a convention by hand at each call site is how the two end
+    /// up mismatched, and the mistake is silent: a rooted convention over a
+    /// daemon backend writes to a path nothing tails.
+    #[must_use]
+    pub fn daemon_absolute(backend: Arc<dyn FsBackend>, self_id: String) -> Self {
+        Self::new(backend, self_id, InboxConvention::new(String::new()))
+    }
+
+    /// A mailbox rooted under a host directory: `self_id`'s conversations at
+    /// `{root}/conversations/...` over the host filesystem.
+    ///
+    /// The counterpart to [`Self::daemon_absolute`] for a `scode` running with
+    /// no daemon to reach. Same conversations, same addressing, same receiver —
+    /// the root is the only difference, and it is the one thing two call sites
+    /// must not each decide for themselves.
+    #[must_use]
+    pub fn workspace_local(root: &std::path::Path, self_id: String) -> Self {
+        Self::new(
+            Arc::new(crate::fs_backend::StdFsBackend),
+            self_id,
+            InboxConvention::new(root.to_string_lossy().into_owned()),
+        )
+    }
+
     /// Create the recipient's inbox stream if this mailbox has not already.
     ///
     /// A send to an agent that has never run has to work — an inbox is durable
@@ -198,7 +296,7 @@ impl Mailbox {
     /// read    -> StreamNotFound            the recipient can never see it
     /// ensure  -> entry_type immutable      and can never repair its own inbox
     /// ```
-    fn ensure_recipient_stream(&self, recipient: &str, path: &str) -> Result<(), String> {
+    fn ensure_provisioned(&self, recipient: &str) -> Result<(), String> {
         {
             let seen = self
                 .provisioned
@@ -208,9 +306,7 @@ impl Mailbox {
                 return Ok(());
             }
         }
-        self.backend
-            .create_append_log(path, crate::agent_mailbox::DEFAULT_STREAM_CAPACITY)
-            .map_err(|e| format!("provision inbox {path}: {e}"))?;
+        self.ensure_conversation(recipient)?;
         self.provisioned
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -223,7 +319,7 @@ impl Mailbox {
     ///
     /// Asked per call, deliberately — do NOT cache it on the struct. For
     /// `KernelFsBackend` this is a real `sys_stat`, so the answer CHANGES the
-    /// moment [`Self::ensure_inbox`] creates the stream: resolved once at
+    /// moment [`Self::ensure_conversation`] creates the stream: resolved once at
     /// construction it would be `false` forever, and a provisioned DT_STREAM
     /// inbox would be written and read as JSONL. The call is cheap — a string
     /// test for the VFS backend, a constant `false` for the file one.
@@ -250,9 +346,7 @@ impl Mailbox {
                 auth_token.into(),
             )),
             agent.into(),
-            InboxConvention::PerRecipient {
-                root: String::new(),
-            },
+            InboxConvention::new(String::new()),
         )
     }
 
@@ -262,16 +356,17 @@ impl Mailbox {
         &self.self_id
     }
 
+    /// The transcript this mailbox and `peer` share.
+    ///
+    /// There is no "my inbox" any more, which is the point: a conversation is
+    /// addressed by its PAIR, so the same call serves both directions — what I
+    /// read from `peer` and what I write to `peer` are one path. The old
+    /// `inbox_path(name)` / `own_inbox_path()` split existed only because a
+    /// per-recipient inbox had two different answers for those two questions.
     #[must_use]
     #[inline]
-    pub fn inbox_path(&self, agent: &str) -> String {
-        self.convention.inbox_path(agent)
-    }
-
-    #[must_use]
-    #[inline]
-    pub fn own_inbox_path(&self) -> String {
-        self.convention.inbox_path(&self.self_id)
+    pub fn transcript_path(&self, peer: &str) -> String {
+        self.convention.transcript_path(&self.self_id, peer)
     }
 
     /// Provision this agent's inbox (idempotent).
@@ -295,11 +390,95 @@ impl Mailbox {
     /// exist, and its receiver got `StreamNotFound` on every poll. Unit tests
     /// could not see it: the shape is right, the code runs, and only a real
     /// daemon has an opinion about whether the stream is there.
-    pub fn ensure_inbox(&self) -> Result<(), String> {
-        let path = self.own_inbox_path();
+    /// This agent's recorded position in its conversation with `peer`, or
+    /// `None` if it has never read that conversation.
+    ///
+    /// Readable rather than private because the position is a durable fact
+    /// ABOUT the conversation, not bookkeeping private to the receiver: an
+    /// operator asking "has this agent seen it yet?" and a test asserting that
+    /// a receiver advanced past what it surfaced are the same question, and
+    /// neither should have to reconstruct the register's path to ask it.
+    ///
+    /// # Errors
+    /// Returns an error when the register exists but cannot be read or parsed.
+    pub fn read_position(&self, peer: &str) -> Result<Option<u64>, String> {
+        self.conversation_reader(peer)
+            .load()
+            .map(|register| register.map(|r| r.read_offset))
+    }
+
+    /// Make this agent discoverable before it has any conversations.
+    ///
+    /// Creates the agent's chat-list directory and nothing else. Without it a
+    /// receiver leaves NO trace until somebody writes to it: it cannot be
+    /// listed, an operator cannot see that it is running, and a sender has no
+    /// way to tell "this agent is up but idle" from "this name is a typo". The
+    /// per-recipient inbox this replaced gave that for free, because the inbox
+    /// itself was the presence; a conversation belongs to a pair, so presence
+    /// has to be stated separately.
+    ///
+    /// Idempotent, and deliberately NOT a precondition for delivery — a send
+    /// provisions what it needs, so an agent that has never run still receives.
+    ///
+    /// # Errors
+    /// Returns an error when the directory cannot be created.
+    pub fn ensure_presence(&self) -> Result<(), String> {
+        let dir = self.convention.chat_list_dir(&self.self_id);
+        self.backend
+            .create_dir_all(&dir)
+            .map_err(|e| format!("announce {} at {dir}: {e}", self.self_id))
+    }
+
+    /// Index the conversation under BOTH agents, then create the transcript.
+    ///
+    /// Both directions, because whichever side sends first provisions, and the
+    /// side that has to DISCOVER the conversation is the other one: a receiver
+    /// finds what to tail by listing its own chat list, so an entry filed only
+    /// under the sender leaves the recipient deaf while every send reports
+    /// success.
+    ///
+    /// The transcript is created LAST so its presence is a sound completion
+    /// sentinel — a conversation half-built by an interrupted send is finished
+    /// by the next one rather than being mistaken for done.
+    pub fn ensure_conversation(&self, peer: &str) -> Result<(), String> {
+        // A conversation is addressed by its pair, so a nameless side has no
+        // conversation to be in. Refused rather than tolerated: an empty name
+        // still produces a cid and still composes a path, just a degenerate one
+        // (`…/conversations/`, no leaf), so the failure would otherwise surface
+        // far from its cause as an unwritable directory.
+        if self.self_id.is_empty() || peer.is_empty() {
+            return Err(format!(
+                "a conversation needs two names, got self={:?} peer={peer:?}",
+                self.self_id
+            ));
+        }
+        let root = self.convention.conversation_root(&self.self_id, peer);
+        for (owner, other) in [(self.self_id.as_str(), peer), (peer, self.self_id.as_str())] {
+            let dir = self.convention.chat_list_dir(owner);
+            self.backend
+                .create_dir_all(&dir)
+                .map_err(|e| format!("create chat list {dir}: {e}"))?;
+            // A plain entry holding the conversation's root, NOT a link.
+            //
+            // A link would read better — it is what this is — but only one of
+            // the three backends can make one: the gRPC surface carries no link
+            // target on `Setattr`, so over that transport `link` falls to the
+            // trait's silent no-op and the entry never appears at all. A
+            // receiver finds its conversations by listing this directory, so an
+            // entry that never appears is a receiver that never hears anything.
+            //
+            // Every backend can write bytes. The NAME is what `readdir` needs,
+            // and putting the root in the body keeps `cat` able to answer
+            // "pointing at which conversation?".
+            let alias = self.convention.chat_list_path(owner, other);
+            self.backend
+                .write(&alias, root.as_bytes())
+                .map_err(|e| format!("index conversation for {owner} at {alias}: {e}"))?;
+        }
+        let path = self.transcript_path(peer);
         self.backend
             .create_append_log(&path, crate::agent_mailbox::DEFAULT_STREAM_CAPACITY)
-            .map_err(|e| format!("ensure inbox {path}: {e}"))
+            .map_err(|e| format!("ensure conversation with {peer} at {path}: {e}"))
     }
 
     /// Send a message to a recipient's inbox.
@@ -344,32 +523,31 @@ impl Mailbox {
         if envelope.timestamp == 0 {
             envelope.timestamp = crate::agent_mailbox::now_secs();
         }
-        let path = self.convention.inbox_path(&envelope.to);
+        let path = self.transcript_path(&envelope.to);
+
+        // Provision on BOTH branches. It used to happen only on the framed one,
+        // so over a host FS the conversation was never indexed: the recipient
+        // had nothing to discover and heard nothing, while every send reported
+        // success.
+        self.ensure_provisioned(&envelope.to)?;
 
         if self.backend_frames(&path) {
-            self.ensure_recipient_stream(&envelope.to, &path)?;
             return self
                 .backend
                 .append(&path, &envelope.to_bytes())
                 .map_err(|e| format!("mailbox send to {path}: {e}"));
         }
 
-        match &self.convention {
-            InboxConvention::PerRecipient { .. } => {
-                // Non-framed backend (StdFs): a message is one JSONL line at the
-                // recipient's inbox path. `path` is the unified
-                // `{root}/agents/{name}/chat-with-me` shape from `inbox_path`;
-                // the JSONL framing is the file backend's, written through the
-                // one envelope-line writer.
-                crate::agent_mailbox::append_envelope_to_path(&path, envelope).map(|_| ())
-            }
-            // A non-stream path under a stream convention means the inbox was
-            // never provisioned. Say so rather than writing a line into a
-            // location nothing tails.
-            InboxConvention::SharedStream { .. } => Err(format!(
-                "mailbox send to {path}: not an append stream — inbox not provisioned"
-            )),
-        }
+        // Non-framed backend (StdFs): a message is one JSONL line at the
+        // conversation's transcript path, written through the one
+        // envelope-line writer so the format has a single definition.
+        //
+        // No second arm any more. There used to be one for `SharedStream`,
+        // which returned "not an append stream — inbox not provisioned" — but
+        // that variant was describing a conversation (both parties reading and
+        // writing one log) as if it were a special case, and with conventions
+        // collapsed there is exactly one shape to write.
+        crate::agent_mailbox::append_envelope_to_path(&path, envelope).map(|_| ())
     }
 
     /// Read new messages from own inbox starting at `cursor`.
@@ -400,8 +578,13 @@ impl Mailbox {
     ///
     /// Skips our OWN writes (`from == self_id`) so a shared read/write stream
     /// never echoes back to us, and skips senderless or empty-body frames.
-    pub fn poll(&self, cursor: u64, block_ms: u64) -> Result<(Vec<MailboxEnvelope>, u64), String> {
-        let path = self.own_inbox_path();
+    pub fn poll_conversation(
+        &self,
+        peer: &str,
+        cursor: u64,
+        block_ms: u64,
+    ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
+        let path = self.transcript_path(peer);
         let is_stream = self.backend_frames(&path);
         if is_stream {
             self.poll_stream(&path, cursor, block_ms)
@@ -475,11 +658,10 @@ impl Mailbox {
         Ok((out, next))
     }
 
-    /// Read ALL messages for a recipient (batch read). Primarily for the
-    /// coordinator's multi-turn loop which reads the entire inbox between
-    /// turns.
-    pub fn read_all(&self, recipient: &str) -> Result<Vec<MailboxEnvelope>, String> {
-        let path = self.convention.inbox_path(recipient);
+    /// Read the whole conversation with `peer` (batch read). Primarily for the
+    /// coordinator's multi-turn loop, which drains between turns.
+    pub fn read_conversation(&self, peer: &str) -> Result<Vec<MailboxEnvelope>, String> {
+        let path = self.transcript_path(peer);
         let is_stream = self.backend_frames(&path);
         if is_stream {
             let (envs, _cursor) = self.poll_stream(&path, 0, 0)?;
@@ -489,42 +671,52 @@ impl Mailbox {
         }
     }
 
-    /// List the recipients that have an inbox under this convention.
-    ///
-    /// Only the non-framed per-recipient convention can answer from the paths
-    /// alone, because only there is a recipient a directory entry
-    /// (`{root}/agents/<name>/chat-with-me`). Over a DT_STREAM backend the
-    /// `/agents` namespace is discovered through the agent registry, not by
-    /// listing paths; a `SharedStream` has no per-recipient path to enumerate at
-    /// all — one stream, every name resolving to it.
+    /// Every agent with a presence in this namespace — who a broadcast reaches.
     ///
     /// # Errors
     ///
-    /// An `Err` for a convention that cannot enumerate, rather than an empty
+    /// An `Err` when the namespace cannot be enumerated, rather than an empty
     /// list. The difference matters to the one caller that needs this: a
     /// broadcast over "no recipients" reports success having delivered nothing,
     /// which is the silent kind of failure. Saying so at the source means no
     /// caller has to remember to ask first.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
-        match &self.convention {
-            // Only enumerable when the backend leaves paths on the host FS.
-            // Over a framed (DT_STREAM) backend the same convention is the
-            // replicated /agents namespace, enumerated through the registry.
-            InboxConvention::PerRecipient { root }
-                if !self.backend_frames(&self.own_inbox_path()) =>
-            {
-                crate::agent_mailbox::list_recipients_under(std::path::Path::new(root))
+        let dir = self.convention.agents_dir();
+        let entries = self
+            .backend
+            .readdir(&dir)
+            .map_err(|e| format!("list recipients at {dir}: {e}"))?;
+        let mut names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+        names.sort();
+        Ok(names)
+    }
+
+    /// The peers this agent has a conversation with — its chat list.
+    ///
+    /// Deliberately NOT the same question as [`Self::list_recipients`], and the
+    /// two are not interchangeable. This one answers "who am I talking to",
+    /// which is what the receiver tails; that one answers "who is there", which
+    /// is what a broadcast addresses. Broadcasting to this list would silently
+    /// skip every agent not yet spoken to, and tailing that one would park a
+    /// reader on every agent in the cluster.
+    ///
+    /// # Errors
+    ///
+    /// An `Err` when the chat list exists but cannot be read. A chat list that
+    /// does not exist yet is not an error — see below.
+    pub fn list_conversations(&self) -> Result<Vec<String>, String> {
+        let dir = self.convention.chat_list_dir(&self.self_id);
+        match self.backend.readdir(&dir) {
+            Ok(entries) => {
+                let mut peers: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+                peers.sort();
+                Ok(peers)
             }
-            InboxConvention::PerRecipient { .. } => Err(
-                "this session's mailbox is the replicated /agents namespace, which is \
-                 enumerated through the agent registry rather than by listing paths"
-                    .to_string(),
-            ),
-            InboxConvention::SharedStream { .. } => Err(
-                "a shared stream has no per-recipient inbox to enumerate — every name \
-                 resolves to the one path"
-                    .to_string(),
-            ),
+            // Nothing has been sent or received yet, so the index does not
+            // exist. That is "no conversations", not a failure — distinct from
+            // a backend that cannot enumerate at all, which surfaces as Err.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(format!("list conversations at {dir}: {e}")),
         }
     }
 
@@ -549,87 +741,262 @@ impl Mailbox {
     }
 }
 
+/// One agent's durable read position in one conversation, and the instance
+/// currently advancing it.
+///
+/// The three fields are ONE register deliberately. A reader whose position
+/// lived in one place and whose lease lived in another can be observed
+/// half-updated — a new holder reading the previous holder's offset, or an
+/// offset advancing under a lease already handed away. Written together, every
+/// read sees a self-consistent triple, and that is what lets the claim protocol
+/// below be plain read-after-write with no compare-and-swap underneath it.
+///
+/// Durable facts only: where this agent has read to, and until when the seat is
+/// spoken for. Both outlive the process that wrote them, which is the point —
+/// this replaced a dotfile beside the workspace, and a position that lives on
+/// one machine is lost the moment the agent is restarted on another. That is
+/// not hypothetical: it is half of what the Win↔Mac duet hit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ReaderRegister {
+    /// The instance tailing this conversation for this agent, empty if the seat
+    /// is free. Deliberately NOT the agent name: two instances of the SAME
+    /// agent are exactly what this has to tell apart.
+    #[serde(default)]
+    pub holder: String,
+    /// Unix millis after which another instance may take the seat.
+    #[serde(default)]
+    pub lease_expires_at: u64,
+    /// Offset past the last envelope this agent has taken responsibility for.
+    #[serde(default)]
+    pub read_offset: u64,
+}
+
+/// How long a claimed seat stays claimed without being renewed.
+///
+/// This is a deadlock escape, not a safety boundary: it bounds how long a
+/// conversation goes untailed after an instance dies without releasing. It
+/// compares wall clocks across machines, so it is sized far above any
+/// plausible NTP skew rather than tightly.
+const READER_LEASE_MS: u64 = 30_000;
+
+/// Renew once the lease is half spent, so a renewal has a full half-lease to
+/// be retried in before anyone else may claim the seat.
+///
+/// Renewing on every poll return instead would be one replicated write per
+/// `block_ms` per conversation, most of them carrying no new information.
+const READER_RENEW_MS: u64 = READER_LEASE_MS / 2;
+
+/// How often a receiver re-lists its chat list looking for conversations it is
+/// not yet tailing.
+///
+/// This one IS a poll, and unavoidably so: [`FsBackend`] has no watch
+/// primitive, so there is nothing to park on. It bounds how long a peer's
+/// FIRST message waits — every later message on that conversation arrives on a
+/// parked tail — so it is sized against that latency rather than against its
+/// own cost. The listing is a `readdir` of one directory holding one entry per
+/// peer, served from the local metastore without consensus; paying it once a
+/// second is cheaper than making an opening message wait.
+const CONVERSATION_DISCOVERY_MS: u64 = 1_000;
+
 const LOCAL_POLL_BLOCK_MS: u64 = 1000;
 
-/// A receiver's read position, persisted so it survives the process.
-///
-/// Not an optimisation. Two agents handing off asynchronously otherwise lose
-/// every message that arrives while the receiver is between processes: the
-/// sender was told it was delivered, it sits durably in the inbox, and a
-/// receiver that seeks to the tail on every start never looks back at it. That
-/// was observed live in the Win↔Mac duet.
-///
-/// The other failure is the opposite one, so a FIRST run still seeks to the
-/// tail: a receiver that has never read this inbox was not party to what came
-/// before, and replaying it is the #81 re-reply storm.
-#[derive(Debug, Clone)]
-pub struct InboxCursor {
-    path: std::path::PathBuf,
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-impl InboxCursor {
-    /// Keep the cursor in `path`. Sanitise `name` into a filename with
-    /// [`Self::file_name`] when deriving one from an agent name.
-    #[must_use]
-    pub fn at(path: std::path::PathBuf) -> Self {
-        Self { path }
+/// Sleep up to `ms`, waking early if the receiver is being shut down.
+///
+/// A plain sleep would hold shutdown hostage for a full discovery interval.
+fn sleep_unless_aborted(abort: &crate::HookAbortSignal, ms: u64) {
+    const STEP_MS: u64 = 200;
+    let mut left = ms;
+    while left > 0 && !abort.is_aborted() {
+        let step = left.min(STEP_MS);
+        std::thread::sleep(std::time::Duration::from_millis(step));
+        left -= step;
     }
+}
 
-    /// Where a workspace-local receiver keeps its position: a dotfile beside
-    /// the inbox it tracks, so it is scoped to the (root, agent) pair and swept
-    /// with it. Keying by root as well as name is load-bearing: the same agent
-    /// name under two roots (the pair root vs a workspace) must not share one
-    /// cursor, or a position from one stream gets applied to another and inbound
-    /// messages are silently skipped.
-    #[must_use]
-    pub fn local(root: &std::path::Path, self_id: &str) -> Self {
-        Self::at(
-            root.join("agents")
-                .join(self_id)
-                .join(Self::file_name(".cursor-", self_id)),
-        )
-    }
+/// A process-and-machine-unique id for one receiver instance.
+///
+/// Uniqueness is the whole requirement: two instances of the same agent must
+/// never mint the same holder, or each reads the other's claim as its own and
+/// both tail the conversation. A pid repeats across machines and a counter
+/// repeats across processes, so both are mixed with a nanosecond clock read.
+/// The clock is entropy here and nothing else — the lease compares deadlines,
+/// never these.
+fn instance_id() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{nanos}-{seq}", std::process::id())
+}
 
-    /// The file this cursor lives in.
-    #[must_use]
-    #[inline]
-    pub fn path(&self) -> &std::path::Path {
-        &self.path
-    }
+/// Whether this instance holds the reader seat for a conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seat {
+    /// Held by us; carries the position to resume from.
+    Taken(u64),
+    /// Held by another live instance until this unix-millis deadline.
+    HeldBy(u64),
+}
 
-    /// `<prefix><name>` with everything outside `[A-Za-z0-9_-]` folded to `_`,
-    /// so an agent name is safe to use as a filename on every platform.
-    #[must_use]
-    pub fn file_name(prefix: &str, name: &str) -> String {
-        let safe: String = name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        format!("{prefix}{safe}")
-    }
+/// This mailbox's read position in one conversation, as a claimable seat.
+///
+/// Exactly one instance advances a given agent's position in a given
+/// conversation. Without that, two instances of one agent each tail the same
+/// transcript and each advance the same offset, so every message is handled
+/// twice or handled by whichever raced ahead — and the other instance never
+/// sees it, because the offset it would have read from has already moved.
+///
+/// The seat is claimed by read-after-write, which is sound here for one
+/// specific reason: the register is a single replicated value, so concurrent
+/// claims serialise and the last writer wins. Every claimant then reads back
+/// and only the one that sees its own holder proceeds. No compare-and-swap
+/// primitive is needed, and none exists to use.
+pub struct ConversationReader {
+    backend: Arc<dyn FsBackend>,
+    path: String,
+    holder: String,
+}
 
-    fn load(&self) -> Option<u64> {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-    }
-
-    fn save(&self, offset: u64) {
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+impl ConversationReader {
+    /// The register as currently stored, or `None` if this agent has never read
+    /// this conversation.
+    fn load(&self) -> Result<Option<ReaderRegister>, String> {
+        match self.backend.read(&self.path) {
+            Ok(raw) if raw.is_empty() => Ok(None),
+            Ok(raw) => serde_json::from_slice(&raw)
+                .map(Some)
+                .map_err(|e| format!("reader register {}: {e}", self.path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("read reader register {}: {e}", self.path)),
         }
-        let _ = std::fs::write(&self.path, offset.to_string());
+    }
+
+    fn store(&self, register: &ReaderRegister) -> Result<(), String> {
+        let raw = serde_json::to_vec(register)
+            .map_err(|e| format!("encode reader register {}: {e}", self.path))?;
+        self.backend
+            .write_atomic(&self.path, &raw)
+            .map_err(|e| format!("write reader register {}: {e}", self.path))
+    }
+
+    /// Take the seat if it is free or expired, and report the position to
+    /// resume from.
+    fn acquire(&self) -> Result<Seat, String> {
+        let now = now_ms();
+        let current = self.load()?;
+        if let Some(held) = current
+            .as_ref()
+            .filter(|r| !r.holder.is_empty() && r.holder != self.holder && r.lease_expires_at > now)
+        {
+            return Ok(Seat::HeldBy(held.lease_expires_at));
+        }
+
+        // A first read starts at the BEGINNING. There is deliberately no
+        // seek-to-tail: a transcript carries one pair's conversation, so its
+        // history belongs to this reader, and what seeking skipped was the
+        // peer's opening message. The re-reply storm that seeking was added to
+        // prevent came from a SHARED inbox, where a restarting agent replayed
+        // everything every peer had ever sent it. Against a per-pair transcript
+        // with a durable position, a restart resumes and replays nothing.
+        //
+        // Nor is there a clamp for a position past the tail. That guarded a
+        // position kept in a node-local file while the stream lived in the
+        // cluster, so the two could outlive each other; the register now sits
+        // beside the transcript it describes and they are created and destroyed
+        // together.
+        let resume = current.as_ref().map_or(0, |r| r.read_offset);
+
+        // `write_atomic` renames into place and will not create the parent, and
+        // the side that provisioned this conversation had no reader of its own
+        // to make room for. A reader owns its register, including where it
+        // lives. Done once per claim rather than on every commit.
+        if let Some((dir, _)) = self.path.rsplit_once('/') {
+            self.backend
+                .create_dir_all(dir)
+                .map_err(|e| format!("create reader directory {dir}: {e}"))?;
+        }
+
+        self.store(&ReaderRegister {
+            holder: self.holder.clone(),
+            lease_expires_at: now + READER_LEASE_MS,
+            read_offset: resume,
+        })?;
+        match self.load()? {
+            Some(back) if back.holder == self.holder => Ok(Seat::Taken(back.read_offset)),
+            Some(back) => Ok(Seat::HeldBy(back.lease_expires_at)),
+            // Vanished between write and read-back: something deleted the
+            // conversation under us. Treat as contended rather than looping.
+            None => Ok(Seat::HeldBy(now + READER_LEASE_MS)),
+        }
+    }
+
+    /// Record `offset` as read and renew the lease. `Ok(false)` means the seat
+    /// was taken over and this instance must stop advancing it.
+    ///
+    /// Also the renewal path — renewing is committing the position already
+    /// held, so there is one write and one place that can get it wrong.
+    fn commit(&self, offset: u64) -> Result<bool, String> {
+        if let Some(current) = self.load()? {
+            if current.holder != self.holder {
+                return Ok(false);
+            }
+        }
+        self.store(&ReaderRegister {
+            holder: self.holder.clone(),
+            lease_expires_at: now_ms() + READER_LEASE_MS,
+            read_offset: offset,
+        })?;
+        Ok(true)
+    }
+
+    /// Give the seat up, keeping the position.
+    ///
+    /// Without this a clean shutdown still holds the seat until the lease runs
+    /// out, so an agent restarted inside that window is locked out of its own
+    /// conversation and simply appears not to receive. The lease is the
+    /// recovery path for an instance that DIED; an instance that is leaving
+    /// says so.
+    ///
+    /// A no-op when the seat has already moved on, so a tail that was taken
+    /// over cannot evict its successor on the way out.
+    fn release(&self) -> Result<(), String> {
+        let Some(current) = self.load()? else {
+            return Ok(());
+        };
+        if current.holder != self.holder {
+            return Ok(());
+        }
+        self.store(&ReaderRegister {
+            holder: String::new(),
+            lease_expires_at: 0,
+            read_offset: current.read_offset,
+        })
     }
 }
 
-/// Spawn the background inbox receiver: park on the tail, hand each new
-/// envelope to `sink`, persist the cursor.
+impl Mailbox {
+    /// This mailbox's claimable read position in the conversation with `peer`.
+    #[must_use]
+    pub fn conversation_reader(&self, peer: &str) -> ConversationReader {
+        ConversationReader {
+            path: self
+                .convention
+                .reader_path(&self.self_id, peer, &self.self_id),
+            backend: Arc::clone(&self.backend),
+            holder: instance_id(),
+        }
+    }
+}
+
+/// Spawn the background receiver: one parked tail per conversation, each
+/// handing new envelopes to `sink` and advancing its own read position.
 ///
 /// The ONE receive loop. It used to be two — this one over gRPC for A2A and a
 /// second for the local JSONL inbox — and because the loop was duplicated the
@@ -638,130 +1005,184 @@ impl InboxCursor {
 /// does not vary by transport, only the `mailbox` handed to it does, so there
 /// is nothing for a second copy to do except diverge.
 ///
-/// Event-driven, not polling, wherever the backend can be: each iteration
-/// parks inside [`Mailbox::poll`] until the backend reports new data or
+/// A receiver used to tail ONE stream — its own inbox, which every sender
+/// appended to. Conversations put each pair on its own transcript, so a
+/// receiver tails N of them, discovered from its chat list. That directory is
+/// written by whichever side provisions the conversation, so a peer that has
+/// never written before shows up there before its first message is readable.
+///
+/// Event-driven, not polling, wherever the backend can be: each tail parks
+/// inside [`Mailbox::poll_conversation`] until the backend reports new data or
 /// `block_ms` elapses. A DT_STREAM backend parks on a condvar the kernel
 /// signals (including from a peer's replicated append); `StdFsBackend` has no
-/// such primitive and falls back to a bounded size poll, which is the one
-/// place this is a poll rather than a wait.
-/// `sink` returns whether the consumer has TAKEN RESPONSIBILITY for the
-/// envelope — not merely that it was handed over. The cursor does not advance
-/// past an envelope that was not accepted, so a consumer that blocks until it
-/// has the message applies back-pressure to the receiver instead of letting
-/// messages pile up in a queue the cursor has already been advanced past.
+/// such primitive and falls back to a bounded size poll. Discovery is the one
+/// genuine poll, for the reason on [`CONVERSATION_DISCOVERY_MS`].
 ///
-/// That distinction is the whole reason this is a `bool`. Saving the cursor
-/// after a `sink` that only enqueues means a crash loses everything still in
-/// the queue, silently, with the sender already told "delivered" — the loss
-/// this cursor exists to prevent, reintroduced one layer up.
+/// `sink` returns whether the consumer has TAKEN RESPONSIBILITY for the
+/// envelope — not merely that it was handed over. The read position does not
+/// advance past an envelope that was not accepted, so a consumer that blocks
+/// until it has the message applies back-pressure to the receiver instead of
+/// letting messages pile up past a position already recorded as read.
+///
+/// That distinction is the whole reason this is a `bool`. Committing after a
+/// `sink` that only enqueues means a crash loses everything still in the queue,
+/// silently, with the sender already told "delivered" — the loss the register
+/// exists to prevent, reintroduced one layer up.
+///
+/// `sink` is shared by every tail, so it must be `Sync`: it is one consumer
+/// receiving from all conversations, not one per peer.
 pub fn spawn_inbox_poller(
     mailbox: Arc<Mailbox>,
-    cursor_store: InboxCursor,
     block_ms: u64,
     label: &'static str,
     abort: crate::HookAbortSignal,
-    sink: impl Fn(&MailboxEnvelope) -> bool + Send + 'static,
+    sink: impl Fn(&MailboxEnvelope) -> bool + Send + Sync + 'static,
 ) -> std::thread::JoinHandle<()> {
+    let sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync> = Arc::new(sink);
     std::thread::Builder::new()
-        .name(format!("{label}-inbox-poller"))
+        .name(format!("{label}-inbox"))
         .spawn(move || {
-            let mut cursor = match cursor_store.load() {
-                // A saved position PAST the stream's end cannot describe this
-                // stream: the cursor outlived the inbox it was recording — a
-                // rebuilt cluster, a fresh data dir, a reused agent name. Left
-                // alone the poller parks on an offset the stream will not reach
-                // for a long time, and the symptom is silence: no error, no
-                // message, nothing to grep for. Clamp to the tail and say so.
-                Some(saved) => match mailbox.poll(0, 0) {
-                    Ok((_history, tail)) if saved > tail => {
-                        eprintln!(
-                            "[{label}] saved read position {saved} is past this inbox's tail \
-                             {tail} — the cursor predates this stream; resuming at {tail}"
-                        );
-                        cursor_store.save(tail);
-                        tail
-                    }
-                    _ => saved,
-                },
-                // Never read before: seek to the tail rather than replay.
-                //
-                // The accepted cost is that a send landing DURING this seek is
-                // positioned past and never delivered. That window exists only
-                // on a receiver's first-ever run, and the alternative — start
-                // at 0 — replays a backlog this receiver was never party to,
-                // which is the #81 re-reply storm. A caller that must not miss
-                // a first message should create the inbox before advertising
-                // the agent, not widen this window.
-                None => match mailbox.poll(0, 0) {
-                    Ok((_history, tail)) => {
-                        cursor_store.save(tail);
-                        tail
-                    }
-                    Err(e) => {
-                        eprintln!("[{label}] initial inbox seek failed: {e}");
-                        0
-                    }
-                },
-            };
+            // Announce before listening. A receiver that only becomes visible
+            // once someone has written to it cannot be found by whoever wants
+            // to write, and cannot be observed to be running at all.
+            if let Err(e) = mailbox.ensure_presence() {
+                eprintln!("[{label}] announcing this agent failed: {e}");
+            }
+            let mut tailing: std::collections::HashMap<String, std::thread::JoinHandle<()>> =
+                std::collections::HashMap::new();
             while !abort.is_aborted() {
-                match mailbox.poll(cursor, block_ms) {
-                    Ok((msgs, next)) => {
-                        let accepted = msgs.iter().all(|m| sink(m));
-                        // Persist only on real forward progress, and only when
-                        // the consumer took every envelope in the batch: an
-                        // idle deadline return would otherwise rewrite the same
-                        // offset every iteration, and advancing past a rejected
-                        // envelope drops it.
-                        //
-                        // A batch is all-or-nothing because the cursor is one
-                        // offset — there is no way to say "past the second but
-                        // not the third". Re-delivering an accepted envelope is
-                        // the tolerable half of that: at-least-once, which is
-                        // the right side to err on for mail.
-                        if accepted && next > cursor {
-                            cursor = next;
-                            cursor_store.save(cursor);
+                match mailbox.list_conversations() {
+                    Ok(peers) => {
+                        for peer in peers {
+                            if tailing.contains_key(&peer) {
+                                continue;
+                            }
+                            let tail = spawn_conversation_tail(
+                                Arc::clone(&mailbox),
+                                peer.clone(),
+                                block_ms,
+                                label,
+                                abort.clone(),
+                                Arc::clone(&sink),
+                            );
+                            tailing.insert(peer, tail);
                         }
                     }
+                    Err(e) => eprintln!("[{label}] listing conversations failed: {e}"),
+                }
+                sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
+            }
+            // Joining is what makes the returned handle mean "the receiver has
+            // stopped". Without it the caller's join returns while N tails are
+            // still delivering into a sink it believes is finished with.
+            for (_, tail) in tailing {
+                let _ = tail.join();
+            }
+        })
+        .expect("spawn inbox receiver thread")
+}
+
+/// One conversation's tail: hold the reader seat, park on the transcript,
+/// deliver, commit.
+fn spawn_conversation_tail(
+    mailbox: Arc<Mailbox>,
+    peer: String,
+    block_ms: u64,
+    label: &'static str,
+    abort: crate::HookAbortSignal,
+    sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::Builder::new()
+        .name(format!("{label}-tail"))
+        .spawn(move || {
+            let reader = mailbox.conversation_reader(&peer);
+            // Outer loop re-claims: a seat held by an instance that then dies is
+            // free once its lease expires, and nobody is coming to tell us.
+            while !abort.is_aborted() {
+                let mut cursor = match reader.acquire() {
+                    Ok(Seat::Taken(at)) => at,
+                    Ok(Seat::HeldBy(until)) => {
+                        sleep_unless_aborted(&abort, until.saturating_sub(now_ms()).max(1));
+                        continue;
+                    }
                     Err(e) => {
-                        eprintln!("[{label}] inbox poll failed: {e}");
-                        // Avoid a hot error loop when the backend is sick; the
-                        // blocking read itself paces the happy path.
-                        std::thread::sleep(std::time::Duration::from_millis(block_ms.max(1)));
+                        eprintln!("[{label}] claiming the reader seat for {peer} failed: {e}");
+                        sleep_unless_aborted(&abort, block_ms.max(1));
+                        continue;
+                    }
+                };
+                let mut renew_at = now_ms() + READER_RENEW_MS;
+                while !abort.is_aborted() {
+                    let (msgs, next) = match mailbox.poll_conversation(&peer, cursor, block_ms) {
+                        Ok(batch) => batch,
+                        Err(e) => {
+                            eprintln!("[{label}] polling the conversation with {peer} failed: {e}");
+                            // Avoid a hot error loop when the backend is sick;
+                            // the blocking read itself paces the happy path.
+                            sleep_unless_aborted(&abort, block_ms.max(1));
+                            continue;
+                        }
+                    };
+                    let accepted = msgs.iter().all(|m| sink(m));
+                    // Commit only on real forward progress the consumer took in
+                    // full, otherwise only when the lease needs renewing. A
+                    // batch is all-or-nothing because the position is one
+                    // offset — there is no way to say "past the second but not
+                    // the third". Re-delivering an accepted envelope is the
+                    // tolerable half of that: at-least-once, the right side to
+                    // err on for mail.
+                    let commit_at = if accepted && next > cursor {
+                        next
+                    } else if now_ms() >= renew_at {
+                        cursor
+                    } else {
+                        continue;
+                    };
+                    match reader.commit(commit_at) {
+                        Ok(true) => {
+                            cursor = commit_at;
+                            renew_at = now_ms() + READER_RENEW_MS;
+                        }
+                        // Another instance of this agent took the seat. It is
+                        // now the one advancing the position; two tails
+                        // advancing one offset is the split this prevents.
+                        Ok(false) => {
+                            eprintln!(
+                                "[{label}] the reader seat for {peer} was taken over; \
+                                 stopping this tail"
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("[{label}] committing the read position for {peer}: {e}");
+                            sleep_unless_aborted(&abort, block_ms.max(1));
+                        }
                     }
                 }
             }
+            // Hand the seat back rather than leaving the next instance to wait
+            // out a lease held by a process that has already stopped.
+            if let Err(e) = reader.release() {
+                eprintln!("[{label}] releasing the reader seat for {peer} failed: {e}");
+            }
         })
-        .expect("spawn inbox poller thread")
+        .expect("spawn conversation tail thread")
 }
 
-/// [`spawn_inbox_poller`] over the workspace's local JSONL inbox.
+/// [`spawn_inbox_poller`] over a workspace-local root.
 ///
-/// Owns only the two things that are local-specific: the backend/convention
-/// pair, and where the cursor lives — a dotfile beside the inbox it tracks, so
-/// it is scoped to the workspace and swept with it.
+/// Owns only what is local-specific: the backend and the root the convention
+/// hangs off. The read position is NOT local-specific and is not passed in —
+/// it lives in the conversation, beside the transcript it describes, under both
+/// backends alike.
 pub fn spawn_local_poller(
     workspace_root: std::path::PathBuf,
     self_id: String,
     abort: crate::HookAbortSignal,
-    sink: impl Fn(&MailboxEnvelope) -> bool + Send + 'static,
+    sink: impl Fn(&MailboxEnvelope) -> bool + Send + Sync + 'static,
 ) -> std::thread::JoinHandle<()> {
-    let cursor_store = InboxCursor::local(&workspace_root, &self_id);
-    let mailbox = Arc::new(Mailbox::new(
-        Arc::new(crate::fs_backend::StdFsBackend),
-        self_id,
-        InboxConvention::PerRecipient {
-            root: workspace_root.to_string_lossy().into_owned(),
-        },
-    ));
-    spawn_inbox_poller(
-        mailbox,
-        cursor_store,
-        LOCAL_POLL_BLOCK_MS,
-        "local-inbox",
-        abort,
-        sink,
-    )
+    let mailbox = Arc::new(Mailbox::workspace_local(&workspace_root, self_id));
+    spawn_inbox_poller(mailbox, LOCAL_POLL_BLOCK_MS, "local-inbox", abort, sink)
 }
 
 // ---------------------------------------------------------------------------
@@ -841,17 +1262,18 @@ pub fn sending_mailbox() -> Arc<Mailbox> {
     // coordinator/sub-agent send stays per-workspace (a sub-agent belongs to its
     // parent scode; different scodes must not cross-talk). The standalone
     // same-machine pair uses a scoped mailbox rooted at `local_pair_root()`,
-    // installed by the host — this fallback is not that path. `self_id` is empty
-    // here by design (see doc above); a real identity rides the scoped mailbox.
-    Arc::new(Mailbox::new(
-        Arc::new(crate::fs_backend::StdFsBackend),
-        String::new(),
-        InboxConvention::PerRecipient {
-            root: crate::current_workspace_root_or_default()
-                .to_string_lossy()
-                .into_owned(),
-        },
-    ))
+    // installed by the host — this fallback is not that path.
+    //
+    // The identity is DERIVED rather than left empty. It used to be empty, on
+    // the reasoning that a real identity rides the scoped mailbox and this one
+    // only needed to address a recipient. A conversation is addressed by its
+    // PAIR, so a nameless side has no conversation to be in: the id degenerates
+    // and the chat-list entry comes out as `…/conversations/` with no leaf.
+    // `local_agent_name` is the same derivation the host uses when it builds
+    // the scoped mailbox, so the two agree instead of nearly agreeing.
+    let root = crate::current_workspace_root_or_default();
+    let self_id = local_agent_name(None, &root);
+    Arc::new(Mailbox::workspace_local(&root, self_id))
 }
 
 #[cfg(test)]
@@ -876,9 +1298,7 @@ mod tests {
         Mailbox::new(
             Arc::new(StdFsBackend),
             self_id.to_string(),
-            InboxConvention::PerRecipient {
-                root: root.to_string(),
-            },
+            InboxConvention::new(root.to_string()),
         )
     }
 
@@ -919,7 +1339,6 @@ mod tests {
         let ws = temp_workspace("reject-redeliver");
         let ws_path = std::path::PathBuf::from(&ws);
         let peer = local_mailbox(&ws, "peer");
-        let cursor_file = InboxCursor::local(&ws_path, "me").path().to_path_buf();
 
         // Refuse the first delivery of each body, accept the second.
         let attempts: Arc<std::sync::Mutex<Vec<String>>> =
@@ -933,10 +1352,6 @@ mod tests {
                 log.push(m.body.clone());
                 !first_time
             });
-        wait_until("the poller to record where it starts", || {
-            cursor_file.exists()
-        });
-
         peer.send(note("peer", "me", "needs-two-tries"))
             .expect("send");
         wait_until("the refused message to come back", || {
@@ -954,31 +1369,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&ws);
     }
 
-    /// The receiver must neither replay a backlog it was never party to nor
-    /// lose what arrived while it was not running.
+    /// A restarted receiver must neither replay what it already handled nor
+    /// lose what arrived while it was gone.
     ///
     /// Both halves in one test because they are the two ways to get this wrong
-    /// and a fix for either one alone reintroduces the other. Replaying the
-    /// backlog is the #81 re-reply storm; losing the offline message is the
-    /// Win↔Mac duet handoff, where the sender was told "delivered", the
-    /// envelope sat durably in the inbox, and no later reader looked back.
+    /// and a fix for either alone reintroduces the other. Replaying is the #81
+    /// re-reply storm; losing the offline message is the Win-Mac duet handoff,
+    /// where the sender was told "delivered", the envelope sat durably in the
+    /// transcript, and no later reader ever looked back.
     ///
-    /// This is the regression the duplicated receive loop caused: the local
-    /// copy kept its cursor in a local variable starting at 0.
+    /// What makes the second run able to resume at all is WHERE the position
+    /// lives: in the conversation, beside the transcript it describes. The
+    /// node-local cursor file this replaced did not survive the agent being
+    /// restarted anywhere else, and a position that can be lost is a position
+    /// that replays.
+    ///
+    /// Note what is NOT asserted: that a first run skips history. It does not,
+    /// and must not. A transcript is one pair's conversation, so what a
+    /// first-run seek-to-tail would skip is the peer's opening message.
     #[test]
-    fn local_poller_resumes_from_its_cursor_instead_of_replaying() {
+    fn a_restarted_receiver_resumes_instead_of_replaying() {
         let ws = temp_workspace("poller-resume");
         let ws_path = std::path::PathBuf::from(&ws);
         let peer = local_mailbox(&ws, "peer");
 
-        // A backlog that predates any receiver.
-        peer.send(note("peer", "me", "backlog-1")).expect("send");
-        peer.send(note("peer", "me", "backlog-2")).expect("send");
+        peer.send(note("peer", "me", "first-1")).expect("send");
+        peer.send(note("peer", "me", "first-2")).expect("send");
 
         let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let cursor_file = InboxCursor::local(&ws_path, "me").path().to_path_buf();
 
-        // First run: never read this inbox before, so seek to the tail.
         let abort = crate::HookAbortSignal::new();
         let sink_seen = Arc::clone(&seen);
         let first =
@@ -986,22 +1405,13 @@ mod tests {
                 sink_seen.lock().unwrap().push(m.body.clone());
                 true
             });
-        wait_until("the first run to record its cursor", || {
-            cursor_file.exists()
+        wait_until("the conversation this receiver has never read", || {
+            seen.lock().unwrap().len() == 2
         });
-        assert!(
-            seen.lock().unwrap().is_empty(),
-            "a first run must not replay the backlog, got {:?}",
-            seen.lock().unwrap()
-        );
-
-        // Delivered while it is listening.
-        peer.send(note("peer", "me", "live-1")).expect("send");
-        wait_until("live-1", || seen.lock().unwrap().len() == 1);
         abort.abort();
         first.join().expect("first poller joins");
 
-        // Arrives with nobody listening — must survive the gap.
+        // Arrives with nobody listening - must survive the gap.
         peer.send(note("peer", "me", "offline-1")).expect("send");
 
         let abort2 = crate::HookAbortSignal::new();
@@ -1016,16 +1426,20 @@ mod tests {
             },
         );
         wait_until("offline-1 after the restart", || {
-            seen.lock().unwrap().len() == 2
+            seen.lock().unwrap().len() == 3
         });
         abort2.abort();
         second.join().expect("second poller joins");
 
         assert_eq!(
             *seen.lock().unwrap(),
-            vec!["live-1".to_string(), "offline-1".to_string()],
-            "exactly the two messages addressed to a running-or-restarted receiver, \
-             in order, with no backlog replay"
+            vec![
+                "first-1".to_string(),
+                "first-2".to_string(),
+                "offline-1".to_string()
+            ],
+            "each message exactly once and in order: the second run must resume \
+             where the first stopped, not replay what it already took"
         );
 
         let _ = std::fs::remove_dir_all(&ws);
@@ -1049,7 +1463,7 @@ mod tests {
         .unwrap();
 
         let worker_mb = local_mailbox(&ws, "worker");
-        let (msgs, _cursor) = worker_mb.poll(0, 0).unwrap();
+        let (msgs, _cursor) = worker_mb.poll_conversation("team-lead", 0, 0).unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].from, "team-lead");
         assert_eq!(msgs[0].body, "hello worker");
@@ -1062,9 +1476,11 @@ mod tests {
         let ws = temp_workspace("self-filter");
         let mb = local_mailbox(&ws, "agent-a");
 
+        // Both land in the SAME transcript — that is the point of a shared
+        // conversation. Each side tells its own appends apart by `from`.
         mb.send(MailboxEnvelope {
             from: "agent-a".to_string(),
-            to: "agent-a".to_string(),
+            to: "agent-b".to_string(),
             body: "self-write".to_string(),
             summary: None,
             timestamp: 0,
@@ -1075,7 +1491,7 @@ mod tests {
         .unwrap();
         mb.send(MailboxEnvelope {
             from: "agent-b".to_string(),
-            to: "agent-a".to_string(),
+            to: "agent-b".to_string(),
             body: "from peer".to_string(),
             summary: None,
             timestamp: 0,
@@ -1085,7 +1501,7 @@ mod tests {
         })
         .unwrap();
 
-        let (msgs, _) = mb.poll(0, 0).unwrap();
+        let (msgs, _) = mb.poll_conversation("agent-b", 0, 0).unwrap();
         assert_eq!(msgs.len(), 1, "self-writes must be filtered");
         assert_eq!(msgs[0].body, "from peer");
 
@@ -1111,7 +1527,7 @@ mod tests {
             .unwrap();
         }
 
-        let envs = mb.read_all("worker").unwrap();
+        let envs = mb.read_conversation("worker").unwrap();
         assert_eq!(envs.len(), 3);
 
         let _ = std::fs::remove_dir_all(&ws);
@@ -1145,36 +1561,54 @@ mod tests {
         })
         .unwrap();
 
+        // The sender is in its own namespace — provisioning a conversation
+        // gives BOTH sides a presence. Excluding self is the broadcast
+        // caller's job, not this call's: "who is there" and "who should this
+        // message go to" are different questions.
         let names = mb.list_recipients().unwrap();
-        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(names, vec!["alpha", "beta", "coordinator"]);
 
         let _ = std::fs::remove_dir_all(&ws);
     }
 
     #[test]
-    fn inbox_path_conventions() {
+    fn transcript_path_conventions() {
+        let cid = a2a::conversation_id("me", "worker");
+
         // One shape, root-prefixed. Standalone: a host dir root.
-        let local = InboxConvention::PerRecipient {
-            root: "/workspace".to_string(),
-        };
+        let local = InboxConvention::new("/workspace".to_string());
         assert_eq!(
-            local.inbox_path("worker"),
-            "/workspace/agents/worker/chat-with-me"
+            local.transcript_path("me", "worker"),
+            format!("/workspace/conversations/{cid}/transcript")
         );
 
         // Nexus: empty root → daemon-absolute, exactly one leading slash.
-        let nexus = InboxConvention::PerRecipient {
-            root: String::new(),
-        };
-        assert_eq!(nexus.inbox_path("win-ai"), "/agents/win-ai/chat-with-me");
+        let nexus = InboxConvention::new(String::new());
+        assert_eq!(
+            nexus.transcript_path("me", "worker"),
+            format!("/conversations/{cid}/transcript")
+        );
 
         // A trailing slash on the root must not double up.
-        let trailing = InboxConvention::PerRecipient {
-            root: "/workspace/".to_string(),
-        };
+        let trailing = InboxConvention::new("/workspace/".to_string());
         assert_eq!(
-            trailing.inbox_path("worker"),
-            "/workspace/agents/worker/chat-with-me"
+            trailing.transcript_path("me", "worker"),
+            format!("/workspace/conversations/{cid}/transcript")
+        );
+
+        // Order-free, which is what lets each side derive the shared transcript
+        // from its own point of view without agreeing on who is "first".
+        assert_eq!(
+            nexus.transcript_path("worker", "me"),
+            nexus.transcript_path("me", "worker")
+        );
+
+        // The chat list is keyed by the PEER, not the cid: a digest is one-way,
+        // so a cid-named entry would say a conversation exists without saying
+        // with whom, and the receiver could derive no transcript from it.
+        assert_eq!(
+            nexus.chat_list_path("me", "worker"),
+            "/agents/me/conversations/worker"
         );
     }
 
@@ -1218,19 +1652,13 @@ mod tests {
             },
         );
 
-        // Wait for the poller to have recorded where it starts reading before
-        // sending anything. A first-ever run seeks to the tail — the
-        // alternative is replaying a backlog it was never party to (#81) — so a
-        // send that lands DURING that seek is positioned past and never
-        // delivered. This test is about a message arriving while the receiver
-        // is listening, which means it has to establish "listening" first.
-        wait_until("the poller to record where it starts", || {
-            InboxCursor::local(std::path::Path::new(&ws), "team-lead")
-                .path()
-                .exists()
-        });
-
-        // Write a message from a sub-agent to team-lead's inbox.
+        // Deliberately NOT waiting for the receiver to be listening first. A
+        // first read starts at the beginning of the conversation, so a message
+        // that lands before the tail exists is still delivered once discovery
+        // finds it — and a test that had to establish "listening" first could
+        // not tell that apart from a seek-to-tail that silently drops it.
+        //
+        // Write a message from a sub-agent to team-lead.
         let mb = local_mailbox(&ws, "sub-agent-1");
         mb.send(MailboxEnvelope {
             from: "sub-agent-1".to_string(),

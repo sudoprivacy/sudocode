@@ -282,7 +282,9 @@ impl EngineEventRenderer {
             | EngineEvent::AutoCompaction(_)
             | EngineEvent::Compaction(_)
             | EngineEvent::ModelChanged { .. }
-            | EngineEvent::PermissionModeChanged { .. } => RenderOutcome::Continue,
+            | EngineEvent::PermissionModeChanged { .. }
+            // The REPL attaches no sub-agent relay, so these never arrive.
+            | EngineEvent::Subagent(_) => RenderOutcome::Continue,
         }
     }
 }

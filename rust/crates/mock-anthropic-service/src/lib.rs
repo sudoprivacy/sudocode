@@ -238,7 +238,51 @@ enum Scenario {
     /// the two addends in that prompt so the parent's tool_result carries a
     /// clean number (203 / 403 / 603).
     SubagentCalcChild,
+    /// Sub-agent events contract: a parent that spawns ONE synchronous
+    /// `Agent` whose child ([`Scenario::SubagentToolChild`]) makes a tool call,
+    /// so the forwarded stream has text, a tool call and its result.
+    SubagentEventsSync,
+    /// Two `Agent` calls in one message, both `run_in_background: true`: the
+    /// children run in parallel and finish after the parent's turn ended.
+    SubagentEventsBackground,
+    /// One synchronous `Agent` of the custom type `nester`
+    /// ([`Scenario::SubagentNestChild`]), which itself spawns a synchronous
+    /// grandchild — one level of nesting.
+    SubagentEventsNested,
+    /// One background `Agent` whose child is [`Scenario::DelayedText`], slow
+    /// enough to be cancelled from the client.
+    SubagentEventsCancel,
+    /// A child that calls `read_file` once (tool id `toolu_child_read` in
+    /// every child — the namespacing must keep them apart), then answers.
+    SubagentToolChild,
+    /// A child that spawns one synchronous grandchild via `agent_spawn`, then
+    /// answers.
+    SubagentNestChild,
+    /// [`Scenario::SubagentToolChild`], but every request is held for
+    /// [`SUBAGENT_SLOW_CHILD_LATENCY`]: background children outlive the
+    /// parent's turn and overlap each other.
+    SubagentSlowChild,
+    /// One background `Agent` whose child ([`Scenario::SubagentSleepChild`])
+    /// is cancelled while its `bash` call is still running.
+    SubagentEventsCancelTool,
+    /// A child that runs `bash` with [`SUBAGENT_SLEEP_COMMAND`], then answers.
+    SubagentSleepChild,
 }
+
+/// What [`Scenario::SubagentSleepChild`] runs: long enough that a test sees
+/// the difference between an interrupted tool and one left to finish.
+pub const SUBAGENT_SLEEP_COMMAND: &str = "sleep 30";
+
+/// How long [`Scenario::SubagentSlowChild`] holds each request.
+pub const SUBAGENT_SLOW_CHILD_LATENCY: Duration = Duration::from_millis(1500);
+
+/// The tool use id every [`Scenario::SubagentToolChild`] reuses.
+pub const SUBAGENT_CHILD_TOOL_ID: &str = "toolu_child_read";
+/// The workspace-relative file a [`Scenario::SubagentToolChild`] reads (the
+/// test seeds it, so the tool result is the same on every run).
+pub const SUBAGENT_CHILD_READ_PATH: &str = "subagent-notes.txt";
+/// What a [`Scenario::SubagentToolChild`] answers after its tool call.
+pub const SUBAGENT_CHILD_ANSWER: &str = "child saw the workspace";
 
 /// How long [`Scenario::DelayedText`] holds a request before answering.
 pub const DELAYED_TEXT_LATENCY: Duration = Duration::from_secs(3);
@@ -287,6 +331,15 @@ impl Scenario {
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
+            "subagent_events_sync" => Some(Self::SubagentEventsSync),
+            "subagent_events_background" => Some(Self::SubagentEventsBackground),
+            "subagent_events_nested" => Some(Self::SubagentEventsNested),
+            "subagent_events_cancel" => Some(Self::SubagentEventsCancel),
+            "subagent_tool_child" => Some(Self::SubagentToolChild),
+            "subagent_nest_child" => Some(Self::SubagentNestChild),
+            "subagent_slow_child" => Some(Self::SubagentSlowChild),
+            "subagent_events_cancel_tool" => Some(Self::SubagentEventsCancelTool),
+            "subagent_sleep_child" => Some(Self::SubagentSleepChild),
             _ => None,
         }
     }
@@ -332,6 +385,15 @@ impl Scenario {
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
+            Self::SubagentEventsSync => "subagent_events_sync",
+            Self::SubagentEventsBackground => "subagent_events_background",
+            Self::SubagentEventsNested => "subagent_events_nested",
+            Self::SubagentEventsCancel => "subagent_events_cancel",
+            Self::SubagentToolChild => "subagent_tool_child",
+            Self::SubagentNestChild => "subagent_nest_child",
+            Self::SubagentSlowChild => "subagent_slow_child",
+            Self::SubagentEventsCancelTool => "subagent_events_cancel_tool",
+            Self::SubagentSleepChild => "subagent_sleep_child",
         }
     }
 }
@@ -388,6 +450,9 @@ async fn handle_connection(
 
     if scenario == Scenario::DelayedText {
         tokio::time::sleep(DELAYED_TEXT_LATENCY).await;
+    }
+    if scenario == Scenario::SubagentSlowChild {
+        tokio::time::sleep(SUBAGENT_SLOW_CHILD_LATENCY).await;
     }
     // How many times this scenario has already been served AT THIS PATH, so a
     // scenario can answer differently on a retry. Per-path because a turn is
@@ -681,6 +746,169 @@ fn subagent_calc_results(request: &MessageRequest) -> Vec<i64> {
         }
     }
     sums
+}
+
+/// One step of a sub-agent-events scenario: either the tool calls to make
+/// now, or the final answer once their results are back. Shared by the
+/// streaming and non-streaming responders so both say the same thing.
+enum SubagentStep {
+    Tools(Vec<(&'static str, &'static str, Value)>),
+    Answer(String),
+}
+
+/// `description` doubles as the agent's name, and a spawn resumes the last
+/// session of the same name — so every child here gets its own.
+fn agent_call_input(
+    description: &str,
+    prompt: &str,
+    subagent_type: &str,
+    background: bool,
+) -> Value {
+    json!({
+        "description": description,
+        "subagent_type": subagent_type,
+        "model": "claude-sonnet",
+        "auth_mode": "api-key",
+        "run_in_background": background,
+        "prompt": prompt,
+    })
+}
+
+fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> SubagentStep {
+    let done = latest_tool_result(request);
+    let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
+    match (scenario, done) {
+        (Scenario::SubagentEventsSync, None) => SubagentStep::Tools(vec![(
+            "toolu_events_sync",
+            "Agent",
+            agent_call_input(
+                "sync child",
+                &child("subagent_tool_child", "list the workspace"),
+                "general-purpose",
+                false,
+            ),
+        )]),
+        (Scenario::SubagentEventsBackground, None) => SubagentStep::Tools(vec![
+            (
+                "toolu_events_bg_1",
+                "Agent",
+                agent_call_input(
+                    "background child one",
+                    &child("subagent_slow_child", "first look"),
+                    "general-purpose",
+                    true,
+                ),
+            ),
+            (
+                "toolu_events_bg_2",
+                "Agent",
+                agent_call_input(
+                    "background child two",
+                    &child("subagent_slow_child", "second look"),
+                    "general-purpose",
+                    true,
+                ),
+            ),
+        ]),
+        (Scenario::SubagentEventsNested, None) => SubagentStep::Tools(vec![(
+            "toolu_events_nest",
+            "Agent",
+            agent_call_input(
+                "nesting child",
+                &child("subagent_nest_child", "delegate once more"),
+                "nester",
+                false,
+            ),
+        )]),
+        (Scenario::SubagentEventsCancel, None) => SubagentStep::Tools(vec![(
+            "toolu_events_cancel",
+            "Agent",
+            agent_call_input(
+                "slow child",
+                &child("delayed_text", "take your time"),
+                "general-purpose",
+                true,
+            ),
+        )]),
+        (Scenario::SubagentToolChild | Scenario::SubagentSlowChild, None) => {
+            SubagentStep::Tools(vec![(
+                SUBAGENT_CHILD_TOOL_ID,
+                "read_file",
+                json!({ "path": SUBAGENT_CHILD_READ_PATH }),
+            )])
+        }
+        (Scenario::SubagentEventsCancelTool, None) => SubagentStep::Tools(vec![(
+            "toolu_events_cancel_tool",
+            "Agent",
+            agent_call_input(
+                "sleeping child",
+                &child("subagent_sleep_child", "sleep a while"),
+                "general-purpose",
+                true,
+            ),
+        )]),
+        (Scenario::SubagentSleepChild, None) => SubagentStep::Tools(vec![(
+            "toolu_child_sleep",
+            "bash",
+            json!({ "command": SUBAGENT_SLEEP_COMMAND }),
+        )]),
+        (Scenario::SubagentNestChild, None) => SubagentStep::Tools(vec![(
+            "toolu_nest_spawn",
+            "agent_spawn",
+            agent_call_input(
+                "grandchild",
+                &child("subagent_tool_child", "grandchild task"),
+                "general-purpose",
+                false,
+            ),
+        )]),
+        (Scenario::SubagentToolChild | Scenario::SubagentSlowChild, Some(_)) => {
+            SubagentStep::Answer(SUBAGENT_CHILD_ANSWER.to_string())
+        }
+        (scenario, Some(_)) => SubagentStep::Answer(format!("{} done", scenario.name())),
+        (scenario, None) => SubagentStep::Answer(format!("{} has no plan", scenario.name())),
+    }
+}
+
+fn subagent_events_sse(request: &MessageRequest, scenario: Scenario) -> String {
+    match subagent_events_step(request, scenario) {
+        SubagentStep::Answer(text) => final_text_sse(&text),
+        SubagentStep::Tools(calls) => {
+            let inputs: Vec<String> = calls
+                .iter()
+                .map(|(_, _, input)| input.to_string())
+                .collect();
+            let chunks: Vec<[&str; 1]> = inputs.iter().map(|input| [input.as_str()]).collect();
+            let uses: Vec<ToolUseSse<'_>> = calls
+                .iter()
+                .zip(&chunks)
+                .map(|((tool_id, tool_name, _), chunk)| ToolUseSse {
+                    tool_id,
+                    tool_name,
+                    partial_json_chunks: chunk,
+                })
+                .collect();
+            tool_uses_sse(&uses)
+        }
+    }
+}
+
+fn subagent_events_response(request: &MessageRequest, scenario: Scenario) -> MessageResponse {
+    let id = format!("msg_{}", scenario.name());
+    match subagent_events_step(request, scenario) {
+        SubagentStep::Answer(text) => text_message_response(&id, &text),
+        SubagentStep::Tools(calls) => {
+            let uses: Vec<ToolUseMessage<'_>> = calls
+                .into_iter()
+                .map(|(tool_id, tool_name, input)| ToolUseMessage {
+                    tool_id,
+                    tool_name,
+                    input,
+                })
+                .collect();
+            tool_message_response_many(&id, &uses)
+        }
+    }
 }
 
 /// Sum the two addends in a `SubagentCalcChild` prompt of the form
@@ -1207,6 +1435,15 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             let sum = subagent_child_sum(request);
             final_text_sse(&sum.to_string())
         }
+        Scenario::SubagentEventsSync
+        | Scenario::SubagentEventsBackground
+        | Scenario::SubagentEventsNested
+        | Scenario::SubagentEventsCancel
+        | Scenario::SubagentToolChild
+        | Scenario::SubagentNestChild
+        | Scenario::SubagentSlowChild
+        | Scenario::SubagentEventsCancelTool
+        | Scenario::SubagentSleepChild => subagent_events_sse(request, scenario),
     }
 }
 
@@ -1730,6 +1967,15 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             let sum = subagent_child_sum(request);
             text_message_response("msg_subagent_calc_child", &sum.to_string())
         }
+        Scenario::SubagentEventsSync
+        | Scenario::SubagentEventsBackground
+        | Scenario::SubagentEventsNested
+        | Scenario::SubagentEventsCancel
+        | Scenario::SubagentToolChild
+        | Scenario::SubagentNestChild
+        | Scenario::SubagentSlowChild
+        | Scenario::SubagentEventsCancelTool
+        | Scenario::SubagentSleepChild => subagent_events_response(request, scenario),
     }
 }
 
@@ -1776,6 +2022,15 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",
+        Scenario::SubagentEventsSync => "req_subagent_events_sync",
+        Scenario::SubagentEventsBackground => "req_subagent_events_background",
+        Scenario::SubagentEventsNested => "req_subagent_events_nested",
+        Scenario::SubagentEventsCancel => "req_subagent_events_cancel",
+        Scenario::SubagentToolChild => "req_subagent_tool_child",
+        Scenario::SubagentNestChild => "req_subagent_nest_child",
+        Scenario::SubagentSlowChild => "req_subagent_slow_child",
+        Scenario::SubagentEventsCancelTool => "req_subagent_events_cancel_tool",
+        Scenario::SubagentSleepChild => "req_subagent_sleep_child",
     }
 }
 

@@ -11,6 +11,23 @@ scode
 The REPL accepts prose and slash commands. Tab completion expands slash
 command names, model aliases, permission modes, and recent session IDs.
 
+A line starting with `!` runs the rest as a shell command instead of
+sending it to the model:
+
+```text
+❯ ! git status --short
+  ⎿  M docs/usage.md
+```
+
+The output is printed and recorded in the transcript (as
+`<bash-input>` / `<bash-stdout>` / `<bash-stderr>` user messages, the
+same shape Claude Code uses), so the next prompt you send can refer to
+it. No model turn runs. The command executes outside the tool sandbox
+with the default tool timeout; a bare `!` is sent to the model as text.
+ACP clients get the same behaviour: a `session/prompt` whose text starts
+with `!` runs in the session's workspace and streams the output back as
+agent text.
+
 For the canonical, live command list:
 
 ```bash

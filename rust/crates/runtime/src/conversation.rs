@@ -401,6 +401,15 @@ pub trait RuntimeObserver {
     fn retry_sink(&self) -> Option<RetrySink> {
         None
     }
+
+    /// Sink for what spawned sub-agents are doing (their text, thinking, tool
+    /// calls and lifecycle). Default `None`: sub-agents run without an
+    /// observer, exactly as before. A renderer that returns a sink gets the
+    /// events via [`ToolDispatchContext::subagent_sink`] → the Agent tool; see
+    /// [`crate::subagent_events`].
+    fn subagent_sink(&self) -> Option<crate::subagent_events::SubagentSink> {
+        None
+    }
 }
 
 /// A live progress report from a running tool. Structured, not rendered — the
@@ -599,6 +608,13 @@ pub struct ToolDispatchContext {
     pub parent_thinking_enabled: bool,
     /// The parent's routing key, inherited verbatim by spawned subagents.
     pub parent_routing_session_id: Option<String>,
+    /// Where a spawned sub-agent reports what it is doing, if the renderer
+    /// asked for that (see [`RuntimeObserver::subagent_sink`]).
+    pub subagent_sink: Option<crate::subagent_events::SubagentSink>,
+    /// The `tool_use` id of the call being dispatched. Set for calls run one
+    /// at a time (which is how `agent_spawn` always runs); `None` inside a
+    /// concurrent batch.
+    pub tool_use_id: Option<String>,
 }
 
 impl ToolDispatchContext {
@@ -2049,7 +2065,7 @@ where
             // identical across all tool_uses emitted in the same
             // assistant message, so cloning once here (rather than per
             // tool_use iteration) saves an O(n_tools) allocation.
-            let dispatch_context = ToolDispatchContext {
+            let mut dispatch_context = ToolDispatchContext {
                 parent_assistant_message: Some(assistant_message),
                 parent_session_messages: self.session.messages.clone(),
                 tool_results_dir: self.session.tool_results_dir(),
@@ -2062,6 +2078,8 @@ where
                 parent_reasoning_effort: self.api_client.reasoning_effort().map(str::to_string),
                 parent_thinking_enabled: self.api_client.thinking_enabled(),
                 parent_routing_session_id: self.api_client.routing_session_id().map(str::to_string),
+                subagent_sink: observer.as_deref().and_then(RuntimeObserver::subagent_sink),
+                tool_use_id: None,
             };
 
             let mut batch_start = 0usize;
@@ -2170,6 +2188,7 @@ where
                     // `&self.tool_executor`) is already dropped and `&mut self`
                     // is free.
                     let abort_signal = self.hook_abort_signal.clone();
+                    dispatch_context.tool_use_id = None;
                     let batch_exec = futures::future::join_all(prepared.iter().map(|p| async {
                         if p.deny_reason.is_some() {
                             None
@@ -2410,6 +2429,7 @@ where
                         // would be left without a matching `tool_result` —
                         // producing a session the API rejects on resume.
                         let abort_signal = self.hook_abort_signal.clone();
+                        dispatch_context.tool_use_id = Some(tool_use_id.clone());
                         let exec_outcome = {
                             let exec = self.tool_executor.execute_with_context(
                                 &tool_name,

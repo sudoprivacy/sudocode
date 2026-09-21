@@ -70,6 +70,7 @@ pub mod spawn_task;
 mod sse;
 pub mod stale_base;
 pub mod stale_branch;
+pub mod subagent_events;
 pub mod summary_compression;
 pub mod task_packet;
 mod time;
@@ -227,6 +228,10 @@ pub use stale_base::{
 pub use stale_branch::{
     apply_policy, check_freshness, BranchFreshness, StaleBranchAction, StaleBranchEvent,
     StaleBranchPolicy,
+};
+pub use subagent_events::{
+    SubagentEvent, SubagentIdentity, SubagentLifecycle, SubagentPhase, SubagentScope, SubagentSink,
+    SubagentStreamRef, SubagentUpdate,
 };
 pub use task_packet::{validate_packet, TaskPacket, TaskPacketValidationError, ValidatedPacket};
 pub use time::today_local;

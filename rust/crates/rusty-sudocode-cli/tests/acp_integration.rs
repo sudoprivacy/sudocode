@@ -17,6 +17,7 @@ mod openai_compat_mock;
 #[path = "common/python.rs"]
 mod python;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -24,7 +25,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
-use mock_anthropic_service::{MockAnthropicService, SCENARIO_PREFIX};
+use mock_anthropic_service::{
+    MockAnthropicService, SCENARIO_PREFIX, SUBAGENT_CHILD_ANSWER, SUBAGENT_CHILD_READ_PATH,
+    SUBAGENT_CHILD_TOOL_ID,
+};
 use openai_compat_mock::OpenAiCompatMock;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -166,6 +170,9 @@ struct AcpTestClient {
     /// [`AcpTestClient::send_request`] so it never leaks into the next
     /// request's notifications).
     last_available_commands: Option<Value>,
+    /// Every stdout line received over stdio, verbatim, in order — for tests
+    /// that compare the wire byte for byte.
+    raw_lines: Vec<String>,
 }
 
 impl AcpTestClient {
@@ -311,6 +318,7 @@ impl AcpTestClient {
                     }
                     // Try parsing as JSON; skip non-JSON lines (e.g. log output).
                     if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+                        self.raw_lines.push(trimmed.to_string());
                         return val;
                     }
                 }
@@ -421,6 +429,7 @@ fn spawn_stdio_client_with_args_and_env(
         },
         next_id: 1,
         last_available_commands: None,
+        raw_lines: Vec::new(),
     }
 }
 
@@ -484,6 +493,7 @@ async fn spawn_ws_client(workspace: &TestWorkspace) -> AcpTestClient {
         },
         next_id: 1,
         last_available_commands: None,
+        raw_lines: Vec::new(),
     }
 }
 
@@ -573,6 +583,12 @@ async fn scenario_initialize(client: &mut AcpTestClient) {
             "initialize must advertise _meta.sudocode.{flag}"
         );
     }
+    // Echoed only to a client that asked for it (see the sub-agent events
+    // tests); this client did not, so the result must not mention it.
+    assert!(
+        result["_meta"]["sudocode"].get("subagentEvents").is_none(),
+        "subagentEvents must not be advertised to a client that did not opt in: {result}"
+    );
 }
 
 async fn scenario_session_new(client: &mut AcpTestClient, cwd: &std::path::Path) -> String {
@@ -1378,6 +1394,111 @@ async fn acp_stdio_exits_on_stdin_close() {
 /// exit, then in a FRESH process B loads the same session id and runs another
 /// turn — asserting the upstream model request still carries process A's
 /// message (proving history was restored, not started fresh).
+/// `!<command>` over ACP: the prompt runs in the session workspace, the
+/// output streams back as agent text, no model request is made, and the
+/// exchange is persisted as `<bash-input>` / `<bash-stdout>` user messages
+/// that the next real turn carries to the model.
+#[tokio::test]
+async fn acp_stdio_bang_prompt_runs_shell_without_model_turn() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-bang");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+
+    let before = server.captured_requests().await.len();
+    let (notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": "! printf 'acp-bang-marker-%s' 7" }]
+            }),
+        )
+        .await;
+    assert_eq!(
+        resp["result"]["stopReason"].as_str(),
+        Some("end_turn"),
+        "! prompt should end the turn normally: {resp}"
+    );
+    let text = notifs
+        .iter()
+        .filter(|m| {
+            m["params"]["sessionId"].as_str() == Some(&session_id)
+                && m["params"]["update"]["sessionUpdate"].as_str() == Some("agent_message_chunk")
+        })
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("$ printf 'acp-bang-marker-%s' 7") && text.contains("acp-bang-marker-7"),
+        "! output should stream back as agent text: {text:?}"
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        before,
+        "a ! prompt must not call the model"
+    );
+
+    let transcript = read_session_transcript(&workspace.root, &session_id);
+    assert!(
+        transcript.contains("<bash-input>printf 'acp-bang-marker-%s' 7</bash-input>"),
+        "transcript should record the bash input: {transcript}"
+    );
+    assert!(
+        transcript.contains("<bash-stdout>acp-bang-marker-7</bash-stdout>"),
+        "transcript should record the bash output: {transcript}"
+    );
+
+    // A host that prepends `<system-reminder>` notes to the user's text (apeiron
+    // does, on every prompt) still gets bash mode: the reminder is skipped.
+    let (notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": "<system-reminder>\nworkspace note\n</system-reminder>\n\n! printf 'acp-bang-after-note'" }]
+            }),
+        )
+        .await;
+    assert_eq!(
+        resp["result"]["stopReason"].as_str(),
+        Some("end_turn"),
+        "{resp}"
+    );
+    let text = notifs
+        .iter()
+        .filter_map(|m| m["params"]["update"]["content"]["text"].as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("acp-bang-after-note"),
+        "reminder-prefixed ! prompt should run the command: {text:?}"
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        before,
+        "a reminder-prefixed ! prompt must not call the model"
+    );
+
+    // The next real turn carries the exchange to the model.
+    run_marked_turn(&mut client, &session_id, "after-bang").await;
+    let requests = server.captured_requests().await;
+    let body = &requests
+        .last()
+        .expect("the marked turn should reach the mock")
+        .raw_body;
+    assert!(
+        body.contains("<bash-input>") && body.contains("acp-bang-marker-7"),
+        "the model request should carry the ! exchange: {body}"
+    );
+
+    client.shutdown().await;
+}
+
 #[tokio::test]
 async fn acp_stdio_resume_restores_history_across_reconnect() {
     const HISTORY_MARKER: &str = "resume-marker-7f3a91c2";
@@ -2779,6 +2900,7 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
         },
         next_id: 1,
         last_available_commands: None,
+        raw_lines: Vec::new(),
     };
 
     // 1×1 transparent PNG.
@@ -2975,6 +3097,7 @@ fn spawn_stdio_client_danger(workspace: &TestWorkspace) -> AcpTestClient {
         },
         next_id: 1,
         last_available_commands: None,
+        raw_lines: Vec::new(),
     }
 }
 
@@ -3015,6 +3138,7 @@ fn spawn_stdio_client_danger_with_allowed(
         },
         next_id: 1,
         last_available_commands: None,
+        raw_lines: Vec::new(),
     }
 }
 
@@ -3196,6 +3320,737 @@ async fn acp_subagent_delegation_deterministic() {
         result.get("usage").is_some(),
         "subagent delegation response should include usage"
     );
+
+    // This client never opted into sub-agent events: nothing is forwarded
+    // and no update carries sub-agent `_meta`.
+    for n in &notifs {
+        assert!(
+            n["params"]["update"].get("_meta").is_none(),
+            "no update may carry _meta without the subagentEvents opt-in: {n}"
+        );
+    }
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// Sub-agent events (`clientCapabilities._meta.sudocode.subagentEvents`).
+// The contract is written down in docs/acp.md § Sub-agent events.
+// ---------------------------------------------------------------------------
+
+/// How long a test waits for background sub-agents to report their end.
+const SUBAGENT_EVENTS_WAIT: Duration = Duration::from_secs(60);
+
+/// A workspace for the sub-agent scenarios: the file the mock child reads and
+/// the custom `nester` agent type, which may spawn agents itself.
+fn subagent_events_workspace(label: &str, base_url: &str) -> TestWorkspace {
+    let workspace = TestWorkspace::new(label);
+    workspace.create();
+    workspace.write_sudocode_json(base_url);
+    fs::write(
+        workspace.root.join(SUBAGENT_CHILD_READ_PATH),
+        "notes for the sub-agent\n",
+    )
+    .expect("seed the file the mock child reads");
+    let agents = workspace.root.join(".sudocode").join("agents");
+    fs::create_dir_all(&agents).expect("custom agents dir");
+    fs::write(
+        agents.join("nester.md"),
+        "---\nname: nester\ndescription: Delegates once more.\ntools: [agent_spawn, read_file]\n---\nYou delegate.\n",
+    )
+    .expect("write nester agent");
+    workspace
+}
+
+/// `initialize` with the sub-agent events opt-in; checks scode echoes it.
+async fn initialize_with_subagent_events(client: &mut AcpTestClient) {
+    let (_, resp) = client
+        .send_request(
+            "initialize",
+            json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "_meta": { "sudocode": { "subagentEvents": { "version": 1 } } }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(
+        resp["result"]["_meta"]["sudocode"]["subagentEvents"],
+        json!({ "version": 1, "cancel": true }),
+        "scode must echo the subagentEvents opt-in: {resp}"
+    );
+}
+
+async fn prompt_scenario(
+    client: &mut AcpTestClient,
+    session_id: &str,
+    scenario: &str,
+) -> (Vec<Value>, Value) {
+    let (notifs, resp) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}{scenario}") }]
+            }),
+        )
+        .await;
+    assert_eq!(
+        resp["result"]["stopReason"], "end_turn",
+        "{scenario} should end its turn: {resp}"
+    );
+    (notifs, resp)
+}
+
+fn sudocode_meta(n: &Value) -> &Value {
+    &n["params"]["update"]["_meta"]["sudocode"]
+}
+
+/// `(agentId, phase)` of a lifecycle update, if `n` is one.
+fn lifecycle_of(n: &Value) -> Option<(String, String)> {
+    let spawn = &sudocode_meta(n)["agentSpawn"];
+    let phase = spawn["lifecycle"]["phase"].as_str()?;
+    Some((spawn["agentId"].as_str()?.to_string(), phase.to_string()))
+}
+
+fn finished_count(notifs: &[Value]) -> usize {
+    notifs
+        .iter()
+        .filter(|n| lifecycle_of(n).is_some_and(|(_, phase)| phase == "finished"))
+        .count()
+}
+
+/// Keep reading until `want` agents have finished (counting `seen`), and
+/// return everything read.
+async fn collect_until_finished(
+    client: &mut AcpTestClient,
+    seen: &[Value],
+    want: usize,
+) -> Vec<Value> {
+    let mut more = Vec::new();
+    let deadline = tokio::time::Instant::now() + SUBAGENT_EVENTS_WAIT;
+    while finished_count(seen) + finished_count(&more) < want {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Ok(msg) = timeout(remaining, client.recv_inner()).await else {
+            panic!(
+                "only {} of {want} sub-agents finished within {SUBAGENT_EVENTS_WAIT:?}; after the prompt saw: {more:#?}",
+                finished_count(seen) + finished_count(&more)
+            );
+        };
+        more.push(msg);
+    }
+    more
+}
+
+/// What one spawned agent looked like on the wire.
+#[derive(Debug, Default)]
+struct AgentTrace {
+    /// Client-visible id of the call that spawned it.
+    spawn_call: String,
+    /// Its `finished` lifecycle update.
+    finished: Value,
+    /// Its own stream (updates whose `subagent.agentId` is this agent).
+    stream: Vec<Value>,
+}
+
+/// The invariants of docs/acp.md § Sub-agent events that hold for any
+/// opted-in session, checked over everything it received (in arrival order).
+/// Returns each agent's trace.
+fn assert_subagent_invariants(notifs: &[Value]) -> BTreeMap<String, AgentTrace> {
+    let mut traces: BTreeMap<String, AgentTrace> = BTreeMap::new();
+    // (agentId) -> seqs in arrival order, stream and lifecycle together.
+    let mut seqs: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
+    let mut call_ids = std::collections::HashSet::new();
+    for n in notifs {
+        if n["method"] != "session/update" {
+            continue;
+        }
+        let update = &n["params"]["update"];
+        let kind = update["sessionUpdate"].as_str().unwrap_or_default();
+        let meta = sudocode_meta(n);
+        if kind == "tool_call" {
+            let id = update["toolCallId"].as_str().expect("toolCallId");
+            assert!(call_ids.insert(id.to_string()), "duplicate toolCallId {id}");
+        }
+        if let Some(sub) = meta.get("subagent") {
+            let agent = sub["agentId"]
+                .as_str()
+                .expect("subagent.agentId")
+                .to_string();
+            let seq = sub["seq"].as_u64().expect("subagent.seq");
+            let parent = sub["parentToolCallId"].as_str().expect("parentToolCallId");
+            let trace = traces.entry(agent.clone()).or_default();
+            if trace.spawn_call.is_empty() {
+                trace.spawn_call = parent.to_string();
+            }
+            assert_eq!(
+                trace.spawn_call, parent,
+                "one parentToolCallId per agent: {n}"
+            );
+            trace.stream.push(n.clone());
+            seqs.entry(agent.clone())
+                .or_default()
+                .push((seq, kind.into()));
+            if kind.starts_with("tool_call") && lifecycle_of(n).is_none() {
+                let id = update["toolCallId"].as_str().expect("toolCallId");
+                assert!(
+                    id.starts_with(&format!("{agent}:")),
+                    "a sub-agent's call id is namespaced with its agentId: {n}"
+                );
+            }
+        } else if kind.starts_with("tool_call") {
+            let id = update["toolCallId"].as_str().expect("toolCallId");
+            assert!(
+                !id.contains(':'),
+                "a parent-session call must not look namespaced: {n}"
+            );
+        }
+        if let Some((agent, phase)) = lifecycle_of(n) {
+            assert!(
+                update.get("status").is_none(),
+                "lifecycle updates carry no status: {n}"
+            );
+            let seq = meta["agentSpawn"]["lifecycle"]["seq"]
+                .as_u64()
+                .expect("lifecycle.seq");
+            let trace = traces.entry(agent.clone()).or_default();
+            let spawn_call = update["toolCallId"]
+                .as_str()
+                .expect("toolCallId")
+                .to_string();
+            if phase == "started" {
+                assert!(
+                    trace.spawn_call.is_empty() || trace.spawn_call == spawn_call,
+                    "started names the spawning call: {n}"
+                );
+                trace.spawn_call = spawn_call;
+            } else {
+                assert_eq!(
+                    trace.spawn_call, spawn_call,
+                    "finished names the spawning call"
+                );
+                trace.finished = n.clone();
+            }
+            seqs.entry(agent).or_default().push((seq, phase));
+        }
+    }
+    for (agent, seen) in &seqs {
+        let order: Vec<u64> = seen.iter().map(|(seq, _)| *seq).collect();
+        let expected: Vec<u64> = (0..order.len() as u64).collect();
+        assert_eq!(
+            order, expected,
+            "agent {agent}: seq must run 0.. without gaps in arrival order ({seen:?})"
+        );
+        assert_eq!(
+            seen.first().map(|(_, k)| k.as_str()),
+            Some("started"),
+            "{agent}"
+        );
+        assert_eq!(
+            seen.last().map(|(_, k)| k.as_str()),
+            Some("finished"),
+            "{agent}"
+        );
+    }
+    traces
+}
+
+/// The first `tool_call` with `toolCallId == id`.
+fn tool_call_named<'a>(notifs: &'a [Value], id: &str) -> &'a Value {
+    notifs
+        .iter()
+        .find(|n| {
+            n["params"]["update"]["sessionUpdate"] == "tool_call"
+                && n["params"]["update"]["toolCallId"] == id
+        })
+        .unwrap_or_else(|| panic!("no tool_call {id}"))
+}
+
+/// The status-bearing `tool_call_update` for `id` (not a lifecycle one).
+fn tool_result_named<'a>(notifs: &'a [Value], id: &str) -> &'a Value {
+    notifs
+        .iter()
+        .find(|n| {
+            let update = &n["params"]["update"];
+            update["sessionUpdate"] == "tool_call_update"
+                && update["toolCallId"] == id
+                && update.get("status").is_some()
+        })
+        .unwrap_or_else(|| panic!("no tool_call_update with status for {id}"))
+}
+
+/// A child's stream, in order: its read, the read's result, its answer.
+fn assert_child_stream(trace: &AgentTrace, agent: &str) {
+    let kinds: Vec<&str> = trace
+        .stream
+        .iter()
+        .filter(|n| lifecycle_of(n).is_none())
+        .map(|n| {
+            n["params"]["update"]["sessionUpdate"]
+                .as_str()
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["tool_call", "tool_call_update", "agent_message_chunk"],
+        "agent {agent} stream"
+    );
+    let call = &trace.stream[0]["params"]["update"];
+    assert_eq!(
+        call["toolCallId"],
+        format!("{agent}:{SUBAGENT_CHILD_TOOL_ID}")
+    );
+    assert_eq!(call["title"], "read_file");
+    assert_eq!(trace.stream[1]["params"]["update"]["status"], "completed");
+    assert_eq!(
+        trace.stream[2]["params"]["update"]["content"]["text"],
+        SUBAGENT_CHILD_ANSWER
+    );
+}
+
+fn assert_finished(trace: &AgentTrace, status: &str, result: Option<&str>) {
+    let update = &trace.finished["params"]["update"];
+    let lifecycle = &update["_meta"]["sudocode"]["agentSpawn"]["lifecycle"];
+    assert_eq!(lifecycle["status"], status, "finished status: {update}");
+    assert!(lifecycle["startedAt"].is_string() && lifecycle["completedAt"].is_string());
+    if let Some(result) = result {
+        assert_eq!(
+            update["rawOutput"]["result"], result,
+            "final result: {update}"
+        );
+    }
+}
+
+/// Print a scenario's opted-in wire when `SUDOCODE_DUMP_SUBAGENT_EVENTS` is
+/// set — how the samples in docs/acp.md were captured.
+fn dump_subagent_events(label: &str, notifs: &[Value]) {
+    if std::env::var_os("SUDOCODE_DUMP_SUBAGENT_EVENTS").is_some() {
+        for n in notifs {
+            eprintln!("[{label}] {n}");
+        }
+    }
+}
+
+/// Without the opt-in, the wire is what it was before sub-agent events
+/// existed. The fixtures were captured from the pre-contract binary
+/// (`origin/main` e3000e02) over these same scenarios and normalized the same
+/// way: workspace path, version, generated ids / timestamps (runs of ten or
+/// more digits), the palette colour hashed from an agent id, and the size
+/// estimate that depends on path lengths. Background children are given time
+/// to finish so a late update would be caught too.
+///
+/// Regenerate (only when an off-path change is intended) with
+/// `SUDOCODE_UPDATE_ACP_FIXTURES=1`.
+///
+/// Unix-only: the fixtures hold Unix paths, and on Windows the workspace
+/// path appears JSON-escaped, so the byte comparison cannot line up there.
+/// The Windows run still checks the off path through
+/// `acp_subagent_delegation_deterministic` (no `_meta` without the opt-in)
+/// and `scenario_initialize` (no `subagentEvents` advertised).
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_subagent_events_off_matches_pre_contract_output() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let fixtures =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_subagent_events_off");
+    for scenario in [
+        "subagent_delegation_parent",
+        "subagent_events_sync",
+        "subagent_events_background",
+        "subagent_events_nested",
+    ] {
+        let workspace = subagent_events_workspace("subagent-events-off", &server.base_url());
+        let mut client = spawn_stdio_client_danger(&workspace);
+        scenario_initialize(&mut client).await;
+        let initialize = client.raw_lines.last().cloned().expect("initialize line");
+        let session_id = scenario_session_new(&mut client, &workspace.root).await;
+        client.raw_lines.clear();
+        prompt_scenario(&mut client, &session_id, scenario).await;
+        // Background children finish after the turn: wait them out.
+        let _ = client.recv_until(Duration::from_secs(6), |_| false).await;
+
+        let canonical = fs::canonicalize(&workspace.root).expect("canonical root");
+        let normalize = |line: &str| -> String {
+            let mut line = line
+                .replace(canonical.to_string_lossy().as_ref(), "<WS>")
+                .replace(workspace.root.to_string_lossy().as_ref(), "<WS>")
+                .replace(
+                    &format!(
+                        r#""name":"scode","version":"{}""#,
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                    r#""name":"scode","version":"<VERSION>""#,
+                );
+            for color in runtime::agent_color::AGENT_COLOR_PALETTE {
+                line = line
+                    .replace(&format!(r#""color":"{color}""#), r#""color":"<COLOR>""#)
+                    .replace(
+                        &format!(r#"\"color\": \"{color}\""#),
+                        r#"\"color\": \"<COLOR>\""#,
+                    );
+            }
+            normalize_digit_runs(&normalize_number_after(
+                &line,
+                r#""estimatedSessionTokens":"#,
+            ))
+        };
+        let actual: String = std::iter::once(initialize)
+            .chain(client.raw_lines.iter().cloned())
+            .map(|line| normalize(&line) + "\n")
+            .collect();
+        let fixture = fixtures.join(format!("{scenario}.jsonl"));
+        if std::env::var_os("SUDOCODE_UPDATE_ACP_FIXTURES").is_some() {
+            fs::write(&fixture, &actual).expect("write fixture");
+        } else {
+            let expected = fs::read_to_string(&fixture).expect("fixture");
+            assert!(
+                actual == expected,
+                "{scenario}: output without the opt-in changed.\n--- expected\n{expected}\n--- actual\n{actual}"
+            );
+        }
+        client.shutdown().await;
+        workspace.cleanup();
+    }
+}
+
+/// Replace the number following `key` with `<N>`.
+#[cfg(unix)]
+fn normalize_number_after(line: &str, key: &str) -> String {
+    let Some(at) = line.find(key) else {
+        return line.to_string();
+    };
+    let start = at + key.len();
+    let end = start
+        + line[start..]
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(line.len() - start);
+    format!("{}<N>{}", &line[..start], &line[end..])
+}
+
+/// Replace every run of ten or more ASCII digits with `<N>`.
+#[cfg(unix)]
+fn normalize_digit_runs(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if run.len() >= 10 {
+            out.push_str("<N>");
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
+    for c in line.chars() {
+        if c.is_ascii_digit() {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
+/// Synchronous: the whole child stream lands inside the parent's turn,
+/// between `started` and the parent's own result.
+#[tokio::test]
+async fn acp_subagent_events_sync() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = subagent_events_workspace("subagent-events-sync", &server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    initialize_with_subagent_events(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+    let (notifs, _) = prompt_scenario(&mut client, &session_id, "subagent_events_sync").await;
+    dump_subagent_events("sync", &notifs);
+
+    let traces = assert_subagent_invariants(&notifs);
+    assert_eq!(traces.len(), 1, "one agent: {traces:#?}");
+    let (agent, trace) = traces.iter().next().expect("one agent");
+    assert_eq!(trace.spawn_call, "toolu_events_sync");
+    assert_child_stream(trace, agent);
+    assert_finished(trace, "completed", Some(SUBAGENT_CHILD_ANSWER));
+
+    // The spawn call itself: identity from the model's arguments first (no
+    // agentId yet), then the parent's result — after `finished` — names it.
+    let call = tool_call_named(&notifs, "toolu_events_sync");
+    let spawn = &sudocode_meta(call)["agentSpawn"];
+    assert!(spawn.get("agentId").is_none(), "{call}");
+    assert_eq!(spawn["background"], false);
+    assert_eq!(spawn["subagentType"], "general-purpose");
+    assert!(sudocode_meta(call).get("subagent").is_none());
+    let result = tool_result_named(&notifs, "toolu_events_sync");
+    assert_eq!(result["params"]["update"]["status"], "completed");
+    assert_eq!(
+        sudocode_meta(result)["agentSpawn"]["agentId"],
+        agent.as_str()
+    );
+    let position = |needle: &Value| notifs.iter().position(|n| n == needle).expect("present");
+    assert!(
+        position(&trace.finished) < position(result),
+        "finished precedes the parent's result"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Background, two at once: the parent's calls complete at once with
+/// `status: running`; the children then run in parallel after the turn
+/// ended, and each one's end — with its result — still reaches the client.
+#[tokio::test]
+async fn acp_subagent_events_background_parallel() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = subagent_events_workspace("subagent-events-bg", &server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    initialize_with_subagent_events(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+    let (during, _) = prompt_scenario(&mut client, &session_id, "subagent_events_background").await;
+    assert_eq!(
+        finished_count(&during),
+        0,
+        "slow background children cannot have finished inside the turn"
+    );
+    for id in ["toolu_events_bg_1", "toolu_events_bg_2"] {
+        let result = tool_result_named(&during, id);
+        assert_eq!(result["params"]["update"]["rawOutput"]["status"], "running");
+        assert_eq!(
+            sudocode_meta(tool_call_named(&during, id))["agentSpawn"]["background"],
+            true
+        );
+    }
+    let after = collect_until_finished(&mut client, &during, 2).await;
+    for n in &after {
+        assert_eq!(
+            n["method"], "session/update",
+            "only updates after the turn: {n}"
+        );
+        assert_eq!(n["params"]["sessionId"], session_id.as_str());
+    }
+    let all: Vec<Value> = during.iter().chain(&after).cloned().collect();
+    dump_subagent_events("background", &all);
+
+    let traces = assert_subagent_invariants(&all);
+    assert_eq!(traces.len(), 2, "two agents: {traces:#?}");
+    let mut spawn_calls: Vec<&str> = traces.values().map(|t| t.spawn_call.as_str()).collect();
+    spawn_calls.sort_unstable();
+    assert_eq!(spawn_calls, ["toolu_events_bg_1", "toolu_events_bg_2"]);
+    for (agent, trace) in &traces {
+        assert_child_stream(trace, agent);
+        assert_finished(trace, "completed", Some(SUBAGENT_CHILD_ANSWER));
+    }
+    // Parallel: each agent's stream began before the other one finished.
+    let position = |needle: &Value| all.iter().position(|n| n == needle).expect("present");
+    let traces: Vec<&AgentTrace> = traces.values().collect();
+    for (a, b) in [(0, 1), (1, 0)] {
+        assert!(
+            position(&traces[a].stream[0]) < position(&traces[b].finished),
+            "the two children overlap"
+        );
+    }
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// One level of nesting: the child's own `agent_spawn` is part of the
+/// child's stream and spawns a grandchild whose stream points back at it.
+#[tokio::test]
+async fn acp_subagent_events_nested() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = subagent_events_workspace("subagent-events-nested", &server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    initialize_with_subagent_events(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+    let (notifs, _) = prompt_scenario(&mut client, &session_id, "subagent_events_nested").await;
+    dump_subagent_events("nested", &notifs);
+
+    let traces = assert_subagent_invariants(&notifs);
+    assert_eq!(traces.len(), 2, "child + grandchild: {traces:#?}");
+    let (child, child_trace) = traces
+        .iter()
+        .find(|(_, t)| t.spawn_call == "toolu_events_nest")
+        .expect("the child");
+    let nested_call = format!("{child}:toolu_nest_spawn");
+    let (grandchild, grand_trace) = traces
+        .iter()
+        .find(|(_, t)| t.spawn_call == nested_call)
+        .expect("the grandchild hangs off the child's agent_spawn");
+    assert_child_stream(grand_trace, grandchild);
+    assert_finished(grand_trace, "completed", Some(SUBAGENT_CHILD_ANSWER));
+    assert_finished(child_trace, "completed", Some("subagent_nest_child done"));
+
+    // The child's agent_spawn call: in the child's stream AND a spawn.
+    let call = tool_call_named(&notifs, &nested_call);
+    assert_eq!(sudocode_meta(call)["subagent"]["agentId"], child.as_str());
+    assert_eq!(sudocode_meta(call)["agentSpawn"]["background"], false);
+    // The grandchild's lifecycle belongs to the child's stream too.
+    assert!(
+        !grand_trace.stream.iter().any(|n| lifecycle_of(n).is_some()),
+        "a grandchild's lifecycle is not part of its own stream"
+    );
+    let grand_lifecycle: Vec<&Value> = child_trace
+        .stream
+        .iter()
+        .filter(|n| lifecycle_of(n).is_some_and(|(agent, _)| &agent == grandchild))
+        .collect();
+    assert_eq!(
+        grand_lifecycle.len(),
+        2,
+        "started + finished in the child's stream"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// `_sudocode/agent/cancel` stops one running background agent, whose end
+/// then reports `cancelled`; it refuses agents the session never spawned.
+#[tokio::test]
+async fn acp_subagent_events_cancel() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = subagent_events_workspace("subagent-events-cancel", &server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    initialize_with_subagent_events(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+    let (during, _) = prompt_scenario(&mut client, &session_id, "subagent_events_cancel").await;
+    let (agent, _) = during
+        .iter()
+        .find_map(lifecycle_of)
+        .expect("the background agent started inside the turn");
+
+    let (_, refused) = client
+        .send_request(
+            "_sudocode/agent/cancel",
+            json!({ "sessionId": session_id, "agentId": "agent-0" }),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "unknown agent: {refused}");
+
+    let (mut early, resp) = client
+        .send_request(
+            "_sudocode/agent/cancel",
+            json!({ "sessionId": session_id, "agentId": agent }),
+        )
+        .await;
+    assert_eq!(resp["result"], json!({ "cancelled": true }), "{resp}");
+    let seen: Vec<Value> = during.iter().chain(&early).cloned().collect();
+    let after = collect_until_finished(&mut client, &seen, 1).await;
+    early.extend(after);
+    let all: Vec<Value> = during.iter().chain(&early).cloned().collect();
+    dump_subagent_events("cancel", &all);
+    let traces = assert_subagent_invariants(&all);
+    assert_finished(&traces[&agent], "cancelled", None);
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Cancelling an agent interrupts the tool it is running. The child here is
+/// inside a 30s `bash` call when the cancel lands; the agent must end with
+/// `cancelled` long before that command would have finished on its own.
+///
+/// Unix-only: the child's tool is a `sh -c` subprocess (`sleep 30`).
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_subagent_cancel_interrupts_the_running_tool() {
+    const PROMPT_END: Duration = Duration::from_secs(15);
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = subagent_events_workspace("subagent-cancel-tool", &server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    initialize_with_subagent_events(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+    let (during, _) =
+        prompt_scenario(&mut client, &session_id, "subagent_events_cancel_tool").await;
+    let (agent, _) = during
+        .iter()
+        .find_map(lifecycle_of)
+        .expect("the background agent started inside the turn");
+
+    // Wait until the child's bash call is under way (it may already have
+    // been reported inside the turn), then cancel.
+    let sleep_call = format!("{agent}:toolu_child_sleep");
+    let is_sleep_call = |n: &Value| {
+        n["params"]["update"]["sessionUpdate"] == "tool_call"
+            && n["params"]["update"]["toolCallId"] == sleep_call.as_str()
+    };
+    let mut seen = Vec::new();
+    let call = if let Some(call) = during.iter().find(|n| is_sleep_call(n)) {
+        call.clone()
+    } else {
+        let (before, call) = client
+            .recv_until(Duration::from_secs(30), is_sleep_call)
+            .await
+            .unwrap_or_else(|seen| panic!("the child never started its bash call: {seen:#?}"));
+        seen.extend(before);
+        seen.push(call.clone());
+        call
+    };
+    assert_eq!(
+        call["params"]["update"]["rawInput"]["command"],
+        mock_anthropic_service::SUBAGENT_SLEEP_COMMAND
+    );
+    let cancelled_at = tokio::time::Instant::now();
+    let (early, resp) = client
+        .send_request(
+            "_sudocode/agent/cancel",
+            json!({ "sessionId": session_id, "agentId": agent }),
+        )
+        .await;
+    assert_eq!(resp["result"], json!({ "cancelled": true }), "{resp}");
+    seen.extend(early);
+
+    let (after_cancel, finished) = client
+        .recv_until(PROMPT_END, |n| {
+            lifecycle_of(n).is_some_and(|(id, phase)| id == agent && phase == "finished")
+        })
+        .await
+        .unwrap_or_else(|seen| {
+            panic!("the agent did not end within {PROMPT_END:?} of the cancel — the running tool was not interrupted: {seen:#?}")
+        });
+    assert!(cancelled_at.elapsed() < PROMPT_END);
+    seen.extend(after_cancel);
+    seen.push(finished);
+    let all: Vec<Value> = during.iter().chain(&seen).cloned().collect();
+    let traces = assert_subagent_invariants(&all);
+    assert_finished(&traces[&agent], "cancelled", None);
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Without the opt-in there is no cancel surface for a session.
+#[tokio::test]
+async fn acp_subagent_cancel_needs_the_opt_in() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = subagent_events_workspace("subagent-cancel-off", &server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+    let session_id = scenario_session_new(&mut client, &workspace.root).await;
+    let (_, resp) = client
+        .send_request(
+            "_sudocode/agent/cancel",
+            json!({ "sessionId": session_id, "agentId": "agent-0" }),
+        )
+        .await;
+    assert_eq!(resp["error"]["code"], -32602, "{resp}");
 
     client.shutdown().await;
     workspace.cleanup();

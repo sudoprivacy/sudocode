@@ -1,3 +1,13 @@
+//! nexus-vfs gRPC client (P1a zone-aware, SW-20260915-002 step-08).
+//!
+//! Lint note: the generated protobuf surface (`pub mod proto`) carries
+//! non-idiomatic doc wording by construction; `doc_markdown` is allowed at
+//! the crate level so the derived client matches the workspace `-D warnings`
+//! gate without editing generated code.
+#![allow(clippy::doc_markdown)]
+// Generated prost structs (e.g. RenameResponse) legitimately pack bool flags.
+#![allow(clippy::struct_excessive_bools)]
+
 pub mod proto {
     tonic::include_proto!("nexus.grpc.vfs");
 }
@@ -125,6 +135,7 @@ impl NexusVfsClient {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     fn connect_inner(endpoint: &str, tls: Option<TlsMaterial>) -> io::Result<Self> {
         // tonic's `Channel::from_shared` requires a URI scheme; accept a bare
         // `host:port` for ergonomics and supply the scheme the transport

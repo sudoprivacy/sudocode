@@ -47,6 +47,13 @@ fn plant_chat_stream(kernel: &Kernel, pid: &str) {
     kernel
         .sys_setattr(
             &path,
+            &kernel::kernel::OperationContext::new(
+                "test-owner",
+                "root",
+                false,
+                Some("plant"),
+                true,
+            ),
             DT_STREAM,
             "",
             None,

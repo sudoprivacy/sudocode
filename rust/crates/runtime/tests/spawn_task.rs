@@ -193,6 +193,7 @@ fn plant_stream(kernel: &Kernel, path: &str) {
     kernel
         .sys_setattr(
             path,
+            &OperationContext::new("test-owner", "root", false, Some("plant"), true),
             DT_STREAM,
             /* backend_name */ "",
             /* backend */ None,

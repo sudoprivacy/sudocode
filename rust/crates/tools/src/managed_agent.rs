@@ -25,6 +25,7 @@ use runtime::{
     ToolExecutor,
 };
 
+use runtime::zone_context::HostZoneContext;
 use crate::{
     canonicalize_tool_name, execute_tool_with_backend, normalize_send_input, ProviderRuntimeClient,
 };
@@ -75,6 +76,14 @@ where
     let allowed_tools: BTreeSet<String> = ["send"].iter().map(|s| s.to_string()).collect();
     let api_client = ProviderRuntimeClient::new(model, allowed_tools)
         .expect("failed to construct API client from model label");
+
+    // -- P1a zone context (§8.11 R6.2/R6.4): the ONLY trusted zone source
+    // in the cohost path is the planted descriptor (ManagedAgentService).
+    // The HostZoneContext is built from it and every ResourceRef-shaped
+    // target the loop touches is re-validated through it (R6.3); a client
+    // payload zone never reaches this construction.
+    let zone_ctx = HostZoneContext::from_planted_descriptor(&desc);
+    debug_assert!(zone_ctx.zone_id().is_some());
 
     // -- FsBackend: in-process VFS, NOT host std::fs. The co-hosted
     // agent's file tools (read/write/edit/glob/grep) route through

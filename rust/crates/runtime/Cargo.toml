@@ -6,6 +6,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# P1a (§8.11 R6.1)：仅 common/auth 子集的派生 Rust 契约（zone-id/path owner
+# validators + ResourceRef）。Git exact pin 到 sudostack feat/contract-zone
+# assembly revision；本 crate 不引入 Moss business policy。
+sudo-contracts = { package = "sudo-contracts", git = "https://github.com/sudoprivacy/sudostack", rev = "f0c586477694f054c8a31fe682e7481593c16948" }
+tracing = "0.1"
 agent-client-protocol = { workspace = true }
 agent-client-protocol-schema = { workspace = true }
 agent-client-protocol-tokio = { workspace = true }
@@ -37,14 +42,14 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # Pinned to the SAME nexus-vfs rev the nexus daemon (rust/nexusd) uses, so
 # `SpawnTask<Kernel>` monomorphises to one type when nexusd links both
 # sudocode_runtime and the nexus service crates (co-host binary edge).
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "b878b015bf2b4663063425af19902b18c09890b9", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "763f8c0fef392da8c1151fc3f17b3a6f3f707dbd", default-features = false }
 # The A2A messaging substrate: SSOT for the mailbox message schema
 # (`MailboxEnvelope`) + the `/chat-with-me` path suffix. MUST be the same
 # nexus-vfs rev as `kernel` (a2a itself deps kernel; a mismatched rev = two
 # distinct `Kernel` types). Re-exported from `spawn_task` so downstream crates
 # use it without a direct a2a dependency.
-a2a = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "b878b015bf2b4663063425af19902b18c09890b9", default-features = false }
-lib = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "b878b015bf2b4663063425af19902b18c09890b9", default-features = false, features = ["runtime-bridge"] }
+a2a = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "763f8c0fef392da8c1151fc3f17b3a6f3f707dbd", default-features = false }
+lib = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "763f8c0fef392da8c1151fc3f17b3a6f3f707dbd", default-features = false, features = ["runtime-bridge"] }
 sha2 = "0.10"
 glob = "0.3"
 keyring = "3"

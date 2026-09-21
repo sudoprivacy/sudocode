@@ -611,6 +611,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
             .kernel
             .sys_setattr(
                 path,
+                &self.ctx,
                 DT_STREAM as i32,
                 "",    // backend_name
                 None,  // backend
@@ -684,6 +685,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         self.kernel
             .sys_setattr(
                 alias,
+                &self.ctx,
                 DT_LINK as i32,
                 "",   // backend_name
                 None, // backend
@@ -779,6 +781,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
             }
             let _ = self.kernel.sys_setattr(
                 &prefix,
+                &self.ctx,
                 1, // DT_DIR
                 "",
                 None,

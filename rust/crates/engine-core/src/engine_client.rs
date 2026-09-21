@@ -20,12 +20,12 @@ use std::time::Duration;
 use api::{
     AuthMode, CacheHints, ContentBlockDelta, InputMessage, MessageRequest, MessageResponse,
     MessageStream, OutputContentBlock, PromptCache, PromptCacheRecord, ProviderClient,
-    ResolvedProvider, StreamEvent, SudoCodeConfig, ToolChoice,
+    ResolvedProvider, StreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
 };
 use async_trait::async_trait;
 use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, MessageRole, PromptCacheEvent,
-    RuntimeError,
+    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ConversationMessage, MessageRole,
+    PromptCacheEvent, RuntimeError,
 };
 use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
@@ -150,6 +150,25 @@ impl EngineApiClient {
                 .core_definitions(self.allowed_tools.as_ref(), None)
         });
         api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize
+    }
+
+    /// The `tools` array a request over `messages` carries — the same
+    /// `core_definitions` call [`ApiClient::stream`] makes, with the same
+    /// discovered-tool reveal — so `/context` counts what is actually on the
+    /// wire rather than a second guess at it. Empty when tools are disabled.
+    #[must_use]
+    pub fn request_tool_definitions(
+        &self,
+        messages: &[ConversationMessage],
+        pre_compact_discovered_tools: &BTreeSet<String>,
+    ) -> Vec<ToolDefinition> {
+        if !self.enable_tools {
+            return Vec::new();
+        }
+        let mut discovered = tools::extract_discovered_tool_names(messages);
+        discovered.extend(pre_compact_discovered_tools.iter().cloned());
+        self.tool_registry
+            .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
     }
 
     /// Start a streaming response, optionally applying a stall timeout on the

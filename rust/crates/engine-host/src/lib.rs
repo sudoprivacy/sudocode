@@ -65,6 +65,10 @@ pub mod nexus_a2a;
 /// policy, system prompt, `EngineApiClient`) every engine-side (re)build shares.
 pub mod runtime_build;
 
+/// The `/context` figures: what the next request carries, by category, read
+/// from the live runtime so the report cannot disagree with the wire.
+pub mod context_usage;
+
 /// The one live session's `EngineDelegate` (turns) + `SessionLifecycle`
 /// (non-turn model/auth/permission/reset/resume/fork/compaction ops) impl:
 /// `SessionEngine`, its `AcpCliSession` state, and the `ModelSwitchReport` data.
@@ -72,6 +76,7 @@ pub mod session_engine;
 
 // Re-export both modules' public items at the crate root so the CLI (and
 // intra-crate code) can name them as `engine_host::X` / `crate::X`.
+pub use context_usage::{collect_context_usage, ContextEntry, ContextUsage};
 pub use runtime_build::*;
 pub use session_engine::*;
 

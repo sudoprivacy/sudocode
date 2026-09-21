@@ -48,6 +48,7 @@ use crate::{
     InternalPromptProgressState, BUILD_TARGET, DEFAULT_DATE, GIT_SHA, LATEST_SESSION_REFERENCE,
     PRIMARY_SESSION_EXTENSION, VERSION,
 };
+use crossterm::style::Color;
 
 // ---------------------------------------------------------------------------
 // Unified message rendering pipeline
@@ -2530,6 +2531,347 @@ pub(crate) fn truncate_output_for_display(
         }
     }
     preview
+}
+
+// ---------------------------------------------------------------------------
+// /context — context-window occupancy grid (Claude Code parity)
+// ---------------------------------------------------------------------------
+
+/// Reserved-buffer legend name; the grid draws it at the end in `⛝`.
+const CONTEXT_RESERVED_NAME: &str = "Autocompact buffer";
+
+/// One `/context` category with the color its grid squares use.
+struct ContextCategory<'a> {
+    name: &'a str,
+    tokens: usize,
+    color: Color,
+}
+
+/// Compact token count in Claude Code's `/context` style: `249`, `4.2k`,
+/// `33k`, `879.5k`, `1m` — one decimal, dropped when it is `.0`.
+fn format_context_tokens(n: usize) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let scaled = |divisor: f64, suffix: &str| {
+        let value = format!("{:.1}", n as f64 / divisor);
+        let value = value.strip_suffix(".0").unwrap_or(&value).to_string();
+        format!("{value}{suffix}")
+    };
+    if n >= 1_000_000 {
+        scaled(1_000_000.0, "m")
+    } else if n >= 1000 {
+        scaled(1000.0, "k")
+    } else {
+        n.to_string()
+    }
+}
+
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn context_percent(tokens: usize, window: usize) -> f64 {
+    if window == 0 {
+        0.0
+    } else {
+        tokens as f64 / window as f64 * 100.0
+    }
+}
+
+/// Render the `/context` report: a square grid of the context window on the
+/// left (one square per `window / squares` tokens, colored by category, `⛶`
+/// free, `⛝` reserved for auto-compaction), the category legend on the right,
+/// then a per-source footer. `expand` (`/context all`) lists every tool, agent
+/// type, memory file and skill instead of the one-line counts.
+///
+/// Mirrors Claude Code's `ContextVisualization`: 10×10 squares for a 200k-class
+/// window, 20×10 for 1M+, halved in width under 80 columns; a category never
+/// draws fewer than one square so a small contributor stays visible; the
+/// partial square at a category's edge renders `⛀` below 70% fullness.
+pub(crate) fn format_context_report(
+    usage: &engine_host::ContextUsage,
+    terminal_width: usize,
+    expand: bool,
+    color: bool,
+) -> String {
+    let paint = |c: Color| if color { ansi_fg(c) } else { String::new() };
+    let dim = if color { DIM } else { "" };
+    let bold = if color { BOLD } else { "" };
+    let reset = if color { RESET } else { "" };
+
+    let categories = [
+        ContextCategory {
+            name: "System prompt",
+            tokens: usage.system_prompt_tokens,
+            color: Color::DarkYellow,
+        },
+        ContextCategory {
+            name: "System tools",
+            tokens: usage.system_tools_tokens(),
+            color: Color::Blue,
+        },
+        ContextCategory {
+            name: "MCP tools",
+            tokens: usage.mcp_tools_tokens(),
+            color: Color::Cyan,
+        },
+        ContextCategory {
+            name: "Agent types",
+            tokens: usage.agent_types_tokens,
+            color: Color::Green,
+        },
+        ContextCategory {
+            name: "Memory files",
+            tokens: usage.memory_files_tokens,
+            color: Color::Magenta,
+        },
+        ContextCategory {
+            name: "Skills",
+            tokens: usage.skills_tokens,
+            color: Color::Yellow,
+        },
+        ContextCategory {
+            name: "Messages",
+            tokens: usage.message_tokens,
+            color: Color::DarkMagenta,
+        },
+    ];
+    let visible: Vec<&ContextCategory<'_>> = categories.iter().filter(|c| c.tokens > 0).collect();
+
+    let window = usage.context_window as usize;
+    let reserved = usage.reserved_tokens() as usize;
+    let used: usize = visible.iter().map(|c| c.tokens).sum();
+    let free = window.saturating_sub(used).saturating_sub(reserved);
+    let total = usage.total_tokens();
+
+    // Grid geometry.
+    let narrow = terminal_width < 80;
+    let grid_width = match (window >= 1_000_000, narrow) {
+        (true, false) => 20,
+        (false, false) => 10,
+        (_, true) => 5,
+    };
+    let grid_height = if window >= 1_000_000 || !narrow {
+        10
+    } else {
+        5
+    };
+    let total_squares = grid_width * grid_height;
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let exact_squares = |tokens: usize| -> f64 {
+        if window == 0 {
+            0.0
+        } else {
+            tokens as f64 / window as f64 * total_squares as f64
+        }
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let squares_for = |tokens: usize| -> usize { (exact_squares(tokens).round() as usize).max(1) };
+
+    // Squares: categories in order, then free space, then the reserved
+    // buffer pinned to the end of the grid.
+    let mut squares: Vec<String> = Vec::with_capacity(total_squares);
+    for category in &visible {
+        let exact = exact_squares(category.tokens);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let whole = exact.floor() as usize;
+        let fraction = exact - exact.floor();
+        for index in 0..squares_for(category.tokens) {
+            if squares.len() >= total_squares {
+                break;
+            }
+            let fullness = if index == whole && fraction > 0.0 {
+                fraction
+            } else {
+                1.0
+            };
+            let glyph = if fullness >= 0.7 { "⛁" } else { "⛀" };
+            squares.push(format!("{}{glyph}{reset}", paint(category.color)));
+        }
+    }
+    let reserved_squares = if reserved > 0 {
+        squares_for(reserved)
+    } else {
+        0
+    };
+    let free_target = total_squares.saturating_sub(reserved_squares);
+    while squares.len() < free_target {
+        squares.push(format!("{dim}⛶{reset}"));
+    }
+    while squares.len() < total_squares {
+        squares.push(format!("{}⛝{reset}", paint(Color::DarkGrey)));
+    }
+    let grid_rows: Vec<String> = squares
+        .chunks(grid_width)
+        .map(|row| row.join(" "))
+        .collect();
+    // Visible width of one grid row: glyphs separated by single spaces.
+    let grid_cols = grid_width * 2 - 1;
+
+    // Legend, to the right of the grid.
+    let mut legend: Vec<String> = vec![
+        format!("{dim}{}{reset}", usage.model),
+        format!(
+            "{dim}{}/{} tokens ({:.0}%){reset}",
+            format_context_tokens(total),
+            format_context_tokens(window),
+            context_percent(total, window)
+        ),
+        String::new(),
+        format!("{dim}Estimated usage by category{reset}"),
+    ];
+    for category in &visible {
+        legend.push(format!(
+            "{}⛁{reset} {}: {dim}{} tokens ({:.1}%){reset}",
+            paint(category.color),
+            category.name,
+            format_context_tokens(category.tokens),
+            context_percent(category.tokens, window)
+        ));
+    }
+    if free > 0 {
+        legend.push(format!(
+            "{dim}⛶{reset} Free space: {dim}{} ({:.1}%){reset}",
+            format_context_tokens(free),
+            context_percent(free, window)
+        ));
+    }
+    if reserved > 0 {
+        legend.push(format!(
+            "{}⛝{reset} {dim}{CONTEXT_RESERVED_NAME}: {} tokens ({:.1}%){reset}",
+            paint(Color::DarkGrey),
+            format_context_tokens(reserved),
+            context_percent(reserved, window)
+        ));
+    }
+
+    let mut lines: Vec<String> = vec![format!("{bold}Context Usage{reset}")];
+    let rows = grid_rows.len().max(legend.len());
+    for index in 0..rows {
+        let grid = grid_rows.get(index).cloned().unwrap_or_default();
+        let grid_visible = if index < grid_rows.len() {
+            grid_cols
+        } else {
+            0
+        };
+        let pad = " ".repeat(grid_cols.saturating_sub(grid_visible));
+        match legend.get(index) {
+            Some(entry) if !entry.is_empty() => lines.push(format!("{grid}{pad}   {entry}")),
+            _ => lines.push(grid),
+        }
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "{dim}Auto-compact threshold: {} tokens{reset}",
+        format_context_tokens(usage.auto_compact_threshold as usize)
+    ));
+
+    let entry_line = |entry: &engine_host::ContextEntry, with_source: bool| {
+        let label = if with_source && !entry.source.is_empty() {
+            format!("{} ({})", entry.name, entry.source)
+        } else {
+            entry.name.clone()
+        };
+        if entry.loaded {
+            format!(
+                "└ {label}: {dim}{} tokens{reset}",
+                format_context_tokens(entry.tokens)
+            )
+        } else {
+            format!("{dim}└ {label}{reset}")
+        }
+    };
+
+    if expand && !usage.system_tools.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("{bold}System tools{reset}"));
+        for tool in &usage.system_tools {
+            lines.push(entry_line(tool, false));
+        }
+    }
+
+    if !usage.mcp_tools.is_empty() {
+        let deferred = usage.mcp_tools.iter().any(|tool| !tool.loaded);
+        lines.push(String::new());
+        lines.push(format!(
+            "{bold}MCP tools{reset}{dim} · /mcp{}{reset}",
+            if deferred { " (loaded on-demand)" } else { "" }
+        ));
+        if expand {
+            for tool in &usage.mcp_tools {
+                lines.push(entry_line(tool, true));
+            }
+        } else {
+            lines.push(format!(
+                "└ {} · {dim}{} tokens{reset}",
+                plural(usage.mcp_tools.len(), "tool"),
+                format_context_tokens(usage.mcp_tools_tokens())
+            ));
+        }
+    }
+
+    if !usage.agent_types.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("{bold}Agent types{reset}{dim} · /agents{reset}"));
+        if expand {
+            for agent in &usage.agent_types {
+                lines.push(entry_line(agent, true));
+            }
+        } else {
+            lines.push(format!(
+                "└ {} · {dim}{} tokens{reset}",
+                plural(usage.agent_types.len(), "agent type"),
+                format_context_tokens(usage.agent_types_tokens)
+            ));
+        }
+    }
+
+    if !usage.memory_files.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("{bold}Memory files{reset}{dim} · /memory{reset}"));
+        if expand {
+            for file in &usage.memory_files {
+                lines.push(entry_line(file, false));
+            }
+        } else {
+            lines.push(format!(
+                "└ {} · {dim}{} tokens{reset}",
+                plural(usage.memory_files.len(), "file"),
+                format_context_tokens(usage.memory_files_tokens)
+            ));
+        }
+    }
+
+    if !usage.skills.is_empty() {
+        lines.push(String::new());
+        lines.push(format!("{bold}Skills{reset}{dim} · /skills{reset}"));
+        if expand {
+            for skill in &usage.skills {
+                lines.push(entry_line(skill, true));
+            }
+        } else {
+            lines.push(format!(
+                "└ {} · {dim}{} tokens{reset}",
+                plural(usage.skills.len(), "skill"),
+                format_context_tokens(usage.skills_tokens)
+            ));
+        }
+    }
+
+    if !expand {
+        lines.push(String::new());
+        lines.push(format!("{dim}/context all to expand{reset}"));
+    }
+
+    lines.join("\n")
 }
 
 #[cfg(test)]

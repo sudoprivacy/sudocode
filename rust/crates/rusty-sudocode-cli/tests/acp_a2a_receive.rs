@@ -232,12 +232,11 @@ fn a2a_peer_message_reaches_an_acp_client() {
     }
     .connect()
     .expect("dial the daemon");
+    // One call provisions BOTH sides: a conversation is indexed under each
+    // agent, so there is no separate peer inbox left to create.
     mailbox(&client, SELF_AGENT, "")
-        .ensure_inbox()
-        .expect("provision the agent inbox");
-    mailbox(&client, PEER_AGENT, "")
-        .ensure_inbox()
-        .expect("provision the peer inbox");
+        .ensure_conversation(PEER_AGENT)
+        .expect("provision the conversation");
 
     let workspace = tempfile::tempdir().expect("temp workspace");
     let config_home = tempfile::tempdir().expect("temp config home");
@@ -321,12 +320,11 @@ fn a_message_sent_while_offline_is_delivered_on_the_next_start() {
     }
     .connect()
     .expect("dial the daemon");
+    // One call provisions BOTH sides: a conversation is indexed under each
+    // agent, so there is no separate peer inbox left to create.
     mailbox(&client, &agent, "")
-        .ensure_inbox()
-        .expect("provision the agent inbox");
-    mailbox(&client, &peer, "")
-        .ensure_inbox()
-        .expect("provision the peer inbox");
+        .ensure_conversation(&peer)
+        .expect("provision the conversation");
 
     let workspace = tempfile::tempdir().expect("temp workspace");
     let config_home = tempfile::tempdir().expect("temp config home");
@@ -412,12 +410,11 @@ fn a_first_time_receiver_does_not_replay_history() {
     }
     .connect()
     .expect("dial the daemon");
+    // One call provisions BOTH sides: a conversation is indexed under each
+    // agent, so there is no separate peer inbox left to create.
     mailbox(&client, &agent, "")
-        .ensure_inbox()
-        .expect("provision the agent inbox");
-    mailbox(&client, &peer, "")
-        .ensure_inbox()
-        .expect("provision the peer inbox");
+        .ensure_conversation(&peer)
+        .expect("provision the conversation");
 
     // History accumulates before this client has ever existed.
     send_to(&client, &peer, &agent, "ancient history", "").expect("write history");

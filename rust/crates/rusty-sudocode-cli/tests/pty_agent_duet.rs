@@ -222,14 +222,18 @@ fn run_duet(transport: &Transport) {
     let workspace = env.workspace_root().to_path_buf();
     std::fs::write(workspace.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
-    // ── 1. Provision the receiver's inbox ──────────────────────────────────
+    // ── 1. Provision the conversation ──────────────────────────────────
     // A send to a path that is not an append stream fails loudly rather than
-    // writing where nothing tails, so provision the receiver's stream first.
+    // writing where nothing tails, so provision the pair's transcript first.
+    // Either side may do it; here the test does, so the tail below has
+    // something to seek in even when the sender has not started.
     let inbox = receiver_mailbox(transport, env.config_home());
     inbox
-        .ensure_inbox()
-        .expect("provision the receiver's inbox");
-    let (_history, tail) = inbox.poll(0, 0).expect("seek the inbox to its tail");
+        .ensure_conversation(&sender_name)
+        .expect("provision the conversation");
+    let (_history, tail) = inbox
+        .poll_conversation(&sender_name, 0, 0)
+        .expect("seek the transcript to its tail");
 
     let mut receiver_env_vars = vec![("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
     if let Transport::OneNode { endpoint }
@@ -356,7 +360,9 @@ fn run_duet(transport: &Transport) {
     // ── 5. Check what crossed ──────────────────────────────────────────────
     // The screen proves delivery; the mailbox proves the contents. Read from
     // the tail snapshot so this is about this run.
-    let (envelopes, next) = inbox.poll(tail, 0).expect("read the receiver's inbox");
+    let (envelopes, next) = inbox
+        .poll_conversation(&expected_from, tail, 0)
+        .expect("read the conversation");
     let delivered = envelopes
         .iter()
         .find(|e| e.from == expected_from)

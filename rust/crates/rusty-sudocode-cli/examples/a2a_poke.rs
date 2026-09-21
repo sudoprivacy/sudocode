@@ -69,10 +69,9 @@ fn main() {
     .connect()
     .unwrap_or_else(|e| panic!("{e}"));
 
-    // Idempotent, and the sender's own inbox has to exist for a reply to land.
-    mailbox(&client, from, "")
-        .ensure_inbox()
-        .unwrap_or_else(|e| panic!("ensure {from} inbox: {e}"));
+    // No provisioning step. The send creates the conversation when it is the
+    // first one and indexes it under BOTH names, so a reply has somewhere to
+    // land without the sender preparing an inbox of its own.
     send_to(&client, from, to, body, "").unwrap_or_else(|e| panic!("send to {to}: {e}"));
     println!("sent as {from} -> {to}: {body}");
 }

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::fs_backend::StdFsBackend;
-use runtime::mailbox::{local_agent_name, InboxConvention, InboxCursor, Mailbox};
+use runtime::mailbox::{local_agent_name, InboxConvention, Mailbox};
 
 fn tmp_root(label: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -33,9 +33,7 @@ fn mailbox(root: &Path, self_id: &str) -> Mailbox {
     Mailbox::new(
         Arc::new(StdFsBackend),
         self_id.to_string(),
-        InboxConvention::PerRecipient {
-            root: root.to_string_lossy().into_owned(),
-        },
+        InboxConvention::new(root.to_string_lossy().into_owned()),
     )
 }
 
@@ -61,14 +59,16 @@ fn a_sends_to_b_over_shared_pair_root() {
 
     alice.send(note("alice", "bob", "hi bob")).unwrap();
 
-    // Bob reads his own inbox; alice's write landed there, addressed by name.
-    let bob_inbox = bob.read_all("bob").unwrap();
+    // Bob reads the conversation he shares with alice: one transcript, which
+    // alice appended to and he reads from.
+    let bob_inbox = bob.read_conversation("alice").unwrap();
     assert_eq!(bob_inbox.len(), 1);
     assert_eq!(bob_inbox[0].body, "hi bob");
     assert_eq!(bob_inbox[0].from, "alice");
 
-    // A third name nobody wrote to stays empty — no cross-talk.
-    assert!(bob.read_all("carol").unwrap().is_empty());
+    // A conversation nobody wrote to stays empty — no cross-talk between
+    // pairs, which is the property per-pair transcripts buy.
+    assert!(bob.read_conversation("carol").unwrap().is_empty());
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -86,10 +86,13 @@ fn derived_names_disambiguate_same_basename_folders() {
     sender.send(note("sender", &a, "for x/app")).unwrap();
 
     // Only the exact derived name sees it; the collision candidate does not.
-    let to_a = mailbox(&root, &a).read_all(&a).unwrap();
+    let to_a = mailbox(&root, &a).read_conversation("sender").unwrap();
     assert_eq!(to_a.len(), 1, "the addressed folder's agent receives it");
     assert!(
-        mailbox(&root, &b).read_all(&b).unwrap().is_empty(),
+        mailbox(&root, &b)
+            .read_conversation("sender")
+            .unwrap()
+            .is_empty(),
         "the same-basename sibling must not receive it"
     );
 
@@ -97,19 +100,25 @@ fn derived_names_disambiguate_same_basename_folders() {
 }
 
 #[test]
-fn cursor_is_keyed_by_root_and_agent() {
-    // The same agent name under two different roots must keep independent
-    // cursor files — otherwise a position from one stream is applied to the
+fn the_read_position_is_scoped_to_its_root() {
+    // The same agent name under two different roots must keep independent read
+    // positions — otherwise a position from one conversation is applied to the
     // other and inbound messages are silently skipped.
-    let root_a = tmp_root("cursor-a");
-    let root_b = tmp_root("cursor-b");
+    //
+    // It now falls out of WHERE the position lives: inside the conversation,
+    // under that root, beside the transcript it describes. The cursor file this
+    // replaced sat outside any conversation and had to key itself by
+    // (root, agent) by hand to get the same property.
+    let root_a = tmp_root("pos-a");
+    let root_b = tmp_root("pos-b");
 
-    let cur_a = InboxCursor::local(&root_a, "worker");
-    let cur_b = InboxCursor::local(&root_b, "worker");
+    let in_a = InboxConvention::new(root_a.to_string_lossy().into_owned())
+        .reader_path("worker", "peer", "worker");
+    let in_b = InboxConvention::new(root_b.to_string_lossy().into_owned())
+        .reader_path("worker", "peer", "worker");
     assert_ne!(
-        cur_a.path(),
-        cur_b.path(),
-        "same name under two roots must not share one cursor file"
+        in_a, in_b,
+        "same name under two roots must not share one read position"
     );
 
     let _ = std::fs::remove_dir_all(&root_a);

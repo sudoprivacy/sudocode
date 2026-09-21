@@ -18,29 +18,6 @@ use runtime::mailbox::{InboxConvention, Mailbox};
 use runtime::HookAbortSignal;
 use tools::testing::{compose_next_turn_from_envelopes_for_test, run_multi_turn_loop_for_test};
 
-/// Block until the poller has recorded where it starts reading.
-///
-/// A first-ever run seeks to the inbox tail rather than replaying a backlog it
-/// was never party to, so an append that lands DURING that seek is positioned
-/// past and never delivered. Every test below spawns the poller and then sends,
-/// so each has to establish "listening" first or it is racing the seek 鈥?which
-/// is exactly how they passed locally and failed on CI.
-///
-/// Asks `InboxCursor` where the file is rather than rebuilding the name: a
-/// rebuilt name is a second definition that compiles.
-fn wait_for_poller_ready(ws: &std::path::Path) {
-    let cursor = runtime::mailbox::InboxCursor::local(ws, "team-lead");
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !cursor.path().exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the poller never recorded its cursor at {}",
-            cursor.path().display()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 // 鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 fn unique_workspace(label: &str) -> std::path::PathBuf {
@@ -289,15 +266,16 @@ fn local_poller_delivers_sub_agent_message_to_parent() {
             true
         },
     );
-    wait_for_poller_ready(&ws);
 
-    // Sub-agent writes to team-lead's inbox
-    agent_mailbox::append_envelope(
-        &ws,
-        "team-lead",
-        envelope(kinds::MESSAGE, "researcher", "found the bug in line 42"),
-    )
-    .unwrap();
+    // Write the way a sub-agent actually does - through a Mailbox - instead of
+    // appending to a path by hand. Hand-addressing a path is exactly what let
+    // this test keep passing against a location the receiver had stopped
+    // reading.
+    let mut note = envelope(kinds::MESSAGE, "researcher", "found the bug in line 42");
+    note.to = "team-lead".to_string();
+    Mailbox::workspace_local(&ws, "researcher".to_string())
+        .send(note)
+        .unwrap();
 
     let msg = rx
         .recv_timeout(Duration::from_secs(5))
@@ -310,7 +288,7 @@ fn local_poller_delivers_sub_agent_message_to_parent() {
 }
 
 #[test]
-fn local_poller_delivers_multiple_messages_in_order() {
+fn local_poller_delivers_in_order_within_a_conversation() {
     let ws = unique_workspace("poller-multi");
     let (tx, rx) = std::sync::mpsc::channel::<MailboxEnvelope>();
     let abort = HookAbortSignal::new();
@@ -325,33 +303,50 @@ fn local_poller_delivers_multiple_messages_in_order() {
             true
         },
     );
-    wait_for_poller_ready(&ws);
 
-    // Multiple sub-agents write to team-lead's inbox
-    agent_mailbox::append_envelope(
-        &ws,
-        "team-lead",
-        envelope(kinds::MESSAGE, "worker-1", "task A done"),
-    )
-    .unwrap();
-    agent_mailbox::append_envelope(
-        &ws,
-        "team-lead",
-        envelope(kinds::MESSAGE, "worker-2", "task B done"),
-    )
-    .unwrap();
+    // Two messages from ONE sub-agent: order is guaranteed WITHIN a
+    // conversation, and this is what that guarantee looks like.
+    for body in ["task A done", "task B done"] {
+        let mut note = envelope(kinds::MESSAGE, "worker-1", body);
+        note.to = "team-lead".to_string();
+        Mailbox::workspace_local(&ws, "worker-1".to_string())
+            .send(note)
+            .unwrap();
+    }
+    // And one from a DIFFERENT sub-agent, which is a different conversation
+    // on its own transcript and its own tail. It must arrive - but its
+    // position relative to the pair above is deliberately NOT asserted:
+    // ordering across conversations is not a promise the contract makes,
+    // and a test that pinned it would be pinning a scheduling accident.
+    let mut other = envelope(kinds::MESSAGE, "worker-2", "unrelated work done");
+    other.to = "team-lead".to_string();
+    Mailbox::workspace_local(&ws, "worker-2".to_string())
+        .send(other)
+        .unwrap();
 
-    let msg1 = rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("first message");
-    let msg2 = rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("second message");
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        seen.push(
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("all three messages must be delivered"),
+        );
+    }
 
-    assert_eq!(msg1.from, "worker-1");
-    assert_eq!(msg1.body, "task A done");
-    assert_eq!(msg2.from, "worker-2");
-    assert_eq!(msg2.body, "task B done");
+    let from_worker_1: Vec<&str> = seen
+        .iter()
+        .filter(|m| m.from == "worker-1")
+        .map(|m| m.body.as_str())
+        .collect();
+    assert_eq!(
+        from_worker_1,
+        vec!["task A done", "task B done"],
+        "messages within one conversation must arrive in the order they were sent"
+    );
+    assert!(
+        seen.iter()
+            .any(|m| m.from == "worker-2" && m.body == "unrelated work done"),
+        "a message on a second conversation must still be delivered"
+    );
 
     abort.abort();
     let _ = std::fs::remove_dir_all(&ws);
@@ -373,7 +368,6 @@ fn local_poller_stops_on_abort() {
             true
         },
     );
-    wait_for_poller_ready(&ws);
 
     abort.abort();
     handle.join().expect("poller thread should exit cleanly");
@@ -546,9 +540,7 @@ fn unified_mailbox_send_poll_roundtrip() {
     let sender_mb = Mailbox::new(
         Arc::new(runtime::fs_backend::StdFsBackend),
         "coordinator".to_string(),
-        InboxConvention::PerRecipient {
-            root: ws_str.clone(),
-        },
+        InboxConvention::new(ws_str.clone()),
     );
 
     sender_mb
@@ -567,23 +559,25 @@ fn unified_mailbox_send_poll_roundtrip() {
     let receiver_mb = Mailbox::new(
         Arc::new(runtime::fs_backend::StdFsBackend),
         "researcher".to_string(),
-        InboxConvention::PerRecipient { root: ws_str },
+        InboxConvention::new(ws_str),
     );
 
-    let (msgs, cursor) = receiver_mb.poll(0, 0).unwrap();
+    let (msgs, cursor) = receiver_mb.poll_conversation("coordinator", 0, 0).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].from, "coordinator");
     assert_eq!(msgs[0].body, "investigate the auth module");
     assert_eq!(msgs[0].summary.as_deref(), Some("auth investigation"));
 
     // Subsequent poll with updated cursor should return no new messages
-    let (msgs2, _) = receiver_mb.poll(cursor, 0).unwrap();
+    let (msgs2, _) = receiver_mb
+        .poll_conversation("coordinator", cursor, 0)
+        .unwrap();
     assert!(msgs2.is_empty(), "no new messages after cursor advance");
 
     let _ = std::fs::remove_dir_all(&ws);
 }
 
-/// Tests that `read_all` returns messages from all senders.
+/// Tests that reading a conversation returns every message in it.
 #[test]
 fn unified_mailbox_read_all_from_multiple_senders() {
     let ws = unique_workspace("read-all-multi");
@@ -592,9 +586,7 @@ fn unified_mailbox_read_all_from_multiple_senders() {
     let mb = Mailbox::new(
         Arc::new(runtime::fs_backend::StdFsBackend),
         "hub".to_string(),
-        InboxConvention::PerRecipient {
-            root: ws_str.clone(),
-        },
+        InboxConvention::new(ws_str.clone()),
     );
 
     for i in 0..5 {
@@ -611,7 +603,7 @@ fn unified_mailbox_read_all_from_multiple_senders() {
         .unwrap();
     }
 
-    let envs = mb.read_all("worker").unwrap();
+    let envs = mb.read_conversation("worker").unwrap();
     assert_eq!(envs.len(), 5);
     for (i, env) in envs.iter().enumerate() {
         assert_eq!(env.body, format!("report {i}"));
@@ -744,29 +736,6 @@ fn coordinator_predicate_admits_deprecated_aliases_via_canonicalization() {
 }
 
 // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-// 9. INBOX PATH CONVENTIONS
-// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-
-#[test]
-fn inbox_convention_local_jsonl_resolves_correctly() {
-    let conv = InboxConvention::PerRecipient {
-        root: "/project".to_string(),
-    };
-    assert_eq!(
-        conv.inbox_path("worker-1"),
-        "/project/agents/worker-1/chat-with-me"
-    );
-}
-
-#[test]
-fn inbox_convention_nexus_a2a_resolves_correctly() {
-    let conv = InboxConvention::PerRecipient {
-        root: String::new(),
-    };
-    assert_eq!(conv.inbox_path("agent-x"), "/agents/agent-x/chat-with-me");
-}
-
-// 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 10. MULTI-TURN LOOP: PEER MESSAGE INJECTION DURING IDLE
 // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
@@ -794,19 +763,20 @@ fn peer_message_poller_to_compose_roundtrip() {
             true
         },
     );
-    wait_for_poller_ready(&ws);
 
-    // Sub-agent sends a message
-    agent_mailbox::append_envelope(
-        &ws,
-        "team-lead",
-        envelope(
-            kinds::MESSAGE,
-            "researcher",
-            "found critical vulnerability in auth.rs",
-        ),
-    )
-    .unwrap();
+    // Write the way a sub-agent actually does - through a Mailbox - instead of
+    // appending to a path by hand. Hand-addressing a path is exactly what let
+    // this test keep passing against a location the receiver had stopped
+    // reading.
+    let mut note = envelope(
+        kinds::MESSAGE,
+        "researcher",
+        "found critical vulnerability in auth.rs",
+    );
+    note.to = "team-lead".to_string();
+    Mailbox::workspace_local(&ws, "researcher".to_string())
+        .send(note)
+        .unwrap();
 
     // Poller delivers
     let msg = rx
@@ -935,13 +905,13 @@ fn mailbox_sender_closure_writes_envelope() {
     let mb = Arc::new(Mailbox::new(
         Arc::new(runtime::fs_backend::StdFsBackend),
         "team-lead".to_string(),
-        InboxConvention::PerRecipient { root: ws_str },
+        InboxConvention::new(ws_str),
     ));
 
     let sender = mb.sender();
     sender("worker-1", "please review PR #42").unwrap();
 
-    let envs = mb.read_all("worker-1").unwrap();
+    let envs = mb.read_conversation("worker-1").unwrap();
     assert_eq!(envs.len(), 1);
     assert_eq!(envs[0].from, "team-lead");
     assert_eq!(envs[0].body, "please review PR #42");

@@ -321,6 +321,26 @@ impl FsBackend for StdFsBackend {
         std::fs::read(path)
     }
 
+    /// A host FS has no VFS link, so the alias is recorded as a small file
+    /// holding the path it points at.
+    ///
+    /// Deliberately NOT the inherited no-op. An index built out of links is
+    /// read back by LISTING it — the chat list that tells a receiver which
+    /// conversations to tail is exactly that — so a backend that silently does
+    /// nothing here yields an empty index and a receiver that hears nothing,
+    /// with no error raised anywhere along the way.
+    ///
+    /// A plain file rather than a symlink: it needs no privilege on Windows,
+    /// and nothing resolves these by walking them — only the entry's NAME is
+    /// read. The target goes in the body so `cat` answers the same question
+    /// the VFS answers by following the link.
+    fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        if let Some(parent) = std::path::Path::new(alias).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(alias, target)
+    }
+
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
         std::fs::write(path, data)
     }
@@ -545,8 +565,30 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
 }
 
 /// Map a kernel error to an `io::Error`.
+///
+/// "Not found" is singled out because [`FsBackend`] callers BRANCH on it, and
+/// the two backends have to answer alike: `StdFsBackend` reports a missing file
+/// as [`io::ErrorKind::NotFound`], so a kernel-backed read that reported the
+/// same condition as `Other` turns "this reader has no position yet" into "this
+/// read failed". The receiver then never claims its seat and simply hears
+/// nothing, with the error scrolling past as a retry.
+///
+/// Only a missing ENTRY qualifies. An unmounted path is deliberately left as an
+/// error: "the namespace is not here" is not "there is nothing here", and
+/// collapsing them would have a reader start from zero — replaying a
+/// conversation — every time a mount was late.
+///
+/// The kernel's error type is opaque at this boundary (this is generic over
+/// `impl Debug` precisely so the backend does not depend on it), so the
+/// classification reads the debug text. That is load-bearing enough to be
+/// tested rather than trusted — see `a_missing_path_reports_not_found` in
+/// `runtime/tests/spawn_task.rs`, which fails if the variant is ever renamed.
 fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
-    io::Error::other(format!("{e:?}"))
+    let text = format!("{e:?}");
+    if text.contains("FileNotFound") {
+        return io::Error::new(io::ErrorKind::NotFound, text);
+    }
+    io::Error::other(text)
 }
 
 impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
@@ -891,7 +933,7 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX))
+        Ok(crate::mailbox::is_mailbox_path(path))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {

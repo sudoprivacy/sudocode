@@ -170,6 +170,8 @@ impl Drop for MockAnthropicService {
 enum Scenario {
     StreamingText,
     ReadFileRoundtrip,
+    ImageReadRoundtrip,
+    BrowserImageRoundtrip,
     GrepChunkAssembly,
     WriteFileAllowed,
     WriteFileDenied,
@@ -292,6 +294,8 @@ impl Scenario {
         match value.trim() {
             "streaming_text" => Some(Self::StreamingText),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
+            "image_read_roundtrip" => Some(Self::ImageReadRoundtrip),
+            "browser_image_roundtrip" => Some(Self::BrowserImageRoundtrip),
             "grep_chunk_assembly" => Some(Self::GrepChunkAssembly),
             "write_file_allowed" => Some(Self::WriteFileAllowed),
             "write_file_denied" => Some(Self::WriteFileDenied),
@@ -348,6 +352,8 @@ impl Scenario {
         match self {
             Self::StreamingText => "streaming_text",
             Self::ReadFileRoundtrip => "read_file_roundtrip",
+            Self::ImageReadRoundtrip => "image_read_roundtrip",
+            Self::BrowserImageRoundtrip => "browser_image_roundtrip",
             Self::GrepChunkAssembly => "grep_chunk_assembly",
             Self::WriteFileAllowed => "write_file_allowed",
             Self::WriteFileDenied => "write_file_denied",
@@ -1027,6 +1033,41 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             streaming_text_sse()
         }
         Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(),
+        Scenario::BrowserImageRoundtrip => {
+            let results = tool_results_by_name(request);
+            if results.contains_key("Read") || results.contains_key("read_file") {
+                final_text_sse("browser image received")
+            } else if results.contains_key("bash") {
+                tool_use_sse("browser-read", "Read", &[r#"{"path":"screen.png"}"#])
+            } else {
+                tool_use_sse(
+                    "browser-capture",
+                    "bash",
+                    &[r#"{"command":"bash capture.sh"}"#],
+                )
+            }
+        }
+        Scenario::ImageReadRoundtrip => match latest_tool_result(request) {
+            Some(_) => final_text_sse("image roundtrip complete"),
+            None if request.messages.iter().flat_map(|m| &m.content).any(
+                |b| matches!(b, InputContentBlock::Text { text } if text.contains("IMAGE_SINGLE")),
+            ) =>
+            {
+                tool_use_sse("image-1", "Read", &[r#"{"path":"screen.png"}"#])
+            }
+            None => tool_uses_sse(&[
+                ToolUseSse {
+                    tool_id: "image-1",
+                    tool_name: "Read",
+                    partial_json_chunks: &[r#"{"path":"screen.png"}"#],
+                },
+                ToolUseSse {
+                    tool_id: "text-2",
+                    tool_name: "read_file",
+                    partial_json_chunks: &[r#"{"path":"fixture.txt"}"#],
+                },
+            ]),
+        },
         Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "read_file roundtrip complete: {}",
@@ -1459,6 +1500,44 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "Mock streaming says hello from the parity harness.",
             )
         }
+        Scenario::BrowserImageRoundtrip => {
+            let results = tool_results_by_name(request);
+            if results.contains_key("Read") || results.contains_key("read_file") {
+                text_message_response("browser-done", "browser image received")
+            } else if results.contains_key("bash") {
+                tool_message_response(
+                    "browser-read",
+                    "browser-read",
+                    "Read",
+                    json!({"path":"screen.png"}),
+                )
+            } else {
+                tool_message_response(
+                    "browser-capture",
+                    "browser-capture",
+                    "bash",
+                    json!({"command":"bash capture.sh"}),
+                )
+            }
+        }
+        Scenario::ImageReadRoundtrip => match latest_tool_result(request) {
+            Some(_) => text_message_response("image-done", "image roundtrip complete"),
+            None => tool_message_response_many(
+                "image-read",
+                &[
+                    ToolUseMessage {
+                        tool_id: "image-1",
+                        tool_name: "Read",
+                        input: json!({"path":"screen.png"}),
+                    },
+                    ToolUseMessage {
+                        tool_id: "text-2",
+                        tool_name: "read_file",
+                        input: json!({"path":"fixture.txt"}),
+                    },
+                ],
+            ),
+        },
         Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_read_file_final",
@@ -1985,6 +2064,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
+        Scenario::ImageReadRoundtrip => "req_image_read_roundtrip",
+        Scenario::BrowserImageRoundtrip => "req_browser_image_roundtrip",
         Scenario::GrepChunkAssembly => "req_grep_chunk_assembly",
         Scenario::WriteFileAllowed => "req_write_file_allowed",
         Scenario::WriteFileDenied => "req_write_file_denied",

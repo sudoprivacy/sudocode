@@ -1,19 +1,6 @@
-//! VLM-route helper: turn a base64 image into a short text description by
-//! POSTing it to an OpenAI-compatible `/chat/completions` endpoint.
-//!
-//! This is the side-call used by `push_images` when:
-//!   1. `image_registry::preflight_base64` returns `ImageTooLargeError` even
-//!      after the JPEG-quality loop — historically replaced by a static text
-//!      placeholder; now replaced by a real description of the image.
-//!   2. The active chat model isn't vision-capable but the user attached an
-//!      image — historically a wrong-model error; now transparent VLM-route.
-//!
-//! Architecture: HTTP lives in this file (cli crate), the runtime crate stays
-//! free of network calls. The function is async; `push_images` runs it via a
-//! one-off blocking tokio runtime since the SdkAcpDelegate trait is sync.
-//!
-//! Design rationale: `docs/design/image-handling-non-user-facing.html`
-//! (Decision 2 + the "VLM model selection" section).
+//! Shared visual-description client for ACP attachments, CLI input, and tool
+//! screenshots. The async engine awaits it directly; synchronous ACP callers
+//! keep their dedicated runtime so network I/O cannot starve the ACP task pool.
 use std::collections::{HashMap, VecDeque};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -156,7 +143,10 @@ pub async fn describe_image_via_vlm(
     mime_type: &str,
 ) -> Result<String, VlmError> {
     // Cache hit short-circuits everything (no client build, no HTTP).
-    let key = cache_key(model, image_b64);
+    let key = cache_key(
+        &format!("{base_url}\0{api_key}\0{model}\0{mime_type}"),
+        image_b64,
+    );
     if let Ok(mut cache) = VLM_DESCRIPTION_CACHE.lock() {
         if let Some(cached) = cache.get(&key) {
             return Ok(cached);

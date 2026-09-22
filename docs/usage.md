@@ -138,3 +138,56 @@ JSONL at `<transcript>.before-compact-<timestamp>` before committing the new
 history. Keep these files to inspect or recover older context; they are not
 subject to automatic cleanup. See [ACP compaction](acp.md#slash-commands) for
 budgets and persistence details.
+
+## Images and browser screenshots
+
+The CLI accepts PNG, JPEG, GIF, and WebP references in a user prompt:
+
+```sh
+scode --model <vision-model> 'Describe @/absolute/path/screenshot.png'
+scode --model <vision-model> 'Describe @"screenshots/home page.png"'
+```
+
+The synchronous REPL also submits clipboard images pasted alongside a text
+prompt. Image bytes are validated and preflighted before being sent; a missing
+or invalid referenced image produces an error rather than a text-only request.
+Repeated references to the same spelling of a path attach it once per prompt.
+
+Agents can inspect images using `Read` (`read_file`). For example, after the
+independently installed sudohand CLI saves a browser screenshot:
+
+```sh
+suh browser page_screenshot --port <browser-port> --path screenshot.png
+```
+
+ask scode to **Read `screenshot.png` and inspect the screenshot**. The screenshot
+command's path/size response alone does not give the model the image. Read
+returns a short textual receipt plus an image attachment, and the next model
+request includes the pixels. The image is stored in the transcript so resume
+does not depend on the screenshot file still existing. All outstanding tool
+replies are sent before image attachments, including parallel Read calls.
+
+Files are read through the filesystem backend and normal tool permissions.
+Image source files are limited to 20 MiB; accepted files use the existing
+5 MiB / 8000 px image preflight, which downsamples when necessary. Images do
+not use text pagination or tool-output truncation.
+
+For a model marked text-only in the model capabilities table, scode uses the
+configured `auth_modes.proxy.sudorouter` account to obtain a visual description
+through `gemini-2.5-flash`. The main model receives an explicitly labelled
+description, not the original pixels. Missing credentials, invalid images, or
+a failed visual-description request are reported as errors. Vision-capable
+models receive the image directly.
+
+Regression coverage lives in `pty_image_handling` (CLI references, image Read,
+parallel results, errors, VLM routing, and resume) and the API transport tests.
+With suh and Chrome installed, run the actual browser-to-model-payload test:
+
+```sh
+cd rust
+cargo test -p rusty-sudocode-cli --test pty_image_handling -- --include-ignored
+```
+
+This last test scripts only model replies: scode executes Bash, suh captures
+real Chrome pixels, and the test verifies those exact bytes in the next model
+request. A live model's visual accuracy is a separate check.

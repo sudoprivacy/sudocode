@@ -2,6 +2,35 @@
 
 Day-to-day `scode` workflows.
 
+## Web search with Bocha
+
+Set `web_search` in `~/.nexus/sudocode/sudocode.json`:
+
+```json
+{
+  "web_search": {
+    "provider": "bocha",
+    "apiUrl": "https://api.bocha.cn/v1/web-search"
+  }
+}
+```
+
+Export `BOCHA_API_KEY` before starting `scode`, or set `web_search.apiKey`
+in your private configuration. `.env` files are not loaded automatically.
+`BOCHA_API_KEY` takes precedence over the config key. Bocha uses its own
+credentials; it does not reuse the model proxy key.
+
+The API URL above is the default when `provider` is `bocha`; it can be
+omitted. `SUDOCODE_BOCHA_API_URL` overrides it, and
+`SUDOCODE_WEB_SEARCH_PROVIDER=bocha` selects Bocha for a single process.
+The existing `WebSearch` tool returns titles, URLs, and summaries, with
+domain inclusion/exclusion, deduplication, and at most eight results.
+Existing Tavily configurations continue to use `provider: "tavily"`.
+
+```bash
+scode --allowedTools WebSearch "Use WebSearch to find the Rust official website and cite the result URLs."
+```
+
 ## Interactive REPL
 
 ```bash

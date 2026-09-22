@@ -121,11 +121,11 @@ pub struct ModelConfigEntry {
 /// Web search configuration from `sudocode.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebSearchConfig {
-    /// Search provider: `"tavily"` or `"duckduckgo"`.
+    /// Search provider: `"tavily"`, `"bocha"`, or `"duckduckgo"`.
     pub provider: String,
     /// API endpoint URL.
     pub api_url: String,
-    /// API key (empty string = fallback to `proxy.sudorouter.apiKey`).
+    /// API key (Tavily alone falls back to `proxy.sudorouter.apiKey`).
     pub api_key: String,
 }
 
@@ -1948,11 +1948,16 @@ fn parse_web_search_section(root: &BTreeMap<String, JsonValue>) -> WebSearchConf
         .and_then(JsonValue::as_str)
         .filter(|s| !s.is_empty())
         .map_or(defaults.provider, str::to_string);
+    let default_url = if provider == "bocha" {
+        "https://api.bocha.cn/v1/web-search".to_string()
+    } else {
+        defaults.api_url
+    };
     let api_url = obj
         .get("apiUrl")
         .and_then(JsonValue::as_str)
         .filter(|s| !s.is_empty())
-        .map_or(defaults.api_url, str::to_string);
+        .map_or(default_url, str::to_string);
     let api_key = obj
         .get("apiKey")
         .and_then(JsonValue::as_str)

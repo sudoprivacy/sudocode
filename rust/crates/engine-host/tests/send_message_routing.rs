@@ -76,7 +76,7 @@ impl FsBackend for RecordingBackend {
     }
 
     /// Mirrors `NexusVfsFsBackend` by calling the SAME predicate it calls, not
-    /// by restating it. Both used to spell `ends_with(CHAT_WITH_ME_SUFFIX)`, so
+    /// by restating it. Both used to spell the mailbox leaf themselves, so
     /// when the mailbox moved to `…/transcript` the mock and the backend went
     /// wrong together and agreed with each other about it — the envelope fell
     /// to the JSONL branch and was written to the local filesystem while the

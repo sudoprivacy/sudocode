@@ -4167,6 +4167,32 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
         std::env::var("SUDOCODE_WEB_SEARCH_PROVIDER").unwrap_or_else(|_| ws.provider.clone());
 
     let mut hits = match provider.as_str() {
+        "bocha" => {
+            let api_key = std::env::var("BOCHA_API_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty())
+                .unwrap_or_else(|| {
+                    if ws.provider == "bocha" {
+                        ws.api_key.clone()
+                    } else {
+                        String::new()
+                    }
+                });
+            if api_key.trim().is_empty() || api_key.starts_with('<') {
+                return Err("Bocha search requires BOCHA_API_KEY or web_search.apiKey".into());
+            }
+            let api_url = std::env::var("SUDOCODE_BOCHA_API_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty())
+                .unwrap_or_else(|| {
+                    if ws.provider == "bocha" {
+                        ws.api_url.clone()
+                    } else {
+                        "https://api.bocha.cn/v1/web-search".to_string()
+                    }
+                });
+            execute_bocha_search(input, &api_url, &api_key)?
+        }
         "tavily" => {
             let api_key = std::env::var("SUDOCODE_TAVILY_API_KEY")
                 .ok()
@@ -4336,6 +4362,92 @@ fn execute_duckduckgo_search(input: &WebSearchInput) -> Result<Vec<SearchHit>, S
     }
 
     Ok(hits)
+}
+
+fn execute_bocha_search(
+    input: &WebSearchInput,
+    api_url: &str,
+    api_key: &str,
+) -> Result<Vec<SearchHit>, String> {
+    let client = build_http_client()?;
+    let mut body = serde_json::json!({
+        "query": input.query,
+        "summary": true,
+        "count": 8,
+    });
+    if let Some(allowed) = input
+        .allowed_domains
+        .as_ref()
+        .filter(|domains| !domains.is_empty())
+    {
+        body["include"] = serde_json::json!(allowed.join("|"));
+    }
+    if let Some(blocked) = input
+        .blocked_domains
+        .as_ref()
+        .filter(|domains| !domains.is_empty())
+    {
+        body["exclude"] = serde_json::json!(blocked.join("|"));
+    }
+    let response: serde_json::Value = block_on_http(async {
+        let response = client
+            .post(api_url)
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| format!("Bocha request failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("Bocha API returned HTTP {status}"));
+        }
+        response
+            .json()
+            .await
+            .map_err(|error| format!("Failed to parse Bocha response: {error}"))
+    })?;
+    let code = response.get("code").and_then(serde_json::Value::as_u64);
+    if code != Some(200) {
+        return Err(format!(
+            "Bocha API returned unsuccessful or missing code: {code:?}"
+        ));
+    }
+    let data = response
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or("Bocha response is missing search data")?;
+    let Some(pages) = data.get("webPages").filter(|pages| !pages.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let values = pages
+        .get("value")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Bocha response is missing webPages.value")?;
+    Ok(values
+        .iter()
+        .filter_map(|page| {
+            let url = page.get("url")?.as_str()?.trim();
+            if url.is_empty() {
+                return None;
+            }
+            let snippet = ["summary", "snippet"].iter().find_map(|field| {
+                page.get(*field)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned)
+            });
+            Some(SearchHit {
+                title: page
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(url)
+                    .to_string(),
+                url: url.to_string(),
+                snippet,
+            })
+        })
+        .collect())
 }
 
 fn execute_tavily_search(

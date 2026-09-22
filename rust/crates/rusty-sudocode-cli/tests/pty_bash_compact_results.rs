@@ -83,6 +83,9 @@ fn assert_shell_statuses(sent: &BTreeMap<String, String>) {
         serde_json::json!({"stdout":"", "stderr":"diagnostic only", "exit_code":0})
     );
     for result in &parsed {
+        // Public Rust consumers can still deserialize the compact wire result.
+        serde_json::from_value::<runtime::BashCommandOutput>(result.clone())
+            .expect("compact output remains readable by the public result type");
         assert!(result.get("sandboxStatus").is_none());
         assert!(result.as_object().unwrap().values().all(|v| !v.is_null()));
     }

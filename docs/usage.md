@@ -43,8 +43,10 @@ Failures retain `returnCodeInterpretation`; interrupted runs include
 `noOutputExpected`, but do not claim a completed exit code. Signal termination
 also has no numeric exit code and is described in `returnCodeInterpretation`.
 
-Empty optional fields and routine sandbox capability flags are omitted. On
-failure, an available sandbox fallback reason is included as `sandboxWarning`.
+Empty optional fields and routine sandbox capability flags are omitted. The
+public Rust result type accepts omitted stderr and interruption fields as an
+empty string and `false`, respectively. On failure, an available sandbox
+fallback reason is included as `sandboxWarning`.
 The full execution struct remains available internally; the compact text is
 persisted before it reaches the provider, so resume sends identical results.
 Large results still use the existing persisted-output marker and

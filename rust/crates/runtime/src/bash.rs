@@ -86,9 +86,13 @@ pub struct BashCommandOutput {
     /// Actual process exit code; absent for background, interrupted or signaled runs.
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// Compact model results omit empty stderr.
+    #[serde(default)]
     pub stderr: String,
     #[serde(rename = "rawOutputPath")]
     pub raw_output_path: Option<String>,
+    /// Compact model results only emit this flag when true.
+    #[serde(default)]
     pub interrupted: bool,
     #[serde(rename = "isImage")]
     pub is_image: Option<bool>,

@@ -29,6 +29,7 @@ pub mod fs_backend;
 mod git_context;
 pub mod green_contract;
 mod hooks;
+pub mod image_input;
 pub mod image_registry;
 mod json;
 mod lane_events;

@@ -172,6 +172,7 @@ enum Scenario {
     ReadFileRoundtrip,
     ImageReadRoundtrip,
     BrowserImageRoundtrip,
+    WebSearchRoundtrip,
     GrepChunkAssembly,
     WriteFileAllowed,
     WriteFileDenied,
@@ -297,6 +298,7 @@ impl Scenario {
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
             "image_read_roundtrip" => Some(Self::ImageReadRoundtrip),
             "browser_image_roundtrip" => Some(Self::BrowserImageRoundtrip),
+            "web_search_roundtrip" => Some(Self::WebSearchRoundtrip),
             "grep_chunk_assembly" => Some(Self::GrepChunkAssembly),
             "write_file_allowed" => Some(Self::WriteFileAllowed),
             "write_file_denied" => Some(Self::WriteFileDenied),
@@ -356,6 +358,7 @@ impl Scenario {
             Self::ReadFileRoundtrip => "read_file_roundtrip",
             Self::ImageReadRoundtrip => "image_read_roundtrip",
             Self::BrowserImageRoundtrip => "browser_image_roundtrip",
+            Self::WebSearchRoundtrip => "web_search_roundtrip",
             Self::GrepChunkAssembly => "grep_chunk_assembly",
             Self::WriteFileAllowed => "write_file_allowed",
             Self::WriteFileDenied => "write_file_denied",
@@ -1073,6 +1076,18 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             streaming_text_sse()
         }
         Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(),
+        Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
+            Some((output, is_error)) => {
+                final_text_sse(&format!("search roundtrip error={is_error}: {output}"))
+            }
+            None => tool_use_sse(
+                "toolu_web_search",
+                "WebSearch",
+                &[
+                    r#"{"query":"Rust official website","allowed_domains":["rust-lang.org"],"blocked_domains":["blocked.rust-lang.org"]}"#,
+                ],
+            ),
+        },
         Scenario::BrowserImageRoundtrip => {
             let results = tool_results_by_name(request);
             if results.contains_key("Read") || results.contains_key("read_file") {
@@ -1544,6 +1559,18 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "Mock streaming says hello from the parity harness.",
             )
         }
+        Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
+            Some((output, is_error)) => text_message_response(
+                "msg_search_final",
+                &format!("search roundtrip error={is_error}: {output}"),
+            ),
+            None => tool_message_response(
+                "msg_search_tool",
+                "toolu_web_search",
+                "WebSearch",
+                json!({"query":"Rust official website","allowed_domains":["rust-lang.org"],"blocked_domains":["blocked.rust-lang.org"]}),
+            ),
+        },
         Scenario::BrowserImageRoundtrip => {
             let results = tool_results_by_name(request);
             if results.contains_key("Read") || results.contains_key("read_file") {
@@ -2114,6 +2141,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
         Scenario::ImageReadRoundtrip => "req_image_read_roundtrip",
         Scenario::BrowserImageRoundtrip => "req_browser_image_roundtrip",
+        Scenario::WebSearchRoundtrip => "req_web_search_roundtrip",
         Scenario::GrepChunkAssembly => "req_grep_chunk_assembly",
         Scenario::WriteFileAllowed => "req_write_file_allowed",
         Scenario::WriteFileDenied => "req_write_file_denied",

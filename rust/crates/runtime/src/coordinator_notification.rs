@@ -33,7 +33,8 @@
 
 use std::path::Path;
 
-use crate::agent_mailbox::{self, kinds, MailboxEnvelope};
+use crate::agent_mailbox::{kinds, MailboxEnvelope};
+use crate::mailbox::Mailbox;
 
 /// Well-known recipient string for the coordinator's inbox.
 pub const COORDINATOR_INBOX_RECIPIENT: &str = "coordinator";
@@ -70,12 +71,11 @@ pub fn emit(workspace_root: &Path, from: &str, task_notification_xml: &str) -> R
         kind: kinds::TASK_NOTIFICATION.to_string(),
         request_id: None,
     };
-    agent_mailbox::append_envelope_to_path(
-        &agent_mailbox::inbox_path_under(workspace_root, COORDINATOR_INBOX_RECIPIENT)
-            .to_string_lossy(),
-        envelope,
-    )
-    .map(|_| ())
+    // Through the mailbox, like any other message. This wrote straight to
+    // `{ws}/agents/coordinator/chat-with-me` — its own path, its own reader,
+    // its own consumed-offset file — which made the coordinator queue the last
+    // user of a shape nothing else addressed any more.
+    Mailbox::workspace_local(workspace_root, from.to_string()).send(envelope)
 }
 
 /// Drain all `<task-notification>` envelopes that arrived since the
@@ -105,42 +105,24 @@ pub fn drain(workspace_root: &Path) -> Result<Vec<String>, String> {
     if !crate::coordinator_mode::is_coordinator_mode() {
         return Ok(Vec::new());
     }
-    let inbox = agent_mailbox::inbox_path_under(workspace_root, COORDINATOR_INBOX_RECIPIENT);
-    let envelopes = agent_mailbox::read_all_from_path(&inbox.to_string_lossy())?;
-    let consumed = read_consumed_offset(workspace_root);
-    if envelopes.len() <= consumed {
-        return Ok(Vec::new());
+    let mailbox = Mailbox::workspace_local(workspace_root, COORDINATOR_INBOX_RECIPIENT.to_string());
+    // One transcript per sub-agent rather than one inbox for all of them, so
+    // the drain walks the chat list. `take_unread` advances each conversation's
+    // own recorded position, which is what the consumed-offset sidecar used to
+    // do for the single file.
+    let mut batch: Vec<(u64, String)> = Vec::new();
+    for peer in mailbox.list_conversations()? {
+        for envelope in mailbox.take_unread(&peer)? {
+            if envelope.kind == kinds::TASK_NOTIFICATION {
+                batch.push((envelope.timestamp, envelope.body));
+            }
+        }
     }
-    let out: Vec<String> = envelopes[consumed..]
-        .iter()
-        .filter(|env| env.kind == kinds::TASK_NOTIFICATION)
-        .map(|env| env.body.clone())
-        .collect();
-    write_consumed_offset(workspace_root, envelopes.len())?;
-    Ok(out)
-}
-
-fn consumed_offset_path(workspace_root: &Path) -> std::path::PathBuf {
-    // Beside the unified inbox (`{ws}/agents/coordinator/chat-with-me`), so the
-    // read position is swept with the inbox it tracks.
-    agent_mailbox::inbox_path_under(workspace_root, COORDINATOR_INBOX_RECIPIENT)
-        .with_file_name(CONSUMED_OFFSET_FILE)
-}
-
-fn read_consumed_offset(workspace_root: &Path) -> usize {
-    std::fs::read_to_string(consumed_offset_path(workspace_root))
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .unwrap_or(0)
-}
-
-fn write_consumed_offset(workspace_root: &Path, offset: usize) -> Result<(), String> {
-    let path = consumed_offset_path(workspace_root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir mailbox: {e}"))?;
-    }
-    std::fs::write(&path, offset.to_string())
-        .map_err(|e| format!("write consumed offset {}: {e}", path.display()))
+    // Ordered by send time. There is no single log to read in order any more,
+    // and a batch that arrives in chat-list order would read as whichever
+    // sub-agent happens to sort first rather than as what happened when.
+    batch.sort_by_key(|(sent_at, _)| *sent_at);
+    Ok(batch.into_iter().map(|(_, body)| body).collect())
 }
 
 /// Format a batch of drained task-notifications into a single prompt
@@ -207,9 +189,14 @@ mod tests {
         disable_coord();
         let ws = unique_ws("emit-noop");
         emit(&ws, "agent-x", "<task-notification>x</task-notification>").expect("ok");
+        let transcript = std::path::PathBuf::from(
+            crate::mailbox::InboxConvention::new(ws.to_string_lossy().into_owned())
+                .transcript_path("agent-x", COORDINATOR_INBOX_RECIPIENT),
+        );
         assert!(
-            !agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT).exists(),
-            "no file created when coord mode is off"
+            !transcript.exists(),
+            "no transcript created when coord mode is off, expected none at {}",
+            transcript.display()
         );
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -257,12 +244,12 @@ mod tests {
         let _g = enable_coord();
         let ws = unique_ws("drain-mixed");
 
-        // Direct low-level append to inject a non-task-notification
-        // envelope alongside a task-notification, at the unified inbox path
-        // `drain` reads.
-        agent_mailbox::append_envelope_to_path(
-            &agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT).to_string_lossy(),
-            MailboxEnvelope {
+        // A plain message alongside a task-notification, sent the way any
+        // peer sends one — through its own mailbox, into its own conversation
+        // with the coordinator. Two senders means two transcripts, which is
+        // also what makes this cover the drain walking the chat list.
+        Mailbox::workspace_local(&ws, "team-lead".to_string())
+            .send(MailboxEnvelope {
                 from: "team-lead".to_string(),
                 to: COORDINATOR_INBOX_RECIPIENT.to_string(),
                 body: "just chatting".to_string(),
@@ -271,18 +258,17 @@ mod tests {
                 color: None,
                 kind: kinds::MESSAGE.to_string(),
                 request_id: None,
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         emit(&ws, "agent-tn", "<task-notification>tn</task-notification>").unwrap();
 
         let batch = drain(&ws).unwrap();
         assert_eq!(batch.len(), 1, "MESSAGE kind filtered out");
         assert!(batch[0].contains(">tn<"));
 
-        // Offset advanced past BOTH envelopes — a MESSAGE that
-        // arrives AFTER this drain would show up next time, but
-        // the ones already drained shouldn't.
+        // Every conversation's position advanced past what was taken — a
+        // MESSAGE arriving AFTER this drain would show up next time, but the
+        // ones already drained must not, filtered out or otherwise.
         assert!(drain(&ws).unwrap().is_empty());
 
         disable_coord();

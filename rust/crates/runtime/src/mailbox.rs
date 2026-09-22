@@ -407,6 +407,32 @@ impl Mailbox {
             .map(|register| register.map(|r| r.read_offset))
     }
 
+    /// Take everything this agent has not read from `peer`, advancing the
+    /// recorded position past it.
+    ///
+    /// The one-shot counterpart to the receiver loop: that one parks and hands
+    /// each envelope to a sink, this returns the batch and returns. They
+    /// advance the SAME position, which is the point — a session that drains
+    /// and a receiver that tails cannot re-deliver each other's work, and
+    /// neither needs a consumed-offset file of its own.
+    ///
+    /// The position advances past every envelope taken, including ones the
+    /// caller filters out afterwards. That is deliberate: they were read, and
+    /// leaving them unread would hand them back on every later call.
+    ///
+    /// # Errors
+    /// Returns an error when the transcript cannot be read or the position
+    /// cannot be recorded.
+    pub fn take_unread(&self, peer: &str) -> Result<Vec<MailboxEnvelope>, String> {
+        let reader = self.conversation_reader(peer);
+        let from = reader.load()?.map_or(0, |r| r.read_offset);
+        let (messages, next) = self.poll_conversation(peer, from, 0)?;
+        if next > from {
+            reader.commit(next)?;
+        }
+        Ok(messages)
+    }
+
     /// Make this agent discoverable before it has any conversations.
     ///
     /// Creates the agent's chat-list directory and nothing else. Without it a
@@ -879,6 +905,16 @@ impl ConversationReader {
     }
 
     fn store(&self, register: &ReaderRegister) -> Result<(), String> {
+        // `write_atomic` renames into place and will not create the parent,
+        // and the side that provisioned this conversation had no reader of its
+        // own to make room for. Done here rather than at the claim, because a
+        // claim is not the only thing that writes: a one-shot `take_unread`
+        // commits without ever claiming, and it hit exactly this.
+        if let Some((dir, _)) = self.path.rsplit_once('/') {
+            self.backend
+                .create_dir_all(dir)
+                .map_err(|e| format!("create reader directory {dir}: {e}"))?;
+        }
         let raw = serde_json::to_vec(register)
             .map_err(|e| format!("encode reader register {}: {e}", self.path))?;
         self.backend
@@ -912,16 +948,6 @@ impl ConversationReader {
         // beside the transcript it describes and they are created and destroyed
         // together.
         let resume = current.as_ref().map_or(0, |r| r.read_offset);
-
-        // `write_atomic` renames into place and will not create the parent, and
-        // the side that provisioned this conversation had no reader of its own
-        // to make room for. A reader owns its register, including where it
-        // lives. Done once per claim rather than on every commit.
-        if let Some((dir, _)) = self.path.rsplit_once('/') {
-            self.backend
-                .create_dir_all(dir)
-                .map_err(|e| format!("create reader directory {dir}: {e}"))?;
-        }
 
         self.store(&ReaderRegister {
             holder: self.holder.clone(),

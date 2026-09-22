@@ -175,6 +175,7 @@ enum Scenario {
     WriteFileDenied,
     MultiToolTurnRoundtrip,
     BashStdoutRoundtrip,
+    BashCompactResults,
     BashInterruptLongRunning,
     BashPermissionPromptApproved,
     BashPermissionPromptDenied,
@@ -296,6 +297,7 @@ impl Scenario {
             "write_file_allowed" => Some(Self::WriteFileAllowed),
             "write_file_denied" => Some(Self::WriteFileDenied),
             "multi_tool_turn_roundtrip" => Some(Self::MultiToolTurnRoundtrip),
+            "bash_compact_results" => Some(Self::BashCompactResults),
             "bash_stdout_roundtrip" => Some(Self::BashStdoutRoundtrip),
             "bash_interrupt_long_running" => Some(Self::BashInterruptLongRunning),
             "bash_permission_prompt_approved" => Some(Self::BashPermissionPromptApproved),
@@ -352,6 +354,7 @@ impl Scenario {
             Self::WriteFileAllowed => "write_file_allowed",
             Self::WriteFileDenied => "write_file_denied",
             Self::MultiToolTurnRoundtrip => "multi_tool_turn_roundtrip",
+            Self::BashCompactResults => "bash_compact_results",
             Self::BashStdoutRoundtrip => "bash_stdout_roundtrip",
             Self::BashInterruptLongRunning => "bash_interrupt_long_running",
             Self::BashPermissionPromptApproved => "bash_permission_prompt_approved",
@@ -613,6 +616,43 @@ fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
             _ => false,
         })
     })
+}
+
+// Shell commands exercised by the PTY regression; each status must survive
+// the real executor, transcript persistence, and the next provider request.
+fn compact_bash_step(request: &MessageRequest) -> Option<(String, &'static str, Value)> {
+    let completed = request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|block| {
+            matches!(block, InputContentBlock::ToolResult { tool_use_id, .. }
+            if tool_use_id.starts_with("compact_bash_"))
+        })
+        .count();
+    let steps = [
+        json!({"command":"printf 'compact stdout'"}),
+        json!({"command":"printf 'failure detail' >&2; exit 7"}),
+        json!({"command":"sleep 1", "timeout":10}),
+        json!({"command":"sleep 1", "run_in_background":true}),
+        // Git Bash on Windows represents termination as an exit code, rather
+        // than the Unix signal status; exercise an explicit exit there.
+        json!({"command":if cfg!(unix) { "kill -TERM $$" } else { "exit 143" }}),
+        json!({"command":"awk 'BEGIN { for (i=0;i<4000;i++) print \"large output line\" }'"}),
+        json!({"command":":"}),
+        json!({"command":"printf 'diagnostic only' >&2"}),
+    ];
+    if completed == steps.len() {
+        return Some((
+            format!("compact_bash_{completed}"),
+            "read_tool_output",
+            json!({"id":"compact_bash_5", "offset":60000, "limit":1000}),
+        ));
+    }
+    steps
+        .get(completed)
+        .cloned()
+        .map(|input| (format!("compact_bash_{completed}"), "bash", input))
 }
 
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
@@ -1103,6 +1143,10 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 ]),
             }
         }
+        Scenario::BashCompactResults => match compact_bash_step(request) {
+            Some((id, name, input)) => tool_use_sse(&id, name, &[&input.to_string()]),
+            None => final_text_sse("compact bash results verified"),
+        },
         Scenario::BashStdoutRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "bash completed: {}",
@@ -1544,6 +1588,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 ),
             }
         }
+        Scenario::BashCompactResults => match compact_bash_step(request) {
+            Some((id, name, input)) => tool_message_response("compact", &id, name, input),
+            None => text_message_response("compact_done", "compact bash results verified"),
+        },
         Scenario::BashStdoutRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_bash_stdout_final",
@@ -1989,6 +2037,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::WriteFileAllowed => "req_write_file_allowed",
         Scenario::WriteFileDenied => "req_write_file_denied",
         Scenario::MultiToolTurnRoundtrip => "req_multi_tool_turn_roundtrip",
+        Scenario::BashCompactResults => "req_bash_compact_results",
         Scenario::BashStdoutRoundtrip => "req_bash_stdout_roundtrip",
         Scenario::BashInterruptLongRunning => "req_bash_interrupt_long_running",
         Scenario::BashPermissionPromptApproved => "req_bash_permission_prompt_approved",

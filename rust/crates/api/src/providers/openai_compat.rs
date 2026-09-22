@@ -2543,8 +2543,8 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
     let parsed_error = serde_json::from_str::<ErrorEnvelope>(&body).ok();
-    let retryable =
-        crate::error::is_retryable_http_status(status.as_u16()) || is_retryable_400(status, &body);
+    let retryable = crate::error::is_retryable_http_status(status.as_u16())
+        || crate::error::is_retryable_masked_400(status, &body);
 
     let suggested_action = suggested_action_for_status(status);
 
@@ -2562,23 +2562,6 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         suggested_action,
         retry_after,
     })
-}
-
-/// Some gateways and proxies return HTTP 400 with a body like "HTTP 400 from
-/// backend (no parseable body)" when a transient network blip corrupts the
-/// exchange. These are gateway errors wearing a 400 mask, not real bad
-/// requests, so they deserve the same retry treatment as a 502. Genuine
-/// client errors (bad parameter, unknown model, oversized prompt) never
-/// contain these phrases and still fail immediately.
-fn is_retryable_400(status: reqwest::StatusCode, body: &str) -> bool {
-    if status != reqwest::StatusCode::BAD_REQUEST {
-        return false;
-    }
-    let lowered = body.to_ascii_lowercase();
-    lowered.contains("no parseable body")
-        || lowered.contains("connection reset")
-        || lowered.contains("broken pipe")
-        || lowered.contains("empty reply from server")
 }
 
 /// Generate a suggested user action based on the HTTP status code and error context.

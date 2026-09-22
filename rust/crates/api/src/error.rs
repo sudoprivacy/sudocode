@@ -622,10 +622,11 @@ pub fn format_context_window_blocked_error(session_id: &str, error: &ApiError) -
 /// Included:
 /// - `408` request timeout, `409` conflict, `429` rate limit
 /// - `500 502 503 504` server + gateway errors
-/// - `520 522 524` Cloudflare origin/gateway failures and timeouts (a 524 is
-///   the gateway giving up on a slow upstream; the request may or may not have
-///   been processed, but retrying matches every mainstream SDK and the win
-///   outweighs the rare duplicate-generation risk)
+/// - `520 522 524 525` Cloudflare origin/gateway failures, timeouts, and
+///   edge↔origin SSL handshake failures (a 524 is the gateway giving up on a
+///   slow upstream; the request may or may not have been processed, but
+///   retrying matches every mainstream SDK and the win outweighs the rare
+///   duplicate-generation risk)
 /// - `529` Anthropic "Overloaded"
 ///
 /// NOT included: `4xx` client errors (`400 401 403 404 413 422 …`) — a retry
@@ -636,7 +637,7 @@ pub fn format_context_window_blocked_error(session_id: &str, error: &ApiError) -
 pub const fn is_retryable_http_status(status: u16) -> bool {
     matches!(
         status,
-        408 | 409 | 429 | 500 | 502 | 503 | 504 | 520 | 522 | 524 | 529
+        408 | 409 | 429 | 500 | 502 | 503 | 504 | 520 | 522 | 524 | 525 | 529
     )
 }
 
@@ -647,7 +648,7 @@ mod tests {
     #[test]
     fn retryable_http_status_covers_gateway_and_overload_codes() {
         // Transient server / gateway / overload — retry may succeed.
-        for status in [408, 409, 429, 500, 502, 503, 504, 520, 522, 524, 529] {
+        for status in [408, 409, 429, 500, 502, 503, 504, 520, 522, 524, 525, 529] {
             assert!(
                 is_retryable_http_status(status),
                 "{status} should be retryable"

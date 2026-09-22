@@ -354,7 +354,7 @@ async fn execute_bash_async(
                 "Command interrupted by user",
                 "interrupted",
                 input.dangerously_disable_sandbox,
-                sandbox_status,
+                Some(sandbox_status),
             ));
         }
         () = &mut timeout_sleep => {
@@ -362,7 +362,7 @@ async fn execute_bash_async(
                 &format!("Command exceeded timeout of {timeout_ms} ms"),
                 "timeout",
                 input.dangerously_disable_sandbox,
-                sandbox_status,
+                Some(sandbox_status),
             ));
         }
         result = &mut output => result?,
@@ -546,7 +546,7 @@ async fn execute_bash_streaming(
                     "Command interrupted by user",
                     "interrupted",
                     input.dangerously_disable_sandbox,
-                    sandbox_status,
+                    Some(sandbox_status),
                 ));
             }
             _ = tokio::time::sleep_until(timeout_deadline) => {
@@ -555,7 +555,7 @@ async fn execute_bash_streaming(
                     &format!("Command exceeded timeout of {timeout_ms} ms"),
                     "timeout",
                     input.dangerously_disable_sandbox,
-                    sandbox_status,
+                    Some(sandbox_status),
                 ));
             }
             () = &mut readers => {
@@ -623,11 +623,11 @@ async fn execute_bash_streaming(
     })
 }
 
-fn interrupted_bash_output(
+pub(crate) fn interrupted_bash_output(
     stderr: &str,
     return_code_interpretation: &str,
     dangerously_disable_sandbox: Option<bool>,
-    sandbox_status: SandboxStatus,
+    sandbox_status: Option<SandboxStatus>,
 ) -> BashCommandOutput {
     BashCommandOutput {
         exit_code: None,
@@ -643,7 +643,7 @@ fn interrupted_bash_output(
         return_code_interpretation: Some(return_code_interpretation.to_string()),
         no_output_expected: Some(true),
         structured_content: None,
-        sandbox_status: Some(sandbox_status),
+        sandbox_status,
     }
 }
 

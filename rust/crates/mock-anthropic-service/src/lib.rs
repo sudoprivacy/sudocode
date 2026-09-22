@@ -618,7 +618,7 @@ fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
     })
 }
 
-// POSIX commands exercised by the Unix PTY regression; each status must survive
+// Shell commands exercised by the PTY regression; each status must survive
 // the real executor, transcript persistence, and the next provider request.
 fn compact_bash_step(request: &MessageRequest) -> Option<(String, &'static str, Value)> {
     let completed = request
@@ -635,8 +635,12 @@ fn compact_bash_step(request: &MessageRequest) -> Option<(String, &'static str, 
         json!({"command":"printf 'failure detail' >&2; exit 7"}),
         json!({"command":"sleep 1", "timeout":10}),
         json!({"command":"sleep 1", "run_in_background":true}),
-        json!({"command":"kill -TERM $$"}),
+        // Git Bash on Windows represents termination as an exit code, rather
+        // than the Unix signal status; exercise an explicit exit there.
+        json!({"command":if cfg!(unix) { "kill -TERM $$" } else { "exit 143" }}),
         json!({"command":"awk 'BEGIN { for (i=0;i<4000;i++) print \"large output line\" }'"}),
+        json!({"command":":"}),
+        json!({"command":"printf 'diagnostic only' >&2"}),
     ];
     if completed == steps.len() {
         return Some((

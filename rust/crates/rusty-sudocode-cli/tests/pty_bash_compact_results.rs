@@ -1,5 +1,4 @@
 //! Assert model-visible bash results through the real CLI, including save/resume.
-#![cfg(unix)]
 mod common;
 
 use common::TestEnv;
@@ -45,27 +44,11 @@ fn transcript(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-#[test]
-fn compact_bash_results_reach_model_and_survive_resume() {
-    let env = TestEnv::new("compact-bash-results");
-    if !env.is_mock() {
-        return;
-    }
-    let prompt = env.prompt("Exercise shell result statuses", "bash_compact_results");
-    let mut cli = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
-    cli.expect("compact bash results verified")
-        .expect("all tool steps complete");
-    assert_eq!(cli.expect_eof().unwrap(), 0);
-    let requests: Vec<Value> = env
-        .captured_message_bodies()
-        .iter()
-        .map(|body| serde_json::from_str(body).unwrap())
-        .collect();
-    let sent = results(requests.last().unwrap());
+fn assert_shell_statuses(sent: &BTreeMap<String, String>) {
     assert_eq!(
         sent.len(),
-        7,
-        "six shell runs plus reading offloaded output"
+        9,
+        "eight shell runs plus reading offloaded output"
     );
     let parsed: Vec<Value> = (0..5)
         .map(|i| serde_json::from_str(&sent[&format!("compact_bash_{i}")]).unwrap())
@@ -83,17 +66,48 @@ fn compact_bash_results_reach_model_and_survive_resume() {
     assert!(parsed[3]["backgroundTaskId"].as_str().is_some());
     assert_eq!(parsed[3]["noOutputExpected"], true);
     assert!(parsed[3].get("exit_code").is_none());
-    assert!(parsed[4]["returnCodeInterpretation"]
-        .as_str()
-        .unwrap()
-        .contains("signal"));
-    assert!(parsed[4].get("exit_code").is_none());
+    if cfg!(unix) {
+        assert!(parsed[4]["returnCodeInterpretation"]
+            .as_str()
+            .unwrap()
+            .contains("signal"));
+        assert!(parsed[4].get("exit_code").is_none());
+    } else {
+        assert_eq!(parsed[4]["exit_code"], 143);
+    }
+    let empty: Value = serde_json::from_str(&sent["compact_bash_6"]).unwrap();
+    assert_eq!(empty, serde_json::json!({"stdout":"", "exit_code":0}));
+    let diagnostic: Value = serde_json::from_str(&sent["compact_bash_7"]).unwrap();
+    assert_eq!(
+        diagnostic,
+        serde_json::json!({"stdout":"", "stderr":"diagnostic only", "exit_code":0})
+    );
     for result in &parsed {
         assert!(result.get("sandboxStatus").is_none());
         assert!(result.as_object().unwrap().values().all(|v| !v.is_null()));
     }
     assert!(sent["compact_bash_5"].contains("<persisted-output"));
-    assert!(sent["compact_bash_6"].contains("large output line"));
+    assert!(sent["compact_bash_8"].contains("large output line"));
+}
+
+#[test]
+fn compact_bash_results_reach_model_and_survive_resume() {
+    let env = TestEnv::new("compact-bash-results");
+    if !env.is_mock() {
+        return;
+    }
+    let prompt = env.prompt("Exercise shell result statuses", "bash_compact_results");
+    let mut cli = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
+    cli.expect("compact bash results verified")
+        .expect("all tool steps complete");
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let requests: Vec<Value> = env
+        .captured_message_bodies()
+        .iter()
+        .map(|body| serde_json::from_str(body).unwrap())
+        .collect();
+    let sent = results(requests.last().unwrap());
+    assert_shell_statuses(&sent);
     let path = transcript(&env.workspace_root().join(".scode/sessions")).expect("saved transcript");
     let saved = runtime::Session::load_from_path(&path).unwrap();
     let saved_results: BTreeMap<_, _> = saved
@@ -142,6 +156,7 @@ fn compact_bash_results_reach_model_and_survive_resume() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn cancelled_bash_persists_a_compact_interruption() {
     let env = TestEnv::new("compact-bash-cancel");
@@ -156,10 +171,15 @@ fn cancelled_bash_persists_a_compact_interruption() {
     cli.expect("❯").expect("initial prompt");
     cli.send(&format!("{prompt}\r")).unwrap();
     cli.expect("interrupt-start")
-        .expect("command has actually started");
+        .expect("running bash call is visible");
     cli.send("\x1b").unwrap();
     cli.expect("(?i)(cancelled|interrupted)")
         .expect("turn cancelled");
+    common::expect_input_line_cleared(
+        &cli,
+        std::time::Duration::from_secs(15),
+        "cancel ready to exit",
+    );
     cli.send("/exit\r").unwrap();
     cli.set_default_timeout(std::time::Duration::from_secs(15));
     cli.expect_eof().expect("cancel exits promptly");

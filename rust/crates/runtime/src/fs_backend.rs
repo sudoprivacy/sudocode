@@ -942,7 +942,7 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(crate::mailbox::is_mailbox_path(path))
+        Ok(crate::mailbox::is_conversation_transcript_path(path))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {

@@ -16,15 +16,19 @@ use std::sync::Arc;
 use crate::agent_mailbox::MailboxEnvelope;
 use crate::fs_backend::FsBackend;
 
-/// Whether `path` is a mailbox a send APPENDS to — a conversation's transcript.
+/// Whether `path` is a log a send APPENDS to — a conversation's transcript.
 ///
 /// Re-exported from the a2a substrate so that a backend deciding "is this
 /// framed?" and a test asserting the same thing cannot each answer it
-/// separately. They did: both spelled the leaf themselves, and when the mailbox
+/// separately. They did: both spelled the leaf themselves, and when the log
 /// moved to `…/transcript` both silently said "not a stream" — sending a JSONL
 /// line to the local filesystem instead of a record to the daemon, and
 /// reporting success.
-pub use a2a::is_mailbox_path;
+///
+/// The daemon decides this, and it is the same question it answers when it
+/// chooses what to stamp and what a cross-org guest may reach, so there is one
+/// predicate and scode reads it rather than holding an opinion.
+pub use a2a::is_conversation_transcript_path;
 /// Directory an A2A inbox lives under.
 ///
 /// scode's convention, not nexus's: nexus supplies the zone prefix, routing and

@@ -82,7 +82,7 @@ impl FsBackend for RecordingBackend {
     /// to the JSONL branch and was written to the local filesystem while the
     /// send reported success.
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(runtime::mailbox::is_mailbox_path(path))
+        Ok(runtime::mailbox::is_conversation_transcript_path(path))
     }
 
     fn read(&self, _: &str) -> io::Result<Vec<u8>> {

@@ -907,7 +907,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file or a PNG/JPEG/GIF/WebP image from the workspace. Images are attached for visual inspection (text-only models receive a vision-model description). After a screenshot command, call Read on its saved image path. Text reads up to 2000 lines by default; a page that would exceed the size cap is shrunk automatically and ends with a [Truncated: PARTIAL view …] banner telling you the offset/limit for the next page. When you already know which part of the file you need, only read that part.",
+            description: "Read a text file or a PNG/JPEG/GIF/WebP image from the workspace. Images are attached for visual inspection; a vision-capable model is required. After a screenshot command, call Read on its saved image path. Text reads up to 2000 lines by default; a page that would exceed the size cap is shrunk automatically and ends with a [Truncated: PARTIAL view …] banner telling you the offset/limit for the next page. When you already know which part of the file you need, only read that part.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

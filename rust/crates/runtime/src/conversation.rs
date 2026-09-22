@@ -659,7 +659,7 @@ pub trait ToolExecutor: Send {
             .as_ref()
             .and_then(|m| m.model.as_deref())
             .unwrap_or("");
-        crate::image_input::ToolOutput::from_dispatch(tool_name, output, model).await
+        crate::image_input::ToolOutput::from_dispatch(tool_name, output, model)
     }
 
     async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError>;
@@ -1687,11 +1687,8 @@ where
             let block = match block {
                 ContentBlock::Image { data, mime_type } => {
                     let model = self.running_model().to_string();
-                    tokio::select! {
-                        biased;
-                        () = self.hook_abort_signal.cancelled() => return Err(RuntimeError::new("image preparation cancelled")),
-                        result = crate::image_input::prepare_image(&data, &mime_type, &model) => result.map_err(RuntimeError::new)?,
-                    }
+                    crate::image_input::prepare_image(&data, &mime_type, &model)
+                        .map_err(RuntimeError::new)?
                 }
                 other => other,
             };

@@ -1,6 +1,6 @@
 //! Image input and screenshot feedback exercised through the real CLI in a PTY.
 //! Assertions inspect captured provider requests, including exact image bytes,
-//! tool-result ordering, permission failures, session replay, and VLM fallback.
+//! tool-result ordering, permission failures, session replay, and text-only rejection.
 //! The ignored browser case additionally requires installed suh and Chrome.
 //!
 //! Run normal coverage with `cargo test --test pty_image_handling`; add
@@ -356,64 +356,82 @@ fn missing_cli_image_fails_before_model_request() {
 #[path = "common/openai_compat_mock.rs"]
 mod image_vlm_mock;
 
+fn mark_model_text_only(env: &TestEnv) {
+    let cache = env.config_home().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("model-capabilities.json"), serde_json::json!({
+        "updated_at":0, "default":{"context_window":200000,"max_output_tokens":64000},
+        "models":{"claude-sonnet-4-6":{"context_window":200000,"max_output_tokens":64000,"vision_supported":false}}
+    }).to_string()).unwrap();
+}
+
 #[test]
-fn read_image_on_text_only_model_uses_vlm_and_sends_description() {
-    let env = TestEnv::new("read-image-vlm");
+fn text_only_model_rejects_images_without_calling_configured_vlm() {
+    let env = TestEnv::new("read-image-text-only");
+    if !env.is_mock() {
+        return; // This test needs deterministic capability and provider fixtures.
+    }
     seed_read_fixture(&env);
-    // In live mode the configured real model is used; the native path is
-    // covered above. The deterministic branch explicitly marks sonnet text-only.
+    mark_model_text_only(&env);
     let rt = tokio::runtime::Runtime::new().unwrap();
     let vlm = rt
         .block_on(image_vlm_mock::OpenAiCompatMock::spawn(
-            "RED_RECTANGLE_AND_CYAN_CIRCLE",
+            "UNEXPECTED_VLM_CALL",
         ))
         .unwrap();
-    if env.is_mock() {
-        let path = env.config_home().join("sudocode.json");
-        let mut config: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        config["auth_modes"]["proxy"]["sudorouter"] =
-            serde_json::json!({"baseUrl": vlm.base_url(), "apiKey": "test-image-key"});
-        fs::write(path, serde_json::to_string(&config).unwrap()).unwrap();
-        let cache = env.config_home().join("cache");
-        fs::create_dir_all(&cache).unwrap();
-        fs::write(cache.join("model-capabilities.json"), serde_json::json!({
-            "updated_at":0, "default":{"context_window":200000,"max_output_tokens":64000},
-            "models":{"claude-sonnet-4-6":{"context_window":200000,"max_output_tokens":64000,"vision_supported":false}}
-        }).to_string()).unwrap();
-    }
-    let prompt = env.prompt(
-        "Read screen.png and fixture.txt, then describe the image.",
-        "image_read_roundtrip",
-    );
-    let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
-    assert_eq!(
-        sess.expect_eof().unwrap(),
-        0,
-        "{}",
-        sess.render(|s| s.contents())
-    );
-    if env.is_mock() {
-        let requests: Vec<_> = rt
-            .block_on(vlm.captured_requests())
-            .into_iter()
-            .filter(|r| r.method == "POST" && r.path.ends_with("/chat/completions"))
-            .collect();
-        assert_eq!(requests.len(), 1, "the VLM must receive the pixels");
-        assert!(requests[0].raw_body.contains("data:image/png;base64,"));
+    let path = env.config_home().join("sudocode.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    config["auth_modes"]["proxy"]["sudorouter"] =
+        serde_json::json!({"baseUrl": vlm.base_url(), "apiKey": "test-image-key"});
+    fs::write(path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    // Both the serial and parallel tool paths must return an explicit tool
+    // error without pixels or a hidden request to the configured vision service.
+    for marker in ["", " IMAGE_SINGLE"] {
+        let prompt = env.prompt(
+            &format!("Read screen.png and fixture.txt, then describe the image.{marker}"),
+            "image_read_roundtrip",
+        );
+        let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
         assert_eq!(
-            requests[0].authorization.as_deref(),
-            Some("Bearer test-image-key")
+            sess.expect_eof().unwrap(),
+            0,
+            "{}",
+            sess.render(|s| s.contents())
         );
         let requests = captured_blocks(&env);
         let blocks = requests.last().unwrap().as_array().unwrap();
         assert!(blocks.iter().all(|b| b["type"] != "image"));
-        assert!(blocks.iter().any(|b| b["type"] == "text"
-            && b["text"]
-                .as_str()
-                .unwrap()
-                .contains("RED_RECTANGLE_AND_CYAN_CIRCLE")));
+        let result = blocks
+            .iter()
+            .find(|b| b["tool_use_id"] == "image-1")
+            .unwrap();
+        assert_eq!(result["is_error"], true);
+        assert!(result
+            .to_string()
+            .contains("Switch to a vision-capable model"));
+        if marker.is_empty() {
+            assert!(blocks.iter().any(|b| b["tool_use_id"] == "text-2"
+                && b.to_string().contains("ordinary text survives")));
+        }
     }
+
+    let before = env.captured_message_count();
+    let prompt = env.prompt("Describe @screen.png", "single_turn_text");
+    let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
+    sess.expect("Switch to a vision-capable model").unwrap();
+    sess.expect_eof().unwrap();
+    assert_eq!(
+        env.captured_message_count(),
+        before,
+        "rejected CLI image must not reach the main model"
+    );
+    let requests = rt.block_on(vlm.captured_requests());
+    assert!(
+        requests.iter().all(|r| r.method != "POST"),
+        "no vision side call is allowed: {requests:?}"
+    );
 }
 
 #[test]

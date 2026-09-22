@@ -45,7 +45,7 @@ use serde_json::{json, Map, Value};
 use crate::acp_sdk_server::{
     AcpStopReason, CumulativeUsage, PromptUsage, SdkAcpConfig, SessionForkSource, SessionRegistry,
 };
-use runtime::vlm_describe;
+use crate::vlm_describe;
 
 // ===========================================================================
 // EngineEvent → ACP SessionUpdate

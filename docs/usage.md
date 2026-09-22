@@ -172,15 +172,15 @@ Image source files are limited to 20 MiB; accepted files use the existing
 5 MiB / 8000 px image preflight, which downsamples when necessary. Images do
 not use text pagination or tool-output truncation.
 
-For a model marked text-only in the model capabilities table, scode uses the
-configured `auth_modes.proxy.sudorouter` account to obtain a visual description
-through `gemini-2.5-flash`. The main model receives an explicitly labelled
-description, not the original pixels. Missing credentials, invalid images, or
-a failed visual-description request are reported as errors. Vision-capable
-models receive the image directly.
+Vision-capable models receive image attachments directly. If the model
+capabilities table explicitly marks the active model as text-only, image Read
+returns a tool error asking the agent to switch to a vision-capable model;
+a CLI image prompt fails before making a model request. These paths do not
+call a second model or use another account. Unknown model capabilities retain
+the existing optimistic policy, so the provider may reject image input.
 
 Regression coverage lives in `pty_image_handling` (CLI references, image Read,
-parallel results, errors, VLM routing, and resume) and the API transport tests.
+parallel results, errors, text-only model rejection, and resume) and the API transport tests.
 With suh and Chrome installed, run the actual browser-to-model-payload test:
 
 ```sh

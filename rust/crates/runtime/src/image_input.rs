@@ -1,4 +1,4 @@
-//! Image files and tool attachments share the same validation and model routing.
+//! Read image files and construct native image attachments.
 use std::io;
 use std::path::Path;
 
@@ -88,7 +88,7 @@ impl ToolOutput {
 
     /// Adapt the legacy string dispatcher at the trusted Read boundary only.
     /// A shell/plugin returning image-looking JSON cannot inject attachments.
-    pub async fn from_dispatch(tool: &str, output: String, model: &str) -> Result<Self, ToolError> {
+    pub fn from_dispatch(tool: &str, output: String, model: &str) -> Result<Self, ToolError> {
         if !matches!(tool, "Read" | "read_file") {
             return Ok(Self::text(output));
         }
@@ -100,9 +100,12 @@ impl ToolOutput {
         }
         let image: ImageReadResult =
             serde_json::from_value(value).map_err(|e| ToolError::new(e.to_string()))?;
-        let attachment = prepare_image(&image.data, &image.mime_type, model)
-            .await
-            .map_err(ToolError::new)?;
+        ensure_vision_capable(model).map_err(ToolError::new)?;
+        // read_image already validated and preflighted this trusted Read result.
+        let attachment = ContentBlock::Image {
+            data: image.data,
+            mime_type: image.mime_type.clone(),
+        };
         Ok(Self {
             text: format!(
                 "Image read from {} ({}); attached below.",
@@ -122,45 +125,23 @@ impl ToolOutput {
     }
 }
 
-/// Validate before either native delivery or a VLM side call. Fail visibly;
-/// a failed image decode must never be presented as a successful image read.
-pub async fn prepare_image(data: &str, mime: &str, model: &str) -> Result<ContentBlock, String> {
+/// Reject models explicitly marked text-only. Unknown capabilities keep the
+/// existing optimistic policy and are ultimately validated by the provider.
+fn ensure_vision_capable(model: &str) -> Result<(), String> {
+    if !crate::model_capabilities::vision_capable(model) {
+        return Err(format!(
+            "Model '{model}' does not support image input. Switch to a vision-capable model to inspect this image."
+        ));
+    }
+    Ok(())
+}
+
+/// Validate incoming prompt attachments before native delivery.
+pub fn prepare_image(data: &str, mime: &str, model: &str) -> Result<ContentBlock, String> {
+    ensure_vision_capable(model)?;
     let (data, mime_type) =
         crate::image_registry::preflight_base64(data, mime).map_err(|e| e.to_string())?;
-    if crate::model_capabilities::vision_capable(model) {
-        return Ok(ContentBlock::Image { data, mime_type });
-    }
-    let config = crate::current_workspace_root().ok().and_then(|cwd| {
-        crate::ConfigLoader::default_for(cwd)
-            .load_sudocode_config()
-            .ok()
-    });
-    let credentials = config
-        .as_ref()
-        .and_then(|c| c.auth_modes.get("proxy"))
-        .and_then(|p| p.get("sudorouter"))
-        .and_then(|p| {
-            p.api_key
-                .as_ref()
-                .map(|key| (p.base_url.as_str(), key.as_str()))
-        });
-    let Some((url, key)) = credentials else {
-        return Err("image requires a vision-capable model or configured proxy.sudorouter for visual description".into());
-    };
-    let description = crate::vlm_describe::describe_image_via_vlm(
-        url,
-        key,
-        crate::vlm_describe::DEFAULT_VISION_MODEL,
-        &data,
-        &mime_type,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(ContentBlock::Text {
-        text: format!(
-            "[Image description from a vision model; not direct image input: {description}]"
-        ),
-    })
+    Ok(ContentBlock::Image { data, mime_type })
 }
 
 /// Resolve explicit CLI image references, including quoted paths containing

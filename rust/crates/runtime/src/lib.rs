@@ -64,7 +64,6 @@ mod session;
 pub mod session_control;
 pub mod test_support;
 pub mod verification_watcher;
-pub mod vlm_describe;
 pub use session_control::SessionStore;
 pub mod cron_registry;
 pub mod cron_schedule;

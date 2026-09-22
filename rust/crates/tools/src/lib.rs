@@ -2871,10 +2871,13 @@ fn run_bash(
     abort_signal: Option<&HookAbortSignal>,
 ) -> Result<String, String> {
     if let Some(output) = workspace_test_branch_preflight(&input.command) {
-        return serde_json::to_string_pretty(&output).map_err(|error| error.to_string());
+        return serde_json::to_string_pretty(&output.model_output())
+            .map_err(|error| error.to_string());
     }
     serde_json::to_string_pretty(
-        &execute_bash_with_abort(input, abort_signal).map_err(|error| error.to_string())?,
+        &execute_bash_with_abort(input, abort_signal)
+            .map_err(|error| error.to_string())?
+            .model_output(),
     )
     .map_err(|error| error.to_string())
 }
@@ -2998,6 +3001,7 @@ fn branch_divergence_output(
     );
 
     BashCommandOutput {
+        exit_code: None,
         stdout: String::new(),
         stderr: stderr.clone(),
         raw_output_path: None,
@@ -8145,6 +8149,7 @@ fn execute_shell_command(
         let pid = child.id();
         drop(child);
         return Ok(runtime::BashCommandOutput {
+            exit_code: None,
             stdout: String::new(),
             stderr: String::new(),
             raw_output_path: None,
@@ -8245,6 +8250,7 @@ fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime:
 
     match result.outcome {
         ShellOutcome::Completed(status) => runtime::BashCommandOutput {
+            exit_code: status.code(),
             stdout: stdout_text,
             stderr: stderr_text,
             raw_output_path: None,
@@ -8263,6 +8269,7 @@ fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime:
             sandbox_status: None,
         },
         ShellOutcome::Interrupted => runtime::BashCommandOutput {
+            exit_code: None,
             stdout: stdout_text,
             stderr: append_status_line(&stderr_text, "Command interrupted by user"),
             raw_output_path: None,
@@ -8278,6 +8285,7 @@ fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime:
             sandbox_status: None,
         },
         ShellOutcome::TimedOut => runtime::BashCommandOutput {
+            exit_code: None,
             stdout: stdout_text,
             stderr: append_status_line(
                 &stderr_text,
@@ -11919,7 +11927,8 @@ mod tests {
             .expect("bash should succeed");
         let success_output: serde_json::Value = serde_json::from_str(&success).expect("json");
         assert_eq!(success_output["stdout"], "hello");
-        assert_eq!(success_output["interrupted"], false);
+        assert_eq!(success_output["exit_code"], 0);
+        assert!(success_output.get("interrupted").is_none());
 
         let failure = execute_tool("bash", &json!({ "command": "printf 'oops' >&2; exit 7" }))
             .expect("bash failure should still return structured output");

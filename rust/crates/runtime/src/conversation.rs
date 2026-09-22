@@ -49,25 +49,18 @@ const MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS: u8 = 3;
 /// Message used in synthetic tool results when a turn is interrupted.
 const INTERRUPT_MESSAGE: &str = "Interrupted · What should Sudo Code do instead?";
 
-/// Preserve the bash result wire contract when cancellation wins the race with
-/// the blocking tool task. Other tools have no structured interruption shape.
+/// Cancellation can win before the blocking tool returns its execution result.
+/// Use the same constructor and model projection as an executor-side abort so
+/// synthetic results cannot drift from the bash result contract.
 fn interrupted_tool_output(tool_name: &str) -> String {
     if tool_name.eq_ignore_ascii_case("bash") {
-        serde_json::json!({
-            "stdout": "",
-            "stderr": "Command interrupted by user",
-            "rawOutputPath": null,
-            "interrupted": true,
-            "isImage": null,
-            "backgroundTaskId": null,
-            "backgroundedByUser": null,
-            "assistantAutoBackgrounded": null,
-            "dangerouslyDisableSandbox": null,
-            "returnCodeInterpretation": "interrupted",
-            "noOutputExpected": true,
-            "structuredContent": null,
-            "sandboxStatus": null,
-        })
+        crate::bash::interrupted_bash_output(
+            "Command interrupted by user",
+            "interrupted",
+            None,
+            None,
+        )
+        .model_output()
         .to_string()
     } else {
         INTERRUPT_MESSAGE.to_string()

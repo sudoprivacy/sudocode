@@ -56,17 +56,8 @@ fn interrupted_tool_output(tool_name: &str) -> String {
         serde_json::json!({
             "stdout": "",
             "stderr": "Command interrupted by user",
-            "rawOutputPath": null,
             "interrupted": true,
-            "isImage": null,
-            "backgroundTaskId": null,
-            "backgroundedByUser": null,
-            "assistantAutoBackgrounded": null,
-            "dangerouslyDisableSandbox": null,
             "returnCodeInterpretation": "interrupted",
-            "noOutputExpected": true,
-            "structuredContent": null,
-            "sandboxStatus": null,
         })
         .to_string()
     } else {

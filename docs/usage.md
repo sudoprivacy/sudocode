@@ -34,6 +34,22 @@ For the canonical, live command list:
 scode --help
 ```
 
+## Bash tool results
+
+Model-invoked `bash` returns compact JSON: `stdout` and the actual
+`exit_code` for a completed process, with nonempty `stderr` when present.
+Failures retain `returnCodeInterpretation`; interrupted runs include
+`interrupted: true`. Background launches retain `backgroundTaskId` and
+`noOutputExpected`, but do not claim a completed exit code. Signal termination
+also has no numeric exit code and is described in `returnCodeInterpretation`.
+
+Empty optional fields and routine sandbox capability flags are omitted. On
+failure, an available sandbox fallback reason is included as `sandboxWarning`.
+The full execution struct remains available internally; the compact text is
+persisted before it reaches the provider, so resume sends identical results.
+Large results still use the existing persisted-output marker and
+`read_tool_output` pagination.
+
 ## One-shot prompt
 
 ```bash

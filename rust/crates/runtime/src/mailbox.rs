@@ -16,25 +16,15 @@ use std::sync::Arc;
 use crate::agent_mailbox::MailboxEnvelope;
 use crate::fs_backend::FsBackend;
 
-/// Whether `path` is a mailbox a send APPENDS to — a conversation's transcript,
-/// or the node-local `chat-with-me` pipe.
+/// Whether `path` is a mailbox a send APPENDS to — a conversation's transcript.
 ///
 /// Re-exported from the a2a substrate so that a backend deciding "is this
 /// framed?" and a test asserting the same thing cannot each answer it
-/// separately. They did: both spelled it `ends_with(CHAT_WITH_ME_SUFFIX)`, and
-/// when the mailbox moved to `…/transcript` both silently said "not a stream"
-/// — sending a JSONL line to the local filesystem instead of a record to the
-/// daemon, and reporting success.
+/// separately. They did: both spelled the leaf themselves, and when the mailbox
+/// moved to `…/transcript` both silently said "not a stream" — sending a JSONL
+/// line to the local filesystem instead of a record to the daemon, and
+/// reporting success.
 pub use a2a::is_mailbox_path;
-/// The leaf of an A2A inbox path, re-exported so scode spells it the same way
-/// the daemon's mailbox-stamping policy does.
-///
-/// The SSOT is `a2a`, in the infra crate — the daemon decides which paths it
-/// stamps, so scode reading the constant rather than retyping it is what keeps
-/// the two in agreement. Re-exported HERE, and used from here, so there is one
-/// hop rather than each module reaching for `a2a` on its own.
-pub use a2a::CHAT_WITH_ME_SUFFIX;
-
 /// Directory an A2A inbox lives under.
 ///
 /// scode's convention, not nexus's: nexus supplies the zone prefix, routing and

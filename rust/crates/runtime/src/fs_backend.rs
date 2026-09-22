@@ -916,7 +916,7 @@ impl FsBackend for NexusVfsFsBackend {
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
         // Ask the predicate rather than restating it. This branch spelled
-        // `ends_with(CHAT_WITH_ME_SUFFIX)` on its own, so when the mailbox moved
+        // spelled the mailbox leaf on its own, so when the mailbox moved
         // to `…/transcript` it quietly took the read-modify-write path below:
         // every append re-read the stream through `read` (which yields its FIRST
         // frame), concatenated the new envelope onto that, and wrote the pair

@@ -50,7 +50,6 @@ pub use kernel::kernel::syscall::KernelSyscall;
 
 pub use crate::agent_mailbox::MailboxEnvelope;
 use crate::mailbox::Mailbox;
-pub use crate::mailbox::CHAT_WITH_ME_SUFFIX;
 
 use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};
 use crate::hooks::HookAbortSignal;

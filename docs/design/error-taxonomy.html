@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sudocode 错误处理架构 · Who-Can-Act Taxonomy</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --muted: #8b949e;
+    --transport: #58a6ff; --model: #d29922; --human: #3fb950; --fatal: #f85149;
+    --accent: #a371f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.65; padding: 0 0 80px;
+  }
+  header {
+    padding: 48px 24px 32px; text-align: center;
+    background: radial-gradient(ellipse at top, #1b2230 0%, var(--bg) 70%);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: .5px; }
+  header .sub { color: var(--muted); font-size: 15px; }
+  header .tag { display:inline-block; margin-top:14px; padding:4px 12px; border:1px solid var(--border); border-radius:999px; font-size:12px; color:var(--muted); }
+  main { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  section { margin-top: 48px; }
+  h2 { font-size: 22px; border-left: 3px solid var(--accent); padding-left: 12px; margin-bottom: 6px; }
+  h2 .n { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 8px; }
+  .lead { color: var(--muted); margin: 8px 0 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; margin: 16px 0; }
+  pre.mermaid { background: none; border: none; text-align: center; padding: 16px 0; visibility: hidden; }
+  pre.mermaid[data-processed] { visibility: visible; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: #1b2230; font-weight: 600; }
+  td code, p code, li code { background: #1b2230; padding: 1px 6px; border-radius: 5px; font-size: 12.5px; color: #c9d1d9; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:6px; font-size:12px; font-weight:600; white-space:nowrap; }
+  .pill.transport { background: rgba(88,166,255,.15); color: var(--transport); border:1px solid rgba(88,166,255,.35);}
+  .pill.model { background: rgba(210,153,34,.15); color: var(--model); border:1px solid rgba(210,153,34,.35);}
+  .pill.human { background: rgba(63,185,80,.15); color: var(--human); border:1px solid rgba(63,185,80,.35);}
+  .pill.fatal { background: rgba(248,81,73,.15); color: var(--fatal); border:1px solid rgba(248,81,73,.35);}
+  .grid4 { display:grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin:16px 0; }
+  .bucket { border-radius:12px; padding:16px; border:1px solid var(--border); background:var(--panel); }
+  .bucket h3 { margin:0 0 8px; font-size:16px; display:flex; align-items:center; gap:8px; }
+  .bucket .who { font-size:12px; color:var(--muted); }
+  .bucket ul { margin:10px 0 0; padding-left:18px; font-size:13px; color:#c9d1d9; }
+  .dot { width:10px;height:10px;border-radius:50%;display:inline-block; }
+  .warn { border-left:3px solid var(--fatal); background:rgba(248,81,73,.06); padding:12px 16px; border-radius:8px; margin:12px 0; }
+  .ok { border-left:3px solid var(--human); background:rgba(63,185,80,.06); padding:12px 16px; border-radius:8px; margin:12px 0; }
+  .note { border-left:3px solid var(--model); background:rgba(210,153,34,.06); padding:12px 16px; border-radius:8px; margin:12px 0; }
+  .file { color: var(--transport); font-family: "SF Mono", Consolas, monospace; font-size: 12.5px; }
+  footer { text-align:center; color:var(--muted); font-size:13px; margin-top:56px; padding-top:24px; border-top:1px solid var(--border); }
+  .legend { font-size:12px; color:var(--muted); margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sudocode 错误处理架构</h1>
+  <div class="sub">The "Who-Can-Act" Taxonomy · 谁能对这个错误采取行动</div>
+  <div class="tag">draft · 供后续 refactor 回看 · 基于只读审计</div>
+</header>
+
+<main>
+
+<section>
+  <h2><span class="n">0</span>一句话</h2>
+  <p class="lead">错误不该按"要不要重试"两分,而该按 <strong>谁能修</strong> 四分。这决定了系统对它做什么。</p>
+  <div class="grid4">
+    <div class="bucket" style="border-color:var(--transport)">
+      <h3><span class="dot" style="background:var(--transport)"></span>Transport</h3>
+      <div class="who">传输层自己能修</div>
+      <ul><li>429 / 5xx / 520·522·524·525</li><li>connect / timeout</li><li>截断的流</li></ul>
+      <div style="margin-top:10px"><span class="pill transport">自动 retry</span></div>
+    </div>
+    <div class="bucket" style="border-color:var(--model)">
+      <h3><span class="dot" style="background:var(--model)"></span>Model</h3>
+      <div class="who">LLM 能修</div>
+      <ul><li>坏的 tool 参数</li><li>模型构造的非法请求</li><li>context 溢出(可 compact 时)</li></ul>
+      <div style="margin-top:10px"><span class="pill model">llm-revisit 回喂给模型</span></div>
+    </div>
+    <div class="bucket" style="border-color:var(--human)">
+      <h3><span class="dot" style="background:var(--human)"></span>Human</h3>
+      <div class="who">人能修</div>
+      <ul><li>认证失败 401/403</li><li>配置错 / 缺 key</li><li>请求体过大</li></ul>
+      <div style="margin-top:10px"><span class="pill human">报给用户</span></div>
+    </div>
+    <div class="bucket" style="border-color:var(--fatal)">
+      <h3><span class="dot" style="background:var(--fatal)"></span>Fatal</h3>
+      <div class="who">没人能修</div>
+      <ul><li>服务器返回坏数据</li><li>不可恢复的内部错误</li></ul>
+      <div style="margin-top:10px"><span class="pill fatal">真 fatal · 停</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">1</span>决策流:一个错误进来,系统怎么走</h2>
+  <p class="lead">目标终态 —— 每个错误恰好落进一个桶,由 <code>action()</code> 单点决定。</p>
+  <pre class="mermaid">
+flowchart TD
+    E([错误产生]) --> A{"action()<br/>谁能修?"}
+    A -->|Transport| T["自动 retry<br/>共享 retry 循环<br/>max_retries=8"]
+    A -->|Model| M["llm-revisit<br/>作为 tool_result 回喂模型"]
+    A -->|Human| H["surface<br/>报给用户 · 暂停"]
+    A -->|Fatal| F["abort<br/>真 fatal"]
+    T -->|重试耗尽| X["降级 → 按 last_error 的桶"]
+    M -->|模型改不动/次数耗尽| H
+    style T fill:#132030,stroke:#58a6ff,color:#e6edf3
+    style M fill:#2a2410,stroke:#d29922,color:#e6edf3
+    style H fill:#12241a,stroke:#3fb950,color:#e6edf3
+    style F fill:#2a1414,stroke:#f85149,color:#e6edf3
+    style X fill:#161b22,stroke:#8b949e,color:#8b949e
+  </pre>
+  <div class="legend">注:两条虚线转移(retry 耗尽 → 回落桶;model 改不动 → human)是<strong>状态依赖</strong>的,不能烤进错误类型里 —— 见 §4。</div>
+</section>
+
+<section>
+  <h2><span class="n">2</span>状态码 → 桶 映射表</h2>
+  <p class="lead">Transport 桶的 HTTP 状态集合已经是单一 SSOT(<code>is_retryable_http_status</code>,PR #722/#727)。</p>
+  <table>
+    <thead><tr><th>状态 / 错误</th><th>桶</th><th>为什么</th></tr></thead>
+    <tbody>
+      <tr><td><code>408 409 429</code></td><td><span class="pill transport">Transport</span></td><td>超时 / 冲突 / 限流 —— 瞬时</td></tr>
+      <tr><td><code>500 502 503 504</code></td><td><span class="pill transport">Transport</span></td><td>服务器 / 网关错误</td></tr>
+      <tr><td><code>520 522 524 525</code></td><td><span class="pill transport">Transport</span></td><td>Cloudflare 边缘↔上游 故障 / 超时 / SSL 握手失败</td></tr>
+      <tr><td><code>529</code></td><td><span class="pill transport">Transport</span></td><td>Anthropic "Overloaded"</td></tr>
+      <tr><td>connect / timeout / 截断流</td><td><span class="pill transport">Transport</span></td><td><code>is_connect/is_timeout</code> + <code>IncompleteStream</code></td></tr>
+      <tr><td><code>422</code> + 可改消息</td><td><span class="pill model">Model</span></td><td>模型构造的请求非法,改了能过</td></tr>
+      <tr><td>tool 参数错(<code>is_error:true</code>)</td><td><span class="pill model">Model</span></td><td>已走 llm-revisit(tool_result 回喂)</td></tr>
+      <tr><td>context-window 溢出</td><td><span class="pill model">Model</span> → <span class="pill human">Human</span></td><td>可 compact 时 Model;compact 耗尽转 Human(状态依赖)</td></tr>
+      <tr><td><code>401 403</code> / 缺 key / 配置错</td><td><span class="pill human">Human</span></td><td>只有人能提供凭据 / 改配置</td></tr>
+      <tr><td><code>413</code> 请求体过大</td><td><span class="pill human">Human</span></td><td>需人减小输入(或上层 compact 策略)</td></tr>
+      <tr><td>服务器返回坏 JSON / 语义 decode 失败</td><td><span class="pill fatal">Fatal</span></td><td>重试也是一样的坏数据</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="n">3</span>现状:分类只活在一个类型里,一跨边界就死</h2>
+  <p class="lead">审计发现 —— <code>ApiError</code> 是唯一会自我分类的错误;越过 api crate 后全退化成 <code>String</code>,上层靠字符串匹配重新猜。</p>
+  <pre class="mermaid">
+flowchart LR
+    subgraph api["crate: api ✅ 有分类"]
+      AE["ApiError<br/>is_retryable() · safe_failure_class()<br/>categorize() · is_retryable_http_status()"]
+    end
+    subgraph runtime["crate: runtime ⚠️ 分类丢失"]
+      RE["RuntimeError<br/>{ message, kind }<br/>只剩 ContextWindowBlocked 一个 bit"]
+      CO["compact.rs<br/>字符串匹配 'context_window_blocked'"]
+    end
+    subgraph tools["crate: tools ⚠️"]
+      TE["ToolError = String 包装"]
+    end
+    subgraph events["crate: engine-events ⚠️"]
+      EE["EngineEvent::Error<br/>{ message: String }"]
+    end
+    AE -->|"runtime_error_from_api()<br/>❗三处重复"| RE
+    AE -.->|降级为 string| TE
+    RE --> CO
+    RE -->|降级为 string| EE
+    style AE fill:#132030,stroke:#58a6ff,color:#e6edf3
+    style RE fill:#2a2410,stroke:#d29922,color:#e6edf3
+    style CO fill:#2a1414,stroke:#f85149,color:#e6edf3
+    style TE fill:#161b22,stroke:#8b949e,color:#8b949e
+    style EE fill:#161b22,stroke:#8b949e,color:#8b949e
+  </pre>
+
+  <h3 style="font-size:16px;margin-top:24px">审计发现的具体问题</h3>
+  <table>
+    <thead><tr><th>问题</th><th>位置</th><th>类型</th></tr></thead>
+    <tbody>
+      <tr><td><code>runtime_error_from_api</code> 三处重复</td><td><span class="file">completion.rs:57 · tools/lib.rs:6761 · engine_client.rs:457</span></td><td>DRY 违背</td></tr>
+      <tr><td><code>is_retryable_400</code> 字节级相同两份</td><td><span class="file">anthropic.rs:1068 · openai_compat.rs:2573</span></td><td>DRY 违背</td></tr>
+      <tr><td>context-window 检测两份、marker 集不同<br/>(可互相不一致)</td><td><span class="file">error.rs (markers) · compact.rs:649 is_prompt_too_long</span></td><td>潜在真 bug</td></tr>
+      <tr><td>compact.rs 靠匹配字符串 <code>"context_window_blocked"</code> 还原已丢的分类</td><td><span class="file">compact.rs:658</span></td><td>boundary leak</td></tr>
+      <tr><td>4 个独立 retry 循环,3 套 "retryable" 词汇</td><td><span class="file">http_transport · tools/lib · compact.rs · mcp_server_manager</span></td><td>分散</td></tr>
+    </tbody>
+  </table>
+  <div class="ok"><strong>好消息:</strong> retryable 的状态码分类已经是干净单源(#722/#727)。这块不动。</div>
+</section>
+
+<section>
+  <h2><span class="n">4</span>taxonomy 不能干净落地的 3 处(诚实标注)</h2>
+  <p class="lead">4 桶是对的轴,但现实有 3 处 resist,重构必须显式处理、不能假装。</p>
+  <div class="note">
+    <strong>① context-window 是状态依赖的。</strong> 它先是 <span class="pill model">Model</span>(自动 compact + retry),compact 次数耗尽后才变 <span class="pill human">Human</span>。桶取决于运行时状态 → <code>action()</code> 必须结合 compaction 预算计算,不能把桶写死进错误类型。
+  </div>
+  <div class="note">
+    <strong>② llm-revisit 目前只覆盖 tool 错误。</strong> provider 错误从不走回喂模型这条路。要让 <span class="pill model">Model</span>-可行动的 provider 错误也进 llm-revisit,是 Phase 2 的活。
+  </div>
+  <div class="note">
+    <strong>③ Human vs Fatal 现在根本没被表示。</strong> <code>safe_failure_class</code> 是给 telemetry 的分析轴,不是"谁能行动"的行为轴。两轴要分开(SRP),不能混用。
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">5</span>重构分阶段(每阶段独立可发 · CI 绿 · 行为保持)</h2>
+  <p class="lead">"让全代码都用这套"横跨 5 crate,一次做完 review 不了。分 3 阶段,先交付地基。</p>
+  <pre class="mermaid">
+flowchart TD
+    P1["Phase 1 · 地基 SSOT + 去重<br/>—————————<br/>· pub enum ErrorAction{Transport,Model,Human,Fatal}<br/>· ApiError::action() 单点定义<br/>· is_retryable() 变成它的薄封装(行为不变)<br/>· 合并 3×runtime_error_from_api → 1<br/>· 合并 2×is_retryable_400 → 1<br/>· 统一 context-window 检测(修潜在 bug)<br/>· 零用户可见行为变化"]
+    P2["Phase 2 · provider 错误接入 llm-revisit<br/>—————————<br/>· Model-可行动的 provider 错误<br/>  走 tool-result 式回喂<br/>· 需 e2e 测试"]
+    P3["Phase 3 · context-window 状态机显式化<br/>—————————<br/>· 干掉字符串匹配的 compaction-耗尽逻辑<br/>· Model→Human 转移集中一处计算"]
+    P1 --> P2 --> P3
+    style P1 fill:#12241a,stroke:#3fb950,color:#e6edf3
+    style P2 fill:#2a2410,stroke:#d29922,color:#e6edf3
+    style P3 fill:#132030,stroke:#58a6ff,color:#e6edf3
+  </pre>
+  <div class="ok"><strong>Phase 1 是纯 DRY + SSOT + 去 boundary-leak,零行为变化</strong> —— 最安全的第一步,后面都建在它上面。</div>
+</section>
+
+<section>
+  <h2><span class="n">6</span>守则(重构全程红线)</h2>
+  <table>
+    <tbody>
+      <tr><td>基础设施</td><td>不碰 nexus kernel / syscall / raft ABI —— 全在 api/runtime/engine 的错误路径,零 infra-ABI 面</td></tr>
+      <tr><td>持久化</td><td>错误是 ephemeral,不持久化任何东西</td></tr>
+      <tr><td>删除</td><td>被替换的重复函数 / marker 直接删,callers 重指;不留"replacement for the retired X"墓碑</td></tr>
+      <tr><td>Perf</td><td><code>action()</code> 是 inline enum match,只在出错时走,成功路径零开销</td></tr>
+      <tr><td>SRP / 正交</td><td>行为轴(<code>ErrorAction</code>)与分析轴(<code>safe_failure_class</code>)分开,互不混用</td></tr>
+      <tr><td>验证</td><td>每阶段 fmt + clippy 干净,全 CI 绿才 merge</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  Sudocode error-handling taxonomy · 基于只读审计(不改代码)· 供 refactor 分阶段落地时回看<br/>
+  已落地地基:PR #721(Running 卡 overlay-only)· #722(retry 状态码 SSOT)· #727(补 525)
+</footer>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark', look: 'handDrawn', securityLevel: 'loose' });
+</script>
+</body>
+</html>

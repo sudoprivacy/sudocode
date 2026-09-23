@@ -777,7 +777,11 @@ fn enter_key_event_for_value(
     }
 }
 
-fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -> String {
+fn format_question_panel(
+    question: &QuestionPromptView,
+    selected_index: usize,
+    custom_input: &str,
+) -> String {
     let mut lines = Vec::new();
     if let Some(title) = question.title.as_deref().filter(|title| !title.is_empty()) {
         lines.push(format!("[{title}]"));
@@ -816,20 +820,35 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
         ));
     }
     let max_digit = question.options.len().min(9);
+    // Built-in custom-input row: every DialPad has it. When the question opted
+    // into free text (`allow_custom_input`), it accepts typing in-place; the row
+    // shows the typed buffer (with a caret when selected) or the hint. When the
+    // question did not opt in, the row is omitted.
     if question.allow_custom_input {
-        let hint = question
-            .custom_input_hint
-            .as_deref()
-            .filter(|hint| !hint.is_empty())
-            .unwrap_or("type your own answer");
-        // The custom-input row sits at index == options.len(), so Up/Down can
-        // land on it like any option; `>` marks it when selected.
-        let selector = if selected_index == question.options.len() {
-            ">"
+        let on_row = selected_index == question.options.len();
+        let selector = if on_row { ">" } else { " " };
+        let body = if custom_input.is_empty() {
+            let hint = question
+                .custom_input_hint
+                .as_deref()
+                .filter(|hint| !hint.is_empty())
+                .unwrap_or("type your own answer");
+            if on_row {
+                // Show a caret so it reads as an active field once selected.
+                format!(
+                    "\u{2588} {}{hint}{}",
+                    crate::render::DIM,
+                    crate::render::RESET
+                )
+            } else {
+                format!("{}{hint}{}", crate::render::DIM, crate::render::RESET)
+            }
+        } else if on_row {
+            format!("{custom_input}\u{2588}")
         } else {
-            " "
+            custom_input.to_string()
         };
-        lines.push(format!("{selector} [+] {hint}"));
+        lines.push(format!("{selector} [+] {body}"));
     }
     let arrow_hint = if question.back_value.is_some() {
         "\u{2190}\u{2192} back/open \u{00b7} "
@@ -1353,11 +1372,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut tab_index = hooks.use_state(|| 0usize);
     let mut footer_hint = hooks.use_state(|| None::<(String, Instant)>);
     let mut dialpad_cursor = hooks.use_state(|| 0usize);
-    // When the user starts typing a free-form answer to a DialPad question
-    // (only when the question set `allow_custom_input`), the active question is
-    // captured here so TextInput's Enter routes the typed text back as the
-    // answer instead of submitting it as a new prompt. Cleared on submit/cancel.
-    let mut custom_answer_question = hooks.use_state(|| None::<QuestionPromptView>);
+    // Free-text buffer for a DialPad's built-in custom-input row. Every DialPad
+    // has this row (empty until the question opts in via `allow_custom_input`);
+    // typing appends here in-place — no slot switch, no component-mount race —
+    // mirroring how FuzzySelect owns its `filter`. Cleared when a question opens.
+    let mut dialpad_input = hooks.use_state(String::new);
     // Ephemeral paste store: placeholder_id -> real pasted text.
     // Allocated when the user pastes, freed on submit/clear.
     // Never persisted — the real content goes into the submitted message.
@@ -1435,6 +1454,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     .position(|o| o.recommended)
                                     .unwrap_or(0);
                                 dialpad_cursor.set(initial);
+                                dialpad_input.set(String::new());
                                 InputSlot::DialPad(question)
                             };
                             input_slot.set(slot);
@@ -1582,15 +1602,24 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             InputSlot::DialPad(question) => {
                                 let selected = dialpad_cursor.get();
-                                if question.allow_custom_input
-                                    && selected == question.options.len()
-                                {
-                                    // Cursor is on the `[+]` custom-input row —
-                                    // enter free-text mode; Enter there routes
-                                    // the typed text back as the answer.
-                                    custom_answer_question.set(Some(question.clone()));
-                                    input_slot.set(InputSlot::TextInput);
-                                    input_value.set(String::new());
+                                let on_custom_row =
+                                    question.allow_custom_input && selected == question.options.len();
+                                if on_custom_row {
+                                    // On the `[+]` row: submit the typed buffer
+                                    // as the free-text answer. Empty buffer does
+                                    // nothing (stay on the row so the user can
+                                    // type), matching an input field.
+                                    let answer = dialpad_input.read().trim().to_string();
+                                    if !answer.is_empty() {
+                                        if !*has_submitted.read() {
+                                            has_submitted.set(true);
+                                        }
+                                        let _ = input_tx_for_events
+                                            .send(InputEvent::QuestionAnswer(answer));
+                                        dialpad_input.set(String::new());
+                                        input_value.set(String::new());
+                                        input_slot.set(InputSlot::TextInput);
+                                    }
                                 } else {
                                     submit_dialpad_selection(question, selected, &input_tx_for_events);
                                     if !*has_submitted.read() { has_submitted.set(true); }
@@ -1628,22 +1657,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             InputSlot::TextInput => {
                                 let val = input_value.read().clone();
-                                // If we're typing a free-form answer to a
-                                // DialPad question (allow_custom_input), route
-                                // the text back as the answer, not a new prompt.
-                                if custom_answer_question.read().is_some() {
-                                    let trimmed = val.trim();
-                                    if !trimmed.is_empty() {
-                                        if !*has_submitted.read() {
-                                            has_submitted.set(true);
-                                        }
-                                        let _ = input_tx_for_events
-                                            .send(InputEvent::QuestionAnswer(trimmed.to_string()));
-                                        input_value.set(String::new());
-                                        custom_answer_question.set(None);
-                                    }
-                                    return;
-                                }
                                 if let Some(event) = enter_key_event_for_value(None, 0, &val) {
                                     if !*has_submitted.read() { has_submitted.set(true); }
                                     match event {
@@ -1829,8 +1842,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     // ── Digit shortcut — DialPad only ─────────────────
+                    // Only when NOT composing free text: an empty custom-input
+                    // buffer AND the cursor not parked on the `[+]` row. Once you
+                    // start typing (or select `[+]`), digits are literal input.
                     KeyCode::Char(ch)
-                        if matches!(current_slot, InputSlot::DialPad(ref q) if q.options.len() >= 2)
+                        if matches!(current_slot, InputSlot::DialPad(ref q)
+                            if q.options.len() >= 2
+                                && dialpad_input.read().is_empty()
+                                && dialpad_cursor.get() != q.options.len())
                             && ch.is_ascii_digit()
                             && !modifiers.contains(KeyModifiers::CONTROL)
                             && !modifiers.contains(KeyModifiers::ALT) =>
@@ -1850,21 +1869,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                         }
                     }
-                    // ── Typing a free-form answer — DialPad with allow_custom_input ──
-                    // A printable character (that is not a digit quick-select)
-                    // switches to TextInput seeded with that char; the active
-                    // question is captured so Enter routes the text back as the
-                    // answer. Only when the question opted in via
-                    // `allow_custom_input`.
+                    // ── Typing a free-form answer — DialPad custom-input row ──
+                    // A printable char (not a digit quick-select) appends to the
+                    // DialPad's in-place custom-input buffer and moves the cursor
+                    // onto the `[+]` row. No slot switch, so a fast keystroke
+                    // burst can't be dropped by a component-mount race. Only when
+                    // the question opted in via `allow_custom_input`.
                     KeyCode::Char(ch)
                         if matches!(current_slot, InputSlot::DialPad(ref q) if q.allow_custom_input)
                             && !modifiers.contains(KeyModifiers::CONTROL)
                             && !modifiers.contains(KeyModifiers::ALT) =>
                     {
                         if let InputSlot::DialPad(ref question) = current_slot {
-                            custom_answer_question.set(Some(question.clone()));
-                            input_slot.set(InputSlot::TextInput);
-                            input_value.set(ch.to_string());
+                            let mut buf = dialpad_input.read().clone();
+                            buf.push(ch);
+                            dialpad_input.set(buf);
+                            dialpad_cursor.set(question.options.len());
                         }
                     }
                     // ── Typing in FuzzySelect updates filter ──────────
@@ -1885,6 +1905,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             fs.filter.pop();
                             fs.apply_filter();
                         }
+                    }
+                    KeyCode::Backspace
+                        if matches!(current_slot, InputSlot::DialPad(_))
+                            && !dialpad_input.read().is_empty() =>
+                    {
+                        let mut buf = dialpad_input.read().clone();
+                        buf.pop();
+                        dialpad_input.set(buf);
                     }
                     // ── Global keys ───────────────────────────────────
                     KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1912,9 +1940,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Esc => {
-                        // In FuzzySelect/DialPad/Hint, ESC cancels.
-                        // Also drop any in-progress custom answer.
-                        custom_answer_question.set(None);
+                        // In FuzzySelect/DialPad/Hint, ESC cancels. Also drop any
+                        // in-progress DialPad custom-input buffer.
+                        dialpad_input.set(String::new());
                         if !matches!(current_slot, InputSlot::TextInput | InputSlot::Hint(_)) {
                             input_slot.set(InputSlot::TextInput);
                             input_value.set(String::new());
@@ -2020,7 +2048,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let (panel_text, prompt_label) = match &current_input_slot {
         InputSlot::Hint(_) | InputSlot::TextInput => (None, crate::render::PROMPT_PREFIX),
         InputSlot::DialPad(q) => (
-            Some(format_question_panel(q, dialpad_cursor.get())),
+            Some(format_question_panel(
+                q,
+                dialpad_cursor.get(),
+                &dialpad_input.read(),
+            )),
             "\u{2753} ",
         ),
         InputSlot::FuzzySelect(fs) => (Some(fs.format_panel()), "\u{1f50d} "),
@@ -2398,7 +2430,7 @@ mod tests {
 
     #[test]
     fn question_panel_marks_selected_option() {
-        let panel = format_question_panel(&question_with_options(), 1);
+        let panel = format_question_panel(&question_with_options(), 1, "");
 
         assert!(panel.contains("[Setup]"));
         assert!(panel.contains(" [1] Project (recommended)"));
@@ -2411,13 +2443,28 @@ mod tests {
         question.allow_custom_input = true;
         question.custom_input_hint = Some("type a comment".to_string());
 
-        // Cursor on the `[+]` row (index == options.len()) marks it, not an
-        // option — this is the row Up/Down can now reach and Enter opens for
-        // free-text input.
-        let panel = format_question_panel(&question, question.options.len());
-        assert!(panel.contains("> [+] type a comment"));
+        // Cursor on the `[+]` row (index == options.len()) marks it; empty buffer
+        // shows a caret + the hint. This is the row Up/Down reach and typing
+        // fills in-place.
+        let panel = format_question_panel(&question, question.options.len(), "");
+        assert!(panel.contains("> [+]"));
+        assert!(panel.contains("type a comment"));
         assert!(panel.contains("  [1] Project"));
         assert!(panel.contains("  [2] User"));
+    }
+
+    #[test]
+    fn custom_input_row_shows_typed_buffer_in_place() {
+        let mut question = question_with_options();
+        question.allow_custom_input = true;
+
+        // With a non-empty buffer, the `[+]` row renders the typed text (with a
+        // caret when selected) instead of the hint — no slot switch needed.
+        let on_row = format_question_panel(&question, question.options.len(), "hi there");
+        assert!(on_row.contains("> [+] hi there"));
+        let off_row = format_question_panel(&question, 0, "hi there");
+        assert!(off_row.contains("[+] hi there"));
+        assert!(!off_row.contains("type your own answer"));
     }
 
     #[test]

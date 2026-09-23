@@ -4271,9 +4271,26 @@ impl LiveCli {
         // If the plan confirmation dialog chose "clear context & execute", pick
         // up the plan and re-run in a fresh session (the engine preserves the
         // current model across the reset).
-        if let Some(plan) = take_pending_plan_execution() {
+        // "Clear context & execute" = human-in-the-loop compaction: reset the
+        // session, then re-run with the APPROVED plan (the plan file is the SSOT)
+        // plus the todo-continuity block — the same light action auto-compaction
+        // uses — so todos survive the clear. No LLM summarization call needed:
+        // the reviewed plan IS the continuity, which makes this faster than an
+        // automatic compaction. `pending` is just the "user chose clear+execute"
+        // signal; read the plan text from the file, not the in-memory string.
+        if take_pending_plan_execution().is_some() {
             self.lifecycle.reset_session()?;
-            let prompt = format!("Implement the following plan:\n\n{plan}");
+            let plan = runtime::plan_store::read_plan().unwrap_or_default();
+            let mut prompt = String::from(
+                "You are resuming after the user APPROVED your plan and chose to clear the \
+                 conversation. The prior exploration context is gone on purpose; the approved \
+                 plan below is the source of truth. Implement it now.\n\n",
+            );
+            prompt.push_str(&plan);
+            if let Some(todo_block) = runtime::render_todo_continuity_block() {
+                prompt.push_str("\n\n");
+                prompt.push_str(&todo_block);
+            }
             return self.run_turn_impl(&prompt, interactive_cancel);
         }
         Ok(())

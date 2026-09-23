@@ -1159,7 +1159,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Write an implementation plan and present it to the user for approval before you start changing code.\n\n",
                 "Use this proactively before a non-trivial implementation task — getting sign-off on the approach first prevents wasted effort. Prefer it when ANY of these apply: a new feature, several valid approaches, changes to existing behavior, an architectural choice, edits spanning more than 2-3 files, unclear scope you must explore first, or when the approach could reasonably go multiple ways (if you'd ask a clarifying question about the approach, write a plan instead).\n\n",
                 "Skip it for simple work: one-line or obvious fixes, a single function with clear requirements, tasks the user already specified in detail, or pure research/read-only exploration.\n\n",
-                "Pass the full plan as `content` (markdown). It is saved to the session's plan file and shown to the user, who chooses whether to execute it, comment, or stop. When executing, this plan is the source of truth — write it completely, not a summary."
+                "Pass the full plan as `content` (markdown). It is saved to the session's plan file and shown to the user, who chooses whether to execute it, comment, or stop. When executing, this plan is the source of truth — write it completely, not a summary.\n\n",
+                "Before writing the plan: thoroughly explore the codebase to understand existing patterns, identify similar features and architectural approaches, and consider multiple approaches with their trade-offs. Then design a concrete implementation strategy — the steps to take, the files involved, and how you will verify the result — so the plan is specific enough to execute directly.\n\n",
+                "Revising a plan that is already partway done: if some steps have been completed, remove or tightly collapse the finished parts and keep or refine only what has not been started. The plan should describe the REMAINING work, not repeat what is done."
             ),
             input_schema: json!({
                 "type": "object",

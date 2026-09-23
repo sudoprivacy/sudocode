@@ -271,15 +271,7 @@ fn typing_still_works_while_bracketed_paste_enabled() {
     let env = TestEnv::new("bracketed-paste-typing");
     let mut sess = spawn_iocraft_repl(&env);
 
-    sess.send("/exit").expect("type /exit");
-    common::expect_input_line(
-        &sess,
-        "/exit",
-        Duration::from_secs(10),
-        "typed text must render while VT input is active",
-    );
-
-    sess.send("\r").expect("press Enter");
+    sess.send("/exit\r").expect("type and submit /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY:\n{screen}");

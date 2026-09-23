@@ -85,13 +85,17 @@ fn bocha_search_roundtrip() {
         configure(&env, &url);
         Some(server)
     } else {
+        let Ok(api_key) = std::env::var("BOCHA_API_KEY") else {
+            eprintln!("skipping bocha_search_roundtrip: BOCHA_API_KEY is not set");
+            return;
+        };
         let path = env.config_home().join("sudocode.json");
         let mut config: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         config["web_search"] = json!({
             "provider":"bocha",
             "apiUrl":"https://api.bocha.cn/v1/web-search",
-            "apiKey":std::env::var("BOCHA_API_KEY").expect("live Bocha test requires BOCHA_API_KEY")
+            "apiKey":api_key
         });
         std::fs::write(path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
         None

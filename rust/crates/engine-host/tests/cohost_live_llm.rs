@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use engine_host::managed_agent::spawn_managed_agent;
 use kernel::core::agents::registry::{AgentDescriptor, AgentKind};
 use kernel::kernel::{Kernel, OperationContext, ReadRequest, WriteRequest};
 use runtime::mailbox::{InboxConvention, Mailbox};
 use runtime::{FsBackend, KernelFsBackend};
-use tools::managed_agent::spawn_managed_agent;
 
 /// Model the agent runs, read from its descriptor `model` label. SudoRouter
 /// serves `claude-sonnet-4-6`; override via `SUDOCODE_TEST_MODEL`.

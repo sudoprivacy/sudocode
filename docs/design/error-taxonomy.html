@@ -175,9 +175,9 @@ flowchart LR
       <tr><td>Dependency direction is <code>api → runtime</code></td><td><span class="file">api/Cargo.toml depends on runtime</span></td><td>constraint</td><td>runtime can't call an api-side SSOT (would be circular)</td></tr>
       <tr><td><code>is_retryable_400</code> byte-identical twice</td><td><span class="file">anthropic.rs · openai_compat.rs</span></td><td>DRY</td><td>✅ fixed (Phase 1) — one <code>is_retryable_masked_400</code></td></tr>
       <tr><td><code>is_retryable()</code> a second hand-written match</td><td><span class="file">api/error.rs</span></td><td>SSOT</td><td>✅ fixed (Phase 1) — now <code>action() == Transport</code></td></tr>
-      <tr><td>context-window detection in two places, different marker sets (can disagree)</td><td><span class="file">error.rs markers · compact.rs is_prompt_too_long</span></td><td>latent bug</td><td>Phase 3</td></tr>
-      <tr><td>compact.rs string-matches <code>"context_window_blocked"</code> to recover lost classification</td><td><span class="file">compact.rs</span></td><td>boundary leak</td><td>Phase 3</td></tr>
-      <tr><td>4 independent retry loops, 3 "retryable" vocabularies</td><td><span class="file">http_transport · tools/lib · compact.rs · mcp_server_manager</span></td><td>fragmentation</td><td>later</td></tr>
+      <tr><td>context-window detection in two places, different marker sets (can disagree)</td><td><span class="file">error.rs markers · compact.rs is_prompt_too_long</span></td><td>latent bug</td><td>✅ fixed (Phase 3) — compact.rs uses the typed <code>RuntimeError</code> classification; the string detector is deleted</td></tr>
+      <tr><td>compact.rs string-matches <code>"context_window_blocked"</code> to recover lost classification</td><td><span class="file">compact.rs</span></td><td>boundary leak</td><td>✅ fixed (Phase 3) — <code>RuntimeError</code> carries the classification across the boundary; no string re-derivation</td></tr>
+      <tr><td>4 independent retry loops, 3 "retryable" vocabularies</td><td><span class="file">http_transport · tools/lib · compact.rs · mcp_server_manager</span></td><td>fragmentation</td><td>compact.rs's string vocabulary removed (Phase 3); MCP's own remains, noted</td></tr>
     </tbody>
   </table>
 </section>
@@ -203,7 +203,7 @@ flowchart LR
 flowchart TD
     P1["Phase 1 · foundation SSOT + dedup ✅ LANDED (#733)<br/>—————————<br/>· pub enum ErrorAction{Transport,Model,Human,Fatal}<br/>· ApiError::action() single definition<br/>· is_retryable() becomes action()==Transport (behavior-identical)<br/>· merge 2×is_retryable_400 → 1<br/>· zero user-visible behavior change"]
     P2["Phase 2 · route provider errors into llm-revisit<br/>—————————<br/>· Model-actionable provider errors<br/>  fed back tool-result-style<br/>· explicit error messages<br/>· needs live e2e"]
-    P3["Phase 3 · context-window state machine explicit<br/>—————————<br/>· single context-window detector SSOT (in runtime, dep-correct)<br/>· drop compact.rs string-match of context_window_blocked<br/>· compaction budget drives Model→Human, computed in one place"]
+    P3["Phase 3 · context-window state machine explicit ✅ LANDED<br/>—————————<br/>· RuntimeError carries the typed classification across the api→runtime boundary<br/>· compact.rs retry loop uses the typed bits, not string matching<br/>· deleted is_retryable_error + is_prompt_too_long string detectors<br/>· context-window failure never destructively retried"]
     P1 --> P2 --> P3
     style P1 fill:#12241a,stroke:#3fb950,color:#e6edf3
     style P2 fill:#2a2410,stroke:#d29922,color:#e6edf3
@@ -229,7 +229,7 @@ flowchart TD
 
 <footer>
   Sudocode error-handling taxonomy · SSOT: docs/design/error-taxonomy.html · mirrored to ShareOne via remote-url<br/>
-  Landed foundations: #721 (Running card overlay-only) · #722 (retry status SSOT) · #727 (add 525) · #733 (Phase 1 ErrorAction)
+  Landed foundations: #721 (Running card overlay-only) · #722 (retry status SSOT) · #727 (add 525) · #733 (Phase 1 ErrorAction) · Phase 3 (typed classification across the api→runtime boundary; compaction no longer string-matches)
 </footer>
 
 </main>

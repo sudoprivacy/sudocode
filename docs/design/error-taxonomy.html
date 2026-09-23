@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sudocode 错误处理架构 · Who-Can-Act Taxonomy</title>
+<title>Sudocode Error-Handling Architecture · Who-Can-Act Taxonomy</title>
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --border: #30363d;
@@ -58,108 +58,109 @@
 </head>
 <body>
 <header>
-  <h1>Sudocode 错误处理架构</h1>
-  <div class="sub">The "Who-Can-Act" Taxonomy · 谁能对这个错误采取行动</div>
-  <div class="tag">draft · 供后续 refactor 回看 · 基于只读审计</div>
+  <h1>Sudocode Error-Handling Architecture</h1>
+  <div class="sub">The "Who-Can-Act" Taxonomy — who can act on this error</div>
+  <div class="tag">design doc · lives in docs/design/error-taxonomy.html · mirrored to ShareOne via remote-url</div>
 </header>
 
 <main>
 
 <section>
-  <h2><span class="n">0</span>一句话</h2>
-  <p class="lead">错误不该按"要不要重试"两分,而该按 <strong>谁能修</strong> 四分。这决定了系统对它做什么。</p>
+  <h2><span class="n">0</span>In one sentence</h2>
+  <p class="lead">An error should not be split into "retryable vs not" — it should be split by <strong>who can fix it</strong>. That decides what the system does with it.</p>
   <div class="grid4">
     <div class="bucket" style="border-color:var(--transport)">
       <h3><span class="dot" style="background:var(--transport)"></span>Transport</h3>
-      <div class="who">传输层自己能修</div>
-      <ul><li>429 / 5xx / 520·522·524·525</li><li>connect / timeout</li><li>截断的流</li></ul>
-      <div style="margin-top:10px"><span class="pill transport">自动 retry</span></div>
+      <div class="who">the transport layer can fix it</div>
+      <ul><li>429 / 5xx / 520·522·524·525</li><li>connect / timeout</li><li>truncated stream</li></ul>
+      <div style="margin-top:10px"><span class="pill transport">auto-retry</span></div>
     </div>
     <div class="bucket" style="border-color:var(--model)">
       <h3><span class="dot" style="background:var(--model)"></span>Model</h3>
-      <div class="who">LLM 能修</div>
-      <ul><li>坏的 tool 参数</li><li>模型构造的非法请求</li><li>context 溢出(可 compact 时)</li></ul>
-      <div style="margin-top:10px"><span class="pill model">llm-revisit 回喂给模型</span></div>
+      <div class="who">the LLM can fix it</div>
+      <ul><li>bad tool arguments</li><li>a request the model built badly</li><li>context overflow (while compaction budget remains)</li></ul>
+      <div style="margin-top:10px"><span class="pill model">llm-revisit — feed back to the model</span></div>
     </div>
     <div class="bucket" style="border-color:var(--human)">
       <h3><span class="dot" style="background:var(--human)"></span>Human</h3>
-      <div class="who">人能修</div>
-      <ul><li>认证失败 401/403</li><li>配置错 / 缺 key</li><li>请求体过大</li></ul>
-      <div style="margin-top:10px"><span class="pill human">报给用户</span></div>
+      <div class="who">only a human can fix it</div>
+      <ul><li>auth failure 401/403</li><li>bad config / missing key</li><li>request too large</li></ul>
+      <div style="margin-top:10px"><span class="pill human">surface to the user</span></div>
     </div>
     <div class="bucket" style="border-color:var(--fatal)">
       <h3><span class="dot" style="background:var(--fatal)"></span>Fatal</h3>
-      <div class="who">没人能修</div>
-      <ul><li>服务器返回坏数据</li><li>不可恢复的内部错误</li></ul>
-      <div style="margin-top:10px"><span class="pill fatal">真 fatal · 停</span></div>
+      <div class="who">nobody can fix it</div>
+      <ul><li>malformed server response</li><li>unrecoverable internal error</li></ul>
+      <div style="margin-top:10px"><span class="pill fatal">terminal · stop</span></div>
     </div>
   </div>
+  <div class="note"><strong>Transparency is a hard requirement.</strong> Sudocode is a hacker tool: every error surfaced to the user must state <em>what</em> failed, <em>which bucket</em> it is, and <em>what the system is doing</em> — e.g. <code>⟳ retry 3/8 — Cloudflare 524</code>, <code>context window exceeded — compacting and retrying</code>, <code>missing ANTHROPIC_API_KEY</code>. Never a swallowed or generic "something went wrong".</div>
 </section>
 
 <section>
-  <h2><span class="n">1</span>决策流:一个错误进来,系统怎么走</h2>
-  <p class="lead">目标终态 —— 每个错误恰好落进一个桶,由 <code>action()</code> 单点决定。</p>
+  <h2><span class="n">1</span>Decision flow: an error arrives, what happens</h2>
+  <p class="lead">Target state — every error lands in exactly one bucket, decided in one place by <code>action()</code>.</p>
   <pre class="mermaid">
 flowchart TD
-    E([错误产生]) --> A{"action()<br/>谁能修?"}
-    A -->|Transport| T["自动 retry<br/>共享 retry 循环<br/>max_retries=8"]
-    A -->|Model| M["llm-revisit<br/>作为 tool_result 回喂模型"]
-    A -->|Human| H["surface<br/>报给用户 · 暂停"]
-    A -->|Fatal| F["abort<br/>真 fatal"]
-    T -->|重试耗尽| X["降级 → 按 last_error 的桶"]
-    M -->|模型改不动/次数耗尽| H
+    E([error raised]) --> A{"action()<br/>who can fix it?"}
+    A -->|Transport| T["auto-retry<br/>shared retry loop<br/>max_retries=8"]
+    A -->|Model| M["llm-revisit<br/>fed back as a tool_result"]
+    A -->|Human| H["surface<br/>report to user · pause"]
+    A -->|Fatal| F["abort<br/>terminal"]
+    T -->|retries exhausted| X["degrade → bucket of last_error"]
+    M -->|model can't fix / budget exhausted| H
     style T fill:#132030,stroke:#58a6ff,color:#e6edf3
     style M fill:#2a2410,stroke:#d29922,color:#e6edf3
     style H fill:#12241a,stroke:#3fb950,color:#e6edf3
     style F fill:#2a1414,stroke:#f85149,color:#e6edf3
     style X fill:#161b22,stroke:#8b949e,color:#8b949e
   </pre>
-  <div class="legend">注:两条虚线转移(retry 耗尽 → 回落桶;model 改不动 → human)是<strong>状态依赖</strong>的,不能烤进错误类型里 —— 见 §4。</div>
+  <div class="legend">Note: the two dashed transitions (retries exhausted → fall back; model can't fix → human) are <strong>state-dependent</strong> and cannot be baked into the error type — see §4.</div>
 </section>
 
 <section>
-  <h2><span class="n">2</span>状态码 → 桶 映射表</h2>
-  <p class="lead">Transport 桶的 HTTP 状态集合已经是单一 SSOT(<code>is_retryable_http_status</code>,PR #722/#727)。</p>
+  <h2><span class="n">2</span>Status code → bucket map</h2>
+  <p class="lead">The HTTP status set for the Transport bucket is already a single SSOT (<code>is_retryable_http_status</code>, PR #722/#727).</p>
   <table>
-    <thead><tr><th>状态 / 错误</th><th>桶</th><th>为什么</th></tr></thead>
+    <thead><tr><th>Status / error</th><th>Bucket</th><th>Why</th></tr></thead>
     <tbody>
-      <tr><td><code>408 409 429</code></td><td><span class="pill transport">Transport</span></td><td>超时 / 冲突 / 限流 —— 瞬时</td></tr>
-      <tr><td><code>500 502 503 504</code></td><td><span class="pill transport">Transport</span></td><td>服务器 / 网关错误</td></tr>
-      <tr><td><code>520 522 524 525</code></td><td><span class="pill transport">Transport</span></td><td>Cloudflare 边缘↔上游 故障 / 超时 / SSL 握手失败</td></tr>
+      <tr><td><code>408 409 429</code></td><td><span class="pill transport">Transport</span></td><td>timeout / conflict / rate limit — transient</td></tr>
+      <tr><td><code>500 502 503 504</code></td><td><span class="pill transport">Transport</span></td><td>server / gateway errors</td></tr>
+      <tr><td><code>520 522 524 525</code></td><td><span class="pill transport">Transport</span></td><td>Cloudflare edge↔origin failure / timeout / SSL handshake</td></tr>
       <tr><td><code>529</code></td><td><span class="pill transport">Transport</span></td><td>Anthropic "Overloaded"</td></tr>
-      <tr><td>connect / timeout / 截断流</td><td><span class="pill transport">Transport</span></td><td><code>is_connect/is_timeout</code> + <code>IncompleteStream</code></td></tr>
-      <tr><td><code>422</code> + 可改消息</td><td><span class="pill model">Model</span></td><td>模型构造的请求非法,改了能过</td></tr>
-      <tr><td>tool 参数错(<code>is_error:true</code>)</td><td><span class="pill model">Model</span></td><td>已走 llm-revisit(tool_result 回喂)</td></tr>
-      <tr><td>context-window 溢出</td><td><span class="pill model">Model</span> → <span class="pill human">Human</span></td><td>可 compact 时 Model;compact 耗尽转 Human(状态依赖)</td></tr>
-      <tr><td><code>401 403</code> / 缺 key / 配置错</td><td><span class="pill human">Human</span></td><td>只有人能提供凭据 / 改配置</td></tr>
-      <tr><td><code>413</code> 请求体过大</td><td><span class="pill human">Human</span></td><td>需人减小输入(或上层 compact 策略)</td></tr>
-      <tr><td>服务器返回坏 JSON / 语义 decode 失败</td><td><span class="pill fatal">Fatal</span></td><td>重试也是一样的坏数据</td></tr>
+      <tr><td>connect / timeout / truncated stream</td><td><span class="pill transport">Transport</span></td><td><code>is_connect/is_timeout</code> + <code>IncompleteStream</code></td></tr>
+      <tr><td><code>422</code> + fixable message</td><td><span class="pill model">Model</span></td><td>the model built an invalid request; revising can pass</td></tr>
+      <tr><td>tool argument error (<code>is_error:true</code>)</td><td><span class="pill model">Model</span></td><td>already goes through llm-revisit (tool_result feedback)</td></tr>
+      <tr><td>context-window overflow</td><td><span class="pill model">Model</span> → <span class="pill human">Human</span></td><td>Model while compaction budget remains; Human once exhausted (state-dependent)</td></tr>
+      <tr><td><code>401 403</code> / missing key / bad config</td><td><span class="pill human">Human</span></td><td>only a human can supply credentials / fix config</td></tr>
+      <tr><td><code>413</code> request too large</td><td><span class="pill human">Human</span></td><td>needs a human to shrink input (or an upstream compaction strategy)</td></tr>
+      <tr><td>malformed server JSON / semantic decode failure</td><td><span class="pill fatal">Fatal</span></td><td>a retry yields the same bad data</td></tr>
     </tbody>
   </table>
 </section>
 
 <section>
-  <h2><span class="n">3</span>现状:分类只活在一个类型里,一跨边界就死</h2>
-  <p class="lead">审计发现 —— <code>ApiError</code> 是唯一会自我分类的错误;越过 api crate 后全退化成 <code>String</code>,上层靠字符串匹配重新猜。</p>
+  <h2><span class="n">3</span>Current state: classification lives in one type and dies at the boundary</h2>
+  <p class="lead">Audit finding — <code>ApiError</code> is the only self-classifying error; once it crosses the api crate it degrades to a <code>String</code>, and upper layers re-guess by string-matching.</p>
   <pre class="mermaid">
 flowchart LR
-    subgraph api["crate: api ✅ 有分类"]
-      AE["ApiError<br/>is_retryable() · safe_failure_class()<br/>categorize() · is_retryable_http_status()"]
+    subgraph api["crate: api ✅ classifies"]
+      AE["ApiError<br/>action() · is_retryable() · safe_failure_class()<br/>is_retryable_http_status()"]
     end
-    subgraph runtime["crate: runtime ⚠️ 分类丢失"]
-      RE["RuntimeError<br/>{ message, kind }<br/>只剩 ContextWindowBlocked 一个 bit"]
-      CO["compact.rs<br/>字符串匹配 'context_window_blocked'"]
+    subgraph runtime["crate: runtime ⚠️ classification lost"]
+      RE["RuntimeError<br/>{ message, kind }<br/>only ContextWindowBlocked survives"]
+      CO["compact.rs<br/>string-matches 'context_window_blocked'"]
     end
     subgraph tools["crate: tools ⚠️"]
-      TE["ToolError = String 包装"]
+      TE["ToolError = String wrapper"]
     end
     subgraph events["crate: engine-events ⚠️"]
       EE["EngineEvent::Error<br/>{ message: String }"]
     end
-    AE -->|"runtime_error_from_api()<br/>❗三处重复"| RE
-    AE -.->|降级为 string| TE
+    AE -->|"runtime_error_from_api()<br/>(dedup'd to classification only)"| RE
+    AE -.->|degrades to string| TE
     RE --> CO
-    RE -->|降级为 string| EE
+    RE -->|degrades to string| EE
     style AE fill:#132030,stroke:#58a6ff,color:#e6edf3
     style RE fill:#2a2410,stroke:#d29922,color:#e6edf3
     style CO fill:#2a1414,stroke:#f85149,color:#e6edf3
@@ -167,67 +168,68 @@ flowchart LR
     style EE fill:#161b22,stroke:#8b949e,color:#8b949e
   </pre>
 
-  <h3 style="font-size:16px;margin-top:24px">审计发现的具体问题</h3>
+  <h3 style="font-size:16px;margin-top:24px">Specific issues found by the audit</h3>
   <table>
-    <thead><tr><th>问题</th><th>位置</th><th>类型</th></tr></thead>
+    <thead><tr><th>Issue</th><th>Location</th><th>Type</th><th>Status</th></tr></thead>
     <tbody>
-      <tr><td><code>runtime_error_from_api</code> 三处重复</td><td><span class="file">completion.rs:57 · tools/lib.rs:6761 · engine_client.rs:457</span></td><td>DRY 违背</td></tr>
-      <tr><td><code>is_retryable_400</code> 字节级相同两份</td><td><span class="file">anthropic.rs:1068 · openai_compat.rs:2573</span></td><td>DRY 违背</td></tr>
-      <tr><td>context-window 检测两份、marker 集不同<br/>(可互相不一致)</td><td><span class="file">error.rs (markers) · compact.rs:649 is_prompt_too_long</span></td><td>潜在真 bug</td></tr>
-      <tr><td>compact.rs 靠匹配字符串 <code>"context_window_blocked"</code> 还原已丢的分类</td><td><span class="file">compact.rs:658</span></td><td>boundary leak</td></tr>
-      <tr><td>4 个独立 retry 循环,3 套 "retryable" 词汇</td><td><span class="file">http_transport · tools/lib · compact.rs · mcp_server_manager</span></td><td>分散</td></tr>
+      <tr><td>Dependency direction is <code>api → runtime</code></td><td><span class="file">api/Cargo.toml depends on runtime</span></td><td>constraint</td><td>runtime can't call an api-side SSOT (would be circular)</td></tr>
+      <tr><td><code>is_retryable_400</code> byte-identical twice</td><td><span class="file">anthropic.rs · openai_compat.rs</span></td><td>DRY</td><td>✅ fixed (Phase 1) — one <code>is_retryable_masked_400</code></td></tr>
+      <tr><td><code>is_retryable()</code> a second hand-written match</td><td><span class="file">api/error.rs</span></td><td>SSOT</td><td>✅ fixed (Phase 1) — now <code>action() == Transport</code></td></tr>
+      <tr><td>context-window detection in two places, different marker sets (can disagree)</td><td><span class="file">error.rs markers · compact.rs is_prompt_too_long</span></td><td>latent bug</td><td>Phase 3</td></tr>
+      <tr><td>compact.rs string-matches <code>"context_window_blocked"</code> to recover lost classification</td><td><span class="file">compact.rs</span></td><td>boundary leak</td><td>Phase 3</td></tr>
+      <tr><td>4 independent retry loops, 3 "retryable" vocabularies</td><td><span class="file">http_transport · tools/lib · compact.rs · mcp_server_manager</span></td><td>fragmentation</td><td>later</td></tr>
     </tbody>
   </table>
-  <div class="ok"><strong>好消息:</strong> retryable 的状态码分类已经是干净单源(#722/#727)。这块不动。</div>
 </section>
 
 <section>
-  <h2><span class="n">4</span>taxonomy 不能干净落地的 3 处(诚实标注)</h2>
-  <p class="lead">4 桶是对的轴,但现实有 3 处 resist,重构必须显式处理、不能假装。</p>
+  <h2><span class="n">4</span>Three places the taxonomy resists a clean mapping (stated honestly)</h2>
+  <p class="lead">Four buckets is the right axis, but reality resists in three spots that the refactor must handle explicitly, not paper over.</p>
   <div class="note">
-    <strong>① context-window 是状态依赖的。</strong> 它先是 <span class="pill model">Model</span>(自动 compact + retry),compact 次数耗尽后才变 <span class="pill human">Human</span>。桶取决于运行时状态 → <code>action()</code> 必须结合 compaction 预算计算,不能把桶写死进错误类型。
+    <strong>① Context-window is state-dependent.</strong> It is <span class="pill model">Model</span> (auto-compact + retry) while compaction budget remains, and only becomes <span class="pill human">Human</span> once exhausted. The bucket depends on runtime state, so <code>action()</code> must be combined with the compaction budget — the bucket cannot be hard-coded into the error type.
   </div>
   <div class="note">
-    <strong>② llm-revisit 目前只覆盖 tool 错误。</strong> provider 错误从不走回喂模型这条路。要让 <span class="pill model">Model</span>-可行动的 provider 错误也进 llm-revisit,是 Phase 2 的活。
+    <strong>② llm-revisit currently covers only tool errors.</strong> Provider errors never take the feed-back-to-model path. Making <span class="pill model">Model</span>-actionable provider errors go through llm-revisit is Phase 2.
   </div>
   <div class="note">
-    <strong>③ Human vs Fatal 现在根本没被表示。</strong> <code>safe_failure_class</code> 是给 telemetry 的分析轴,不是"谁能行动"的行为轴。两轴要分开(SRP),不能混用。
+    <strong>③ Human vs Fatal is not represented today.</strong> <code>safe_failure_class</code> is the telemetry/analytics axis, not the "who can act" behavior axis. The two axes are kept separate (SRP); they must not be conflated.
   </div>
 </section>
 
 <section>
-  <h2><span class="n">5</span>重构分阶段(每阶段独立可发 · CI 绿 · 行为保持)</h2>
-  <p class="lead">"让全代码都用这套"横跨 5 crate,一次做完 review 不了。分 3 阶段,先交付地基。</p>
+  <h2><span class="n">5</span>Phased refactor (each phase independently shippable · CI green · behavior-preserving)</h2>
+  <p class="lead">"Make all code use this" spans 5 crates and can't be reviewed in one PR. Three phases; the foundation ships first.</p>
   <pre class="mermaid">
 flowchart TD
-    P1["Phase 1 · 地基 SSOT + 去重<br/>—————————<br/>· pub enum ErrorAction{Transport,Model,Human,Fatal}<br/>· ApiError::action() 单点定义<br/>· is_retryable() 变成它的薄封装(行为不变)<br/>· 合并 3×runtime_error_from_api → 1<br/>· 合并 2×is_retryable_400 → 1<br/>· 统一 context-window 检测(修潜在 bug)<br/>· 零用户可见行为变化"]
-    P2["Phase 2 · provider 错误接入 llm-revisit<br/>—————————<br/>· Model-可行动的 provider 错误<br/>  走 tool-result 式回喂<br/>· 需 e2e 测试"]
-    P3["Phase 3 · context-window 状态机显式化<br/>—————————<br/>· 干掉字符串匹配的 compaction-耗尽逻辑<br/>· Model→Human 转移集中一处计算"]
+    P1["Phase 1 · foundation SSOT + dedup ✅ LANDED (#733)<br/>—————————<br/>· pub enum ErrorAction{Transport,Model,Human,Fatal}<br/>· ApiError::action() single definition<br/>· is_retryable() becomes action()==Transport (behavior-identical)<br/>· merge 2×is_retryable_400 → 1<br/>· zero user-visible behavior change"]
+    P2["Phase 2 · route provider errors into llm-revisit<br/>—————————<br/>· Model-actionable provider errors<br/>  fed back tool-result-style<br/>· explicit error messages<br/>· needs live e2e"]
+    P3["Phase 3 · context-window state machine explicit<br/>—————————<br/>· single context-window detector SSOT (in runtime, dep-correct)<br/>· drop compact.rs string-match of context_window_blocked<br/>· compaction budget drives Model→Human, computed in one place"]
     P1 --> P2 --> P3
     style P1 fill:#12241a,stroke:#3fb950,color:#e6edf3
     style P2 fill:#2a2410,stroke:#d29922,color:#e6edf3
     style P3 fill:#132030,stroke:#58a6ff,color:#e6edf3
   </pre>
-  <div class="ok"><strong>Phase 1 是纯 DRY + SSOT + 去 boundary-leak,零行为变化</strong> —— 最安全的第一步,后面都建在它上面。</div>
+  <div class="ok"><strong>Phase 1 is pure DRY + SSOT with zero behavior change</strong> — the safest first step; everything else builds on it. Landed in PR #733.</div>
 </section>
 
 <section>
-  <h2><span class="n">6</span>守则(重构全程红线)</h2>
+  <h2><span class="n">6</span>Guardrails (red lines for the whole refactor)</h2>
   <table>
     <tbody>
-      <tr><td>基础设施</td><td>不碰 nexus kernel / syscall / raft ABI —— 全在 api/runtime/engine 的错误路径,零 infra-ABI 面</td></tr>
-      <tr><td>持久化</td><td>错误是 ephemeral,不持久化任何东西</td></tr>
-      <tr><td>删除</td><td>被替换的重复函数 / marker 直接删,callers 重指;不留"replacement for the retired X"墓碑</td></tr>
-      <tr><td>Perf</td><td><code>action()</code> 是 inline enum match,只在出错时走,成功路径零开销</td></tr>
-      <tr><td>SRP / 正交</td><td>行为轴(<code>ErrorAction</code>)与分析轴(<code>safe_failure_class</code>)分开,互不混用</td></tr>
-      <tr><td>验证</td><td>每阶段 fmt + clippy 干净,全 CI 绿才 merge</td></tr>
+      <tr><td>Infrastructure</td><td>Do not touch nexus kernel / syscall / raft ABI — this is all in the api/runtime/engine error path, zero infra-ABI surface</td></tr>
+      <tr><td>Persistence</td><td>Errors are ephemeral; nothing here is persisted</td></tr>
+      <tr><td>Deletion</td><td>Replaced duplicate fns / markers are removed outright and callers repointed; no "replacement for the retired X" tombstones</td></tr>
+      <tr><td>Perf</td><td><code>action()</code> is an inline enum match, only on the error path — zero success-path cost</td></tr>
+      <tr><td>SRP / orthogonality</td><td>Behavior axis (<code>ErrorAction</code>) and analytics axis (<code>safe_failure_class</code>) stay separate</td></tr>
+      <tr><td>Transparency</td><td>Every surfaced error states what/which-bucket/what-the-system-is-doing; never swallow or blur</td></tr>
+      <tr><td>Verification</td><td>Each phase: fmt + clippy clean, live tests (prefer live PTY), full CI green before merge</td></tr>
     </tbody>
   </table>
 </section>
 
 <footer>
-  Sudocode error-handling taxonomy · 基于只读审计(不改代码)· 供 refactor 分阶段落地时回看<br/>
-  已落地地基:PR #721(Running 卡 overlay-only)· #722(retry 状态码 SSOT)· #727(补 525)
+  Sudocode error-handling taxonomy · SSOT: docs/design/error-taxonomy.html · mirrored to ShareOne via remote-url<br/>
+  Landed foundations: #721 (Running card overlay-only) · #722 (retry status SSOT) · #727 (add 525) · #733 (Phase 1 ErrorAction)
 </footer>
 
 </main>

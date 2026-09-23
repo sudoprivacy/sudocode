@@ -36,6 +36,21 @@ prompting.
 For local-only use, bind to `127.0.0.1`. For team access, expose the port
 behind your own auth proxy.
 
+## Errors
+
+JSON-RPC numeric error codes keep their protocol meaning. `error.message`
+contains recovery guidance; `error.data` is an object with `error_type` (a stable
+failure class) and `diagnostic` (technical detail, not display copy). Older
+agents used a string for `data`; clients should accept both and use a generic
+presentation when no class is available.
+
+Model failures retain their classification through the engine boundary:
+`provider_auth`, `provider_rate_limit`, `provider_transport`, `context_window`,
+`request_size`, `runtime_io`, and `compaction_failed`. Unknown failures use safe
+generic guidance. Terminal retries and failed turns use the same runtime
+presenter. Tool results remain task output, and the protocol inspector remains
+a diagnostic surface.
+
 ## Sessions
 
 One `scode acp` process serves **many sessions**. Requests are ordered per

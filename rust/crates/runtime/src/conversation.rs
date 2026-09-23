@@ -697,6 +697,7 @@ impl std::error::Error for ToolError {}
 pub struct RuntimeError {
     message: String,
     kind: RuntimeErrorKind,
+    failure_class: &'static str,
 }
 
 /// Coarse classification of a [`RuntimeError`], for the few failures the
@@ -715,6 +716,7 @@ impl RuntimeError {
         Self {
             message: message.into(),
             kind: RuntimeErrorKind::Generic,
+            failure_class: "model_error",
         }
     }
 
@@ -725,6 +727,42 @@ impl RuntimeError {
         Self {
             message: message.into(),
             kind: RuntimeErrorKind::ContextWindowBlocked,
+            failure_class: "context_window",
+        }
+    }
+
+    /// Classification crosses the engine seam independently of diagnostic text.
+    #[must_use]
+    pub fn with_failure_class(mut self, failure_class: &'static str) -> Self {
+        self.failure_class = failure_class;
+        self
+    }
+
+    #[must_use]
+    pub fn failure_class(&self) -> &'static str {
+        // Remove this compatibility branch when CompactError crosses every
+        // runtime call site as a typed failure instead of a diagnostic string.
+        if self.failure_class == "model_error"
+            && self.message.contains(crate::compact::COMPACTION_FAILED)
+        {
+            "compaction_failed"
+        } else {
+            self.failure_class
+        }
+    }
+
+    /// Never use upstream text as recovery advice, including unknown failures.
+    #[must_use]
+    pub fn user_message(&self) -> &'static str {
+        match self.failure_class() {
+            "provider_auth" => "The model service needs updated authorization or configuration. Check your model settings or contact your administrator.",
+            "provider_rate_limit" => "The model service is busy. Wait a moment before trying again.",
+            "provider_transport" => "Cannot connect to the model service. Check your connection before trying again.",
+            "context_window" => "This conversation exceeds the model's context limit. Use /compact or start a new conversation.",
+            "request_size" => "This request is too large. Reduce the text or attachments before sending it again.",
+            "runtime_io" => "Could not read or save a working file. Check file permissions and available disk space.",
+            "compaction_failed" => "上下文压缩失败，本次对话已停止。已有对话历史已保留。",
+            _ => "The response could not be completed. Check the task state before trying again; contact your administrator if the problem persists.",
         }
     }
 

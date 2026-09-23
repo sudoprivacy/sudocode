@@ -73,6 +73,8 @@
 //! (`StreamEvent`, `MessageRequest`, the provider clients, …) stay internal to
 //! the engine side.
 
+pub use runtime::RuntimeError as TurnFailure;
+
 mod engine_client;
 mod session;
 pub use engine_client::EngineApiClient;

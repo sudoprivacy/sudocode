@@ -187,7 +187,7 @@ body { display: flex; flex-direction: column; }
       updateSessionDropdown((listResp.result && listResp.result.sessions) || []);
       sessionSelect.value = currentSession;
     } else {
-      addChatMsg('system', 'Failed to create session: ' + JSON.stringify(resp.error));
+      addChatMsg('system', 'Could not start the conversation. Check your connection and session settings, then try again.');
     }
   }
 

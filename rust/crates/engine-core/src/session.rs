@@ -89,7 +89,7 @@ pub trait EngineDelegate: Send + Sync + 'static {
         blocks: Vec<ContentBlock>,
         observer: &mut dyn RuntimeObserver,
         prompter: &mut dyn PermissionPrompter,
-    ) -> Result<TurnComplete, String>;
+    ) -> Result<TurnComplete, crate::TurnFailure>;
 
     /// Install the question prompter the `AskUserQuestion` tool uses for the
     /// *next* turn. The driver calls this immediately before each `run_turn`.
@@ -353,12 +353,12 @@ async fn run_one_turn(
                     Ok(Ok(complete)) => {
                         let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
                     }
-                    Ok(Err(message)) => {
-                        let _ = evt_tx.send(EngineEvent::Error { message });
+                    Ok(Err(error)) => {
+                        let _ = evt_tx.send(EngineEvent::Error { message: error.user_message().to_string() });
                     }
-                    Err(join_error) => {
+                    Err(_join_error) => {
                         let _ = evt_tx.send(EngineEvent::Error {
-                            message: format!("engine turn panicked: {join_error}"),
+                            message: "The task stopped unexpectedly. Check its state before trying again.".to_string(),
                         });
                     }
                 }

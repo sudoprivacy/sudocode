@@ -18,18 +18,8 @@ use crate::http_client::build_http_client_or_default;
 /// Implementors bridge the transport retry loop to spinners, progress bars,
 /// or other visual indicators.
 pub trait RetryNotifier: Send + Sync {
-    fn on_retry(&self, attempt: u32, max_retries: u32, reason: &str);
+    fn on_retry(&self, attempt: u32, max_retries: u32, failure_class: &'static str);
     fn on_retry_end(&self);
-}
-
-/// Default notifier that writes to stderr (matches legacy behavior).
-pub struct StderrRetryNotifier;
-
-impl RetryNotifier for StderrRetryNotifier {
-    fn on_retry(&self, attempt: u32, max_retries: u32, reason: &str) {
-        eprintln!("  \u{27f3} retry {attempt}/{max_retries} — {reason}");
-    }
-    fn on_retry_end(&self) {}
 }
 
 const REQUEST_ID_HEADER: &str = "request-id";
@@ -343,15 +333,7 @@ impl HttpTransport {
             // Surface retry attempts to the user so they know scode
             // isn't hung — it's waiting for the provider to recover.
             if let Some(ref error) = last_error {
-                let reason = match error {
-                    ApiError::Api {
-                        status, message, ..
-                    } => {
-                        let msg = message.as_deref().unwrap_or("unknown error");
-                        format!("{status}: {msg}")
-                    }
-                    other => format!("{other}"),
-                };
+                let reason = error.safe_failure_class();
                 // Reported only through the notifier. A transport writing to
                 // the terminal itself is the boundary leak the engine/renderer
                 // split exists to remove: it lands wherever the cursor happens
@@ -360,7 +342,7 @@ impl HttpTransport {
                 // indicator once the notifier stopped being installed, which is
                 // what let that regression go unnoticed.
                 if let Some(ref notifier) = self.retry_notifier {
-                    notifier.on_retry(attempts, retry_policy.max_retries, &reason);
+                    notifier.on_retry(attempts, retry_policy.max_retries, reason);
                 }
             }
             tokio::time::sleep(delay).await;

@@ -294,11 +294,14 @@ impl EngineApiClient {
 struct RetrySinkNotifier(runtime::RetrySink);
 
 impl api::RetryNotifier for RetrySinkNotifier {
-    fn on_retry(&self, attempt: u32, max_retries: u32, reason: &str) {
+    fn on_retry(&self, attempt: u32, max_retries: u32, failure_class: &'static str) {
         self.0.emit(runtime::RetryEvent::Waiting {
             attempt,
             max_retries,
-            reason: reason.to_string(),
+            reason: runtime::RuntimeError::new("")
+                .with_failure_class(failure_class)
+                .user_message()
+                .to_string(),
         });
     }
 
@@ -464,7 +467,7 @@ fn runtime_error_from_api(
     if error.is_context_window_failure() {
         RuntimeError::context_window_blocked(message)
     } else {
-        RuntimeError::new(message)
+        RuntimeError::new(message).with_failure_class(error.safe_failure_class())
     }
 }
 

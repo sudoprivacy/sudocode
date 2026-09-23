@@ -3,7 +3,7 @@
 //! When the provider answers 429 or 5xx the transport backs off and tries
 //! again. From the outside that is indistinguishable from a slow model —
 //! several seconds of nothing, possibly repeatedly — so the retry has to say
-//! so. `⟳ retry 1/8 — 429: slow down` is the whole feature.
+//! so. `⟳ retry 1/8 — The model service is busy` is the whole feature.
 //!
 //! **Why this test exists.** This regressed once already and nothing caught
 //! it. Before the engine/renderer split, the CLI owned its own `ApiClient` and
@@ -52,10 +52,11 @@ fn provider_retry_is_reported_then_the_turn_completes() {
     // Named as the user sees it: which attempt, out of how many, and why.
     // Matched as one line so a report that lost the reason — the only part
     // that says whether to wait or to go fix something — fails here.
-    sess.expect(r"retry 1/8 .* 429").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("the retry should be reported: {e}\nPTY screen:\n{screen}");
-    });
+    sess.expect(r"retry 1/8 .* model service is busy")
+        .unwrap_or_else(|e| {
+            let screen = sess.render(|s| s.contents());
+            panic!("the retry should be reported: {e}\nPTY screen:\n{screen}");
+        });
 
     // And the retry actually retried: the turn produces its answer.
     sess.expect("(?i)hello").unwrap_or_else(|e| {

@@ -5441,7 +5441,14 @@ async fn acp_compaction_failure_is_terminal_and_preserves_history() {
         .as_str()
         .unwrap()
         .contains("上下文压缩失败，本次对话已停止"));
-    assert!(text.contains("上下文压缩失败，本次对话已停止"), "{text}");
+    assert!(
+        text.is_empty(),
+        "failure diagnostics must not become assistant text: {text}"
+    );
+    assert!(
+        response["error"]["data"].is_string(),
+        "original diagnostic is retained"
+    );
     assert_eq!(fs::read(path).unwrap(), before);
     client.shutdown().await;
     workspace.cleanup();

@@ -226,6 +226,10 @@ Every terminal update is delivered before the prompt response, including error
 responses. A failed compaction ends the prompt with an error; clients must mark
 the run failed. The completed operation remains available for client replay.
 
+Failed prompts return a JSON-RPC error, with the original diagnostic in `error.data`.
+They do not append a synthetic `agent_message_chunk` containing the error: clients
+present the failure separately from assistant output already received.
+
 **Automatic compaction.** When a turn compacts the transcript on its own —
 either the pre-turn overflow guard or the in-turn threshold path — the
 `session/prompt` response carries `_meta.sudocode.autoCompacted: true`

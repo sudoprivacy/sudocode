@@ -1832,14 +1832,8 @@ pub(crate) async fn run_acp_on_transport(
                                 responder.respond(response)?;
                             }
                             Err(error) => {
-                                let user_message = error.user_friendly_message();
-                                let error_notification = SessionNotification::new(
-                                    sid.clone(),
-                                    SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                        ContentBlock::Text(TextContent::new(&user_message)),
-                                    )),
-                                );
-                                let _ = cx_inner.send_notification(error_notification);
+                                // Clients render the failed response. Emitting it as assistant
+                                // text duplicates the error and persists diagnostics as an answer.
                                 responder.respond_with_error(acp_error_to_sdk(&error))?;
                             }
                         }

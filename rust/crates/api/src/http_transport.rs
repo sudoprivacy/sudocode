@@ -333,6 +333,8 @@ impl HttpTransport {
             // Surface retry attempts to the user so they know scode
             // isn't hung — it's waiting for the provider to recover.
             if let Some(ref error) = last_error {
+                // record_failure above retains the full original reason in the
+                // session trace. Only the UI callback receives the stable class.
                 let reason = error.safe_failure_class();
                 // Reported only through the notifier. A transport writing to
                 // the terminal itself is the boundary leak the engine/renderer

@@ -2,6 +2,35 @@
 
 Day-to-day `scode` workflows.
 
+## Web search with Bocha
+
+Set `web_search` in `~/.nexus/sudocode/sudocode.json`:
+
+```json
+{
+  "web_search": {
+    "provider": "bocha",
+    "apiUrl": "https://api.bocha.cn/v1/web-search"
+  }
+}
+```
+
+Export `BOCHA_API_KEY` before starting `scode`, or set `web_search.apiKey`
+in your private configuration. `.env` files are not loaded automatically.
+`BOCHA_API_KEY` takes precedence over the config key. Bocha uses its own
+credentials; it does not reuse the model proxy key.
+
+The API URL above is the default when `provider` is `bocha`; it can be
+omitted. `SUDOCODE_BOCHA_API_URL` overrides it, and
+`SUDOCODE_WEB_SEARCH_PROVIDER=bocha` selects Bocha for a single process.
+The existing `WebSearch` tool returns titles, URLs, and summaries, with
+domain inclusion/exclusion, deduplication, and at most eight results.
+Existing Tavily configurations continue to use `provider: "tavily"`.
+
+```bash
+scode --allowedTools WebSearch "Use WebSearch to find the Rust official website and cite the result URLs."
+```
+
 ## Interactive REPL
 
 ```bash
@@ -33,6 +62,24 @@ For the canonical, live command list:
 ```bash
 scode --help
 ```
+
+## Bash tool results
+
+Model-invoked `bash` returns compact JSON: `stdout` and the actual
+`exit_code` for a completed process, with nonempty `stderr` when present.
+Failures retain `returnCodeInterpretation`; interrupted runs include
+`interrupted: true`. Background launches retain `backgroundTaskId` and
+`noOutputExpected`, but do not claim a completed exit code. Signal termination
+also has no numeric exit code and is described in `returnCodeInterpretation`.
+
+Empty optional fields and routine sandbox capability flags are omitted. The
+public Rust result type accepts omitted stderr and interruption fields as an
+empty string and `false`, respectively. On failure, an available sandbox
+fallback reason is included as `sandboxWarning`.
+The full execution struct remains available internally; the compact text is
+persisted before it reaches the provider, so resume sends identical results.
+Large results still use the existing persisted-output marker and
+`read_tool_output` pagination.
 
 ## One-shot prompt
 
@@ -138,3 +185,56 @@ JSONL at `<transcript>.before-compact-<timestamp>` before committing the new
 history. Keep these files to inspect or recover older context; they are not
 subject to automatic cleanup. See [ACP compaction](acp.md#slash-commands) for
 budgets and persistence details.
+
+## Images and browser screenshots
+
+The CLI accepts PNG, JPEG, GIF, and WebP references in a user prompt:
+
+```sh
+scode --model <vision-model> 'Describe @/absolute/path/screenshot.png'
+scode --model <vision-model> 'Describe @"screenshots/home page.png"'
+```
+
+The synchronous REPL also submits clipboard images pasted alongside a text
+prompt. Image bytes are validated and preflighted before being sent; a missing
+or invalid referenced image produces an error rather than a text-only request.
+Repeated references to the same spelling of a path attach it once per prompt.
+
+Agents can inspect images using `Read` (`read_file`). For example, after the
+independently installed sudohand CLI saves a browser screenshot:
+
+```sh
+suh browser page_screenshot --port <browser-port> --path screenshot.png
+```
+
+ask scode to **Read `screenshot.png` and inspect the screenshot**. The screenshot
+command's path/size response alone does not give the model the image. Read
+returns a short textual receipt plus an image attachment, and the next model
+request includes the pixels. The image is stored in the transcript so resume
+does not depend on the screenshot file still existing. All outstanding tool
+replies are sent before image attachments, including parallel Read calls.
+
+Files are read through the filesystem backend and normal tool permissions.
+Image source files are limited to 20 MiB; accepted files use the existing
+5 MiB / 8000 px image preflight, which downsamples when necessary. Images do
+not use text pagination or tool-output truncation.
+
+Vision-capable models receive image attachments directly. If the model
+capabilities table explicitly marks the active model as text-only, image Read
+returns a tool error asking the agent to switch to a vision-capable model;
+a CLI image prompt fails before making a model request. These paths do not
+call a second model or use another account. Unknown model capabilities retain
+the existing optimistic policy, so the provider may reject image input.
+
+Regression coverage lives in `pty_image_handling` (CLI references, image Read,
+parallel results, errors, text-only model rejection, and resume) and the API transport tests.
+With suh and Chrome installed, run the actual browser-to-model-payload test:
+
+```sh
+cd rust
+cargo test -p rusty-sudocode-cli --test pty_image_handling -- --include-ignored
+```
+
+This last test scripts only model replies: scode executes Bash, suh captures
+real Chrome pixels, and the test verifies those exact bytes in the next model
+request. A live model's visual accuracy is a separate check.

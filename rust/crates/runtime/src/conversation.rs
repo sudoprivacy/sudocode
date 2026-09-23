@@ -49,25 +49,18 @@ const MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS: u8 = 3;
 /// Message used in synthetic tool results when a turn is interrupted.
 const INTERRUPT_MESSAGE: &str = "Interrupted · What should Sudo Code do instead?";
 
-/// Preserve the bash result wire contract when cancellation wins the race with
-/// the blocking tool task. Other tools have no structured interruption shape.
+/// Cancellation can win before the blocking tool returns its execution result.
+/// Use the same constructor and model projection as an executor-side abort so
+/// synthetic results cannot drift from the bash result contract.
 fn interrupted_tool_output(tool_name: &str) -> String {
     if tool_name.eq_ignore_ascii_case("bash") {
-        serde_json::json!({
-            "stdout": "",
-            "stderr": "Command interrupted by user",
-            "rawOutputPath": null,
-            "interrupted": true,
-            "isImage": null,
-            "backgroundTaskId": null,
-            "backgroundedByUser": null,
-            "assistantAutoBackgrounded": null,
-            "dangerouslyDisableSandbox": null,
-            "returnCodeInterpretation": "interrupted",
-            "noOutputExpected": true,
-            "structuredContent": null,
-            "sandboxStatus": null,
-        })
+        crate::bash::interrupted_bash_output(
+            "Command interrupted by user",
+            "interrupted",
+            None,
+            None,
+        )
+        .model_output()
         .to_string()
     } else {
         INTERRUPT_MESSAGE.to_string()
@@ -647,6 +640,21 @@ impl ToolDispatchContext {
 /// state (spinner, prompter) lives behind single-threaded interior mutability
 /// in the impl.
 pub trait ToolExecutor: Send {
+    async fn execute_with_attachments(
+        &self,
+        tool_name: &str,
+        input: &str,
+        ctx: &ToolDispatchContext,
+    ) -> Result<crate::image_input::ToolOutput, ToolError> {
+        let output = self.execute_with_context(tool_name, input, ctx).await?;
+        let model = ctx
+            .parent_assistant_message
+            .as_ref()
+            .and_then(|m| m.model.as_deref())
+            .unwrap_or("");
+        crate::image_input::ToolOutput::from_dispatch(tool_name, output, model)
+    }
+
     async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 
     /// Dispatch with per-call context. Default forwards to
@@ -698,6 +706,13 @@ pub struct RuntimeError {
     message: String,
     kind: RuntimeErrorKind,
     failure_class: &'static str,
+    /// `true` when the underlying failure is transport-transient (rate limit,
+    /// 5xx, gateway timeout, dropped/truncated stream) and the same request may
+    /// succeed on a retry. Derived once, at the api→runtime boundary, from
+    /// [`api::ApiError::is_retryable`] (the `ErrorAction::Transport` bucket) —
+    /// so callers branch on this typed bit instead of re-deriving retryability
+    /// by string-matching the rendered message.
+    retryable: bool,
 }
 
 /// Coarse classification of a [`RuntimeError`], for the few failures the
@@ -717,6 +732,7 @@ impl RuntimeError {
             message: message.into(),
             kind: RuntimeErrorKind::Generic,
             failure_class: "model_error",
+            retryable: false,
         }
     }
 
@@ -728,6 +744,7 @@ impl RuntimeError {
             message: message.into(),
             kind: RuntimeErrorKind::ContextWindowBlocked,
             failure_class: "context_window",
+            retryable: false,
         }
     }
 
@@ -766,9 +783,24 @@ impl RuntimeError {
         }
     }
 
+    /// Set the transport-retryable classification. Chainable so the api→runtime
+    /// boundary can stamp it in one place: `RuntimeError::new(msg).retryable(a)`.
+    #[must_use]
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
+    }
+
     #[must_use]
     pub fn is_context_window_blocked(&self) -> bool {
         self.kind == RuntimeErrorKind::ContextWindowBlocked
+    }
+
+    /// `true` when this is a transport-transient failure worth retrying. The
+    /// typed successor to string-matching the message for "timeout"/"503"/etc.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.retryable
     }
 }
 
@@ -1705,6 +1737,19 @@ where
             }
         }
 
+        let mut prepared_blocks = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let block = match block {
+                ContentBlock::Image { data, mime_type } => {
+                    let model = self.running_model().to_string();
+                    crate::image_input::prepare_image(&data, &mime_type, &model)
+                        .map_err(RuntimeError::new)?
+                }
+                other => other,
+            };
+            prepared_blocks.push(block);
+        }
+
         // Start file tracking for this turn
         let turn_id = format!(
             "turn-{}-{}",
@@ -1729,7 +1774,7 @@ where
         // assistant message so it persists and re-sums on resume.
         let turn_started_at = std::time::Instant::now();
         self.session
-            .push_user_blocks(blocks)
+            .push_user_blocks(prepared_blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
 
         // Route live plugin-hook progress through the seam: when the observer
@@ -2233,7 +2278,7 @@ where
                         } else {
                             Some(
                                 self.tool_executor
-                                    .execute_with_context(
+                                    .execute_with_attachments(
                                         &p.tool_name,
                                         &p.effective_input,
                                         &dispatch_context,
@@ -2242,7 +2287,9 @@ where
                             )
                         }
                     }));
-                    let maybe_results: Option<Vec<Option<Result<String, ToolError>>>> = tokio::select! {
+                    let maybe_results: Option<
+                        Vec<Option<Result<crate::image_input::ToolOutput, ToolError>>>,
+                    > = tokio::select! {
                         biased;
                         () = abort_signal.cancelled() => None,
                         results = batch_exec => Some(results),
@@ -2290,12 +2337,14 @@ where
                                 true,
                             )
                         } else {
-                            let (mut output, mut is_error) = match exec_results[offset]
+                            let (mut output, attachments, mut is_error) = match exec_results[offset]
                                 .as_ref()
                                 .expect("permitted tool has an execute result")
                             {
-                                Ok(output) => (output.clone(), false),
-                                Err(error) => (error.to_string(), true),
+                                Ok(output) => {
+                                    (output.text.clone(), output.attachments.clone(), false)
+                                }
+                                Err(error) => (error.to_string(), Vec::new(), true),
                             };
                             if self.hook_abort_signal.is_aborted() {
                                 output =
@@ -2355,10 +2404,13 @@ where
                                     || post_hook_result.is_failed()
                                     || post_hook_result.is_cancelled(),
                             );
-                            ConversationMessage::tool_result(
+                            crate::image_input::ToolOutput {
+                                text: output,
+                                attachments,
+                            }
+                            .into_message(
                                 p.tool_use_id,
                                 p.tool_name,
-                                output,
                                 is_error,
                             )
                         };
@@ -2469,7 +2521,7 @@ where
                         let abort_signal = self.hook_abort_signal.clone();
                         dispatch_context.tool_use_id = Some(tool_use_id.clone());
                         let exec_outcome = {
-                            let exec = self.tool_executor.execute_with_context(
+                            let exec = self.tool_executor.execute_with_attachments(
                                 &tool_name,
                                 &effective_input,
                                 &dispatch_context,
@@ -2511,9 +2563,9 @@ where
                                 iterations,
                             ));
                         };
-                        let (mut output, mut is_error) = match exec_result {
-                            Ok(output) => (output, false),
-                            Err(error) => (error.to_string(), true),
+                        let (mut output, attachments, mut is_error) = match exec_result {
+                            Ok(output) => (output.text, output.attachments, false),
+                            Err(error) => (error.to_string(), Vec::new(), true),
                         };
                         if self.hook_abort_signal.is_aborted() {
                             output = merge_hook_feedback(pre_hook_result.messages(), output, true);
@@ -2575,7 +2627,11 @@ where
 
                         let output =
                             self.maybe_offload_tool_output(&tool_use_id, &tool_name, output);
-                        ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error)
+                        crate::image_input::ToolOutput {
+                            text: output,
+                            attachments,
+                        }
+                        .into_message(tool_use_id, tool_name, is_error)
                     }
                     PermissionOutcome::Deny { reason } => ConversationMessage::tool_result(
                         tool_use_id,

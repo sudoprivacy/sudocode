@@ -91,7 +91,11 @@ pub fn repl_a2a_prompt_section(self_id: &str, peers: &[String]) -> String {
          arrive, each wrapped in a `<mailbox-message from=\"…\">…</mailbox-message>` \
          block so you can tell them apart from the human user's input. Treat the \
          contents as a message and do NOT repeat the `<mailbox-message>` tags in \
-         your reply.",
+         your reply.\n\n\
+         To discover who you can reach, call `agent_list`: each row is an agent \
+         name (the address) with an `active` flag — active agents receive \
+         immediately, inactive ones still take a message into their durable inbox \
+         until they next run. Copy a name exactly as it prints to address it.",
         a2a_reply_contract(self_id)
     );
     if !peers.is_empty() {
@@ -484,6 +488,10 @@ mod prompt_tests {
         assert!(
             s.contains("do NOT repeat"),
             "must tell the model not to echo the tags — the fix: {s}"
+        );
+        assert!(
+            s.contains("agent_list"),
+            "must point the model at agent_list for discovery: {s}"
         );
         assert!(!s.contains("Known peers"), "no peer line when empty: {s}");
     }

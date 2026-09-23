@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sudocode Error-Handling Architecture · Who-Can-Act Taxonomy</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --fg: #e6edf3; --muted: #8b949e;
+    --transport: #58a6ff; --model: #d29922; --human: #3fb950; --fatal: #f85149;
+    --accent: #a371f7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.65; padding: 0 0 80px;
+  }
+  header {
+    padding: 48px 24px 32px; text-align: center;
+    background: radial-gradient(ellipse at top, #1b2230 0%, var(--bg) 70%);
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: .5px; }
+  header .sub { color: var(--muted); font-size: 15px; }
+  header .tag { display:inline-block; margin-top:14px; padding:4px 12px; border:1px solid var(--border); border-radius:999px; font-size:12px; color:var(--muted); }
+  main { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+  section { margin-top: 48px; }
+  h2 { font-size: 22px; border-left: 3px solid var(--accent); padding-left: 12px; margin-bottom: 6px; }
+  h2 .n { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 8px; }
+  .lead { color: var(--muted); margin: 8px 0 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; margin: 16px 0; }
+  pre.mermaid { background: none; border: none; text-align: center; padding: 16px 0; visibility: hidden; }
+  pre.mermaid[data-processed] { visibility: visible; }
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 14px; }
+  th, td { border: 1px solid var(--border); padding: 9px 12px; text-align: left; vertical-align: top; }
+  th { background: #1b2230; font-weight: 600; }
+  td code, p code, li code { background: #1b2230; padding: 1px 6px; border-radius: 5px; font-size: 12.5px; color: #c9d1d9; }
+  .pill { display:inline-block; padding:2px 9px; border-radius:6px; font-size:12px; font-weight:600; white-space:nowrap; }
+  .pill.transport { background: rgba(88,166,255,.15); color: var(--transport); border:1px solid rgba(88,166,255,.35);}
+  .pill.model { background: rgba(210,153,34,.15); color: var(--model); border:1px solid rgba(210,153,34,.35);}
+  .pill.human { background: rgba(63,185,80,.15); color: var(--human); border:1px solid rgba(63,185,80,.35);}
+  .pill.fatal { background: rgba(248,81,73,.15); color: var(--fatal); border:1px solid rgba(248,81,73,.35);}
+  .grid4 { display:grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap:14px; margin:16px 0; }
+  .bucket { border-radius:12px; padding:16px; border:1px solid var(--border); background:var(--panel); }
+  .bucket h3 { margin:0 0 8px; font-size:16px; display:flex; align-items:center; gap:8px; }
+  .bucket .who { font-size:12px; color:var(--muted); }
+  .bucket ul { margin:10px 0 0; padding-left:18px; font-size:13px; color:#c9d1d9; }
+  .dot { width:10px;height:10px;border-radius:50%;display:inline-block; }
+  .warn { border-left:3px solid var(--fatal); background:rgba(248,81,73,.06); padding:12px 16px; border-radius:8px; margin:12px 0; }
+  .ok { border-left:3px solid var(--human); background:rgba(63,185,80,.06); padding:12px 16px; border-radius:8px; margin:12px 0; }
+  .note { border-left:3px solid var(--model); background:rgba(210,153,34,.06); padding:12px 16px; border-radius:8px; margin:12px 0; }
+  .file { color: var(--transport); font-family: "SF Mono", Consolas, monospace; font-size: 12.5px; }
+  footer { text-align:center; color:var(--muted); font-size:13px; margin-top:56px; padding-top:24px; border-top:1px solid var(--border); }
+  .legend { font-size:12px; color:var(--muted); margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sudocode Error-Handling Architecture</h1>
+  <div class="sub">The "Who-Can-Act" Taxonomy — who can act on this error</div>
+  <div class="tag">design doc · lives in docs/design/error-taxonomy.html · mirrored to ShareOne via remote-url</div>
+</header>
+
+<main>
+
+<section>
+  <h2><span class="n">0</span>In one sentence</h2>
+  <p class="lead">An error should not be split into "retryable vs not" — it should be split by <strong>who can fix it</strong>. That decides what the system does with it.</p>
+  <div class="grid4">
+    <div class="bucket" style="border-color:var(--transport)">
+      <h3><span class="dot" style="background:var(--transport)"></span>Transport</h3>
+      <div class="who">the transport layer can fix it</div>
+      <ul><li>429 / 5xx / 520·522·524·525</li><li>connect / timeout</li><li>truncated stream</li></ul>
+      <div style="margin-top:10px"><span class="pill transport">auto-retry</span></div>
+    </div>
+    <div class="bucket" style="border-color:var(--model)">
+      <h3><span class="dot" style="background:var(--model)"></span>Model</h3>
+      <div class="who">the LLM can fix it</div>
+      <ul><li>bad tool arguments</li><li>a request the model built badly</li><li>context overflow (while compaction budget remains)</li></ul>
+      <div style="margin-top:10px"><span class="pill model">llm-revisit — feed back to the model</span></div>
+    </div>
+    <div class="bucket" style="border-color:var(--human)">
+      <h3><span class="dot" style="background:var(--human)"></span>Human</h3>
+      <div class="who">only a human can fix it</div>
+      <ul><li>auth failure 401/403</li><li>bad config / missing key</li><li>request too large</li></ul>
+      <div style="margin-top:10px"><span class="pill human">surface to the user</span></div>
+    </div>
+    <div class="bucket" style="border-color:var(--fatal)">
+      <h3><span class="dot" style="background:var(--fatal)"></span>Fatal</h3>
+      <div class="who">nobody can fix it</div>
+      <ul><li>malformed server response</li><li>unrecoverable internal error</li></ul>
+      <div style="margin-top:10px"><span class="pill fatal">terminal · stop</span></div>
+    </div>
+  </div>
+  <div class="note"><strong>Transparency is a hard requirement.</strong> Sudocode is a hacker tool: every error surfaced to the user must state <em>what</em> failed, <em>which bucket</em> it is, and <em>what the system is doing</em> — e.g. <code>⟳ retry 3/8 — Cloudflare 524</code>, <code>context window exceeded — compacting and retrying</code>, <code>missing ANTHROPIC_API_KEY</code>. Never a swallowed or generic "something went wrong".</div>
+</section>
+
+<section>
+  <h2><span class="n">1</span>Decision flow: an error arrives, what happens</h2>
+  <p class="lead">Target state — every error lands in exactly one bucket, decided in one place by <code>action()</code>.</p>
+  <pre class="mermaid">
+flowchart TD
+    E([error raised]) --> A{"action()<br/>who can fix it?"}
+    A -->|Transport| T["auto-retry<br/>shared retry loop<br/>max_retries=8"]
+    A -->|Model| M["llm-revisit<br/>fed back as a tool_result"]
+    A -->|Human| H["surface<br/>report to user · pause"]
+    A -->|Fatal| F["abort<br/>terminal"]
+    T -->|retries exhausted| X["degrade → bucket of last_error"]
+    M -->|model can't fix / budget exhausted| H
+    style T fill:#132030,stroke:#58a6ff,color:#e6edf3
+    style M fill:#2a2410,stroke:#d29922,color:#e6edf3
+    style H fill:#12241a,stroke:#3fb950,color:#e6edf3
+    style F fill:#2a1414,stroke:#f85149,color:#e6edf3
+    style X fill:#161b22,stroke:#8b949e,color:#8b949e
+  </pre>
+  <div class="legend">Note: the two dashed transitions (retries exhausted → fall back; model can't fix → human) are <strong>state-dependent</strong> and cannot be baked into the error type — see §4.</div>
+</section>
+
+<section>
+  <h2><span class="n">2</span>Status code → bucket map</h2>
+  <p class="lead">The HTTP status set for the Transport bucket is already a single SSOT (<code>is_retryable_http_status</code>, PR #722/#727).</p>
+  <table>
+    <thead><tr><th>Status / error</th><th>Bucket</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td><code>408 409 429</code></td><td><span class="pill transport">Transport</span></td><td>timeout / conflict / rate limit — transient</td></tr>
+      <tr><td><code>500 502 503 504</code></td><td><span class="pill transport">Transport</span></td><td>server / gateway errors</td></tr>
+      <tr><td><code>520 522 524 525</code></td><td><span class="pill transport">Transport</span></td><td>Cloudflare edge↔origin failure / timeout / SSL handshake</td></tr>
+      <tr><td><code>529</code></td><td><span class="pill transport">Transport</span></td><td>Anthropic "Overloaded"</td></tr>
+      <tr><td>connect / timeout / truncated stream</td><td><span class="pill transport">Transport</span></td><td><code>is_connect/is_timeout</code> + <code>IncompleteStream</code></td></tr>
+      <tr><td><code>422</code> + fixable message</td><td><span class="pill model">Model</span></td><td>the model built an invalid request; revising can pass</td></tr>
+      <tr><td>tool argument error (<code>is_error:true</code>)</td><td><span class="pill model">Model</span></td><td>already goes through llm-revisit (tool_result feedback)</td></tr>
+      <tr><td>context-window overflow</td><td><span class="pill model">Model</span> → <span class="pill human">Human</span></td><td>Model while compaction budget remains; Human once exhausted (state-dependent)</td></tr>
+      <tr><td><code>401 403</code> / missing key / bad config</td><td><span class="pill human">Human</span></td><td>only a human can supply credentials / fix config</td></tr>
+      <tr><td><code>413</code> request too large</td><td><span class="pill human">Human</span></td><td>needs a human to shrink input (or an upstream compaction strategy)</td></tr>
+      <tr><td>malformed server JSON / semantic decode failure</td><td><span class="pill fatal">Fatal</span></td><td>a retry yields the same bad data</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="n">3</span>Current state: classification lives in one type and dies at the boundary</h2>
+  <p class="lead">Audit finding — <code>ApiError</code> is the only self-classifying error; once it crosses the api crate it degrades to a <code>String</code>, and upper layers re-guess by string-matching.</p>
+  <pre class="mermaid">
+flowchart LR
+    subgraph api["crate: api ✅ classifies"]
+      AE["ApiError<br/>action() · is_retryable() · safe_failure_class()<br/>is_retryable_http_status()"]
+    end
+    subgraph runtime["crate: runtime ⚠️ classification lost"]
+      RE["RuntimeError<br/>{ message, kind }<br/>only ContextWindowBlocked survives"]
+      CO["compact.rs<br/>string-matches 'context_window_blocked'"]
+    end
+    subgraph tools["crate: tools ⚠️"]
+      TE["ToolError = String wrapper"]
+    end
+    subgraph events["crate: engine-events ⚠️"]
+      EE["EngineEvent::Error<br/>{ message: String }"]
+    end
+    AE -->|"runtime_error_from_api()<br/>(dedup'd to classification only)"| RE
+    AE -.->|degrades to string| TE
+    RE --> CO
+    RE -->|degrades to string| EE
+    style AE fill:#132030,stroke:#58a6ff,color:#e6edf3
+    style RE fill:#2a2410,stroke:#d29922,color:#e6edf3
+    style CO fill:#2a1414,stroke:#f85149,color:#e6edf3
+    style TE fill:#161b22,stroke:#8b949e,color:#8b949e
+    style EE fill:#161b22,stroke:#8b949e,color:#8b949e
+  </pre>
+
+  <h3 style="font-size:16px;margin-top:24px">Specific issues found by the audit</h3>
+  <table>
+    <thead><tr><th>Issue</th><th>Location</th><th>Type</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>Dependency direction is <code>api → runtime</code></td><td><span class="file">api/Cargo.toml depends on runtime</span></td><td>constraint</td><td>runtime can't call an api-side SSOT (would be circular)</td></tr>
+      <tr><td><code>is_retryable_400</code> byte-identical twice</td><td><span class="file">anthropic.rs · openai_compat.rs</span></td><td>DRY</td><td>✅ fixed (Phase 1) — one <code>is_retryable_masked_400</code></td></tr>
+      <tr><td><code>is_retryable()</code> a second hand-written match</td><td><span class="file">api/error.rs</span></td><td>SSOT</td><td>✅ fixed (Phase 1) — now <code>action() == Transport</code></td></tr>
+      <tr><td>context-window detection in two places, different marker sets (can disagree)</td><td><span class="file">error.rs markers · compact.rs is_prompt_too_long</span></td><td>latent bug</td><td>✅ fixed (Phase 3) — compact.rs uses the typed <code>RuntimeError</code> classification; the string detector is deleted</td></tr>
+      <tr><td>compact.rs string-matches <code>"context_window_blocked"</code> to recover lost classification</td><td><span class="file">compact.rs</span></td><td>boundary leak</td><td>✅ fixed (Phase 3) — <code>RuntimeError</code> carries the classification across the boundary; no string re-derivation</td></tr>
+      <tr><td>4 independent retry loops, 3 "retryable" vocabularies</td><td><span class="file">http_transport · tools/lib · compact.rs · mcp_server_manager</span></td><td>fragmentation</td><td>compact.rs's string vocabulary removed (Phase 3); MCP's own remains, noted</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2><span class="n">4</span>Three places the taxonomy resists a clean mapping (stated honestly)</h2>
+  <p class="lead">Four buckets is the right axis, but reality resists in three spots that the refactor must handle explicitly, not paper over.</p>
+  <div class="note">
+    <strong>① Context-window is state-dependent.</strong> It is <span class="pill model">Model</span> (auto-compact + retry) while compaction budget remains, and only becomes <span class="pill human">Human</span> once exhausted. The bucket depends on runtime state, so <code>action()</code> must be combined with the compaction budget — the bucket cannot be hard-coded into the error type.
+  </div>
+  <div class="note">
+    <strong>② llm-revisit currently covers only tool errors.</strong> Provider errors never take the feed-back-to-model path. Making <span class="pill model">Model</span>-actionable provider errors go through llm-revisit is Phase 2.
+  </div>
+  <div class="note">
+    <strong>③ Human vs Fatal is not represented today.</strong> <code>safe_failure_class</code> is the telemetry/analytics axis, not the "who can act" behavior axis. The two axes are kept separate (SRP); they must not be conflated.
+  </div>
+</section>
+
+<section>
+  <h2><span class="n">5</span>Phased refactor (each phase independently shippable · CI green · behavior-preserving)</h2>
+  <p class="lead">"Make all code use this" spans 5 crates and can't be reviewed in one PR. Three phases; the foundation ships first.</p>
+  <pre class="mermaid">
+flowchart TD
+    P1["Phase 1 · foundation SSOT + dedup ✅ LANDED (#733)<br/>—————————<br/>· pub enum ErrorAction{Transport,Model,Human,Fatal}<br/>· ApiError::action() single definition<br/>· is_retryable() becomes action()==Transport (behavior-identical)<br/>· merge 2×is_retryable_400 → 1<br/>· zero user-visible behavior change"]
+    P2["Phase 2 · route provider errors into llm-revisit<br/>—————————<br/>· Model-actionable provider errors<br/>  fed back tool-result-style<br/>· explicit error messages<br/>· needs live e2e"]
+    P3["Phase 3 · context-window state machine explicit ✅ LANDED<br/>—————————<br/>· RuntimeError carries the typed classification across the api→runtime boundary<br/>· compact.rs retry loop uses the typed bits, not string matching<br/>· deleted is_retryable_error + is_prompt_too_long string detectors<br/>· context-window failure never destructively retried"]
+    P1 --> P2 --> P3
+    style P1 fill:#12241a,stroke:#3fb950,color:#e6edf3
+    style P2 fill:#2a2410,stroke:#d29922,color:#e6edf3
+    style P3 fill:#132030,stroke:#58a6ff,color:#e6edf3
+  </pre>
+  <div class="ok"><strong>Phase 1 is pure DRY + SSOT with zero behavior change</strong> — the safest first step; everything else builds on it. Landed in PR #733.</div>
+</section>
+
+<section>
+  <h2><span class="n">6</span>Guardrails (red lines for the whole refactor)</h2>
+  <table>
+    <tbody>
+      <tr><td>Infrastructure</td><td>Do not touch nexus kernel / syscall / raft ABI — this is all in the api/runtime/engine error path, zero infra-ABI surface</td></tr>
+      <tr><td>Persistence</td><td>Errors are ephemeral; nothing here is persisted</td></tr>
+      <tr><td>Deletion</td><td>Replaced duplicate fns / markers are removed outright and callers repointed; no "replacement for the retired X" tombstones</td></tr>
+      <tr><td>Perf</td><td><code>action()</code> is an inline enum match, only on the error path — zero success-path cost</td></tr>
+      <tr><td>SRP / orthogonality</td><td>Behavior axis (<code>ErrorAction</code>) and analytics axis (<code>safe_failure_class</code>) stay separate</td></tr>
+      <tr><td>Transparency</td><td>Every surfaced error states what/which-bucket/what-the-system-is-doing; never swallow or blur</td></tr>
+      <tr><td>Verification</td><td>Each phase: fmt + clippy clean, live tests (prefer live PTY), full CI green before merge</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>
+  Sudocode error-handling taxonomy · SSOT: docs/design/error-taxonomy.html · mirrored to ShareOne via remote-url<br/>
+  Landed foundations: #721 (Running card overlay-only) · #722 (retry status SSOT) · #727 (add 525) · #733 (Phase 1 ErrorAction) · Phase 3 (typed classification across the api→runtime boundary; compaction no longer string-matches)
+</footer>
+
+</main>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark', look: 'handDrawn', securityLevel: 'loose' });
+</script>
+</body>
+</html>

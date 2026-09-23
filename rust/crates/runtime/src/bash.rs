@@ -83,9 +83,16 @@ pub struct BashCommandInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BashCommandOutput {
     pub stdout: String,
+    /// Actual process exit code; absent for background, interrupted or signaled runs.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// Compact model results omit empty stderr.
+    #[serde(default)]
     pub stderr: String,
     #[serde(rename = "rawOutputPath")]
     pub raw_output_path: Option<String>,
+    /// Compact model results only emit this flag when true.
+    #[serde(default)]
     pub interrupted: bool,
     #[serde(rename = "isImage")]
     pub is_image: Option<bool>,
@@ -105,6 +112,67 @@ pub struct BashCommandOutput {
     pub structured_content: Option<Vec<serde_json::Value>>,
     #[serde(rename = "sandboxStatus")]
     pub sandbox_status: Option<SandboxStatus>,
+}
+
+impl BashCommandOutput {
+    /// Model-facing projection, applied before transcript persistence and output offload.
+    /// The full execution result remains available to internal callers via `Serialize`.
+    #[must_use]
+    pub fn model_output(&self) -> serde_json::Value {
+        let mut value = serde_json::json!({ "stdout": self.stdout });
+        let object = value.as_object_mut().expect("object literal");
+        if let Some(code) = self.exit_code {
+            object.insert("exit_code".into(), code.into());
+        }
+        if !self.stderr.is_empty() {
+            object.insert("stderr".into(), self.stderr.clone().into());
+        }
+        if self.interrupted {
+            object.insert("interrupted".into(), true.into());
+        }
+        // Preserve names consumed by renderers and task/output readers.
+        for (key, text) in [
+            ("returnCodeInterpretation", &self.return_code_interpretation),
+            ("backgroundTaskId", &self.background_task_id),
+            ("rawOutputPath", &self.raw_output_path),
+        ] {
+            if let Some(text) = text.as_ref().filter(|text| !text.is_empty()) {
+                object.insert(key.into(), text.clone().into());
+            }
+        }
+        if self.background_task_id.is_some() && self.no_output_expected == Some(true) {
+            object.insert("noOutputExpected".into(), true.into());
+        }
+        if let Some(content) = self.structured_content.as_ref().filter(|v| !v.is_empty()) {
+            object.insert("structuredContent".into(), content.clone().into());
+        }
+        if self.is_image == Some(true) {
+            object.insert("isImage".into(), true.into());
+        }
+        // On failure, explain unavailable isolation without routine capability flags.
+        if self.return_code_interpretation.is_some() {
+            if let Some(reason) = self
+                .sandbox_status
+                .as_ref()
+                .and_then(|status| status.fallback_reason.as_ref())
+                .filter(|reason| !reason.is_empty())
+            {
+                object.insert("sandboxWarning".into(), reason.clone().into());
+            }
+        }
+        value
+    }
+}
+
+fn describe_exit_status(status: std::process::ExitStatus) -> Option<String> {
+    if status.success() {
+        None
+    } else if let Some(code) = status.code() {
+        Some(format!("exit_code:{code}"))
+    } else {
+        // `code() == None` means signal termination on Unix, not success.
+        Some(status.to_string())
+    }
 }
 
 /// Executes a shell command with the requested sandbox settings.
@@ -150,6 +218,7 @@ pub fn execute_bash_with_progress(
             .spawn()?;
 
         return Ok(BashCommandOutput {
+            exit_code: None,
             stdout: String::new(),
             stderr: String::new(),
             raw_output_path: None,
@@ -289,7 +358,7 @@ async fn execute_bash_async(
                 "Command interrupted by user",
                 "interrupted",
                 input.dangerously_disable_sandbox,
-                sandbox_status,
+                Some(sandbox_status),
             ));
         }
         () = &mut timeout_sleep => {
@@ -297,7 +366,7 @@ async fn execute_bash_async(
                 &format!("Command exceeded timeout of {timeout_ms} ms"),
                 "timeout",
                 input.dangerously_disable_sandbox,
-                sandbox_status,
+                Some(sandbox_status),
             ));
         }
         result = &mut output => result?,
@@ -312,15 +381,10 @@ async fn execute_bash_async(
         MAX_OUTPUT_BYTES_SAFETY,
     );
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = output.status.code().and_then(|code| {
-        if code == 0 {
-            None
-        } else {
-            Some(format!("exit_code:{code}"))
-        }
-    });
+    let return_code_interpretation = describe_exit_status(output.status);
 
     Ok(BashCommandOutput {
+        exit_code: output.status.code(),
         stdout,
         stderr,
         raw_output_path: None,
@@ -486,7 +550,7 @@ async fn execute_bash_streaming(
                     "Command interrupted by user",
                     "interrupted",
                     input.dangerously_disable_sandbox,
-                    sandbox_status,
+                    Some(sandbox_status),
                 ));
             }
             _ = tokio::time::sleep_until(timeout_deadline) => {
@@ -495,7 +559,7 @@ async fn execute_bash_streaming(
                     &format!("Command exceeded timeout of {timeout_ms} ms"),
                     "timeout",
                     input.dangerously_disable_sandbox,
-                    sandbox_status,
+                    Some(sandbox_status),
                 ));
             }
             () = &mut readers => {
@@ -543,15 +607,10 @@ async fn execute_bash_streaming(
     let stdout = truncate_output(&stdout_buf, MAX_OUTPUT_BYTES_SAFETY);
     let stderr = truncate_output(&stderr_buf, MAX_OUTPUT_BYTES_SAFETY);
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = status.code().and_then(|code| {
-        if code == 0 {
-            None
-        } else {
-            Some(format!("exit_code:{code}"))
-        }
-    });
+    let return_code_interpretation = describe_exit_status(status);
 
     Ok(BashCommandOutput {
+        exit_code: status.code(),
         stdout,
         stderr,
         raw_output_path: None,
@@ -568,13 +627,14 @@ async fn execute_bash_streaming(
     })
 }
 
-fn interrupted_bash_output(
+pub(crate) fn interrupted_bash_output(
     stderr: &str,
     return_code_interpretation: &str,
     dangerously_disable_sandbox: Option<bool>,
-    sandbox_status: SandboxStatus,
+    sandbox_status: Option<SandboxStatus>,
 ) -> BashCommandOutput {
     BashCommandOutput {
+        exit_code: None,
         stdout: String::new(),
         stderr: stderr.to_string(),
         raw_output_path: None,
@@ -587,7 +647,7 @@ fn interrupted_bash_output(
         return_code_interpretation: Some(return_code_interpretation.to_string()),
         no_output_expected: Some(true),
         structured_content: None,
-        sandbox_status: Some(sandbox_status),
+        sandbox_status,
     }
 }
 

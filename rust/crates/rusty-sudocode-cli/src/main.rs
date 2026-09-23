@@ -133,10 +133,9 @@ use engine_host::tool_executor::{
 // `build_*` helpers). `RuntimeConfig` is the engine-side config struct; it does
 // not shadow `runtime::RuntimeConfig` (always named fully-qualified).
 use engine_host::{
-    build_engine_runtime, build_plugin_manager, build_runtime_for_cwd,
-    build_runtime_plugin_state_with_loader, plugin_load_outcome_for_cwd, AcpCliSession,
-    BuiltRuntime, ModelSwitchReport, RuntimeConfig, RuntimePluginState, SessionEngine,
-    SessionLifecycle,
+    build_engine_runtime, build_plugin_manager, build_runtime_plugin_state_with_loader,
+    plugin_load_outcome_for_cwd, AcpCliSession, BuiltRuntime, ModelSwitchReport, RuntimeConfig,
+    RuntimePluginState, SessionEngine, SessionLifecycle,
 };
 use init::initialize_repo;
 use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};
@@ -2179,6 +2178,12 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                 print!("\x1b[J");
                 let _ = io::stdout().flush();
                 let trimmed = input.trim().to_string();
+                *cli.pending_images.borrow_mut() = editor
+                    .borrow_mut()
+                    .take_images()
+                    .into_values()
+                    .map(|(data, mime_type)| runtime::ContentBlock::Image { data, mime_type })
+                    .collect();
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {
                     cli.persist_session()?;
                     break;
@@ -3451,6 +3456,7 @@ fn spawn_iocraft_turn(
 /// (audit finding B). It physically cannot drive a turn except through
 /// `engine_handle` (no `EngineDelegate`), and cannot reach into the runtime.
 struct LiveCli {
+    pending_images: RefCell<Vec<runtime::ContentBlock>>,
     /// The turn seam: `commands.send(Prompt/Cancel/PermissionAnswer/…)`,
     /// `events.recv()`. The ONLY way turns cross.
     engine_handle: EngineHandle,
@@ -3845,6 +3851,7 @@ impl LiveCli {
         }
 
         Ok(Self {
+            pending_images: RefCell::new(Vec::new()),
             engine_handle,
             lifecycle,
             prompt_history: Vec::new(),
@@ -4050,9 +4057,8 @@ impl LiveCli {
         // never committed to durable scrollback, so `Running` cannot outlive
         // the call regardless of whether a `ui` overlay is present.
         let mut renderer = render.then(|| EngineEventRenderer::new(spinner_ref, output.cloned()));
-        let blocks = vec![runtime::ContentBlock::Text {
-            text: input.to_string(),
-        }];
+        let mut blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
+        blocks.append(&mut self.pending_images.borrow_mut());
         self.engine_handle
             .commands
             .send(EngineCommand::Prompt { blocks })?;
@@ -4264,9 +4270,26 @@ impl LiveCli {
         // If the plan confirmation dialog chose "clear context & execute", pick
         // up the plan and re-run in a fresh session (the engine preserves the
         // current model across the reset).
-        if let Some(plan) = take_pending_plan_execution() {
+        // "Clear context & execute" = human-in-the-loop compaction: reset the
+        // session, then re-run with the APPROVED plan (the plan file is the SSOT)
+        // plus the todo-continuity block — the same light action auto-compaction
+        // uses — so todos survive the clear. No LLM summarization call needed:
+        // the reviewed plan IS the continuity, which makes this faster than an
+        // automatic compaction. `pending` is just the "user chose clear+execute"
+        // signal; read the plan text from the file, not the in-memory string.
+        if take_pending_plan_execution().is_some() {
             self.lifecycle.reset_session()?;
-            let prompt = format!("Implement the following plan:\n\n{plan}");
+            let plan = runtime::plan_store::read_plan().unwrap_or_default();
+            let mut prompt = String::from(
+                "You are resuming after the user APPROVED your plan and chose to clear the \
+                 conversation. The prior exploration context is gone on purpose; the approved \
+                 plan below is the source of truth. Implement it now.\n\n",
+            );
+            prompt.push_str(&plan);
+            if let Some(todo_block) = runtime::render_todo_continuity_block() {
+                prompt.push_str("\n\n");
+                prompt.push_str(&todo_block);
+            }
             return self.run_turn_impl(&prompt, interactive_cancel);
         }
         Ok(())

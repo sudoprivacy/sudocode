@@ -190,7 +190,7 @@ impl SessionEngine {
             .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
         let abort_signal = runtime::HookAbortSignal::new();
         let runtime = build_engine_runtime(
-            &cwd,
+            &crate::HostContext::for_cwd(cwd.clone()),
             session_state.with_persistence_path(handle.path.clone()),
             &handle.id,
             RuntimeConfig {
@@ -273,7 +273,7 @@ impl SessionEngine {
         // `save_to_path` (it is already on disk at `handle.path`; re-saving here
         // would rewrite a transcript the turn loop has not touched yet).
         let runtime = build_engine_runtime(
-            &cwd,
+            &crate::HostContext::for_cwd(cwd.clone()),
             session,
             &handle.id,
             RuntimeConfig {
@@ -366,7 +366,7 @@ impl SessionEngine {
         let system_prompt =
             build_acp_system_prompt(&cwd, &session.prompt_overrides, session.memory)?;
         let runtime = build_engine_runtime(
-            &cwd,
+            &crate::HostContext::for_cwd(cwd.clone()),
             new_session,
             &handle.id,
             RuntimeConfig {

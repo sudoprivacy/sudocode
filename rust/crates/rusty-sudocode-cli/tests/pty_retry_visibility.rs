@@ -44,7 +44,11 @@ fn provider_retry_is_reported_then_the_turn_completes() {
     }
 
     let prompt = env.prompt("Say hello", "retry_then_succeed");
-    let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
+    let trace_path = env.workspace_root().join("retry-diagnostic.jsonl");
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only", &prompt],
+        &[("SCODE_LOG_PATH", trace_path.to_str().unwrap())],
+    );
     // The first backoff is a second plus jitter, and the turn still has to
     // finish after it.
     sess.set_default_timeout(Duration::from_secs(60));
@@ -69,6 +73,18 @@ fn provider_retry_is_reported_then_the_turn_completes() {
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
     assert_eq!(exit, 0, "a retried turn should still exit 0; got {exit}");
+    let trace = std::fs::read_to_string(trace_path).expect("session trace");
+    assert!(
+        trace.contains("slow down"),
+        "the original provider reason must remain diagnosable"
+    );
+    assert!(
+        trace.contains("429"),
+        "the original status must remain diagnosable"
+    );
+    assert!(!sess
+        .render(|screen| screen.contents())
+        .contains("slow down"));
 }
 
 /// A turn that never hits a retry says nothing about retries.

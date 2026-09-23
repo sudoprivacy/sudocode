@@ -166,7 +166,7 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                     && last
                         .content
                         .iter()
-                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
+                        .any(|block| matches!(block, InputContentBlock::ToolResult { .. }))
                 {
                     last.content.extend(content);
                     continue;
@@ -177,6 +177,13 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
             role: role.to_string(),
             content,
         });
+    }
+    for message in &mut result {
+        // Keep every tool result before its attachments. OpenAI tool messages
+        // must answer the whole assistant batch before a user image message.
+        message
+            .content
+            .sort_by_key(|block| !matches!(block, InputContentBlock::ToolResult { .. }));
     }
     result
 }

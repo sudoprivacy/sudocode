@@ -463,7 +463,13 @@ pub fn format_compact_summary(summary: &str) -> String {
 /// could only recover a lossy prose paraphrase from the summary's "Pending
 /// Tasks". Re-injecting the structured list keeps the next `TodoWrite` faithful.
 /// Mirrors Claude Code's todo-continuity on compaction.
-fn render_todo_continuity_block() -> Option<String> {
+///
+/// Shared: auto-compaction and the write_plan clear-context path both call this
+/// so a manual "clear context & execute" carries the todo list forward the same
+/// way an automatic compaction does.
+#[inline]
+#[must_use]
+pub fn render_todo_continuity_block() -> Option<String> {
     let todos = crate::todo_store::todo_store_path()
         .ok()
         .map(|path| crate::todo_store::TodoStore::load(&path).list())
@@ -631,37 +637,6 @@ fn build_compaction_messages(
 /// Matches CC's `MAX_COMPACT_STREAMING_RETRIES`.
 const MAX_COMPACT_RETRIES: u32 = 2;
 
-/// Check if an error is retryable (transient failures, not permanent ones).
-fn is_retryable_error(error_msg: &str) -> bool {
-    let lower = error_msg.to_lowercase();
-    lower.contains("timeout")
-        || lower.contains("connection")
-        || lower.contains("server error")
-        || lower.contains("500")
-        || lower.contains("502")
-        || lower.contains("503")
-        || lower.contains("529")
-        || lower.contains("overloaded")
-        || lower.contains("rate limit")
-        || lower.contains("rate_limit")
-}
-
-/// Check if an error indicates prompt-too-long.
-fn is_prompt_too_long(error_msg: &str) -> bool {
-    let lower = error_msg.to_lowercase();
-    lower.contains("prompt is too long")
-        || lower.contains("prompt_too_long")
-        || lower.contains("maximum context length")
-        || lower.contains("token limit")
-        // The API client's local preflight rejects an oversized compaction
-        // request before it leaves the process; treat it like the provider's
-        // own prompt-too-long so no destructive retry is attempted.
-        || lower.contains("context_window_blocked")
-        // Anthropic: "input length and `max_tokens` exceed context limit".
-        || lower.contains("context limit")
-        || lower.contains("context window")
-}
-
 /// Compacts a session using an LLM to produce a high-quality summary.
 ///
 /// Retries transient failures up to [`MAX_COMPACT_RETRIES`] times with
@@ -723,11 +698,16 @@ pub async fn compact_session<C: ApiClient>(
         {
             Ok(summary) => break summary,
             Err(error) => {
+                // Use the typed classification the error already carries (set
+                // once at the api→runtime boundary), not a re-derivation from
+                // the rendered string. Retry only transport-transient failures;
+                // a context-window rejection can never be fixed by resending the
+                // same oversized compaction request, so it fails immediately.
+                let retry = attempt < MAX_COMPACT_RETRIES
+                    && error.is_retryable()
+                    && !error.is_context_window_blocked();
                 let message = error.to_string();
-                if attempt < MAX_COMPACT_RETRIES
-                    && is_retryable_error(&message)
-                    && !is_prompt_too_long(&message)
-                {
+                if retry {
                     tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
                     attempt += 1;
                 } else {
@@ -2396,7 +2376,9 @@ mod tests {
             ) -> Result<String, RuntimeError> {
                 let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
                 if attempt < 2 {
-                    Err(RuntimeError::new("503 server error: overloaded"))
+                    // A real transport failure (503) arrives here already
+                    // classified retryable by the api→runtime boundary.
+                    Err(RuntimeError::new("503 server error: overloaded").retryable(true))
                 } else {
                     Ok("<summary>Recovered after retry.</summary>".to_string())
                 }
@@ -2463,7 +2445,9 @@ mod tests {
             ) -> Result<String, RuntimeError> {
                 let attempt = PTL_ATTEMPT.fetch_add(1, Ordering::Relaxed);
                 if attempt == 0 {
-                    Err(RuntimeError::new(
+                    // A context-window rejection arrives here already classified
+                    // by the api→runtime boundary (not by string-matching).
+                    Err(RuntimeError::context_window_blocked(
                         "prompt_too_long: exceeds maximum context length",
                     ))
                 } else {
@@ -2646,5 +2630,128 @@ mod tests {
         assert!(result
             .formatted_summary
             .contains("Cache-safe compaction test"));
+    }
+
+    #[tokio::test]
+    async fn compaction_retries_a_transport_error_then_succeeds() {
+        // Phase 3: the retry loop keys off the typed `RuntimeError.is_retryable()`
+        // bit, not a string match. A transport-transient failure (retryable=true)
+        // must be retried within MAX_COMPACT_RETRIES and then succeed.
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        static CALLS: AtomicU8 = AtomicU8::new(0);
+        struct RetryMock;
+        #[async_trait]
+        impl ApiClient for RetryMock {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("unused"))
+            }
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                if CALLS.fetch_add(1, Ordering::Relaxed) == 0 {
+                    // Transport error carrying a message that does NOT contain any
+                    // legacy retry keyword — proving classification comes from the
+                    // typed bit, not the string.
+                    Err(RuntimeError::new("upstream hiccup").retryable(true))
+                } else {
+                    Ok("<summary>\n1. Primary Request and Intent:\n   ok.\n</summary>".to_string())
+                }
+            }
+        }
+        CALLS.store(0, Ordering::Relaxed);
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("Do work ".repeat(100)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Working ".repeat(100),
+            }]),
+        ];
+        let mut mock = RetryMock;
+        let result = super::compact_session(
+            &session,
+            super::CompactionConfig {
+                preserve_recent_messages: 0,
+                max_estimated_tokens: 1,
+            },
+            &mut mock,
+            "claude-sonnet-4-6",
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "should succeed after one retry: {result:?}");
+        assert_eq!(CALLS.load(Ordering::Relaxed), 2, "expected one retry");
+    }
+
+    #[tokio::test]
+    async fn compaction_does_not_retry_a_context_window_error() {
+        // A context-window rejection can never be fixed by resending the same
+        // oversized request, so it must fail on the first attempt — driven by
+        // the typed `is_context_window_blocked()` bit, no string match.
+        use crate::conversation::{ApiClient, ApiRequest, AssistantEventStream, RuntimeError};
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicU8, Ordering};
+
+        static CALLS: AtomicU8 = AtomicU8::new(0);
+        struct OverflowMock;
+        #[async_trait]
+        impl ApiClient for OverflowMock {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("unused"))
+            }
+            async fn send_compaction(
+                &mut self,
+                _model: &str,
+                _system_prompt: &str,
+                _messages: Vec<ConversationMessage>,
+                _max_tokens: u32,
+            ) -> Result<String, RuntimeError> {
+                CALLS.fetch_add(1, Ordering::Relaxed);
+                // A generic-looking message: only the typed bit marks it as a
+                // context-window failure, so a string matcher would have missed
+                // it and wrongly retried.
+                Err(RuntimeError::context_window_blocked("request rejected"))
+            }
+        }
+        CALLS.store(0, Ordering::Relaxed);
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("Do work ".repeat(100)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Working ".repeat(100),
+            }]),
+        ];
+        let mut mock = OverflowMock;
+        let result = super::compact_session(
+            &session,
+            super::CompactionConfig {
+                preserve_recent_messages: 0,
+                max_estimated_tokens: 1,
+            },
+            &mut mock,
+            "claude-sonnet-4-6",
+            None,
+        )
+        .await;
+        assert!(result.is_err(), "context-window overflow must not succeed");
+        assert_eq!(
+            CALLS.load(Ordering::Relaxed),
+            1,
+            "context-window error must not be retried"
+        );
     }
 }

@@ -29,6 +29,7 @@ pub mod fs_backend;
 mod git_context;
 pub mod green_contract;
 mod hooks;
+pub mod image_input;
 pub mod image_registry;
 mod json;
 mod lane_events;
@@ -94,9 +95,9 @@ pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, Branch
 pub use compact::{
     autocompact_buffer_tokens, compact_session, compact_session_sync,
     compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
-    format_compact_summary, get_compact_continuation_message, should_compact, CompactionConfig,
-    CompactionError, CompactionResult, CompactionSummarySource, ContextBudget,
-    AUTOCOMPACT_BUFFER_TOKENS, COMPACTION_FAILED, COMPACT_MAX_OUTPUT_TOKENS,
+    format_compact_summary, get_compact_continuation_message, render_todo_continuity_block,
+    should_compact, CompactionConfig, CompactionError, CompactionResult, CompactionSummarySource,
+    ContextBudget, AUTOCOMPACT_BUFFER_TOKENS, COMPACTION_FAILED, COMPACT_MAX_OUTPUT_TOKENS,
 };
 pub use config::{
     default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,

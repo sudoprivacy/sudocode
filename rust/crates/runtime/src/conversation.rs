@@ -705,6 +705,13 @@ impl std::error::Error for ToolError {}
 pub struct RuntimeError {
     message: String,
     kind: RuntimeErrorKind,
+    /// `true` when the underlying failure is transport-transient (rate limit,
+    /// 5xx, gateway timeout, dropped/truncated stream) and the same request may
+    /// succeed on a retry. Derived once, at the api→runtime boundary, from
+    /// [`api::ApiError::is_retryable`] (the `ErrorAction::Transport` bucket) —
+    /// so callers branch on this typed bit instead of re-deriving retryability
+    /// by string-matching the rendered message.
+    retryable: bool,
 }
 
 /// Coarse classification of a [`RuntimeError`], for the few failures the
@@ -723,6 +730,7 @@ impl RuntimeError {
         Self {
             message: message.into(),
             kind: RuntimeErrorKind::Generic,
+            retryable: false,
         }
     }
 
@@ -733,12 +741,28 @@ impl RuntimeError {
         Self {
             message: message.into(),
             kind: RuntimeErrorKind::ContextWindowBlocked,
+            retryable: false,
         }
+    }
+
+    /// Set the transport-retryable classification. Chainable so the api→runtime
+    /// boundary can stamp it in one place: `RuntimeError::new(msg).retryable(a)`.
+    #[must_use]
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
     }
 
     #[must_use]
     pub fn is_context_window_blocked(&self) -> bool {
         self.kind == RuntimeErrorKind::ContextWindowBlocked
+    }
+
+    /// `true` when this is a transport-transient failure worth retrying. The
+    /// typed successor to string-matching the message for "timeout"/"503"/etc.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.retryable
     }
 }
 

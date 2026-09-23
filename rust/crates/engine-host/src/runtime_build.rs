@@ -415,6 +415,10 @@ pub(crate) fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
+    // Point the built-in file tools at the host's filesystem. Everything
+    // above this line is identical for both hosts; this is the line that
+    // decides whether a write lands on local disk or in the kernel.
+    let tool_registry = tool_registry.with_fs(Arc::clone(&host.fs));
     // Resolve the standalone nexus-A2A session once (fail loud on a partial
     // config or a dial failure). `None` when A2A is off — the fast path that
     // leaves scode behaviour unchanged. Held as `Option<&'static Session>`

@@ -133,10 +133,9 @@ use engine_host::tool_executor::{
 // `build_*` helpers). `RuntimeConfig` is the engine-side config struct; it does
 // not shadow `runtime::RuntimeConfig` (always named fully-qualified).
 use engine_host::{
-    build_engine_runtime, build_plugin_manager,
-    build_runtime_plugin_state_with_loader, plugin_load_outcome_for_cwd, AcpCliSession,
-    BuiltRuntime, ModelSwitchReport, RuntimeConfig, RuntimePluginState, SessionEngine,
-    SessionLifecycle,
+    build_engine_runtime, build_plugin_manager, build_runtime_plugin_state_with_loader,
+    plugin_load_outcome_for_cwd, AcpCliSession, BuiltRuntime, ModelSwitchReport, RuntimeConfig,
+    RuntimePluginState, SessionEngine, SessionLifecycle,
 };
 use init::initialize_repo;
 use plugins::{PluginLoadOutcome, PluginManager, PluginRegistry};

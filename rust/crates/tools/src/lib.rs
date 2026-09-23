@@ -427,11 +427,32 @@ impl From<ToolSpec> for ToolDefinition {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GlobalToolRegistry {
     plugin_tools: Vec<PluginTool>,
     runtime_tools: Vec<RuntimeToolDefinition>,
     enforcer: Option<PermissionEnforcer>,
+    /// Filesystem the built-in file tools act on.
+    ///
+    /// `StdFsBackend` unless a host says otherwise, which is what the CLI
+    /// wants. A co-hosted agent supplies a kernel-backed one so its writes
+    /// land where the hooks, the audit trail and the permission checks are —
+    /// that reach IS the reason to co-host, and a literal backend here is what
+    /// denied it.
+    fs: Arc<dyn FsBackend>,
+}
+
+// Hand-written because `FsBackend` carries no `Debug` bound, and widening the
+// trait to get a derive would push that on every implementor for the sake of
+// one struct's formatting.
+impl std::fmt::Debug for GlobalToolRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GlobalToolRegistry")
+            .field("plugin_tools", &self.plugin_tools)
+            .field("runtime_tools", &self.runtime_tools)
+            .field("enforcer", &self.enforcer)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -449,7 +470,19 @@ impl GlobalToolRegistry {
             plugin_tools: Vec::new(),
             runtime_tools: Vec::new(),
             enforcer: None,
+            fs: Arc::new(StdFsBackend),
         }
+    }
+
+    /// Point the built-in file tools at `fs`.
+    ///
+    /// The one call that makes the same tools reach a different store; every
+    /// other difference between a CLI session and a co-hosted agent is a value
+    /// in `HostContext`, and this is the one that decides where bytes go.
+    #[must_use]
+    pub fn with_fs(mut self, fs: Arc<dyn FsBackend>) -> Self {
+        self.fs = fs;
+        self
     }
 
     pub fn with_plugin_tools(plugin_tools: Vec<PluginTool>) -> Result<Self, String> {
@@ -475,6 +508,7 @@ impl GlobalToolRegistry {
             plugin_tools,
             runtime_tools: Vec::new(),
             enforcer: None,
+            fs: Arc::new(StdFsBackend),
         })
     }
 
@@ -839,7 +873,7 @@ impl GlobalToolRegistry {
                 input,
                 abort_signal,
                 ctx,
-                &StdFsBackend,
+                self.fs.as_ref(),
             );
         }
         self.plugin_tools

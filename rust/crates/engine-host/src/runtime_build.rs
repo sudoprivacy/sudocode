@@ -52,6 +52,14 @@ pub struct HostContext {
     /// The agent's name when the host knows it. `None` means "derive it",
     /// which is what a CLI session does from its directory and config.
     pub agent_name: Option<String>,
+    /// Where this agent's messages are sent and received, when the host owns
+    /// that. `None` means "resolve it", which is what a CLI session does.
+    ///
+    /// A co-hosted agent's mailbox IS its identity, so it is supplied rather
+    /// than derived: a second one resolved here would give `send` a different
+    /// address than the one the agent receives on, and neither side can see
+    /// the other's answer.
+    pub mailbox: Option<Arc<runtime::mailbox::Mailbox>>,
 }
 
 impl HostContext {
@@ -65,6 +73,7 @@ impl HostContext {
             workspace_root: cwd.clone(),
             config_root: cwd,
             agent_name: None,
+            mailbox: None,
         }
     }
 
@@ -129,6 +138,18 @@ pub struct BuiltRuntime {
 }
 
 impl BuiltRuntime {
+    /// Take the engine out, leaving the shell behind.
+    ///
+    /// For a host that drives the runtime itself rather than borrowing it per
+    /// turn — the co-host hands it to the mailbox loop. The SHELL must outlive
+    /// that loop: its `Drop` shuts down MCP servers and plugins, so dropping it
+    /// at spawn time would tear those down under a still-running agent.
+    pub fn take_runtime(
+        &mut self,
+    ) -> Option<ConversationRuntime<EngineApiClient, CliToolExecutor>> {
+        self.runtime.take()
+    }
+
     pub fn new(
         runtime: ConversationRuntime<EngineApiClient, CliToolExecutor>,
         plugin_registry: PluginRegistry,
@@ -501,7 +522,12 @@ pub(crate) fn build_runtime_with_plugin_state(
     // framing. Every receive path renders the shared REPL section; nexus adds
     // its network note (via `peer_system_prompt`), standalone uses the same
     // local identity the `send` routing below resolves.
-    if let Some(session) = a2a {
+    if host.mailbox.is_some() {
+        // A host that supplied its own mailbox also drives delivery, and the
+        // prose describing that framing travels with the driver rather than
+        // being guessed here — the co-host's messages arrive wrapped in
+        // `[message from <sender>]`, which only its loop knows to emit.
+    } else if let Some(session) = a2a {
         system_prompt
             .dynamic_sections
             .push(session.peer_system_prompt());
@@ -542,7 +568,9 @@ pub(crate) fn build_runtime_with_plugin_state(
     // No A2A session means no nexus configured, and the resolver answers with
     // workspace-local JSONL — the same code path rather than a fallback branch,
     // which is what stops the two from drifting.
-    if let Some(a2a_session) = a2a {
+    if let Some(mailbox) = host.mailbox.clone() {
+        tool_executor.set_mailbox(mailbox);
+    } else if let Some(a2a_session) = a2a {
         tool_executor.set_mailbox(a2a_session.mailbox());
     } else {
         // Standalone (no nexus): route `send` to the shared same-machine pair
@@ -550,15 +578,12 @@ pub(crate) fn build_runtime_with_plugin_state(
         // in another folder receives it (its poller tails the same
         // `{pair_root}/agents/{name}/chat-with-me`). Without this the send would
         // fall back to workspace-local, which two different folders never share.
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let configured = runtime::ConfigLoader::default_for(&cwd)
-            .load()
-            .ok()
-            .and_then(|rc| {
-                rc.get("agentName")
-                    .and_then(|v| v.as_str().map(str::to_string))
-            });
-        let self_name = runtime::mailbox::local_agent_name(configured.as_deref(), &cwd);
+        // The SAME name the prompt section above announced. It resolved from
+        // the host context while this read `current_dir()`, so a session whose
+        // directory differed from the process's told the model it was one peer
+        // and delivered as another — silently, since neither side can see the
+        // other's answer.
+        let self_name = host.resolved_agent_name();
         tool_executor.set_mailbox(std::sync::Arc::new(
             runtime::mailbox::Mailbox::workspace_local(
                 &runtime::mailbox::local_pair_root(),

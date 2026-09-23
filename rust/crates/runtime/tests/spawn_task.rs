@@ -22,8 +22,9 @@ use kernel::kernel::{Kernel, OperationContext, ReadRequest, WriteRequest};
 use runtime::mailbox::{InboxConvention, Mailbox};
 use runtime::spawn_task::{spawn_task, MailboxEnvelope, MailboxSender, SpawnHandle};
 use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, FsBackend, KernelFsBackend,
-    PermissionMode, PermissionPolicy, RuntimeError, SystemPromptBuilder, ToolError, ToolExecutor,
+    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ConversationRuntime, FsBackend,
+    KernelFsBackend, PermissionMode, PermissionPolicy, RuntimeError, Session, SystemPromptBuilder,
+    ToolError, ToolExecutor,
 };
 
 const DT_STREAM: i32 = 4;
@@ -95,9 +96,9 @@ impl ApiClient for SendsReply {
     }
 }
 
-/// Executor mirroring the production `ManagedToolExecutor` send path: routes
-/// `send_message` through the [`MailboxSender`] (the SSOT send-write), so a
-/// scripted `send_message` turn actually writes to the recipient's inbox.
+/// Executor mirroring the production send path: routes `send_message` through
+/// the [`MailboxSender`] (the SSOT send-write), so a scripted `send_message`
+/// turn actually writes to the recipient's inbox.
 struct SendingTools {
     send: MailboxSender,
 }
@@ -197,11 +198,28 @@ fn spawn_real(kernel: &Arc<Kernel>, desc: &AgentDescriptor) -> SpawnHandle {
     spawn_task(
         desc,
         cohost_mailbox(kernel, desc),
-        ScriptedReply,
-        NoTools,
-        SystemPromptBuilder::new().build(),
-        PermissionPolicy::new(PermissionMode::Allow),
+        test_runtime(ScriptedReply, NoTools),
+        (),
         |_state, _reason| {},
+    )
+}
+
+/// The engine the loop drives.
+///
+/// A host builds this — the co-host through `engine_host`, which cannot be
+/// reached from here without inverting the dependency — so these tests assemble
+/// the same `ConversationRuntime` directly from the pieces a host would supply.
+fn test_runtime<C, T>(api_client: C, tool_executor: T) -> ConversationRuntime<C, T>
+where
+    C: runtime::ApiClient + 'static,
+    T: runtime::ToolExecutor + 'static,
+{
+    ConversationRuntime::new(
+        Session::new(),
+        api_client,
+        tool_executor,
+        PermissionPolicy::new(PermissionMode::Allow),
+        SystemPromptBuilder::new().build(),
     )
 }
 
@@ -220,14 +238,15 @@ fn spawn_sending(
     spawn_task(
         desc,
         mailbox,
-        SendsReply {
-            to: reply_to.to_string(),
-            body: reply_body.to_string(),
-            sent: false,
-        },
-        SendingTools { send },
-        SystemPromptBuilder::new().build(),
-        PermissionPolicy::new(PermissionMode::Allow),
+        test_runtime(
+            SendsReply {
+                to: reply_to.to_string(),
+                body: reply_body.to_string(),
+                sent: false,
+            },
+            SendingTools { send },
+        ),
+        (),
         |_state, _reason| {},
     )
 }

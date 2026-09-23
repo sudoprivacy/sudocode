@@ -1416,6 +1416,8 @@ version = "0.2.18"
 dependencies = [
  "commands",
  "engine-core",
+ "kernel",
+ "managed-agent",
  "nexus-vfs-client",
  "plugins",
  "runtime",
@@ -4957,8 +4959,6 @@ dependencies = [
  "commands",
  "flate2",
  "futures",
- "kernel",
- "managed-agent",
  "plugins",
  "regex",
  "reqwest",

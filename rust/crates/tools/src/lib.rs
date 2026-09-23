@@ -1,5 +1,3 @@
-pub mod managed_agent;
-
 /// Test-only seams exposed for integration tests.
 ///
 /// These wrappers cross the crate boundary so `tools/tests/*.rs`

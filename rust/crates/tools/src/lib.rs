@@ -7043,7 +7043,9 @@ fn runtime_error_from_api(error: &ApiError) -> RuntimeError {
     if error.is_context_window_failure() {
         RuntimeError::context_window_blocked(error.to_string())
     } else {
-        RuntimeError::new(error.to_string()).retryable(error.is_retryable())
+        RuntimeError::new(error.to_string())
+            .retryable(error.is_retryable())
+            .with_failure_class(error.safe_failure_class())
     }
 }
 

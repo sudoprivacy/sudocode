@@ -78,6 +78,7 @@ mod session;
 pub use engine_client::EngineApiClient;
 pub use session::{
     EngineDelegate, EngineHandle, EngineSession, ObserverAdapter, SubagentRelay, SubagentTurnGuard,
+    TurnError,
 };
 
 // Re-export the seam data types so a renderer / engine gets the WHOLE seam from

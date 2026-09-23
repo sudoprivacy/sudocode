@@ -464,7 +464,9 @@ fn runtime_error_from_api(
     if error.is_context_window_failure() {
         RuntimeError::context_window_blocked(message)
     } else {
-        RuntimeError::new(message).retryable(error.is_retryable())
+        RuntimeError::new(message)
+            .retryable(error.is_retryable())
+            .with_failure_class(error.safe_failure_class())
     }
 }
 

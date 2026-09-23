@@ -62,6 +62,30 @@ use engine_events::{
 };
 use runtime::{HookAbortSignal, PermissionPrompter, QuestionPrompter, RuntimeObserver, TokenUsage};
 
+/// A turn failure crossing the engine seam; renderers own its presentation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnError {
+    pub message: String,
+    pub error_type: &'static str,
+}
+
+impl std::fmt::Display for TurnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TurnError {}
+
+impl From<runtime::RuntimeError> for TurnError {
+    fn from(error: runtime::RuntimeError) -> Self {
+        Self {
+            error_type: error.failure_class(),
+            message: error.to_string(),
+        }
+    }
+}
+
 /// The engine-side contract: one live session's worth of "things a turn can do".
 ///
 /// Implement this to plug an engine into the seam. The CLI implements it over
@@ -83,13 +107,13 @@ pub trait EngineDelegate: Send + Sync + 'static {
     /// * run on a **multi-threaded Tokio runtime** (`rt.block_on(...)`), so the
     ///   `prompter`/question `block_in_place` bridge does not panic.
     ///
-    /// Returns the end-of-turn aggregate, or a renderer-facing error string.
+    /// Returns the end-of-turn aggregate, or a diagnostic with its original classification.
     fn run_turn(
         &self,
         blocks: Vec<ContentBlock>,
         observer: &mut dyn RuntimeObserver,
         prompter: &mut dyn PermissionPrompter,
-    ) -> Result<TurnComplete, String>;
+    ) -> Result<TurnComplete, TurnError>;
 
     /// Install the question prompter the `AskUserQuestion` tool uses for the
     /// *next* turn. The driver calls this immediately before each `run_turn`.
@@ -353,8 +377,8 @@ async fn run_one_turn(
                     Ok(Ok(complete)) => {
                         let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
                     }
-                    Ok(Err(message)) => {
-                        let _ = evt_tx.send(EngineEvent::Error { message });
+                    Ok(Err(error)) => {
+                        let _ = evt_tx.send(EngineEvent::Error { message: error.to_string() });
                     }
                     Err(join_error) => {
                         let _ = evt_tx.send(EngineEvent::Error {

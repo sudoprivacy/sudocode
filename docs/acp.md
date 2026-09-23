@@ -226,7 +226,14 @@ Every terminal update is delivered before the prompt response, including error
 responses. A failed compaction ends the prompt with an error; clients must mark
 the run failed. The completed operation remains available for client replay.
 
-Failed prompts return a JSON-RPC error, with the original diagnostic in `error.data`.
+Failed model turns return a JSON-RPC error (`code: -32603`) with
+`data: { "error_type": "provider_auth", "diagnostic": "original diagnostic" }`.
+`error_type` carries the existing API `safe_failure_class()` unchanged (for example
+`provider_auth`, `provider_rate_limit`, `context_window`, `provider_transport`,
+`provider_error`); runtime compaction failures use `compaction_failed`, unclassified
+turn failures use `model_error`. Clients own wording and recovery controls; these
+codes do not change the engine's retry decisions. The full diagnostic is retained.
+Other RPC failures may still carry string data; clients must accept both shapes.
 They do not append a synthetic `agent_message_chunk` containing the error: clients
 present the failure separately from assistant output already received.
 

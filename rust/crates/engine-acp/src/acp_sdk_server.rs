@@ -57,10 +57,8 @@ use crate::session_ops;
 pub enum AcpError {
     InvalidParams(String),
     Internal(String),
+    Turn(engine_core::TurnError),
 }
-
-/// What a client shows when context maintenance ends the run.
-const COMPACTION_FAILED_MESSAGE: &str = "上下文压缩失败，本次对话已停止。已有对话历史已保留。";
 
 impl AcpError {
     #[must_use]
@@ -72,81 +70,13 @@ impl AcpError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
-
-    /// Generate a user-friendly error message with actionable suggestions.
-    #[must_use]
-    pub fn user_friendly_message(&self) -> String {
-        let raw_message = match self {
-            Self::InvalidParams(msg) | Self::Internal(msg) => msg,
-        };
-
-        if raw_message.contains(runtime::COMPACTION_FAILED) {
-            return COMPACTION_FAILED_MESSAGE.to_string();
-        }
-
-        if raw_message.contains("[context_window_exceeded]") {
-            return raw_message.clone();
-        }
-
-        // Check for specific error types and provide friendly messages.
-        // A context-window rejection that reaches here was not classified by
-        // the prompt path (which knows whether history was compactable), so
-        // do not guess a sub-class: a long history and a single oversized
-        // message are different problems with different fixes.
-        if raw_message.contains("context_window_blocked")
-            || raw_message.contains("Context window blocked")
-        {
-            return "[context_window_exceeded] 请求超出了模型的上下文限制。\n\n建议解决方案：\n1. 压缩或清除对话历史后重新开始\n2. 使用较小的图片或简化输入内容\n3. 使用支持更大上下文的模型".to_string();
-        }
-
-        if raw_message.contains("authentication")
-            || raw_message.contains("认证失败")
-            || raw_message.contains("AUTH")
-        {
-            return "认证失败，请检查您的账户配置。\n\n建议解决方案：\n1. 检查 API 密钥或订阅是否有效\n2. 重新登录账户\n3. 检查网络连接".to_string();
-        }
-
-        if raw_message.contains("timeout")
-            || raw_message.contains("Timeout")
-            || raw_message.contains("timed out")
-        {
-            return "请求超时，模型响应时间过长。\n\n建议解决方案：\n1. 简化输入内容\n2. 检查网络连接\n3. 稍后重试".to_string();
-        }
-
-        if raw_message.contains("rate limit")
-            || raw_message.contains("RateLimit")
-            || raw_message.contains("429")
-        {
-            return "请求频率过高，请稍后重试。\n\n建议解决方案：\n1. 等待几分钟后重试\n2. 减少请求频率".to_string();
-        }
-
-        if raw_message.contains("network")
-            || raw_message.contains("connection")
-            || raw_message.contains("Connection")
-        {
-            return "网络连接出现问题。\n\n建议解决方案：\n1. 检查网络连接\n2. 检查代理设置\n3. 稍后重试".to_string();
-        }
-
-        if raw_message.contains("permission") || raw_message.contains("Permission") {
-            return "权限不足，无法执行此操作。\n\n建议解决方案：\n1. 检查文件或目录权限\n2. 检查账户权限配置".to_string();
-        }
-
-        // Default: return a simplified message
-        if raw_message.len() > 200 {
-            format!(
-                "发生错误：{}\n\n请尝试简化输入或稍后重试。",
-                raw_message.chars().take(100).collect::<String>()
-            )
-        } else {
-            format!("发生错误：{}\n\n请尝试简化输入或稍后重试。", raw_message)
-        }
-    }
 }
 
 impl std::fmt::Display for AcpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidParams(message) | Self::Internal(message) => f.write_str(message),
+            Self::Turn(error) => f.write_str(&error.message),
         }
     }
 }
@@ -1667,7 +1597,7 @@ pub(crate) async fn run_acp_on_transport(
                             }];
                             let complete = engine_blocking
                                 .run_turn(blocks, &mut observer, &mut bridge)
-                                .map_err(AcpError::internal)?;
+                                .map_err(AcpError::Turn)?;
                             let auto_compacted = complete.auto_compaction.is_some();
                             session_ops::record_turn_usage(&engine_blocking, &complete);
                             let usage = session_ops::build_prompt_usage(
@@ -2168,24 +2098,15 @@ fn session_lease_cwd(cwd: &std::path::Path) -> PathBuf {
 /// Map our `AcpError` to the SDK's `Error` type.
 pub(crate) fn acp_error_to_sdk(e: &AcpError) -> Error {
     match e {
+        AcpError::Turn(error) => Error::internal_error().data(json!({
+            "error_type": error.error_type,
+            "diagnostic": error.message,
+        })),
         AcpError::InvalidParams(msg) => {
             Error::invalid_params().data(serde_json::Value::String(msg.clone()))
         }
         AcpError::Internal(msg) => {
-            let mut error = Error::internal_error().data(serde_json::Value::String(msg.clone()));
-            if msg.contains(runtime::COMPACTION_FAILED) {
-                // Clients use the JSON-RPC `message` for the terminal run
-                // banner. Only compaction overrides it because only compaction
-                // ends the run on something the USER is expected to act on;
-                // every other Internal error keeps JSON-RPC's generic message
-                // and carries its detail in `data`, which clients render as a
-                // diagnostic. Blanket-applying `user_friendly_message()` here
-                // is not the alternative: its catch-all truncates the raw
-                // message to 100 chars, which would lose detail for every
-                // unclassified failure.
-                error.message = COMPACTION_FAILED_MESSAGE.to_string();
-            }
-            error
+            Error::internal_error().data(serde_json::Value::String(msg.clone()))
         }
     }
 }

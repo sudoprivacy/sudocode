@@ -838,9 +838,12 @@ pub(crate) fn handle_slash_command(
         }
         SlashCommand::Help => render_acp_slash_command_help(),
         SlashCommand::Compact => {
-            let outcome = engine
-                .compact_cancellable(observer)
-                .map_err(crate::AcpError::internal)?;
+            let outcome = engine.compact_cancellable(observer).map_err(|message| {
+                crate::AcpError::Turn(engine_core::TurnError {
+                    message,
+                    error_type: "compaction_failed",
+                })
+            })?;
             if outcome.cancelled {
                 stop = AcpStopReason::Cancelled;
                 "Compact\n  Result           cancelled\n  Transcript       unchanged".to_string()

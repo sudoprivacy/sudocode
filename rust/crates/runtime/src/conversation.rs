@@ -705,6 +705,7 @@ impl std::error::Error for ToolError {}
 pub struct RuntimeError {
     message: String,
     kind: RuntimeErrorKind,
+    failure_class: &'static str,
     /// `true` when the underlying failure is transport-transient (rate limit,
     /// 5xx, gateway timeout, dropped/truncated stream) and the same request may
     /// succeed on a retry. Derived once, at the api→runtime boundary, from
@@ -730,6 +731,7 @@ impl RuntimeError {
         Self {
             message: message.into(),
             kind: RuntimeErrorKind::Generic,
+            failure_class: "model_error",
             retryable: false,
         }
     }
@@ -741,8 +743,21 @@ impl RuntimeError {
         Self {
             message: message.into(),
             kind: RuntimeErrorKind::ContextWindowBlocked,
+            failure_class: "context_window",
             retryable: false,
         }
+    }
+
+    /// Preserve the API's existing diagnostic code independently of retry policy.
+    #[must_use]
+    pub fn with_failure_class(mut self, failure_class: &'static str) -> Self {
+        self.failure_class = failure_class;
+        self
+    }
+
+    #[must_use]
+    pub fn failure_class(&self) -> &'static str {
+        self.failure_class
     }
 
     /// Set the transport-retryable classification. Chainable so the api→runtime
@@ -1821,9 +1836,9 @@ where
                             iterations,
                         ));
                     }
-                    if let Some(event) =
-                        attempt.map_err(|error| RuntimeError::new(error.to_string()))?
-                    {
+                    if let Some(event) = attempt.map_err(|error| {
+                        RuntimeError::new(error.to_string()).with_failure_class("compaction_failed")
+                    })? {
                         overflow_compaction =
                             merge_auto_compaction(overflow_compaction, Some(event));
                     } else {
@@ -1910,9 +1925,10 @@ where
                                 iterations,
                             ));
                         }
-                        if let Some(event) =
-                            attempt.map_err(|error| RuntimeError::new(error.to_string()))?
-                        {
+                        if let Some(event) = attempt.map_err(|error| {
+                            RuntimeError::new(error.to_string())
+                                .with_failure_class("compaction_failed")
+                        })? {
                             turn_compactions += 1;
                             overflow_compaction =
                                 merge_auto_compaction(overflow_compaction, Some(event));

@@ -5437,19 +5437,99 @@ async fn acp_compaction_failure_is_terminal_and_preserves_history() {
         .filter_map(|n| n["params"]["update"]["content"]["text"].as_str())
         .collect::<String>();
     assert!(response.get("error").is_some(), "{response}");
-    assert!(response["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("上下文压缩失败，本次对话已停止"));
+    assert_eq!(response["error"]["data"]["error_type"], "compaction_failed");
+    assert_eq!(response["error"]["code"], -32603);
     assert!(
         text.is_empty(),
         "failure diagnostics must not become assistant text: {text}"
     );
     assert!(
-        response["error"]["data"].is_string(),
+        response["error"]["data"]["diagnostic"]
+            .as_str()
+            .unwrap()
+            .contains("Context compaction failed"),
         "original diagnostic is retained"
     );
     assert_eq!(fs::read(path).unwrap(), before);
     client.shutdown().await;
     workspace.cleanup();
+}
+
+/// Exercise the provider -> runtime -> engine -> ACP wire, not just the serializer.
+#[tokio::test]
+async fn acp_provider_failure_codes_survive_without_assistant_diagnostics() {
+    use tokio::io::AsyncReadExt;
+    for (status, diagnostic, expected) in [
+        (401, "PRIVATE_TEST invalid credentials", "provider_auth"),
+        (403, "PRIVATE_TEST forbidden", "provider_auth"),
+        (400, "PRIVATE_TEST invalid input", "provider_error"),
+        (413, "PRIVATE_TEST request too large", "provider_error"),
+        (
+            400,
+            "PRIVATE_TEST context length exceeded",
+            "context_window",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    if socket.read_line(&mut line).await.unwrap() == 0 {
+                        break;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                socket.read_exact(&mut body).await.unwrap();
+                let body = json!({"type":"error", "error":{"type":"invalid_request_error", "message":diagnostic}}).to_string();
+                let reply = format!("HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                socket.get_mut().write_all(reply.as_bytes()).await.unwrap();
+            }
+        });
+        let workspace = TestWorkspace::new("typed-provider-error");
+        workspace.create();
+        workspace.write_sudocode_json(&url);
+        let mut client = spawn_stdio_client(&workspace);
+        scenario_initialize(&mut client).await;
+        let session = scenario_session_new(&mut client, &workspace.root).await;
+        let (notifications, response) = client
+            .send_request(
+                "session/prompt",
+                json!({
+                    "sessionId": session, "prompt": [{"type":"text", "text":"hello"}]
+                }),
+            )
+            .await;
+        assert_eq!(response["error"]["code"], -32603, "{response}");
+        assert_eq!(
+            response["error"]["data"]["error_type"], expected,
+            "{response}"
+        );
+        assert!(
+            response["error"]["data"]["diagnostic"]
+                .as_str()
+                .unwrap()
+                .contains("PRIVATE_TEST"),
+            "{response}"
+        );
+        assert!(
+            !notifications
+                .iter()
+                .any(|n| n["params"]["update"]["sessionUpdate"] == "agent_message_chunk"),
+            "{notifications:?}"
+        );
+        client.shutdown().await;
+        server.abort();
+        workspace.cleanup();
+    }
 }

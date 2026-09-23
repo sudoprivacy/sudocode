@@ -60,6 +60,7 @@ impl ProviderClient {
                     RuntimeError::context_window_blocked(error.to_string())
                 } else {
                     RuntimeError::new(error.to_string())
+                        .with_failure_class(error.safe_failure_class())
                 }
             })?;
         Ok(TextCompletion {

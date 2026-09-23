@@ -1574,21 +1574,6 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
     execute_tool_with_abort(name, input, None)
 }
 
-/// Dispatch a tool against an explicit filesystem backend.
-///
-/// This is the entry the co-hosted managed agent uses: it passes a
-/// `KernelFsBackend` so the file tools (`read_file` / `write_file` /
-/// `edit_file` / `glob_search` / `grep_search`) hit the VFS in-process via
-/// kernel syscalls instead of the host `std::fs`. The standalone CLI keeps
-/// using [`execute_tool`], which defaults to [`StdFsBackend`].
-pub fn execute_tool_with_backend(
-    name: &str,
-    input: &Value,
-    fs: &dyn FsBackend,
-) -> Result<String, String> {
-    execute_tool_with_enforcer(None, name, input, None, None, fs)
-}
-
 pub fn execute_tool_with_abort(
     name: &str,
     input: &Value,

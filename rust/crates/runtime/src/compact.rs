@@ -463,7 +463,13 @@ pub fn format_compact_summary(summary: &str) -> String {
 /// could only recover a lossy prose paraphrase from the summary's "Pending
 /// Tasks". Re-injecting the structured list keeps the next `TodoWrite` faithful.
 /// Mirrors Claude Code's todo-continuity on compaction.
-fn render_todo_continuity_block() -> Option<String> {
+///
+/// Shared: auto-compaction and the write_plan clear-context path both call this
+/// so a manual "clear context & execute" carries the todo list forward the same
+/// way an automatic compaction does.
+#[inline]
+#[must_use]
+pub fn render_todo_continuity_block() -> Option<String> {
     let todos = crate::todo_store::todo_store_path()
         .ok()
         .map(|path| crate::todo_store::TodoStore::load(&path).list())

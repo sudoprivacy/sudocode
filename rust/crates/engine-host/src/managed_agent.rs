@@ -18,6 +18,7 @@ use std::sync::Arc;
 // `::` because this module shares its name with that crate.
 use ::managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnTask};
 use runtime::mailbox::Mailbox;
+use runtime::session_control::SessionStore;
 use runtime::spawn_task::{
     cohost_a2a_prompt_section, spawn_task, AgentDescriptor, AgentState, KernelSyscall, SpawnHandle,
 };
@@ -132,9 +133,29 @@ where
         memory: runtime::memory::MemoryMode::default(),
     };
 
+    // The agent's session, rooted where its OWN filesystem says sessions live:
+    // `/sessions/<id>/transcript.jsonl` on a kernel, and `create_handle` plants
+    // the `/agents/{name}/sessions/<id>` index for it. Nothing here chooses a
+    // path — `FsBackend::managed_sessions_root` does, which is why pointing
+    // sessions at nexus is a backend swap rather than a second layout to keep in
+    // step.
+    //
+    // The session id is its own, NOT the pid: a pid names a running process and
+    // a session names a transcript, and one agent's pid is reused across the
+    // sessions it runs.
+    let session = Session::new();
+    let handle =
+        session_store_for(&workspace_root, &host.fs, &desc.name).create_handle(&session.session_id);
+    let session = session
+        .with_persistence_path(handle.path)
+        // The backend too, or persistence would default to `StdFsBackend` and
+        // write a VFS-looking path onto the daemon's local disk — the same
+        // mistake the mailbox made before #752.
+        .with_fs_backend(Arc::clone(&host.fs));
+
     let built = build_engine_runtime(
         &host,
-        Session::new(),
+        session,
         &desc.pid,
         config,
         &BTreeMap::new(),
@@ -150,6 +171,22 @@ where
     // `built` goes with it: its `Drop` shuts down the MCP servers and plugins
     // this engine is using, so it has to outlive the loop rather than the call.
     spawn_task(&desc, mailbox, engine, built, state_callback)
+}
+
+/// The session store a co-hosted agent records into.
+///
+/// Fails loud rather than degrading to a session nobody can find: a store that
+/// cannot be built means `/sessions` is unroutable, and an agent that runs
+/// anyway would hold its whole transcript in memory and lose it on exit —
+/// exactly the state this replaces.
+fn session_store_for(
+    workspace_root: &str,
+    fs: &Arc<dyn FsBackend>,
+    agent_name: &str,
+) -> SessionStore {
+    SessionStore::from_cwd_with(workspace_root, Arc::clone(fs))
+        .expect("co-host: the agent's session store must be reachable")
+        .with_agent_name(agent_name)
 }
 
 /// The `SpawnTask` provider that hosts a `sudocode` agent as a nexus

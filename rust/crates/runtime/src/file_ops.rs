@@ -946,7 +946,7 @@ pub fn write_file_with_intent(
     // Determine actual path
     let requested_path = Path::new(path);
     let actual_path = if intent == FileIntent::Draft {
-        redirect_to_drafts(requested_path, workspace_root)
+        redirect_to_drafts(requested_path, workspace_root, fs)
     } else {
         requested_path.to_path_buf()
     };
@@ -1007,7 +1007,7 @@ pub fn edit_file_with_intent(
 
     // Determine actual path (may need to move to .drafts/)
     let actual_path = if intent == FileIntent::Draft {
-        let dest = redirect_to_drafts(requested_path, workspace_root);
+        let dest = redirect_to_drafts(requested_path, workspace_root, fs);
         // Move the file
         fs.rename(path, &dest.to_string_lossy())?;
         dest

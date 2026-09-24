@@ -136,7 +136,7 @@ where
     // The agent's session, rooted where its OWN filesystem says sessions live:
     // `/sessions/<id>/transcript.jsonl` on a kernel, and `create_handle` plants
     // the `/agents/{name}/sessions/<id>` index for it. Nothing here chooses a
-    // path — `FsBackend::managed_sessions_root` does, which is why pointing
+    // path — `FsBackend::managed_root` does, which is why pointing
     // sessions at nexus is a backend swap rather than a second layout to keep in
     // step.
     //

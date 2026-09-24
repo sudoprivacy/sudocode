@@ -258,7 +258,10 @@ fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
     let fs = vfs_backend(&kernel);
 
     // nexus imposes the flat, session-id-keyed /sessions/ namespace.
-    assert_eq!(fs.managed_sessions_root().as_deref(), Some("/sessions"));
+    assert_eq!(
+        fs.managed_root(runtime::ManagedRoot::Sessions).as_deref(),
+        Some("/sessions")
+    );
 
     // link() creates a DT_LINK pointer (the /agents/{name}/sessions/<sid> index).
     fs.link("/agents/alice/sessions/sid-1", "/sessions/sid-1")
@@ -354,4 +357,113 @@ fn glob_and_grep_walk_the_vfs_trie() {
     // contain the needle.
     let grepped = grep_search(&fs, &grep_input("needle", root)).expect("VFS grep should succeed");
     assert_eq!(grepped.num_files, 2, "grep should match a.rs and sub/c.rs");
+}
+/// Memory is READ through the backend, so a co-hosted agent recalls what is in
+/// its own subtree of the VFS.
+///
+/// The directory already came from `managed_root`; the reading did not. The
+/// provider handed `/agents/agent-x/memory` to `std::fs`, which names nothing on
+/// any host — so memory was silently empty for every co-hosted agent, with the
+/// files sitting in the VFS where nobody looked. The host path is asserted
+/// absent for the same reason this file uses `/ws`: a regression back to the
+/// host filesystem fails here instead of passing by luck.
+#[test]
+fn memory_is_read_from_the_agents_own_vfs_subtree() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+
+    let dir = fs
+        .managed_root(runtime::ManagedRoot::Memory)
+        .expect("a co-hosted agent roots memory under itself");
+    assert_eq!(dir, "/agents/agent-x/memory");
+    fs.create_dir_all(&dir).expect("create the memory dir");
+    fs.write(
+        &format!("{dir}/MEMORY.md"),
+        b"- [One fact](one.md) - the hook
+",
+    )
+    .expect("write the index");
+    fs.write(
+        &format!("{dir}/one.md"),
+        b"---
+name: one
+description: the one fact
+metadata:
+  type: project
+---
+
+the body
+",
+    )
+    .expect("write the entry");
+
+    let index = runtime::memory::MemoryIndex::load(std::path::Path::new(&dir), &fs)
+        .expect("load memory through the backend");
+    assert_eq!(
+        index.entries().len(),
+        1,
+        "the entry written into the VFS is the entry recalled"
+    );
+    assert_eq!(index.entries()[0].name, "one");
+    assert!(
+        index.index().is_some(),
+        "MEMORY.md is read through the backend too, not just the entries"
+    );
+    assert!(
+        !std::path::Path::new(&dir).exists(),
+        "and none of it was written to the host filesystem"
+    );
+}
+
+/// Two co-hosted agents on one daemon keep their own todo list.
+///
+/// Both halves mattered: the path was derived from the daemon's directory (one
+/// file for every agent), and the store itself was a process-wide `OnceLock`
+/// (one list object for every agent, whoever resolved a path first).
+#[test]
+fn two_cohosted_agents_do_not_share_one_todo_list() {
+    use runtime::{Todo, TodoStatus, TodoStore};
+
+    let kernel = kernel_with_root_backend();
+    let agent = |name: &str| -> Arc<dyn FsBackend> {
+        Arc::new(KernelFsBackend::for_agent(
+            Arc::clone(&kernel),
+            "test-owner",
+            "root",
+            name,
+            "/ws",
+        ))
+    };
+    let (alice, bob) = (agent("alice"), agent("bob"));
+
+    let alice_path = runtime::todo_store_path(&alice).expect("alice's store path");
+    let bob_path = runtime::todo_store_path(&bob).expect("bob's store path");
+    // `Path::join` writes a host separator; every backend entry point collapses
+    // it back to the VFS spelling, so the comparison is against the VFS form.
+    let norm = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+    assert_eq!(norm(&alice_path), "/agents/alice/.sudocode-todos.json");
+    assert_ne!(
+        alice_path, bob_path,
+        "each agent's list is keyed by the agent, not by a directory they share"
+    );
+
+    TodoStore::load(&alice_path, Arc::clone(&alice)).set(vec![Todo {
+        content: String::from("Run the tests"),
+        status: TodoStatus::InProgress,
+        active_form: String::from("Running the tests"),
+    }]);
+
+    assert_eq!(
+        TodoStore::load(&alice_path, Arc::clone(&alice))
+            .list()
+            .len(),
+        1,
+        "a fresh handle over the same path is the same store — the write persisted"
+    );
+    assert!(
+        TodoStore::load(&bob_path, Arc::clone(&bob))
+            .list()
+            .is_empty(),
+        "and bob's list is untouched by alice's write"
+    );
 }

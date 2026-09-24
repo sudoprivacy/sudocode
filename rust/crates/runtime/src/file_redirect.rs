@@ -3,8 +3,9 @@
 //! This module handles redirecting draft files to the `.drafts/` directory
 //! and managing naming conflicts.
 
-use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::fs_backend::FsBackend;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Default drafts directory name.
@@ -13,12 +14,21 @@ pub const DRAFTS_DIR_NAME: &str = ".drafts";
 /// Redirect a draft file to the `.drafts/` directory.
 ///
 /// If the file already exists in `.drafts/`, append a timestamp to avoid collision.
-pub fn redirect_to_drafts(requested_path: &Path, workspace_root: &Path) -> PathBuf {
+///
+/// The directory is created through `fs`, the same filesystem the draft itself is
+/// then written to. Creating it with `std::fs` put the directory on the host and
+/// the file in the VFS for a co-hosted agent — the collision check below then
+/// asked the host about a file that was never going to be there.
+pub fn redirect_to_drafts(
+    requested_path: &Path,
+    workspace_root: &Path,
+    fs: &dyn FsBackend,
+) -> PathBuf {
     let drafts_dir = workspace_root.join(DRAFTS_DIR_NAME);
 
     // Ensure .drafts/ directory exists
-    if !drafts_dir.exists() {
-        if let Err(_e) = fs::create_dir_all(&drafts_dir) {
+    if !fs.exists(&drafts_dir.to_string_lossy()).unwrap_or(false) {
+        if fs.create_dir_all(&drafts_dir.to_string_lossy()).is_err() {
             // Fallback: return original path
             return requested_path.to_path_buf();
         }
@@ -77,7 +87,7 @@ mod tests {
         fs::create_dir_all(&tmp_dir).expect("create temp dir");
 
         let requested = tmp_dir.join("temp_script.py");
-        let result = redirect_to_drafts(&requested, &tmp_dir);
+        let result = redirect_to_drafts(&requested, &tmp_dir, &crate::fs_backend::StdFsBackend);
 
         assert!(result.starts_with(&tmp_dir.join(DRAFTS_DIR_NAME)));
         assert_eq!(result.file_name().unwrap(), "temp_script.py");
@@ -98,7 +108,7 @@ mod tests {
         fs::write(drafts_dir.join("temp.py"), "").expect("write existing file");
 
         let requested = tmp_dir.join("temp.py");
-        let result = redirect_to_drafts(&requested, &tmp_dir);
+        let result = redirect_to_drafts(&requested, &tmp_dir, &crate::fs_backend::StdFsBackend);
 
         // Should have timestamp suffix
         assert!(result.starts_with(&drafts_dir));

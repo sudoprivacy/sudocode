@@ -266,3 +266,69 @@ fn every_method_takes_the_host_spelling() {
         at("seed.txt")
     );
 }
+
+/// Every stored concern follows the BACKEND, for both hosts.
+///
+/// `agent_store_dir` derived a host path from the process directory, so every
+/// co-hosted agent on one daemon shared a single `.sudocode-agents/` — outside
+/// the kernel's hooks and audit, invisible to the cluster, and colliding with
+/// its neighbours. The root is the backend's answer now, which is also why a
+/// CLI session's own sub-agents are untouched: its backend declines to impose
+/// one, exactly as it does for sessions.
+#[test]
+fn a_backend_roots_every_concern_it_imposes_a_namespace_for() {
+    use runtime::{FsBackend, KernelFsBackend, ManagedRoot};
+    use std::sync::Arc;
+
+    let kernel = Arc::new(kernel::kernel::Kernel::new());
+    let cohost: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+        Arc::clone(&kernel),
+        "owner",
+        "root",
+        "scode-agent",
+        "/proc/7/workspace".to_string(),
+    ));
+    // Every concern the backend roots, asserted where the one match answers
+    // them — so a variant added to the enum and forgotten here is visible.
+    assert_eq!(
+        cohost.managed_root(ManagedRoot::Sessions).as_deref(),
+        Some("/sessions"),
+        "sessions are flat and global"
+    );
+    assert_eq!(
+        cohost.managed_root(ManagedRoot::SubAgents).as_deref(),
+        Some("/agents/scode-agent/subagents"),
+        "a co-hosted agent's sub-agents belong under the agent that spawned them"
+    );
+    assert_eq!(
+        cohost.managed_root(ManagedRoot::Memory).as_deref(),
+        Some("/agents/scode-agent/memory"),
+        "and so does its memory — keyed by the agent, not by a directory every \
+         agent on the daemon would share"
+    );
+    assert_eq!(
+        cohost.managed_root(ManagedRoot::Todos).as_deref(),
+        Some("/agents/scode-agent"),
+        "a todo list is one small file, so it sits beside the agent's other state \
+         rather than in a directory of its own"
+    );
+
+    // The CLI's own backend: host-spelled, so it imposes no namespace for any of
+    // them and each stays where its own tooling looks.
+    let dir = sandbox("roots");
+    let workspace = dir.path().join("project");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let host = HostContext::for_cli_session(&workspace).expect("boot the session host");
+    for concern in [
+        ManagedRoot::Sessions,
+        ManagedRoot::SubAgents,
+        ManagedRoot::Memory,
+        ManagedRoot::Todos,
+    ] {
+        assert_eq!(
+            host.fs.managed_root(concern),
+            None,
+            "a CLI session keeps {concern:?} where its own tooling looks"
+        );
+    }
+}

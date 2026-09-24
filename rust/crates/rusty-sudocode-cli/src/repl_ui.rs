@@ -2244,7 +2244,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// The coordinator reads `InputEvent`s from `ReplHandle::input_rx` and
 /// sends output text via `ReplHandle::output`. The spinner state is
 /// shared so the runner thread can update it atomically.
-pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle {
+pub fn spawn_repl_ui(
+    permission_mode: &str,
+    startup_banner: &str,
+    context_todos: Vec<runtime::Todo>,
+) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
     let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(16);
@@ -2261,7 +2265,7 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         permission_mode: permission_mode.to_string(),
         tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
         stderr_redir: Arc::clone(&stderr_redir),
-        context_todos: Arc::new(Mutex::new(tools::global_todo_list())),
+        context_todos: Arc::new(Mutex::new(context_todos)),
         pending: Arc::new(Mutex::new(Vec::new())),
     };
 

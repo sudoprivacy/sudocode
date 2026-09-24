@@ -41,6 +41,36 @@ pub struct FsDirEntry {
 // FsBackend trait
 // ---------------------------------------------------------------------------
 
+/// A stored concern whose ROOT the backend decides.
+///
+/// One enum and one method rather than one method per concern. With two it was
+/// tolerable; with memory it would have been three bodies each repeating the same
+/// host-or-VFS decision, so "where does a co-hosted agent's world live" would
+/// have had three answers that could disagree. Here it is one match per backend:
+/// adding a concern is a variant plus an arm, and the compiler requires both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedRoot {
+    /// Session transcripts.
+    Sessions,
+    /// Sub-agents this session spawns: their manifests, outputs and resumable
+    /// sessions.
+    SubAgents,
+    /// Remembered context.
+    Memory,
+    /// The session's todo list.
+    Todos,
+}
+
+/// Names of the per-agent subtrees sudocode creates under the agents base.
+///
+/// The BASES belong to nexus-vfs, which owns the VFS namespace
+/// (`a2a::A2A_INBOX_BASE`, `contracts::SESSIONS_BASE`); these two leaves are
+/// sudocode's own, so they are named once, here, beside the match that uses
+/// them. They are the siblings of `a2a::AGENT_CONVERSATIONS_SEGMENT` and belong
+/// next to it if that crate ever owns them.
+const SUBAGENTS_SEGMENT: &str = "/subagents";
+const MEMORY_SEGMENT: &str = "/memory";
+
 /// Unified filesystem abstraction.
 ///
 /// Every method mirrors a common `std::fs` operation. Implementations must be
@@ -98,16 +128,17 @@ pub trait FsBackend: Send + Sync + 'static {
         Ok(false)
     }
 
-    /// The root under which managed sessions live **when the backend imposes
-    /// its own namespace**. nexus (`KernelFsBackend`) → `Some("/sessions")` —
-    /// the flat, session-id-keyed byte-SSOT (no `workspace_hash`). `None`
-    /// (host backends) → the caller uses its own computed root
-    /// (`<cwd>/.scode/sessions/<workspace_hash>/`).
+    /// Where `concern` is stored, when this backend imposes its own namespace.
     ///
-    /// This is what makes the session root swap **with the backend**: callers
-    /// ask the backend rather than hardcoding, so pointing sessions at nexus
-    /// is a backend swap, not a code change to remember.
-    fn managed_sessions_root(&self) -> Option<String> {
+    /// `None` — every host backend, for every concern — means the caller keeps
+    /// its own layout: `<cwd>/.scode/sessions/<workspace_hash>/`,
+    /// `<workspace>/.sudocode-agents/`, `$HOME/.scode/projects/<slug>/memory`.
+    /// A VFS backend answers with a place inside the namespace it serves.
+    ///
+    /// This is what makes a root swap **with the backend**: callers ask rather
+    /// than hardcode, so pointing sessions, sub-agents or memory at nexus is a
+    /// backend swap and not three code changes to remember.
+    fn managed_root(&self, _concern: ManagedRoot) -> Option<String> {
         None
     }
 
@@ -227,6 +258,36 @@ pub trait FsBackend: Send + Sync + 'static {
 /// handed for a file under it resolves through the same rule. Two rules would
 /// mean a file readable under one spelling and missing under the other.
 ///
+/// The host filesystem, for a path that is a HOST path.
+///
+/// The filesystem that answers for a stored concern is the one that ROOTED it.
+/// A backend answers [`FsBackend::managed_root`] with `Some` only for the
+/// concerns it keeps inside its own namespace; `None` means the caller's own
+/// layout, and those layouts are host paths — `$HOME/.scode/projects/<slug>/`,
+/// `<workspace>/.sudocode-agents`, `$SUDOCODE_TODO_STORE`. An operator's
+/// override is a host path for the same reason: it was typed on the host.
+///
+/// Reading them through the SESSION's filesystem is wrong, not merely
+/// roundabout: a CLI session's kernel serves its workspace and nothing else, so
+/// every path outside the workspace is refused. Memory came back empty and an
+/// operator's store override was silently never written.
+///
+/// Zero-sized, so the handle is free; `_arc` exists for the callers that store
+/// one rather than borrow it.
+#[must_use]
+pub fn host_fs() -> &'static (dyn FsBackend + 'static) {
+    static HOST: StdFsBackend = StdFsBackend;
+    &HOST
+}
+
+/// [`host_fs`] as a shareable handle. One `Arc` for the process: the backend is
+/// zero-sized and the handle exists only to satisfy a shared signature.
+#[must_use]
+pub fn host_fs_arc() -> &'static Arc<dyn FsBackend> {
+    static HOST: std::sync::OnceLock<Arc<dyn FsBackend>> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| Arc::new(StdFsBackend))
+}
+
 /// On unix this is the identity — a host path already *is* a VFS path. On
 /// Windows it is not: a host path carries a drive (`C:\a\b`) or a verbatim
 /// prefix (`\\?\C:\a\b`, which is what `canonicalize` yields), and neither is
@@ -365,8 +426,8 @@ impl FsBackend for Arc<dyn FsBackend> {
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         (**self).is_append_stream(path)
     }
-    fn managed_sessions_root(&self) -> Option<String> {
-        (**self).managed_sessions_root()
+    fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
+        (**self).managed_root(concern)
     }
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         (**self).link(alias, target)
@@ -655,6 +716,16 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
         lexical_join(&self.workspace_root, path)
     }
 
+    /// `<agents base>/<this agent>/<segment>` — a subtree of the agent itself.
+    ///
+    /// `None` when the context names no agent: a subtree keyed by an agent that
+    /// does not exist would be one directory every anonymous caller shared,
+    /// which is the bug this shape exists to prevent.
+    fn agent_subtree(&self, segment: &str) -> Option<String> {
+        let agent = self.ctx.agent_id.as_deref()?;
+        Some(format!("{}/{agent}{segment}", a2a::A2A_INBOX_BASE))
+    }
+
     /// A VFS path in the spelling this backend ANSWERS in.
     ///
     /// The inverse of [`Self::to_kernel`], needed by the one method that returns
@@ -888,17 +959,29 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         }
     }
 
-    fn managed_sessions_root(&self) -> Option<String> {
-        // nexus keeps sessions as a flat, session-id-keyed byte-SSOT at the
-        // VFS root — no `.scode`, no `workspace_hash` (isolation is policy +
-        // `owner`, not path). So a `SessionStore` over this backend roots
-        // sessions here automatically.
-        //
-        // Not for a host-spelled session: its transcripts belong beside its
-        // configuration on host disk, where `scode --resume` and every other
-        // host tool already look for them, and where they outlive a VFS that
-        // exists only while the session does.
-        self.host_root.is_none().then(|| "/sessions".to_string())
+    fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
+        // A host-spelled session imposes nothing, for any concern: its
+        // transcripts, sub-agents and memory belong where its own tooling looks
+        // (`scode --resume`, `.sudocode-agents`, the project memory dir), and
+        // they outlive a VFS that exists only while the session does.
+        if self.host_root.is_some() {
+            return None;
+        }
+        match concern {
+            // Flat and session-id-keyed: no `.scode`, no `workspace_hash`,
+            // because isolation here is policy plus `owner`, not path.
+            ManagedRoot::Sessions => Some(contracts::SESSIONS_BASE.to_string()),
+            // Under the spawning agent. Keyed by the agent rather than by a
+            // workspace path, which is what stops two agents on one daemon from
+            // colliding — the host paths these replace are derived from the
+            // daemon's own directory, which every co-hosted agent shares.
+            ManagedRoot::SubAgents => self.agent_subtree(SUBAGENTS_SEGMENT),
+            ManagedRoot::Memory => self.agent_subtree(MEMORY_SEGMENT),
+            // Beside the agent's other state rather than in a subtree of its
+            // own: a todo list is one small file, and a directory per file is a
+            // namespace nobody browses.
+            ManagedRoot::Todos => self.agent_subtree(""),
+        }
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {

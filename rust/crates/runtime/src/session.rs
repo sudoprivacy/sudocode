@@ -270,6 +270,20 @@ impl Session {
         self.persistence.as_ref().map(|value| value.path.as_path())
     }
 
+    /// The filesystem this session persists through, as a shareable handle.
+    ///
+    /// The session is where a host's filesystem already reaches the engine, so
+    /// anything the engine needs to read on the session's behalf — the todo list
+    /// carried across a compaction, say — asks here rather than growing a second
+    /// way in.
+    #[must_use]
+    pub fn fs_handle(&self) -> Arc<dyn FsBackend> {
+        self.persistence
+            .as_ref()
+            .map(|p| Arc::clone(&p.fs))
+            .unwrap_or_else(|| Arc::new(StdFsBackend))
+    }
+
     /// Return the filesystem backend attached to the persistence layer,
     /// falling back to a static `StdFsBackend` when no persistence is set.
     fn backend(&self) -> &dyn FsBackend {

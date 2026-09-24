@@ -61,7 +61,48 @@ pub mod testing {
             auth_mode: None,
             permission_mode: None,
         };
-        crate::prepare_agent_job(input, None).map(|_| ())
+        crate::prepare_agent_job(input, None, runtime::host_fs_arc().clone()).map(|_| ())
+    }
+
+    /// Test seam for `prepare_agent_job` on a GIVEN filesystem, returning the
+    /// manifest it wrote.
+    ///
+    /// The filesystem is the point: preparing a job creates the store directory,
+    /// writes the manifest and lays down the first output file, and for a
+    /// co-hosted agent all three belong in its own VFS subtree rather than on the
+    /// daemon's disk. A seam that always used the host could not tell the
+    /// difference — which is how the store kept being read with `std::fs` after
+    /// its root moved into the VFS.
+    pub fn prepare_agent_job_on(
+        fs: std::sync::Arc<dyn runtime::FsBackend>,
+        subagent_type: &str,
+        prompt: &str,
+    ) -> Result<PreparedPaths, String> {
+        let input = crate::AgentInput {
+            description: format!("store-{subagent_type}"),
+            prompt: prompt.to_string(),
+            subagent_type: Some(subagent_type.to_string()),
+            name: None,
+            model: Some("test-model".to_string()),
+            run_in_background: Some(true),
+            fresh: None,
+            auth_mode: None,
+            permission_mode: None,
+        };
+        crate::prepare_agent_job(input, None, fs).map(|prepared| PreparedPaths {
+            agent_id: prepared.manifest.agent_id.clone(),
+            manifest_file: prepared.manifest.manifest_file.clone(),
+            output_file: prepared.manifest.output_file.clone(),
+        })
+    }
+
+    /// The three paths a prepared job put on the filesystem. The manifest's own
+    /// fields are private — deliberately, they are wire shape — so the seam
+    /// hands back exactly what a store test needs to look for.
+    pub struct PreparedPaths {
+        pub agent_id: String,
+        pub manifest_file: String,
+        pub output_file: String,
     }
 
     /// Test seam for `build_forked_messages`. Produces the same
@@ -130,7 +171,7 @@ pub mod testing {
     ) -> Result<(), String> {
         let raw = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
         let manifest: crate::AgentOutput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        crate::record_agent_telemetry(&manifest, telemetry.into())
+        crate::record_agent_telemetry(&manifest, telemetry.into(), runtime::host_fs())
     }
 
     /// Test seam for `record_full_result_path` — mirrors the private
@@ -141,7 +182,7 @@ pub mod testing {
     ) -> Result<(), String> {
         let raw = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
         let manifest: crate::AgentOutput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        crate::record_full_result_path(&manifest, full_path)
+        crate::record_full_result_path(&manifest, full_path, runtime::host_fs())
     }
 
     /// Test seam for `persist_agent_terminal_state_with_telemetry`.
@@ -160,6 +201,7 @@ pub mod testing {
             result,
             error,
             telemetry.map(Into::into),
+            runtime::host_fs(),
         )
     }
 
@@ -186,8 +228,9 @@ pub mod testing {
         if full_text.chars().count() <= threshold {
             return Ok((full_text.to_string(), None));
         }
-        let full_path = crate::write_full_result_and_update_manifest(&manifest, full_text)?;
-        crate::record_full_result_path(&manifest, &full_path)?;
+        let full_path =
+            crate::write_full_result_and_update_manifest(&manifest, full_text, runtime::host_fs())?;
+        crate::record_full_result_path(&manifest, &full_path, runtime::host_fs())?;
         Ok((placeholder_summary.to_string(), Some(full_path)))
     }
 }
@@ -245,27 +288,21 @@ fn global_cron_registry() -> &'static CronRegistry {
     })
 }
 
-fn global_todo_store() -> &'static TodoStore {
-    use std::sync::OnceLock;
-    static STORE: OnceLock<TodoStore> = OnceLock::new();
-    STORE.get_or_init(|| {
-        if let Ok(path) = runtime::todo_store::todo_store_path() {
-            TodoStore::load(&path)
-        } else {
-            TodoStore::new()
-        }
-    })
+/// The persisted todo list for this session. Used to seed a REPL's context panel
+/// at startup, before any turn has produced a `TodoWrite` result to read.
+///
+/// Opened per call, never cached in a process global: the store resolves per
+/// filesystem, and a `OnceLock` resolved it once for the whole process — so a
+/// daemon hosting several co-hosted agents gave them all one list, whichever
+/// agent asked first. Every mutation persists immediately, so a fresh handle
+/// over the same path is the same store.
+pub fn todo_list(fs: &Arc<dyn FsBackend>) -> Vec<runtime::Todo> {
+    TodoStore::open(fs).list()
 }
 
 /// Global auth mode set by the CLI at startup. Subagents inherit this so they
 /// use the same credential path as the main agent.
 static GLOBAL_AUTH_MODE: std::sync::OnceLock<api::AuthMode> = std::sync::OnceLock::new();
-
-/// Return the current todo list from the global store. Used by the CLI to push
-/// todo state to the ContextSlot after a TodoWrite.
-pub fn global_todo_list() -> Vec<runtime::Todo> {
-    global_todo_store().list()
-}
 
 /// Called by the CLI at startup to set the auth mode for the entire process.
 /// Subagents automatically inherit this unless explicitly overridden.
@@ -321,6 +358,10 @@ impl AgentCompletionRegistry {
     /// Block until the agent reaches a terminal state or the timeout expires.
     /// Returns the terminal manifest on success, or an error message.
     fn await_agent(&self, agent_id: &str, timeout: Duration) -> Result<AgentOutput, String> {
+        // No session filesystem reaches this trait method, so the store is the
+        // host's — which is what it has always been here. A co-hosted caller
+        // goes through the tool dispatch, which carries its own.
+        let fs = runtime::host_fs_arc().as_ref();
         let map = self
             .inner
             .lock()
@@ -328,7 +369,7 @@ impl AgentCompletionRegistry {
         if !map.contains_key(agent_id) {
             // Not registered in-process — try to read from the manifest file.
             drop(map);
-            return read_manifest_from_store(agent_id);
+            return read_manifest_from_store(agent_id, fs);
         }
         let (map, wait_result) = self
             .condvar
@@ -350,12 +391,14 @@ impl AgentCompletionRegistry {
 }
 
 /// Fall back to reading the manifest from the agent store on disk.
-fn read_manifest_from_store(agent_id: &str) -> Result<AgentOutput, String> {
-    let store = agent_store_dir()?;
-    let manifest_path = store.join(format!("{agent_id}.json"));
-    let contents = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        format!("agent {agent_id} not found (no in-process record, no manifest file): {e}")
-    })?;
+fn read_manifest_from_store(agent_id: &str, fs: &dyn FsBackend) -> Result<AgentOutput, String> {
+    let store = agent_store_dir(fs)?;
+    let manifest_path = store_path(&store, &format!("{agent_id}.json"), fs);
+    let contents = fs
+        .read_to_string(&manifest_path.to_string_lossy())
+        .map_err(|e| {
+            format!("agent {agent_id} not found (no in-process record, no manifest file): {e}")
+        })?;
     let manifest: AgentOutput = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
     if manifest.status == "completed" || manifest.status == "failed" {
         Ok(manifest)
@@ -871,7 +914,7 @@ impl GlobalToolRegistry {
                 input,
                 abort_signal,
                 ctx,
-                self.fs.as_ref(),
+                &self.fs,
             );
         }
         self.plugin_tools
@@ -1585,7 +1628,14 @@ pub fn execute_tool_with_abort(
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
 ) -> Result<String, String> {
-    execute_tool_with_enforcer(None, name, input, abort_signal, None, &StdFsBackend)
+    execute_tool_with_enforcer(
+        None,
+        name,
+        input,
+        abort_signal,
+        None,
+        runtime::host_fs_arc(),
+    )
 }
 
 /// The alias table's SSOT is [`runtime::tool_names`] — `runtime` sits below
@@ -1601,7 +1651,9 @@ fn execute_tool_with_enforcer(
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
     ctx: Option<&ToolDispatchContext>,
-    fs: &dyn FsBackend,
+    // The handle, not a borrow of it: a sub-agent outlives this call on its own
+    // thread and has to take the parent's filesystem with it.
+    fs: &Arc<dyn FsBackend>,
 ) -> Result<String, String> {
     let name = canonicalize_tool_name(name);
     let name = name.as_str();
@@ -1647,7 +1699,7 @@ fn execute_tool_with_enforcer(
         "grep_search" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
             from_value::<GrepSearchInput>(input)
-                .and_then(|input| run_grep_search(input, fs, abort_signal))
+                .and_then(|input| run_grep_search(input, fs.as_ref(), abort_signal))
         }
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
@@ -1659,13 +1711,13 @@ fn execute_tool_with_enforcer(
         // (session resume is future work).
         "agent_spawn" => {
             let input = normalize_agent_spawn_input(input);
-            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
+            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx, fs))
         }
         // pid_fork: synthesize an AgentInput with subagent_type="fork"
         // and delegate to the existing fork machinery.
         "pid_fork" => {
             let input = normalize_pid_fork_input(input);
-            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
+            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx, fs))
         }
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
@@ -1684,21 +1736,23 @@ fn execute_tool_with_enforcer(
         "AskUserQuestion" => {
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
         }
-        "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
+        "TodoWrite" => {
+            from_value::<TodoWriteInput>(input).and_then(|input| run_todo_write(input, fs))
+        }
         // The pid.* family — agent process control.
         "pid_kill" => {
             let input = normalize_pid_input(input);
-            from_value::<TaskIdInput>(&input).and_then(run_pid_kill)
+            from_value::<TaskIdInput>(&input).and_then(|input| run_pid_kill(input, fs.as_ref()))
         }
         "pid_status" => {
             let input = normalize_pid_input(input);
-            run_pid_status(input)
+            run_pid_status(input, fs.as_ref())
         }
         "pid_output" => {
             let input = normalize_pid_output_input(input);
-            from_value::<TaskOutputInput>(&input).and_then(run_pid_output)
+            from_value::<TaskOutputInput>(&input).and_then(|input| run_pid_output(input, fs.as_ref()))
         }
-        "agent_list" => run_agent_list(input),
+        "agent_list" => run_agent_list(input, fs.as_ref()),
         // Defense in depth: the specs are already hidden when the host owns
         // scheduling, so refuse a stale/rogue call rather than persisting a
         // cron nothing will ever fire.
@@ -1852,7 +1906,7 @@ fn run_ask_user_question_v2(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
+fn run_todo_write(input: TodoWriteInput, fs: &Arc<dyn FsBackend>) -> Result<String, String> {
     use runtime::todo_store::TodoStatus;
 
     let todos: Vec<runtime::Todo> = input.todos.into_iter().map(Into::into).collect();
@@ -1869,7 +1923,7 @@ fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
     }
     let verification_streak_nudge = runtime::verification_watcher::should_nudge_and_consume();
 
-    let saved = global_todo_store().set(todos);
+    let saved = TodoStore::open(fs).set(todos);
     let mut result = json!({ "todos": saved });
     if let Some(nudge) = verification_streak_nudge {
         result["verificationStreakNudge"] = json!(nudge);
@@ -1877,19 +1931,29 @@ fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
     to_pretty_json(result)
 }
 
-fn run_pid_status(input: Value) -> Result<String, String> {
+/// The todo list a successful `TodoWrite` result carries, if it is one.
+///
+/// The key is spelled once, beside the `run_todo_write` that writes it, so a
+/// renderer reading the list back cannot drift from the tool that produced it.
+pub fn todos_from_tool_result(output: &str) -> Option<Vec<runtime::Todo>> {
+    let value: Value = serde_json::from_str(output).ok()?;
+    serde_json::from_value(value.get("todos")?.clone()).ok()
+}
+
+fn run_pid_status(input: Value, fs: &dyn FsBackend) -> Result<String, String> {
     let pid = input
         .get("task_id")
         .or_else(|| input.get("pid"))
         .and_then(|v| v.as_str());
 
     if let Some(pid) = pid {
-        let store = agent_store_dir()?;
-        let path = store.join(format!("{pid}.json"));
-        if !path.exists() {
+        let store = agent_store_dir(fs)?;
+        let path = store_path(&store, &format!("{pid}.json"), fs);
+        if !fs.exists(&path.to_string_lossy()).unwrap_or(false) {
             return Err(format!("pid not found: {pid}"));
         }
-        let text = std::fs::read_to_string(&path)
+        let text = fs
+            .read_to_string(&path.to_string_lossy())
             .map_err(|e| format!("read agent manifest {}: {e}", path.display()))?;
         let manifest: AgentOutput =
             serde_json::from_str(&text).map_err(|e| format!("parse agent manifest: {e}"))?;
@@ -1907,7 +1971,7 @@ fn run_pid_status(input: Value) -> Result<String, String> {
         .get("backgrounded_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let agents = list_agent_snapshots_from_store(backgrounded_only).unwrap_or_default();
+    let agents = list_agent_snapshots_from_store_with(backgrounded_only, fs).unwrap_or_default();
 
     to_pretty_json(json!({
         "agents": agents,
@@ -1941,22 +2005,23 @@ pub struct AgentSnapshot {
 /// Errors accessing the directory itself surface as `Err`. Errors
 /// reading individual manifests are logged-then-skipped so a
 /// corrupt file doesn't wipe the whole list.
-pub fn list_agent_snapshots_from_store(
+pub fn list_agent_snapshots_from_store_with(
     backgrounded_only: bool,
+    fs: &dyn FsBackend,
 ) -> Result<Vec<AgentSnapshot>, String> {
-    let store = agent_store_dir()?;
-    let read_dir = match std::fs::read_dir(&store) {
-        Ok(rd) => rd,
+    let store = agent_store_dir(fs)?;
+    let listing = match fs.readdir(&store.to_string_lossy()) {
+        Ok(listing) => listing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("read agent store {}: {e}", store.display())),
     };
     let mut out = Vec::new();
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+    for entry in listing {
+        if entry.is_dir || !entry.name.ends_with(".json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let path = store_path(&store, &entry.name, fs);
+        let Ok(text) = fs.read_to_string(&path.to_string_lossy()) else {
             continue;
         };
         let Ok(manifest) = serde_json::from_str::<AgentOutput>(&text) else {
@@ -2011,11 +2076,15 @@ pub struct AgentListRow {
 /// (gRPC), and an in-process kernel. (Hand-rolling `std::fs` here found only
 /// local disk and probed a filename the conversation contract stopped
 /// creating — it discovered nobody real.)
-pub fn collect_agent_list(active_only: bool) -> Vec<AgentListRow> {
+///
+/// The sub-agent half is read through `fs` for the same reason: the workers this
+/// session spawned live in ITS store, which for a co-hosted agent is a subtree
+/// of the VFS and not a directory on the daemon's disk.
+pub fn collect_agent_list(active_only: bool, fs: &dyn FsBackend) -> Vec<AgentListRow> {
     let mailbox = runtime::mailbox::sending_mailbox();
     let self_name = mailbox.self_id().to_string();
     let peers = mailbox.list_recipients().unwrap_or_default();
-    let subagents = list_agent_snapshots_from_store(true).unwrap_or_default();
+    let subagents = list_agent_snapshots_from_store_with(true, fs).unwrap_or_default();
     merge_agent_list(&peers, &self_name, subagents, active_only)
 }
 
@@ -2090,12 +2159,12 @@ pub fn merge_agent_list(
     out
 }
 
-fn run_agent_list(input: &Value) -> Result<String, String> {
+fn run_agent_list(input: &Value, fs: &dyn FsBackend) -> Result<String, String> {
     let active_only = input
         .get("active_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let agents = collect_agent_list(active_only);
+    let agents = collect_agent_list(active_only, fs);
     to_pretty_json(json!({
         "agents": agents,
         "count": agents.len(),
@@ -2103,21 +2172,22 @@ fn run_agent_list(input: &Value) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_pid_kill(input: TaskIdInput) -> Result<String, String> {
+fn run_pid_kill(input: TaskIdInput, fs: &dyn FsBackend) -> Result<String, String> {
     // Terminate a backgrounded agent by pid, marking its manifest stopped in
     // the agent store (the same store pid_status / pid_output read from).
-    let store = agent_store_dir()?;
-    let path = store.join(format!("{}.json", input.task_id));
-    if !path.exists() {
+    let store = agent_store_dir(fs)?;
+    let path = store_path(&store, &format!("{}.json", input.task_id), fs);
+    if !fs.exists(&path.to_string_lossy()).unwrap_or(false) {
         return Err(format!("pid not found: {}", input.task_id));
     }
-    let text = std::fs::read_to_string(&path)
+    let text = fs
+        .read_to_string(&path.to_string_lossy())
         .map_err(|e| format!("read agent manifest {}: {e}", path.display()))?;
     let mut manifest: AgentOutput =
         serde_json::from_str(&text).map_err(|e| format!("parse agent manifest: {e}"))?;
     manifest.status = "stopped".to_string();
     if let Ok(serialized) = serde_json::to_string_pretty(&manifest) {
-        let _ = std::fs::write(&path, serialized);
+        let _ = fs.write(&path.to_string_lossy(), serialized.as_bytes());
     }
     to_pretty_json(json!({
         "pid": manifest.agent_id,
@@ -2127,21 +2197,21 @@ fn run_pid_kill(input: TaskIdInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_pid_output(input: TaskOutputInput) -> Result<String, String> {
+fn run_pid_output(input: TaskOutputInput, fs: &dyn FsBackend) -> Result<String, String> {
     let agent_id = input
         .agent_id
         .as_deref()
         .or(input.task_id.as_deref())
         .ok_or_else(|| String::from("pid is required"))?;
-    let mut result = await_agent_output(agent_id, input.block, input.timeout_ms)?;
+    let mut result = await_agent_output(agent_id, input.block, input.timeout_ms, fs)?;
     if input.merge {
         if let Ok(mut parsed) = serde_json::from_str::<Value>(&result) {
             if let Some(obj) = parsed.as_object_mut() {
                 obj.insert("merge".to_string(), json!(true));
-                let store = agent_store_dir().ok();
+                let store = agent_store_dir(fs).ok();
                 if let Some(store) = store {
-                    let session_path = agent_session_path(&store, agent_id.trim());
-                    if session_path.exists() {
+                    let session_path = agent_session_path(&store, agent_id.trim(), fs);
+                    if fs.exists(&session_path.to_string_lossy()).unwrap_or(false) {
                         obj.insert(
                             "session_path".to_string(),
                             json!(session_path.display().to_string()),
@@ -2169,7 +2239,12 @@ fn agent_await_timeout_cap_ms() -> u64 {
         .unwrap_or(MAX_AGENT_AWAIT_TIMEOUT_MS)
 }
 
-fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<String, String> {
+fn await_agent_output(
+    agent_id: &str,
+    block: bool,
+    timeout_ms: u64,
+    fs: &dyn FsBackend,
+) -> Result<String, String> {
     let agent_id = agent_id.trim();
     if agent_id.is_empty() {
         return Err(String::from("agent_id must not be empty"));
@@ -2177,13 +2252,13 @@ fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<St
 
     if !block {
         // Non-blocking: read manifest from disk and return current state.
-        if let Ok(manifest) = read_manifest_from_store(agent_id) {
+        if let Ok(manifest) = read_manifest_from_store(agent_id, fs) {
             return format_agent_output(&manifest, "success");
         }
         // Try reading the manifest even if status is still running.
-        let store = agent_store_dir()?;
-        let path = store.join(format!("{agent_id}.json"));
-        return match std::fs::read_to_string(&path) {
+        let store = agent_store_dir(fs)?;
+        let path = store_path(&store, &format!("{agent_id}.json"), fs);
+        return match fs.read_to_string(&path.to_string_lossy()) {
             Ok(contents) => {
                 let manifest: AgentOutput =
                     serde_json::from_str(&contents).map_err(|e| e.to_string())?;
@@ -3364,7 +3439,7 @@ fn run_write_file(input: WriteFileInput, fs: &dyn FsBackend) -> Result<String, S
     let actual_path = match intent {
         runtime::FileIntent::Draft => {
             let workspace_root = std::path::PathBuf::from(fs.working_root().unwrap_or_default());
-            runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
+            runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root, fs)
         }
         runtime::FileIntent::Final => std::path::PathBuf::from(&input.path),
     };
@@ -3395,7 +3470,7 @@ fn run_edit_file(input: EditFileInput, fs: &dyn FsBackend) -> Result<String, Str
     let actual_path = if intent == runtime::FileIntent::Draft
         && !runtime::is_in_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
     {
-        runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
+        runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root, fs)
     } else {
         std::path::PathBuf::from(&input.path)
     };
@@ -3462,8 +3537,12 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
 }
 
-fn run_agent(input: AgentInput, ctx: Option<&ToolDispatchContext>) -> Result<String, String> {
-    to_pretty_json(execute_agent(input, ctx)?)
+fn run_agent(
+    input: AgentInput,
+    ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
+) -> Result<String, String> {
+    to_pretty_json(execute_agent(input, ctx, fs)?)
 }
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
@@ -4046,7 +4125,11 @@ pub struct AgentRunTelemetry {
     pub tool_uses: u64,
 }
 
-#[derive(Debug, Clone)]
+// No `Debug` derive: nothing formats a job, and the filesystem it now carries
+// has no `Debug` bound — widening `FsBackend` for one struct's formatting is
+// what `GlobalToolRegistry` already declined to do, and a hand-written impl over
+// these twelve fields would go stale on the thirteenth.
+#[derive(Clone)]
 struct AgentJob {
     manifest: AgentOutput,
     prompt: String,
@@ -4072,6 +4155,11 @@ struct AgentJob {
     /// differ — so the inherited set is kept as a single value that is
     /// impossible to partially thread through.
     execution: ParentExecution,
+    /// The filesystem the parent runs on, inherited so the sub-agent's tools
+    /// and its store land where its parent's do. A co-hosted parent's
+    /// sub-agent therefore writes through the kernel rather than onto the
+    /// daemon's local disk.
+    fs: Arc<dyn FsBackend>,
     /// Signal wired into the subagent's `ConversationRuntime` via
     /// `with_hook_abort_signal`. Registered by name in
     /// [`global_agent_abort_signals`] so
@@ -4157,8 +4245,12 @@ impl SubagentLink {
     /// Report the end of the run from the manifest it persisted. `aborted`
     /// means the agent was stopped from outside (cancel / shutdown request),
     /// which the manifest itself does not record.
-    fn emit_finished(&self, fallback: &AgentOutput, aborted: bool) {
-        let manifest = std::fs::read_to_string(&fallback.manifest_file)
+    fn emit_finished(&self, fallback: &AgentOutput, aborted: bool, fs: &dyn FsBackend) {
+        // The manifest is in the store, so it is read on the store's filesystem —
+        // a co-hosted agent's lifecycle event would otherwise report the fallback
+        // status forever, having looked for the manifest on the daemon's disk.
+        let manifest = fs
+            .read_to_string(&fallback.manifest_file)
             .ok()
             .and_then(|text| serde_json::from_str::<AgentOutput>(&text).ok())
             .unwrap_or_else(|| fallback.clone());
@@ -4984,11 +5076,12 @@ const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 fn execute_agent(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
 ) -> Result<AgentOutput, String> {
     if input.run_in_background.unwrap_or(true) {
-        execute_agent_with_spawn_and_context(input, ctx, spawn_agent_job)
+        execute_agent_with_spawn_and_context(input, ctx, fs, spawn_agent_job)
     } else {
-        execute_agent_inline(input, ctx)
+        execute_agent_inline(input, ctx, fs)
     }
 }
 
@@ -5000,6 +5093,7 @@ struct PreparedAgent {
 fn prepare_agent_job(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: Arc<dyn FsBackend>,
 ) -> Result<PreparedAgent, String> {
     if input.description.trim().is_empty() {
         return Err(String::from("description must not be empty"));
@@ -5046,11 +5140,12 @@ fn prepare_agent_job(
     }
 
     let agent_id = make_agent_id();
-    let output_dir = agent_store_dir()?;
-    std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
-    sweep_orphaned_tmp_files(&output_dir);
-    let output_file = output_dir.join(format!("{agent_id}.md"));
-    let manifest_file = output_dir.join(format!("{agent_id}.json"));
+    let output_dir = agent_store_dir(fs.as_ref())?;
+    fs.create_dir_all(&output_dir.to_string_lossy())
+        .map_err(|error| error.to_string())?;
+    sweep_orphaned_tmp_files(&output_dir, fs.as_ref());
+    let output_file = store_path(&output_dir, &format!("{agent_id}.md"), fs.as_ref());
+    let manifest_file = store_path(&output_dir, &format!("{agent_id}.json"), fs.as_ref());
 
     let model = resolve_agent_model(input.model.as_deref(), ctx)?;
     let agent_name = input
@@ -5075,7 +5170,7 @@ fn prepare_agent_job(
         let messages = build_forked_messages(&input.prompt, parent_assistant);
         (build_fork_child_message(&input.prompt), messages)
     } else if !input.fresh.unwrap_or(false) {
-        let resumed = find_resumable_session(&agent_name);
+        let resumed = find_resumable_session(&agent_name, fs.as_ref());
         (input.prompt.clone(), resumed.unwrap_or_default())
     } else {
         (input.prompt.clone(), Vec::new())
@@ -5096,7 +5191,8 @@ fn prepare_agent_job(
 ",
         agent_id, agent_name, input.description, normalized_subagent_type, created_at, input.prompt
     );
-    std::fs::write(&output_file, output_contents).map_err(|error| error.to_string())?;
+    fs.write(&output_file.to_string_lossy(), output_contents.as_bytes())
+        .map_err(|error| error.to_string())?;
 
     let assigned_color = runtime::agent_color::assign_agent_color(&agent_id).map(str::to_string);
     let manifest = AgentOutput {
@@ -5122,7 +5218,7 @@ fn prepare_agent_job(
         tool_uses: None,
         notified: None,
     };
-    write_agent_manifest(&manifest)?;
+    write_agent_manifest(&manifest, fs.as_ref())?;
 
     // Capture provider config at spawn time so the subagent thread inherits the
     // parent's auth/credential settings rather than re-loading from CWD.
@@ -5161,6 +5257,7 @@ fn prepare_agent_job(
         .and_then(|c| c.parent_permission_mode)
         .unwrap_or(PermissionMode::WorkspaceWrite);
     let job = AgentJob {
+        fs: Arc::clone(&fs),
         manifest: manifest.clone(),
         prompt: prompt_body,
         system_prompt,
@@ -5194,7 +5291,7 @@ where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
     input.model.get_or_insert_with(|| "test-model".to_string());
-    execute_agent_with_spawn_and_context(input, None, spawn_fn)
+    execute_agent_with_spawn_and_context(input, None, runtime::host_fs_arc(), spawn_fn)
 }
 
 /// Runtime tool-loop entry point: threads the parent's assistant
@@ -5203,20 +5300,26 @@ where
 fn execute_agent_with_spawn_and_context<F>(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
     spawn_fn: F,
 ) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
-    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
+    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, Arc::clone(fs))?;
     global_agent_registry().register(&manifest.agent_id);
     let subagent = job.subagent.clone();
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
-        let persisted =
-            persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()));
+        let persisted = persist_agent_terminal_state(
+            &manifest,
+            "failed",
+            None,
+            Some(error.clone()),
+            fs.as_ref(),
+        );
         if let Some(link) = &subagent {
-            link.emit_finished(&manifest, false);
+            link.emit_finished(&manifest, false, fs.as_ref());
         }
         persisted?;
         return Err(error);
@@ -5227,8 +5330,9 @@ where
 fn execute_agent_inline(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
 ) -> Result<AgentOutput, String> {
-    execute_agent_inline_with_work(input, ctx, |job| run_agent_job_returning_text(&job))
+    execute_agent_inline_with_work(input, ctx, fs, |job| run_agent_job_returning_text(&job))
 }
 
 /// Default auto-background threshold. Mirrors CC-fork's 120-second
@@ -5282,12 +5386,13 @@ fn auto_background_threshold() -> Option<Duration> {
 fn execute_agent_inline_with_work<W>(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
     work_fn: W,
 ) -> Result<AgentOutput, String>
 where
     W: FnOnce(AgentJob) -> Result<String, String> + Send + 'static,
 {
-    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
+    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, Arc::clone(fs))?;
     let subagent = job.subagent.clone();
     let Some(threshold) = auto_background_threshold() else {
         // Auto-bg disabled — original fully-sync path.
@@ -5298,17 +5403,23 @@ where
                 "completed",
                 Some(final_text.as_str()),
                 None,
+                fs.as_ref(),
             ),
             Err(error) => {
-                let _ =
-                    persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()));
+                let _ = persist_agent_terminal_state(
+                    &manifest,
+                    "failed",
+                    None,
+                    Some(error.clone()),
+                    fs.as_ref(),
+                );
                 Err(format!("sub-agent failed: {error}"))
             }
         };
         if let Some(link) = &subagent {
-            link.emit_finished(&manifest, abort_signal.is_aborted());
+            link.emit_finished(&manifest, abort_signal.is_aborted(), fs.as_ref());
         }
-        return outcome.and_then(|()| reload_manifest_or_fallback(manifest));
+        return outcome.and_then(|()| reload_manifest_or_fallback(manifest, fs.as_ref()));
     };
 
     // Auto-bg enabled: run on a worker thread + await up to threshold.
@@ -5320,6 +5431,10 @@ where
     let bg_agent_id = agent_id.clone();
     let workspace = job.workspace.clone();
     let bg_abort_signal = job.abort_signal.clone();
+    // The worker's own handle, cloned before `job` moves into the closure. A
+    // thread reaching back for the parent's would not compile, which is how this
+    // stays honest about who owns the filesystem it writes through.
+    let bg_fs = Arc::clone(&job.fs);
     std::thread::spawn(move || {
         // Worker threads carry the parent turn's workspace root with them.
         let _workspace = workspace.enter();
@@ -5331,10 +5446,17 @@ where
                     "completed",
                     Some(final_text.as_str()),
                     None,
+                    bg_fs.as_ref(),
                 );
             }
             Ok(Err(err)) => {
-                let _ = persist_agent_terminal_state(&bg_manifest, "failed", None, Some(err));
+                let _ = persist_agent_terminal_state(
+                    &bg_manifest,
+                    "failed",
+                    None,
+                    Some(err),
+                    bg_fs.as_ref(),
+                );
             }
             Err(_) => {
                 let _ = persist_agent_terminal_state(
@@ -5342,21 +5464,22 @@ where
                     "failed",
                     None,
                     Some(String::from("sub-agent thread panicked")),
+                    bg_fs.as_ref(),
                 );
             }
         }
         // Before the completion notice: that is what releases the waiting
         // parent, whose own tool result must come after this agent's end.
         if let Some(link) = &subagent {
-            link.emit_finished(&bg_manifest, bg_abort_signal.is_aborted());
+            link.emit_finished(&bg_manifest, bg_abort_signal.is_aborted(), bg_fs.as_ref());
         }
-        notify_agent_completion(&bg_manifest);
+        notify_agent_completion(&bg_manifest, bg_fs.as_ref());
         unregister_agent_abort_signal(&bg_agent_id);
     });
 
     match global_agent_registry().await_agent(&agent_id, threshold) {
         Ok(final_manifest) => Ok(final_manifest),
-        Err(e) if e.contains("timed out") => Ok(mark_manifest_backgrounded(&manifest)),
+        Err(e) if e.contains("timed out") => Ok(mark_manifest_backgrounded(&manifest, fs.as_ref())),
         Err(e) => Err(e),
     }
 }
@@ -5369,17 +5492,20 @@ where
 /// false so mid-flight `TaskOutput` queries under coord mode still
 /// return JSON (not the `<task-notification>` XML that requires a real
 /// terminal outcome).
-fn mark_manifest_backgrounded(manifest: &AgentOutput) -> AgentOutput {
+fn mark_manifest_backgrounded(manifest: &AgentOutput, fs: &dyn FsBackend) -> AgentOutput {
     let mut updated = manifest.clone();
     updated.status = String::from("backgrounded");
-    let _ = write_agent_manifest(&updated);
+    let _ = write_agent_manifest(&updated, fs);
     updated
 }
 
-fn reload_manifest_or_fallback(manifest: AgentOutput) -> Result<AgentOutput, String> {
+fn reload_manifest_or_fallback(
+    manifest: AgentOutput,
+    fs: &dyn FsBackend,
+) -> Result<AgentOutput, String> {
     // Re-read so lane events + result written by persist are visible;
     // fall back to the in-memory manifest if the re-read blips.
-    std::fs::read_to_string(&manifest.manifest_file)
+    fs.read_to_string(&manifest.manifest_file)
         .map_err(|e| e.to_string())
         .and_then(|s| serde_json::from_str::<AgentOutput>(&s).map_err(|e| e.to_string()))
         .or(Ok(manifest))
@@ -5405,13 +5531,25 @@ fn run_spawned_agent_job(job: AgentJob) {
     let agent_id = job.manifest.agent_id.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_agent_job_returning_text(&job).and_then(|text| {
-            persist_agent_terminal_state(&job.manifest, "completed", Some(text.as_str()), None)
+            persist_agent_terminal_state(
+                &job.manifest,
+                "completed",
+                Some(text.as_str()),
+                None,
+                job.fs.as_ref(),
+            )
         })
     }));
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            let _ = persist_agent_terminal_state(&job.manifest, "failed", None, Some(error));
+            let _ = persist_agent_terminal_state(
+                &job.manifest,
+                "failed",
+                None,
+                Some(error),
+                job.fs.as_ref(),
+            );
         }
         Err(_) => {
             let _ = persist_agent_terminal_state(
@@ -5419,14 +5557,19 @@ fn run_spawned_agent_job(job: AgentJob) {
                 "failed",
                 None,
                 Some(String::from("sub-agent thread panicked")),
+                job.fs.as_ref(),
             );
         }
     }
     if let Some(link) = &job.subagent {
-        link.emit_finished(&job.manifest, job.abort_signal.is_aborted());
+        link.emit_finished(
+            &job.manifest,
+            job.abort_signal.is_aborted(),
+            job.fs.as_ref(),
+        );
     }
     // Signal the completion registry so TaskOutput(agent_id, block=true) callers unblock.
-    notify_agent_completion(&job.manifest);
+    notify_agent_completion(&job.manifest, job.fs.as_ref());
     // Drop the abort-signal registration LAST — a
     // `SendMessage(shutdown_request)` arriving during teardown against
     // an already-completed agent is silently a no-op (returns
@@ -5437,8 +5580,9 @@ fn run_spawned_agent_job(job: AgentJob) {
 }
 
 /// Re-read the persisted manifest and notify the global completion registry.
-fn notify_agent_completion(original_manifest: &AgentOutput) {
-    let manifest = std::fs::read_to_string(&original_manifest.manifest_file)
+fn notify_agent_completion(original_manifest: &AgentOutput, fs: &dyn FsBackend) {
+    let manifest = fs
+        .read_to_string(&original_manifest.manifest_file)
         .ok()
         .and_then(|s| serde_json::from_str::<AgentOutput>(&s).ok())
         .unwrap_or_else(|| {
@@ -5502,14 +5646,14 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
         },
     )?;
 
-    persist_agent_session(&job.manifest, conv_runtime.session());
+    persist_agent_session(&job.manifest, conv_runtime.session(), job.fs.as_ref());
 
     // Fold telemetry into the on-disk manifest BEFORE any downstream
     // step (summarizer, persist) reads it, so the terminal-state
     // write picks up the counts. Best-effort: an IO error here just
     // means the notification will omit `<usage>` counters — not a
     // fatal condition.
-    if let Err(err) = record_agent_telemetry(&job.manifest, cumulative_telemetry) {
+    if let Err(err) = record_agent_telemetry(&job.manifest, cumulative_telemetry, job.fs.as_ref()) {
         eprintln!("sudocode: failed to record agent telemetry on manifest: {err}");
     }
 
@@ -5534,7 +5678,7 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
         // point to the unabridged output. Best-effort: any IO error
         // is logged but not fatal — the parent still receives the
         // summary via the return value.
-        if let Err(err) = record_full_result_path(&job.manifest, &path) {
+        if let Err(err) = record_full_result_path(&job.manifest, &path, job.fs.as_ref()) {
             eprintln!("sudocode: failed to record full-result path on manifest: {err}");
         }
     }
@@ -5573,15 +5717,16 @@ fn telemetry_from_turn(summary: &runtime::TurnSummary) -> (u64, u64) {
 fn record_agent_telemetry(
     manifest: &AgentOutput,
     telemetry: AgentRunTelemetry,
+    fs: &dyn FsBackend,
 ) -> Result<(), String> {
-    let existing = std::fs::read_to_string(&manifest.manifest_file).ok();
+    let existing = fs.read_to_string(&manifest.manifest_file).ok();
     let mut updated: AgentOutput = existing
         .as_deref()
         .and_then(|text| serde_json::from_str::<AgentOutput>(text).ok())
         .unwrap_or_else(|| manifest.clone());
     updated.total_tokens = Some(telemetry.total_tokens);
     updated.tool_uses = Some(telemetry.tool_uses);
-    write_agent_manifest(&updated)
+    write_agent_manifest(&updated, fs)
 }
 
 /// Write `full_text` to `<agent_id>.full.md` sibling next to the
@@ -5590,6 +5735,7 @@ fn record_agent_telemetry(
 fn write_full_result_and_update_manifest(
     manifest: &AgentOutput,
     full_text: &str,
+    fs: &dyn FsBackend,
 ) -> Result<std::path::PathBuf, String> {
     let output_path = std::path::PathBuf::from(&manifest.output_file);
     let sibling = output_path.with_extension("full.md");
@@ -5604,7 +5750,7 @@ fn write_full_result_and_update_manifest(
             .as_deref()
             .unwrap_or("general-purpose"),
     );
-    std::fs::write(&sibling, contents)
+    fs.write(&sibling.to_string_lossy(), contents.as_bytes())
         .map_err(|e| format!("write full-result sibling {}: {e}", sibling.display()))?;
     Ok(sibling)
 }
@@ -5618,16 +5764,17 @@ fn write_full_result_and_update_manifest(
 fn record_full_result_path(
     manifest: &AgentOutput,
     full_path: &std::path::Path,
+    fs: &dyn FsBackend,
 ) -> Result<(), String> {
     let path_str = full_path.display().to_string();
-    let existing = std::fs::read_to_string(&manifest.manifest_file).ok();
+    let existing = fs.read_to_string(&manifest.manifest_file).ok();
     let mut updated: AgentOutput = if let Some(text) = existing {
         serde_json::from_str(&text).unwrap_or_else(|_| manifest.clone())
     } else {
         manifest.clone()
     };
     updated.result_full_path = Some(path_str);
-    write_agent_manifest(&updated)
+    write_agent_manifest(&updated, fs)
 }
 
 fn maybe_summarize_agent_result(
@@ -5641,7 +5788,8 @@ fn maybe_summarize_agent_result(
         return Ok((full_text.to_string(), None));
     }
     // Over threshold: persist full text alongside + summarize.
-    let full_path = write_full_result_and_update_manifest(&job.manifest, full_text)?;
+    let full_path =
+        write_full_result_and_update_manifest(&job.manifest, full_text, job.fs.as_ref())?;
     let summary = run_agent_summarizer(job, full_text)?;
     Ok((summary, Some(full_path)))
 }
@@ -5927,9 +6075,15 @@ fn build_agent_runtime(
     .with_parent_execution(job.execution.clone());
     let permission_policy = agent_permission_policy(job.permission_mode);
     let tool_executor = SubagentToolExecutor::new(allowed_tools)
+        .with_fs(Arc::clone(&job.fs))
         .with_enforcer(PermissionEnforcer::new(permission_policy.clone()));
     Ok(ConversationRuntime::new(
-        Session::new().with_messages(job.inherited_messages.clone()),
+        // The parent's filesystem, so the transcript `persist_agent_session`
+        // writes lands in the store it was told about rather than on the host at
+        // a path only the VFS can hold.
+        Session::new()
+            .with_messages(job.inherited_messages.clone())
+            .with_fs_backend(Arc::clone(&job.fs)),
         api_client,
         tool_executor,
         permission_policy,
@@ -6040,26 +6194,31 @@ fn agent_permission_policy(mode: PermissionMode) -> PermissionPolicy {
 /// Best-effort removal of `*.tmp` files left behind by a previous crash between
 /// `fs::write` and `fs::rename` in `write_agent_manifest`. Called once per agent
 /// launch so the directory stays clean without a separate startup sweep.
-fn sweep_orphaned_tmp_files(dir: &std::path::Path) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                let _ = std::fs::remove_file(path);
-            }
+fn sweep_orphaned_tmp_files(dir: &std::path::Path, fs: &dyn FsBackend) {
+    let Ok(entries) = fs.readdir(&dir.to_string_lossy()) else {
+        return;
+    };
+    for entry in entries {
+        if entry.is_dir || !entry.name.ends_with(".tmp") {
+            continue;
         }
+        let _ = fs.delete(&store_path(dir, &entry.name, fs).to_string_lossy());
     }
 }
 
-fn write_agent_manifest(manifest: &AgentOutput) -> Result<(), String> {
+fn write_agent_manifest(manifest: &AgentOutput, fs: &dyn FsBackend) -> Result<(), String> {
     let mut normalized = manifest.clone();
     normalized.lane_events = dedupe_superseded_commit_events(&normalized.lane_events);
     let json = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
     // Write to a temp file then rename for atomic visibility — prevents a reader
-    // seeing a partially-written file during truncate-then-write.
+    // seeing a partially-written file during truncate-then-write. Both halves go
+    // through `fs`: a rename is only atomic within one filesystem, and these two
+    // paths are in whichever one the store is rooted on.
     let tmp_path = format!("{}.tmp", normalized.manifest_file);
-    std::fs::write(&tmp_path, &json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp_path, &normalized.manifest_file).map_err(|e| e.to_string())
+    fs.write(&tmp_path, json.as_bytes())
+        .map_err(|e| e.to_string())?;
+    fs.rename(&tmp_path, &normalized.manifest_file)
+        .map_err(|e| e.to_string())
 }
 
 fn persist_agent_terminal_state(
@@ -6067,8 +6226,9 @@ fn persist_agent_terminal_state(
     status: &str,
     result: Option<&str>,
     error: Option<String>,
+    fs: &dyn FsBackend,
 ) -> Result<(), String> {
-    persist_agent_terminal_state_with_telemetry(manifest, status, result, error, None)
+    persist_agent_terminal_state_with_telemetry(manifest, status, result, error, None, fs)
 }
 
 /// Terminal-state persistence with optional run telemetry.
@@ -6085,17 +6245,20 @@ fn persist_agent_terminal_state_with_telemetry(
     result: Option<&str>,
     error: Option<String>,
     telemetry: Option<AgentRunTelemetry>,
+    fs: &dyn FsBackend,
 ) -> Result<(), String> {
     let blocker = error.as_deref().map(classify_lane_blocker);
     append_agent_output(
         &manifest.output_file,
         &format_agent_terminal_output(status, result, blocker.as_ref(), error.as_deref()),
+        fs,
     )?;
     // Re-read the current on-disk manifest so fields mutated between
     // spawn and terminal-state (result_full_path from AgentSummary,
     // per-turn telemetry updates) survive the write. Fall back to the
     // caller's snapshot when the disk state is unreadable.
-    let mut next_manifest = std::fs::read_to_string(&manifest.manifest_file)
+    let mut next_manifest = fs
+        .read_to_string(&manifest.manifest_file)
         .ok()
         .and_then(|text| serde_json::from_str::<AgentOutput>(&text).ok())
         .unwrap_or_else(|| manifest.clone());
@@ -6153,7 +6316,7 @@ fn persist_agent_terminal_state_with_telemetry(
     if should_emit {
         next_manifest.notified = Some(true);
     }
-    write_agent_manifest(&next_manifest)?;
+    write_agent_manifest(&next_manifest, fs)?;
 
     if should_emit {
         // The emit helper self-guards on `is_coordinator_mode` —
@@ -6809,14 +6972,8 @@ fn current_git_branch() -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn append_agent_output(path: &str, suffix: &str) -> Result<(), String> {
-    use std::io::Write as _;
-
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    file.write_all(suffix.as_bytes())
+fn append_agent_output(path: &str, suffix: &str, fs: &dyn FsBackend) -> Result<(), String> {
+    fs.append(path, suffix.as_bytes())
         .map_err(|error| error.to_string())
 }
 
@@ -7289,15 +7446,27 @@ struct SubagentToolExecutor {
     /// (`bash`, `Sleep`, `grep_search`, `PowerShell`) stop when it fires;
     /// without it a cancelled agent sat out whatever tool it was running.
     abort_signal: Option<HookAbortSignal>,
+    /// The parent's filesystem. `StdFsBackend` when nothing supplies one, which
+    /// is a standalone CLI's own disk; a co-hosted parent hands down its kernel,
+    /// so a sub-agent's writes pass the same hooks its parent's do.
+    fs: Arc<dyn FsBackend>,
 }
 
 impl SubagentToolExecutor {
     fn new(allowed_tools: BTreeSet<String>) -> Self {
         Self {
             allowed_tools,
+            fs: runtime::host_fs_arc().clone(),
             enforcer: None,
             abort_signal: None,
         }
+    }
+
+    /// Run this sub-agent's tools on `fs` — the filesystem its parent runs on.
+    #[must_use]
+    fn with_fs(mut self, fs: Arc<dyn FsBackend>) -> Self {
+        self.fs = fs;
+        self
     }
 
     fn with_enforcer(mut self, enforcer: PermissionEnforcer) -> Self {
@@ -7331,7 +7500,10 @@ impl ToolExecutor for SubagentToolExecutor {
             &value,
             self.abort_signal.as_ref(),
             Some(ctx),
-            &StdFsBackend,
+            // The parent's filesystem, so a sub-agent's file tools land where
+            // its parent's do — through the kernel for a co-hosted parent,
+            // rather than on the daemon's local disk.
+            &self.fs,
         )
         .map_err(ToolError::new)
     }
@@ -7719,7 +7891,19 @@ fn canonical_tool_token(value: &str) -> String {
     canonical
 }
 
-fn agent_store_dir() -> Result<std::path::PathBuf, String> {
+/// Where this session's sub-agents live.
+///
+/// The backend answers first (`managed_root(ManagedRoot::SubAgents)`), exactly as
+/// it does for sessions: a co-hosted agent's sub-agents belong under the agent
+/// that spawned them, inside the namespace its kernel serves. Without that this
+/// derived a HOST path from the daemon's own process directory — so every
+/// co-hosted agent on one daemon shared a single `.sudocode-agents/`, outside the
+/// kernel's hooks and audit, invisible to the cluster, and colliding with its
+/// neighbours.
+///
+/// An explicit `SUDOCODE_AGENT_STORE` still wins: it is an operator override, and
+/// the one thing an operator overriding a path wants is for it to be used.
+fn agent_store_dir(fs: &dyn FsBackend) -> Result<std::path::PathBuf, String> {
     if let Ok(raw) = std::env::var("SUDOCODE_AGENT_STORE") {
         let path = std::path::PathBuf::from(&raw);
         // Ensure the returned path is always absolute so that the output_file
@@ -7731,21 +7915,38 @@ fn agent_store_dir() -> Result<std::path::PathBuf, String> {
         let cwd = current_workspace_root().map_err(|error| error.to_string())?;
         return Ok(cwd.join(path));
     }
+    if let Some(root) = fs.managed_root(runtime::ManagedRoot::SubAgents) {
+        return Ok(std::path::PathBuf::from(root));
+    }
     let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     Ok(cwd.join(".sudocode-agents"))
 }
 
-fn agent_session_path(store_dir: &std::path::Path, agent_id: &str) -> std::path::PathBuf {
-    store_dir.join(format!("{agent_id}.session.jsonl"))
+fn agent_session_path(
+    store_dir: &std::path::Path,
+    agent_id: &str,
+    fs: &dyn FsBackend,
+) -> std::path::PathBuf {
+    store_path(store_dir, &format!("{agent_id}.session.jsonl"), fs)
+}
+
+/// `<store>/<name>`, spelled by the backend that owns the store.
+///
+/// `Path::join` writes a HOST separator, and while every syscall entry point
+/// collapses one back to the VFS spelling, these paths are recorded in the
+/// manifest and handed to the model and to other tools. A store on a co-hosted
+/// agent's VFS composes with `/` wherever it runs.
+fn store_path(dir: &std::path::Path, name: &str, fs: &dyn FsBackend) -> std::path::PathBuf {
+    std::path::PathBuf::from(fs.join_path(&dir.to_string_lossy(), name))
 }
 
 /// Persist the agent's conversation session to disk so a future
 /// `agent_spawn(fresh: false)` with the same name can resume it.
-fn persist_agent_session(manifest: &AgentOutput, session: &Session) {
-    let Ok(store) = agent_store_dir() else {
+fn persist_agent_session(manifest: &AgentOutput, session: &Session, fs: &dyn FsBackend) {
+    let Ok(store) = agent_store_dir(fs) else {
         return;
     };
-    let path = agent_session_path(&store, &manifest.agent_id);
+    let path = agent_session_path(&store, &manifest.agent_id, fs);
     if let Err(e) = session.save_to_path(&path) {
         eprintln!("sudocode: failed to persist agent session: {e}");
     }
@@ -7754,19 +7955,22 @@ fn persist_agent_session(manifest: &AgentOutput, session: &Session) {
 /// Find the most recent completed agent with the given slugified name
 /// and return its persisted session messages. Returns `None` when no
 /// resumable session exists.
-fn find_resumable_session(agent_name: &str) -> Option<Vec<ConversationMessage>> {
-    let store = agent_store_dir().ok()?;
-    if !store.exists() {
+fn find_resumable_session(
+    agent_name: &str,
+    fs: &dyn FsBackend,
+) -> Option<Vec<ConversationMessage>> {
+    let store = agent_store_dir(fs).ok()?;
+    if !fs.exists(&store.to_string_lossy()).unwrap_or(false) {
         return None;
     }
     let mut candidates: Vec<(String, String)> = Vec::new();
-    let entries = std::fs::read_dir(&store).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let entries = fs.readdir(&store.to_string_lossy()).ok()?;
+    for entry in entries {
+        let path = store_path(&store, &entry.name, fs);
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let Ok(text) = fs.read_to_string(&path.to_string_lossy()) else {
             continue;
         };
         let Ok(manifest) = serde_json::from_str::<AgentOutput>(&text) else {
@@ -7782,8 +7986,10 @@ fn find_resumable_session(agent_name: &str) -> Option<Vec<ConversationMessage>> 
     }
     candidates.sort_by(|a, b| b.1.cmp(&a.1));
     let best_id = &candidates.first()?.0;
-    let session_path = agent_session_path(&store, best_id);
-    let session = Session::load_from_path(&session_path).ok()?;
+    let session_path = agent_session_path(&store, best_id, fs);
+    // On the store's filesystem: the transcript this resumes from was written
+    // there, and `load_from_path` would look for it on the host.
+    let session = Session::load_from_path_with(fs, &session_path).ok()?;
     Some(session.messages.clone())
 }
 
@@ -10770,6 +10976,7 @@ mod tests {
                     "completed",
                     Some("Finished successfully in commit abc1234"),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10831,6 +11038,7 @@ mod tests {
                     "failed",
                     None,
                     Some(String::from("tool failed: simulated failure")),
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10882,6 +11090,7 @@ mod tests {
                     "completed",
                     Some("commit push everyting, keep sweeping $ralph"),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10933,6 +11142,7 @@ mod tests {
                         "Team read-only-audit-only-for-roadm: worker panes stalled, no progress 2m30s. Next: omx team status read-only-audit-only-for-roadm; read worker messages; unblock/reassign or shutdown. [OMX_TMUX_INJECT]",
                     ),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10983,6 +11193,7 @@ mod tests {
                     "completed",
                     Some("APPROVE\n\nTarget: commit 1234abcd\nRationale: scoped diff is safe."),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -11029,6 +11240,7 @@ mod tests {
                         "Selected next backlog target.\nChosen: ROADMAP #65\nSkipped: ROADMAP #63, ROADMAP #64\nAction: execute\nRationale: #65 is the next repo-local lane-finished metadata task.",
                     ),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -11079,6 +11291,7 @@ mod tests {
                         "Completed ROADMAP #64. Files: rust/crates/tools/src/lib.rs ROADMAP.md. Diff stat: 2 files, +12/-1. Tested, committed, pushed as commit deadbee.",
                     ),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -11151,6 +11364,7 @@ mod tests {
                     "completed",
                     Some("Completed ROADMAP #66 after verification."),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -11531,15 +11745,21 @@ mod tests {
                     "completed",
                     Some("The answer is 4"),
                     None,
+                    job.fs.as_ref(),
                 )?;
-                super::notify_agent_completion(&job.manifest);
+                super::notify_agent_completion(&job.manifest, job.fs.as_ref());
                 Ok(())
             },
         )
         .expect("spawn should succeed");
 
-        let result = await_agent_output(&manifest.agent_id, true, 5_000)
-            .expect("blocking await should succeed");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            true,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("blocking await should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["retrieval_status"], "success");
@@ -11578,15 +11798,21 @@ mod tests {
                     "failed",
                     None,
                     Some(String::from("division by zero")),
+                    job.fs.as_ref(),
                 )?;
-                super::notify_agent_completion(&job.manifest);
+                super::notify_agent_completion(&job.manifest, job.fs.as_ref());
                 Ok(())
             },
         )
         .expect("spawn should succeed");
 
-        let result = await_agent_output(&manifest.agent_id, true, 5_000)
-            .expect("blocking await of failed agent should succeed");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            true,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("blocking await of failed agent should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["status"], "failed");
         assert!(value["error"]
@@ -11627,8 +11853,9 @@ mod tests {
                             "completed",
                             Some("The answer is 42"),
                             None,
+                            job.fs.as_ref(),
                         );
-                        super::notify_agent_completion(&job.manifest);
+                        super::notify_agent_completion(&job.manifest, job.fs.as_ref());
                     })
                     .map(|_| ())
                     .map_err(|e| e.to_string())
@@ -11636,8 +11863,13 @@ mod tests {
         )
         .expect("spawn should succeed");
 
-        let result = await_agent_output(&manifest.agent_id, true, 10_000)
-            .expect("blocking await should succeed after thread finishes");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            true,
+            10_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("blocking await should succeed after thread finishes");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["result"], "The answer is 42");
@@ -11668,8 +11900,13 @@ mod tests {
         )
         .expect("spawn should succeed");
 
-        let result = await_agent_output(&manifest.agent_id, false, 5_000)
-            .expect("non-blocking poll should not error");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            false,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("non-blocking poll should not error");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["retrieval_status"], "not_ready");
         assert_eq!(value["status"], "running");
@@ -11701,7 +11938,8 @@ mod tests {
         .expect("spawn should succeed");
 
         let result =
-            await_agent_output(&manifest.agent_id, true, 1).expect("timeout path should return Ok");
+            await_agent_output(&manifest.agent_id, true, 1, runtime::host_fs_arc().as_ref())
+                .expect("timeout path should return Ok");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["retrieval_status"], "timeout");
         assert_eq!(value["status"], "running");
@@ -11771,11 +12009,16 @@ mod tests {
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
         std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "5");
 
-        let manifest = execute_agent_inline_with_work(auto_bg_input("fast"), None, |_job| {
-            // Finishes well before the 5-second threshold.
-            std::thread::sleep(Duration::from_millis(50));
-            Ok(String::from("done fast"))
-        })
+        let manifest = execute_agent_inline_with_work(
+            auto_bg_input("fast"),
+            None,
+            runtime::host_fs_arc(),
+            |_job| {
+                // Finishes well before the 5-second threshold.
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(String::from("done fast"))
+            },
+        )
         .expect("fast work should complete via auto-bg await path");
 
         assert_eq!(manifest.status, "completed");
@@ -11795,13 +12038,18 @@ mod tests {
         std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "1");
 
         let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let manifest = execute_agent_inline_with_work(auto_bg_input("slow"), None, move |_job| {
-            // Block until the test releases us — proves the manifest is
-            // returned from the timeout branch while the worker is
-            // still running.
-            let _ = rx.recv();
-            Ok(String::from("eventually done"))
-        })
+        let manifest = execute_agent_inline_with_work(
+            auto_bg_input("slow"),
+            None,
+            runtime::host_fs_arc(),
+            move |_job| {
+                // Block until the test releases us — proves the manifest is
+                // returned from the timeout branch while the worker is
+                // still running.
+                let _ = rx.recv();
+                Ok(String::from("eventually done"))
+            },
+        )
         .expect("timeout path should still return Ok(manifest)");
 
         assert_eq!(
@@ -11819,8 +12067,13 @@ mod tests {
         // Now release the worker and prove TaskOutput(block=true) eventually
         // sees the "completed" transition.
         let _ = tx.send(());
-        let out = await_agent_output(&manifest.agent_id, true, 5_000)
-            .expect("await should succeed after worker finishes");
+        let out = await_agent_output(
+            &manifest.agent_id,
+            true,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("await should succeed after worker finishes");
         let value: serde_json::Value = serde_json::from_str(&out).expect("valid json");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["result"], "eventually done");
@@ -11840,10 +12093,15 @@ mod tests {
         // With auto-bg disabled, the call must block for the full work
         // duration — no early "backgrounded" return.
         let start = std::time::Instant::now();
-        let manifest = execute_agent_inline_with_work(auto_bg_input("disabled"), None, |_job| {
-            std::thread::sleep(Duration::from_millis(200));
-            Ok(String::from("sync done"))
-        })
+        let manifest = execute_agent_inline_with_work(
+            auto_bg_input("disabled"),
+            None,
+            runtime::host_fs_arc(),
+            |_job| {
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(String::from("sync done"))
+            },
+        )
         .expect("disabled auto-bg must still complete");
         let elapsed = start.elapsed();
 
@@ -12174,8 +12432,13 @@ mod tests {
         // Request an absurdly long timeout — the cap must clamp it so ACP-style
         // upper-layer callers don't get cut off waiting for taskoutput.
         let start = std::time::Instant::now();
-        let result = await_agent_output(&manifest.agent_id, true, 10 * 60 * 1000)
-            .expect("clamped timeout path should return Ok");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            true,
+            10 * 60 * 1000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("clamped timeout path should return Ok");
         let elapsed = start.elapsed();
 
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
@@ -12198,8 +12461,13 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create dir");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
 
-        let err = await_agent_output("agent-nonexistent", false, 5_000)
-            .expect_err("missing agent should error");
+        let err = await_agent_output(
+            "agent-nonexistent",
+            false,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect_err("missing agent should error");
         assert!(err.contains("agent not found"), "got: {err}");
 
         std::env::remove_var("SUDOCODE_AGENT_STORE");
@@ -12208,7 +12476,8 @@ mod tests {
 
     #[test]
     fn task_output_rejects_blank_agent_id() {
-        let err = await_agent_output("  ", true, 5_000).expect_err("blank agent_id should fail");
+        let err = await_agent_output("  ", true, 5_000, runtime::host_fs_arc().as_ref())
+            .expect_err("blank agent_id should fail");
         assert!(err.contains("agent_id must not be empty"));
     }
 
@@ -12259,7 +12528,7 @@ mod tests {
         std::fs::write(&tmp_path, b"partial").expect("write tmp");
         std::fs::write(&json_path, b"{}").expect("write json");
 
-        sweep_orphaned_tmp_files(&dir);
+        sweep_orphaned_tmp_files(&dir, runtime::host_fs());
 
         assert!(!tmp_path.exists(), ".tmp file should be removed");
         assert!(json_path.exists(), ".json file should be kept");

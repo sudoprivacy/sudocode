@@ -312,7 +312,7 @@ fn validate_summary(summary: &str, removed: &[ConversationMessage]) -> Result<()
         return Err(CompactionError::InvalidSummary("unclosed summary".into()));
     }
     let replacement =
-        ConversationMessage::user_text(get_compact_continuation_message(summary, true, true));
+        ConversationMessage::user_text(get_compact_continuation_message(summary, true, true, None));
     let before: usize = removed.iter().map(estimate_message_tokens).sum();
     if estimate_message_tokens(&replacement) >= before {
         return Err(CompactionError::InvalidSummary(
@@ -469,11 +469,10 @@ pub fn format_compact_summary(summary: &str) -> String {
 /// way an automatic compaction does.
 #[inline]
 #[must_use]
-pub fn render_todo_continuity_block() -> Option<String> {
-    let todos = crate::todo_store::todo_store_path()
-        .ok()
-        .map(|path| crate::todo_store::TodoStore::load(&path).list())
-        .unwrap_or_default();
+pub fn render_todo_continuity_block(
+    fs: std::sync::Arc<dyn crate::fs_backend::FsBackend>,
+) -> Option<String> {
+    let todos = crate::todo_store::TodoStore::open(&fs).list();
     format_todo_continuity_block(&todos)
 }
 
@@ -504,6 +503,10 @@ pub fn get_compact_continuation_message(
     summary: &str,
     suppress_follow_up_questions: bool,
     recent_messages_preserved: bool,
+    // `None` means "do not read the todo list": the validator below builds a
+    // candidate only to MEASURE it, and a measurement that depends on what is on
+    // disk is a measurement that changes under it.
+    fs: Option<std::sync::Arc<dyn crate::fs_backend::FsBackend>>,
 ) -> String {
     let mut base = format!(
         "{COMPACT_CONTINUATION_PREAMBLE}{}",
@@ -513,7 +516,7 @@ pub fn get_compact_continuation_message(
     // Carry the structured todo list across the compaction boundary (CC parity):
     // TodoWrite has no read tool, so the model needs the exact list back in
     // context to re-send it faithfully.
-    if let Some(todo_block) = render_todo_continuity_block() {
+    if let Some(todo_block) = fs.and_then(render_todo_continuity_block) {
         base.push_str("\n\n");
         base.push_str(&todo_block);
     }
@@ -722,7 +725,12 @@ pub async fn compact_session<C: ApiClient>(
     validate_summary(&llm_summary, removed)?;
     let summary = llm_summary;
     let formatted_summary = format_compact_summary(&summary);
-    let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
+    let continuation = get_compact_continuation_message(
+        &summary,
+        true,
+        !preserved.is_empty(),
+        Some(session.fs_handle()),
+    );
 
     let mut compacted_messages = vec![ConversationMessage {
         role: MessageRole::System,
@@ -812,7 +820,12 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
     validate_summary(&llm_summary, removed)?;
     let summary = llm_summary;
     let formatted_summary = format_compact_summary(&summary);
-    let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
+    let continuation = get_compact_continuation_message(
+        &summary,
+        true,
+        !preserved.is_empty(),
+        Some(session.fs_handle()),
+    );
 
     let mut compacted_messages = vec![ConversationMessage {
         role: MessageRole::System,
@@ -894,7 +907,12 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
         &summarize_messages_local(removed),
     );
     let formatted_summary = format_compact_summary(&summary);
-    let continuation = get_compact_continuation_message(&summary, true, !preserved.is_empty());
+    let continuation = get_compact_continuation_message(
+        &summary,
+        true,
+        !preserved.is_empty(),
+        Some(session.fs_handle()),
+    );
 
     let mut compacted_messages = vec![ConversationMessage {
         role: MessageRole::System,
@@ -1727,7 +1745,7 @@ mod tests {
             ConversationMessage {
                 role: MessageRole::System,
                 blocks: vec![ContentBlock::Text {
-                    text: get_compact_continuation_message(summary, true, true),
+                    text: get_compact_continuation_message(summary, true, true, None),
                 }],
                 usage: None,
                 model: None,

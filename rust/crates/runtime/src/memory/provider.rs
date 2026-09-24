@@ -28,6 +28,7 @@ use super::loader::{
     agent_memory_dir_for, default_memory_dir, default_memory_dir_for, ensure_memory_dir_exists,
 };
 use super::{MemoryIndex, MemoryPromptVariant};
+use crate::fs_backend::FsBackend;
 
 /// Where a memory lookup is happening, resolved once at the call site.
 ///
@@ -119,12 +120,17 @@ pub enum MemoryMode {
 }
 
 impl MemoryMode {
-    /// The provider this mode selects. The one place the mapping lives, so a
-    /// call site chooses a mode and never a provider.
+    /// The provider this mode selects, reading through `fs`. The one place the
+    /// mapping lives, so a call site chooses a mode and never a provider.
+    ///
+    /// The filesystem is the provider's, not the context's: where memory lives
+    /// is a value a caller resolves, but reading it is this provider's own
+    /// behaviour, and a co-hosted agent's files are reachable only through the
+    /// backend that serves its VFS.
     #[must_use]
-    pub fn provider(self) -> Box<dyn MemoryProvider> {
+    pub fn provider<'fs>(self, fs: &'fs dyn FsBackend) -> Box<dyn MemoryProvider + 'fs> {
         match self {
-            Self::Enabled => Box::new(FileMemoryProvider::new()),
+            Self::Enabled => Box::new(FileMemoryProvider::new(fs)),
             Self::Disabled => Box::new(DisabledMemoryProvider::new()),
         }
     }
@@ -135,22 +141,24 @@ impl MemoryMode {
     }
 }
 
-/// The on-disk provider: `MEMORY.md` plus one file per entry, rendered whole.
+/// The stored provider: `MEMORY.md` plus one file per entry, rendered whole.
 ///
-/// This is the behaviour every session has today, moved behind the trait
-/// without changing a byte of what it emits.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct FileMemoryProvider;
+/// "On disk" only for a host session — the files are wherever `fs` keeps them,
+/// which for a co-hosted agent is its own subtree of the VFS.
+#[derive(Clone, Copy)]
+pub struct FileMemoryProvider<'fs> {
+    fs: &'fs dyn FsBackend,
+}
 
-impl FileMemoryProvider {
+impl<'fs> FileMemoryProvider<'fs> {
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub fn new(fs: &'fs dyn FsBackend) -> Self {
+        Self { fs }
     }
 }
 
 #[async_trait]
-impl MemoryProvider for FileMemoryProvider {
+impl MemoryProvider for FileMemoryProvider<'_> {
     // The trait deliberately returns `&str` rather than `&'static str`: a
     // provider fronting an MCP server takes its name from configuration and
     // cannot hand back a literal. This impl happens to have one.
@@ -161,10 +169,10 @@ impl MemoryProvider for FileMemoryProvider {
 
     fn system_prompt_block(&self, ctx: &MemoryContext) -> Option<String> {
         let dir = ctx.memory_dir();
-        ensure_memory_dir_exists(dir);
+        ensure_memory_dir_exists(dir, self.fs);
         // Always render, even with zero entries: the block carries the
         // auto-memory instructions telling the model where to write.
-        let index = MemoryIndex::load(dir).unwrap_or_else(|_| MemoryIndex {
+        let index = MemoryIndex::load(dir, self.fs).unwrap_or_else(|_| MemoryIndex {
             directory: dir.to_path_buf(),
             ..Default::default()
         });
@@ -215,6 +223,7 @@ impl MemoryProvider for DisabledMemoryProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs_backend::StdFsBackend;
     use crate::memory::ENV_LOCK;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -273,7 +282,7 @@ mod tests {
     fn file_provider_renders_instructions_when_empty() {
         let dir = temp_dir("empty");
         let ctx = MemoryContext::resolve(Some(&dir), None, None, MemoryPromptVariant::Compact);
-        let block = FileMemoryProvider::new()
+        let block = FileMemoryProvider::new(&StdFsBackend)
             .system_prompt_block(&ctx)
             .expect("file provider always contributes a block");
         assert!(block.contains("# auto memory"), "block was: {block}");
@@ -284,7 +293,7 @@ mod tests {
         let dir = temp_dir("variant");
         let compact = MemoryContext::resolve(Some(&dir), None, None, MemoryPromptVariant::Compact);
         let full = MemoryContext::resolve(Some(&dir), None, None, MemoryPromptVariant::Full);
-        let provider = FileMemoryProvider::new();
+        let provider = FileMemoryProvider::new(&StdFsBackend);
         let compact_block = provider.system_prompt_block(&compact).expect("compact");
         let full_block = provider.system_prompt_block(&full).expect("full");
         assert!(
@@ -304,7 +313,7 @@ mod tests {
         )
         .expect("write entry");
         let ctx = MemoryContext::resolve(Some(&dir), None, None, MemoryPromptVariant::Compact);
-        let block = FileMemoryProvider::new()
+        let block = FileMemoryProvider::new(&StdFsBackend)
             .system_prompt_block(&ctx)
             .expect("file provider always contributes a block");
         assert!(block.contains("body text"), "block was: {block}");

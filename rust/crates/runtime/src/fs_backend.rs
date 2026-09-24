@@ -262,10 +262,7 @@ fn host_absolute_as_vfs(path: &str) -> io::Result<Option<String>> {
         if !rest.is_empty() && !rest.starts_with(['/', '\\']) {
             return unsupported("a drive-relative path");
         }
-        return Ok(Some(format!(
-            "/{}{rest}",
-            bare[..1].to_ascii_uppercase()
-        )));
+        return Ok(Some(format!("/{}{rest}", bare[..1].to_ascii_uppercase())));
     }
     if bare.starts_with('\\') {
         return unsupported("a drive-less rooted path");
@@ -829,9 +826,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         // configuration on host disk, where `scode --resume` and every other
         // host tool already look for them, and where they outlive a VFS that
         // exists only while the session does.
-        self.host_root
-            .is_none()
-            .then(|| "/sessions".to_string())
+        self.host_root.is_none().then(|| "/sessions".to_string())
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {

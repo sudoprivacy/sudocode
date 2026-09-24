@@ -6959,7 +6959,6 @@ impl ProviderRuntimeClient {
             execution: ParentExecution::default(),
         })
     }
-
 }
 
 fn build_provider_entry_with_config(

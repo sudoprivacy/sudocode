@@ -83,7 +83,8 @@ pub fn boot_session_fs(
 /// edit.
 fn mount_host_root(kernel: &Arc<Kernel>, root: &Path) -> io::Result<String> {
     let mount_point = runtime::vfs_path_for_host_path(root)?;
-    let backend = backends::storage::local_connector::LocalConnectorBackend::new(root, true, false)?;
+    let backend =
+        backends::storage::local_connector::LocalConnectorBackend::new(root, true, false)?;
     kernel
         .vfs_router_arc()
         .add_mount(&mount_point, ZONE, Some(Arc::new(backend)), false);

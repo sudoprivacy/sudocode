@@ -8,8 +8,8 @@
 //! seam as `EngineEvent::HookProgress` (installed per-turn from the observer),
 //! so no renderer type is named below the seam.
 
-use std::ops::{Deref, DerefMut};
 use std::io;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -42,7 +42,7 @@ pub struct HostContext {
     ///
     /// Kernel-backed for both hosts: a co-hosted agent reaches the daemon's
     /// kernel in-process, a CLI session its own
-    /// ([`crate::local_kernel::LocalKernel`]). Which kernel is the host's
+    /// ([`crate::local_kernel::boot_session_fs`]). Which kernel is the host's
     /// choice; that there is one is not, because a hook, a permission gate and
     /// an audit row that exist for one host have to exist for the other.
     pub fs: Arc<dyn runtime::FsBackend>,

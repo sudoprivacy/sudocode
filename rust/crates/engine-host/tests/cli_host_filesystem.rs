@@ -77,7 +77,8 @@ fn a_session_reads_and_writes_the_real_files_in_its_workspace() {
     assert_eq!(read, "on disk\n");
 
     fs.write(
-        &fs.normalize_allow_missing("written.txt").expect("normalize"),
+        &fs.normalize_allow_missing("written.txt")
+            .expect("normalize"),
         b"through the kernel\n",
     )
     .expect("write through the kernel");

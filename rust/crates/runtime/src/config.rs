@@ -2906,7 +2906,6 @@ mod tests {
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }
 
-
     #[test]
     fn parses_typed_mcp_and_oauth_config() {
         let root = temp_dir();

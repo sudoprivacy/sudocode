@@ -8111,7 +8111,12 @@ struct ConfigSettingSpec {
     scope: ConfigScope,
     kind: ConfigKind,
     path: &'static [&'static str],
+    /// What a picker OFFERS.
     options: Option<&'static [&'static str]>,
+    /// What a set ACCEPTS, when that is wider than what it offers — a setting
+    /// with compatibility spellings takes them without listing each in a menu.
+    /// `None` means the menu is the whole truth, which is the usual case.
+    accepts: Option<&'static [&'static str]>,
 }
 
 #[derive(Clone, Copy)]
@@ -8127,6 +8132,7 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             kind: ConfigKind::String,
             path: &["theme"],
             options: None,
+            accepts: None,
         },
         // Per-project selector for which named account (under `auth_modes`) to
         // use. Scope = Settings (project `settings.local.json`, gitignored): a
@@ -8137,90 +8143,108 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             kind: ConfigKind::String,
             path: &["auth_profile"],
             options: None,
+            accepts: None,
         },
         "editorMode" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::String,
             path: &["editorMode"],
             options: Some(&["default", "vim", "emacs"]),
+            accepts: None,
         },
         "verbose" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["verbose"],
             options: None,
+            accepts: None,
         },
         "preferredNotifChannel" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::String,
             path: &["preferredNotifChannel"],
             options: None,
+            accepts: None,
         },
         "autoCompactEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["autoCompactEnabled"],
             options: None,
+            accepts: None,
         },
         "autoDreamEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::Boolean,
             path: &["autoDreamEnabled"],
             options: None,
+            accepts: None,
         },
         "fileCheckpointingEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["fileCheckpointingEnabled"],
             options: None,
+            accepts: None,
         },
         "showTurnDuration" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["showTurnDuration"],
             options: None,
+            accepts: None,
         },
         "terminalProgressBarEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["terminalProgressBarEnabled"],
             options: None,
+            accepts: None,
         },
         "todoFeatureEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["todoFeatureEnabled"],
             options: None,
+            accepts: None,
         },
         "model" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::String,
             path: &["model"],
             options: None,
+            accepts: None,
         },
         "alwaysThinkingEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::Boolean,
             path: &["alwaysThinkingEnabled"],
             options: None,
+            accepts: None,
         },
+        // Options from the parser's own table, not a copy. This list offered
+        // four of the seven spellings and the config UI offered a different
+        // three, so which names existed depended on where you looked.
         "permissions.defaultMode" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::String,
             path: &["permissions", "defaultMode"],
-            options: Some(&["default", "acceptEdits", "dontAsk", "auto"]),
+            options: Some(runtime::PERMISSION_MODE_OPTIONS),
+            accepts: Some(runtime::PERMISSION_MODE_ACCEPTED),
         },
         "language" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::String,
             path: &["language"],
             options: None,
+            accepts: None,
         },
         "teammateMode" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::String,
             path: &["teammateMode"],
             options: Some(&["tmux", "in-process", "auto"]),
+            accepts: None,
         },
         // This process's mailbox identity — the name peers address and the
         // inbox the receiver polls. Settings scope (per-project settings file):
@@ -8232,6 +8256,7 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             kind: ConfigKind::String,
             path: &["agentName"],
             options: None,
+            accepts: None,
         },
         _ => return None,
     })
@@ -8255,11 +8280,16 @@ fn normalize_config_value(spec: ConfigSettingSpec, value: ConfigValue) -> Result
         (ConfigKind::String, ConfigValue::Number(value)) => json!(value),
     };
 
+    // Checked against what this setting ACCEPTS, which for a setting with
+    // compatibility spellings is wider than what its menu offers. The message
+    // still names the menu: a rejection should point at the modes worth choosing,
+    // not recite every alias that happens to parse.
     if let Some(options) = spec.options {
+        let accepted = spec.accepts.unwrap_or(options);
         let Some(as_str) = normalized.as_str() else {
             return Err(String::from("setting requires a string value"));
         };
-        if !options.iter().any(|option| option == &as_str) {
+        if !accepted.iter().any(|option| option == &as_str) {
             return Err(format!(
                 "Invalid value \"{as_str}\". Options: {}",
                 options.join(", ")

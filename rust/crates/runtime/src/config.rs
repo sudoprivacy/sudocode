@@ -1752,18 +1752,133 @@ fn parse_optional_permission_mode(
     parse_permission_mode_label(mode, "merged settings.permissions.defaultMode").map(Some)
 }
 
+/// Every spelling `permissions.defaultMode` accepts, and what each resolves to.
+///
+/// Two vocabularies on purpose: `default` / `acceptEdits` / `auto` / `dontAsk`
+/// are Claude Code's, so a settings file written for it keeps working, and
+/// `read-only` / `workspace-write` / `danger-full-access` are this runtime's own
+/// (`PermissionMode::as_str`).
+///
+/// What a MENU offers is a different question — see [`PERMISSION_MODE_OPTIONS`].
+const PERMISSION_MODE_LABELS: &[(&str, ResolvedPermissionMode)] = &[
+    ("default", ResolvedPermissionMode::ReadOnly),
+    ("read-only", ResolvedPermissionMode::ReadOnly),
+    ("acceptEdits", ResolvedPermissionMode::WorkspaceWrite),
+    ("auto", ResolvedPermissionMode::WorkspaceWrite),
+    ("workspace-write", ResolvedPermissionMode::WorkspaceWrite),
+    ("dontAsk", ResolvedPermissionMode::DangerFullAccess),
+    (
+        "danger-full-access",
+        ResolvedPermissionMode::DangerFullAccess,
+    ),
+];
+
+/// The permission modes a MENU offers: three modes, this product's own names.
+///
+/// Not the same list as [`PERMISSION_MODE_LABELS`] and deliberately shorter. A
+/// menu offering `acceptEdits` beside `workspace-write` would be asking the user
+/// to choose between two spellings of one mode; the aliases exist so a file
+/// written elsewhere loads, not so anyone picks them.
+///
+/// It IS the same list for the two places that offer it — the config UI (via
+/// `config_schema`) and `scode config set`, which enforces its options. They had
+/// drifted to three canonical names and four aliases respectively, so
+/// `config set permissions.defaultMode read-only` was refused for a value the
+/// config UI writes and the parser accepts.
+pub const PERMISSION_MODE_OPTIONS: &[&str] =
+    &["read-only", "workspace-write", "danger-full-access"];
+
+/// Every spelling a SETTER accepts — the menu plus the compatibility aliases.
+///
+/// Offering and accepting are different jobs, and one list doing both is what
+/// made every choice wrong somewhere: validate against the three and
+/// `config set permissions.defaultMode acceptEdits` breaks for a value the
+/// parser reads fine; offer all seven and an index-driven picker lists one mode
+/// three times. So the menu is short and this is what a value is checked against.
+pub const PERMISSION_MODE_ACCEPTED: &[&str] = &[
+    "default",
+    "read-only",
+    "acceptEdits",
+    "auto",
+    "workspace-write",
+    "dontAsk",
+    "danger-full-access",
+];
+
+/// Byte equality for `const` context, where `==` on `&str` is not available.
+const fn same_label(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const fn is_parsable(label: &str) -> bool {
+    let mut i = 0;
+    while i < PERMISSION_MODE_LABELS.len() {
+        if same_label(PERMISSION_MODE_LABELS[i].0, label) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+// The three lists are one truth, checked by the compiler rather than by intent —
+// which is how they drifted in the first place. Every spelling a setter accepts
+// must parse, the accepted set must be the parser's whole vocabulary (equal
+// length, each parsable), and every mode the menu offers must be settable.
+const _: () = {
+    assert!(
+        PERMISSION_MODE_ACCEPTED.len() == PERMISSION_MODE_LABELS.len(),
+        "the accepted spellings must be exactly the ones the parser knows"
+    );
+    let mut i = 0;
+    while i < PERMISSION_MODE_ACCEPTED.len() {
+        assert!(
+            is_parsable(PERMISSION_MODE_ACCEPTED[i]),
+            "every accepted permission mode must be one the parser accepts"
+        );
+        i += 1;
+    }
+    let mut j = 0;
+    while j < PERMISSION_MODE_OPTIONS.len() {
+        assert!(
+            is_accepted(PERMISSION_MODE_OPTIONS[j]),
+            "every permission mode the menu offers must be one a setter accepts"
+        );
+        j += 1;
+    }
+};
+
+const fn is_accepted(label: &str) -> bool {
+    let mut i = 0;
+    while i < PERMISSION_MODE_ACCEPTED.len() {
+        if same_label(PERMISSION_MODE_ACCEPTED[i], label) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn parse_permission_mode_label(
     mode: &str,
     context: &str,
 ) -> Result<ResolvedPermissionMode, ConfigError> {
-    match mode {
-        "default" | "read-only" => Ok(ResolvedPermissionMode::ReadOnly),
-        "acceptEdits" | "auto" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
-        "dontAsk" | "danger-full-access" => Ok(ResolvedPermissionMode::DangerFullAccess),
-        other => Err(ConfigError::Parse(format!(
-            "{context}: unsupported permission mode {other}"
-        ))),
-    }
+    PERMISSION_MODE_LABELS
+        .iter()
+        .find(|(label, _)| *label == mode)
+        .map(|(_, resolved)| *resolved)
+        .ok_or_else(|| ConfigError::Parse(format!("{context}: unsupported permission mode {mode}")))
 }
 
 fn parse_optional_sandbox_config(root: &JsonValue) -> Result<SandboxConfig, ConfigError> {

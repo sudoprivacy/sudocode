@@ -154,7 +154,10 @@ const HOOKS_CHILDREN: &[FieldSchema] = &[
     ),
 ];
 
-const PERMISSION_MODE_OPTIONS: &[&str] = &["read-only", "workspace-write", "danger-full-access"];
+// The option list comes from the parser's own table (`crate::config`), not a
+// copy: this one offered three of the seven spellings `permissions.defaultMode`
+// accepts, so the config UI hid four of them.
+use crate::config::PERMISSION_MODE_OPTIONS;
 
 const PERMISSIONS_CHILDREN: &[FieldSchema] = &[
     FieldSchema::enumerated(

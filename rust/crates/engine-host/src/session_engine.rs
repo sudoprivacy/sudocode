@@ -62,6 +62,14 @@ fn resume_model_from_config_ssot(
 
 pub struct AcpCliSession {
     pub cwd: PathBuf,
+    /// What this session's engine is hosted ON: its filesystem (a kernel of
+    /// its own), its config root, its identity.
+    ///
+    /// Built once, at session start, and reused by every rebuild. Re-deriving
+    /// it per rebuild would boot a second kernel for the same session — a
+    /// second mount table and a second metastore — so a `/model` switch could
+    /// silently change what the session can reach.
+    pub host: crate::HostContext,
     pub handle: SessionHandle,
     pub runtime: BuiltRuntime,
     pub abort_signal: runtime::HookAbortSignal,
@@ -189,8 +197,10 @@ impl SessionEngine {
         let resolved_auth = resolve_auth_mode(&resolved_model, auth_mode, &sudocode_config)
             .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
         let abort_signal = runtime::HookAbortSignal::new();
+        let host = crate::HostContext::for_cli_session(cwd.clone())
+            .map_err(|e| format!("failed to build the session filesystem: {e}"))?;
         let runtime = build_engine_runtime(
-            &cwd,
+            &host,
             session_state.with_persistence_path(handle.path.clone()),
             &handle.id,
             RuntimeConfig {
@@ -215,6 +225,7 @@ impl SessionEngine {
 
         let session = AcpCliSession {
             cwd,
+            host,
             handle,
             runtime,
             abort_signal,
@@ -272,8 +283,10 @@ impl SessionEngine {
         // Adopt the persisted transcript verbatim — no `new_cli_session_for`, no
         // `save_to_path` (it is already on disk at `handle.path`; re-saving here
         // would rewrite a transcript the turn loop has not touched yet).
+        let host = crate::HostContext::for_cli_session(cwd.clone())
+            .map_err(|e| format!("failed to build the session filesystem: {e}"))?;
         let runtime = build_engine_runtime(
-            &cwd,
+            &host,
             session,
             &handle.id,
             RuntimeConfig {
@@ -294,6 +307,7 @@ impl SessionEngine {
 
         let session = AcpCliSession {
             cwd,
+            host,
             handle,
             runtime,
             abort_signal,
@@ -366,7 +380,7 @@ impl SessionEngine {
         let system_prompt =
             build_acp_system_prompt(&cwd, &session.prompt_overrides, session.memory)?;
         let runtime = build_engine_runtime(
-            &cwd,
+            &session.host,
             new_session,
             &handle.id,
             RuntimeConfig {
@@ -961,6 +975,13 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     fn session_tracer(&self) -> Option<telemetry::SessionTracer>;
     /// A snapshot of the plugin load outcome (for `/skills` resolution).
     fn plugin_load_outcome(&self) -> PluginLoadOutcome;
+    /// The name this session answers to as an A2A peer.
+    ///
+    /// Asked of the session rather than re-derived, so the name the renderer
+    /// listens on is the name the session announces and signs with. Deriving it
+    /// a second time from the process directory is how a session ends up
+    /// described as one peer and delivering as another.
+    fn agent_name(&self) -> String;
     /// Run an `/mcp reconnect|enable|disable <server>` action against the live
     /// MCP state. `None` when no MCP servers are running in this session; else
     /// the action's `Ok(message)` / `Err(message)`.
@@ -1058,6 +1079,10 @@ impl SessionLifecycle for SessionEngine {
 
     fn plugin_load_outcome(&self) -> PluginLoadOutcome {
         self.lock_session().runtime.plugin_load_outcome().clone()
+    }
+
+    fn agent_name(&self) -> String {
+        self.lock_session().host.resolved_agent_name()
     }
 
     fn mcp_command(&self, action: &str, server: &str) -> Option<Result<String, String>> {

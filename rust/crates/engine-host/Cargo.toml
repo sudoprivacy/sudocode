@@ -21,7 +21,24 @@ runtime = { path = "../runtime" }
 # The MCP engine state merges plugin-advertised MCP servers (`PluginLoadOutcome`)
 # and exposes the discovered tools as `RuntimeToolDefinition`s.
 plugins = { path = "../plugins" }
+# The managed-agent DI seam (`SpawnTask` + `SpawnHandle`) that
+# `SudoCodeSpawnAdapter` implements so nexus can host an agent loop in-process.
+# Same nexus-vfs rev the runtime crate pins (transitive `kernel` unifies).
+# default-features = false → no subprocess-host, which is the raw-ACP path
+# rather than the in-process co-host.
+managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
 tools = { path = "../tools" }
+# The standalone session's own kernel (`local_kernel`): a CLI session's file
+# tools reach a VFS, like the co-hosted agent's do, so neither host has hooks or
+# an audit trail the other lacks. Same nexus-vfs rev `runtime` and
+# `managed-agent` pin — a second rev would make `Kernel` two types and the
+# co-host's `SpawnTask<Kernel>` stop unifying.
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
+# `LocalConnectorBackend` — the reference-mode connector that mounts a host
+# directory without copying it, so the workspace files stay the source of truth.
+# Only that driver: the connector umbrella would drag an HTTP + crypto stack
+# into the CLI for backends a standalone session never mounts.
+backends = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false, features = ["driver-local-connector"] }
 # MCP discovery/dispatch drives an isolated Tokio runtime; tool payloads and the
 # degraded-server report serialize through serde_json.
 tokio = { version = "1", features = ["rt-multi-thread"] }
@@ -40,8 +57,15 @@ commands = { path = "../commands" }
 [dev-dependencies]
 # `send_message_routing` drives the executor's async trait method to
 # completion and needs a workspace to prove the local delivery path.
-tokio = { version = "1", features = ["rt", "macros"] }
+#
+# `rt-multi-thread`: the scripted model runs on its own runtime while the agent
+# loop blocks a test thread waiting for it, so a current-thread runtime would
+# deadlock the two against each other.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 tempfile = "3"
+# `cohost_mock_llm` stands the co-host up against a scripted model, so the
+# co-host has a CI gate that needs no API key and no network beyond loopback.
+mock-anthropic-service = { path = "../mock-anthropic-service" }
 
 [lints]
 workspace = true

@@ -63,7 +63,13 @@ pub mod nexus_a2a;
 /// Runtime construction: the `BuiltRuntime` wrapper, the `RuntimeConfig` /
 /// `RuntimePluginState` inputs, and the `build_runtime*` chain (plugins, MCP,
 /// policy, system prompt, `EngineApiClient`) every engine-side (re)build shares.
+pub mod managed_agent;
 pub mod runtime_build;
+
+/// The standalone host's in-process kernel: the VFS a CLI session's file tools
+/// act on, so both hosts drive the engine through a kernel rather than one
+/// reaching the host disk directly.
+pub mod local_kernel;
 
 /// The one live session's `EngineDelegate` (turns) + `SessionLifecycle`
 /// (non-turn model/auth/permission/reset/resume/fork/compaction ops) impl:

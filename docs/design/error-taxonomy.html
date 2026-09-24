@@ -178,6 +178,7 @@ flowchart LR
       <tr><td>context-window detection in two places, different marker sets (can disagree)</td><td><span class="file">error.rs markers · compact.rs is_prompt_too_long</span></td><td>latent bug</td><td>✅ fixed (Phase 3) — compact.rs uses the typed <code>RuntimeError</code> classification; the string detector is deleted</td></tr>
       <tr><td>compact.rs string-matches <code>"context_window_blocked"</code> to recover lost classification</td><td><span class="file">compact.rs</span></td><td>boundary leak</td><td>✅ fixed (Phase 3) — <code>RuntimeError</code> carries the classification across the boundary; no string re-derivation</td></tr>
       <tr><td>4 independent retry loops, 3 "retryable" vocabularies</td><td><span class="file">http_transport · tools/lib · compact.rs · mcp_server_manager</span></td><td>fragmentation</td><td>compact.rs's string vocabulary removed (Phase 3); MCP's own remains, noted</td></tr>
+      <tr><td>ACP <code>user_friendly_message</code> string-matched the rendered turn error</td><td><span class="file">engine-acp acp_sdk_server.rs</span></td><td>boundary leak</td><td>✅ fixed — <code>EngineDelegate::run_turn</code> now returns a typed <code>RuntimeError</code>; <code>AcpError::Turn</code> carries the classification, decided from the bucket not the text</td></tr>
     </tbody>
   </table>
 </section>

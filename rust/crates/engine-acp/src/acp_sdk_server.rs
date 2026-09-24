@@ -57,10 +57,26 @@ use crate::session_ops;
 pub enum AcpError {
     InvalidParams(String),
     Internal(String),
+    /// A prompt-turn failure that arrived already classified by the runtime
+    /// (via [`runtime::RuntimeError`]'s typed bits). Carrying the classification
+    /// here — instead of flattening to a bare `Internal(String)` and later
+    /// re-guessing it by string-matching — is what lets the ACP surface pick
+    /// the right user-facing message from the who-can-act taxonomy.
+    Turn {
+        message: String,
+        /// The request exceeded the model's context window (taxonomy: Model,
+        /// then Human once compaction is exhausted). Terminal for the turn.
+        context_window: bool,
+    },
 }
 
 /// What a client shows when context maintenance ends the run.
 const COMPACTION_FAILED_MESSAGE: &str = "上下文压缩失败，本次对话已停止。已有对话历史已保留。";
+
+/// Friendly guidance shown when a request exceeds the model's context window.
+/// Single source so the typed (turn) path and the legacy string-sniff fallback
+/// cannot drift apart.
+const CONTEXT_WINDOW_EXCEEDED_MESSAGE: &str = "[context_window_exceeded] 请求超出了模型的上下文限制。\n\n建议解决方案：\n1. 压缩或清除对话历史后重新开始\n2. 使用较小的图片或简化输入内容\n3. 使用支持更大上下文的模型";
 
 impl AcpError {
     #[must_use]
@@ -73,10 +89,32 @@ impl AcpError {
         Self::Internal(message.into())
     }
 
+    /// Build a turn error from a runtime error, capturing its typed
+    /// classification so the ACP surface never has to re-derive behavior by
+    /// string-matching the message.
+    #[must_use]
+    pub fn from_turn_error(error: &runtime::RuntimeError) -> Self {
+        Self::Turn {
+            message: error.to_string(),
+            context_window: error.is_context_window_blocked(),
+        }
+    }
+
     /// Generate a user-friendly error message with actionable suggestions.
     #[must_use]
     pub fn user_friendly_message(&self) -> String {
+        // A turn error carries its classification typed — decide from the
+        // taxonomy bucket, not by string-matching the rendered message.
         let raw_message = match self {
+            Self::Turn {
+                message,
+                context_window,
+            } => {
+                if *context_window {
+                    return CONTEXT_WINDOW_EXCEEDED_MESSAGE.to_string();
+                }
+                message
+            }
             Self::InvalidParams(msg) | Self::Internal(msg) => msg,
         };
 
@@ -96,7 +134,7 @@ impl AcpError {
         if raw_message.contains("context_window_blocked")
             || raw_message.contains("Context window blocked")
         {
-            return "[context_window_exceeded] 请求超出了模型的上下文限制。\n\n建议解决方案：\n1. 压缩或清除对话历史后重新开始\n2. 使用较小的图片或简化输入内容\n3. 使用支持更大上下文的模型".to_string();
+            return CONTEXT_WINDOW_EXCEEDED_MESSAGE.to_string();
         }
 
         if raw_message.contains("authentication")
@@ -146,7 +184,9 @@ impl AcpError {
 impl std::fmt::Display for AcpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidParams(message) | Self::Internal(message) => f.write_str(message),
+            Self::InvalidParams(message) | Self::Internal(message) | Self::Turn { message, .. } => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -780,7 +820,8 @@ fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::V
 #[cfg(test)]
 mod tests {
     use super::{
-        acp_mcp_servers_to_scoped, sudocode_meta_from_prompt_usage, CumulativeUsage, PromptUsage,
+        acp_mcp_servers_to_scoped, sudocode_meta_from_prompt_usage, AcpError, CumulativeUsage,
+        PromptUsage, CONTEXT_WINDOW_EXCEEDED_MESSAGE,
     };
     use agent_client_protocol_schema::{
         EnvVariable, McpServer, McpServerHttp, McpServerSse, McpServerStdio,
@@ -788,6 +829,40 @@ mod tests {
     use runtime::config::{ConfigSource, McpServerConfig};
     use runtime::UsageCostCurrency;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn turn_error_classification_comes_from_typed_bits_not_strings() {
+        // A context-window turn failure is recognized by the runtime's typed
+        // bit — even when the rendered message contains none of the legacy
+        // keyword strings — and maps to the context-window guidance.
+        let cw = AcpError::from_turn_error(&runtime::RuntimeError::context_window_blocked(
+            "the provider said no",
+        ));
+        assert!(matches!(
+            cw,
+            AcpError::Turn {
+                context_window: true,
+                ..
+            }
+        ));
+        assert_eq!(cw.user_friendly_message(), CONTEXT_WINDOW_EXCEEDED_MESSAGE);
+
+        // A generic (non-context-window) turn failure keeps its own message and
+        // is NOT misclassified as a context-window error.
+        let generic = AcpError::from_turn_error(&runtime::RuntimeError::new("upstream 503"));
+        assert!(matches!(
+            generic,
+            AcpError::Turn {
+                context_window: false,
+                ..
+            }
+        ));
+        assert_ne!(
+            generic.user_friendly_message(),
+            CONTEXT_WINDOW_EXCEEDED_MESSAGE
+        );
+        assert!(generic.user_friendly_message().contains("upstream 503"));
+    }
 
     #[test]
     fn prompt_usage_meta_includes_cost_without_standard_usage_tokens() {
@@ -1667,7 +1742,7 @@ pub(crate) async fn run_acp_on_transport(
                             }];
                             let complete = engine_blocking
                                 .run_turn(blocks, &mut observer, &mut bridge)
-                                .map_err(AcpError::internal)?;
+                                .map_err(|error| AcpError::from_turn_error(&error))?;
                             let auto_compacted = complete.auto_compaction.is_some();
                             session_ops::record_turn_usage(&engine_blocking, &complete);
                             let usage = session_ops::build_prompt_usage(
@@ -2190,6 +2265,20 @@ pub(crate) fn acp_error_to_sdk(e: &AcpError) -> Error {
                 // message to 100 chars, which would lose detail for every
                 // unclassified failure.
                 error.message = COMPACTION_FAILED_MESSAGE.to_string();
+            }
+            error
+        }
+        AcpError::Turn {
+            message,
+            context_window,
+        } => {
+            let mut error =
+                Error::internal_error().data(serde_json::Value::String(message.clone()));
+            // A context-window turn failure is user-actionable (compact/clear or
+            // switch model), so it overrides the generic JSON-RPC banner — the
+            // same treatment compaction gets, decided from the typed bucket.
+            if *context_window {
+                error.message = e.user_friendly_message();
             }
             error
         }

@@ -21,9 +21,11 @@ serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [dev-dependencies]
-# For the in-process co-host live proof (tests/cohost_live_llm.rs): builds a
-# real Kernel, plants the /proc mailbox stream, and drives spawn_managed_agent
-# through a real LLM turn. Same nexus-vfs rev the runtime crate pins.
+# A real Kernel for the co-hosted store proof (tests/cohost_agent_store.rs):
+# the sub-agent store is asserted against the VFS it claims to live in, not a
+# mock of it. Same nexus-vfs rev the runtime crate pins — a mismatched rev is two
+# kernels in one process.
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
 
 [lints]
 workspace = true

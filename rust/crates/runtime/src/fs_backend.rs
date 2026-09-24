@@ -695,14 +695,16 @@ fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
 
 impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
-        let path = &self.to_kernel(path)?;
+        // The message this builds names the path as the CALLER spelled it: an
+        // error a user reads should name the file the way they named it.
+        let vfs = &self.to_kernel(path)?;
         // A DT_STREAM is read by walking its framed records to the tail; a
         // single `sys_read` would return only the first record's payload.
-        if self.is_stream_entry(path) {
-            return self.read_stream_all(path);
+        if self.is_stream_entry(vfs) {
+            return self.read_stream_all(vfs);
         }
         self.kernel
-            .sys_read(path, &self.ctx, 0, 0)
+            .sys_read(vfs, &self.ctx, 0, 0)
             .map_err(kernel_err)
             .and_then(|r| {
                 r.data.ok_or_else(|| {
@@ -874,9 +876,9 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {
-        let path = &self.to_kernel(path)?;
+        let vfs = &self.to_kernel(path)?;
         self.kernel
-            .sys_stat(path, &self.ctx.zone_id)
+            .sys_stat(vfs, &self.ctx.zone_id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path}: not found")))
             .map(|s| FsMetadata {
                 len: s.size,

@@ -62,6 +62,14 @@ fn resume_model_from_config_ssot(
 
 pub struct AcpCliSession {
     pub cwd: PathBuf,
+    /// What this session's engine is hosted ON: its filesystem (a kernel of
+    /// its own), its config root, its identity.
+    ///
+    /// Built once, at session start, and reused by every rebuild. Re-deriving
+    /// it per rebuild would boot a second kernel for the same session — a
+    /// second mount table and a second metastore — so a `/model` switch could
+    /// silently change what the session can reach.
+    pub host: crate::HostContext,
     pub handle: SessionHandle,
     pub runtime: BuiltRuntime,
     pub abort_signal: runtime::HookAbortSignal,
@@ -189,8 +197,10 @@ impl SessionEngine {
         let resolved_auth = resolve_auth_mode(&resolved_model, auth_mode, &sudocode_config)
             .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
         let abort_signal = runtime::HookAbortSignal::new();
+        let host = crate::HostContext::for_cli_session(cwd.clone())
+            .map_err(|e| format!("failed to build the session filesystem: {e}"))?;
         let runtime = build_engine_runtime(
-            &crate::HostContext::for_cwd(cwd.clone()),
+            &host,
             session_state.with_persistence_path(handle.path.clone()),
             &handle.id,
             RuntimeConfig {
@@ -215,6 +225,7 @@ impl SessionEngine {
 
         let session = AcpCliSession {
             cwd,
+            host,
             handle,
             runtime,
             abort_signal,
@@ -272,8 +283,10 @@ impl SessionEngine {
         // Adopt the persisted transcript verbatim — no `new_cli_session_for`, no
         // `save_to_path` (it is already on disk at `handle.path`; re-saving here
         // would rewrite a transcript the turn loop has not touched yet).
+        let host = crate::HostContext::for_cli_session(cwd.clone())
+            .map_err(|e| format!("failed to build the session filesystem: {e}"))?;
         let runtime = build_engine_runtime(
-            &crate::HostContext::for_cwd(cwd.clone()),
+            &host,
             session,
             &handle.id,
             RuntimeConfig {
@@ -294,6 +307,7 @@ impl SessionEngine {
 
         let session = AcpCliSession {
             cwd,
+            host,
             handle,
             runtime,
             abort_signal,
@@ -366,7 +380,7 @@ impl SessionEngine {
         let system_prompt =
             build_acp_system_prompt(&cwd, &session.prompt_overrides, session.memory)?;
         let runtime = build_engine_runtime(
-            &crate::HostContext::for_cwd(cwd.clone()),
+            &session.host,
             new_session,
             &handle.id,
             RuntimeConfig {

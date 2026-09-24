@@ -266,6 +266,18 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
         FieldType::StringArray,
         "Trusted project root paths",
     ),
+    // Directories a session may reach beyond its own workspace. A session's
+    // filesystem is a VFS with one mount per root (see
+    // `engine_host::local_kernel`), so this is literally the mount list: a path
+    // under none of these roots belongs to no mount and is refused.
+    //
+    // Deliberately NOT in the `config` tool's settable registry — a session that
+    // can widen its own reach is not contained by it.
+    FieldSchema::leaf(
+        "additionalDirectories",
+        FieldType::StringArray,
+        "Directories a session may reach beyond its workspace",
+    ),
     FieldSchema::leaf(
         "auth_profile",
         FieldType::String,

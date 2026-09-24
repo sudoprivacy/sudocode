@@ -9,6 +9,7 @@
 //! so no renderer type is named below the seam.
 
 use std::ops::{Deref, DerefMut};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -36,18 +37,25 @@ use crate::tool_executor::{permission_policy, CliToolExecutor};
 /// agent's identity and the skills listing from one would force it to invent a
 /// plausible path and hope all four derivations agreed with each other.
 pub struct HostContext {
-    /// Backend the file tools read and write through — `StdFsBackend` for the
-    /// CLI, a kernel-backed one for a co-hosted agent. Same tools, different
-    /// store.
-    pub fs: Arc<dyn runtime::FsBackend>,
-    /// Absolute root relative tool paths resolve against, and the tree the
-    /// skills / agent-type listings are read from.
-    pub workspace_root: PathBuf,
-    /// Where host configuration is read from.
+    /// Filesystem the file tools read and write through, and the SSOT for the
+    /// root relative tool paths resolve against ([`runtime::FsBackend::working_root`]).
     ///
-    /// Stays on the HOST disk for both hosts, deliberately: a daemon's own
-    /// configuration has to be readable without the VFS it is about to serve,
-    /// so this is the one root that does NOT follow `fs`.
+    /// Kernel-backed for both hosts: a co-hosted agent reaches the daemon's
+    /// kernel in-process, a CLI session its own
+    /// ([`crate::local_kernel::LocalKernel`]). Which kernel is the host's
+    /// choice; that there is one is not, because a hook, a permission gate and
+    /// an audit row that exist for one host have to exist for the other.
+    pub fs: Arc<dyn runtime::FsBackend>,
+    /// Where the host reads its own files from: configuration, the skills and
+    /// agent-type listings, and the directory a session's agent name is derived
+    /// from when nothing configures one.
+    ///
+    /// Stays on the HOST disk for both hosts, deliberately: a daemon has to
+    /// read its configuration before it can serve the VFS that configuration
+    /// describes, so this is the one root that does NOT follow `fs`. It is also
+    /// why there is no second "workspace root" beside it — a host root that
+    /// answered *some* of these questions differently from `fs` is exactly how
+    /// a session ends up announcing one identity and writing as another.
     pub config_root: PathBuf,
     /// The agent's name when the host knows it. `None` means "derive it",
     /// which is what a CLI session does from its directory and config.
@@ -63,18 +71,33 @@ pub struct HostContext {
 }
 
 impl HostContext {
-    /// The CLI's shape: one directory is the workspace, the config root, and
-    /// the source of the agent's name.
-    #[must_use]
-    pub fn for_cwd(cwd: impl Into<PathBuf>) -> Self {
+    /// The CLI's shape: a session at `cwd`, on a kernel of its own.
+    ///
+    /// Booting a kernel here rather than handing the engine the host disk is
+    /// what makes the two hosts one system: the same tools, over the same
+    /// `FsBackend`, against the same VFS semantics, differing only in which
+    /// kernel answers.
+    ///
+    /// What the session may reach is `cwd` plus the configured
+    /// `additionalDirectories`, and is decided HERE rather than passed in:
+    /// every path outside the mounts is refused, so a second caller with a
+    /// second list would be a second answer to what a session is allowed to
+    /// touch.
+    pub fn for_cli_session(cwd: impl Into<PathBuf>) -> io::Result<Self> {
         let cwd = cwd.into();
-        Self {
-            fs: Arc::new(runtime::StdFsBackend),
-            workspace_root: cwd.clone(),
+        let extra_roots = additional_directories(&cwd)?;
+        // The name has to be known before the kernel is built: it is the
+        // identity every syscall from this session carries, and resolving it
+        // afterwards would leave the kernel's view of who is writing and the
+        // prompt's claim about who this is free to disagree.
+        let agent_name = agent_name_under(&cwd);
+        let local = crate::local_kernel::LocalKernel::boot(&cwd, &extra_roots, &agent_name)?;
+        Ok(Self {
+            fs: local.fs(),
             config_root: cwd,
-            agent_name: None,
+            agent_name: Some(agent_name),
             mailbox: None,
-        }
+        })
     }
 
     /// The name this agent answers to.
@@ -85,18 +108,54 @@ impl HostContext {
     /// and delivers as another.
     #[must_use]
     pub fn resolved_agent_name(&self) -> String {
-        if let Some(name) = &self.agent_name {
-            return name.clone();
+        match &self.agent_name {
+            Some(name) => name.clone(),
+            None => agent_name_under(&self.config_root),
         }
-        let configured = ConfigLoader::default_for(&self.config_root)
-            .load()
-            .ok()
-            .and_then(|rc| {
-                rc.get("agentName")
-                    .and_then(|v| v.as_str().map(str::to_string))
-            });
-        runtime::mailbox::local_agent_name(configured.as_deref(), &self.workspace_root)
     }
+}
+
+/// Directories a session under `root` may reach beyond `root` itself, from the
+/// `additionalDirectories` configuration key.
+///
+/// A malformed value is an error rather than an empty list: the key exists to
+/// widen what a session can read, so silently ignoring it would present the
+/// containment refusal as if the directory were forbidden — with the setting
+/// that was meant to allow it sitting right there, apparently applied.
+fn additional_directories(root: &Path) -> io::Result<Vec<PathBuf>> {
+    // Configuration that will not parse is an error here, not an empty list:
+    // what a session may reach comes out of this file, and a session that
+    // quietly falls back to "the workspace only" because of a typo elsewhere in
+    // it would refuse a directory the config plainly grants.
+    let config = ConfigLoader::default_for(root)
+        .load()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let Some(value) = config.get("additionalDirectories").cloned() else {
+        return Ok(Vec::new());
+    };
+    let malformed = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "additionalDirectories must be a list of directory paths",
+        )
+    };
+    value
+        .as_array()
+        .ok_or_else(malformed)?
+        .iter()
+        .map(|entry| entry.as_str().map(PathBuf::from).ok_or_else(malformed))
+        .collect()
+}
+
+/// The agent name a session under `root` answers to: what the configuration
+/// there says, else what [`runtime::mailbox::local_agent_name`] derives from
+/// the directory itself.
+fn agent_name_under(root: &Path) -> String {
+    let configured = ConfigLoader::default_for(root).load().ok().and_then(|rc| {
+        rc.get("agentName")
+            .and_then(|v| v.as_str().map(str::to_string))
+    });
+    runtime::mailbox::local_agent_name(configured.as_deref(), root)
 }
 
 // === moved from rusty-sudocode-cli/src/main.rs (CORE cluster extraction) ===
@@ -505,9 +564,14 @@ pub(crate) fn build_runtime_with_plugin_state(
     // cache measurement behind the split.
     //
     // This runs for the REPL, `--print`, and ACP sessions alike: they all land
-    // in this function via `build_runtime_for_cwd`.
+    // in this function via `build_runtime_for_host`.
+    //
+    // Read from the host's own root, not through `fs`: a skill and an agent
+    // type are host installations (they live beside the configuration that
+    // declares them), so a co-hosted agent gets the daemon's, exactly as it
+    // gets the daemon's auth mode.
     system_prompt.dynamic_sections.extend(cwd_prompt_sections(
-        &host.workspace_root,
+        &host.config_root,
         Some(&plugin_load_outcome),
     ));
     // Deferred tools listing: inject `<available-deferred-tools>` so the

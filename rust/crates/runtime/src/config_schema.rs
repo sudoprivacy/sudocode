@@ -261,11 +261,7 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
         FieldType::Object,
         "Provider fallback chain",
     ),
-    FieldSchema::leaf(
-        "trustedRoots",
-        FieldType::StringArray,
-        "Trusted project root paths",
-    ),
+    FieldSchema::deprecated("trustedRoots", FieldType::StringArray, "additionalDirectories"),
     // Directories a session may reach beyond its own workspace. A session's
     // filesystem is a VFS with one mount per root (see
     // `engine_host::local_kernel`), so this is literally the mount list: a path

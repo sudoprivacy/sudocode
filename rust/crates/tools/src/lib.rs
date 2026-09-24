@@ -6919,12 +6919,6 @@ pub(crate) struct ProviderRuntimeClient {
 }
 
 impl ProviderRuntimeClient {
-    #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
-        let fallback_config = load_provider_fallback_config();
-        Self::new_with_fallback_config(model, allowed_tools, &fallback_config)
-    }
-
     /// Carry the parent's inherited settings onto a subagent's client — the
     /// single seam between a spawn and the requests it will send.
     ///
@@ -6966,37 +6960,6 @@ impl ProviderRuntimeClient {
         })
     }
 
-    #[allow(dead_code, clippy::needless_pass_by_value)]
-    fn new_with_fallback_config(
-        model: String,
-        allowed_tools: BTreeSet<String>,
-        fallback_config: &ProviderFallbackConfig,
-    ) -> Result<Self, String> {
-        let primary_model = fallback_config.primary().map_or(model, str::to_string);
-        let primary = build_provider_entry(&primary_model)?;
-        let mut chain = vec![primary];
-        for fallback_model in fallback_config.fallbacks() {
-            match build_provider_entry(fallback_model) {
-                Ok(entry) => chain.push(entry),
-                Err(error) => {
-                    eprintln!(
-                        "warning: skipping unavailable fallback provider {fallback_model}: {error}"
-                    );
-                }
-            }
-        }
-        Ok(Self {
-            chain,
-            allowed_tools,
-            execution: ParentExecution::default(),
-        })
-    }
-}
-
-#[allow(dead_code)]
-fn build_provider_entry(model: &str) -> Result<ProviderEntry, String> {
-    let sudocode_config = load_sudocode_config();
-    build_provider_entry_with_config(model, &sudocode_config, None)
 }
 
 fn build_provider_entry_with_config(
@@ -8329,30 +8292,6 @@ fn set_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str], ne
     }
     let map = entry.as_object_mut().expect("object inserted");
     set_nested_value(map, rest, new_value);
-}
-
-fn remove_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str]) -> bool {
-    let Some((first, rest)) = path.split_first() else {
-        return false;
-    };
-    if rest.is_empty() {
-        return root.remove(*first).is_some();
-    }
-
-    let mut should_remove_parent = false;
-    let removed = root.get_mut(*first).is_some_and(|entry| {
-        entry.as_object_mut().is_some_and(|map| {
-            let removed = remove_nested_value(map, rest);
-            should_remove_parent = removed && map.is_empty();
-            removed
-        })
-    });
-
-    if should_remove_parent {
-        root.remove(*first);
-    }
-
-    removed
 }
 
 #[allow(clippy::needless_pass_by_value)]

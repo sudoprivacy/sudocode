@@ -18,12 +18,12 @@
 
 mod common;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use common::{
-    agent_workspace, make_desc, mount_agent_world, provision_stream_transcript, user_ctx,
-    wait_for_agent_reply, write_prompt,
+    agent_workspace, make_desc, mount_agent_world, provision_stream_transcript, send_prompt,
+    user_ctx, wait_for_agent_reply,
 };
 use engine_host::managed_agent::spawn_managed_agent;
 use kernel::kernel::Kernel;
@@ -124,26 +124,35 @@ fn harness() -> &'static Harness {
     })
 }
 
-/// A co-hosted agent reads its workspace through the kernel and replies.
+/// Drive one co-hosted turn and report what came back, and how many times the
+/// model was asked to produce it.
 ///
-/// The assertion is the fixture's content coming back in the agent's reply,
-/// which only happens if the whole chain worked: the loop claimed the envelope,
-/// the engine asked the model, the model's `read_file` call reached a
-/// kernel-backed tool, the RELATIVE path resolved against the agent's VFS
-/// workspace, and the reply was appended to the transcript the user reads.
-#[test]
-fn a_cohost_agent_reads_its_workspace_and_replies() {
+/// `transcript_is_stream` is the ONLY difference between the two tests below:
+/// whether the pair's transcript is the DT_STREAM a federated daemon provides,
+/// or the DT_REG a conversation degrades to when that stream cannot be created.
+/// An agent has to behave the same on both, so the shape is a parameter rather
+/// than a second copy of this.
+fn run_read_then_reply(pid: &str, agent_id: &str, transcript_is_stream: bool) -> (String, usize) {
+    // One at a time. What this harness configures is process-global — the
+    // scripted model's base URL lives in one `SUDO_CODE_CONFIG_HOME`, and the
+    // runtime build reads and creates state under it — so two overlapping turns
+    // race over the same directories (`failed to build the agent runtime:
+    // NotFound` under the default parallel runner, green with `--test-threads=1`,
+    // which is the shape of a harness that only looks fine).
+    static SERIAL: Mutex<()> = Mutex::new(());
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let harness = harness();
+    // The scripted model is shared by every test in this binary, so what this
+    // turn cost is a DELTA. Counting the total made the assertion depend on how
+    // many tests ran before it — green alone, red in the suite.
+    let asked_before = harness.requests_seen();
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
-
-    let pid = "cohost-mock-1";
-    let agent_id = "scode-mock";
     let desc = make_desc(pid, agent_id, MODEL);
 
     // The user's side of the VFS: plants the fixture and provisions the
-    // conversation through a real `Mailbox`, so the test exercises the
-    // production provisioning path rather than planting entries by hand.
+    // conversation through a real `Mailbox`, so this exercises the production
+    // provisioning path rather than planting entries by hand.
     let user_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
         Arc::clone(&kernel),
         "test-owner",
@@ -160,8 +169,13 @@ fn a_cohost_agent_reads_its_workspace_and_replies() {
         .expect("plant the fixture the model will read");
 
     let transcript = InboxConvention::new(String::new()).transcript_path(USER, agent_id);
-    provision_stream_transcript(&kernel, &transcript);
-    let user_mb = Mailbox::daemon_absolute(Arc::clone(&user_fs), USER.to_string());
+    if transcript_is_stream {
+        provision_stream_transcript(&kernel, &transcript);
+    }
+    let user_mb = Arc::new(Mailbox::daemon_absolute(
+        Arc::clone(&user_fs),
+        USER.to_string(),
+    ));
     user_mb
         .ensure_conversation(agent_id)
         .expect("provision the conversation with the co-host");
@@ -171,11 +185,8 @@ fn a_cohost_agent_reads_its_workspace_and_replies() {
     });
 
     let ctx = user_ctx();
-    write_prompt(
-        &kernel,
-        &transcript,
-        &ctx,
-        USER,
+    send_prompt(
+        &user_mb,
         agent_id,
         "Read fixture.txt and tell me what it says. PARITY_SCENARIO:cohost_read_then_reply",
     );
@@ -190,37 +201,66 @@ fn a_cohost_agent_reads_its_workspace_and_replies() {
     handle.abort_signal.abort();
     let _ = handle.join.join();
 
+    let asked = harness.requests_seen() - asked_before;
     let reply = reply.unwrap_or_else(|| {
         let raw = user_fs
             .read(&transcript)
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_else(|e| format!("<unreadable: {e}>"));
-        panic!(
-            "no agent reply within 60s
-  scripted model saw {} request(s)
-  transcript:
-{raw}",
-            harness.requests_seen()
-        )
+        panic!("no agent reply within 60s; model asked {asked} time(s); transcript:\n{raw}")
     });
     let body = reply
         .get("body")
         .and_then(|b| b.as_str())
-        .unwrap_or_default();
-    eprintln!("[agent → user] {body}");
-    assert!(
-        body.contains(FIXTURE_BODY),
-        "the reply should carry what the agent read out of its workspace; got: {body}"
-    );
+        .unwrap_or_default()
+        .to_string();
+    eprintln!("[agent -> user] {body}");
+    (body, asked)
+}
 
-    // One envelope is one turn. The scripted turn asks the model three times
-    // (read, send, then the closing text), and a fourth means the loop claimed
-    // the same envelope again — the re-reply storm that ships as a peer being
-    // answered over and over. Caught here once already: a transcript that could
-    // not advance a read position drove 1044 requests in 60 seconds.
-    let asked = harness.requests_seen();
+/// One envelope is one turn — on either transcript shape.
+///
+/// The scripted turn asks the model three times (read, send, then the closing
+/// text). A fourth means the loop claimed the same envelope again, which a peer
+/// experiences as being answered over and over.
+fn assert_one_turn(asked: usize) {
     assert!(
         asked <= 6,
         "one envelope should cost one turn; the model was asked {asked} times"
     );
+}
+
+/// A co-hosted agent reads its workspace through the kernel and replies.
+///
+/// The fixture's content coming back is the assertion, and it only happens if
+/// the whole chain worked: the loop claimed the envelope, the engine asked the
+/// model, the model's `read_file` call reached a kernel-backed tool, the
+/// RELATIVE path resolved against the agent's VFS workspace, and the reply was
+/// appended to the transcript the user reads.
+#[test]
+fn a_cohost_agent_reads_its_workspace_and_replies() {
+    let (body, asked) = run_read_then_reply("cohost-mock-1", "scode-mock", true);
+    assert!(
+        body.contains(FIXTURE_BODY),
+        "the reply should carry what the agent read out of its workspace; got: {body}"
+    );
+    assert_one_turn(asked);
+}
+
+/// The same turn, on a transcript that could not become a stream.
+///
+/// `ensure_conversation` asks for a `"wal"` stream and gets a DT_REG whenever
+/// federation is not wired, so this is not a corner case but every
+/// non-federated daemon. Delivery has to be exactly once there too: reading a
+/// byte-addressed transcript used to leave the cursor where it was, so every
+/// poll re-delivered the same envelope and the peer was answered hundreds of
+/// times over (1044 model calls in 60 seconds, measured).
+#[test]
+fn a_conversation_that_is_not_a_stream_still_delivers_once() {
+    let (body, asked) = run_read_then_reply("cohost-mock-2", "scode-mock-jsonl", false);
+    assert!(
+        body.contains(FIXTURE_BODY),
+        "a byte-addressed transcript should carry the same reply; got: {body}"
+    );
+    assert_one_turn(asked);
 }

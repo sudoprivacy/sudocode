@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{
-    make_desc, mount_agent_world, provision_stream_transcript, user_ctx, wait_for_agent_reply,
-    write_prompt,
+    make_desc, mount_agent_world, provision_stream_transcript, send_prompt, user_ctx,
+    wait_for_agent_reply,
 };
 use engine_host::managed_agent::spawn_managed_agent;
 use kernel::kernel::Kernel;
@@ -68,7 +68,7 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
     ));
     let transcript = InboxConvention::new(String::new()).transcript_path(user, agent_id);
     provision_stream_transcript(&kernel, &transcript);
-    let user_mb = Mailbox::daemon_absolute(user_fs, user.to_string());
+    let user_mb = Arc::new(Mailbox::daemon_absolute(user_fs, user.to_string()));
     user_mb
         .ensure_conversation(agent_id)
         .expect("provision the conversation with the co-host");
@@ -86,7 +86,7 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
     let prompt = "You are being tested over a nexus A2A mailbox. \
                   Reply with exactly one word: PONG";
     eprintln!("[user → agent] {prompt}");
-    write_prompt(&kernel, &transcript, &ctx, user, agent_id, prompt);
+    send_prompt(&user_mb, agent_id, prompt);
 
     let reply = wait_for_agent_reply(
         &kernel,

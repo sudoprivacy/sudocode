@@ -41,6 +41,34 @@ pub struct FsDirEntry {
 // FsBackend trait
 // ---------------------------------------------------------------------------
 
+/// A stored concern whose ROOT the backend decides.
+///
+/// One enum and one method rather than one method per concern. With two it was
+/// tolerable; with memory it would have been three bodies each repeating the same
+/// host-or-VFS decision, so "where does a co-hosted agent's world live" would
+/// have had three answers that could disagree. Here it is one match per backend:
+/// adding a concern is a variant plus an arm, and the compiler requires both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedRoot {
+    /// Session transcripts.
+    Sessions,
+    /// Sub-agents this session spawns: their manifests, outputs and resumable
+    /// sessions.
+    SubAgents,
+    /// Remembered context.
+    Memory,
+}
+
+/// Names of the per-agent subtrees sudocode creates under the agents base.
+///
+/// The BASES belong to nexus-vfs, which owns the VFS namespace
+/// (`a2a::A2A_INBOX_BASE`, `contracts::SESSIONS_BASE`); these two leaves are
+/// sudocode's own, so they are named once, here, beside the match that uses
+/// them. They are the siblings of `a2a::AGENT_CONVERSATIONS_SEGMENT` and belong
+/// next to it if that crate ever owns them.
+const SUBAGENTS_SEGMENT: &str = "/subagents";
+const MEMORY_SEGMENT: &str = "/memory";
+
 /// Unified filesystem abstraction.
 ///
 /// Every method mirrors a common `std::fs` operation. Implementations must be
@@ -98,31 +126,17 @@ pub trait FsBackend: Send + Sync + 'static {
         Ok(false)
     }
 
-    /// The root under which managed sessions live **when the backend imposes
-    /// its own namespace**. nexus (`KernelFsBackend`) → `Some("/sessions")` —
-    /// the flat, session-id-keyed byte-SSOT (no `workspace_hash`). `None`
-    /// (host backends) → the caller uses its own computed root
-    /// (`<cwd>/.scode/sessions/<workspace_hash>/`).
+    /// Where `concern` is stored, when this backend imposes its own namespace.
     ///
-    /// This is what makes the session root swap **with the backend**: callers
-    /// ask the backend rather than hardcoding, so pointing sessions at nexus
-    /// is a backend swap, not a code change to remember.
-    fn managed_sessions_root(&self) -> Option<String> {
-        None
-    }
-
-    /// The root under which a session's SUB-AGENTS live, when the backend
-    /// imposes its own namespace. Sibling of [`Self::managed_sessions_root`] and
-    /// answered the same way: `None` (host backends) means the caller uses its
-    /// own `<workspace>/.sudocode-agents`, and a VFS backend names a place
-    /// inside the namespace it serves.
+    /// `None` — every host backend, for every concern — means the caller keeps
+    /// its own layout: `<cwd>/.scode/sessions/<workspace_hash>/`,
+    /// `<workspace>/.sudocode-agents/`, `$HOME/.scode/projects/<slug>/memory`.
+    /// A VFS backend answers with a place inside the namespace it serves.
     ///
-    /// A separate method rather than one shared root because the two concerns
-    /// root differently — a session is flat and global (`/sessions/<id>`), a
-    /// sub-agent belongs to the agent that spawned it (`/agents/<name>/…`) — and
-    /// collapsing them would put one agent's sub-agents where another's
-    /// enumeration finds them.
-    fn managed_agents_root(&self) -> Option<String> {
+    /// This is what makes a root swap **with the backend**: callers ask rather
+    /// than hardcode, so pointing sessions, sub-agents or memory at nexus is a
+    /// backend swap and not three code changes to remember.
+    fn managed_root(&self, _concern: ManagedRoot) -> Option<String> {
         None
     }
 
@@ -380,11 +394,8 @@ impl FsBackend for Arc<dyn FsBackend> {
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         (**self).is_append_stream(path)
     }
-    fn managed_sessions_root(&self) -> Option<String> {
-        (**self).managed_sessions_root()
-    }
-    fn managed_agents_root(&self) -> Option<String> {
-        (**self).managed_agents_root()
+    fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
+        (**self).managed_root(concern)
     }
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         (**self).link(alias, target)
@@ -673,6 +684,16 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
         lexical_join(&self.workspace_root, path)
     }
 
+    /// `<agents base>/<this agent>/<segment>` — a subtree of the agent itself.
+    ///
+    /// `None` when the context names no agent: a subtree keyed by an agent that
+    /// does not exist would be one directory every anonymous caller shared,
+    /// which is the bug this shape exists to prevent.
+    fn agent_subtree(&self, segment: &str) -> Option<String> {
+        let agent = self.ctx.agent_id.as_deref()?;
+        Some(format!("{}/{agent}{segment}", a2a::A2A_INBOX_BASE))
+    }
+
     /// A VFS path in the spelling this backend ANSWERS in.
     ///
     /// The inverse of [`Self::to_kernel`], needed by the one method that returns
@@ -906,31 +927,25 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         }
     }
 
-    fn managed_sessions_root(&self) -> Option<String> {
-        // nexus keeps sessions as a flat, session-id-keyed byte-SSOT at the
-        // VFS root — no `.scode`, no `workspace_hash` (isolation is policy +
-        // `owner`, not path). So a `SessionStore` over this backend roots
-        // sessions here automatically.
-        //
-        // Not for a host-spelled session: its transcripts belong beside its
-        // configuration on host disk, where `scode --resume` and every other
-        // host tool already look for them, and where they outlive a VFS that
-        // exists only while the session does.
-        self.host_root.is_none().then(|| "/sessions".to_string())
-    }
-
-    fn managed_agents_root(&self) -> Option<String> {
-        // Under the spawning agent, so one agent's sub-agents are enumerable as
-        // its own and two agents on one daemon cannot collide — which they do
-        // today: the host path is derived from the daemon's process directory,
-        // which every co-hosted agent shares.
-        //
-        // `None` for a host-spelled session, like sessions above: a CLI's
-        // sub-agents stay in its workspace, where its own tooling finds them.
-        let agent = self.ctx.agent_id.as_deref()?;
-        self.host_root
-            .is_none()
-            .then(|| format!("/agents/{agent}/subagents"))
+    fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
+        // A host-spelled session imposes nothing, for any concern: its
+        // transcripts, sub-agents and memory belong where its own tooling looks
+        // (`scode --resume`, `.sudocode-agents`, the project memory dir), and
+        // they outlive a VFS that exists only while the session does.
+        if self.host_root.is_some() {
+            return None;
+        }
+        match concern {
+            // Flat and session-id-keyed: no `.scode`, no `workspace_hash`,
+            // because isolation here is policy plus `owner`, not path.
+            ManagedRoot::Sessions => Some(contracts::SESSIONS_BASE.to_string()),
+            // Under the spawning agent. Keyed by the agent rather than by a
+            // workspace path, which is what stops two agents on one daemon from
+            // colliding — the host paths these replace are derived from the
+            // daemon's own directory, which every co-hosted agent shares.
+            ManagedRoot::SubAgents => self.agent_subtree(SUBAGENTS_SEGMENT),
+            ManagedRoot::Memory => self.agent_subtree(MEMORY_SEGMENT),
+        }
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {

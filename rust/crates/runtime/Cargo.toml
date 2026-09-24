@@ -44,6 +44,10 @@ kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91e
 # distinct `Kernel` types). Re-exported from `spawn_task` so downstream crates
 # use it without a direct a2a dependency.
 a2a = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
+# VFS namespace constants (SESSIONS_BASE): the layout is nexus-vfs contract, so
+# the paths a backend answers with come from there rather than being spelled here
+# a second time. Same rev as kernel/a2a — one nexus-vfs across the seam.
+contracts = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
 lib = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false, features = ["runtime-bridge"] }
 sha2 = "0.10"
 glob = "0.3"

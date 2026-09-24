@@ -258,7 +258,10 @@ fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
     let fs = vfs_backend(&kernel);
 
     // nexus imposes the flat, session-id-keyed /sessions/ namespace.
-    assert_eq!(fs.managed_sessions_root().as_deref(), Some("/sessions"));
+    assert_eq!(
+        fs.managed_root(runtime::ManagedRoot::Sessions).as_deref(),
+        Some("/sessions")
+    );
 
     // link() creates a DT_LINK pointer (the /agents/{name}/sessions/<sid> index).
     fs.link("/agents/alice/sessions/sid-1", "/sessions/sid-1")

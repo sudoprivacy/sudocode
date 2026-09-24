@@ -7802,7 +7802,7 @@ fn agent_store_dir(fs: &dyn FsBackend) -> Result<std::path::PathBuf, String> {
         let cwd = current_workspace_root().map_err(|error| error.to_string())?;
         return Ok(cwd.join(path));
     }
-    if let Some(root) = fs.managed_agents_root() {
+    if let Some(root) = fs.managed_root(runtime::ManagedRoot::SubAgents) {
         return Ok(std::path::PathBuf::from(root));
     }
     let cwd = current_workspace_root().map_err(|error| error.to_string())?;

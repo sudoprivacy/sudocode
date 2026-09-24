@@ -67,9 +67,19 @@ pub fn default_memory_dir() -> PathBuf {
 /// agent name containing punctuation stays filesystem-safe.
 #[must_use]
 pub fn agent_memory_dir_for(cwd: &Path, agent_type: &str) -> PathBuf {
-    let base = agent_memory_base_dir(cwd);
-    let sanitized_agent = sanitize_path(agent_type.trim());
-    base.join("agent-memory").join(sanitized_agent)
+    agent_memory_dir_under(&agent_memory_base_dir(cwd), agent_type)
+}
+
+/// A sub-agent's memory directory under an explicit `base`.
+///
+/// The one definition of that composition, so a base from anywhere — the
+/// workspace, the `SUDOCODE_MEMORY_DIR` override, or a backend that roots memory
+/// itself — partitions sub-agents the same way. A backend root that skipped this
+/// would put every sub-agent's memory in the spawning agent's own.
+#[must_use]
+pub fn agent_memory_dir_under(base: &Path, agent_type: &str) -> PathBuf {
+    base.join("agent-memory")
+        .join(sanitize_path(agent_type.trim()))
 }
 
 /// Base directory (parent of the trailing `memory/` or

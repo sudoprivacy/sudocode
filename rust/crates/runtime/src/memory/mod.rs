@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 pub use entry::{MemoryEntry, MemoryParseError, MemoryType};
 pub use index::{IndexPointer, ParsedIndex};
 pub use loader::{
-    agent_memory_dir_for, default_memory_dir, default_memory_dir_for, MEMORY_DIR_ENV,
-    MEMORY_INDEX_FILE,
+    agent_memory_dir_for, agent_memory_dir_under, default_memory_dir, default_memory_dir_for,
+    MEMORY_DIR_ENV, MEMORY_INDEX_FILE,
 };
 pub use provider::{
     DisabledMemoryProvider, FileMemoryProvider, MemoryContext, MemoryMode, MemoryProvider,

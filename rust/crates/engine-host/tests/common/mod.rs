@@ -5,6 +5,10 @@
 //! only says something about the live path if both stand the agent up the same
 //! way, and two copies of this setup would drift into two different co-hosts.
 
+// A `tests/common` module is compiled into EVERY test binary that declares it,
+// so a helper only one of them needs reads as dead code in the other.
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};

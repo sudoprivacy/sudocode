@@ -190,7 +190,7 @@ flowchart LR
     <strong>① Context-window is state-dependent.</strong> It is <span class="pill model">Model</span> (auto-compact + retry) while compaction budget remains, and only becomes <span class="pill human">Human</span> once exhausted. The bucket depends on runtime state, so <code>action()</code> must be combined with the compaction budget — the bucket cannot be hard-coded into the error type.
   </div>
   <div class="note">
-    <strong>② llm-revisit currently covers only tool errors.</strong> Provider errors never take the feed-back-to-model path. Making <span class="pill model">Model</span>-actionable provider errors go through llm-revisit is Phase 2.
+    <strong>② llm-revisit covers tool errors; a generic provider-error revisit is deliberately NOT built.</strong> Failed tool calls already go back to the model as <code>tool_result{is_error:true}</code>. A raw provider completion error, however, is not something the model can revise — it never saw or authored the wire request (sudocode builds it), so such errors are a sudocode bug or a config/human issue, not a Model-bucket case. In practice the only <span class="pill model">Model</span> errors today are context-window overflows, which already have a dedicated <em>compact-and-retry</em> salvage (better than feeding them back to the model). Building a generic llm-revisit path would be speculative infrastructure for a case that does not exist and would risk looping on real bugs or hiding the true cause — so Phase 2 is intentionally left unbuilt until a concrete Model-fixable provider error appears.
   </div>
   <div class="note">
     <strong>③ Human vs Fatal is not represented today.</strong> <code>safe_failure_class</code> is the telemetry/analytics axis, not the "who can act" behavior axis. The two axes are kept separate (SRP); they must not be conflated.
@@ -203,12 +203,13 @@ flowchart LR
   <pre class="mermaid">
 flowchart TD
     P1["Phase 1 · foundation SSOT + dedup ✅ LANDED (#733)<br/>—————————<br/>· pub enum ErrorAction{Transport,Model,Human,Fatal}<br/>· ApiError::action() single definition<br/>· is_retryable() becomes action()==Transport (behavior-identical)<br/>· merge 2×is_retryable_400 → 1<br/>· zero user-visible behavior change"]
-    P2["Phase 2 · route provider errors into llm-revisit<br/>—————————<br/>· Model-actionable provider errors<br/>  fed back tool-result-style<br/>· explicit error messages<br/>· needs live e2e"]
+    P2["Phase 2 · provider errors into llm-revisit — NOT BUILT (by design)<br/>—————————<br/>· the only Model-bucket errors today are context-window,<br/>  already handled by compact-and-retry<br/>· a raw provider error isn't model-revisable (model didn't<br/>  author the wire request) → sudocode bug / human, not Model<br/>· left unbuilt to avoid speculative infra + looping on bugs"]
     P3["Phase 3 · context-window state machine explicit ✅ LANDED<br/>—————————<br/>· RuntimeError carries the typed classification across the api→runtime boundary<br/>· compact.rs retry loop uses the typed bits, not string matching<br/>· deleted is_retryable_error + is_prompt_too_long string detectors<br/>· context-window failure never destructively retried"]
-    P1 --> P2 --> P3
+    P1 --> P3
+    P1 -.-> P2
     style P1 fill:#12241a,stroke:#3fb950,color:#e6edf3
-    style P2 fill:#2a2410,stroke:#d29922,color:#e6edf3
-    style P3 fill:#132030,stroke:#58a6ff,color:#e6edf3
+    style P2 fill:#161b22,stroke:#8b949e,color:#8b949e
+    style P3 fill:#12241a,stroke:#3fb950,color:#e6edf3
   </pre>
   <div class="ok"><strong>Phase 1 is pure DRY + SSOT with zero behavior change</strong> — the safest first step; everything else builds on it. Landed in PR #733.</div>
 </section>
@@ -230,7 +231,7 @@ flowchart TD
 
 <footer>
   Sudocode error-handling taxonomy · SSOT: docs/design/error-taxonomy.html · mirrored to ShareOne via remote-url<br/>
-  Landed foundations: #721 (Running card overlay-only) · #722 (retry status SSOT) · #727 (add 525) · #733 (Phase 1 ErrorAction) · Phase 3 (typed classification across the api→runtime boundary; compaction no longer string-matches)
+  Landed foundations: #721 (Running card overlay-only) · #722 (retry status SSOT) · #727 (add 525) · #733 (Phase 1 ErrorAction) · Phase 3 (typed classification through compaction) · #754 (typed classification through the turn seam to ACP) · Phase 2 intentionally not built (no Model-fixable provider error exists today)
 </footer>
 
 </main>

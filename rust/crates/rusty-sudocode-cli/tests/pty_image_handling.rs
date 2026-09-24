@@ -305,6 +305,9 @@ fn disabled_read_cannot_attach_pixels() {
         "glob_search",
         &prompt,
     ]);
+    if env.is_live() {
+        sess.set_default_timeout(common::LIVE_TURN_BUDGET);
+    }
     assert_eq!(
         sess.expect_eof().unwrap(),
         0,
@@ -329,6 +332,9 @@ fn quoted_cli_image_path_is_attached_once() {
     write_fixture_png(&path);
     let prompt = env.prompt("Describe the shapes in @\"screen shot.png\". It is the same picture as @'screen shot.png'.", "single_turn_text");
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
+    if env.is_live() {
+        sess.set_default_timeout(common::LIVE_TURN_BUDGET);
+    }
     assert_eq!(
         sess.expect_eof().unwrap(),
         0,

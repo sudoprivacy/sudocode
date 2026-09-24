@@ -118,6 +118,21 @@ pub trait FsBackend: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Resolve a link `alias` back to the `target` it points at — the follow
+    /// half of [`Self::link`]. The two are a pair: a backend that plants links
+    /// must be able to follow them, or callers see one behaviour on the VFS and
+    /// a silently different one on a host FS (the `link` docstring's failure
+    /// mode, one level up). On the VFS this reads the `DT_LINK` target; on a
+    /// host FS it reads back the pointer file `link` wrote. The default errors
+    /// so a backend that plants no links also follows none, rather than
+    /// pretending a missing link resolved.
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("read_link unsupported by this backend: {alias}"),
+        ))
+    }
+
     /// The absolute working root that relative paths resolve against and
     /// that `glob` / `grep` fall back to when given no explicit path.
     /// `StdFsBackend` → the process cwd; `KernelFsBackend` → the agent's
@@ -356,6 +371,9 @@ impl FsBackend for Arc<dyn FsBackend> {
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         (**self).link(alias, target)
     }
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        (**self).read_link(alias)
+    }
     fn working_root(&self) -> io::Result<String> {
         (**self).working_root()
     }
@@ -402,15 +420,25 @@ impl FsBackend for StdFsBackend {
     /// nothing here yields an empty index and a receiver that hears nothing,
     /// with no error raised anywhere along the way.
     ///
-    /// A plain file rather than a symlink: it needs no privilege on Windows,
-    /// and nothing resolves these by walking them — only the entry's NAME is
-    /// read. The target goes in the body so `cat` answers the same question
-    /// the VFS answers by following the link.
+    /// A plain file rather than an OS symlink: it needs no privilege on Windows
+    /// (native symlinks require Developer Mode / admin), and the entry is read
+    /// two ways, both of which a plain file serves — listed by NAME via
+    /// `readdir` (the enum-index case), and followed via [`Self::read_link`],
+    /// which reads the target back out of the body. So the follow half stays a
+    /// host-FS file op with no privilege, matching the VFS's `DT_LINK` follow.
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         if let Some(parent) = std::path::Path::new(alias).parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(alias, target)
+    }
+
+    /// Follow a link planted by [`Self::link`] — read the target back out of the
+    /// pointer file's body. The host-FS counterpart of the VFS `DT_LINK` follow,
+    /// so a caller resolving a link sees the same target on both backends.
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        let bytes = std::fs::read(alias)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -867,6 +895,21 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
             .map(|_| ())
     }
 
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        // `sys_stat` is lstat — for a `DT_LINK` it fills `link_target` with the
+        // path this alias points at. The host-FS `read_link` returns the same
+        // target string, so a caller resolving a link is backend-agnostic.
+        self.kernel
+            .sys_stat(alias, &self.ctx.zone_id)
+            .and_then(|s| s.link_target)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{alias}: not a link or no target"),
+                )
+            })
+    }
+
     fn delete(&self, path: &str) -> io::Result<()> {
         let path = &self.to_kernel(path)?;
         self.kernel
@@ -1238,6 +1281,18 @@ mod tests {
         let text = fs.read_to_string(&path).unwrap();
         assert_eq!(text, "line1\nline2\n");
         fs.delete(&path).unwrap();
+    }
+
+    #[test]
+    fn std_backend_link_read_link_round_trip() {
+        // link() plants a pointer file; read_link() follows it back to the
+        // target — the host-FS pair matching the VFS DT_LINK plant+follow, so a
+        // caller resolving a link sees the same target on both backends.
+        let alias = temp_path("link-alias");
+        let fs = StdFsBackend;
+        fs.link(&alias, "/sessions/sid-xyz").unwrap();
+        assert_eq!(fs.read_link(&alias).unwrap(), "/sessions/sid-xyz");
+        fs.delete(&alias).unwrap();
     }
 
     #[test]

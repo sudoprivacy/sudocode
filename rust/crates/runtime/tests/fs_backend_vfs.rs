@@ -268,6 +268,13 @@ fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
         .expect("linked path should stat");
     assert_eq!(st.entry_type, DT_LINK, "alias is a DT_LINK");
     assert_eq!(st.link_target.as_deref(), Some("/sessions/sid-1"));
+    // read_link follows the DT_LINK back to its target — the follow half of
+    // link(), matching StdFsBackend::read_link so callers are backend-agnostic.
+    assert_eq!(
+        fs.read_link("/agents/alice/sessions/sid-1")
+            .expect("read_link should resolve the DT_LINK"),
+        "/sessions/sid-1"
+    );
 }
 
 #[test]

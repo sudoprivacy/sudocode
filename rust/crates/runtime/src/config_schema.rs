@@ -284,7 +284,62 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
         EXPERIMENTAL_CHILDREN,
         "Experimental feature flags (off by default)",
     ),
+    // Everything `scode config set` can write MUST be listed here. An unknown
+    // key is a validation ERROR, and one error fails the whole file: a single
+    // key the schema does not know takes permissions, hooks and plugin
+    // configuration down with it, silently, back to defaults. These thirteen
+    // were settable and unlisted, so setting any of them disabled the file that
+    // was just written.
+    FieldSchema::leaf("theme", FieldType::String, "Colour theme"),
+    FieldSchema::enumerated("editorMode", EDITOR_MODE_OPTIONS, "Line-editing mode"),
+    FieldSchema::leaf("language", FieldType::String, "Preferred response language"),
+    FieldSchema::leaf("verbose", FieldType::Bool, "Verbose output"),
+    FieldSchema::leaf(
+        "preferredNotifChannel",
+        FieldType::String,
+        "Where turn-completion notifications go",
+    ),
+    FieldSchema::leaf(
+        "autoCompactEnabled",
+        FieldType::Bool,
+        "Compact the session automatically as it approaches the context limit",
+    ),
+    FieldSchema::leaf("autoDreamEnabled", FieldType::Bool, "Enable auto-dream"),
+    FieldSchema::leaf(
+        "fileCheckpointingEnabled",
+        FieldType::Bool,
+        "Checkpoint files before a tool edits them",
+    ),
+    FieldSchema::leaf(
+        "showTurnDuration",
+        FieldType::Bool,
+        "Show each turn's duration",
+    ),
+    FieldSchema::leaf(
+        "terminalProgressBarEnabled",
+        FieldType::Bool,
+        "Show the terminal progress bar",
+    ),
+    FieldSchema::leaf("todoFeatureEnabled", FieldType::Bool, "Enable the todo list"),
+    FieldSchema::leaf(
+        "alwaysThinkingEnabled",
+        FieldType::Bool,
+        "Always request extended thinking",
+    ),
+    FieldSchema::enumerated(
+        "teammateMode",
+        TEAMMATE_MODE_OPTIONS,
+        "How a teammate agent is run",
+    ),
+    // This session's mailbox identity — the name peers address and the receiver
+    // polls. Unset, `runtime::mailbox::local_agent_name` derives one from the
+    // workspace path.
+    FieldSchema::leaf("agentName", FieldType::String, "This session's A2A name"),
 ];
+
+const EDITOR_MODE_OPTIONS: &[&str] = &["default", "vim", "emacs"];
+
+const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
 
 /// Children of `experimental`. MUST mirror
 /// `runtime::experiments::Experiment::ALL` — `parse_optional_experiments`

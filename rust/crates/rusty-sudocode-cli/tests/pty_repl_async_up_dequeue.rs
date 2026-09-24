@@ -130,6 +130,6 @@ fn up_arrow_on_empty_buffer_dequeues_last_queued_input() {
     // Bounded wait — if abort_current_turn works, this returns in a beat.
     // If it doesn't, PtySession's Drop kills the child. Either way we don't
     // hang the CI runner.
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
 }

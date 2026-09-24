@@ -18,7 +18,7 @@ fn double_ctrlc_exits_sync_repl() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "off")],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("❯").expect("REPL prompt");
 
@@ -35,7 +35,7 @@ fn double_ctrlc_exits_sync_repl() {
     // Second Ctrl-C within 800ms — should exit.
     sess.send("\x03").expect("send second Ctrl-C");
 
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("double Ctrl-C should exit (sync): {e}\nPTY screen:\n{screen}");
@@ -52,7 +52,7 @@ fn double_ctrlc_exits_async_repl() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("❯").expect("async REPL prompt");
 
@@ -71,7 +71,7 @@ fn double_ctrlc_exits_async_repl() {
     // Second Ctrl-C within 800ms — should exit.
     sess.send("\x03").expect("send second Ctrl-C");
 
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("double Ctrl-C should exit (async): {e}\nPTY screen:\n{screen}");

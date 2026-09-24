@@ -23,7 +23,7 @@ fn model_switch_changes_active_model() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

@@ -28,7 +28,7 @@ use common::TestEnv;
 fn config_set_auth_profile_persists_to_settings_local() {
     let env = TestEnv::new("auth-profile-set");
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
 
     sess.expect("❯").expect("async REPL prompt");
 
@@ -84,7 +84,7 @@ fn doctor_resolves_selected_account_when_auth_profile_set() {
     write_auth_profile(&env, "team-b");
 
     let mut sess = env.spawn(&["doctor"]);
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
 
     // Only the Account check prints `account=<resolved>`, so matching
     // `account=team-b` proves the selector actually drove resolution.
@@ -117,7 +117,7 @@ fn doctor_reports_ambiguity_when_no_account_is_selected() {
     strip_model_account_pins(&env);
 
     let mut sess = env.spawn(&["doctor"]);
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
 
     // Assert the short summary line, not the detail: the detail carries the
     // candidate list and the fix command, which the terminal wraps at width —
@@ -220,7 +220,7 @@ fn exit_cleanly(sess: &mut pty_expect::PtySession) {
         panic!("REPL should return to the prompt: {e}\nPTY screen:\n{screen}");
     });
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY screen:\n{screen}");
@@ -243,7 +243,7 @@ fn account_lists_configured_accounts_and_marks_current() {
     write_two_account_config(&env);
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
     sess.expect("❯").expect("async REPL prompt");
 
     sess.send("/account\r").expect("send /account");
@@ -273,7 +273,7 @@ fn account_switch_persists_the_selection() {
     write_two_account_config(&env);
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
     sess.expect("❯").expect("async REPL prompt");
 
     sess.send("/account team-b\r")
@@ -321,7 +321,7 @@ fn account_refuses_a_name_that_is_not_configured() {
     write_two_account_config(&env);
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
     sess.expect("❯").expect("async REPL prompt");
 
     sess.send("/account no-such-account\r")
@@ -366,7 +366,7 @@ fn turn_status_line_names_the_billing_account() {
     }
 
     let mut sess = env.spawn(&["--permission-mode", "read-only"]);
-    sess.set_default_timeout(Duration::from_secs(120));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(120)));
     sess.expect("❯").expect("async REPL prompt");
 
     sess.send("Reply with the single word: ok\r")

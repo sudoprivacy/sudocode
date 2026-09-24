@@ -111,7 +111,7 @@ fn a2a_received_while_idle_surfaces_in_scrollback() {
         .expect("the message body should be shown");
 
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
 }
 
@@ -147,6 +147,6 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
         .expect("during-turn a2a should render in the pending overlay");
 
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
 }

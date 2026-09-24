@@ -22,7 +22,7 @@ fn up_arrow_moves_cursor_to_beginning_before_history() {
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -67,7 +67,7 @@ fn up_arrow_navigates_history_on_empty_buffer() {
 
     let prompt = env.prompt("say OK", "single_turn_text");
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -109,7 +109,7 @@ fn down_arrow_moves_cursor_to_end() {
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -321,7 +321,7 @@ fn up_arrow_moves_to_start_before_recalling_history() {
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
         ],
     );
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
 
     sess.expect("\u{276f}").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -379,7 +379,7 @@ fn up_arrow_moves_between_logical_lines_before_jumping_to_start() {
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
         ],
     );
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
 
     sess.expect("\u{276f}").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -432,7 +432,7 @@ fn down_arrow_at_end_does_not_navigate_forward_history() {
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
         ],
     );
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
 
     sess.expect("\u{276f}").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

@@ -73,6 +73,26 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Live-mode timeout — real API calls can take a few seconds.
 pub const LIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A wait, never shorter than this platform's floor.
+///
+/// [`DEFAULT_TIMEOUT`] exists because Windows runners are slow to spawn a PTY,
+/// and a test that hardcodes fewer seconds silently opts out of it — the
+/// calibration is there precisely for the runner it then fails on. Of the four
+/// `pty_resume` tests, the two asking for 10s and 5s were the two that failed on
+/// a Windows runner while their 15s siblings passed in the same run, same load.
+///
+/// Asking for MORE is a real statement (a live API turn, a long build) and is
+/// kept. Asking for less is not an assertion about the product — nothing checks
+/// that a prompt appears within five seconds — so it is raised to the floor.
+#[must_use]
+pub const fn at_least(wait: Duration) -> Duration {
+    if wait.as_secs() < DEFAULT_TIMEOUT.as_secs() {
+        DEFAULT_TIMEOUT
+    } else {
+        wait
+    }
+}
+
 /// The REPL's input-line marker. The footer and banner never carry it, so a
 /// line containing it is the line the user types on.
 const PROMPT_MARKER: &str = "\u{276f}";
@@ -378,7 +398,7 @@ pub fn spawn_scode_with_timeout(args: &[&str], timeout: Duration) -> Result<PtyS
     let bin = scode_bin();
     let bin_str = bin.to_string_lossy();
     let mut sess = PtySession::spawn(&bin_str, args)?;
-    sess.set_default_timeout(timeout);
+    sess.set_default_timeout(at_least(timeout));
     Ok(sess)
 }
 
@@ -756,7 +776,7 @@ fn spawn_with_workspace(
 
     let sh = resolve_sh();
     let mut sess = PtySession::spawn(&sh, &["-c", &cmd]).expect("spawn scode");
-    sess.set_default_timeout(timeout);
+    sess.set_default_timeout(at_least(timeout));
     sess
 }
 
@@ -965,7 +985,7 @@ pub fn spawn_scode_in_dir_with_env(
     }
     let sh = resolve_sh();
     let mut sess = PtySession::spawn(&sh, &["-c", &cmd])?;
-    sess.set_default_timeout(timeout);
+    sess.set_default_timeout(at_least(timeout));
     Ok(sess)
 }
 

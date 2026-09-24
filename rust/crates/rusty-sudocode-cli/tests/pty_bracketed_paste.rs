@@ -39,7 +39,7 @@ fn spawn_iocraft_repl(env: &TestEnv) -> pty_expect::PtySession {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     sess.resize(50, 100).expect("resize pty");
     sess.expect("❯").expect("initial prompt");
     sess

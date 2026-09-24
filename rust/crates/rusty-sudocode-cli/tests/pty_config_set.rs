@@ -17,7 +17,7 @@ fn config_set_queue_toggles() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
 
     sess.expect("❯").expect("async REPL prompt");
 

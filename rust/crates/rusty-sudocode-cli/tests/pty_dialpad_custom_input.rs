@@ -42,7 +42,7 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
     );
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     if sess.expect("Choose an action").is_err() {
         if env.is_live() {
             eprintln!("SKIP: live model did not call write_plan");
@@ -64,7 +64,7 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
 
     // The WHOLE comment must reach the model as feedback (not just the first
     // char). The mock echoes the tool result verbatim; live re-plans on it.
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     if env.is_mock() {
         sess.expect(marker)
             .expect("the full typed comment must reach the model, not a single char");
@@ -75,7 +75,7 @@ fn dialpad_custom_input_row_accepts_typed_text_in_place() {
     }
 
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let _ = sess.expect_eof();
 }
 
@@ -103,7 +103,7 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
     );
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     if sess.expect("Choose an action").is_err() {
         if env.is_live() {
             eprintln!("SKIP: live model did not call write_plan");
@@ -127,7 +127,7 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
     std::thread::sleep(Duration::from_millis(400));
     sess.send("\r").expect("submit");
 
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     if env.is_mock() {
         // The tool result echoes the feedback verbatim — the full pasted text
         // (both marker lines) must be present, proving paste reached the buffer
@@ -139,6 +139,6 @@ fn dialpad_custom_input_row_accepts_bracketed_paste() {
     }
 
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let _ = sess.expect_eof();
 }

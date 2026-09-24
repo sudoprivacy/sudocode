@@ -135,7 +135,7 @@ pub trait FsBackend: Send + Sync + 'static {
     /// the host — `StdFsBackend` overrides it with `current_dir` +
     /// `canonicalize` host semantics.
     fn normalize(&self, path: &str) -> io::Result<String> {
-        Ok(lexical_join(&self.working_root()?, path))
+        lexical_join(&self.working_root()?, path)
     }
 
     /// Like [`FsBackend::normalize`] but tolerates a missing final
@@ -204,22 +204,82 @@ pub trait FsBackend: Send + Sync + 'static {
     }
 }
 
-/// Resolve `path` against `root` without touching any filesystem.
+/// The VFS path that names a HOST path.
 ///
-/// Absolute paths (leading `/`) are taken as-is; relative paths are joined
-/// onto `root`. `.` and `..` components are collapsed lexically and the
-/// result is emitted with forward-slash separators (VFS-native). A `..`
-/// that would escape the root is clamped at `/` (no host traversal). This
-/// is the resolution the VFS-backed [`KernelFsBackend`] uses; host paths
-/// go through `StdFsBackend`'s `canonicalize` override instead.
-fn lexical_join(root: &str, path: &str) -> String {
-    let combined = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("{}/{}", root.trim_end_matches('/'), path)
+/// A host directory mounted into the VFS needs exactly one VFS name, and that
+/// name has to agree with what the model later writes: the host mounts a root
+/// at `vfs_path_for_host_path(root)`, and every absolute path a tool is then
+/// handed for a file under it resolves through the same rule. Two rules would
+/// mean a file readable under one spelling and missing under the other.
+///
+/// On unix this is the identity — a host path already *is* a VFS path. On
+/// Windows it is not: a host path carries a drive (`C:\a\b`) or a verbatim
+/// prefix (`\\?\C:\a\b`, which is what `canonicalize` yields), and neither is
+/// a VFS path. The drive becomes the leading segment (`/C/a/b`), which keeps
+/// the mapping total and reversible.
+///
+/// The rule is deliberately NOT `cfg(windows)`-gated: a Linux test then proves
+/// the Windows behaviour, and `C:…` is not a relative name any tool emits.
+pub fn vfs_path_for_host_path(path: &std::path::Path) -> io::Result<String> {
+    let as_str = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("host path is not valid UTF-8: {}", path.display()),
+        )
+    })?;
+    match host_absolute_as_vfs(as_str)? {
+        Some(vfs) => Ok(collapse_lexically(&vfs)),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("host path is not absolute, so it names no VFS path: {as_str}"),
+        )),
+    }
+}
+
+/// `path`'s absolute VFS form, or `None` when `path` is relative.
+///
+/// Refusing the shapes it cannot map is the point. A UNC path has no drive to
+/// lift and a drive-relative `C:x` has no root at all; treated as "relative"
+/// either would be joined onto the workspace root and silently read a
+/// different file than the caller named.
+fn host_absolute_as_vfs(path: &str) -> io::Result<Option<String>> {
+    if path.starts_with('/') {
+        return Ok(Some(path.to_string()));
+    }
+    let bare = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let unsupported = |what: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{what} has no VFS path: {path}"),
+        ))
     };
+    if bare.starts_with(r"\\") {
+        return unsupported("a UNC path");
+    }
+    let bytes = bare.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let rest = &bare[2..];
+        if !rest.is_empty() && !rest.starts_with(['/', '\\']) {
+            return unsupported("a drive-relative path");
+        }
+        return Ok(Some(format!(
+            "/{}{rest}",
+            bare[..1].to_ascii_uppercase()
+        )));
+    }
+    if bare.starts_with('\\') {
+        return unsupported("a drive-less rooted path");
+    }
+    Ok(None)
+}
+
+/// Collapse `.` / `..` and emit forward-slash (VFS-native) separators.
+///
+/// A `..` that would escape is clamped at `/`: the VFS namespace has no
+/// parent to walk into, so there is nothing above the root to reach.
+fn collapse_lexically(path: &str) -> String {
     let mut stack: Vec<&str> = Vec::new();
-    for seg in combined.split(['/', '\\']) {
+    for seg in path.split(['/', '\\']) {
         match seg {
             "" | "." => {}
             ".." => {
@@ -229,6 +289,21 @@ fn lexical_join(root: &str, path: &str) -> String {
         }
     }
     format!("/{}", stack.join("/"))
+}
+
+/// Resolve `path` against `root` without touching any filesystem.
+///
+/// Absolute paths — VFS (`/a/b`) or host (`C:\a\b`, see
+/// [`vfs_path_for_host_path`]) — are taken as themselves; relative paths are
+/// joined onto `root`. This is the resolution the VFS-backed
+/// [`KernelFsBackend`] uses; host paths go through `StdFsBackend`'s
+/// `canonicalize` override instead.
+fn lexical_join(root: &str, path: &str) -> io::Result<String> {
+    let combined = match host_absolute_as_vfs(path)? {
+        Some(abs) => abs,
+        None => format!("{}/{}", root.trim_end_matches('/'), path),
+    };
+    Ok(collapse_lexically(&combined))
 }
 
 // Blanket impl: Arc<dyn FsBackend> delegates to the inner backend.

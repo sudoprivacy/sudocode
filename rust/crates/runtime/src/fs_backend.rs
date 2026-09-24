@@ -111,6 +111,21 @@ pub trait FsBackend: Send + Sync + 'static {
         None
     }
 
+    /// The root under which a session's SUB-AGENTS live, when the backend
+    /// imposes its own namespace. Sibling of [`Self::managed_sessions_root`] and
+    /// answered the same way: `None` (host backends) means the caller uses its
+    /// own `<workspace>/.sudocode-agents`, and a VFS backend names a place
+    /// inside the namespace it serves.
+    ///
+    /// A separate method rather than one shared root because the two concerns
+    /// root differently — a session is flat and global (`/sessions/<id>`), a
+    /// sub-agent belongs to the agent that spawned it (`/agents/<name>/…`) — and
+    /// collapsing them would put one agent's sub-agents where another's
+    /// enumeration finds them.
+    fn managed_agents_root(&self) -> Option<String> {
+        None
+    }
+
     /// Create a link `alias` → `target` (a pointer, not a byte-copy). On the
     /// VFS this is a `DT_LINK` (e.g. the `/agents/{name}/sessions/<sid>` enum
     /// index); on a host FS there is no equivalent, so it is a no-op.
@@ -367,6 +382,9 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
     fn managed_sessions_root(&self) -> Option<String> {
         (**self).managed_sessions_root()
+    }
+    fn managed_agents_root(&self) -> Option<String> {
+        (**self).managed_agents_root()
     }
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         (**self).link(alias, target)
@@ -899,6 +917,20 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         // host tool already look for them, and where they outlive a VFS that
         // exists only while the session does.
         self.host_root.is_none().then(|| "/sessions".to_string())
+    }
+
+    fn managed_agents_root(&self) -> Option<String> {
+        // Under the spawning agent, so one agent's sub-agents are enumerable as
+        // its own and two agents on one daemon cannot collide — which they do
+        // today: the host path is derived from the daemon's process directory,
+        // which every co-hosted agent shares.
+        //
+        // `None` for a host-spelled session, like sessions above: a CLI's
+        // sub-agents stay in its workspace, where its own tooling finds them.
+        let agent = self.ctx.agent_id.as_deref()?;
+        self.host_root
+            .is_none()
+            .then(|| format!("/agents/{agent}/subagents"))
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {

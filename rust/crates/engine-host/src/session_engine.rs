@@ -686,7 +686,7 @@ impl engine_core::EngineDelegate for SessionEngine {
         blocks: Vec<runtime::ContentBlock>,
         observer: &mut dyn runtime::RuntimeObserver,
         prompter: &mut dyn runtime::PermissionPrompter,
-    ) -> Result<engine_core::TurnComplete, String> {
+    ) -> Result<engine_core::TurnComplete, runtime::RuntimeError> {
         let mut session = self.lock_session();
         session.abort_signal.reset();
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
@@ -761,34 +761,34 @@ impl engine_core::EngineDelegate for SessionEngine {
                     auto_compaction: None,
                 });
             }
-            pre_send_compaction = attempt.map_err(|error| error.to_string())?;
+            pre_send_compaction =
+                attempt.map_err(|error| runtime::RuntimeError::new(error.to_string()))?;
             // Re-estimate against the hard limit the preflight enforces. Still
             // over → classified error instead of a request that will be rejected.
             let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
             if !budget.fits(new_estimated_tokens + prompt_tokens) {
-                return Err(context_overflow_user_message(
-                    session.runtime.session(),
-                    new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
-                    context_limit,
+                return Err(runtime::RuntimeError::context_window_blocked(
+                    context_overflow_user_message(
+                        session.runtime.session(),
+                        new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
+                        context_limit,
+                    ),
                 ));
             }
         }
 
-        let turn_summary = self
-            .rt()
-            .block_on(
-                session
-                    .runtime
-                    .run_turn_with_blocks(blocks, Some(prompter), Some(observer)),
-            )
-            .map_err(|e| e.to_string())?;
+        let turn_summary = self.rt().block_on(session.runtime.run_turn_with_blocks(
+            blocks,
+            Some(prompter),
+            Some(observer),
+        ))?;
 
         let path = session.handle.path.clone();
         session
             .runtime
             .session()
             .save_to_path(&path)
-            .map_err(|e| format!("failed to persist session: {e}"))?;
+            .map_err(|e| runtime::RuntimeError::new(format!("failed to persist session: {e}")))?;
 
         Ok(engine_core::TurnComplete {
             iterations: turn_summary.iterations,

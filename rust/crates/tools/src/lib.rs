@@ -1589,19 +1589,52 @@ fn is_cron_tool(name: &str) -> bool {
     matches!(name, "CronCreate" | "CronDelete" | "CronList")
 }
 
+/// Why this host will not fire a scode cron, once it has said so.
+///
+/// Set by a host that runs the engine IN ITS OWN PROCESS, which cannot use the
+/// environment variable below: that one is read by a scode the host spawned, and
+/// a co-host spawns nothing. Written once at startup and never cleared — a host
+/// does not acquire a cron ticker mid-run — so a plain `OnceLock` is the whole
+/// mechanism. Deliberately not an `env::set_var`: mutating the environment of a
+/// live, threaded daemon to tell one of its own crates something is a race with
+/// every other reader in the process.
+static NO_CRON_TICKER_REASON: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Declare that crons created here would never fire, and why.
+///
+/// `reason` is shown to the model when it tries anyway, so it reads as a fact
+/// about this host rather than a broken tool: a first-timer should learn what to
+/// use instead from the refusal alone.
+pub fn declare_no_cron_ticker(reason: &'static str) {
+    let _ = NO_CRON_TICKER_REASON.set(reason);
+}
+
 /// A host that owns scheduling itself (e.g. sudowork, which runs its own
 /// scheduler and never ticks `crons.json`) sets `SUDOCODE_DISABLE_CRON_TOOLS=1`
-/// when it spawns scode. Without this the agent could "schedule" a task via
-/// `CronCreate` that persists but is never fired by that host — an orphan.
+/// when it spawns scode; a host that co-hosts the engine in-process calls
+/// [`declare_no_cron_ticker`]. Without either the agent could "schedule" a task
+/// via `CronCreate` that persists but is never fired by that host — an orphan.
 /// Only the agent-facing TOOLS are hidden; the `scode cron` CLI (a deliberate
 /// user/host surface) is untouched.
 pub fn cron_tools_disabled() -> bool {
-    std::env::var("SUDOCODE_DISABLE_CRON_TOOLS")
-        .map(|v| {
-            let v = v.trim();
-            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
+    NO_CRON_TICKER_REASON.get().is_some()
+        || std::env::var("SUDOCODE_DISABLE_CRON_TOOLS")
+            .map(|v| {
+                let v = v.trim();
+                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+}
+
+/// The refusal a cron call gets on a host that will not fire it.
+fn cron_refusal() -> String {
+    format!(
+        "cron tools are disabled: {}",
+        NO_CRON_TICKER_REASON.get().copied().unwrap_or(
+            "this host owns scheduling and will never fire scode crons — use the \
+             host's scheduler instead"
+        )
+    )
 }
 
 /// Check permission before executing a tool. Returns Err with denial reason if blocked.
@@ -1750,15 +1783,14 @@ fn execute_tool_with_enforcer(
         }
         "pid_output" => {
             let input = normalize_pid_output_input(input);
-            from_value::<TaskOutputInput>(&input).and_then(|input| run_pid_output(input, fs.as_ref()))
+            from_value::<TaskOutputInput>(&input)
+                .and_then(|input| run_pid_output(input, fs.as_ref()))
         }
         "agent_list" => run_agent_list(input, fs.as_ref()),
         // Defense in depth: the specs are already hidden when the host owns
         // scheduling, so refuse a stale/rogue call rather than persisting a
         // cron nothing will ever fire.
-        "CronCreate" | "CronDelete" | "CronList" if cron_tools_disabled() => Err(String::from(
-            "cron tools are disabled: this host owns scheduling and will never fire scode crons — use the host's scheduler instead",
-        )),
+        "CronCreate" | "CronDelete" | "CronList" if cron_tools_disabled() => Err(cron_refusal()),
         "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
         "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
         "CronList" => run_cron_list(input.clone()),

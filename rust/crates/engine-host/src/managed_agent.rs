@@ -12,7 +12,7 @@
 //! the dependency between `tools` and this crate.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+
 use std::sync::Arc;
 
 // `::` because this module shares its name with that crate.
@@ -86,7 +86,6 @@ where
 
     let host = HostContext {
         fs,
-        workspace_root: PathBuf::from(&workspace_root),
         // Configuration stays on the daemon's own disk. A daemon has to read
         // its configuration before it can serve the VFS that configuration
         // describes, so this is the one root that does not follow `fs`.

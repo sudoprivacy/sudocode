@@ -66,6 +66,11 @@ pub mod nexus_a2a;
 pub mod managed_agent;
 pub mod runtime_build;
 
+/// The standalone host's in-process kernel: the VFS a CLI session's file tools
+/// act on, so both hosts drive the engine through a kernel rather than one
+/// reaching the host disk directly.
+pub mod local_kernel;
+
 /// The one live session's `EngineDelegate` (turns) + `SessionLifecycle`
 /// (non-turn model/auth/permission/reset/resume/fork/compaction ops) impl:
 /// `SessionEngine`, its `AcpCliSession` state, and the `ModelSwitchReport` data.

@@ -135,7 +135,8 @@ pub use file_redirect::{get_drafts_dir, is_in_drafts, redirect_to_drafts, DRAFTS
 pub use file_snapshot::{FileChangeSnapshot, FileChangeSnapshotWithMtime};
 pub use file_tracker::{CleanupResult, CleanupStrategy, FileOp, TurnFileTracker};
 pub use fs_backend::{
-    FsBackend, FsDirEntry, FsMetadata, KernelFsBackend, NexusVfsFsBackend, StdFsBackend,
+    vfs_path_for_host_path, FsBackend, FsDirEntry, FsMetadata, KernelFsBackend, NexusVfsFsBackend,
+    StdFsBackend,
 };
 pub use git_context::{GitCommitEntry, GitContext};
 pub use hooks::{

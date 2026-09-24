@@ -135,7 +135,7 @@ pub trait FsBackend: Send + Sync + 'static {
     /// the host — `StdFsBackend` overrides it with `current_dir` +
     /// `canonicalize` host semantics.
     fn normalize(&self, path: &str) -> io::Result<String> {
-        Ok(lexical_join(&self.working_root()?, path))
+        lexical_join(&self.working_root()?, path)
     }
 
     /// Like [`FsBackend::normalize`] but tolerates a missing final
@@ -204,22 +204,79 @@ pub trait FsBackend: Send + Sync + 'static {
     }
 }
 
-/// Resolve `path` against `root` without touching any filesystem.
+/// The VFS path that names a HOST path.
 ///
-/// Absolute paths (leading `/`) are taken as-is; relative paths are joined
-/// onto `root`. `.` and `..` components are collapsed lexically and the
-/// result is emitted with forward-slash separators (VFS-native). A `..`
-/// that would escape the root is clamped at `/` (no host traversal). This
-/// is the resolution the VFS-backed [`KernelFsBackend`] uses; host paths
-/// go through `StdFsBackend`'s `canonicalize` override instead.
-fn lexical_join(root: &str, path: &str) -> String {
-    let combined = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("{}/{}", root.trim_end_matches('/'), path)
+/// A host directory mounted into the VFS needs exactly one VFS name, and that
+/// name has to agree with what the model later writes: the host mounts a root
+/// at `vfs_path_for_host_path(root)`, and every absolute path a tool is then
+/// handed for a file under it resolves through the same rule. Two rules would
+/// mean a file readable under one spelling and missing under the other.
+///
+/// On unix this is the identity — a host path already *is* a VFS path. On
+/// Windows it is not: a host path carries a drive (`C:\a\b`) or a verbatim
+/// prefix (`\\?\C:\a\b`, which is what `canonicalize` yields), and neither is
+/// a VFS path. The drive becomes the leading segment (`/C/a/b`), which keeps
+/// the mapping total and reversible.
+///
+/// The rule is deliberately NOT `cfg(windows)`-gated: a Linux test then proves
+/// the Windows behaviour, and `C:…` is not a relative name any tool emits.
+pub fn vfs_path_for_host_path(path: &std::path::Path) -> io::Result<String> {
+    let as_str = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("host path is not valid UTF-8: {}", path.display()),
+        )
+    })?;
+    match host_absolute_as_vfs(as_str)? {
+        Some(vfs) => Ok(collapse_lexically(&vfs)),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("host path is not absolute, so it names no VFS path: {as_str}"),
+        )),
+    }
+}
+
+/// `path`'s absolute VFS form, or `None` when `path` is relative.
+///
+/// Refusing the shapes it cannot map is the point. A UNC path has no drive to
+/// lift and a drive-relative `C:x` has no root at all; treated as "relative"
+/// either would be joined onto the workspace root and silently read a
+/// different file than the caller named.
+fn host_absolute_as_vfs(path: &str) -> io::Result<Option<String>> {
+    if path.starts_with('/') {
+        return Ok(Some(path.to_string()));
+    }
+    let bare = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let unsupported = |what: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{what} has no VFS path: {path}"),
+        ))
     };
+    if bare.starts_with(r"\\") {
+        return unsupported("a UNC path");
+    }
+    let bytes = bare.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let rest = &bare[2..];
+        if !rest.is_empty() && !rest.starts_with(['/', '\\']) {
+            return unsupported("a drive-relative path");
+        }
+        return Ok(Some(format!("/{}{rest}", bare[..1].to_ascii_uppercase())));
+    }
+    if bare.starts_with('\\') {
+        return unsupported("a drive-less rooted path");
+    }
+    Ok(None)
+}
+
+/// Collapse `.` / `..` and emit forward-slash (VFS-native) separators.
+///
+/// A `..` that would escape is clamped at `/`: the VFS namespace has no
+/// parent to walk into, so there is nothing above the root to reach.
+fn collapse_lexically(path: &str) -> String {
     let mut stack: Vec<&str> = Vec::new();
-    for seg in combined.split(['/', '\\']) {
+    for seg in path.split(['/', '\\']) {
         match seg {
             "" | "." => {}
             ".." => {
@@ -229,6 +286,21 @@ fn lexical_join(root: &str, path: &str) -> String {
         }
     }
     format!("/{}", stack.join("/"))
+}
+
+/// Resolve `path` against `root` without touching any filesystem.
+///
+/// Absolute paths — VFS (`/a/b`) or host (`C:\a\b`, see
+/// [`vfs_path_for_host_path`]) — are taken as themselves; relative paths are
+/// joined onto `root`. This is the resolution the VFS-backed
+/// [`KernelFsBackend`] uses; host paths go through `StdFsBackend`'s
+/// `canonicalize` override instead.
+fn lexical_join(root: &str, path: &str) -> io::Result<String> {
+    let combined = match host_absolute_as_vfs(path)? {
+        Some(abs) => abs,
+        None => format!("{}/{}", root.trim_end_matches('/'), path),
+    };
+    Ok(collapse_lexically(&combined))
 }
 
 // Blanket impl: Arc<dyn FsBackend> delegates to the inner backend.
@@ -497,6 +569,16 @@ pub struct KernelFsBackend<K: KernelSyscall> {
     /// Absolute VFS path that relative tool paths resolve against and that
     /// `glob` / `grep` default to (e.g. `/proc/{pid}/workspace`).
     workspace_root: String,
+    /// The same directory as the HOST spells it, when the host has its own
+    /// spelling for these files.
+    ///
+    /// `None` for a co-hosted agent: its world IS the VFS, so a VFS path is the
+    /// only name its files have and the name it should report. `Some` for a CLI
+    /// session, whose files are also host files -- the path its user typed and
+    /// the only one its `bash` tool can open. Set, this backend answers in host
+    /// spelling and converts on the way to each syscall
+    /// ([`Self::to_kernel`]), so one file has one name across every tool.
+    host_root: Option<String>,
 }
 
 impl<K: KernelSyscall> KernelFsBackend<K> {
@@ -505,6 +587,7 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
             kernel,
             ctx,
             workspace_root: workspace_root.into(),
+            host_root: None,
         }
     }
 
@@ -523,6 +606,25 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
     ) -> Self {
         let ctx = OperationContext::new(owner_id, zone_id, false, Some(agent_name), true);
         Self::new(kernel, ctx, workspace_root)
+    }
+
+    /// Answer in the host's spelling, `host_root` being how the host names the
+    /// directory this backend's `workspace_root` mounts.
+    #[must_use]
+    pub fn with_host_root(mut self, host_root: impl Into<String>) -> Self {
+        self.host_root = Some(host_root.into());
+        self
+    }
+
+    /// The VFS path a caller's `path` names.
+    ///
+    /// One entry point for every syscall in this backend, and idempotent: a
+    /// path already in VFS form comes back unchanged, so a method that converts
+    /// and then delegates to another does not convert twice. Relative paths
+    /// resolve against the workspace root; a host-absolute path (`C:\a\b`) is
+    /// mapped by [`vfs_path_for_host_path`]'s rule.
+    fn to_kernel(&self, path: &str) -> io::Result<String> {
+        lexical_join(&self.workspace_root, path)
     }
 
     /// True when the entry at `path` is a DT_STREAM (native append-log).
@@ -593,13 +695,16 @@ fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
 
 impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
+        // The message this builds names the path as the CALLER spelled it: an
+        // error a user reads should name the file the way they named it.
+        let vfs = &self.to_kernel(path)?;
         // A DT_STREAM is read by walking its framed records to the tail; a
         // single `sys_read` would return only the first record's payload.
-        if self.is_stream_entry(path) {
-            return self.read_stream_all(path);
+        if self.is_stream_entry(vfs) {
+            return self.read_stream_all(vfs);
         }
         self.kernel
-            .sys_read(path, &self.ctx, 0, 0)
+            .sys_read(vfs, &self.ctx, 0, 0)
             .map_err(kernel_err)
             .and_then(|r| {
                 r.data.ok_or_else(|| {
@@ -609,6 +714,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        let path = &self.to_kernel(path)?;
         self.kernel
             .sys_write(path, &self.ctx, data, 0)
             .map_err(kernel_err)
@@ -616,6 +722,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        let path = &self.to_kernel(path)?;
         // A DT_STREAM appends `data` as one framed record in O(1): `sys_write`
         // pushes to the log tail (the offset arg is ignored for streams).
         // Regular files have no O(1) append, so fall back to read-concat-write
@@ -634,6 +741,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
+        let path = &self.to_kernel(path)?;
         // Idempotent: an existing entry (DT_STREAM to append to, or a DT_REG
         // from a prior degraded run) is left as-is.
         if self.kernel.sys_stat(path, &self.ctx.zone_id).is_some() {
@@ -684,7 +792,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(self.is_stream_entry(path))
+        Ok(self.is_stream_entry(&self.to_kernel(path)?))
     }
 
     fn tail_read(
@@ -693,6 +801,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
+        let path = &self.to_kernel(path)?;
         let result = self
             .kernel
             .sys_read(path, &self.ctx, block_ms, cursor)
@@ -714,10 +823,17 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         // VFS root — no `.scode`, no `workspace_hash` (isolation is policy +
         // `owner`, not path). So a `SessionStore` over this backend roots
         // sessions here automatically.
-        Some("/sessions".to_string())
+        //
+        // Not for a host-spelled session: its transcripts belong beside its
+        // configuration on host disk, where `scode --resume` and every other
+        // host tool already look for them, and where they outlive a VFS that
+        // exists only while the session does.
+        self.host_root.is_none().then(|| "/sessions".to_string())
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        let alias = &self.to_kernel(alias)?;
+        let target = &self.to_kernel(target)?;
         // DT_LINK: a VFS-internal pointer alias → target (e.g. the
         // `/agents/{name}/sessions/<sid>` enum index → `/sessions/<sid>`).
         if let Some(parent) = std::path::Path::new(alias).parent() {
@@ -752,6 +868,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
+        let path = &self.to_kernel(path)?;
         self.kernel
             .sys_unlink(path, &self.ctx, false)
             .map_err(kernel_err)
@@ -759,8 +876,9 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {
+        let vfs = &self.to_kernel(path)?;
         self.kernel
-            .sys_stat(path, &self.ctx.zone_id)
+            .sys_stat(vfs, &self.ctx.zone_id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path}: not found")))
             .map(|s| FsMetadata {
                 len: s.size,
@@ -774,6 +892,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
+        let path = &self.to_kernel(path)?;
         let zone = &self.ctx.zone_id;
         // `sys_readdir` returns `Vec<(child_GLOBAL_path, entry_type)>` —
         // full paths like `/ws/a.rs`, not basenames. The `FsBackend`
@@ -798,10 +917,12 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn exists(&self, path: &str) -> io::Result<bool> {
+        let path = &self.to_kernel(path)?;
         Ok(self.kernel.sys_stat(path, &self.ctx.zone_id).is_some())
     }
 
     fn create_dir_all(&self, path: &str) -> io::Result<()> {
+        let path = &self.to_kernel(path)?;
         // Writing `/ws/sub/c.rs` creates only the leaf's metastore entry —
         // the intermediate `/ws/sub` dirent is NOT auto-planted, so a later
         // `readdir("/ws")` would not see `sub` and a recursive walk could
@@ -855,8 +976,9 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {
-        // VFS paths are already canonical — no host symlinks to resolve.
-        Ok(path.to_string())
+        // No host canonicalisation: the kernel decides what exists, and
+        // resolving symlinks here would reach past the mount on purpose.
+        self.normalize(path)
     }
 
     fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
@@ -870,11 +992,63 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn working_root(&self) -> io::Result<String> {
-        Ok(self.workspace_root.clone())
+        Ok(self
+            .host_root
+            .clone()
+            .unwrap_or_else(|| self.workspace_root.clone()))
     }
-    // `normalize` / `normalize_allow_missing` use the trait's lexical
-    // default: VFS paths are already canonical, and canonicalising them
-    // against the host (`StdFsBackend`'s override) would corrupt them.
+
+    /// Absolute, lexically clean, in this backend's spelling.
+    ///
+    /// Host spelling keeps the host's separators and drive, so what a tool
+    /// reports is what the user typed and what `bash` will accept.
+    /// `normalize_allow_missing` is the trait's default, which is this: the
+    /// resolution is lexical either way, so a missing leaf is not special.
+    fn normalize(&self, path: &str) -> io::Result<String> {
+        match &self.host_root {
+            Some(root) => Ok(host_lexical_join(root, path)),
+            None => lexical_join(&self.workspace_root, path),
+        }
+    }
+
+    fn join_path(&self, dir: &str, name: &str) -> String {
+        match self.host_root {
+            // Host separators, for the same reason `StdFsBackend` uses them:
+            // the composed path is handed back to the user and to `bash`.
+            Some(_) => std::path::Path::new(dir)
+                .join(name)
+                .to_string_lossy()
+                .into_owned(),
+            None => format!("{}/{}", dir.trim_end_matches(['/', '\\']), name),
+        }
+    }
+}
+
+/// Resolve `path` against `root` in HOST spelling, touching no filesystem.
+///
+/// The host-side twin of [`lexical_join`]: relative paths join onto `root`,
+/// `.` / `..` collapse lexically, and the result keeps the platform's own
+/// separators. Deliberately not `canonicalize`: the kernel is the authority for
+/// what exists, and resolving symlinks here would reach past the mount that
+/// contains the session.
+fn host_lexical_join(root: &str, path: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+    let candidate = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        Path::new(root).join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
 
 // ---------------------------------------------------------------------------

@@ -41,7 +41,10 @@ fn agent_list_discovers_a_peer_provisioned_through_the_mailbox() {
     let me = Arc::new(Mailbox::workspace_local(&root, "me".to_string()));
     let _scope = MailboxScope::enter(me);
 
-    let rows = tools::collect_agent_list(false);
+    // The host filesystem, because `SUDOCODE_AGENT_STORE` above names a host
+    // directory: the sub-agent half of the list is read through the session's
+    // backend, which for this test's session is the host.
+    let rows = tools::collect_agent_list(false, &runtime::fs_backend::StdFsBackend);
     let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
 
     assert!(

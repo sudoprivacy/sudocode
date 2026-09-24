@@ -27,10 +27,13 @@ use runtime::mailbox::Mailbox;
 /// listing that directory, so an empty listing is an agent that hears nothing:
 /// it reaches READY, polls a chat list with no entries, and waits forever.
 ///
-/// In production this cannot arise — `/agents` is a zone mount with a real
-/// store behind it — which is exactly why the harness has to model one.
+/// In production this cannot arise — a founder mounts every prefix its
+/// subsystems declare (`default_replicated_prefixes` = A2A's prefixes plus
+/// `SESSIONS_BASE`) onto its zone — which is exactly why the harness has to
+/// model the same set. `/sessions` is in it because a co-hosted agent records
+/// its turns there.
 pub fn mount_agent_world(kernel: &Kernel) {
-    for point in ["/proc", "/conversations", "/agents"] {
+    for point in ["/proc", "/conversations", "/agents", "/sessions"] {
         kernel.vfs_router_arc().add_mount(
             point,
             "root",

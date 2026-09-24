@@ -132,7 +132,11 @@ fn harness() -> &'static Harness {
 /// or the DT_REG a conversation degrades to when that stream cannot be created.
 /// An agent has to behave the same on both, so the shape is a parameter rather
 /// than a second copy of this.
-fn run_read_then_reply(pid: &str, agent_id: &str, transcript_is_stream: bool) -> (String, usize) {
+fn run_read_then_reply(
+    pid: &str,
+    agent_id: &str,
+    transcript_is_stream: bool,
+) -> (String, usize, Arc<dyn FsBackend>) {
     // One at a time. What this harness configures is process-global — the
     // scripted model's base URL lives in one `SUDO_CODE_CONFIG_HOME`, and the
     // runtime build reads and creates state under it — so two overlapping turns
@@ -215,7 +219,7 @@ fn run_read_then_reply(pid: &str, agent_id: &str, transcript_is_stream: bool) ->
         .unwrap_or_default()
         .to_string();
     eprintln!("[agent -> user] {body}");
-    (body, asked)
+    (body, asked, user_fs)
 }
 
 /// Delivery of one envelope costs a BOUNDED number of turns.
@@ -246,7 +250,7 @@ fn assert_delivery_is_bounded(asked: usize) {
 /// appended to the transcript the user reads.
 #[test]
 fn a_cohost_agent_reads_its_workspace_and_replies() {
-    let (body, asked) = run_read_then_reply("cohost-mock-1", "scode-mock", true);
+    let (body, asked, _fs) = run_read_then_reply("cohost-mock-1", "scode-mock", true);
     assert!(
         body.contains(FIXTURE_BODY),
         "the reply should carry what the agent read out of its workspace; got: {body}"
@@ -264,10 +268,52 @@ fn a_cohost_agent_reads_its_workspace_and_replies() {
 /// times over (1044 model calls in 60 seconds, measured).
 #[test]
 fn a_conversation_that_is_not_a_stream_still_delivers_once() {
-    let (body, asked) = run_read_then_reply("cohost-mock-2", "scode-mock-jsonl", false);
+    let (body, asked, _fs) = run_read_then_reply("cohost-mock-2", "scode-mock-jsonl", false);
     assert!(
         body.contains(FIXTURE_BODY),
         "a byte-addressed transcript should carry the same reply; got: {body}"
     );
     assert_delivery_is_bounded(asked);
+}
+
+/// A co-hosted agent's turn is recorded where its filesystem says sessions live.
+///
+/// The agent ran real turns and kept the whole transcript in memory: its session
+/// had no persistence path, so nothing survived it — no `/sessions/<id>/`, no
+/// `/agents/{name}/sessions/<id>` index, nothing to inspect or resume. Every
+/// piece needed had shipped; the co-host was simply not a consumer of it.
+///
+/// Asserted through the VFS rather than by reading a struct: the point is that
+/// the bytes are addressable by anyone who can reach the kernel, which is what
+/// makes a co-hosted agent's history inspectable at all.
+#[test]
+fn a_cohost_turn_is_recorded_in_the_vfs() {
+    let (_body, _asked, fs) = run_read_then_reply("cohost-mock-3", "scode-mock-session", true);
+
+    let sessions = fs
+        .readdir("/sessions")
+        .expect("the backend's session root should exist after a turn");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "one agent, one session; got {:?}",
+        sessions.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+    let id = &sessions[0].name;
+
+    let transcript = fs
+        .read_to_string(&format!("/sessions/{id}/transcript.jsonl"))
+        .expect("the turn should be persisted at the session root");
+    assert!(
+        transcript.contains(FIXTURE_BODY),
+        "the persisted transcript should carry the turn; got: {transcript}"
+    );
+
+    // The per-agent index, planted by `create_handle`. An index, not the SSOT —
+    // but without it nothing can enumerate what an agent has run.
+    assert!(
+        fs.exists(&format!("/agents/scode-mock-session/sessions/{id}"))
+            .unwrap_or(false),
+        "the agent's session index should point at {id}"
+    );
 }

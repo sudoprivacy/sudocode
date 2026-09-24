@@ -170,3 +170,99 @@ fn a_malformed_additional_directories_fails_the_boot() {
         "the error should name the setting; got: {error}"
     );
 }
+
+/// Every path a CLI session hands its filesystem is a HOST path — for every
+/// method, not just the ones a test happened to cover.
+///
+/// The backend converts at the kernel edge, which means each method has to
+/// convert, and `read_link` shipped without it: added after the host-spelling
+/// contract, it passed a `C:\…` path straight to `sys_stat`, which can only
+/// answer about VFS paths. Nothing caught it because no caller had reached it
+/// yet — a latent hole with a date on it.
+///
+/// So this drives the surface a session actually uses, in host spelling, through
+/// one real kernel. A method added later belongs in this list; one that forgets
+/// to convert fails here rather than when its first caller appears.
+#[test]
+fn every_method_takes_the_host_spelling() {
+    let dir = sandbox("surface");
+    let workspace = dir.path().join("project");
+    write(&workspace.join("seed.txt"), "seed\n");
+    let host = HostContext::for_cli_session(&workspace).expect("boot the session host");
+    let fs = &host.fs;
+    let at = |name: &str| workspace.join(name).to_string_lossy().into_owned();
+
+    // Namespace and metadata.
+    assert_eq!(
+        fs.working_root().expect("working root"),
+        workspace.to_string_lossy()
+    );
+    assert_eq!(fs.normalize("seed.txt").expect("normalize"), at("seed.txt"));
+    assert_eq!(
+        fs.normalize_allow_missing("gone.txt")
+            .expect("normalize missing"),
+        at("gone.txt")
+    );
+    assert_eq!(
+        fs.canonicalize(&at("seed.txt")).expect("canonicalize"),
+        at("seed.txt")
+    );
+    assert_eq!(fs.join_path(&at(""), "seed.txt"), at("seed.txt"));
+    assert!(fs.exists(&at("seed.txt")).expect("exists"));
+    assert_eq!(fs.stat(&at("seed.txt")).expect("stat").len, 5);
+    assert_eq!(fs.symlink_metadata(&at("seed.txt")).expect("lstat").len, 5);
+    assert!(!fs.is_append_stream(&at("seed.txt")).expect("stream probe"));
+    assert!(fs
+        .readdir(&at(""))
+        .expect("readdir")
+        .iter()
+        .any(|e| e.name == "seed.txt"));
+
+    // Bytes in, bytes out.
+    assert_eq!(fs.read_to_string(&at("seed.txt")).expect("read"), "seed\n");
+    fs.write(&at("written.txt"), b"one\n").expect("write");
+    fs.append(&at("written.txt"), b"two\n").expect("append");
+    assert_eq!(
+        fs.read_to_string(&at("written.txt")).expect("reread"),
+        "one\ntwo\n"
+    );
+    fs.write_atomic(&at("atomic.txt"), b"atomic\n")
+        .expect("write_atomic");
+    assert_eq!(
+        fs.read_to_string(&at("atomic.txt")).expect("read atomic"),
+        "atomic\n"
+    );
+
+    // Directories, renames, removals.
+    fs.create_dir_all(&at("sub/deeper"))
+        .expect("create_dir_all");
+    fs.write(&at("sub/deeper/leaf.txt"), b"leaf\n")
+        .expect("write under new dir");
+    fs.rename(&at("sub/deeper/leaf.txt"), &at("sub/deeper/moved.txt"))
+        .expect("rename");
+    assert_eq!(
+        fs.read_to_string(&at("sub/deeper/moved.txt"))
+            .expect("read moved"),
+        "leaf\n"
+    );
+    fs.delete(&at("sub/deeper/moved.txt")).expect("delete");
+    assert!(!fs.exists(&at("sub/deeper/moved.txt")).expect("gone"));
+
+    // Append logs and their tail, the mailbox's read path.
+    fs.create_append_log(&at("log.jsonl"), 0)
+        .expect("create_append_log");
+    fs.append(&at("log.jsonl"), b"first\n")
+        .expect("append to log");
+    let (data, next, eof) = fs.tail_read(&at("log.jsonl"), 0, 0).expect("tail_read");
+    assert!(
+        !eof && data == b"first\n" && next == 6,
+        "tail should advance by what it read"
+    );
+
+    // Links: planted and followed in host spelling.
+    fs.link(&at("alias.lnk"), &at("seed.txt")).expect("link");
+    assert_eq!(
+        fs.read_link(&at("alias.lnk")).expect("read_link"),
+        at("seed.txt")
+    );
+}

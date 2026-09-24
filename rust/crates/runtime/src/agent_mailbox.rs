@@ -30,7 +30,6 @@
 //! Recipients parse `kind` before deciding how to interpret `body`.
 
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -302,29 +301,36 @@ pub fn append_envelope(
     append_envelope_to_path(&path.to_string_lossy(), envelope)
 }
 
-/// Append one envelope as a JSONL line at an explicit inbox path. The one
-/// writer of the local JSONL format — [`append_envelope`] (workspace + name)
-/// and the unified [`crate::mailbox::Mailbox::send`] (path from the convention)
-/// both funnel here, so the line format and the append-lock have one definition.
+/// Append one envelope as a JSONL line THROUGH `backend`.
 ///
-/// Creates the parent directory and file as needed.
+/// The one writer of the local JSONL format: the line shape and the append-lock
+/// have a single definition, and the bytes land wherever the caller's filesystem
+/// lands — host disk for a CLI session, a kernel for a co-hosted agent.
+///
+/// Reaching for `std::fs` here instead is what made a co-hosted agent's replies
+/// disappear: a conversation whose DT_STREAM could not be created falls back to
+/// this JSONL shape, and the reply was then written to a HOST path named like a
+/// VFS one, which the peer reading the VFS could never see. The send reported
+/// success, the peer heard nothing, and the envelope was re-delivered forever.
 ///
 /// # Errors
 ///
-/// Returns a `String` error when the parent directory can't be created, the
-/// file can't be opened for append, or the JSON encoding / write fails. The
-/// critical section is guarded by [`WRITE_LOCK`] so concurrent calls to the
-/// same file cannot produce partial lines.
-pub fn append_envelope_to_path(
+/// Returns a `String` error when the parent directory can't be created, the JSON
+/// encoding fails, or the append fails. The critical section is guarded by
+/// [`WRITE_LOCK`] so concurrent calls to the same file cannot produce partial
+/// lines.
+pub fn append_envelope_via(
+    backend: &dyn crate::fs_backend::FsBackend,
     path: &str,
     mut envelope: MailboxEnvelope,
-) -> Result<PathBuf, String> {
+) -> Result<(), String> {
     if envelope.timestamp == 0 {
         envelope.timestamp = now_secs();
     }
-    let path = PathBuf::from(path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create mailbox dir: {e}"))?;
+    if let Some(parent) = Path::new(path).parent() {
+        backend
+            .create_dir_all(&parent.to_string_lossy())
+            .map_err(|e| format!("create mailbox dir: {e}"))?;
     }
     let mut line =
         serde_json::to_string(&envelope).map_err(|e| format!("serialize envelope: {e}"))?;
@@ -332,14 +338,37 @@ pub fn append_envelope_to_path(
     let _guard = WRITE_LOCK
         .lock()
         .map_err(|_| "mailbox write lock poisoned".to_string())?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("open mailbox {}: {e}", path.display()))?;
-    file.write_all(line.as_bytes())
-        .map_err(|e| format!("write mailbox {}: {e}", path.display()))?;
-    Ok(path)
+    backend
+        .append(path, line.as_bytes())
+        .map_err(|e| format!("write mailbox {path}: {e}"))
+}
+
+/// [`append_envelope_via`] on the host filesystem.
+///
+/// # Errors
+///
+/// As [`append_envelope_via`].
+pub fn append_envelope_to_path(path: &str, envelope: MailboxEnvelope) -> Result<PathBuf, String> {
+    append_envelope_via(&crate::fs_backend::StdFsBackend, path, envelope)?;
+    Ok(PathBuf::from(path))
+}
+
+/// Parse a JSONL mailbox body into envelopes, skipping lines that do not.
+///
+/// A malformed line is skipped rather than fatal: the receiver keeps making
+/// progress if a buggy writer ever commits one. Shared by every reader so
+/// "what a mailbox line is" is answered once.
+#[must_use]
+pub fn parse_envelope_lines(bytes: &[u8]) -> Vec<MailboxEnvelope> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            (!trimmed.is_empty())
+                .then(|| serde_json::from_str::<MailboxEnvelope>(trimmed).ok())
+                .flatten()
+        })
+        .collect()
 }
 
 /// Read the recipient's mailbox as a Vec<MailboxEnvelope>. Skips

@@ -655,6 +655,35 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
         lexical_join(&self.workspace_root, path)
     }
 
+    /// A VFS path in the spelling this backend ANSWERS in.
+    ///
+    /// The inverse of [`Self::to_kernel`], needed by the one method that returns
+    /// a path the kernel stored rather than one the caller passed: `read_link`
+    /// reads back a `DT_LINK` target, which was converted on the way in.
+    ///
+    /// Asymmetric with the forward direction on purpose. Reading `C:\a\b` as
+    /// drive-absolute is safe on any platform (no unix path looks like that), so
+    /// the forward rule is platform-independent and a unix test proves the
+    /// Windows branch. The reverse is not: `/C/a` is this mapping's output on
+    /// Windows and an ordinary path on unix, so undoing it anywhere else would
+    /// corrupt a perfectly good path.
+    fn to_host(&self, vfs: &str) -> String {
+        if self.host_root.is_none() {
+            return vfs.to_string();
+        }
+        #[cfg(windows)]
+        {
+            let mut segments = vfs.trim_start_matches('/').splitn(2, '/');
+            if let Some(drive) = segments.next() {
+                if drive.len() == 1 && drive.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                    let rest = segments.next().unwrap_or_default().replace('/', "\\");
+                    return format!("{}:\\{rest}", drive.to_ascii_uppercase());
+                }
+            }
+        }
+        vfs.to_string()
+    }
+
     /// True when the entry at `path` is a DT_STREAM (native append-log).
     fn is_stream_entry(&self, path: &str) -> bool {
         self.kernel
@@ -839,7 +868,20 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
                 let next = result
                     .stream_next_offset
                     .map(|n| n as u64)
-                    .unwrap_or(cursor);
+                    // A DT_STREAM reports where its next RECORD begins. A
+                    // byte-addressed entry has no record offset to report, so
+                    // the next cursor is what this read consumed — which is the
+                    // contract `StdFsBackend::tail_read` already answers by
+                    // returning the file's new length.
+                    //
+                    // Returning `cursor` unchanged here meant a reader could
+                    // never advance past a byte-addressed conversation, so every
+                    // poll re-delivered the same envelope: the re-delivery storm,
+                    // measured at 1044 turns in 60 seconds. It is not a corner
+                    // case — a conversation degrades to a DT_REG whenever its
+                    // `"wal"` stream cannot be created, which is any daemon
+                    // without federation wired.
+                    .unwrap_or_else(|| cursor + payload.len() as u64);
                 Ok((payload, next, false))
             }
             _ => Ok((vec![], cursor, true)),
@@ -896,12 +938,17 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn read_link(&self, alias: &str) -> io::Result<String> {
+        let alias = &self.to_kernel(alias)?;
         // `sys_stat` is lstat — for a `DT_LINK` it fills `link_target` with the
         // path this alias points at. The host-FS `read_link` returns the same
         // target string, so a caller resolving a link is backend-agnostic.
         self.kernel
             .sys_stat(alias, &self.ctx.zone_id)
             .and_then(|s| s.link_target)
+            // The target was converted on the way in, so it comes back in VFS
+            // spelling; a caller gets paths in the one spelling this backend
+            // speaks, not two depending on which method answered.
+            .map(|target| self.to_host(&target))
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,

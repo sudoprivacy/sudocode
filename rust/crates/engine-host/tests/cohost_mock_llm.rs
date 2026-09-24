@@ -68,6 +68,15 @@ impl Harness {
     }
 }
 
+/// One co-hosted agent at a time in this binary. What the harness configures is
+/// process-global — the scripted model's base URL lives in one
+/// `SUDO_CODE_CONFIG_HOME`, and the runtime build reads and creates state under
+/// it — so two overlapping spawns race over the same directories (`failed to
+/// build the agent runtime: NotFound` under the default parallel runner, green
+/// with `--test-threads=1`, which is the shape of a harness that only looks
+/// fine).
+static SERIAL: Mutex<()> = Mutex::new(());
+
 fn harness() -> &'static Harness {
     static HARNESS: OnceLock<Harness> = OnceLock::new();
     HARNESS.get_or_init(|| {
@@ -137,13 +146,6 @@ fn run_read_then_reply(
     agent_id: &str,
     transcript_is_stream: bool,
 ) -> (String, usize, Arc<dyn FsBackend>) {
-    // One at a time. What this harness configures is process-global — the
-    // scripted model's base URL lives in one `SUDO_CODE_CONFIG_HOME`, and the
-    // runtime build reads and creates state under it — so two overlapping turns
-    // race over the same directories (`failed to build the agent runtime:
-    // NotFound` under the default parallel runner, green with `--test-threads=1`,
-    // which is the shape of a harness that only looks fine).
-    static SERIAL: Mutex<()> = Mutex::new(());
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let harness = harness();
     // The scripted model is shared by every test in this binary, so what this
@@ -316,4 +318,50 @@ fn a_cohost_turn_is_recorded_in_the_vfs() {
             .unwrap_or(false),
         "the agent's session index should point at {id}"
     );
+}
+
+/// A co-hosted agent is not offered crons this daemon will never fire.
+///
+/// The scode scheduler is a CLI process (`scode cron daemon`, or OS cron calling
+/// `scode cron tick`); nexusd does not tick `crons.json`. So a `CronCreate` here
+/// would persist an entry that either never fires or — if a ticker happens to
+/// share this machine's config home — fires later as a standalone CLI run under
+/// a different identity, in a host directory. Both are worse than a refusal.
+///
+/// Both halves are asserted, because hiding the specs only stops a model that
+/// reads the list; one that remembers the name from training calls it anyway.
+#[test]
+fn a_cohost_is_not_offered_crons_this_daemon_will_never_fire() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _harness = harness();
+    let kernel = Arc::new(Kernel::new());
+    mount_agent_world(&kernel);
+
+    // Through the production spawn path: the declaration is the co-host's own
+    // fact about itself, so asserting it after a real spawn is what proves it is
+    // made at all.
+    let handle = spawn_managed_agent(
+        Arc::clone(&kernel),
+        make_desc("pid-cron", "cron-agent", MODEL),
+        |_, _| {},
+    );
+    assert!(
+        tools::cron_tools_disabled(),
+        "spawning a co-hosted agent should declare that this host fires no crons"
+    );
+    assert!(
+        !tools::mvp_tool_specs()
+            .iter()
+            .any(|spec| spec.name.starts_with("Cron")),
+        "the cron tools should not be advertised to a co-hosted agent"
+    );
+    let refused = tools::execute_tool("CronList", &serde_json::json!({}))
+        .expect_err("a cron call must be refused, not answered");
+    assert!(
+        refused.contains("nexusd"),
+        "the refusal should say which host will not fire it; got: {refused}"
+    );
+
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
 }

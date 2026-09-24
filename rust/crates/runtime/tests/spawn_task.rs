@@ -285,6 +285,18 @@ fn write_envelope(
         .expect("write envelope");
 }
 
+/// How long a wait for something that SHOULD happen is given.
+///
+/// Generous on purpose. The happy path returns as soon as the value appears —
+/// this whole suite runs in about two seconds locally — so the budget is only
+/// ever spent on a run that is already failing. Five seconds was enough locally
+/// and not enough on a loaded Windows CI runner sharing the box with nine other
+/// spawn threads, where the timeout read as "the agent never replied".
+///
+/// Waits that assert ABSENCE do not use this: there the wall-clock IS the test,
+/// and every second would be paid on every green run.
+const HAPPENS_BUDGET: Duration = Duration::from_secs(30);
+
 /// Poll `path` until an envelope `from` the given author with a non-empty
 /// body arrives, or `timeout` elapses.
 fn wait_for_reply(
@@ -560,7 +572,7 @@ fn a_reply_lands_in_the_shared_transcript() {
     let ctx = user_ctx();
     let transcript = transcript_of("win-ai", "user-test");
     write_envelope(&kernel, &transcript, &ctx, "user-test", "win-ai", "hi");
-    let reply = wait_for_reply(&kernel, &transcript, &ctx, "win-ai", Duration::from_secs(5));
+    let reply = wait_for_reply(&kernel, &transcript, &ctx, "win-ai", HAPPENS_BUDGET);
     handle.abort_signal.abort();
     let _ = handle.join.join();
 
@@ -592,7 +604,7 @@ fn loop_exits_on_abort_signal() {
     let watcher = thread::Builder::new()
         .spawn(move || handle.join.join())
         .expect("watcher thread");
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + HAPPENS_BUDGET;
     while !watcher.is_finished() {
         assert!(
             Instant::now() < deadline,
@@ -619,7 +631,7 @@ fn skips_own_writes_no_reply_storm() {
     let ctx = user_ctx();
     let transcript = transcript_of("scode", "user-test");
     write_envelope(&kernel, &transcript, &ctx, "user-test", "scode", "ping");
-    let _ = wait_for_reply(&kernel, &transcript, &ctx, "scode", Duration::from_secs(5))
+    let _ = wait_for_reply(&kernel, &transcript, &ctx, "scode", HAPPENS_BUDGET)
         .expect("first agent reply did not arrive");
     // Settle several poll cycles so a self-reply bug would have written by now.
     thread::sleep(Duration::from_millis(600));
@@ -654,7 +666,7 @@ fn the_loop_survives_a_conversation_that_does_not_exist_yet() {
     let transcript = transcript_of("win-ai", "user-test");
     write_envelope(&kernel, &transcript, &ctx, "user-test", "win-ai", "hi");
 
-    let reply = wait_for_reply(&kernel, &transcript, &ctx, "win-ai", Duration::from_secs(5));
+    let reply = wait_for_reply(&kernel, &transcript, &ctx, "win-ai", HAPPENS_BUDGET);
     handle.abort_signal.abort();
     let _ = handle.join.join();
     assert!(
@@ -680,7 +692,9 @@ fn text_only_turn_writes_no_reply_the_ping_pong_fix() {
     let ctx = user_ctx();
     let transcript = transcript_of("win-ai", "user-test");
     write_envelope(&kernel, &transcript, &ctx, "user-test", "win-ai", "hi");
-    // Ample time for the loop to run the turn and (wrongly) auto-forward.
+    // Ample time for the loop to run the turn and (wrongly) auto-forward. NOT
+    // `HAPPENS_BUDGET`: this asserts that nothing arrives, so the wall-clock is
+    // the test and every second of it is paid on every green run.
     let leaked = wait_for_reply(&kernel, &transcript, &ctx, "win-ai", Duration::from_secs(2));
     handle.abort_signal.abort();
     let _ = handle.join.join();
@@ -756,7 +770,7 @@ fn respawn_resumes_from_the_durable_position_and_does_not_replay() {
     let d1 = make_desc("cohost-win-ai-1", "win-ai");
     let h1 = spawn_sending(&kernel, &d1, "user-test", REPLY_TEXT);
     write_envelope(&kernel, &transcript, &ctx, "user-test", "win-ai", "first");
-    let r1 = wait_for_reply(&kernel, &transcript, &ctx, "win-ai", Duration::from_secs(5));
+    let r1 = wait_for_reply(&kernel, &transcript, &ctx, "win-ai", HAPPENS_BUDGET);
     assert!(r1.is_some(), "spawn #1 did not reply to its message");
     thread::sleep(Duration::from_millis(200)); // let the commit land
     h1.abort_signal.abort();
@@ -788,7 +802,7 @@ fn respawn_resumes_from_the_durable_position_and_does_not_replay() {
     let h3 = spawn_sending(&kernel, &d3, "user-test", REPLY_TEXT);
     // Poll for a SECOND reply: spawn #1's is still in the transcript, so a
     // plain "any reply?" check would succeed on the stale one.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HAPPENS_BUDGET;
     while count_from(&kernel, &transcript, &ctx, "win-ai") < 2 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
@@ -833,7 +847,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     // leave no observable reply, so gate on the position reaching that tail.
     // (Aborting early would leave m1/m2 genuinely unprocessed, and the respawn
     // handling them would be CORRECT, not a replay — a flaky false failure.)
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + HAPPENS_BUDGET;
     while read_position(&kernel, "win-ai", "user-test") < inbound_tail && Instant::now() < deadline
     {
         thread::sleep(Duration::from_millis(50));
@@ -869,7 +883,7 @@ fn respawn_resumes_past_silently_processed_messages_not_only_replied_ones() {
     write_envelope(&kernel, &transcript, &ctx, "user-test", "win-ai", "m3");
     let d3 = make_desc("cohost-win-ai-3", "win-ai");
     let h3 = spawn_sending(&kernel, &d3, "user-test", REPLY_TEXT);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + HAPPENS_BUDGET;
     while count_from(&kernel, &transcript, &ctx, "win-ai") < 2 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }

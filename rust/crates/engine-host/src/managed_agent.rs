@@ -60,6 +60,18 @@ where
     K: KernelSyscall + Send + Sync + 'static,
     F: Fn(AgentState, Option<String>) + Send + 'static,
 {
+    // Nothing in this daemon ticks `crons.json`: the scode scheduler is the
+    // `scode cron daemon` / OS-cron path, which is a CLI process. A `CronCreate`
+    // here would persist an entry that either never fires or — if a `scode cron`
+    // ticker happens to share this machine's config home — fires later as a
+    // standalone CLI run under a different identity, in a host directory. Both
+    // are worse than a refusal, so the agent is not offered the tools; the fact
+    // is declared once, on the same predicate an out-of-process host sets
+    // `SUDOCODE_DISABLE_CRON_TOOLS` for.
+    tools::declare_no_cron_ticker(
+        "this host runs the agent inside nexusd, which does not fire scode crons          — schedule the work from the cluster instead",
+    );
+
     let model = desc
         .labels
         .get(MODEL_LABEL)

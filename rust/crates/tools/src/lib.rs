@@ -1982,16 +1982,21 @@ pub fn list_agent_snapshots_from_store(
     Ok(out)
 }
 
-/// One row of `agent_list`: an addressable agent name plus whether it is
-/// running right now. `active` means a live pid/poller exists (immediate
-/// receive); an inactive row is still addressable — a `send` waits in its
-/// durable inbox until it next runs.
+/// One row of `agent_list`: an addressable agent name. `active` is
+/// `Some(true)` only with positive evidence the agent is running now (a live
+/// sub-agent pid); `Some(false)` for a spawned worker that has finished; and
+/// `None` for a peer whose liveness this session cannot answer (a remote
+/// backend does not report "is a poller live"). An addressable row is reachable
+/// regardless — a `send` waits in its durable inbox until it next runs.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentListRow {
     pub name: String,
-    pub active: bool,
-    /// `peer` = a same-machine addressable identity (its own scode/agent);
-    /// `subagent` = a worker this process spawned.
+    /// `Some(true)`/`Some(false)` when known (a spawned worker); omitted when
+    /// liveness is unknowable (a peer discovered through the mailbox namespace).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// `peer` = an addressable identity in the mailbox namespace (another
+    /// scode/agent); `subagent` = a worker this process spawned.
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<String>,
@@ -1999,54 +2004,48 @@ pub struct AgentListRow {
     pub role: Option<String>,
 }
 
-/// Merge the two discovery sources into one addressable list:
-/// - same-machine peers: subdirs of `local_pair_root()/agents/<name>/` that
-///   have a `chat-with-me` inbox (addressable); a sibling `.cursor-*` file
-///   means a poller is live (active).
-/// - spawned sub-agents: running/backgrounded manifests in the agent store.
-///
-/// Deduped by name; if a name appears in both, the active/pid-bearing row wins.
+/// Collect the addressable agents this session can reach, plus the workers it
+/// spawned. Peers come from the session mailbox's namespace via
+/// [`runtime::mailbox::Mailbox::list_recipients`] — the ONE backend-routed
+/// enumeration, so it answers the same over a local pair root, a nexus daemon
+/// (gRPC), and an in-process kernel. (Hand-rolling `std::fs` here found only
+/// local disk and probed a filename the conversation contract stopped
+/// creating — it discovered nobody real.)
 pub fn collect_agent_list(active_only: bool) -> Vec<AgentListRow> {
-    let peers_dir = runtime::mailbox::local_pair_root().join("agents");
+    let mailbox = runtime::mailbox::sending_mailbox();
+    let self_name = mailbox.self_id().to_string();
+    let peers = mailbox.list_recipients().unwrap_or_default();
     let subagents = list_agent_snapshots_from_store(true).unwrap_or_default();
-    merge_agent_list(&peers_dir, subagents, active_only)
+    merge_agent_list(&peers, &self_name, subagents, active_only)
 }
 
-/// Pure core of [`collect_agent_list`], with both sources injected so it is
-/// testable without touching the real config home. `peers_dir` is the
-/// `…/agents/` directory; `subagents` are already-filtered running snapshots.
+/// Pure core of [`collect_agent_list`], sources injected so it is testable
+/// without a real backend. `peers` are addressable names from the mailbox
+/// namespace; `self_name` is filtered out (an agent is not its own peer);
+/// `subagents` are already-filtered running snapshots.
 pub fn merge_agent_list(
-    peers_dir: &std::path::Path,
+    peers: &[String],
+    self_name: &str,
     subagents: Vec<AgentSnapshot>,
     active_only: bool,
 ) -> Vec<AgentListRow> {
     use std::collections::BTreeMap;
     let mut rows: BTreeMap<String, AgentListRow> = BTreeMap::new();
 
-    // Source 1: same-machine addressable peers.
-    if let Ok(entries) = std::fs::read_dir(peers_dir) {
-        for entry in entries.flatten() {
-            let dir = entry.path();
-            if !dir.is_dir() || !dir.join("chat-with-me").exists() {
-                continue; // not a dir, or not addressable (no inbox)
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            // A `.cursor-*` sibling = a poller has seeked this inbox = live.
-            let active = std::fs::read_dir(&dir).is_ok_and(|es| {
-                es.flatten()
-                    .any(|e| e.file_name().to_string_lossy().starts_with(".cursor"))
-            });
-            rows.insert(
-                name.clone(),
-                AgentListRow {
-                    name,
-                    active,
-                    kind: "peer".to_string(),
-                    pid: None,
-                    role: None,
-                },
-            );
+    // Source 1: addressable peers in the mailbox namespace. Liveness is not
+    // knowable from the namespace alone (a remote backend does not report it),
+    // so `active` is left `None` — the row is addressable, not "running".
+    for name in peers {
+        if name == self_name || name.is_empty() {
+            continue; // an agent is not its own peer
         }
+        rows.entry(name.clone()).or_insert_with(|| AgentListRow {
+            name: name.clone(),
+            active: None,
+            kind: "peer".to_string(),
+            pid: None,
+            role: None,
+        });
     }
 
     // Source 2: sub-agents this process spawned (running/backgrounded).
@@ -2061,14 +2060,14 @@ pub fn merge_agent_list(
             .entry(snap.name.clone())
             .or_insert_with(|| AgentListRow {
                 name: snap.name.clone(),
-                active,
+                active: Some(active),
                 kind: "subagent".to_string(),
                 pid: Some(snap.agent_id.clone()),
                 role: role.clone(),
             });
         // A pid-bearing (active) worker wins a name collision with a peer row.
         if active {
-            entry.active = true;
+            entry.active = Some(true);
             entry.pid = Some(snap.agent_id.clone());
             entry.kind = "subagent".to_string();
             if entry.role.is_none() {
@@ -2079,10 +2078,15 @@ pub fn merge_agent_list(
 
     let mut out: Vec<AgentListRow> = rows.into_values().collect();
     if active_only {
-        out.retain(|r| r.active);
+        // Only positively-running rows; unknown-liveness peers are not "active".
+        out.retain(|r| r.active == Some(true));
     }
-    // Active first, then by name for stable output.
-    out.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.cmp(&b.name)));
+    // Positively-active first, then by name for stable output.
+    out.sort_by(|a, b| {
+        let ak = a.active == Some(true);
+        let bk = b.active == Some(true);
+        bk.cmp(&ak).then_with(|| a.name.cmp(&b.name))
+    });
     out
 }
 
@@ -9212,26 +9216,13 @@ mod tests {
     }
 
     #[test]
-    fn merge_agent_list_marks_addressable_peers_and_live_and_running_subagents() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agent-list-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let peers = tmp.join("agents");
-        // peer "alice": addressable (has inbox) + live (has .cursor-*)
-        let alice = peers.join("alice");
-        std::fs::create_dir_all(&alice).unwrap();
-        std::fs::write(alice.join("chat-with-me"), b"").unwrap();
-        std::fs::write(alice.join(".cursor-alice"), b"0").unwrap();
-        // peer "bob": addressable but offline (inbox, no cursor)
-        let bob = peers.join("bob");
-        std::fs::create_dir_all(&bob).unwrap();
-        std::fs::write(bob.join("chat-with-me"), b"").unwrap();
-        // a stray dir with no inbox must be ignored
-        std::fs::create_dir_all(peers.join("not-an-agent")).unwrap();
+    fn merge_agent_list_lists_peers_and_running_subagents() {
+        // Peers come from the mailbox namespace (names), not a probed filename.
+        let peers = vec![
+            "alice".to_string(),
+            "bob".to_string(),
+            "me".to_string(), // self — must be filtered out
+        ];
 
         // one running sub-agent (own name, distinct from peers)
         let subagents = vec![super::AgentSnapshot {
@@ -9244,25 +9235,29 @@ mod tests {
             created_at: "2026-09-23T00:00:00Z".to_string(),
         }];
 
-        let rows = super::merge_agent_list(&peers, subagents, false);
+        let rows = super::merge_agent_list(&peers, "me", subagents, false);
         let by: std::collections::BTreeMap<_, _> =
             rows.iter().map(|r| (r.name.as_str(), r)).collect();
 
-        assert!(!by.contains_key("not-an-agent"), "no inbox → not listed");
-        assert_eq!(by["alice"].active, true, "alice has a cursor → live");
+        assert!(!by.contains_key("me"), "self is not its own peer");
+        // A peer is addressable; liveness is unknown from the namespace → None.
+        assert_eq!(by["alice"].active, None, "peer liveness unknown");
         assert_eq!(by["alice"].kind, "peer");
-        assert_eq!(by["bob"].active, false, "bob has no cursor → offline");
-        assert_eq!(by["researcher"].active, true);
+        assert!(by["alice"].pid.is_none());
+        assert_eq!(by["bob"].active, None);
+        // A running sub-agent is positively active, with its pid + role.
+        assert_eq!(by["researcher"].active, Some(true));
         assert_eq!(by["researcher"].kind, "subagent");
         assert_eq!(by["researcher"].pid.as_deref(), Some("pid-123"));
         assert_eq!(by["researcher"].role.as_deref(), Some("Explore"));
-        // active_only drops the offline peer.
-        let active = super::merge_agent_list(&peers, Vec::new(), true);
-        assert!(active.iter().all(|r| r.active));
-        assert!(active.iter().any(|r| r.name == "alice"));
-        assert!(!active.iter().any(|r| r.name == "bob"));
 
-        std::fs::remove_dir_all(&tmp).ok();
+        // active_only keeps only positively-running rows (not unknown peers).
+        let active = super::merge_agent_list(&peers, "me", Vec::new(), true);
+        assert!(active.iter().all(|r| r.active == Some(true)));
+        assert!(
+            !active.iter().any(|r| r.name == "alice"),
+            "unknown-liveness peer is not 'active'"
+        );
     }
 
     ///

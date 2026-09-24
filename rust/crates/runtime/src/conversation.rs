@@ -1664,6 +1664,23 @@ where
             self.hook_progress_reporter = None;
         }
         self.api_client.set_retry_sink(None);
+        // A completed turn is a durable fact, so the ENGINE records it rather
+        // than each host remembering to after calling in. The CLI did it from
+        // its call site, and the co-host — a later caller of the same engine —
+        // simply did not have that line: it ran real turns and kept the whole
+        // transcript in memory, so nothing survived the agent.
+        //
+        // Here it is true by construction for any host, present or future. Only
+        // on success, which is the behaviour the CLI's call site had: a failed
+        // turn leaves the session as the close-time save finds it, rather than
+        // committing a half-turn as though it completed.
+        if summary.is_ok() {
+            if let Some(path) = self.session.persistence_path() {
+                self.session.save_to_path(path).map_err(|error| {
+                    RuntimeError::new(format!("failed to persist session: {error}"))
+                })?;
+            }
+        }
         summary
     }
 

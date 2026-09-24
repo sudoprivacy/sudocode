@@ -783,13 +783,9 @@ impl engine_core::EngineDelegate for SessionEngine {
             Some(observer),
         ))?;
 
-        let path = session.handle.path.clone();
-        session
-            .runtime
-            .session()
-            .save_to_path(&path)
-            .map_err(|e| runtime::RuntimeError::new(format!("failed to persist session: {e}")))?;
-
+        // No save here: `run_turn_with_blocks` persists a completed turn itself,
+        // so every host gets it — which is the point, since the co-host is the
+        // host that did not have this line.
         Ok(engine_core::TurnComplete {
             iterations: turn_summary.iterations,
             turn_usage: turn_summary.turn_usage,

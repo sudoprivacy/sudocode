@@ -558,16 +558,21 @@ impl Mailbox {
                 .map_err(|e| format!("mailbox send to {path}: {e}"));
         }
 
-        // Non-framed backend (StdFs): a message is one JSONL line at the
-        // conversation's transcript path, written through the one
-        // envelope-line writer so the format has a single definition.
+        // Non-framed transcript: a message is one JSONL line at the
+        // conversation's transcript path, written through the one envelope-line
+        // writer so the format has a single definition — and through THIS
+        // mailbox's backend, so it lands in the same filesystem the reader is
+        // reading. Which shape a transcript has is not a property of the
+        // backend: a kernel-backed conversation whose stream could not be
+        // created is byte-addressed too, and writing that line to the host disk
+        // put the reply somewhere its peer could never look.
         //
         // No second arm any more. There used to be one for `SharedStream`,
         // which returned "not an append stream — inbox not provisioned" — but
         // that variant was describing a conversation (both parties reading and
         // writing one log) as if it were a special case, and with conventions
         // collapsed there is exactly one shape to write.
-        crate::agent_mailbox::append_envelope_to_path(&path, envelope).map(|_| ())
+        crate::agent_mailbox::append_envelope_via(self.backend.as_ref(), &path, envelope)
     }
 
     /// Read new messages from own inbox starting at `cursor`.
@@ -687,7 +692,14 @@ impl Mailbox {
             let (envs, _cursor) = self.poll_stream(&path, 0, 0)?;
             Ok(envs)
         } else {
-            crate::agent_mailbox::read_all_from_path(&path)
+            // Through the backend, for the same reason the write is: the
+            // transcript of a kernel-backed conversation is not on host disk.
+            match self.backend.read(&path) {
+                Ok(bytes) => Ok(crate::agent_mailbox::parse_envelope_lines(&bytes)),
+                // Nothing written yet is an empty conversation, not a failure.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+                Err(e) => Err(format!("read conversation {path}: {e}")),
+            }
         }
     }
 

@@ -2995,6 +2995,10 @@ fn run_repl_iocraft_dispatch(
     // Route LiveCli output through iocraft's OutputSender so it goes
     // through split_for_iocraft and renders correctly in raw mode.
     cli.iocraft_output = Some(repl_output.clone());
+    // Taken before `cli` moves into the shared lock, and used by the local
+    // mailbox poller below: reading it back through the lock would have the
+    // coordinator thread contend with every turn for a value that cannot change.
+    let session_agent_name = cli.lifecycle.agent_name();
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
 
@@ -3030,22 +3034,19 @@ fn run_repl_iocraft_dispatch(
 
     // Local same-machine mailbox poller: picks up messages that a peer scode
     // (or a sub-agent) writes to this process's inbox via the `send` tool.
-    // Rooted at the shared per-machine pair root and keyed by this process's
-    // resolved agent name (config `agentName`, else derived from the workspace
-    // path), so two scode processes started in different folders can converse.
-    // Complements the nexus A2A poller above — together they close the receive
-    // loop for both local and cross-machine messaging.
+    // Rooted at the shared per-machine pair root and keyed by the name the LIVE
+    // SESSION answers to, so two scode processes started in different folders
+    // can converse. Complements the nexus A2A poller above — together they
+    // close the receive loop for both local and cross-machine messaging.
+    //
+    // The name comes from the session rather than being re-derived here: the
+    // session already resolved it (config `agentName`, else derived from its
+    // workspace) and signs outbound messages with it, and a second derivation
+    // from the process directory is how a peer's reply arrives at an inbox
+    // nothing is polling.
     {
         let coord_tx_local = coord_tx.clone();
-        let cwd = env::current_dir().unwrap_or_default();
-        let configured_name = runtime::ConfigLoader::default_for(&cwd)
-            .load()
-            .ok()
-            .and_then(|rc| {
-                rc.get("agentName")
-                    .and_then(|v| v.as_str().map(str::to_string))
-            });
-        let self_name = runtime::mailbox::local_agent_name(configured_name.as_deref(), &cwd);
+        let self_name = session_agent_name;
         let root = runtime::mailbox::local_pair_root();
         let _local_poller = runtime::mailbox::spawn_local_poller(
             root,

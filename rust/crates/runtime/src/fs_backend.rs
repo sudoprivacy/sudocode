@@ -57,6 +57,8 @@ pub enum ManagedRoot {
     SubAgents,
     /// Remembered context.
     Memory,
+    /// The session's todo list.
+    Todos,
 }
 
 /// Names of the per-agent subtrees sudocode creates under the agents base.
@@ -945,6 +947,10 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
             // daemon's own directory, which every co-hosted agent shares.
             ManagedRoot::SubAgents => self.agent_subtree(SUBAGENTS_SEGMENT),
             ManagedRoot::Memory => self.agent_subtree(MEMORY_SEGMENT),
+            // Beside the agent's other state rather than in a subtree of its
+            // own: a todo list is one small file, and a directory per file is a
+            // namespace nobody browses.
+            ManagedRoot::Todos => self.agent_subtree(""),
         }
     }
 

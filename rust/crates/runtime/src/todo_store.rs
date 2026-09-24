@@ -43,26 +43,51 @@ pub struct Todo {
 }
 
 /// Whole-list todo store. Cloneable handle over shared state.
-#[derive(Debug, Clone, Default)]
+///
+/// Built per use, not once per process: a daemon hosts many agents and an ACP
+/// process serves many sessions, and a single global handed all of them the same
+/// list. Every mutation persists, so a fresh handle over the same path is the
+/// same store.
+#[derive(Clone, Default)]
 pub struct TodoStore {
     inner: Arc<Mutex<StoreInner>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct StoreInner {
     todos: Vec<Todo>,
     store_path: Option<PathBuf>,
+    /// Where a save goes. `None` is the host disk, which is what a store built
+    /// without one has always meant.
+    fs: Option<Arc<dyn crate::fs_backend::FsBackend>>,
 }
 
-/// Resolve the on-disk store path for todo persistence.
+/// The file a todo list is persisted to.
 ///
-/// Priority: `$SUDOCODE_TODO_STORE`, then `<workspace_root>/.sudocode-todos.json`.
-pub fn todo_store_path() -> Result<PathBuf, String> {
+/// One name for both hosts; only the directory differs, which is the whole
+/// difference between a CLI session and a co-hosted one.
+const TODO_FILE: &str = ".sudocode-todos.json";
+
+/// Resolve the store path for todo persistence.
+///
+/// Priority: `$SUDOCODE_TODO_STORE`, then the root `fs` gives for
+/// [`ManagedRoot::Todos`], then `<fs working root>/.sudocode-todos.json`.
+///
+/// Asking the backend is what stops a co-hosted agent's list from landing on the
+/// daemon's local disk at a path derived from the daemon's own directory — which
+/// every co-hosted agent shares, so they were overwriting each other's todos.
+pub fn todo_store_path(fs: &dyn crate::fs_backend::FsBackend) -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("SUDOCODE_TODO_STORE") {
         return Ok(PathBuf::from(path));
     }
-    let cwd = crate::current_workspace_root().map_err(|error| error.to_string())?;
-    Ok(cwd.join(".sudocode-todos.json"))
+    if let Some(root) = fs.managed_root(crate::fs_backend::ManagedRoot::Todos) {
+        return Ok(PathBuf::from(root).join(TODO_FILE));
+    }
+    // The session's own working root, not the process's: one rule ("ask the
+    // filesystem") rather than two sources for where the workspace is, which for
+    // a host-spelled kernel session are not the same directory.
+    let root = fs.working_root().map_err(|error| error.to_string())?;
+    Ok(PathBuf::from(root).join(TODO_FILE))
 }
 
 impl TodoStore {
@@ -74,8 +99,9 @@ impl TodoStore {
     /// Load a persisted list from `path`. A missing / unreadable / unparseable
     /// file yields an empty store bound to that path (not an error).
     #[must_use]
-    pub fn load(path: &Path) -> Self {
-        let todos = std::fs::read_to_string(path)
+    pub fn load(path: &Path, fs: Arc<dyn crate::fs_backend::FsBackend>) -> Self {
+        let todos = fs
+            .read_to_string(&path.to_string_lossy())
             .ok()
             .and_then(|text| serde_json::from_str::<Vec<Todo>>(&text).ok())
             .unwrap_or_default();
@@ -83,6 +109,7 @@ impl TodoStore {
             inner: Arc::new(Mutex::new(StoreInner {
                 todos,
                 store_path: Some(path.to_owned()),
+                fs: Some(fs),
             })),
         }
     }
@@ -126,13 +153,25 @@ impl TodoStore {
         let Some(path) = &inner.store_path else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let body = serde_json::to_string_pretty(&inner.todos).unwrap_or_default();
+        let path = path.to_string_lossy();
+        // Through the store's own filesystem when it has one, so a co-hosted
+        // agent's list lands where its path says rather than on the daemon's
+        // disk. `None` is the host, which is every caller that predates this.
+        match &inner.fs {
+            Some(fs) => {
+                if let Some(parent) = std::path::Path::new(path.as_ref()).parent() {
+                    let _ = fs.create_dir_all(&parent.to_string_lossy());
+                }
+                let _ = fs.write(&path, body.as_bytes());
+            }
+            None => {
+                if let Some(parent) = std::path::Path::new(path.as_ref()).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path.as_ref(), body);
+            }
         }
-        let _ = std::fs::write(
-            path,
-            serde_json::to_string_pretty(&inner.todos).unwrap_or_default(),
-        );
     }
 }
 
@@ -195,13 +234,13 @@ mod tests {
         let path = dir.join("todos.json");
         let _ = std::fs::remove_file(&path);
 
-        let store = TodoStore::load(&path);
+        let store = TodoStore::load(&path, Arc::new(crate::fs_backend::StdFsBackend));
         store.set(vec![
             todo("first", TodoStatus::Completed),
             todo("second", TodoStatus::InProgress),
         ]);
 
-        let reloaded = TodoStore::load(&path);
+        let reloaded = TodoStore::load(&path, Arc::new(crate::fs_backend::StdFsBackend));
         let list = reloaded.list();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].content, "first");
@@ -215,7 +254,7 @@ mod tests {
     fn load_missing_file_is_empty_not_error() {
         let path = std::env::temp_dir().join(format!("todo_missing_{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let store = TodoStore::load(&path);
+        let store = TodoStore::load(&path, Arc::new(crate::fs_backend::StdFsBackend));
         assert!(store.is_empty());
     }
 }

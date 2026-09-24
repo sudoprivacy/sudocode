@@ -306,6 +306,12 @@ fn a_backend_roots_every_concern_it_imposes_a_namespace_for() {
         "and so does its memory — keyed by the agent, not by a directory every \
          agent on the daemon would share"
     );
+    assert_eq!(
+        cohost.managed_root(ManagedRoot::Todos).as_deref(),
+        Some("/agents/scode-agent"),
+        "a todo list is one small file, so it sits beside the agent's other state \
+         rather than in a directory of its own"
+    );
 
     // The CLI's own backend: host-spelled, so it imposes no namespace for any of
     // them and each stays where its own tooling looks.
@@ -317,6 +323,7 @@ fn a_backend_roots_every_concern_it_imposes_a_namespace_for() {
         ManagedRoot::Sessions,
         ManagedRoot::SubAgents,
         ManagedRoot::Memory,
+        ManagedRoot::Todos,
     ] {
         assert_eq!(
             host.fs.managed_root(concern),

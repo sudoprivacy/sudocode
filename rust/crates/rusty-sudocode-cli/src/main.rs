@@ -2985,7 +2985,10 @@ fn run_repl_iocraft_dispatch(
 
     // Spawn the iocraft REPL UI on a dedicated thread, then decompose the
     // handle so `input_rx` can be forwarded into the unified event channel.
-    let repl = repl_ui::spawn_repl_ui(&permission_label, &banner);
+    // The panel starts from whatever the session's filesystem has persisted —
+    // its own, so a resumed session shows its todos and not the CLI's cwd.
+    let seed_todos = tools::todo_list(&cli.lifecycle.session_snapshot().fs_handle());
+    let repl = repl_ui::spawn_repl_ui(&permission_label, &banner, seed_todos);
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
     if let Some(status) = resume_status {
         repl_ui_cmd.set_turn_result(&status);
@@ -4115,7 +4118,14 @@ impl LiveCli {
                     if let Some(ui) = ui {
                         if !*is_error && tools::canonicalize_tool_name(name).as_str() == "TodoWrite"
                         {
-                            ui.update_context(tools::global_todo_list());
+                            // From the result itself — the list is in the
+                            // output we are holding. Re-reading a store here
+                            // was the side-channel this comment disclaims, and
+                            // it read the CLI's own disk even when the session
+                            // wrote somewhere else.
+                            if let Some(todos) = tools::todos_from_tool_result(output) {
+                                ui.update_context(todos);
+                            }
                         }
                         // Staging overlay: this call is done — clear its running
                         // yellow card. The finished (green/red) card is written
@@ -4287,7 +4297,10 @@ impl LiveCli {
                  plan below is the source of truth. Implement it now.\n\n",
             );
             prompt.push_str(&plan);
-            if let Some(todo_block) = runtime::render_todo_continuity_block() {
+            // Through the session's filesystem, like the automatic compaction
+            // this mirrors: the list is the session's, not the process's.
+            let fs = self.lifecycle.session_snapshot().fs_handle();
+            if let Some(todo_block) = runtime::render_todo_continuity_block(fs) {
                 prompt.push_str("\n\n");
                 prompt.push_str(&todo_block);
             }

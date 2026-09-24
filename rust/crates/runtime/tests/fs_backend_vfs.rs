@@ -358,3 +358,55 @@ fn glob_and_grep_walk_the_vfs_trie() {
     let grepped = grep_search(&fs, &grep_input("needle", root)).expect("VFS grep should succeed");
     assert_eq!(grepped.num_files, 2, "grep should match a.rs and sub/c.rs");
 }
+/// Two co-hosted agents on one daemon keep their own todo list.
+///
+/// Both halves mattered: the path was derived from the daemon's directory (one
+/// file for every agent), and the store itself was a process-wide `OnceLock`
+/// (one list object for every agent, whoever resolved a path first).
+#[test]
+fn two_cohosted_agents_do_not_share_one_todo_list() {
+    use runtime::{Todo, TodoStatus, TodoStore};
+
+    let kernel = kernel_with_root_backend();
+    let agent = |name: &str| -> Arc<dyn FsBackend> {
+        Arc::new(KernelFsBackend::for_agent(
+            Arc::clone(&kernel),
+            "test-owner",
+            "root",
+            name,
+            "/ws",
+        ))
+    };
+    let (alice, bob) = (agent("alice"), agent("bob"));
+
+    let alice_path = runtime::todo_store_path(alice.as_ref()).expect("alice's store path");
+    let bob_path = runtime::todo_store_path(bob.as_ref()).expect("bob's store path");
+    // `Path::join` writes a host separator; every backend entry point collapses
+    // it back to the VFS spelling, so the comparison is against the VFS form.
+    let norm = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+    assert_eq!(norm(&alice_path), "/agents/alice/.sudocode-todos.json");
+    assert_ne!(
+        alice_path, bob_path,
+        "each agent's list is keyed by the agent, not by a directory they share"
+    );
+
+    TodoStore::load(&alice_path, Arc::clone(&alice)).set(vec![Todo {
+        content: String::from("Run the tests"),
+        status: TodoStatus::InProgress,
+        active_form: String::from("Running the tests"),
+    }]);
+
+    assert_eq!(
+        TodoStore::load(&alice_path, Arc::clone(&alice))
+            .list()
+            .len(),
+        1,
+        "a fresh handle over the same path is the same store — the write persisted"
+    );
+    assert!(
+        TodoStore::load(&bob_path, Arc::clone(&bob))
+            .list()
+            .is_empty(),
+        "and bob's list is untouched by alice's write"
+    );
+}

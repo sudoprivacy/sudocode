@@ -245,27 +245,29 @@ fn global_cron_registry() -> &'static CronRegistry {
     })
 }
 
-fn global_todo_store() -> &'static TodoStore {
-    use std::sync::OnceLock;
-    static STORE: OnceLock<TodoStore> = OnceLock::new();
-    STORE.get_or_init(|| {
-        if let Ok(path) = runtime::todo_store::todo_store_path() {
-            TodoStore::load(&path)
-        } else {
-            TodoStore::new()
-        }
-    })
+/// The todo store for this session, opened per call on `fs`.
+///
+/// Not a process global: `todo_store_path` answers per filesystem, and a
+/// `OnceLock` resolved it once for the whole process — so a daemon hosting
+/// several co-hosted agents gave them all one list, whichever agent asked
+/// first. Every mutation persists immediately, so a fresh handle over the same
+/// path is the same store and nothing in-memory is lost by opening one per call.
+fn todo_store(fs: &Arc<dyn FsBackend>) -> TodoStore {
+    match runtime::todo_store::todo_store_path(fs.as_ref()) {
+        Ok(path) => TodoStore::load(&path, Arc::clone(fs)),
+        Err(_) => TodoStore::new(),
+    }
+}
+
+/// The persisted todo list on `fs`. Used to seed a REPL's context panel at
+/// startup, before any turn has produced a `TodoWrite` result to read.
+pub fn todo_list(fs: &Arc<dyn FsBackend>) -> Vec<runtime::Todo> {
+    todo_store(fs).list()
 }
 
 /// Global auth mode set by the CLI at startup. Subagents inherit this so they
 /// use the same credential path as the main agent.
 static GLOBAL_AUTH_MODE: std::sync::OnceLock<api::AuthMode> = std::sync::OnceLock::new();
-
-/// Return the current todo list from the global store. Used by the CLI to push
-/// todo state to the ContextSlot after a TodoWrite.
-pub fn global_todo_list() -> Vec<runtime::Todo> {
-    global_todo_store().list()
-}
 
 /// Called by the CLI at startup to set the auth mode for the entire process.
 /// Subagents automatically inherit this unless explicitly overridden.
@@ -1690,7 +1692,9 @@ fn execute_tool_with_enforcer(
         "AskUserQuestion" => {
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
         }
-        "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
+        "TodoWrite" => {
+            from_value::<TodoWriteInput>(input).and_then(|input| run_todo_write(input, fs))
+        }
         // The pid.* family — agent process control.
         "pid_kill" => {
             let input = normalize_pid_input(input);
@@ -1858,7 +1862,7 @@ fn run_ask_user_question_v2(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
+fn run_todo_write(input: TodoWriteInput, fs: &Arc<dyn FsBackend>) -> Result<String, String> {
     use runtime::todo_store::TodoStatus;
 
     let todos: Vec<runtime::Todo> = input.todos.into_iter().map(Into::into).collect();
@@ -1875,12 +1879,21 @@ fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
     }
     let verification_streak_nudge = runtime::verification_watcher::should_nudge_and_consume();
 
-    let saved = global_todo_store().set(todos);
+    let saved = todo_store(fs).set(todos);
     let mut result = json!({ "todos": saved });
     if let Some(nudge) = verification_streak_nudge {
         result["verificationStreakNudge"] = json!(nudge);
     }
     to_pretty_json(result)
+}
+
+/// The todo list a successful `TodoWrite` result carries, if it is one.
+///
+/// The key is spelled once, beside the `run_todo_write` that writes it, so a
+/// renderer reading the list back cannot drift from the tool that produced it.
+pub fn todos_from_tool_result(output: &str) -> Option<Vec<runtime::Todo>> {
+    let value: Value = serde_json::from_str(output).ok()?;
+    serde_json::from_value(value.get("todos")?.clone()).ok()
 }
 
 fn run_pid_status(input: Value, fs: &dyn FsBackend) -> Result<String, String> {
@@ -3380,7 +3393,7 @@ fn run_write_file(input: WriteFileInput, fs: &dyn FsBackend) -> Result<String, S
     let actual_path = match intent {
         runtime::FileIntent::Draft => {
             let workspace_root = std::path::PathBuf::from(fs.working_root().unwrap_or_default());
-            runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
+            runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root, fs)
         }
         runtime::FileIntent::Final => std::path::PathBuf::from(&input.path),
     };
@@ -3411,7 +3424,7 @@ fn run_edit_file(input: EditFileInput, fs: &dyn FsBackend) -> Result<String, Str
     let actual_path = if intent == runtime::FileIntent::Draft
         && !runtime::is_in_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
     {
-        runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
+        runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root, fs)
     } else {
         std::path::PathBuf::from(&input.path)
     };

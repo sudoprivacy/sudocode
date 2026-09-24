@@ -2859,7 +2859,8 @@ where
     /// Returns paths of cleaned files.
     pub fn cleanup_current_turn_drafts(&mut self) -> Vec<std::path::PathBuf> {
         if let Some(turn_id) = self.current_turn_id.clone() {
-            self.file_tracker.cleanup_turn_drafts(&turn_id)
+            self.file_tracker
+                .cleanup_turn_drafts(&turn_id, self.session.fs_handle().as_ref())
         } else {
             Vec::new()
         }
@@ -2869,7 +2870,8 @@ where
     /// Returns error messages for failed operations.
     pub fn rollback_current_turn(&mut self) -> Vec<String> {
         if let Some(turn_id) = self.current_turn_id.clone() {
-            self.file_tracker.rollback_turn(&turn_id)
+            self.file_tracker
+                .rollback_turn(&turn_id, self.session.fs_handle().as_ref())
         } else {
             Vec::new()
         }

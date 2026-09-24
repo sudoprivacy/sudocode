@@ -839,7 +839,20 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
                 let next = result
                     .stream_next_offset
                     .map(|n| n as u64)
-                    .unwrap_or(cursor);
+                    // A DT_STREAM reports where its next RECORD begins. A
+                    // byte-addressed entry has no record offset to report, so
+                    // the next cursor is what this read consumed — which is the
+                    // contract `StdFsBackend::tail_read` already answers by
+                    // returning the file's new length.
+                    //
+                    // Returning `cursor` unchanged here meant a reader could
+                    // never advance past a byte-addressed conversation, so every
+                    // poll re-delivered the same envelope: the re-delivery storm,
+                    // measured at 1044 turns in 60 seconds. It is not a corner
+                    // case — a conversation degrades to a DT_REG whenever its
+                    // `"wal"` stream cannot be created, which is any daemon
+                    // without federation wired.
+                    .unwrap_or_else(|| cursor + payload.len() as u64);
                 Ok((payload, next, false))
             }
             _ => Ok((vec![], cursor, true)),

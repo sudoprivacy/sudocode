@@ -1478,6 +1478,7 @@ dependencies = [
  "engine-core",
  "kernel",
  "managed-agent",
+ "mock-anthropic-service",
  "nexus-vfs-client",
  "plugins",
  "runtime",

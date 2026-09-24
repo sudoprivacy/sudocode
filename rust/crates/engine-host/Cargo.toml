@@ -57,8 +57,15 @@ commands = { path = "../commands" }
 [dev-dependencies]
 # `send_message_routing` drives the executor's async trait method to
 # completion and needs a workspace to prove the local delivery path.
-tokio = { version = "1", features = ["rt", "macros"] }
+#
+# `rt-multi-thread`: the scripted model runs on its own runtime while the agent
+# loop blocks a test thread waiting for it, so a current-thread runtime would
+# deadlock the two against each other.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 tempfile = "3"
+# `cohost_mock_llm` stands the co-host up against a scripted model, so the
+# co-host has a CI gate that needs no API key and no network beyond loopback.
+mock-anthropic-service = { path = "../mock-anthropic-service" }
 
 [lints]
 workspace = true

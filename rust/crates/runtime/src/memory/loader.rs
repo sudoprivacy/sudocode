@@ -9,6 +9,7 @@ use std::process::Command;
 
 use super::entry::MemoryEntry;
 use super::index::ParsedIndex;
+use crate::fs_backend::FsBackend;
 
 pub const MEMORY_DIR_ENV: &str = "SUDOCODE_MEMORY_DIR";
 pub const MEMORY_INDEX_FILE: &str = "MEMORY.md";
@@ -106,8 +107,8 @@ fn agent_memory_base_dir(cwd: &Path) -> PathBuf {
 /// Ensure the memory directory exists, creating it (and parents) if needed.
 /// Errors are silently ignored — a missing directory simply means no
 /// memory will be loaded.
-pub fn ensure_memory_dir_exists(dir: &Path) {
-    let _ = std::fs::create_dir_all(dir);
+pub fn ensure_memory_dir_exists(dir: &Path, fs: &dyn FsBackend) {
+    let _ = fs.create_dir_all(&dir.to_string_lossy());
 }
 
 /// Find the canonical git root for a directory by running
@@ -177,9 +178,9 @@ fn format_radix_36(mut n: u64) -> String {
 }
 
 /// Load and parse `MEMORY.md` from the given directory, if present.
-pub fn load_index(memory_dir: &Path) -> std::io::Result<Option<ParsedIndex>> {
+pub fn load_index(memory_dir: &Path, fs: &dyn FsBackend) -> std::io::Result<Option<ParsedIndex>> {
     let path = memory_dir.join(MEMORY_INDEX_FILE);
-    match std::fs::read_to_string(&path) {
+    match fs.read_to_string(&path.to_string_lossy()) {
         Ok(raw) => {
             let mut parsed = ParsedIndex::parse(raw);
             parsed.path = Some(path);
@@ -195,23 +196,19 @@ pub fn load_index(memory_dir: &Path) -> std::io::Result<Option<ParsedIndex>> {
 ///
 /// Files that fail to parse are skipped — a corrupt entry should not break
 /// loading the rest of the memory store.
-pub fn load_entries(memory_dir: &Path) -> std::io::Result<Vec<MemoryEntry>> {
+pub fn load_entries(memory_dir: &Path, fs: &dyn FsBackend) -> std::io::Result<Vec<MemoryEntry>> {
     let mut entries = Vec::new();
-    let read_dir = match std::fs::read_dir(memory_dir) {
-        Ok(rd) => rd,
+    let listing = match fs.readdir(&memory_dir.to_string_lossy()) {
+        Ok(listing) => listing,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
         Err(err) => return Err(err),
     };
 
-    for dir_entry in read_dir {
-        let dir_entry = dir_entry?;
-        let path = dir_entry.path();
-        if !path.is_file() {
+    for dir_entry in listing {
+        if dir_entry.is_dir {
             continue;
         }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
+        let name = dir_entry.name.as_str();
         if name.starts_with('.') {
             continue;
         }
@@ -221,7 +218,8 @@ pub fn load_entries(memory_dir: &Path) -> std::io::Result<Vec<MemoryEntry>> {
         if !name.to_ascii_lowercase().ends_with(".md") {
             continue;
         }
-        if let Ok(entry) = MemoryEntry::from_file(&path) {
+        let path = memory_dir.join(name);
+        if let Ok(entry) = MemoryEntry::from_file(&path, fs) {
             entries.push(entry);
         }
     }
@@ -232,6 +230,7 @@ pub fn load_entries(memory_dir: &Path) -> std::io::Result<Vec<MemoryEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs_backend::StdFsBackend;
     use crate::memory::ENV_LOCK;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -307,7 +306,7 @@ mod tests {
             "---\nname: good\ndescription: a good entry\nmetadata:\n  type: user\n---\nbody\n",
         )
         .unwrap();
-        let entries = load_entries(&dir).expect("load entries");
+        let entries = load_entries(&dir, &StdFsBackend).expect("load entries");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "good");
         fs::remove_dir_all(dir).ok();
@@ -316,7 +315,7 @@ mod tests {
     #[test]
     fn load_index_returns_none_when_missing() {
         let dir = temp_dir("noindex");
-        assert!(load_index(&dir).expect("load").is_none());
+        assert!(load_index(&dir, &StdFsBackend).expect("load").is_none());
         fs::remove_dir_all(dir).ok();
     }
 
@@ -405,7 +404,7 @@ mod tests {
         let dir = std::env::temp_dir().join("runtime-memory-does-not-exist-xyz");
         // Ensure it really doesn't exist.
         fs::remove_dir_all(&dir).ok();
-        let entries = load_entries(&dir).expect("missing dir is empty");
+        let entries = load_entries(&dir, &StdFsBackend).expect("missing dir is empty");
         assert!(entries.is_empty());
     }
 }

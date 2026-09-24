@@ -358,6 +358,63 @@ fn glob_and_grep_walk_the_vfs_trie() {
     let grepped = grep_search(&fs, &grep_input("needle", root)).expect("VFS grep should succeed");
     assert_eq!(grepped.num_files, 2, "grep should match a.rs and sub/c.rs");
 }
+/// Memory is READ through the backend, so a co-hosted agent recalls what is in
+/// its own subtree of the VFS.
+///
+/// The directory already came from `managed_root`; the reading did not. The
+/// provider handed `/agents/agent-x/memory` to `std::fs`, which names nothing on
+/// any host — so memory was silently empty for every co-hosted agent, with the
+/// files sitting in the VFS where nobody looked. The host path is asserted
+/// absent for the same reason this file uses `/ws`: a regression back to the
+/// host filesystem fails here instead of passing by luck.
+#[test]
+fn memory_is_read_from_the_agents_own_vfs_subtree() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+
+    let dir = fs
+        .managed_root(runtime::ManagedRoot::Memory)
+        .expect("a co-hosted agent roots memory under itself");
+    assert_eq!(dir, "/agents/agent-x/memory");
+    fs.create_dir_all(&dir).expect("create the memory dir");
+    fs.write(
+        &format!("{dir}/MEMORY.md"),
+        b"- [One fact](one.md) - the hook
+",
+    )
+    .expect("write the index");
+    fs.write(
+        &format!("{dir}/one.md"),
+        b"---
+name: one
+description: the one fact
+metadata:
+  type: project
+---
+
+the body
+",
+    )
+    .expect("write the entry");
+
+    let index = runtime::memory::MemoryIndex::load(std::path::Path::new(&dir), &fs)
+        .expect("load memory through the backend");
+    assert_eq!(
+        index.entries().len(),
+        1,
+        "the entry written into the VFS is the entry recalled"
+    );
+    assert_eq!(index.entries()[0].name, "one");
+    assert!(
+        index.index().is_some(),
+        "MEMORY.md is read through the backend too, not just the entries"
+    );
+    assert!(
+        !std::path::Path::new(&dir).exists(),
+        "and none of it was written to the host filesystem"
+    );
+}
+
 /// Two co-hosted agents on one daemon keep their own todo list.
 ///
 /// Both halves mattered: the path was derived from the daemon's directory (one

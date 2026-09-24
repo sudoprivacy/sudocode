@@ -682,8 +682,11 @@ fn load_system_prompt_impl(
         agent_type,
         variant,
     );
-    let builder =
-        crate::memory::append_from_provider(builder_base, memory.provider().as_ref(), &memory_ctx);
+    let builder = crate::memory::append_from_provider(
+        builder_base,
+        memory.provider(fs).as_ref(),
+        &memory_ctx,
+    );
     Ok(builder.build())
 }
 

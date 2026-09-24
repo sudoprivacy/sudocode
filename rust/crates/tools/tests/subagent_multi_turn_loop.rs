@@ -31,15 +31,17 @@
 //! 6. **Max multi-turn cap → force-exit** — envelopes never stop
 //!    arriving; loop caps at N to prevent runaway.
 //!
-//! Every test writes envelopes with the SAME `agent_mailbox` API
-//! that production `SendMessage` uses (`append_envelope`), so the
-//! JSONL wire format is exercised end-to-end.
+//! Every test delivers envelopes through the SAME `Mailbox` conversation
+//! model that production `send` uses, so the sub-agent's inbound drain is
+//! exercised end-to-end over the one path — not the retired flat
+//! `.sudocode-inbox/<id>.jsonl` form.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use runtime::agent_mailbox::{self, kinds, MailboxEnvelope};
+use runtime::agent_mailbox::{kinds, MailboxEnvelope};
+use runtime::mailbox::Mailbox;
 use runtime::HookAbortSignal;
 use tools::testing::run_multi_turn_loop_for_test;
 
@@ -59,7 +61,7 @@ fn unique_workspace(label: &str) -> std::path::PathBuf {
 fn envelope(kind: &str, from: &str, text: &str) -> MailboxEnvelope {
     MailboxEnvelope {
         from: from.to_string(),
-        to: String::new(), // filled by append_envelope
+        to: String::new(), // filled by Mailbox::send
         body: text.to_string(),
         summary: None,
         timestamp: 0,
@@ -67,6 +69,18 @@ fn envelope(kind: &str, from: &str, text: &str) -> MailboxEnvelope {
         kind: kind.to_string(),
         request_id: None,
     }
+}
+
+/// Deliver an envelope to `agent_id` through the sender's own `Mailbox`,
+/// exactly as production `send` does: the sender writes to the shared
+/// per-pair conversation transcript that the sub-agent's loop drains. `env.to`
+/// is stamped to the recipient so both sides derive the same conversation id.
+fn send_to_agent(ws: &std::path::Path, agent_id: &str, mut env: MailboxEnvelope) {
+    let sender = env.from.clone();
+    env.to = agent_id.to_string();
+    Mailbox::workspace_local(ws, sender)
+        .send(env)
+        .expect("mailbox send to sub-agent");
 }
 
 #[test]
@@ -132,12 +146,11 @@ fn message_after_turn_1_triggers_synthetic_turn_2_then_exit() {
                 // Just after turn 1's `run_turn`, the loop drains
                 // the mailbox. Write an envelope BEFORE returning so
                 // the drain sees it.
-                agent_mailbox::append_envelope(
+                send_to_agent(
                     &ws_cb,
                     agent_id,
                     envelope(kinds::MESSAGE, "team-lead", "continue the plan"),
-                )
-                .expect("append envelope");
+                );
                 Ok(String::from("worker finished turn 1"))
             } else {
                 Ok(String::from("worker finished turn 2"))
@@ -189,12 +202,11 @@ fn shutdown_request_envelope_causes_immediate_exit_without_extra_turn() {
                 // Parent decided to stop the worker: writes a
                 // shutdown_request envelope. Loop must NOT run a
                 // second turn.
-                agent_mailbox::append_envelope(
+                send_to_agent(
                     &ws_cb,
                     agent_id,
                     envelope(kinds::SHUTDOWN_REQUEST, "team-lead", "stop now"),
-                )
-                .expect("append shutdown");
+                );
                 Ok(String::from("worker's last words"))
             } else {
                 panic!("shutdown_request must not trigger another turn");
@@ -234,12 +246,11 @@ fn abort_signal_after_turn_exits_without_draining_or_resuming() {
                 // drop a plain-text envelope onto the mailbox to
                 // prove abort wins over the envelope drain.
                 abort_cb.abort();
-                agent_mailbox::append_envelope(
+                send_to_agent(
                     &ws_cb,
                     agent_id,
                     envelope(kinds::MESSAGE, "team-lead", "irrelevant continuation"),
-                )
-                .expect("append envelope");
+                );
                 Ok(String::from("interrupted mid-work"))
             } else {
                 panic!("abort must prevent further turns");
@@ -277,18 +288,16 @@ fn two_envelopes_between_drains_are_folded_into_one_synth_turn() {
             prompts_cb.lock().unwrap().push(prompt);
             if idx == 0 {
                 // Two envelopes between turn 1 and turn 2.
-                agent_mailbox::append_envelope(
+                send_to_agent(
                     &ws_cb,
                     agent_id,
                     envelope(kinds::MESSAGE, "team-lead", "first follow-up"),
-                )
-                .expect("append 1");
-                agent_mailbox::append_envelope(
+                );
+                send_to_agent(
                     &ws_cb,
                     agent_id,
                     envelope(kinds::MESSAGE, "team-lead", "second follow-up"),
-                )
-                .expect("append 2");
+                );
             }
             Ok(format!("reply-{idx}"))
         },
@@ -334,12 +343,11 @@ fn max_multi_turns_cap_prevents_infinite_resume() {
         3,
         move |_prompt| {
             let idx = turn_count_cb.fetch_add(1, Ordering::SeqCst);
-            agent_mailbox::append_envelope(
+            send_to_agent(
                 &ws_cb,
                 agent_id,
                 envelope(kinds::MESSAGE, "spam", &format!("spam #{idx}")),
-            )
-            .expect("append spam");
+            );
             Ok(format!("reply-{idx}"))
         },
     )

@@ -5757,7 +5757,15 @@ fn run_multi_turn_loop<F>(
 where
     F: FnMut(String) -> Result<String, String>,
 {
-    let mut consumed_envelopes = 0usize;
+    // Same mailbox the sender writes to: one conversation model, one code
+    // path. The sub-agent's inbound receive used to read a second, flat
+    // `.sudocode-inbox/<id>.jsonl` path via `agent_mailbox::read_all` while
+    // `send` wrote conversation transcripts through `Mailbox` — so a message
+    // to a running sub-agent never arrived. Draining through `Mailbox` here
+    // closes that gap and retires the divergent path. The per-peer reader
+    // register persists the read position, so there is no in-memory cursor to
+    // lose across turns or a restart.
+    let mailbox = runtime::mailbox::Mailbox::workspace_local(workspace_root, agent_id.to_string());
     let mut current_prompt = initial_prompt;
     let mut last_final_text = String::new();
 
@@ -5768,24 +5776,39 @@ where
             return Ok(last_final_text);
         }
 
-        let envelopes =
-            runtime::agent_mailbox::read_all(workspace_root, agent_id).unwrap_or_default();
-        if envelopes.len() > consumed_envelopes {
-            let new_envelopes = &envelopes[consumed_envelopes..];
+        let new_envelopes = drain_mailbox_unread(&mailbox);
+        if !new_envelopes.is_empty() {
             let has_shutdown = new_envelopes
                 .iter()
                 .any(|env| env.kind == runtime::agent_mailbox::kinds::SHUTDOWN_REQUEST);
-            consumed_envelopes = envelopes.len();
             if has_shutdown {
                 return Ok(last_final_text);
             }
-            current_prompt = compose_next_turn_from_envelopes(new_envelopes);
+            current_prompt = compose_next_turn_from_envelopes(&new_envelopes);
             continue;
         }
 
         return Ok(last_final_text);
     }
     Ok(last_final_text)
+}
+
+/// Drain every unread envelope across all of this agent's conversations,
+/// advancing each conversation's persistent read register. Peers are visited
+/// in the chat list's sorted order so the synthesised prompt is deterministic.
+/// A per-conversation read error is skipped rather than aborting the whole
+/// drain — one unreadable peer must not deafen the agent to the rest.
+fn drain_mailbox_unread(
+    mailbox: &runtime::mailbox::Mailbox,
+) -> Vec<runtime::agent_mailbox::MailboxEnvelope> {
+    let peers = mailbox.list_conversations().unwrap_or_default();
+    let mut envelopes = Vec::new();
+    for peer in peers {
+        if let Ok(mut unread) = mailbox.take_unread(&peer) {
+            envelopes.append(&mut unread);
+        }
+    }
+    envelopes
 }
 
 /// Run one `ConversationRuntime::run_turn` call, handling the

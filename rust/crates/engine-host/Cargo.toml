@@ -28,6 +28,17 @@ plugins = { path = "../plugins" }
 # rather than the in-process co-host.
 managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
 tools = { path = "../tools" }
+# The standalone session's own kernel (`local_kernel`): a CLI session's file
+# tools reach a VFS, like the co-hosted agent's do, so neither host has hooks or
+# an audit trail the other lacks. Same nexus-vfs rev `runtime` and
+# `managed-agent` pin — a second rev would make `Kernel` two types and the
+# co-host's `SpawnTask<Kernel>` stop unifying.
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
+# `LocalConnectorBackend` — the reference-mode connector that mounts a host
+# directory without copying it, so the workspace files stay the source of truth.
+# Only that driver: the connector umbrella would drag an HTTP + crypto stack
+# into the CLI for backends a standalone session never mounts.
+backends = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false, features = ["driver-local-connector"] }
 # MCP discovery/dispatch drives an isolated Tokio runtime; tool payloads and the
 # degraded-server report serialize through serde_json.
 tokio = { version = "1", features = ["rt-multi-thread"] }
@@ -48,10 +59,6 @@ commands = { path = "../commands" }
 # completion and needs a workspace to prove the local delivery path.
 tokio = { version = "1", features = ["rt", "macros"] }
 tempfile = "3"
-# `cohost_live_llm` stands up a real in-process kernel to prove the
-# co-hosted agent's file tools and mailbox reach it. Same nexus-vfs rev
-# the runtime crate pins, so the transitive `kernel` unifies.
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
 
 [lints]
 workspace = true

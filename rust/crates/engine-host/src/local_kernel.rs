@@ -45,65 +45,32 @@ use runtime::{FsBackend, KernelFsBackend};
 /// the same way in the cluster.
 const ZONE: &str = "root";
 
-/// A booted single-session kernel and the filesystem the engine drives it by.
+/// Boot a kernel for a session rooted at `workspace`, also mounting
+/// `extra_roots`, and return the filesystem the engine drives it by.
 ///
-/// Held for the session's lifetime: the mounts and the metastore live in this
-/// `Kernel`, so dropping it drops the session's whole VFS. The engine only
-/// ever sees [`Self::fs`].
-pub struct LocalKernel {
-    /// Kept so the kernel outlives every backend handed out of here — a
-    /// `KernelFsBackend` holds an `Arc<Kernel>`, but the mounts are the
-    /// session's, not the backend's.
-    kernel: Arc<Kernel>,
-    fs: Arc<dyn FsBackend>,
-    workspace_root: String,
-}
-
-impl LocalKernel {
-    /// Boot a kernel for a session rooted at `workspace`, also mounting
-    /// `extra_roots`.
-    ///
-    /// `agent_name` becomes the operation context's identity — both principal
-    /// and actor, because a standalone session acts for itself, and that is
-    /// what the hooks and any audit row attribute the writes to.
-    pub fn boot(workspace: &Path, extra_roots: &[PathBuf], agent_name: &str) -> io::Result<Self> {
-        let kernel = Arc::new(Kernel::new());
-        let workspace_root = mount_host_root(&kernel, workspace)?;
-        for root in extra_roots {
-            mount_host_root(&kernel, root)?;
-        }
-        let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
-            Arc::clone(&kernel),
-            agent_name,
-            ZONE,
-            agent_name,
-            workspace_root.clone(),
-        ));
-        Ok(Self {
-            kernel,
-            fs,
-            workspace_root,
-        })
+/// The kernel itself is not returned and needs no keeper: the backend holds it,
+/// so the session's mounts and metastore live exactly as long as the filesystem
+/// the engine is using.
+///
+/// `agent_name` becomes the operation context's identity — both principal and
+/// actor, because a standalone session acts for itself, and that is what the
+/// hooks and any audit row attribute its writes to.
+pub fn boot_session_fs(
+    workspace: &Path,
+    extra_roots: &[PathBuf],
+    agent_name: &str,
+) -> io::Result<Arc<dyn FsBackend>> {
+    let kernel = Arc::new(Kernel::new());
+    let workspace_root = mount_host_root(&kernel, workspace)?;
+    for root in extra_roots {
+        mount_host_root(&kernel, root)?;
     }
-
-    /// The filesystem to hand the engine.
-    #[must_use]
-    pub fn fs(&self) -> Arc<dyn FsBackend> {
-        Arc::clone(&self.fs)
-    }
-
-    /// The session's workspace as a VFS path — what relative tool paths
-    /// resolve against, and what `glob` / `grep` default to.
-    #[must_use]
-    pub fn workspace_root(&self) -> &str {
-        &self.workspace_root
-    }
-
-    /// The kernel itself, for a host that needs more than a filesystem.
-    #[must_use]
-    pub fn kernel(&self) -> Arc<Kernel> {
-        Arc::clone(&self.kernel)
-    }
+    // Host spelling: a CLI session's files are host files, so the paths its
+    // tools report are the ones its user typed and its `bash` tool can open.
+    Ok(Arc::new(
+        KernelFsBackend::for_agent(kernel, agent_name, ZONE, agent_name, workspace_root)
+            .with_host_root(workspace.to_string_lossy().into_owned()),
+    ))
 }
 
 /// Mount host directory `root` into `kernel` and return its VFS path.

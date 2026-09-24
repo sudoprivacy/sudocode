@@ -91,9 +91,9 @@ impl HostContext {
         // afterwards would leave the kernel's view of who is writing and the
         // prompt's claim about who this is free to disagree.
         let agent_name = agent_name_under(&cwd);
-        let local = crate::local_kernel::LocalKernel::boot(&cwd, &extra_roots, &agent_name)?;
+        let fs = crate::local_kernel::boot_session_fs(&cwd, &extra_roots, &agent_name)?;
         Ok(Self {
-            fs: local.fs(),
+            fs,
             config_root: cwd,
             agent_name: Some(agent_name),
             mailbox: None,

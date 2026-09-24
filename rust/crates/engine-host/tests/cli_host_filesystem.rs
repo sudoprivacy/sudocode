@@ -61,8 +61,18 @@ fn a_session_reads_and_writes_the_real_files_in_its_workspace() {
     let host = HostContext::for_cli_session(&workspace).expect("boot the session host");
     let fs = &host.fs;
 
+    // The path a tool reports is the one the HOST spells. Not cosmetic: the
+    // model passes these paths to `bash`, which runs on the host and cannot
+    // open a VFS path.
+    let reported = fs.normalize("notes.txt").expect("normalize");
+    assert_eq!(
+        reported,
+        workspace.join("notes.txt").to_string_lossy(),
+        "a session should report host paths, not the VFS spelling underneath"
+    );
+
     let read = fs
-        .read_to_string(&fs.normalize("notes.txt").expect("normalize"))
+        .read_to_string(&reported)
         .expect("the workspace file is readable through the kernel");
     assert_eq!(read, "on disk\n");
 

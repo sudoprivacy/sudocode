@@ -608,6 +608,13 @@ pub struct ToolDispatchContext {
     /// at a time (which is how `agent_spawn` always runs); `None` inside a
     /// concurrent batch.
     pub tool_use_id: Option<String>,
+    /// The parent session's active permission mode. A spawned sub-agent runs
+    /// under this mode rather than an unconditional full-access policy, so a
+    /// read-only session spawns read-only workers and a workspace-write
+    /// session cannot escalate through a child. `None` when the caller is not
+    /// inside a parent tool loop (test harnesses, direct executor calls); the
+    /// spawn path then falls back to a conservative default.
+    pub parent_permission_mode: Option<crate::permissions::PermissionMode>,
 }
 
 impl ToolDispatchContext {
@@ -2125,6 +2132,7 @@ where
                 parent_routing_session_id: self.api_client.routing_session_id().map(str::to_string),
                 subagent_sink: observer.as_deref().and_then(RuntimeObserver::subagent_sink),
                 tool_use_id: None,
+                parent_permission_mode: Some(self.permission_policy.active_mode()),
             };
 
             let mut batch_start = 0usize;

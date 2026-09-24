@@ -64,6 +64,18 @@ fn envelope_with_request_id(
     }
 }
 
+/// Deliver an envelope to `agent_id` through the sender's own `Mailbox` — the
+/// same conversation-model path production `send` uses, which the sub-agent's
+/// multi-turn loop drains. `env.to` is stamped to the recipient so both sides
+/// derive the same conversation id.
+fn send_to_agent(ws: &std::path::Path, agent_id: &str, mut env: MailboxEnvelope) {
+    let sender = env.from.clone();
+    env.to = agent_id.to_string();
+    Mailbox::workspace_local(ws, sender)
+        .send(env)
+        .expect("mailbox send to sub-agent");
+}
+
 // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 // 1. TOOL ALIAS ROUTING
 // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
@@ -427,12 +439,11 @@ fn full_send_receive_compose_inject_cycle() {
             if idx == 0 {
                 // Sub-agent writes to its own mailbox (simulating a
                 // peer sending a message via the `send` tool)
-                agent_mailbox::append_envelope(
+                send_to_agent(
                     &ws_cb,
                     agent_id,
                     envelope(kinds::MESSAGE, "team-lead", "here is the plan"),
-                )
-                .unwrap();
+                );
                 Ok(String::from("acknowledged, waiting for instructions"))
             } else {
                 // Turn 2: should receive the composed envelope
@@ -492,22 +503,20 @@ fn mixed_message_then_shutdown_exits_after_message_turn() {
             match idx {
                 0 => {
                     // Turn 1: write a message envelope 鈫?should trigger turn 2
-                    agent_mailbox::append_envelope(
+                    send_to_agent(
                         &ws_cb,
                         agent_id,
                         envelope(kinds::MESSAGE, "team-lead", "do more work"),
-                    )
-                    .unwrap();
+                    );
                     Ok(String::from("turn 1 done"))
                 }
                 1 => {
                     // Turn 2: write a shutdown_request 鈫?should exit after this turn
-                    agent_mailbox::append_envelope(
+                    send_to_agent(
                         &ws_cb,
                         agent_id,
                         envelope(kinds::SHUTDOWN_REQUEST, "team-lead", "stop now"),
-                    )
-                    .unwrap();
+                    );
                     Ok(String::from("turn 2 done, about to shutdown"))
                 }
                 _ => panic!("shutdown_request must prevent turn 3"),
@@ -824,7 +833,7 @@ fn poller_compose_multi_turn_integration() {
             match idx {
                 0 => {
                     // Simulate peer sending two messages between turns
-                    agent_mailbox::append_envelope(
+                    send_to_agent(
                         &ws_cb,
                         agent_id,
                         MailboxEnvelope {
@@ -837,9 +846,8 @@ fn poller_compose_multi_turn_integration() {
                             kind: kinds::MESSAGE.to_string(),
                             request_id: None,
                         },
-                    )
-                    .unwrap();
-                    agent_mailbox::append_envelope(
+                    );
+                    send_to_agent(
                         &ws_cb,
                         agent_id,
                         MailboxEnvelope {
@@ -852,8 +860,7 @@ fn poller_compose_multi_turn_integration() {
                             kind: kinds::MESSAGE.to_string(),
                             request_id: None,
                         },
-                    )
-                    .unwrap();
+                    );
                     Ok(String::from("phase 1 complete"))
                 }
                 1 => {

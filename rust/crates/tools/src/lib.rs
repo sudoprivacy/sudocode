@@ -1133,7 +1133,13 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "required": ["prompt"],
                 "additionalProperties": false
             }),
-            required_permission: PermissionMode::DangerFullAccess,
+            // Read-only: spawning is a read-only ACT. The child never runs with
+            // more authority than the spawning session (it inherits the parent's
+            // mode — see `AgentJob.permission_mode`), so the spawn call itself
+            // does not need to gate at the child's ceiling. Gating it at
+            // DangerFullAccess blocked read-only and workspace-write sessions
+            // from using any sub-agent at all, even a read-only Explore.
+            required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
             name: "ToolSearch",
@@ -4078,6 +4084,12 @@ struct AgentJob {
     /// Where this agent reports what it does, when the renderer driving the
     /// spawning turn asked for that. `None`: the child runs unobserved.
     subagent: Option<SubagentLink>,
+    /// The permission mode this sub-agent runs under, inherited from the
+    /// spawning turn's active mode (see [`ToolDispatchContext::parent_permission_mode`]).
+    /// A sub-agent never runs with more authority than the session that spawned
+    /// it; when the parent mode is unknown (no dispatch context, e.g. a test
+    /// harness), this defaults to the conservative [`PermissionMode::WorkspaceWrite`].
+    permission_mode: PermissionMode,
 }
 
 /// A spawned agent's connection to the renderer's sub-agent sink.
@@ -5137,6 +5149,13 @@ fn prepare_agent_job(
     let execution = ParentExecution::from_dispatch(ctx).for_child(is_fork_child);
 
     let subagent = SubagentLink::from_dispatch(ctx, &manifest, background);
+    // A sub-agent inherits the spawning turn's permission mode: it never runs
+    // with more authority than the session that spawned it. No dispatch
+    // context (test harness, direct executor) falls back to the conservative
+    // WorkspaceWrite default rather than the old unconditional full access.
+    let permission_mode = ctx
+        .and_then(|c| c.parent_permission_mode)
+        .unwrap_or(PermissionMode::WorkspaceWrite);
     let job = AgentJob {
         manifest: manifest.clone(),
         prompt: prompt_body,
@@ -5150,6 +5169,7 @@ fn prepare_agent_job(
         abort_signal: HookAbortSignal::default(),
         workspace: WorkspaceRootHandoff::capture(),
         subagent,
+        permission_mode,
     };
     if let Some(link) = &job.subagent {
         link.emit_started(&manifest);
@@ -5674,7 +5694,7 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
         job.auth_mode,
     )?
     .with_parent_execution(job.execution.clone());
-    let permission_policy = agent_permission_policy();
+    let permission_policy = agent_permission_policy(job.permission_mode);
     let tool_executor = SubagentToolExecutor::new(empty_tools);
     let mut system_prompt = SystemPrompt::default();
     system_prompt.dynamic_sections.push(String::from(
@@ -5878,7 +5898,7 @@ fn build_agent_runtime(
         job.auth_mode,
     )?
     .with_parent_execution(job.execution.clone());
-    let permission_policy = agent_permission_policy();
+    let permission_policy = agent_permission_policy(job.permission_mode);
     let tool_executor = SubagentToolExecutor::new(allowed_tools)
         .with_enforcer(PermissionEnforcer::new(permission_policy.clone()));
     Ok(ConversationRuntime::new(
@@ -5982,11 +6002,12 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         .unwrap_or_else(runtime::agent_types::general_purpose_tools)
 }
 
-fn agent_permission_policy() -> PermissionPolicy {
-    mvp_tool_specs().into_iter().fold(
-        PermissionPolicy::new(PermissionMode::DangerFullAccess),
-        |policy, spec| policy.with_tool_requirement(spec.name, spec.required_permission),
-    )
+fn agent_permission_policy(mode: PermissionMode) -> PermissionPolicy {
+    mvp_tool_specs()
+        .into_iter()
+        .fold(PermissionPolicy::new(mode), |policy, spec| {
+            policy.with_tool_requirement(spec.name, spec.required_permission)
+        })
 }
 
 /// Best-effort removal of `*.tmp` files left behind by a previous crash between
@@ -11376,7 +11397,7 @@ mod tests {
                 input_path: path.display().to_string(),
             },
             SubagentToolExecutor::new(BTreeSet::from([String::from("read_file")])),
-            agent_permission_policy(),
+            agent_permission_policy(PermissionMode::WorkspaceWrite),
             SystemPrompt::default(),
         );
 

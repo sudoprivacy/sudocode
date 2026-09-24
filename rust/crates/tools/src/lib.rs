@@ -1378,7 +1378,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "agent_list",
             description: concat!(
-                "List the agents you can reach and which are running right now. ",
+                "List every agent you can reach — including ones with no live pid. ",
                 "Each row is an agent NAME (the address) with an `active` flag: ",
                 "active agents have a live pid and receive immediately; inactive ones ",
                 "are still addressable — a message waits in their durable inbox until ",

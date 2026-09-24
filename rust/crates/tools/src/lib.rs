@@ -245,24 +245,16 @@ fn global_cron_registry() -> &'static CronRegistry {
     })
 }
 
-/// The todo store for this session, opened per call on `fs`.
+/// The persisted todo list for this session. Used to seed a REPL's context panel
+/// at startup, before any turn has produced a `TodoWrite` result to read.
 ///
-/// Not a process global: `todo_store_path` answers per filesystem, and a
-/// `OnceLock` resolved it once for the whole process — so a daemon hosting
-/// several co-hosted agents gave them all one list, whichever agent asked
-/// first. Every mutation persists immediately, so a fresh handle over the same
-/// path is the same store and nothing in-memory is lost by opening one per call.
-fn todo_store(fs: &Arc<dyn FsBackend>) -> TodoStore {
-    match runtime::todo_store::todo_store_path(fs.as_ref()) {
-        Ok(path) => TodoStore::load(&path, Arc::clone(fs)),
-        Err(_) => TodoStore::new(),
-    }
-}
-
-/// The persisted todo list on `fs`. Used to seed a REPL's context panel at
-/// startup, before any turn has produced a `TodoWrite` result to read.
+/// Opened per call, never cached in a process global: the store resolves per
+/// filesystem, and a `OnceLock` resolved it once for the whole process — so a
+/// daemon hosting several co-hosted agents gave them all one list, whichever
+/// agent asked first. Every mutation persists immediately, so a fresh handle
+/// over the same path is the same store.
 pub fn todo_list(fs: &Arc<dyn FsBackend>) -> Vec<runtime::Todo> {
-    todo_store(fs).list()
+    TodoStore::open(fs).list()
 }
 
 /// Global auth mode set by the CLI at startup. Subagents inherit this so they
@@ -1879,7 +1871,7 @@ fn run_todo_write(input: TodoWriteInput, fs: &Arc<dyn FsBackend>) -> Result<Stri
     }
     let verification_streak_nudge = runtime::verification_watcher::should_nudge_and_consume();
 
-    let saved = todo_store(fs).set(todos);
+    let saved = TodoStore::open(fs).set(todos);
     let mut result = json!({ "todos": saved });
     if let Some(nudge) = verification_streak_nudge {
         result["verificationStreakNudge"] = json!(nudge);
@@ -7783,17 +7775,6 @@ fn canonical_tool_token(value: &str) -> String {
     canonical
 }
 
-/// Where this session's sub-agents live.
-///
-/// The backend answers first (`managed_agents_root`), exactly as it does for
-/// sessions: a co-hosted agent's sub-agents belong under the agent that spawned
-/// them, inside the namespace its kernel serves. Without that this derived a
-/// HOST path from the daemon's own process directory — so every co-hosted agent
-/// on one daemon shared a single `.sudocode-agents/`, outside the kernel's hooks
-/// and audit, invisible to the cluster, and colliding with its neighbours.
-///
-/// An explicit `SUDOCODE_AGENT_STORE` still wins: it is an operator override, and
-/// the one thing an operator overriding a path wants is for it to be used.
 /// The one process-wide `StdFsBackend` handle, for callers with no session
 /// filesystem to inherit (the convenience entries and tests). One `Arc` rather
 /// than one per call: the backend is zero-sized and the handle exists only to
@@ -7803,6 +7784,18 @@ fn std_fs_backend() -> &'static Arc<dyn FsBackend> {
     FS.get_or_init(|| Arc::new(StdFsBackend))
 }
 
+/// Where this session's sub-agents live.
+///
+/// The backend answers first (`managed_root(ManagedRoot::SubAgents)`), exactly as
+/// it does for sessions: a co-hosted agent's sub-agents belong under the agent
+/// that spawned them, inside the namespace its kernel serves. Without that this
+/// derived a HOST path from the daemon's own process directory — so every
+/// co-hosted agent on one daemon shared a single `.sudocode-agents/`, outside the
+/// kernel's hooks and audit, invisible to the cluster, and colliding with its
+/// neighbours.
+///
+/// An explicit `SUDOCODE_AGENT_STORE` still wins: it is an operator override, and
+/// the one thing an operator overriding a path wants is for it to be used.
 fn agent_store_dir(fs: &dyn FsBackend) -> Result<std::path::PathBuf, String> {
     if let Ok(raw) = std::env::var("SUDOCODE_AGENT_STORE") {
         let path = std::path::PathBuf::from(&raw);

@@ -436,8 +436,8 @@ fn two_cohosted_agents_do_not_share_one_todo_list() {
     };
     let (alice, bob) = (agent("alice"), agent("bob"));
 
-    let alice_path = runtime::todo_store_path(alice.as_ref()).expect("alice's store path");
-    let bob_path = runtime::todo_store_path(bob.as_ref()).expect("bob's store path");
+    let alice_path = runtime::todo_store_path(&alice).expect("alice's store path");
+    let bob_path = runtime::todo_store_path(&bob).expect("bob's store path");
     // `Path::join` writes a host separator; every backend entry point collapses
     // it back to the VFS spelling, so the comparison is against the VFS form.
     let norm = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");

@@ -68,32 +68,61 @@ struct StoreInner {
 /// difference between a CLI session and a co-hosted one.
 const TODO_FILE: &str = ".sudocode-todos.json";
 
-/// Resolve the store path for todo persistence.
+/// Where the list is persisted, and the filesystem that path is spelled for.
 ///
-/// Priority: `$SUDOCODE_TODO_STORE`, then the root `fs` gives for
-/// [`ManagedRoot::Todos`], then `<fs working root>/.sudocode-todos.json`.
+/// One decision, because the two cannot be chosen apart — see
+/// [`crate::fs_backend::host_fs`] for the rule. In order:
 ///
-/// Asking the backend is what stops a co-hosted agent's list from landing on the
-/// daemon's local disk at a path derived from the daemon's own directory — which
-/// every co-hosted agent shares, so they were overwriting each other's todos.
-pub fn todo_store_path(fs: &dyn crate::fs_backend::FsBackend) -> Result<PathBuf, String> {
+/// 1. `$SUDOCODE_TODO_STORE`, on the HOST: an operator typed that path, and it
+///    may name a file outside anything this session's filesystem can reach.
+/// 2. the root `fs` gives for [`ManagedRoot::Todos`], on `fs`: what stops a
+///    co-hosted agent's list from landing on the daemon's local disk at a path
+///    derived from the daemon's own directory — which every co-hosted agent
+///    shares, so they were overwriting each other's todos.
+/// 3. `<working root>/.sudocode-todos.json`, on the HOST: the layout a standalone
+///    session has always had, in the place it has always had it.
+fn todo_store_location(
+    fs: &Arc<dyn crate::fs_backend::FsBackend>,
+) -> Result<(PathBuf, Arc<dyn crate::fs_backend::FsBackend>), String> {
+    let host = || Arc::clone(crate::fs_backend::host_fs_arc());
     if let Ok(path) = std::env::var("SUDOCODE_TODO_STORE") {
-        return Ok(PathBuf::from(path));
+        return Ok((PathBuf::from(path), host()));
     }
     if let Some(root) = fs.managed_root(crate::fs_backend::ManagedRoot::Todos) {
-        return Ok(PathBuf::from(root).join(TODO_FILE));
+        return Ok((PathBuf::from(root).join(TODO_FILE), Arc::clone(fs)));
     }
-    // The session's own working root, not the process's: one rule ("ask the
-    // filesystem") rather than two sources for where the workspace is, which for
-    // a host-spelled kernel session are not the same directory.
+    // The session's own working root, not the process's: one source for where
+    // the workspace is, which for a host-spelled kernel session is not the
+    // process directory.
     let root = fs.working_root().map_err(|error| error.to_string())?;
-    Ok(PathBuf::from(root).join(TODO_FILE))
+    Ok((PathBuf::from(root).join(TODO_FILE), host()))
+}
+
+/// Where the list is persisted. The path half of [`todo_store_location`], for a
+/// caller that wants to name the file rather than read it.
+pub fn todo_store_path(fs: &Arc<dyn crate::fs_backend::FsBackend>) -> Result<PathBuf, String> {
+    todo_store_location(fs).map(|(path, _)| path)
 }
 
 impl TodoStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The store this session's todos live in, on the filesystem that roots it
+    /// — see [`todo_store_location`]. The one way a caller opens it: resolving
+    /// the path without the filesystem it is spelled for is how a write ends up
+    /// aimed at a namespace that cannot hold it.
+    #[must_use]
+    pub fn open(fs: &Arc<dyn crate::fs_backend::FsBackend>) -> Self {
+        match todo_store_location(fs) {
+            Ok((path, on)) => Self::load(&path, on),
+            // No working root means no path to persist to. An in-memory list is
+            // still a working TodoWrite, which is better than refusing the tool
+            // over a directory question.
+            Err(_) => Self::new(),
+        }
     }
 
     /// Load a persisted list from `path`. A missing / unreadable / unparseable
@@ -155,22 +184,21 @@ impl TodoStore {
         };
         let body = serde_json::to_string_pretty(&inner.todos).unwrap_or_default();
         let path = path.to_string_lossy();
-        // Through the store's own filesystem when it has one, so a co-hosted
-        // agent's list lands where its path says rather than on the daemon's
-        // disk. `None` is the host, which is every caller that predates this.
-        match &inner.fs {
-            Some(fs) => {
-                if let Some(parent) = std::path::Path::new(path.as_ref()).parent() {
-                    let _ = fs.create_dir_all(&parent.to_string_lossy());
-                }
-                let _ = fs.write(&path, body.as_bytes());
-            }
-            None => {
-                if let Some(parent) = std::path::Path::new(path.as_ref()).parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let _ = std::fs::write(path.as_ref(), body);
-            }
+        // The store's own filesystem, so a co-hosted agent's list lands where its
+        // path says rather than on the daemon's disk. `None` is a store built
+        // without one (`TodoStore::new`), which has always meant the host.
+        let fs: &dyn crate::fs_backend::FsBackend = match &inner.fs {
+            Some(fs) => fs.as_ref(),
+            None => crate::fs_backend::host_fs(),
+        };
+        if let Some(parent) = std::path::Path::new(path.as_ref()).parent() {
+            let _ = fs.create_dir_all(&parent.to_string_lossy());
+        }
+        if let Err(error) = fs.write(&path, body.as_bytes()) {
+            // Not swallowed: a list the model believes it saved and that is gone
+            // next turn is worse than a line on stderr. A refused write looked
+            // exactly like a successful one before this.
+            eprintln!("sudocode: failed to persist the todo list to {path}: {error}");
         }
     }
 }

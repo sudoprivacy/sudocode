@@ -670,12 +670,21 @@ fn load_system_prompt_impl(
     // partition is composed here — through `agent_memory_dir_under`, the same
     // rule the workspace path uses, so which host supplied the root changes
     // where memory lives and not how it is laid out.
-    let memory_dir = fs
-        .managed_root(crate::fs_backend::ManagedRoot::Memory)
-        .map(|root| match agent_type {
-            Some(agent) => crate::memory::agent_memory_dir_under(Path::new(&root), agent),
-            None => PathBuf::from(root),
-        });
+    // And the filesystem to read it on: the one that rooted it. `None` leaves
+    // the per-project host layout, which lives outside any workspace mount — so
+    // reading it through a CLI session's kernel would refuse every path and
+    // report a session with no memory at all.
+    let (memory_dir, memory_fs): (Option<PathBuf>, &dyn FsBackend) =
+        match fs.managed_root(crate::fs_backend::ManagedRoot::Memory) {
+            Some(root) => {
+                let dir = match agent_type {
+                    Some(agent) => crate::memory::agent_memory_dir_under(Path::new(&root), agent),
+                    None => PathBuf::from(root),
+                };
+                (Some(dir), fs)
+            }
+            None => (None, crate::fs_backend::host_fs()),
+        };
     let memory_ctx = crate::memory::MemoryContext::resolve(
         memory_dir.as_deref(),
         Some(&cwd),
@@ -684,7 +693,7 @@ fn load_system_prompt_impl(
     );
     let builder = crate::memory::append_from_provider(
         builder_base,
-        memory.provider(fs).as_ref(),
+        memory.provider(memory_fs).as_ref(),
         &memory_ctx,
     );
     Ok(builder.build())

@@ -258,6 +258,36 @@ pub trait FsBackend: Send + Sync + 'static {
 /// handed for a file under it resolves through the same rule. Two rules would
 /// mean a file readable under one spelling and missing under the other.
 ///
+/// The host filesystem, for a path that is a HOST path.
+///
+/// The filesystem that answers for a stored concern is the one that ROOTED it.
+/// A backend answers [`FsBackend::managed_root`] with `Some` only for the
+/// concerns it keeps inside its own namespace; `None` means the caller's own
+/// layout, and those layouts are host paths — `$HOME/.scode/projects/<slug>/`,
+/// `<workspace>/.sudocode-agents`, `$SUDOCODE_TODO_STORE`. An operator's
+/// override is a host path for the same reason: it was typed on the host.
+///
+/// Reading them through the SESSION's filesystem is wrong, not merely
+/// roundabout: a CLI session's kernel serves its workspace and nothing else, so
+/// every path outside the workspace is refused. Memory came back empty and an
+/// operator's store override was silently never written.
+///
+/// Zero-sized, so the handle is free; `_arc` exists for the callers that store
+/// one rather than borrow it.
+#[must_use]
+pub fn host_fs() -> &'static (dyn FsBackend + 'static) {
+    static HOST: StdFsBackend = StdFsBackend;
+    &HOST
+}
+
+/// [`host_fs`] as a shareable handle. One `Arc` for the process: the backend is
+/// zero-sized and the handle exists only to satisfy a shared signature.
+#[must_use]
+pub fn host_fs_arc() -> &'static Arc<dyn FsBackend> {
+    static HOST: std::sync::OnceLock<Arc<dyn FsBackend>> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| Arc::new(StdFsBackend))
+}
+
 /// On unix this is the identity — a host path already *is* a VFS path. On
 /// Windows it is not: a host path carries a drive (`C:\a\b`) or a verbatim
 /// prefix (`\\?\C:\a\b`, which is what `canonicalize` yields), and neither is

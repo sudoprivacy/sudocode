@@ -472,10 +472,7 @@ pub fn format_compact_summary(summary: &str) -> String {
 pub fn render_todo_continuity_block(
     fs: std::sync::Arc<dyn crate::fs_backend::FsBackend>,
 ) -> Option<String> {
-    let todos = crate::todo_store::todo_store_path(fs.as_ref())
-        .ok()
-        .map(|path| crate::todo_store::TodoStore::load(&path, fs).list())
-        .unwrap_or_default();
+    let todos = crate::todo_store::TodoStore::open(&fs).list();
     format_todo_continuity_block(&todos)
 }
 

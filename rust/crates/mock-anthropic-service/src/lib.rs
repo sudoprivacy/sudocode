@@ -224,6 +224,7 @@ enum Scenario {
     UnifiedSendRoundtrip,
     UnifiedSendFromNamedPeer,
     CohostReply,
+    CohostReadThenReply,
     DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
     /// three `Agent` tool_use blocks (run synchronously) whose prompts each
@@ -336,6 +337,7 @@ impl Scenario {
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
             "unified_send_from_named_peer" => Some(Self::UnifiedSendFromNamedPeer),
             "cohost_reply" => Some(Self::CohostReply),
+            "cohost_read_then_reply" => Some(Self::CohostReadThenReply),
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
@@ -394,6 +396,7 @@ impl Scenario {
             Self::UnifiedSendRoundtrip => "unified_send_roundtrip",
             Self::UnifiedSendFromNamedPeer => "unified_send_from_named_peer",
             Self::CohostReply => "cohost_reply",
+            Self::CohostReadThenReply => "cohost_read_then_reply",
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
@@ -1466,6 +1469,28 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 )],
             ),
         },
+        Scenario::CohostReadThenReply => {
+            let results = tool_results_by_name(request);
+            match (results.get("read_file"), results.get("send")) {
+                (Some(_), Some((send_output, _))) => {
+                    final_text_sse(&format!("cohost read-then-reply complete: {send_output}"))
+                }
+                // Read first, then answer the peer with what the workspace said.
+                (Some((read_output, _)), None) => tool_use_sse(
+                    "toolu_cohost_read_reply_send",
+                    "send",
+                    &[&format!(
+                        r#"{{"to":"{COHOST_REPLY_TO}","message":"{}","summary":"reply"}}"#,
+                        extract_read_content(read_output)
+                    )],
+                ),
+                _ => tool_use_sse(
+                    "toolu_cohost_read_reply_read",
+                    "read_file",
+                    &[r#"{"path":"fixture.txt"}"#],
+                ),
+            }
+        }
         Scenario::UnifiedSendFromNamedPeer => match latest_tool_result(request) {
             Some((tool_output, _)) => {
                 final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
@@ -2028,6 +2053,31 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"to": UNIFIED_SEND_RECIPIENT, "message": UNIFIED_SEND_BODY, "summary": "greeting test"}),
             ),
         },
+        Scenario::CohostReadThenReply => {
+            let results = tool_results_by_name(request);
+            match (results.get("read_file"), results.get("send")) {
+                (Some(_), Some((send_output, _))) => text_message_response(
+                    "msg_cohost_read_then_reply_final",
+                    &format!("cohost read-then-reply complete: {send_output}"),
+                ),
+                (Some((read_output, _)), None) => tool_message_response(
+                    "msg_cohost_read_then_reply_send",
+                    "toolu_cohost_read_reply_send",
+                    "send",
+                    json!({
+                        "to": COHOST_REPLY_TO,
+                        "message": extract_read_content(read_output),
+                        "summary": "reply",
+                    }),
+                ),
+                _ => tool_message_response(
+                    "msg_cohost_read_then_reply_read",
+                    "toolu_cohost_read_reply_read",
+                    "read_file",
+                    json!({ "path": "fixture.txt" }),
+                ),
+            }
+        }
         Scenario::CohostReply => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_cohost_reply_final",
@@ -2177,6 +2227,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::UnifiedSendRoundtrip => "req_unified_send_roundtrip",
         Scenario::UnifiedSendFromNamedPeer => "req_unified_send_from_named_peer",
         Scenario::CohostReply => "req_cohost_reply",
+        Scenario::CohostReadThenReply => "req_cohost_read_then_reply",
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",

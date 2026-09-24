@@ -7527,6 +7527,18 @@ const CORE_TOOLS: &[&str] = &[
     // model reaches for it without a ToolSearch round-trip first (deferring it
     // would suppress exactly the proactivity we want).
     "write_plan",
+    // Checking a claim against the live web is a proactive default, the same
+    // argument as `write_plan`: a tool the model must ToolSearch for first is a
+    // tool it silently skips. Deferred, the failure mode is not an error — it is
+    // answering from stale training data when a search was warranted, which no
+    // test catches and the user sees only as a wrong answer. The two run as a
+    // pair (search yields URLs, fetch reads them), so deferring either one just
+    // moves the round-trip to the other half of the workflow. Their schemas are
+    // ~200 tokens each and sit in the cached tools prefix; a ToolSearch
+    // round-trip resends the whole context. This departs from CC, on the same
+    // grounds as `pid_output` / `send` / `agent_list` above.
+    "WebSearch",
+    "WebFetch",
 ];
 
 pub fn is_core_tool(name: &str) -> bool {
@@ -10391,13 +10403,13 @@ mod tests {
         );
         assert_eq!(
             core_tools.get("WebFetch"),
-            Some(&true),
-            "WebFetch should be deferred"
+            Some(&false),
+            "WebFetch is core — reading a found URL is the second half of the search workflow"
         );
         assert_eq!(
             core_tools.get("WebSearch"),
-            Some(&true),
-            "WebSearch should be deferred"
+            Some(&false),
+            "WebSearch is core — a search the model must ToolSearch for first is a search it skips"
         );
         assert_eq!(
             core_tools.get("TodoWrite"),
@@ -10413,12 +10425,12 @@ mod tests {
         let names: BTreeSet<_> = listing.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains("CronCreate"));
         assert!(
-            names.contains("WebFetch"),
-            "WebFetch should be deferred (CC parity)"
+            !names.contains("WebFetch"),
+            "WebFetch is core — departs from CC, see CORE_TOOLS"
         );
         assert!(
-            names.contains("WebSearch"),
-            "WebSearch should be deferred (CC parity)"
+            !names.contains("WebSearch"),
+            "WebSearch is core — departs from CC, see CORE_TOOLS"
         );
         assert!(names.contains("TodoWrite"));
         assert!(!names.contains("bash"), "bash is core");
@@ -10447,12 +10459,12 @@ mod tests {
             "CronCreate should be listed"
         );
         assert!(
-            section.contains("\nWebFetch\n"),
-            "WebFetch should be deferred"
+            !section.contains("\nWebFetch\n"),
+            "WebFetch is core — should not appear"
         );
         assert!(
-            section.contains("\nWebSearch\n"),
-            "WebSearch should be deferred"
+            !section.contains("\nWebSearch\n"),
+            "WebSearch is core — should not appear"
         );
         assert!(
             !section.contains("\nSleep\n"),

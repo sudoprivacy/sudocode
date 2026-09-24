@@ -669,6 +669,34 @@ fn format_paste_placeholder(id: u32, text: &str) -> String {
     }
 }
 
+/// Apply a paste to a text buffer, shared by the `TextInput.on_paste` handler
+/// and the DialPad custom-input row so bracketed / multi-line paste behaves
+/// identically in both. Normalizes line endings, then either inserts the paste
+/// literally (short single-/double-line) or registers it in `store` under a
+/// fresh id and appends a compact `[Pasted text #N +M lines]` placeholder (long
+/// or multi-line) that `expand_paste_placeholders` restores at submit time.
+/// Returns the new buffer contents.
+fn apply_paste_to_buffer(
+    current: &str,
+    pasted: &str,
+    next_id: &mut u32,
+    store: &mut std::collections::HashMap<u32, String>,
+) -> String {
+    let pasted = normalize_paste_newlines(pasted);
+    if !should_use_paste_placeholder(&pasted) {
+        return format!("{current}{pasted}");
+    }
+    let id = *next_id;
+    *next_id += 1;
+    let placeholder = format_paste_placeholder(id, &pasted);
+    store.insert(id, pasted);
+    if current.is_empty() {
+        placeholder
+    } else {
+        format!("{current}{placeholder}")
+    }
+}
+
 /// Core expansion engine shared by plain and display variants.
 ///
 /// Scans left to right and copies each placeholder's replacement into a fresh
@@ -1608,8 +1636,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     // On the `[+]` row: submit the typed buffer
                                     // as the free-text answer. Empty buffer does
                                     // nothing (stay on the row so the user can
-                                    // type), matching an input field.
-                                    let answer = dialpad_input.read().trim().to_string();
+                                    // type), matching an input field. Expand any
+                                    // paste placeholders so a collapsed paste is
+                                    // sent in full (same as TextInput submit).
+                                    let raw = dialpad_input.read().clone();
+                                    let store_snap = paste_store.read().clone();
+                                    let answer =
+                                        expand_paste_placeholders(&raw, &store_snap).trim().to_string();
                                     if !answer.is_empty() {
                                         if !*has_submitted.read() {
                                             has_submitted.set(true);
@@ -1617,6 +1650,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         let _ = input_tx_for_events
                                             .send(InputEvent::QuestionAnswer(answer));
                                         dialpad_input.set(String::new());
+                                        paste_store.write().clear();
+                                        next_paste_id.set(1);
                                         input_value.set(String::new());
                                         input_slot.set(InputSlot::TextInput);
                                     }
@@ -1980,6 +2015,40 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                 }
             }
+            // Bracketed paste. The iocraft `TextInput` component consumes this
+            // via its own `on_paste` when the TextInput slot is active; for the
+            // DialPad custom-input row (and FuzzySelect filter) that component is
+            // not mounted, so route the paste into the active buffer here using
+            // the SAME normalize/placeholder logic (DRY).
+            TerminalEvent::Paste(pasted) => {
+                let current_slot = input_slot.read().clone();
+                match &current_slot {
+                    InputSlot::DialPad(q)
+                        if q.allow_custom_input
+                            && dialpad_cursor.get() == q.options.len() =>
+                    {
+                        let current = dialpad_input.read().clone();
+                        let mut id = next_paste_id.get();
+                        let mut store = paste_store.write();
+                        let new_val =
+                            apply_paste_to_buffer(&current, &pasted, &mut id, &mut store);
+                        drop(store);
+                        next_paste_id.set(id);
+                        dialpad_input.set(new_val);
+                    }
+                    InputSlot::FuzzySelect(_) => {
+                        // FuzzySelect filters in place; a paste is just more
+                        // filter text (short pastes only — a giant paste as a
+                        // filter is nonsensical, so insert literally).
+                        let mut slot = input_slot.write();
+                        if let InputSlot::FuzzySelect(ref mut fs) = *slot {
+                            fs.filter.push_str(&normalize_paste_newlines(&pasted));
+                            fs.apply_filter();
+                        }
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     });
@@ -2147,33 +2216,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 input_value.set(new_val);
                             },
                             on_paste: move |pasted: String| {
-                                // Normalize CR / CRLF line endings first so
-                                // line counting, the placeholder, and the
-                                // expanded text are all consistent (Windows
-                                // Terminal pastes carry \r or \r\n).
-                                let pasted = normalize_paste_newlines(&pasted);
+                                // Normalize + literal-vs-placeholder handling is
+                                // shared with the DialPad custom-input row.
                                 let current = input_value.read().clone();
-                                // Match Claude Code: only long or multi-line
-                                // pastes collapse into a compact placeholder;
-                                // short single-/double-line pastes insert
-                                // literally so the box shows what you pasted.
-                                if !should_use_paste_placeholder(&pasted) {
-                                    input_value.set(format!("{current}{pasted}"));
-                                    return;
-                                }
-                                // Store the real text and replace with a
-                                // compact placeholder so the input box does
-                                // not overflow with potentially huge content.
-                                let id = next_paste_id.get();
-                                next_paste_id.set(id + 1);
-                                let placeholder = format_paste_placeholder(id, &pasted);
-                                paste_store.write().insert(id, pasted);
-                                // Append the placeholder to whatever is already in the box.
-                                input_value.set(if current.is_empty() {
-                                    placeholder
-                                } else {
-                                    format!("{current}{placeholder}")
-                                });
+                                let mut id = next_paste_id.get();
+                                let mut store = paste_store.write();
+                                let new_val =
+                                    apply_paste_to_buffer(&current, &pasted, &mut id, &mut store);
+                                next_paste_id.set(id);
+                                input_value.set(new_val);
                             },
                         )
                     }
@@ -2541,6 +2592,32 @@ mod tests {
     fn paste_placeholder_multi_line_includes_line_count() {
         let p = format_paste_placeholder(1, "line one\nline two\nline three");
         assert_eq!(p, "[Pasted text #1 +2 lines]");
+    }
+
+    #[test]
+    fn apply_paste_short_single_line_inserts_literally() {
+        let mut store = std::collections::HashMap::new();
+        let mut id = 1u32;
+        let out = apply_paste_to_buffer("hi ", "there", &mut id, &mut store);
+        assert_eq!(out, "hi there");
+        assert!(store.is_empty(), "short paste is literal, not stored");
+        assert_eq!(id, 1, "no id consumed");
+    }
+
+    #[test]
+    fn apply_paste_multi_line_collapses_to_placeholder_and_expands() {
+        let mut store = std::collections::HashMap::new();
+        let mut id = 1u32;
+        // >2 newlines crosses PASTE_PLACEHOLDER_MAX_LINES → placeholder.
+        let pasted = "l1\nl2\nl3\nl4";
+        let out = apply_paste_to_buffer("start ", pasted, &mut id, &mut store);
+        assert_eq!(out, "start [Pasted text #1 +3 lines]");
+        assert_eq!(id, 2, "id consumed");
+        // Round-trips back to the real text at submit time.
+        assert_eq!(
+            expand_paste_placeholders(&out, &store),
+            format!("start {pasted}")
+        );
     }
 
     #[test]

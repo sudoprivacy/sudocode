@@ -1,5 +1,3 @@
-pub mod managed_agent;
-
 /// Test-only seams exposed for integration tests.
 ///
 /// These wrappers cross the crate boundary so `tools/tests/*.rs`
@@ -427,11 +425,32 @@ impl From<ToolSpec> for ToolDefinition {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GlobalToolRegistry {
     plugin_tools: Vec<PluginTool>,
     runtime_tools: Vec<RuntimeToolDefinition>,
     enforcer: Option<PermissionEnforcer>,
+    /// Filesystem the built-in file tools act on.
+    ///
+    /// `StdFsBackend` unless a host says otherwise, which is what the CLI
+    /// wants. A co-hosted agent supplies a kernel-backed one so its writes
+    /// land where the hooks, the audit trail and the permission checks are —
+    /// that reach IS the reason to co-host, and a literal backend here is what
+    /// denied it.
+    fs: Arc<dyn FsBackend>,
+}
+
+// Hand-written because `FsBackend` carries no `Debug` bound, and widening the
+// trait to get a derive would push that on every implementor for the sake of
+// one struct's formatting.
+impl std::fmt::Debug for GlobalToolRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GlobalToolRegistry")
+            .field("plugin_tools", &self.plugin_tools)
+            .field("runtime_tools", &self.runtime_tools)
+            .field("enforcer", &self.enforcer)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -449,7 +468,19 @@ impl GlobalToolRegistry {
             plugin_tools: Vec::new(),
             runtime_tools: Vec::new(),
             enforcer: None,
+            fs: Arc::new(StdFsBackend),
         }
+    }
+
+    /// Point the built-in file tools at `fs`.
+    ///
+    /// The one call that makes the same tools reach a different store; every
+    /// other difference between a CLI session and a co-hosted agent is a value
+    /// in `HostContext`, and this is the one that decides where bytes go.
+    #[must_use]
+    pub fn with_fs(mut self, fs: Arc<dyn FsBackend>) -> Self {
+        self.fs = fs;
+        self
     }
 
     pub fn with_plugin_tools(plugin_tools: Vec<PluginTool>) -> Result<Self, String> {
@@ -475,6 +506,7 @@ impl GlobalToolRegistry {
             plugin_tools,
             runtime_tools: Vec::new(),
             enforcer: None,
+            fs: Arc::new(StdFsBackend),
         })
     }
 
@@ -839,7 +871,7 @@ impl GlobalToolRegistry {
                 input,
                 abort_signal,
                 ctx,
-                &StdFsBackend,
+                self.fs.as_ref(),
             );
         }
         self.plugin_tools
@@ -1159,7 +1191,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Write an implementation plan and present it to the user for approval before you start changing code.\n\n",
                 "Use this proactively before a non-trivial implementation task — getting sign-off on the approach first prevents wasted effort. Prefer it when ANY of these apply: a new feature, several valid approaches, changes to existing behavior, an architectural choice, edits spanning more than 2-3 files, unclear scope you must explore first, or when the approach could reasonably go multiple ways (if you'd ask a clarifying question about the approach, write a plan instead).\n\n",
                 "Skip it for simple work: one-line or obvious fixes, a single function with clear requirements, tasks the user already specified in detail, or pure research/read-only exploration.\n\n",
-                "Pass the full plan as `content` (markdown). It is saved to the session's plan file and shown to the user, who chooses whether to execute it, comment, or stop. When executing, this plan is the source of truth — write it completely, not a summary."
+                "Pass the full plan as `content` (markdown). It is saved to the session's plan file and shown to the user, who chooses whether to execute it, comment, or stop. When executing, this plan is the source of truth — write it completely, not a summary.\n\n",
+                "Before writing the plan: thoroughly explore the codebase to understand existing patterns, identify similar features and architectural approaches, and consider multiple approaches with their trade-offs. Then design a concrete implementation strategy — the steps to take, the files involved, and how you will verify the result — so the plan is specific enough to execute directly.\n\n",
+                "Revising a plan that is already partway done: if some steps have been completed, remove or tightly collapse the finished parts and keep or refine only what has not been started. The plan should describe the REMAINING work, not repeat what is done."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1341,6 +1375,29 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        ToolSpec {
+            name: "agent_list",
+            description: concat!(
+                "List the agents you can reach and which are running right now. ",
+                "Each row is an agent NAME (the address) with an `active` flag: ",
+                "active agents have a live pid and receive immediately; inactive ones ",
+                "are still addressable — a message waits in their durable inbox until ",
+                "they next run. Names are the address: to message one, call ",
+                "`send({\"to\": \"<name>\", \"message\": \"...\"})`, copying the name exactly ",
+                "as a row prints it. Read-only discovery; it starts nothing."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "active_only": {
+                        "type": "boolean",
+                        "description": "When true, list only agents that are currently running (have a live pid)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
         // ── pid_fork ───────────────────────────────────────────────────
         // Snapshots the current session into a new pid. Equivalent to
         // `agent_spawn(agent="fork")` but exposed as its own tool for
@@ -1517,21 +1574,6 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
     execute_tool_with_abort(name, input, None)
 }
 
-/// Dispatch a tool against an explicit filesystem backend.
-///
-/// This is the entry the co-hosted managed agent uses: it passes a
-/// `KernelFsBackend` so the file tools (`read_file` / `write_file` /
-/// `edit_file` / `glob_search` / `grep_search`) hit the VFS in-process via
-/// kernel syscalls instead of the host `std::fs`. The standalone CLI keeps
-/// using [`execute_tool`], which defaults to [`StdFsBackend`].
-pub fn execute_tool_with_backend(
-    name: &str,
-    input: &Value,
-    fs: &dyn FsBackend,
-) -> Result<String, String> {
-    execute_tool_with_enforcer(None, name, input, None, None, fs)
-}
-
 pub fn execute_tool_with_abort(
     name: &str,
     input: &Value,
@@ -1650,6 +1692,7 @@ fn execute_tool_with_enforcer(
             let input = normalize_pid_output_input(input);
             from_value::<TaskOutputInput>(&input).and_then(run_pid_output)
         }
+        "agent_list" => run_agent_list(input),
         // Defense in depth: the specs are already hidden when the host owns
         // scheduling, so refuse a stale/rogue call rather than persisting a
         // cron nothing will ever fire.
@@ -1931,6 +1974,122 @@ pub fn list_agent_snapshots_from_store(
     }
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(out)
+}
+
+/// One row of `agent_list`: an addressable agent name plus whether it is
+/// running right now. `active` means a live pid/poller exists (immediate
+/// receive); an inactive row is still addressable — a `send` waits in its
+/// durable inbox until it next runs.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentListRow {
+    pub name: String,
+    pub active: bool,
+    /// `peer` = a same-machine addressable identity (its own scode/agent);
+    /// `subagent` = a worker this process spawned.
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+/// Merge the two discovery sources into one addressable list:
+/// - same-machine peers: subdirs of `local_pair_root()/agents/<name>/` that
+///   have a `chat-with-me` inbox (addressable); a sibling `.cursor-*` file
+///   means a poller is live (active).
+/// - spawned sub-agents: running/backgrounded manifests in the agent store.
+///
+/// Deduped by name; if a name appears in both, the active/pid-bearing row wins.
+pub fn collect_agent_list(active_only: bool) -> Vec<AgentListRow> {
+    let peers_dir = runtime::mailbox::local_pair_root().join("agents");
+    let subagents = list_agent_snapshots_from_store(true).unwrap_or_default();
+    merge_agent_list(&peers_dir, subagents, active_only)
+}
+
+/// Pure core of [`collect_agent_list`], with both sources injected so it is
+/// testable without touching the real config home. `peers_dir` is the
+/// `…/agents/` directory; `subagents` are already-filtered running snapshots.
+pub fn merge_agent_list(
+    peers_dir: &std::path::Path,
+    subagents: Vec<AgentSnapshot>,
+    active_only: bool,
+) -> Vec<AgentListRow> {
+    use std::collections::BTreeMap;
+    let mut rows: BTreeMap<String, AgentListRow> = BTreeMap::new();
+
+    // Source 1: same-machine addressable peers.
+    if let Ok(entries) = std::fs::read_dir(peers_dir) {
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() || !dir.join("chat-with-me").exists() {
+                continue; // not a dir, or not addressable (no inbox)
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // A `.cursor-*` sibling = a poller has seeked this inbox = live.
+            let active = std::fs::read_dir(&dir).is_ok_and(|es| {
+                es.flatten()
+                    .any(|e| e.file_name().to_string_lossy().starts_with(".cursor"))
+            });
+            rows.insert(
+                name.clone(),
+                AgentListRow {
+                    name,
+                    active,
+                    kind: "peer".to_string(),
+                    pid: None,
+                    role: None,
+                },
+            );
+        }
+    }
+
+    // Source 2: sub-agents this process spawned (running/backgrounded).
+    for snap in subagents {
+        let status = snap.status.trim().to_ascii_lowercase();
+        let active = status == "running" || status == "backgrounded";
+        let role = snap
+            .subagent_type
+            .clone()
+            .or_else(|| (!snap.description.is_empty()).then(|| snap.description.clone()));
+        let entry = rows
+            .entry(snap.name.clone())
+            .or_insert_with(|| AgentListRow {
+                name: snap.name.clone(),
+                active,
+                kind: "subagent".to_string(),
+                pid: Some(snap.agent_id.clone()),
+                role: role.clone(),
+            });
+        // A pid-bearing (active) worker wins a name collision with a peer row.
+        if active {
+            entry.active = true;
+            entry.pid = Some(snap.agent_id.clone());
+            entry.kind = "subagent".to_string();
+            if entry.role.is_none() {
+                entry.role = role;
+            }
+        }
+    }
+
+    let mut out: Vec<AgentListRow> = rows.into_values().collect();
+    if active_only {
+        out.retain(|r| r.active);
+    }
+    // Active first, then by name for stable output.
+    out.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.cmp(&b.name)));
+    out
+}
+
+fn run_agent_list(input: &Value) -> Result<String, String> {
+    let active_only = input
+        .get("active_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let agents = collect_agent_list(active_only);
+    to_pretty_json(json!({
+        "agents": agents,
+        "count": agents.len(),
+    }))
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -6884,7 +7043,7 @@ fn runtime_error_from_api(error: &ApiError) -> RuntimeError {
     if error.is_context_window_failure() {
         RuntimeError::context_window_blocked(error.to_string())
     } else {
-        RuntimeError::new(error.to_string())
+        RuntimeError::new(error.to_string()).retryable(error.is_retryable())
     }
 }
 
@@ -7353,6 +7512,11 @@ const CORE_TOOLS: &[&str] = &[
     // answer, and often concluded it could not reply at all. A tool required to
     // finish a core workflow is core.
     "send",
+    // Discovery is the first step of any delegate/message workflow: a model
+    // can't `send` to or `agent_spawn` a teammate it can't see. Deferred, it
+    // would have to ToolSearch for `agent_list` before discovering anyone —
+    // the same round-trip-in-a-core-path problem as `send`/`pid_output`. Core.
+    "agent_list",
     // Plan-before-implement is a proactive default: keep it always-visible so the
     // model reaches for it without a ToolSearch round-trip first (deferring it
     // would suppress exactly the proactivity we want).
@@ -9044,6 +9208,7 @@ mod tests {
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"agent_spawn"));
         assert!(names.contains(&"send"));
+        assert!(names.contains(&"agent_list"));
         assert!(names.contains(&"ToolSearch"));
         assert!(names.contains(&"Sleep"));
         assert!(names.contains(&"Config"));
@@ -9052,8 +9217,60 @@ mod tests {
         assert!(names.contains(&"PowerShell"));
     }
 
-    /// The invariant that keeps a model from having to guess: a capability is
-    /// advertised under exactly ONE name.
+    #[test]
+    fn merge_agent_list_marks_addressable_peers_and_live_and_running_subagents() {
+        let tmp = std::env::temp_dir().join(format!(
+            "agent-list-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let peers = tmp.join("agents");
+        // peer "alice": addressable (has inbox) + live (has .cursor-*)
+        let alice = peers.join("alice");
+        std::fs::create_dir_all(&alice).unwrap();
+        std::fs::write(alice.join("chat-with-me"), b"").unwrap();
+        std::fs::write(alice.join(".cursor-alice"), b"0").unwrap();
+        // peer "bob": addressable but offline (inbox, no cursor)
+        let bob = peers.join("bob");
+        std::fs::create_dir_all(&bob).unwrap();
+        std::fs::write(bob.join("chat-with-me"), b"").unwrap();
+        // a stray dir with no inbox must be ignored
+        std::fs::create_dir_all(peers.join("not-an-agent")).unwrap();
+
+        // one running sub-agent (own name, distinct from peers)
+        let subagents = vec![super::AgentSnapshot {
+            agent_id: "pid-123".to_string(),
+            status: "running".to_string(),
+            name: "researcher".to_string(),
+            description: "dig the docs".to_string(),
+            subagent_type: Some("Explore".to_string()),
+            color: None,
+            created_at: "2026-09-23T00:00:00Z".to_string(),
+        }];
+
+        let rows = super::merge_agent_list(&peers, subagents, false);
+        let by: std::collections::BTreeMap<_, _> =
+            rows.iter().map(|r| (r.name.as_str(), r)).collect();
+
+        assert!(!by.contains_key("not-an-agent"), "no inbox → not listed");
+        assert_eq!(by["alice"].active, true, "alice has a cursor → live");
+        assert_eq!(by["alice"].kind, "peer");
+        assert_eq!(by["bob"].active, false, "bob has no cursor → offline");
+        assert_eq!(by["researcher"].active, true);
+        assert_eq!(by["researcher"].kind, "subagent");
+        assert_eq!(by["researcher"].pid.as_deref(), Some("pid-123"));
+        assert_eq!(by["researcher"].role.as_deref(), Some("Explore"));
+        // active_only drops the offline peer.
+        let active = super::merge_agent_list(&peers, Vec::new(), true);
+        assert!(active.iter().all(|r| r.active));
+        assert!(active.iter().any(|r| r.name == "alice"));
+        assert!(!active.iter().any(|r| r.name == "bob"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
     ///
     /// It regressed once — `SendMessage`, `send` and `send` were all
     /// advertised at the same time, differing only in which schema field
@@ -10179,6 +10396,11 @@ mod tests {
             core_tools.get("send"),
             Some(&false),
             "send is core — replying to an inbound message is the a2a receive path"
+        );
+        assert_eq!(
+            core_tools.get("agent_list"),
+            Some(&false),
+            "agent_list is core — discovery is the first step of any delegate/message workflow"
         );
         assert_eq!(
             core_tools.get("CronCreate"),

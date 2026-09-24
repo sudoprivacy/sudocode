@@ -63,6 +63,7 @@ pub mod nexus_a2a;
 /// Runtime construction: the `BuiltRuntime` wrapper, the `RuntimeConfig` /
 /// `RuntimePluginState` inputs, and the `build_runtime*` chain (plugins, MCP,
 /// policy, system prompt, `EngineApiClient`) every engine-side (re)build shares.
+pub mod managed_agent;
 pub mod runtime_build;
 
 /// The one live session's `EngineDelegate` (turns) + `SessionLifecycle`

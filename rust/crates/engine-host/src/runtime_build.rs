@@ -9,7 +9,7 @@
 //! so no renderer type is named below the seam.
 
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use commands::cwd_prompt_sections;
@@ -24,6 +24,80 @@ use crate::mcp::{
     RuntimeMcpState,
 };
 use crate::tool_executor::{permission_policy, CliToolExecutor};
+
+/// What the HOST supplies to the engine, in place of a working directory.
+///
+/// Two hosts run this engine: the `scode` CLI on a developer's machine, and a
+/// co-hosted agent inside `nexusd-cluster`. They differ in where the agent's
+/// files live and what the agent is called — not in any engine behaviour — so
+/// those are values a host passes, not facts the engine infers from a path.
+///
+/// A co-host has no meaningful current directory. Deriving the workspace, the
+/// agent's identity and the skills listing from one would force it to invent a
+/// plausible path and hope all four derivations agreed with each other.
+pub struct HostContext {
+    /// Backend the file tools read and write through — `StdFsBackend` for the
+    /// CLI, a kernel-backed one for a co-hosted agent. Same tools, different
+    /// store.
+    pub fs: Arc<dyn runtime::FsBackend>,
+    /// Absolute root relative tool paths resolve against, and the tree the
+    /// skills / agent-type listings are read from.
+    pub workspace_root: PathBuf,
+    /// Where host configuration is read from.
+    ///
+    /// Stays on the HOST disk for both hosts, deliberately: a daemon's own
+    /// configuration has to be readable without the VFS it is about to serve,
+    /// so this is the one root that does NOT follow `fs`.
+    pub config_root: PathBuf,
+    /// The agent's name when the host knows it. `None` means "derive it",
+    /// which is what a CLI session does from its directory and config.
+    pub agent_name: Option<String>,
+    /// Where this agent's messages are sent and received, when the host owns
+    /// that. `None` means "resolve it", which is what a CLI session does.
+    ///
+    /// A co-hosted agent's mailbox IS its identity, so it is supplied rather
+    /// than derived: a second one resolved here would give `send` a different
+    /// address than the one the agent receives on, and neither side can see
+    /// the other's answer.
+    pub mailbox: Option<Arc<runtime::mailbox::Mailbox>>,
+}
+
+impl HostContext {
+    /// The CLI's shape: one directory is the workspace, the config root, and
+    /// the source of the agent's name.
+    #[must_use]
+    pub fn for_cwd(cwd: impl Into<PathBuf>) -> Self {
+        let cwd = cwd.into();
+        Self {
+            fs: Arc::new(runtime::StdFsBackend),
+            workspace_root: cwd.clone(),
+            config_root: cwd,
+            agent_name: None,
+            mailbox: None,
+        }
+    }
+
+    /// The name this agent answers to.
+    ///
+    /// One definition rather than the two identical blocks this replaces: the
+    /// name feeds both the A2A prompt section and `send` routing, and a
+    /// disagreement between them is an agent that describes itself as one peer
+    /// and delivers as another.
+    #[must_use]
+    pub fn resolved_agent_name(&self) -> String {
+        if let Some(name) = &self.agent_name {
+            return name.clone();
+        }
+        let configured = ConfigLoader::default_for(&self.config_root)
+            .load()
+            .ok()
+            .and_then(|rc| {
+                rc.get("agentName")
+                    .and_then(|v| v.as_str().map(str::to_string))
+            });
+        runtime::mailbox::local_agent_name(configured.as_deref(), &self.workspace_root)
+    }
+}
 
 // === moved from rusty-sudocode-cli/src/main.rs (CORE cluster extraction) ===
 
@@ -64,6 +138,18 @@ pub struct BuiltRuntime {
 }
 
 impl BuiltRuntime {
+    /// Take the engine out, leaving the shell behind.
+    ///
+    /// For a host that drives the runtime itself rather than borrowing it per
+    /// turn — the co-host hands it to the mailbox loop. The SHELL must outlive
+    /// that loop: its `Drop` shuts down MCP servers and plugins, so dropping it
+    /// at spawn time would tear those down under a still-running agent.
+    pub fn take_runtime(
+        &mut self,
+    ) -> Option<ConversationRuntime<EngineApiClient, CliToolExecutor>> {
+        self.runtime.take()
+    }
+
     pub fn new(
         runtime: ConversationRuntime<EngineApiClient, CliToolExecutor>,
         plugin_registry: PluginRegistry,
@@ -286,7 +372,7 @@ pub(crate) fn runtime_hook_config_from_plugin_hooks(
 /// The workspace-root scope must already be active for `cwd`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_engine_runtime(
-    cwd: &Path,
+    host: &HostContext,
     session: Session,
     handle_id: &str,
     config: RuntimeConfig,
@@ -294,11 +380,11 @@ pub fn build_engine_runtime(
     abort_signal: runtime::HookAbortSignal,
     reasoning_effort: Option<String>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    let mut runtime = build_runtime_for_cwd(cwd, session, handle_id, config, session_mcp)?;
+    let mut runtime = build_runtime_for_host(host, session, handle_id, config, session_mcp)?;
     runtime = runtime.with_hook_abort_signal(abort_signal);
     if let Some(rt) = runtime.runtime.as_mut() {
         rt.api_client_mut().set_reasoning_effort(reasoning_effort);
-        let thinking = ConfigLoader::default_for(cwd)
+        let thinking = ConfigLoader::default_for(&host.config_root)
             .load()
             .map_or(true, |cfg| cfg.thinking());
         rt.api_client_mut().set_thinking_enabled(thinking);
@@ -306,19 +392,23 @@ pub fn build_engine_runtime(
     Ok(runtime)
 }
 
-pub fn build_runtime_for_cwd(
-    cwd: &Path,
+pub fn build_runtime_for_host(
+    host: &HostContext,
     session: Session,
     session_id: &str,
     config: RuntimeConfig,
     session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    let loader = ConfigLoader::default_for(cwd);
+    let loader = ConfigLoader::default_for(&host.config_root);
     let file_config = loader.load()?;
-    let runtime_plugin_state =
-        build_runtime_plugin_state_with_loader(cwd, &loader, &file_config, session_mcp)?;
+    let runtime_plugin_state = build_runtime_plugin_state_with_loader(
+        &host.config_root,
+        &loader,
+        &file_config,
+        session_mcp,
+    )?;
     build_runtime_with_plugin_state(
-        cwd,
+        host,
         session,
         session_id,
         config,
@@ -328,7 +418,7 @@ pub fn build_runtime_for_cwd(
 }
 
 pub(crate) fn build_runtime_with_plugin_state(
-    cwd: &Path,
+    host: &HostContext,
     mut session: Session,
     session_id: &str,
     mut config: RuntimeConfig,
@@ -346,6 +436,10 @@ pub(crate) fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
+    // Point the built-in file tools at the host's filesystem. Everything
+    // above this line is identical for both hosts; this is the line that
+    // decides whether a write lands on local disk or in the kernel.
+    let tool_registry = tool_registry.with_fs(Arc::clone(&host.fs));
     // Resolve the standalone nexus-A2A session once (fail loud on a partial
     // config or a dial failure). `None` when A2A is off — the fast path that
     // leaves scode behaviour unchanged. Held as `Option<&'static Session>`
@@ -388,7 +482,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         config.permission_mode,
         &feature_config,
         &tool_registry,
-        cwd,
+        &host.config_root,
         config.memory,
     ) {
         Ok(policy) => policy,
@@ -412,9 +506,10 @@ pub(crate) fn build_runtime_with_plugin_state(
     //
     // This runs for the REPL, `--print`, and ACP sessions alike: they all land
     // in this function via `build_runtime_for_cwd`.
-    system_prompt
-        .dynamic_sections
-        .extend(cwd_prompt_sections(cwd, Some(&plugin_load_outcome)));
+    system_prompt.dynamic_sections.extend(cwd_prompt_sections(
+        &host.workspace_root,
+        Some(&plugin_load_outcome),
+    ));
     // Deferred tools listing: inject `<available-deferred-tools>` so the
     // model knows which tools exist beyond the core set visible in the API
     // `tools` array. Discovery via ToolSearch, direct execution by name.
@@ -427,16 +522,17 @@ pub(crate) fn build_runtime_with_plugin_state(
     // framing. Every receive path renders the shared REPL section; nexus adds
     // its network note (via `peer_system_prompt`), standalone uses the same
     // local identity the `send` routing below resolves.
-    if let Some(session) = a2a {
+    if host.mailbox.is_some() {
+        // A host that supplied its own mailbox also drives delivery, and the
+        // prose describing that framing travels with the driver rather than
+        // being guessed here — the co-host's messages arrive wrapped in
+        // `[message from <sender>]`, which only its loop knows to emit.
+    } else if let Some(session) = a2a {
         system_prompt
             .dynamic_sections
             .push(session.peer_system_prompt());
     } else {
-        let configured = ConfigLoader::default_for(cwd).load().ok().and_then(|rc| {
-            rc.get("agentName")
-                .and_then(|v| v.as_str().map(str::to_string))
-        });
-        let self_name = runtime::mailbox::local_agent_name(configured.as_deref(), cwd);
+        let self_name = host.resolved_agent_name();
         system_prompt
             .dynamic_sections
             .push(runtime::agent_mailbox::repl_a2a_prompt_section(
@@ -472,7 +568,9 @@ pub(crate) fn build_runtime_with_plugin_state(
     // No A2A session means no nexus configured, and the resolver answers with
     // workspace-local JSONL — the same code path rather than a fallback branch,
     // which is what stops the two from drifting.
-    if let Some(a2a_session) = a2a {
+    if let Some(mailbox) = host.mailbox.clone() {
+        tool_executor.set_mailbox(mailbox);
+    } else if let Some(a2a_session) = a2a {
         tool_executor.set_mailbox(a2a_session.mailbox());
     } else {
         // Standalone (no nexus): route `send` to the shared same-machine pair
@@ -480,15 +578,12 @@ pub(crate) fn build_runtime_with_plugin_state(
         // in another folder receives it (its poller tails the same
         // `{pair_root}/agents/{name}/chat-with-me`). Without this the send would
         // fall back to workspace-local, which two different folders never share.
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let configured = runtime::ConfigLoader::default_for(&cwd)
-            .load()
-            .ok()
-            .and_then(|rc| {
-                rc.get("agentName")
-                    .and_then(|v| v.as_str().map(str::to_string))
-            });
-        let self_name = runtime::mailbox::local_agent_name(configured.as_deref(), &cwd);
+        // The SAME name the prompt section above announced. It resolved from
+        // the host context while this read `current_dir()`, so a session whose
+        // directory differed from the process's told the model it was one peer
+        // and delivered as another — silently, since neither side can see the
+        // other's answer.
+        let self_name = host.resolved_agent_name();
         tool_executor.set_mailbox(std::sync::Arc::new(
             runtime::mailbox::Mailbox::workspace_local(
                 &runtime::mailbox::local_pair_root(),

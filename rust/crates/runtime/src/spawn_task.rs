@@ -53,9 +53,6 @@ use crate::mailbox::Mailbox;
 
 use crate::conversation::{ApiClient, ConversationRuntime, ToolExecutor};
 use crate::hooks::HookAbortSignal;
-use crate::permissions::PermissionPolicy;
-use crate::prompt::SystemPrompt;
-use crate::session::Session;
 
 /// Blocking-tail read timeout per iteration. A `sys_read` with a non-zero
 /// timeout does a fast-path read at the cursor and, on empty, parks on the
@@ -84,8 +81,7 @@ const READ_BLOCK_MS: u64 = 500;
 pub type MailboxSender = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
 /// Shared handler for the `send` A2A tool: read `{to, message}` from the
-/// parsed tool input and hand it to `sender`. BOTH the co-host
-/// (`ManagedToolExecutor`) and the standalone CLI executor route their
+/// parsed tool input and hand it to `sender`. Every executor routes its
 /// `send` here, so the parse + delivery contract is defined ONCE 鈥?only
 /// the `sender` differs by deployment (in-process [`mailbox_sender`] vs gRPC
 /// `crate::nexus_mailbox::grpc_sender`).
@@ -157,35 +153,33 @@ pub struct SpawnHandle {
 /// `state_callback` is invoked on every state transition so the caller
 /// can forward to `AgentRegistry::update_state`.
 #[must_use]
-pub fn spawn_task<C, T, F>(
+pub fn spawn_task<C, T, F, R>(
     desc: &AgentDescriptor,
     mailbox: Arc<Mailbox>,
-    api_client: C,
-    tool_executor: T,
-    system_prompt: SystemPrompt,
-    permission_policy: PermissionPolicy,
+    runtime: ConversationRuntime<C, T>,
+    host_resources: R,
     state_callback: F,
 ) -> SpawnHandle
 where
     C: ApiClient + 'static,
     T: ToolExecutor + 'static,
     F: Fn(AgentState, Option<String>) + Send + 'static,
+    // Whatever the host must keep alive for as long as the loop runs — plugin
+    // handles, MCP server processes. Held, never touched. A host that has none
+    // passes `()`.
+    R: Send + 'static,
 {
     let abort_signal = HookAbortSignal::default();
     let abort_for_thread = abort_signal.clone();
 
+    // The abort signal is created here, so it is applied here: a caller
+    // cannot hold a signal that does not exist yet.
+    let runtime = runtime.with_hook_abort_signal(abort_for_thread.clone());
     let join = thread::Builder::new()
         .name(format!("managed-agent-{}", desc.pid))
         .spawn(move || {
-            run_loop(
-                mailbox,
-                api_client,
-                tool_executor,
-                system_prompt,
-                permission_policy,
-                abort_for_thread,
-                state_callback,
-            );
+            let _host_resources = host_resources;
+            run_loop(mailbox, runtime, abort_for_thread, state_callback);
         })
         .expect("OS refused to spawn managed-agent thread");
 
@@ -198,10 +192,7 @@ where
 
 fn run_loop<C, T, F>(
     mailbox: Arc<Mailbox>,
-    api_client: C,
-    tool_executor: T,
-    system_prompt: SystemPrompt,
-    permission_policy: PermissionPolicy,
+    mut runtime: ConversationRuntime<C, T>,
     abort: HookAbortSignal,
     state_cb: F,
 ) where
@@ -217,22 +208,6 @@ fn run_loop<C, T, F>(
 
     // -- WARMING_UP --
     state_cb(AgentState::WarmingUp, None);
-
-    // The VFS-backed file tools are constructed by the spawn factory
-    // (`tools::managed_agent::spawn_managed_agent`), which injects a
-    // `KernelFsBackend` into the `tool_executor` this loop receives 鈥?so
-    // the loop itself no longer builds one.
-
-    let session = Session::new();
-    let mut runtime = ConversationRuntime::new(
-        session,
-        api_client,
-        tool_executor,
-        permission_policy,
-        system_prompt,
-    )
-    .with_session_known_date(crate::time::today_local())
-    .with_hook_abort_signal(abort.clone());
 
     // -- READY --
     state_cb(AgentState::Ready, None);

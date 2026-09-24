@@ -21,6 +21,12 @@ runtime = { path = "../runtime" }
 # The MCP engine state merges plugin-advertised MCP servers (`PluginLoadOutcome`)
 # and exposes the discovered tools as `RuntimeToolDefinition`s.
 plugins = { path = "../plugins" }
+# The managed-agent DI seam (`SpawnTask` + `SpawnHandle`) that
+# `SudoCodeSpawnAdapter` implements so nexus can host an agent loop in-process.
+# Same nexus-vfs rev the runtime crate pins (transitive `kernel` unifies).
+# default-features = false → no subprocess-host, which is the raw-ACP path
+# rather than the in-process co-host.
+managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
 tools = { path = "../tools" }
 # MCP discovery/dispatch drives an isolated Tokio runtime; tool payloads and the
 # degraded-server report serialize through serde_json.
@@ -42,6 +48,10 @@ commands = { path = "../commands" }
 # completion and needs a workspace to prove the local delivery path.
 tokio = { version = "1", features = ["rt", "macros"] }
 tempfile = "3"
+# `cohost_live_llm` stands up a real in-process kernel to prove the
+# co-hosted agent's file tools and mailbox reach it. Same nexus-vfs rev
+# the runtime crate pins, so the transitive `kernel` unifies.
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "191fa0efaecf91ed5cc35a021fc13d81c1df3153", default-features = false }
 
 [lints]
 workspace = true

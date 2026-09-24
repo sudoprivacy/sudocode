@@ -266,3 +266,43 @@ fn every_method_takes_the_host_spelling() {
         at("seed.txt")
     );
 }
+
+/// A co-hosted agent's sub-agents live under IT, not on the daemon's disk.
+///
+/// `agent_store_dir` derived a host path from the process directory, so every
+/// co-hosted agent on one daemon shared a single `.sudocode-agents/` — outside
+/// the kernel's hooks and audit, invisible to the cluster, and colliding with
+/// its neighbours. The root is the backend's answer now, which is also why a
+/// CLI session's own sub-agents are untouched: its backend declines to impose
+/// one, exactly as it does for sessions.
+#[test]
+fn a_kernel_backed_session_roots_its_subagents_under_its_agent() {
+    use runtime::{FsBackend, KernelFsBackend};
+    use std::sync::Arc;
+
+    let kernel = Arc::new(kernel::kernel::Kernel::new());
+    let cohost: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+        Arc::clone(&kernel),
+        "owner",
+        "root",
+        "scode-agent",
+        "/proc/7/workspace".to_string(),
+    ));
+    assert_eq!(
+        cohost.managed_agents_root().as_deref(),
+        Some("/agents/scode-agent/subagents"),
+        "a co-hosted agent's sub-agents belong under the agent that spawned them"
+    );
+
+    // The CLI's own backend: host-spelled, so it imposes no namespace and its
+    // sub-agents stay in the workspace where its tooling finds them.
+    let dir = sandbox("subagents");
+    let workspace = dir.path().join("project");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let host = HostContext::for_cli_session(&workspace).expect("boot the session host");
+    assert_eq!(
+        host.fs.managed_agents_root(),
+        None,
+        "a CLI session keeps its sub-agents where its own tooling looks"
+    );
+}

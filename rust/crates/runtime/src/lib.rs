@@ -107,8 +107,7 @@ pub use config::{
     ModelProviderMapping, OAuthConfig, ProviderConnectionConfig, ProviderFallbackConfig,
     ResolvedPermissionMode, RuntimeConfig, RuntimeFeatureConfig, RuntimeHookConfig,
     RuntimePermissionRuleConfig, RuntimePluginConfig, ScopedMcpServerConfig, SudoCodeConfig,
-    WebSearchConfig, PERMISSION_MODE_LABELS, PERMISSION_MODE_OPTIONS, SAMPLE_SUDOCODE_JSON,
-    SUDOCODE_SETTINGS_SCHEMA_NAME,
+    WebSearchConfig, PERMISSION_MODE_OPTIONS, SAMPLE_SUDOCODE_JSON, SUDOCODE_SETTINGS_SCHEMA_NAME,
 };
 pub use config_schema::{
     resolve_input_kind, ConfigInputKind, FieldSchema, FieldType, SETTINGS_SCHEMA, SUDOCODE_SCHEMA,

@@ -1754,17 +1754,13 @@ fn parse_optional_permission_mode(
 
 /// Every spelling `permissions.defaultMode` accepts, and what each resolves to.
 ///
-/// One table because three places need the same answer: this parser, the config
-/// UI's option list (via `config_schema`), and the `config` tool's settable
-/// registry. They were three separate lists, and none of them agreed — the
-/// parser took all seven spellings, the UI offered three, `config set` offered
-/// four, and a user picking from either list could not see the other's.
+/// Two vocabularies on purpose: `default` / `acceptEdits` / `auto` / `dontAsk`
+/// are Claude Code's, so a settings file written for it keeps working, and
+/// `read-only` / `workspace-write` / `danger-full-access` are this runtime's own
+/// (`PermissionMode::as_str`).
 ///
-/// Two vocabularies on purpose: the `default` / `acceptEdits` / `dontAsk` names
-/// are Claude Code's, so a settings file written for it keeps working, and the
-/// `read-only` / `workspace-write` / `danger-full-access` names are this
-/// runtime's own (`PermissionMode::as_str`).
-pub const PERMISSION_MODE_LABELS: &[(&str, ResolvedPermissionMode)] = &[
+/// What a MENU offers is a different question — see [`PERMISSION_MODE_OPTIONS`].
+const PERMISSION_MODE_LABELS: &[(&str, ResolvedPermissionMode)] = &[
     ("default", ResolvedPermissionMode::ReadOnly),
     ("read-only", ResolvedPermissionMode::ReadOnly),
     ("acceptEdits", ResolvedPermissionMode::WorkspaceWrite),
@@ -1777,26 +1773,61 @@ pub const PERMISSION_MODE_LABELS: &[(&str, ResolvedPermissionMode)] = &[
     ),
 ];
 
-/// The same labels in the shape an option list needs (`FieldSchema::enumerated`
-/// and the `config` tool both take `&[&str]`).
+/// The permission modes a MENU offers: three modes, this product's own names.
 ///
-/// Kept beside the table it mirrors, with a compile-time length check below:
-/// adding a spelling to one and not the other fails the build rather than
-/// shipping a list that hides it.
-pub const PERMISSION_MODE_OPTIONS: &[&str] = &[
-    "default",
-    "read-only",
-    "acceptEdits",
-    "auto",
-    "workspace-write",
-    "dontAsk",
-    "danger-full-access",
-];
+/// Not the same list as [`PERMISSION_MODE_LABELS`] and deliberately shorter. A
+/// menu offering `acceptEdits` beside `workspace-write` would be asking the user
+/// to choose between two spellings of one mode; the aliases exist so a file
+/// written elsewhere loads, not so anyone picks them.
+///
+/// It IS the same list for the two places that offer it — the config UI (via
+/// `config_schema`) and `scode config set`, which enforces its options. They had
+/// drifted to three canonical names and four aliases respectively, so
+/// `config set permissions.defaultMode read-only` was refused for a value the
+/// config UI writes and the parser accepts.
+pub const PERMISSION_MODE_OPTIONS: &[&str] =
+    &["read-only", "workspace-write", "danger-full-access"];
 
-const _: () = assert!(
-    PERMISSION_MODE_LABELS.len() == PERMISSION_MODE_OPTIONS.len(),
-    "PERMISSION_MODE_OPTIONS must list exactly the labels PERMISSION_MODE_LABELS parses"
-);
+/// Byte equality for `const` context, where `==` on `&str` is not available.
+const fn same_label(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const fn is_parsable(label: &str) -> bool {
+    let mut i = 0;
+    while i < PERMISSION_MODE_LABELS.len() {
+        if same_label(PERMISSION_MODE_LABELS[i].0, label) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+// A mode the menu offers must be one the parser accepts. Without this the two
+// lists are only related by intent, which is how they drifted in the first
+// place: the build now refuses a menu entry nothing can read back.
+const _: () = {
+    let mut i = 0;
+    while i < PERMISSION_MODE_OPTIONS.len() {
+        assert!(
+            is_parsable(PERMISSION_MODE_OPTIONS[i]),
+            "every permission mode the menu offers must be one the parser accepts"
+        );
+        i += 1;
+    }
+};
 
 fn parse_permission_mode_label(
     mode: &str,

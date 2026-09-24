@@ -1752,18 +1752,61 @@ fn parse_optional_permission_mode(
     parse_permission_mode_label(mode, "merged settings.permissions.defaultMode").map(Some)
 }
 
+/// Every spelling `permissions.defaultMode` accepts, and what each resolves to.
+///
+/// One table because three places need the same answer: this parser, the config
+/// UI's option list (via `config_schema`), and the `config` tool's settable
+/// registry. They were three separate lists, and none of them agreed — the
+/// parser took all seven spellings, the UI offered three, `config set` offered
+/// four, and a user picking from either list could not see the other's.
+///
+/// Two vocabularies on purpose: the `default` / `acceptEdits` / `dontAsk` names
+/// are Claude Code's, so a settings file written for it keeps working, and the
+/// `read-only` / `workspace-write` / `danger-full-access` names are this
+/// runtime's own (`PermissionMode::as_str`).
+pub const PERMISSION_MODE_LABELS: &[(&str, ResolvedPermissionMode)] = &[
+    ("default", ResolvedPermissionMode::ReadOnly),
+    ("read-only", ResolvedPermissionMode::ReadOnly),
+    ("acceptEdits", ResolvedPermissionMode::WorkspaceWrite),
+    ("auto", ResolvedPermissionMode::WorkspaceWrite),
+    ("workspace-write", ResolvedPermissionMode::WorkspaceWrite),
+    ("dontAsk", ResolvedPermissionMode::DangerFullAccess),
+    (
+        "danger-full-access",
+        ResolvedPermissionMode::DangerFullAccess,
+    ),
+];
+
+/// The same labels in the shape an option list needs (`FieldSchema::enumerated`
+/// and the `config` tool both take `&[&str]`).
+///
+/// Kept beside the table it mirrors, with a compile-time length check below:
+/// adding a spelling to one and not the other fails the build rather than
+/// shipping a list that hides it.
+pub const PERMISSION_MODE_OPTIONS: &[&str] = &[
+    "default",
+    "read-only",
+    "acceptEdits",
+    "auto",
+    "workspace-write",
+    "dontAsk",
+    "danger-full-access",
+];
+
+const _: () = assert!(
+    PERMISSION_MODE_LABELS.len() == PERMISSION_MODE_OPTIONS.len(),
+    "PERMISSION_MODE_OPTIONS must list exactly the labels PERMISSION_MODE_LABELS parses"
+);
+
 fn parse_permission_mode_label(
     mode: &str,
     context: &str,
 ) -> Result<ResolvedPermissionMode, ConfigError> {
-    match mode {
-        "default" | "read-only" => Ok(ResolvedPermissionMode::ReadOnly),
-        "acceptEdits" | "auto" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
-        "dontAsk" | "danger-full-access" => Ok(ResolvedPermissionMode::DangerFullAccess),
-        other => Err(ConfigError::Parse(format!(
-            "{context}: unsupported permission mode {other}"
-        ))),
-    }
+    PERMISSION_MODE_LABELS
+        .iter()
+        .find(|(label, _)| *label == mode)
+        .map(|(_, resolved)| *resolved)
+        .ok_or_else(|| ConfigError::Parse(format!("{context}: unsupported permission mode {mode}")))
 }
 
 fn parse_optional_sandbox_config(root: &JsonValue) -> Result<SandboxConfig, ConfigError> {

@@ -8204,11 +8204,14 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             path: &["alwaysThinkingEnabled"],
             options: None,
         },
+        // Options from the parser's own table, not a copy. This list offered
+        // four of the seven spellings and the config UI offered a different
+        // three, so which names existed depended on where you looked.
         "permissions.defaultMode" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::String,
             path: &["permissions", "defaultMode"],
-            options: Some(&["default", "acceptEdits", "dontAsk", "auto"]),
+            options: Some(runtime::PERMISSION_MODE_OPTIONS),
         },
         "language" => ConfigSettingSpec {
             scope: ConfigScope::Settings,

@@ -4290,7 +4290,10 @@ impl LiveCli {
         // signal; read the plan text from the file, not the in-memory string.
         if take_pending_plan_execution().is_some() {
             self.lifecycle.reset_session()?;
-            let plan = runtime::plan_store::read_plan().unwrap_or_default();
+            // The session's filesystem, like the todo list below: the plan the
+            // user approved was written by this session's `write_plan`.
+            let fs = self.lifecycle.session_snapshot().fs_handle();
+            let plan = runtime::plan_store::read_plan(&fs).unwrap_or_default();
             let mut prompt = String::from(
                 "You are resuming after the user APPROVED your plan and chose to clear the \
                  conversation. The prior exploration context is gone on purpose; the approved \

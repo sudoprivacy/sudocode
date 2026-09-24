@@ -1755,7 +1755,9 @@ fn execute_tool_with_enforcer(
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
-        "write_plan" => from_value::<WritePlanInput>(input).and_then(run_write_plan),
+        "write_plan" => {
+            from_value::<WritePlanInput>(input).and_then(|input| run_write_plan(input, fs))
+        }
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
@@ -3589,14 +3591,14 @@ fn run_config(input: ConfigInput) -> Result<String, String> {
     to_pretty_json(execute_config(input)?)
 }
 
-fn run_write_plan(input: WritePlanInput) -> Result<String, String> {
+fn run_write_plan(input: WritePlanInput, fs: &Arc<dyn FsBackend>) -> Result<String, String> {
     let content = input.content.trim();
     if content.is_empty() {
         return Err(String::from(
             "write_plan requires a non-empty `content`: write the full plan before presenting it.",
         ));
     }
-    let path = runtime::plan_store::write_plan(&input.content)?;
+    let path = runtime::plan_store::write_plan(&input.content, fs)?;
     to_pretty_json(json!({
         "ok": true,
         "planFile": path.display().to_string(),

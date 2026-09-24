@@ -467,3 +467,54 @@ fn two_cohosted_agents_do_not_share_one_todo_list() {
         "and bob's list is untouched by alice's write"
     );
 }
+/// Two co-hosted agents plan in their own workspaces.
+///
+/// The plan file resolved from the PROCESS working directory, which for a
+/// co-hosted agent is the daemon's — one file for every agent on that daemon, so
+/// two of them planning at once overwrote each other and the plan the user was
+/// asked to approve was not necessarily the one the agent wrote.
+#[test]
+fn a_cohosted_agents_plan_lives_in_its_own_workspace() {
+    let kernel = kernel_with_root_backend();
+    let agent = |name: &str, workspace: &str| -> Arc<dyn FsBackend> {
+        Arc::new(KernelFsBackend::for_agent(
+            Arc::clone(&kernel),
+            "test-owner",
+            "root",
+            name,
+            workspace.to_string(),
+        ))
+    };
+    let alice = agent("alice", "/proc/1/workspace");
+    let bob = agent("bob", "/proc/2/workspace");
+
+    let path = runtime::plan_store::write_plan(
+        "## Alice
+1. ship it",
+        &alice,
+    )
+    .expect("a co-hosted agent should be able to write its plan");
+    assert_eq!(
+        path.to_string_lossy().replace('\\', "/"),
+        "/proc/1/workspace/.sudocode/plan.md",
+        "the plan belongs in the agent's own workspace"
+    );
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "and not on the host filesystem"
+    );
+
+    assert_eq!(
+        runtime::plan_store::read_plan(&alice).as_deref(),
+        Some(
+            "## Alice
+1. ship it"
+        ),
+        "it reads back through the same filesystem it was written to"
+    );
+    assert_eq!(
+        runtime::plan_store::read_plan(&bob),
+        None,
+        "and the agent next to it has no plan at all"
+    );
+}

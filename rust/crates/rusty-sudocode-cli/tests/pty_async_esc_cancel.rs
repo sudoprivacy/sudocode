@@ -82,7 +82,7 @@ fn esc_cancels_turn_in_async_repl() {
     std::thread::sleep(Duration::from_millis(500));
 
     sess.send("/exit\r").expect("send exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY screen:\n{screen}");

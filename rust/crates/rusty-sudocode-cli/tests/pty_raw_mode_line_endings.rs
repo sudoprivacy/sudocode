@@ -43,7 +43,7 @@ fn spawn_iocraft_repl(env: &TestEnv, permission_mode: &str) -> pty_expect::PtySe
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
     // Generous timeout for CI VMs where PTY output can be slow.
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     // A tall, wide screen keeps the turn's output from scrolling away and
     // gives a runaway staircase room to be unmistakable.
     sess.resize(50, 100).expect("resize pty");

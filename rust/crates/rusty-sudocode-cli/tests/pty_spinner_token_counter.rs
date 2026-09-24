@@ -66,7 +66,7 @@ fn live_spinner_shows_token_counter_during_streaming() {
         "unused_live_only",
     );
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
 
     // The spinner shows `↓` in the raw PTY byte stream while tokens
     // are being received. We must catch it before the response text

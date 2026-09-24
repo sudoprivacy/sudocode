@@ -48,7 +48,7 @@ fn write_plan_shows_confirm_dialog_and_accepts_keep_context() {
     );
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let dialog_appeared = sess.expect("Choose an action").is_ok();
 
     if !dialog_appeared && env.is_live() {
@@ -114,7 +114,7 @@ fn write_plan_choice_clear_context_executes_plan() {
     );
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     if sess.expect("Choose an action").is_err() {
         eprintln!("SKIP: live model did not call write_plan");
         return;
@@ -175,7 +175,7 @@ fn write_plan_comment_row_is_reachable_and_revises() {
     );
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     if sess.expect("Choose an action").is_err() {
         eprintln!("SKIP: live model did not call write_plan");
         return;
@@ -230,7 +230,7 @@ fn write_plan_choice_exit_rejects_execution() {
     );
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let dialog_appeared = sess.expect("Choose an action").is_ok();
 
     if !dialog_appeared && env.is_live() {

@@ -402,7 +402,7 @@ fn memory_tab_completion() {
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     // Wait for the REPL prompt.
     sess.expect("❯").expect("should see REPL prompt");
@@ -487,7 +487,7 @@ fn memory_write_read_forget_workflow() {
         &["--permission-mode", "danger-full-access"],
         &[("EDITOR", "true")],
     );
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
 
     // Wait for the REPL prompt.
     sess.expect("❯").unwrap_or_else(|e| {
@@ -639,7 +639,7 @@ fn memory_dedup_does_not_create_duplicate() {
             ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().unwrap()),
         ],
     );
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
@@ -733,7 +733,7 @@ fn memory_staleness_updates_existing_entry() {
             ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().unwrap()),
         ],
     );
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
@@ -876,7 +876,7 @@ fn memory_multi_type_single_session() {
             ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().unwrap()),
         ],
     );
-    sess.set_default_timeout(Duration::from_secs(90));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(90)));
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");

@@ -65,6 +65,6 @@ fn permission_prompt_allow_is_read_through_shared_editor() {
 
     // Best-effort teardown (the suite's tolerant pattern for post-turn /exit).
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let _ = sess.expect_eof();
 }

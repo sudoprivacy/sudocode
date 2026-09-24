@@ -59,7 +59,7 @@ fn clear_context_carries_todos_forward() {
     );
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     if sess.expect("Choose an action").is_err() {
         eprintln!("SKIP: live model did not call write_plan");
         return;
@@ -78,6 +78,6 @@ fn clear_context_carries_todos_forward() {
 
     // Best-effort teardown (multi-turn /exit sync is non-deterministic over PTY).
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let _ = sess.expect_eof();
 }

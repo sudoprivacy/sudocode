@@ -47,7 +47,7 @@ fn provider_retry_is_reported_then_the_turn_completes() {
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
     // The first backoff is a second plus jitter, and the turn still has to
     // finish after it.
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
 
     // Named as the user sees it: which attempt, out of how many, and why.
     // Matched as one line so a report that lost the reason — the only part
@@ -85,7 +85,7 @@ fn a_turn_without_retries_reports_none() {
 
     let prompt = env.prompt("Say hello", "streaming_text");
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
 
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

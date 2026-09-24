@@ -86,7 +86,7 @@ fn multi_turn_references_prior() {
     );
     sess.send("/exit\r").expect("send /exit");
 
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("scode should exit after /exit: {e}\nPTY screen:\n{screen}");
@@ -147,7 +147,7 @@ fn multi_tool_roundtrip() {
     // Mock: deterministic tool call order. Live: model may call tools
     // in any order or use different tools — verify at least one tool
     // call appears and the response references the fixture content.
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     if env.is_mock() {
         // The card header now shows the canonical tool label (`Read`, `Grep`),
         // not the wire name (`read_file`, `grep_search`), consistently in the
@@ -165,7 +165,7 @@ fn multi_tool_roundtrip() {
     sess.expect("(?i)(parity|2|two|lines|occurrences|matches|complete|result|found)")
         .expect("final response should reference tool results");
 
-    sess.set_default_timeout(Duration::from_secs(120));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(120)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("multi-tool scode should exit: {e}\nPTY screen:\n{screen}");
@@ -202,7 +202,7 @@ fn sigint_cancels_streaming() {
     std::thread::sleep(Duration::from_millis(500));
     sess.send_ctrl('c').expect("send Ctrl+C");
 
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _exit = sess
         .expect_eof()
         .expect("scode should exit after Ctrl+C, not hang");
@@ -221,7 +221,7 @@ fn sigint_cancels_pending_llm_request() {
         .expect("should see request activity before cancelling");
     sess.send_ctrl('c').expect("send Ctrl+C");
 
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _exit = sess
         .expect_eof()
         .expect("scode should exit while the LLM request is pending");
@@ -257,7 +257,7 @@ fn esc_cancels_streaming() {
     std::thread::sleep(Duration::from_millis(500));
     sess.send("\x1b").expect("send ESC");
 
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _exit = sess
         .expect_eof()
         .expect("scode should exit after ESC, not hang");

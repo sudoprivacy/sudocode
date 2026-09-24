@@ -130,6 +130,6 @@ fn task_notification_pushed_into_next_user_turn_under_coord_mode() {
     // Exit cleanly.
     sess.expect("❯").expect("REPL prompt after turn 2");
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
 }

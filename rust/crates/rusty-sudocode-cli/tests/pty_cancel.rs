@@ -90,7 +90,7 @@ fn esc_cancels_turn_in_repl() {
     std::thread::sleep(Duration::from_millis(300));
 
     sess.send("/exit\r").expect("send exit");
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY screen:\n{screen}");
@@ -134,7 +134,7 @@ fn resume_seeds_history_for_up_arrow() {
         &["--resume", "latest", "--permission-mode", "read-only"],
         &[("EDITOR", "true")],
     );
-    sess2.set_default_timeout(Duration::from_secs(15));
+    sess2.set_default_timeout(common::at_least(Duration::from_secs(15)));
 
     // Wait for the resumed REPL prompt.
     sess2.expect("❯").unwrap_or_else(|e| {

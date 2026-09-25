@@ -475,6 +475,25 @@ fn two_cohosted_agents_do_not_share_one_todo_list() {
 /// asked to approve was not necessarily the one the agent wrote.
 #[test]
 fn a_cohosted_agents_plan_lives_in_its_own_workspace() {
+    // This test asserts the workspace branch of plan resolution: with no
+    // `$SUDOCODE_PLAN_FILE`, the plan lands in the agent's own working root on
+    // its own filesystem. That env var takes precedence when set (correct
+    // product behavior — a live CLI points it at the session's plan), so run
+    // this under the var unset regardless of the ambient environment. Without
+    // this the test passes in CI (clean env) but fails inside a live scode,
+    // whose process has the var pointing at its own session plan.
+    struct UnsetPlanFileEnv(Option<String>);
+    impl Drop for UnsetPlanFileEnv {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(prev) => std::env::set_var("SUDOCODE_PLAN_FILE", prev),
+                None => std::env::remove_var("SUDOCODE_PLAN_FILE"),
+            }
+        }
+    }
+    let _plan_env = UnsetPlanFileEnv(std::env::var("SUDOCODE_PLAN_FILE").ok());
+    std::env::remove_var("SUDOCODE_PLAN_FILE");
+
     let kernel = kernel_with_root_backend();
     let agent = |name: &str, workspace: &str| -> Arc<dyn FsBackend> {
         Arc::new(KernelFsBackend::for_agent(

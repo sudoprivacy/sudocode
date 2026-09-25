@@ -33,9 +33,17 @@ log() { echo "[fetch-daemon] $*" >&2; }
 die() { echo "[fetch-daemon] $*" >&2; exit 1; }
 
 # ── 1. the pinned rev ────────────────────────────────────────────────────
+# Read the COMMIT, not the pin's spelling. Cargo records a git source as
+# `?<how>#<commit>` — `?rev=X#X`, `?tag=v0.7.14#X`, `?branch=b#X` — so the part
+# after `#` is the resolved commit however the manifest asked for it. Matching
+# `?rev=` alone made a manifest that pins by TAG look like a missing dependency.
+#
+# `|| true` so an empty match reaches the check below: a failing `grep` inside
+# `$( )` under `set -e` kills the script where it stands, and the `die` written
+# for exactly this case never printed — 0.7s, exit 1, not one line of output.
 [ -f "$LOCKFILE" ] || die "no lockfile at $LOCKFILE"
-REV="$(grep -oE 'nexus-vfs\?rev=[0-9a-f]{40}' "$LOCKFILE" | head -1 | cut -d= -f2)"
-[ -n "$REV" ] || die "no nexus-vfs rev in $LOCKFILE — has the dependency moved?"
+REV="$(grep -oE 'nexus-vfs\?[^#"]*#[0-9a-f]{40}' "$LOCKFILE" | head -1 | sed 's/.*#//' || true)"
+[ -n "$REV" ] || die "no nexus-vfs commit in $LOCKFILE — has the dependency moved?"
 
 # ── 2. the tag that points at it ─────────────────────────────────────────
 # `^{}` marks the commit an annotated tag dereferences to, which is the one the

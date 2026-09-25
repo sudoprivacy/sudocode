@@ -9,6 +9,32 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+# ── nexus-vfs: ONE pin for every crate sudocode takes from it ─────────
+#
+# The pin is a correctness constraint, not a preference. A co-hosted agent
+# receives the daemon's `Arc<Kernel>` and hands back a `SpawnTask<Kernel>`, so two
+# nexus-vfs revs anywhere in this graph are two `Kernel` types in one process and
+# that seam stops unifying. Stated eight times across three manifests, as it was,
+# it is eight chances to move one copy and not the rest.
+#
+# A TAG, not a rev, because that is the rule the harness enforces: the
+# `nexus-A2A live` job fetches the published `nexusd-cluster` matching this pin,
+# and a pin between releases has no daemon to match it. Bumping therefore means
+# tagging nexus-vfs first — which the manifest now says, instead of leaving a
+# script to discover it.
+#
+# `default-features = false` on all of them: the kernel's runtime defaults
+# (mimalloc, the connector stack, py-hook adapters) are daemon concerns that would
+# bloat a standalone CLI. Per-crate features that only one member needs live here
+# too, so a member's line stays `{ workspace = true }` and the pin has no second
+# place to disagree with itself.
+a2a = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false }
+backends = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false, features = ["driver-local-connector"] }
+contracts = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false }
+lib = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false, features = ["runtime-bridge"] }
+managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false }
+
 agent-client-protocol = { version = "0.11", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 agent-client-protocol-schema = { version = "0.12", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 agent-client-protocol-tokio = "0.11"

@@ -28,27 +28,18 @@ futures = "0.3"
 # trees ever drop it.
 getrandom = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-# Nexus kernel rlib — provides `kernel::kernel::syscall::KernelSyscall`
-# trait that `runtime::spawn_task::<K>` is generic over. `default-features
-# = false` keeps the kernel runtime defaults (mimalloc, connector stack,
-# py-hook adapters) off in the sudocode build — sudocode does not need
-# them and they would bloat the standalone CLI.
-#
-# Pinned to the SAME nexus-vfs rev the nexus daemon (rust/nexusd) uses, so
-# `SpawnTask<Kernel>` monomorphises to one type when nexusd links both
-# sudocode_runtime and the nexus service crates (co-host binary edge).
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "2467f35825b872daed0c7913d0466f221cd813df", default-features = false }
+# Nexus kernel rlib — provides the `kernel::kernel::syscall::KernelSyscall`
+# trait that `runtime::spawn_task::<K>` is generic over.
+kernel = { workspace = true }
 # The A2A messaging substrate: SSOT for the mailbox message schema
-# (`MailboxEnvelope`) + the `/chat-with-me` path suffix. MUST be the same
-# nexus-vfs rev as `kernel` (a2a itself deps kernel; a mismatched rev = two
-# distinct `Kernel` types). Re-exported from `spawn_task` so downstream crates
-# use it without a direct a2a dependency.
-a2a = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "2467f35825b872daed0c7913d0466f221cd813df", default-features = false }
+# (`MailboxEnvelope`) + the `/chat-with-me` path suffix. Re-exported from
+# `spawn_task` so downstream crates use it without a direct a2a dependency.
+a2a = { workspace = true }
 # VFS namespace constants (SESSIONS_BASE): the layout is nexus-vfs contract, so
 # the paths a backend answers with come from there rather than being spelled here
-# a second time. Same rev as kernel/a2a — one nexus-vfs across the seam.
-contracts = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "2467f35825b872daed0c7913d0466f221cd813df", default-features = false }
-lib = { git = "https://github.com/nexi-lab/nexus-vfs", rev = "2467f35825b872daed0c7913d0466f221cd813df", default-features = false, features = ["runtime-bridge"] }
+# a second time.
+contracts = { workspace = true }
+lib = { workspace = true }
 sha2 = "0.10"
 glob = "0.3"
 keyring = "3"

@@ -2161,9 +2161,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     element! {
         View(flex_direction: FlexDirection::Column) {
-            // PendingSlot: tools + queued messages, arrival order. Empty string
-            // renders nothing; element always present to keep hook order.
-            Text(content: pending_text)
+            // PendingSlot: tools + queued messages, arrival order. Rendered only
+            // when non-empty — an empty `Text` is not zero-height in iocraft
+            // (its measure clamps to `height.max(1)`), so an always-present slot
+            // left a stray blank line above the status when nothing was pending.
+            // Match the StatusSlot pattern below: `None` renders zero rows.
+            #(if pending_text.is_empty() {
+                None
+            } else {
+                Some(element! { Text(content: pending_text) })
+            })
             // StatusSlot
             #(match &status_slot {
                 StatusSlot::Spinner(s) => Some(element! { Text(content: s.clone()) }),

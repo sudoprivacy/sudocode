@@ -20,7 +20,8 @@ use ::managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnTask};
 use runtime::mailbox::Mailbox;
 use runtime::session_control::SessionStore;
 use runtime::spawn_task::{
-    cohost_a2a_prompt_section, spawn_task, AgentDescriptor, AgentState, KernelSyscall, SpawnHandle,
+    cohost_a2a_prompt_section, cohost_shell_prompt_section, spawn_task, AgentDescriptor,
+    AgentState, KernelSyscall, SpawnHandle,
 };
 use runtime::{FsBackend, KernelFsBackend, PermissionMode, Session, SystemPrompt};
 
@@ -97,17 +98,12 @@ where
     // one object rather than two implementations that have to agree.
     let mailbox = Arc::new(Mailbox::daemon_absolute(Arc::clone(&fs), desc.name.clone()));
 
-    let host = HostContext {
-        fs,
-        // Configuration stays on the daemon's own disk. A daemon has to read
-        // its configuration before it can serve the VFS that configuration
-        // describes, so this is the one root that does not follow `fs`.
-        config_root: std::env::current_dir().unwrap_or_default(),
-        // The descriptor is the SSOT for who this agent is; nothing here should
-        // re-derive it from a path.
-        agent_name: Some(desc.name.clone()),
-        mailbox: Some(Arc::clone(&mailbox)),
-    };
+    // Through the same named constructor the CLI uses, for the same reason the
+    // engine is shared: the two hosts' shapes sit next to each other in
+    // `runtime_build`, so the difference between them is readable in one place
+    // instead of assembled here and inferred there.
+    let host = HostContext::for_cohost_agent(fs, &desc.name, Arc::clone(&mailbox))
+        .expect("co-host: the agent's host-side directory must be creatable");
 
     // Permissions are enforced by the kernel — ReBAC plus the workspace
     // boundary hook — on the far side of every one of these tools. A second
@@ -130,6 +126,15 @@ where
     system_prompt
         .dynamic_sections
         .push(cohost_a2a_prompt_section(&desc.name));
+    // The second: a co-hosted agent's files and its shell are in different
+    // places, and a model not told that reads an unrelated directory and
+    // concludes its workspace is empty.
+    system_prompt
+        .dynamic_sections
+        .push(cohost_shell_prompt_section(
+            &workspace_root,
+            &host.shell_root,
+        ));
 
     let config = RuntimeConfig {
         model,
@@ -182,7 +187,14 @@ where
 
     // `built` goes with it: its `Drop` shuts down the MCP servers and plugins
     // this engine is using, so it has to outlive the loop rather than the call.
-    spawn_task(&desc, mailbox, engine, built, state_callback)
+    spawn_task(
+        &desc,
+        mailbox,
+        engine,
+        built,
+        host.shell_root.clone(),
+        state_callback,
+    )
 }
 
 /// The session store a co-hosted agent records into.

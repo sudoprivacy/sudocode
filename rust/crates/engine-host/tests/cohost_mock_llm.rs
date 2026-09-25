@@ -68,6 +68,12 @@ impl Harness {
     }
 }
 
+/// The turn each test drives. The `PARITY_SCENARIO:` prefix selects the mock's
+/// script, so the prompt and the script it triggers are named together.
+const READ_THEN_REPLY: &str =
+    "Read fixture.txt and tell me what it says. PARITY_SCENARIO:cohost_read_then_reply";
+const SHELL_PWD: &str = "Run pwd and tell me where your shell is. PARITY_SCENARIO:cohost_shell_pwd";
+
 /// One co-hosted agent at a time in this binary. What the harness configures is
 /// process-global — the scripted model's base URL lives in one
 /// `SUDO_CODE_CONFIG_HOME`, and the runtime build reads and creates state under
@@ -136,15 +142,17 @@ fn harness() -> &'static Harness {
 /// Drive one co-hosted turn and report what came back, and how many times the
 /// model was asked to produce it.
 ///
-/// `transcript_is_stream` is the ONLY difference between the two tests below:
-/// whether the pair's transcript is the DT_STREAM a federated daemon provides,
-/// or the DT_REG a conversation degrades to when that stream cannot be created.
-/// An agent has to behave the same on both, so the shape is a parameter rather
-/// than a second copy of this.
-fn run_read_then_reply(
+/// `transcript_is_stream` is whether the pair's transcript is the DT_STREAM a
+/// federated daemon provides, or the DT_REG a conversation degrades to when that
+/// stream cannot be created; an agent has to behave the same on both, so the
+/// shape is a parameter rather than a second copy of this. `prompt` is a
+/// parameter for the same reason: a second scenario is a different question for
+/// the same agent, not a different harness.
+fn run_cohost_turn(
     pid: &str,
     agent_id: &str,
     transcript_is_stream: bool,
+    prompt: &str,
 ) -> (String, usize, Arc<dyn FsBackend>) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let harness = harness();
@@ -191,11 +199,7 @@ fn run_read_then_reply(
     });
 
     let ctx = user_ctx();
-    send_prompt(
-        &user_mb,
-        agent_id,
-        "Read fixture.txt and tell me what it says. PARITY_SCENARIO:cohost_read_then_reply",
-    );
+    send_prompt(&user_mb, agent_id, prompt);
 
     let reply = wait_for_agent_reply(
         &kernel,
@@ -252,7 +256,7 @@ fn assert_delivery_is_bounded(asked: usize) {
 /// appended to the transcript the user reads.
 #[test]
 fn a_cohost_agent_reads_its_workspace_and_replies() {
-    let (body, asked, _fs) = run_read_then_reply("cohost-mock-1", "scode-mock", true);
+    let (body, asked, _fs) = run_cohost_turn("cohost-mock-1", "scode-mock", true, READ_THEN_REPLY);
     assert!(
         body.contains(FIXTURE_BODY),
         "the reply should carry what the agent read out of its workspace; got: {body}"
@@ -270,7 +274,8 @@ fn a_cohost_agent_reads_its_workspace_and_replies() {
 /// times over (1044 model calls in 60 seconds, measured).
 #[test]
 fn a_conversation_that_is_not_a_stream_still_delivers_once() {
-    let (body, asked, _fs) = run_read_then_reply("cohost-mock-2", "scode-mock-jsonl", false);
+    let (body, asked, _fs) =
+        run_cohost_turn("cohost-mock-2", "scode-mock-jsonl", false, READ_THEN_REPLY);
     assert!(
         body.contains(FIXTURE_BODY),
         "a byte-addressed transcript should carry the same reply; got: {body}"
@@ -290,7 +295,8 @@ fn a_conversation_that_is_not_a_stream_still_delivers_once() {
 /// makes a co-hosted agent's history inspectable at all.
 #[test]
 fn a_cohost_turn_is_recorded_in_the_vfs() {
-    let (_body, _asked, fs) = run_read_then_reply("cohost-mock-3", "scode-mock-session", true);
+    let (_body, _asked, fs) =
+        run_cohost_turn("cohost-mock-3", "scode-mock-session", true, READ_THEN_REPLY);
 
     let sessions = fs
         .readdir("/sessions")
@@ -364,4 +370,28 @@ fn a_cohost_is_not_offered_crons_this_daemon_will_never_fire() {
 
     handle.abort_signal.abort();
     let _ = handle.join.join();
+}
+
+/// A co-hosted agent's shell runs in a directory of its OWN.
+///
+/// The scope is thread-local on the loop thread, so no test thread can read it —
+/// but the agent can be asked. It runs `pwd` and reports the answer, and the
+/// answer has to be its own directory rather than the daemon's, which is what
+/// `current_workspace_root()` falls through to when no scope is entered. That
+/// default was shared by every co-hosted agent on the daemon and pointed at the
+/// daemon's own git repository, so `git status` — and the git-context hook, and
+/// the stale-branch check — answered about the daemon.
+///
+/// Matched loosely on purpose: `sh -lc pwd` prints an MSYS path on Windows
+/// (`/c/Users/...`) and a canonicalised one on macOS, and the claim here is about
+/// WHICH directory, not how the platform spells it.
+#[test]
+fn a_cohosted_agents_shell_runs_in_its_own_directory() {
+    let agent_id = "scode-mock-shell";
+    let (body, _asked, _fs) = run_cohost_turn("cohost-mock-4", agent_id, true, SHELL_PWD);
+    let reported = body.replace('\\', "/");
+    assert!(
+        reported.contains(&format!("agents/{agent_id}/shell")),
+        "the agent should report its own shell root; got {reported}"
+    );
 }

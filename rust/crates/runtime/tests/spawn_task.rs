@@ -192,6 +192,19 @@ fn cohost_mailbox(kernel: &Arc<Kernel>, desc: &AgentDescriptor) -> Arc<Mailbox> 
     Arc::new(Mailbox::daemon_absolute(fs, desc.name.clone()))
 }
 
+/// The loop's host-side root. A per-test directory, for the same reason the
+/// co-host gives each agent its own: a shared one is a shared `bash` cwd and a
+/// shared git repository.
+fn shell_root(desc: &AgentDescriptor) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "spawn-task-shell-{}-{}",
+        std::process::id(),
+        desc.pid
+    ));
+    std::fs::create_dir_all(&dir).expect("shell root");
+    dir
+}
+
 /// Spawn the REAL `run_loop` (via `spawn_task`) with the scripted mock — the
 /// exact loop the co-host runs, minus the network provider.
 fn spawn_real(kernel: &Arc<Kernel>, desc: &AgentDescriptor) -> SpawnHandle {
@@ -200,6 +213,7 @@ fn spawn_real(kernel: &Arc<Kernel>, desc: &AgentDescriptor) -> SpawnHandle {
         cohost_mailbox(kernel, desc),
         test_runtime(ScriptedReply, NoTools),
         (),
+        shell_root(desc),
         |_state, _reason| {},
     )
 }
@@ -247,6 +261,7 @@ fn spawn_sending(
             SendingTools { send },
         ),
         (),
+        shell_root(desc),
         |_state, _reason| {},
     )
 }

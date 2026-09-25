@@ -205,6 +205,13 @@ pub mod testing {
         )
     }
 
+    /// Test seam for the `send` dead-pid guard. Returns `Ok(())` when `to` may
+    /// be sent to (a live pid, or any agent-name), `Err` when it is a
+    /// known-terminal pid. Lets a test exercise the D1 rule without a real send.
+    pub fn reject_dead_pid_for_test(to: &str) -> Result<(), String> {
+        crate::reject_dead_pid(to)
+    }
+
     /// Test seam: does the summary-threshold gate — mirrors the
     /// production `maybe_summarize_agent_result` decision but does
     /// NOT invoke the LLM summarizer. Instead, when the text
@@ -1525,6 +1532,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "result reads `message delivered to <name>`; otherwise it lands in the ",
                 "recipient's workspace mailbox (.sudocode-inbox/<name>.jsonl). ",
                 "When `to` is a pid it is routed to the running process. ",
+                "A pid that has already exited is an error — its message cannot be \
+                 delivered, so use `agent_list` to find a live agent (or a name, \
+                 whose inbox holds the message until it next runs). ",
                 "`to: \"*\"` broadcasts to all teammates (structured messages CANNOT be broadcast). ",
                 "`message` accepts a plain string (pass `summary` too so the UI has a preview) ",
                 "or a structured object {type: shutdown_request|shutdown_response|plan_approval_response, ...}. ",
@@ -2795,6 +2805,39 @@ fn generate_request_id(prefix: &str, target: &str) -> String {
     format!("{prefix}_{target_slug}_{ts:x}")
 }
 
+/// Refuse a send to a pid that is known-and-dead (design D1: a dead pid errors,
+/// no fallback). "Dead" is narrow on purpose: `to` must be a spawned agent id
+/// this process knows AND that has reached a terminal state — a live pid, or any
+/// agent-name (which is offline-capable, its inbox filled until it next runs),
+/// passes through untouched to the one shared send path.
+///
+/// Liveness is the in-process abort registry; terminal state is the persisted
+/// manifest. `read_manifest_from_store` returns `Ok` ONLY for a terminal
+/// (`completed`/`failed`) manifest, so its `Ok` is exactly "known and dead". A
+/// name with no manifest is not a pid at all — `Err` there means "not dead",
+/// which is why this returns `Ok(())` on that path.
+fn reject_dead_pid(to: &str) -> Result<(), String> {
+    // Live? Then it can receive — not dead.
+    let live = global_agent_abort_signals()
+        .lock()
+        .map(|m| m.contains_key(to))
+        .unwrap_or(false);
+    if live {
+        return Ok(());
+    }
+    // Not live. If it is a KNOWN agent id with a terminal manifest, it is a
+    // dead pid — refuse. Any other case (unknown name, non-terminal) is not a
+    // dead pid and falls through.
+    let fs = runtime::host_fs_arc();
+    if read_manifest_from_store(to, fs.as_ref()).is_ok() {
+        return Err(format!(
+            "agent '{to}' has exited — its pid is dead, so a message cannot reach it. \
+             Use `agent_list` to find a live agent, or `pid_output` to read what it left."
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn run_send_message(input: SendMessageInput) -> Result<String, String> {
     if input.to.trim().is_empty() {
@@ -2805,6 +2848,16 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
             "to must be a bare teammate name or \"*\" — there is only one team per session"
                 .to_string(),
         );
+    }
+    // One precondition shared by every send path (plain, broadcast filters it
+    // by construction, structured): refuse a target that is a KNOWN-and-dead
+    // pid, so a message to an exited worker errors instead of provisioning a
+    // phantom inbox nobody reads and reporting success (design D1: a dead pid
+    // has no fallback). A plain agent-name — known or not — is offline-capable
+    // and falls through to the one unchanged send path; only a known-terminal
+    // agent id is refused. Not a second send path: a guard, then the same send.
+    if input.to != "*" {
+        reject_dead_pid(&input.to)?;
     }
 
     // Resolved once for the whole call. `send` has one destination namespace

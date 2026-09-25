@@ -134,6 +134,32 @@ pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
     )
 }
 
+/// What a co-hosted agent is told about where its shell runs.
+///
+/// Its files are in the VFS at `workspace` and are reached with the file tools;
+/// its `bash` runs on the daemon's host filesystem, starting in `shell_root`,
+/// which is NOT the workspace. Without this the model does the reasonable thing —
+/// `ls` to see what it is working with — reads an unrelated directory, and
+/// concludes its workspace is empty.
+///
+/// Said once here, beside [`cohost_a2a_prompt_section`], so the two things only
+/// this host contributes are written in one place. Nothing restricts where the
+/// shell may `cd`: containment is the mount table, which bounds what the FILE
+/// TOOLS address, and the process sandbox is the deployment's job — not this
+/// sentence's.
+#[must_use]
+pub fn cohost_shell_prompt_section(workspace: &str, shell_root: &std::path::Path) -> String {
+    format!(
+        "# Your files and your shell are in different places\n\
+         Your workspace is `{workspace}` and you reach it with the file tools \
+         (read_file / write_file / edit_file / glob / grep). Your `bash` runs on \
+         the host that runs this daemon, starting in `{}` — a directory of your \
+         own that is NOT your workspace, so `ls` there will not show your files. \
+         Use the file tools for your work and `bash` for commands.",
+        shell_root.display()
+    )
+}
+
 /// Handle returned by [`spawn_task`].
 pub struct SpawnHandle {
     /// Shared abort signal 鈥?wired into the [`ConversationRuntime`] via
@@ -152,12 +178,22 @@ pub struct SpawnHandle {
 ///
 /// `state_callback` is invoked on every state transition so the caller
 /// can forward to `AgentRegistry::update_state`.
+///
+/// `shell_root` is the HOST directory this agent's host-side execution runs in —
+/// `bash`, `git`, and every hook that resolves
+/// [`crate::workspace_root::current_workspace_root`]. It is entered as a scope on
+/// the loop thread, which is where it has to happen: the scope is thread-local,
+/// and the tool executor carries it onto its blocking threads with
+/// [`crate::WorkspaceRootHandoff`]. Without one, all of the above fell through to
+/// the DAEMON's working directory — one directory shared by every co-hosted agent
+/// on that daemon, and the daemon's own git repository.
 #[must_use]
 pub fn spawn_task<C, T, F, R>(
     desc: &AgentDescriptor,
     mailbox: Arc<Mailbox>,
     runtime: ConversationRuntime<C, T>,
     host_resources: R,
+    shell_root: std::path::PathBuf,
     state_callback: F,
 ) -> SpawnHandle
 where
@@ -179,6 +215,10 @@ where
         .name(format!("managed-agent-{}", desc.pid))
         .spawn(move || {
             let _host_resources = host_resources;
+            // For the whole life of the loop: this agent's host-side root never
+            // changes, and a per-turn scope would leave the gaps between turns
+            // resolving to the daemon's directory again.
+            let _shell_root = crate::WorkspaceRootScope::enter(shell_root);
             run_loop(mailbox, runtime, abort_for_thread, state_callback);
         })
         .expect("OS refused to spawn managed-agent thread");

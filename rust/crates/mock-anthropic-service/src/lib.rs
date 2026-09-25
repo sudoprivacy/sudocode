@@ -225,6 +225,7 @@ enum Scenario {
     UnifiedSendFromNamedPeer,
     CohostReply,
     CohostReadThenReply,
+    CohostShellPwd,
     DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
     /// three `Agent` tool_use blocks (run synchronously) whose prompts each
@@ -338,6 +339,7 @@ impl Scenario {
             "unified_send_from_named_peer" => Some(Self::UnifiedSendFromNamedPeer),
             "cohost_reply" => Some(Self::CohostReply),
             "cohost_read_then_reply" => Some(Self::CohostReadThenReply),
+            "cohost_shell_pwd" => Some(Self::CohostShellPwd),
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
@@ -397,6 +399,7 @@ impl Scenario {
             Self::UnifiedSendFromNamedPeer => "unified_send_from_named_peer",
             Self::CohostReply => "cohost_reply",
             Self::CohostReadThenReply => "cohost_read_then_reply",
+            Self::CohostShellPwd => "cohost_shell_pwd",
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
@@ -1469,6 +1472,31 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 )],
             ),
         },
+        // Where does a co-hosted agent's shell run? Ask it — `pwd`, then report
+        // the answer to the peer. The assertion is the test's; this only has to
+        // make the agent produce the fact.
+        Scenario::CohostShellPwd => {
+            let results = tool_results_by_name(request);
+            match (results.get("bash"), results.get("send")) {
+                (Some(_), Some((send_output, _))) => {
+                    final_text_sse(&format!("cohost shell pwd complete: {send_output}"))
+                }
+                (Some((bash_output, _)), None) => {
+                    // Built through `json!` rather than a format string: a path is
+                    // the one payload guaranteed to carry separators, and a
+                    // hand-escaped one is a mock that breaks on the platform it
+                    // was not written on.
+                    let input = json!({
+                        "to": COHOST_REPLY_TO,
+                        "message": extract_bash_stdout(bash_output),
+                        "summary": "pwd",
+                    })
+                    .to_string();
+                    tool_use_sse("toolu_cohost_pwd_send", "send", &[&input])
+                }
+                _ => tool_use_sse("toolu_cohost_pwd_bash", "bash", &[r#"{"command":"pwd"}"#]),
+            }
+        }
         Scenario::CohostReadThenReply => {
             let results = tool_results_by_name(request);
             match (results.get("read_file"), results.get("send")) {
@@ -2053,6 +2081,31 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"to": UNIFIED_SEND_RECIPIENT, "message": UNIFIED_SEND_BODY, "summary": "greeting test"}),
             ),
         },
+        Scenario::CohostShellPwd => {
+            let results = tool_results_by_name(request);
+            match (results.get("bash"), results.get("send")) {
+                (Some(_), Some((send_output, _))) => text_message_response(
+                    "msg_cohost_shell_pwd_final",
+                    &format!("cohost shell pwd complete: {send_output}"),
+                ),
+                (Some((bash_output, _)), None) => tool_message_response(
+                    "msg_cohost_shell_pwd_send",
+                    "toolu_cohost_pwd_send",
+                    "send",
+                    json!({
+                        "to": COHOST_REPLY_TO,
+                        "message": extract_bash_stdout(bash_output),
+                        "summary": "pwd",
+                    }),
+                ),
+                _ => tool_message_response(
+                    "msg_cohost_shell_pwd_bash",
+                    "toolu_cohost_pwd_bash",
+                    "bash",
+                    json!({"command": "pwd"}),
+                ),
+            }
+        }
         Scenario::CohostReadThenReply => {
             let results = tool_results_by_name(request);
             match (results.get("read_file"), results.get("send")) {
@@ -2228,6 +2281,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::UnifiedSendFromNamedPeer => "req_unified_send_from_named_peer",
         Scenario::CohostReply => "req_cohost_reply",
         Scenario::CohostReadThenReply => "req_cohost_read_then_reply",
+        Scenario::CohostShellPwd => "req_cohost_shell_pwd",
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",

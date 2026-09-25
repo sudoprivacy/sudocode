@@ -60,6 +60,21 @@ pub struct HostContext {
     /// The agent's name when the host knows it. `None` means "derive it",
     /// which is what a CLI session does from its directory and config.
     pub agent_name: Option<String>,
+    /// The HOST directory this session's host-side execution runs in: `bash`,
+    /// `git`, and every hook that resolves `current_workspace_root()`.
+    ///
+    /// A CLI session's shell root IS its workspace — one directory, reached two
+    /// ways. A co-hosted agent's is not and cannot be: its workspace is a VFS
+    /// path (`/proc/<pid>/workspace`, a per-agent view of DT_LINKs onto the
+    /// repos it was given), and no shell can `cd` into that. So it gets a
+    /// directory of its own on the daemon's host, and the model is told the
+    /// difference (`cohost_shell_prompt_section`).
+    ///
+    /// The value matters because the alternative is not "no scope" but "the
+    /// daemon's scope": `current_workspace_root()` falls through to the process
+    /// working directory, which every co-hosted agent on that daemon shares and
+    /// which is the daemon's own checkout.
+    pub shell_root: PathBuf,
     /// Where this agent's messages are sent and received, when the host owns
     /// that. `None` means "resolve it", which is what a CLI session does.
     ///
@@ -94,9 +109,47 @@ impl HostContext {
         let fs = crate::local_kernel::boot_session_fs(&cwd, &extra_roots, &agent_name)?;
         Ok(Self {
             fs,
+            // The CLI's three roots are one directory: what it reads its config
+            // from, what its tools address, and where its shell runs.
+            shell_root: cwd.clone(),
             config_root: cwd,
             agent_name: Some(agent_name),
             mailbox: None,
+        })
+    }
+
+    /// The co-host's shape: an agent inside `nexusd-cluster`, on the daemon's
+    /// kernel.
+    ///
+    /// Deliberately adjacent to [`Self::for_cli_session`]: the difference between
+    /// the two hosts is the difference between these two functions, and a reader
+    /// who has to open two files to find it will not find it. Everything either
+    /// host supplies is a VALUE here — no engine behaviour branches on which one
+    /// is running.
+    ///
+    /// * `fs` — the daemon's kernel, so the agent's writes pass the hooks, the
+    ///   audit trail and the permission checks that co-hosting exists for.
+    /// * `config_root` — the daemon's own directory. A daemon reads its
+    ///   configuration before it can serve the VFS that configuration describes.
+    /// * `agent_name` / `mailbox` — from the descriptor, which is the SSOT for
+    ///   who this agent is. Deriving either here would let `send` address one
+    ///   identity while the agent receives on another.
+    /// * `shell_root` — created if missing, one per agent under the config home
+    ///   so it survives a respawn. See the field's docstring for why it cannot be
+    ///   the workspace.
+    pub fn for_cohost_agent(
+        fs: Arc<dyn runtime::FsBackend>,
+        agent_name: &str,
+        mailbox: Arc<runtime::mailbox::Mailbox>,
+    ) -> io::Result<Self> {
+        let shell_root = cohost_shell_root(agent_name);
+        std::fs::create_dir_all(&shell_root)?;
+        Ok(Self {
+            fs,
+            shell_root,
+            config_root: std::env::current_dir()?,
+            agent_name: Some(agent_name.to_string()),
+            mailbox: Some(mailbox),
         })
     }
 
@@ -113,6 +166,19 @@ impl HostContext {
             None => agent_name_under(&self.config_root),
         }
     }
+}
+
+/// `<config home>/agents/<name>/shell` — a co-hosted agent's own host-side
+/// directory.
+///
+/// Under the config home rather than a temp directory because it is the agent's,
+/// not the run's: an agent respawned onto the same identity comes back to the
+/// files it left. Per AGENT, not per pid, for the same reason.
+fn cohost_shell_root(agent_name: &str) -> PathBuf {
+    runtime::default_config_home()
+        .join("agents")
+        .join(agent_name)
+        .join("shell")
 }
 
 /// Directories a session under `root` may reach beyond `root` itself, from the

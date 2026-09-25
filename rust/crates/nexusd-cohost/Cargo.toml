@@ -1,0 +1,44 @@
+[package]
+name = "nexusd-cohost"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The cluster daemon, plus an in-process sudocode runtime. One binary rather than
+# a feature on `scode`: the products are a CLI and a daemon, and a daemon that
+# ships inside a CLI is a CLI nobody can audit the size of.
+[[bin]]
+name = "nexusd-cohost"
+path = "src/main.rs"
+
+[dependencies]
+# The daemon itself — every flag, every service, every boot path of
+# `nexusd-cluster`, entered through `run_with_services` so this binary chooses
+# the service set instead of forking the composition root.
+nexus-cluster = { workspace = true }
+# The two services it declares. `a2a` is the messaging substrate a co-hosted
+# agent receives on; `managed-agent` is the control plane whose spawn provider
+# this binary supplies.
+a2a = { workspace = true }
+managed-agent = { workspace = true }
+# `ServiceDecl` — the shape a service is handed to the kernel in. The co-host
+# builds one by hand because the provider is the assembly's choice, not the
+# service's.
+kernel = { workspace = true }
+# `SudoCodeSpawnAdapter` — the agent runtime this daemon hosts. A path dep, not a
+# git one, which is the whole reason this crate lives here: the nexus-vfs rev is
+# named once for the workspace, and the runtime cannot be a rev older than the
+# kernel it is handed.
+engine-host = { path = "../engine-host" }
+anyhow = "1"
+
+# The raw ACP-subprocess tunnel (sudowork / hydra `spawn_spec`) is unix-only at
+# the module gate, so the feature is too. Without this a co-host node would be a
+# DOWNGRADE from `nexusd-cluster`, which ships it: this binary has to be a
+# superset of the one it replaces, not a trade.
+[target.'cfg(unix)'.dependencies]
+managed-agent = { workspace = true, features = ["subprocess-host"] }
+
+[lints]
+workspace = true

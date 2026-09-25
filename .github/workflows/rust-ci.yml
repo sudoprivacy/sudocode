@@ -216,6 +216,19 @@ jobs:
       - name: Auth-on A2A — the node decides who a message is from
         run: e2e/nexus-a2a/run-auth-on.sh
 
+      # Everything above is an agent that TALKS TO a daemon. This one runs
+      # INSIDE one: `nexusd-cohost` is built from this checkout, so the agent
+      # under test is the code in this diff — which is the whole reason the crate
+      # lives in this repo. The provider is the in-repo mock, so there is no key
+      # and no nondeterminism; the live-model variant is a manual run.
+      #
+      # The receive loop is the part only this can reach. `cohost_mock_llm`
+      # drives the same loop in-process, but it hands the loop a transcript it
+      # provisioned itself — here the conversation is created over gRPC by a
+      # peer, which is the shape production has.
+      - name: Co-host duet against a daemon built from this checkout
+        run: e2e/nexus-a2a/run-cohost.sh
+
   bench-compile:
     name: cargo bench --no-run (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

@@ -217,11 +217,27 @@ fn additional_directories(root: &Path) -> io::Result<Vec<PathBuf>> {
 /// there says, else what [`runtime::mailbox::local_agent_name`] derives from
 /// the directory itself.
 fn agent_name_under(root: &Path) -> String {
-    let configured = ConfigLoader::default_for(root).load().ok().and_then(|rc| {
+    let loader = ConfigLoader::default_for(root);
+    let configured = loader.load().ok().and_then(|rc| {
         rc.get("agentName")
             .and_then(|v| v.as_str().map(str::to_string))
     });
-    runtime::mailbox::local_agent_name(configured.as_deref(), root)
+    if let Some(name) = configured
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return name.to_string();
+    }
+    // No configured name: mint one from the workspace and persist it, so this
+    // identity is stable across restarts instead of being re-derived every boot
+    // (a re-derivation drifts when the path spelling changes — e.g. Windows
+    // `\\?\` vs plain — leaving a trail of stale presence dirs). This is the
+    // native analog of nexus minting the name at auth. Best-effort: if the
+    // write fails we still return the derived name for this boot.
+    let minted = runtime::mailbox::local_agent_name(None, root);
+    let _ = loader.set_agent_name(&minted);
+    minted
 }
 
 // === moved from rusty-sudocode-cli/src/main.rs (CORE cluster extraction) ===

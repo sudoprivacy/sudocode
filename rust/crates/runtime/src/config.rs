@@ -717,6 +717,64 @@ impl ConfigLoader {
         Ok(path)
     }
 
+    /// Persist `agentName` to the project settings, minting the durable identity
+    /// once so it is stable across restarts. Mirrors [`Self::set_auth_profile`]:
+    /// a locked read-modify-write that rewrites only this one key.
+    ///
+    /// Written to `<cwd>/.nexus/sudocode/settings.json` — a folder is one agent,
+    /// so the name belongs with the project, not the machine-wide config. This
+    /// is the native analog of nexus minting the name at auth: derive it once,
+    /// write it down, and every later boot reads the same name instead of
+    /// re-deriving one that can drift with the path spelling.
+    pub fn set_agent_name(&self, name: &str) -> Result<PathBuf, ConfigError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ConfigError::Parse(
+                "agent name must not be empty".to_string(),
+            ));
+        }
+        let path = self
+            .cwd
+            .join(".nexus")
+            .join("sudocode")
+            .join("settings.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(ConfigError::Io)?;
+        }
+
+        use crate::fs_backend::FsBackend as _;
+
+        let _guard = ConfigFileLock::acquire(&path)?;
+        let mut object = match std::fs::read_to_string(&path) {
+            Ok(text) if text.trim().is_empty() => serde_json::Map::new(),
+            Ok(text) => serde_json::from_str::<SerdeValue>(&text)
+                .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?
+                .as_object()
+                .cloned()
+                .ok_or_else(|| {
+                    ConfigError::Parse(format!(
+                        "{}: top-level settings value must be a JSON object",
+                        path.display()
+                    ))
+                })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+            Err(error) => return Err(ConfigError::Io(error)),
+        };
+        object.insert(
+            "agentName".to_string(),
+            SerdeValue::String(name.to_string()),
+        );
+        let serialized = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&SerdeValue::Object(object))
+                .map_err(|error| ConfigError::Parse(error.to_string()))?
+        );
+        crate::fs_backend::StdFsBackend
+            .write_atomic(&path.to_string_lossy(), serialized.as_bytes())
+            .map_err(ConfigError::Io)?;
+        Ok(path)
+    }
+
     /// Read `sudocode.json` and report the legacy copies it still carries, or
     /// `None` when it carries none.
     ///
@@ -2829,6 +2887,40 @@ mod tests {
                 .as_deref(),
             Some("local-acct")
         );
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn set_agent_name_persists_to_project_settings_and_reloads() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(&home).expect("home config dir");
+
+        let loader = ConfigLoader::new(&cwd, &home);
+        // Unset before minting.
+        assert!(loader.load().expect("load").get("agentName").is_none());
+
+        let written = loader.set_agent_name("scode-abc123").expect("mint name");
+        assert_eq!(
+            written,
+            cwd.join(".nexus").join("sudocode").join("settings.json")
+        );
+
+        // A fresh loader (a "restart") reads the SAME name, not a re-derived one.
+        let reloaded = ConfigLoader::new(&cwd, &home);
+        assert_eq!(
+            reloaded
+                .load()
+                .expect("reload")
+                .get("agentName")
+                .and_then(|v| v.as_str()),
+            Some("scode-abc123")
+        );
+
+        // An empty name is refused.
+        assert!(loader.set_agent_name("   ").is_err());
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

@@ -28,17 +28,17 @@ publish = false
 # bloat a standalone CLI. Per-crate features that only one member needs live here
 # too, so a member's line stays `{ workspace = true }` and the pin has no second
 # place to disagree with itself.
-a2a = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false }
-backends = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false, features = ["driver-local-connector"] }
-contracts = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false }
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false }
-lib = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false, features = ["runtime-bridge"] }
-managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14", default-features = false }
+a2a = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.15", default-features = false }
+backends = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.15", default-features = false, features = ["driver-local-connector"] }
+contracts = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.15", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.15", default-features = false }
+lib = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.15", default-features = false, features = ["runtime-bridge"] }
+managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.15", default-features = false }
 # The daemon `nexusd-cohost` IS, entered at `run_with_services` so the co-host
 # picks its service set without forking the composition root. Same pin as the
 # kernel above, necessarily: this crate and the agent runtime it hosts have to
 # agree on what `Kernel` is.
-nexus-cluster = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.14" }
+nexus-cluster = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.7.15" }
 
 agent-client-protocol = { version = "0.11", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 agent-client-protocol-schema = { version = "0.12", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }

@@ -1,21 +1,26 @@
 //! `nexusd-cohost` — the nexus cluster daemon that hosts sudocode agents
 //! in-process.
 //!
-//! Identical to `nexusd-cluster` in every flag and every boot path; the only
-//! difference is one service declaration. Where the cluster daemon installs the
-//! managed-agent control plane WITHOUT a runtime body — it can register an agent,
-//! stamp its procfs subtree and answer `get_session`, but nothing turns
-//! `spawn` into a running loop — this binary installs it WITH
+//! It is `nexusd-cluster` plus a runtime body, and that is literal: it asks the
+//! cluster crate for its own default service set and replaces ONE entry. Where the
+//! cluster daemon installs the managed-agent control plane WITHOUT a runtime body
+//! — it can register an agent, stamp its procfs subtree and answer `get_session`,
+//! but nothing turns `spawn` into a running loop — this binary installs it WITH
 //! [`SudoCodeSpawnAdapter`], so a spawn becomes a real sudocode agent on a thread
 //! inside this process, reaching the kernel through `KernelFsBackend`.
+//!
+//! Asking rather than re-listing is the point. A hand-written list is a copy of
+//! nexus-vfs's, and a copy drifts the moment a service is added there: this binary
+//! would keep booting the old set, silently, with every test green. The first
+//! draft of this file had already lost the `driver-ai` `llm_mount` entry that way.
 //!
 //! # Why a binary, and why here
 //!
 //! It cannot live in nexus-vfs: that repo owns the kernel, and sudocode depends on
 //! it, so linking sudocode there is a cycle. It should not be a plugin either —
 //! the plugin ABI is a C dispatch seam (bytes in, bytes out), and what crosses
-//! here is `Arc<Kernel>` in and a `SpawnTask<Kernel>` trait object out, which no
-//! C ABI carries. Forcing it across a Rust dylib boundary would reintroduce the
+//! here is `Arc<Kernel>` in and a `SpawnTask<Kernel>` trait object out, which no C
+//! ABI carries. Forcing it across a Rust dylib boundary would reintroduce the
 //! failure the whole pin discipline exists to prevent: two `Kernel` types in one
 //! process.
 //!
@@ -34,21 +39,14 @@ use engine_host::managed_agent::SudoCodeSpawnAdapter;
 
 fn main() -> Result<()> {
     nexus_cluster::run_with_services(|ctx| {
-        vec![
-            a2a::service_decl(ctx.auth_armed),
-            // The one line that makes this binary different from
-            // `nexusd-cluster`. Built here rather than exported from
-            // `managed_agent` because the provider is the caller's: the service
-            // knows how to install one, and only an assembly knows which.
-            kernel::kernel::ServiceDecl {
-                name: "managed_agent".to_string(),
-                install: Box::new(|kernel| {
-                    managed_agent::install_managed_agent_with_spawn(
-                        kernel,
-                        Arc::new(SudoCodeSpawnAdapter),
-                    )
-                }),
-            },
-        ]
+        let mut services = nexus_cluster::default_service_decls(ctx);
+        // By NAME, not by position: the default set's order is nexus-vfs's
+        // business, and an index would silently pick the wrong service the first
+        // time that order changed.
+        services.retain(|decl| decl.name != managed_agent::SERVICE_NAME);
+        services.push(managed_agent::service_decl_with_spawn(Arc::new(
+            SudoCodeSpawnAdapter,
+        )));
+        services
     })
 }

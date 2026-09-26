@@ -1,0 +1,206 @@
+name: Release nexusd-cohost
+
+# The daemon that hosts sudocode agents in-process — the artifact sudocloud
+# deploys. A SECOND product out of this repo, and deliberately on its own tag
+# namespace rather than riding `v*`:
+#
+#   * `v*` (and `nightly`) release `scode`, a CLI, on every patch. Republishing a
+#     ~40 MiB daemon for a CLI-only change is waste, and a nightly cadence for a
+#     production daemon is not a cadence anyone wants to deploy from.
+#   * a co-host build is a PAIRING — this sudocode and one nexus-vfs tag — and the
+#     pairing is what bit us: a daemon whose kernel rev differs from the agent
+#     runtime's is two `Kernel` types in one process. So the release names the
+#     nexus-vfs tag it was built against, read out of the workspace manifest at
+#     build time rather than typed into a release note.
+#
+# `nexusd-cluster` (nexus-vfs) is untouched by all of this and keeps its own slim
+# size budget; this is the bigger binary for nodes that host agents, not a
+# heavier version of that one.
+
+on:
+  push:
+    tags:
+      - 'nexusd-cohost-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-cohost-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The pod target. ubuntu-22.04 (glibc 2.35) to match the base
+          # `nexusd-cluster` releases from: the daemon loads plugin dylibs whose
+          # glibc floor is set by the runner that built THEM, and a co-host built
+          # on a newer glibc than the cluster it replaces would refuse them.
+          - name: linux-x64
+            os: ubuntu-22.04
+            bin: nexusd-cohost
+            package_dir: nexusd-cohost-linux-x64
+            archive_name: nexusd-cohost-linux-x64.tar.gz
+          - name: linux-arm64
+            os: ubuntu-22.04-arm
+            bin: nexusd-cohost
+            package_dir: nexusd-cohost-linux-arm64
+            archive_name: nexusd-cohost-linux-arm64.tar.gz
+          # Not for deployment — for the cross-machine duet, which runs a real
+          # co-host on a developer Mac and a developer Windows box. A daemon you
+          # cannot run on the machines you debug from is a daemon you debug by
+          # reading logs from somewhere else.
+          - name: macos-arm64
+            os: macos-15
+            bin: nexusd-cohost
+            package_dir: nexusd-cohost-macos-arm64
+            archive_name: nexusd-cohost-macos-arm64.tar.gz
+          - name: windows-x64
+            os: windows-2022
+            bin: nexusd-cohost.exe
+            package_dir: nexusd-cohost-windows-x64
+            archive_name: nexusd-cohost-windows-x64.zip
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      # raft-proto 0.7.0 / protobuf-build 0.14.1 rejects protoc >= 4.x with a
+      # faulty version check, so the pinned 3.20.2 is deliberate. Linux runners
+      # ship an accepted protoc in the base image; macOS and Windows have either
+      # none or one too new. (This is also why the `nexusd-cohost` bin sits behind
+      # `--features daemon`: without the gate every `--workspace` job on every PR
+      # would need this step.)
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        working-directory: .
+        run: |
+          set -euo pipefail
+          PROTOC_VERSION=3.20.2
+          case "$(uname -m)" in
+            arm64) ARCH=aarch_64 ;;
+            x86_64) ARCH=x86_64 ;;
+            *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          mkdir -p "$HOME/protoc"
+          curl -fsSL -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-osx-${ARCH}.zip"
+          unzip -o /tmp/protoc.zip -d "$HOME/protoc"
+          echo "$HOME/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/protoc/bin/protoc" --version
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: .
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $protocVersion = '3.20.2'
+          $protocDir = Join-Path $env:USERPROFILE 'protoc'
+          New-Item -ItemType Directory -Force -Path $protocDir | Out-Null
+          $zipPath = Join-Path $env:RUNNER_TEMP 'protoc.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri `
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${protocVersion}/protoc-${protocVersion}-win64.zip" `
+            -OutFile $zipPath
+          Expand-Archive -Force -Path $zipPath -DestinationPath $protocDir
+          $protocBinDir = Join-Path $protocDir 'bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $protocBinDir
+          Add-Content -Path $env:GITHUB_ENV -Value "PROTOC=$(Join-Path $protocBinDir 'protoc.exe')"
+          & "$(Join-Path $protocBinDir 'protoc.exe')" --version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      # `--locked`: a release artifact resolves to the revs the lockfile records
+      # and nothing else. That is the same discipline the pin serves — the daemon
+      # and the agent runtime inside it have to agree on one nexus-vfs.
+      - name: Build release binary
+        run: cargo build --locked --release -p nexusd-cohost --features daemon --bin nexusd-cohost
+
+      - name: Stage release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.package_dir }}"
+          cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+          # The pairing, in the package. A co-host binary is only meaningful with
+          # the nexus-vfs it was built against, and an operator holding a tarball
+          # has no other way to know which one that is.
+          NEXUS_VFS_TAG="$(grep -m1 -oE 'nexus-vfs", tag = "[^"]+"' Cargo.toml | sed 's/.*tag = "//; s/"//')"
+          cat > "dist/${{ matrix.package_dir }}/PAIRING.txt" <<EOF
+          nexusd-cohost ${GITHUB_REF_NAME}
+          sudocode      $(git rev-parse HEAD)
+          nexus-vfs     ${NEXUS_VFS_TAG}
+
+          The cluster daemon with an in-process sudocode agent runtime linked in.
+          Identical to nexusd-cluster in every flag and boot path; the difference
+          is one service declaration (managed-agent WITH a spawn provider).
+          EOF
+          cp "dist/${{ matrix.package_dir }}/PAIRING.txt" "dist/PAIRING-${{ matrix.name }}.txt"
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+            tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.package_dir }}"
+          else
+            (cd dist && 7z a -tzip "${{ matrix.archive_name }}" "${{ matrix.package_dir }}" >/dev/null)
+          fi
+          ls -la "dist/${{ matrix.archive_name }}"
+
+      # Printed, not asserted. The binary links an LLM agent runtime, so it is
+      # several times the slim `nexusd-cluster` by construction; what matters is
+      # that the number is visible in the log when it moves, and that the cluster
+      # binary's own budget lives in nexus-vfs where that artifact is built.
+      - name: Report artifact size
+        shell: bash
+        run: du -h "dist/${{ matrix.archive_name }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package_dir }}
+          path: rust/dist/${{ matrix.archive_name }}
+
+  publish:
+    name: publish
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum nexusd-cohost-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/nexusd-cohost-*
+            dist/SHA256SUMS.txt
+          body: |
+            `nexusd-cohost` — the nexus cluster daemon with an in-process sudocode
+            agent runtime linked in. Every flag and boot path of `nexusd-cluster`;
+            the difference is one service declaration.
+
+            Each archive carries a `PAIRING.txt` naming the sudocode commit and the
+            nexus-vfs tag it was built against. Those two have to agree with each
+            other — a daemon whose kernel rev differs from the agent runtime's is
+            two `Kernel` types in one process — so deploy the pair, not the halves.

@@ -57,7 +57,6 @@ pub mod testing {
             name: None,
             model: Some("test-model".to_string()),
             run_in_background: Some(true),
-            fresh: None,
             auth_mode: None,
             permission_mode: None,
         };
@@ -85,7 +84,6 @@ pub mod testing {
             name: None,
             model: Some("test-model".to_string()),
             run_in_background: Some(true),
-            fresh: None,
             auth_mode: None,
             permission_mode: None,
         };
@@ -1146,8 +1144,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         // ── agent_spawn ───────────────────────────────────────────────
-        // The one spawn tool. `fresh: false` (default) auto-resumes the
-        // agent's most recent session; `true` starts a clean one. A model
+        // The one spawn tool. A sub-agent always starts fresh with an isolated
+        // context (never resumes a prior session); use `pid_fork` to inherit
+        // the current context. A model
         // trained on the CC tool set will name this `Agent` and pass
         // `subagent_type`; `TOOL_ALIASES` + `normalize_agent_spawn_input`
         // accept that spelling without advertising it as a second tool.
@@ -1161,9 +1160,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "agent_spawn",
             description: concat!(
-                "Spawn an agent, returning a pid. ",
-                "By default resumes the agent's most recent session (auto-resume). ",
-                "Set `fresh: true` to start a clean session. ",
+                "Spawn a sub-agent, returning a pid. ",
+                "The sub-agent runs in an isolated context (its own system prompt + this task) ",
+                "and does not inherit this conversation; it is a throwaway worker that returns a result. ",
                 "Runs in the background by default; set `run_in_background: false` for synchronous. ",
                 "Use `pid_output(pid, block: true)` to await a background agent."
             ),
@@ -1172,7 +1171,6 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "properties": {
                     "agent": { "type": "string", "description": "Agent type specialization. The available types are listed in the <available-agent-types> section of the system prompt; defaults to general-purpose." },
                     "prompt": { "type": "string", "description": "The full task prompt for the agent." },
-                    "fresh": { "type": "boolean", "description": "When true, start a clean session instead of resuming. Default false (auto-resume)." },
                     "description": { "type": "string", "description": "A short (3-5 word) description of the task." },
                     "name": { "type": "string", "description": "Optional human-readable label for this agent." },
                     "model": { "type": "string", "description": "Model ID override; when omitted, inherits the parent agent's current model." },
@@ -1750,8 +1748,8 @@ fn execute_tool_with_enforcer(
         // agent_spawn. A CC-trained model names this `Agent`;
         // TOOL_ALIASES folds that spelling onto this arm. Normalize `agent` →
         // `subagent_type` so the new schema's field name maps to
-        // `AgentInput`. `fresh` is accepted but currently no-op
-        // (session resume is future work).
+        // `AgentInput`. A stray `fresh` field is accepted but ignored
+        // (sub-agents never resume a session; `fresh` was retired).
         "agent_spawn" => {
             let input = normalize_agent_spawn_input(input);
             from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx, fs))
@@ -2708,9 +2706,8 @@ fn normalize_agent_spawn_input(input: &Value) -> Value {
                 Value::String("agent task".to_string()),
             );
         }
-        // `fresh` is accepted but stripped (future work: session resume).
-        // No action needed — `AgentInput` ignores unknown fields via
-        // `from_value` which is permissive by default.
+        // A stray `fresh` field needs no handling: `AgentInput` ignores
+        // unknown fields, and sub-agents never resume a session.
     }
     v
 }
@@ -3827,10 +3824,6 @@ struct AgentInput {
     model: Option<String>,
     #[serde(default)]
     run_in_background: Option<bool>,
-    /// When true, start a clean session. When false (default), resume
-    /// the most recent session for this agent name if one exists.
-    #[serde(default)]
-    fresh: Option<bool>,
     /// Explicit auth mode: `"api-key"`, `"proxy"`, or `"subscription"`.
     /// When set, overrides the config's auto-detect priority.
     auth_mode: Option<String>,
@@ -5250,15 +5243,18 @@ fn prepare_agent_job(
     // way CC-fork's `buildChildMessage()` renders them, and build the
     // inherited message prefix so the child's Session::with_messages
     // pre-seed matches CC-fork's `buildForkedMessages` output.
+    //
+    // Only a fork inherits context. Every other sub-agent starts fresh with
+    // an isolated context - the CC Task model: a delegated worker gets its own
+    // system prompt + this task, never the parent's history and never a prior
+    // same-name agent's session. Session retention is the a2a/peer layer's
+    // job, not a sub-agent's.
     let (prompt_body, inherited_messages) = if is_fork {
         let parent_assistant = ctx
             .and_then(|c| c.parent_assistant_message.as_ref())
             .expect("fork ctx presence checked above");
         let messages = build_forked_messages(&input.prompt, parent_assistant);
         (build_fork_child_message(&input.prompt), messages)
-    } else if !input.fresh.unwrap_or(false) {
-        let resumed = find_resumable_session(&agent_name, fs.as_ref());
-        (input.prompt.clone(), resumed.unwrap_or_default())
     } else {
         (input.prompt.clone(), Vec::new())
     };
@@ -8027,8 +8023,9 @@ fn store_path(dir: &std::path::Path, name: &str, fs: &dyn FsBackend) -> std::pat
     std::path::PathBuf::from(fs.join_path(&dir.to_string_lossy(), name))
 }
 
-/// Persist the agent's conversation session to disk so a future
-/// `agent_spawn(fresh: false)` with the same name can resume it.
+/// Persist the sub-agent's conversation session to disk, keyed by its unique
+/// agent_id, so `pid_output` can read the result and it is available for debug.
+/// It is never resumed by name - sub-agents are throwaway (or forked).
 fn persist_agent_session(manifest: &AgentOutput, session: &Session, fs: &dyn FsBackend) {
     let Ok(store) = agent_store_dir(fs) else {
         return;
@@ -8037,47 +8034,6 @@ fn persist_agent_session(manifest: &AgentOutput, session: &Session, fs: &dyn FsB
     if let Err(e) = session.save_to_path(&path) {
         eprintln!("sudocode: failed to persist agent session: {e}");
     }
-}
-
-/// Find the most recent completed agent with the given slugified name
-/// and return its persisted session messages. Returns `None` when no
-/// resumable session exists.
-fn find_resumable_session(
-    agent_name: &str,
-    fs: &dyn FsBackend,
-) -> Option<Vec<ConversationMessage>> {
-    let store = agent_store_dir(fs).ok()?;
-    if !fs.exists(&store.to_string_lossy()).unwrap_or(false) {
-        return None;
-    }
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    let entries = fs.readdir(&store.to_string_lossy()).ok()?;
-    for entry in entries {
-        let path = store_path(&store, &entry.name, fs);
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = fs.read_to_string(&path.to_string_lossy()) else {
-            continue;
-        };
-        let Ok(manifest) = serde_json::from_str::<AgentOutput>(&text) else {
-            continue;
-        };
-        if manifest.status != "completed" {
-            continue;
-        }
-        if slugify_agent_name(&manifest.name) != agent_name {
-            continue;
-        }
-        candidates.push((manifest.agent_id, manifest.created_at));
-    }
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
-    let best_id = &candidates.first()?.0;
-    let session_path = agent_session_path(&store, best_id, fs);
-    // On the store's filesystem: the transcript this resumes from was written
-    // there, and `load_from_path` would look for it on the host.
-    let session = Session::load_from_path_with(fs, &session_path).ok()?;
-    Some(session.messages.clone())
 }
 
 fn make_agent_id() -> String {
@@ -9102,6 +9058,21 @@ pub mod pdf_extract;
 
 #[cfg(test)]
 mod tests {
+    /// A sub-agent never resumes a session, so the retired `fresh` field is not
+    /// in the schema. A caller that still sends it must not break: `AgentInput`
+    /// ignores unknown fields, so the input still deserializes.
+    #[test]
+    fn stray_fresh_field_is_ignored_not_rejected() {
+        let input = super::normalize_agent_spawn_input(&serde_json::json!({
+            "agent": "Explore",
+            "prompt": "look around",
+            "description": "probe",
+            "fresh": true,
+        }));
+        let parsed = super::from_value::<super::AgentInput>(&input)
+            .expect("a stray `fresh` field must be tolerated, not rejected");
+        assert_eq!(parsed.subagent_type.as_deref(), Some("Explore"));
+    }
     /// Effort and thinking follow CC's two rules, which are deliberately
     /// asymmetric (`tools/AgentTool/runAgent.ts`):
     ///
@@ -10960,7 +10931,6 @@ mod tests {
                 name: Some("ship-audit".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11053,7 +11023,6 @@ mod tests {
                 name: Some("complete-task".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11115,7 +11084,6 @@ mod tests {
                 name: Some("fail-task".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11167,7 +11135,6 @@ mod tests {
                 name: Some("summary-floor".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11217,7 +11184,6 @@ mod tests {
                 name: Some("recovery-lane".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11270,7 +11236,6 @@ mod tests {
                 name: Some("review-lane".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11315,7 +11280,6 @@ mod tests {
                 name: Some("backlog-scan".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11366,7 +11330,6 @@ mod tests {
                 name: Some("artifact-lane".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11441,7 +11404,6 @@ mod tests {
                 name: Some("cron-closeout".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11487,7 +11449,6 @@ mod tests {
                 name: Some("spawn-error".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11822,7 +11783,6 @@ mod tests {
                 name: Some("calc-task".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11875,7 +11835,6 @@ mod tests {
                 name: Some("fail-calc".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11925,7 +11884,6 @@ mod tests {
                 name: Some("slow-calc".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11979,7 +11937,6 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -12016,7 +11973,6 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -12085,7 +12041,6 @@ mod tests {
             run_in_background: Some(false),
             auth_mode: None,
             permission_mode: None,
-            fresh: None,
         }
     }
 
@@ -12508,7 +12463,6 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -12582,7 +12536,6 @@ mod tests {
                 name: None,
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },

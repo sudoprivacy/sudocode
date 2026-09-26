@@ -1685,6 +1685,34 @@ mod tests {
     }
 
     #[test]
+    fn strip_windows_verbatim_prefix_collapses_spellings() {
+        // The fix itself: the normalized string is spelling-independent. Tested
+        // directly (not through `local_agent_name`) so it is deterministic on
+        // every platform — `Path::file_name` treats `\` as a separator only on
+        // Windows, so the end-to-end name equality is asserted under cfg(windows).
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\C:\Users\me\proj\app"),
+            r"C:\Users\me\proj\app",
+            "\\\\?\\ prefix must be stripped to the plain spelling"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\UNC\server\share\app"),
+            r"\\server\share\app",
+            "\\\\?\\UNC\\ must fold back to the plain UNC spelling"
+        );
+        // A plain path is returned unchanged.
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"C:\Users\me\proj\app"),
+            r"C:\Users\me\proj\app"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix("/home/me/app"),
+            "/home/me/app"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn agent_name_ignores_windows_verbatim_prefix() {
         let plain = local_agent_name(None, std::path::Path::new(r"C:\Users\me\proj\app"));
         let verbatim = local_agent_name(None, std::path::Path::new(r"\\?\C:\Users\me\proj\app"));

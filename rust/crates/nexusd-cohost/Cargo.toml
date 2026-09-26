@@ -8,37 +8,56 @@ publish.workspace = true
 # The cluster daemon, plus an in-process sudocode runtime. One binary rather than
 # a feature on `scode`: the products are a CLI and a daemon, and a daemon that
 # ships inside a CLI is a CLI nobody can audit the size of.
+#
+# `required-features` is what keeps it out of everyone else's build. The daemon
+# tree pulls raft, whose `raft-proto` build script needs `protoc` — absent on the
+# macOS runners — and compiling tonic + raft on three platforms for every PR is a
+# tax paid by every change in the repo for an artifact that ships to Linux. With
+# the feature off, `cargo test --workspace` skips this bin entirely; the co-host
+# gate and the release build ask for it by name.
 [[bin]]
 name = "nexusd-cohost"
 path = "src/main.rs"
+required-features = ["daemon"]
+
+[features]
+default = []
+daemon = [
+  "dep:nexus-cluster",
+  "dep:a2a",
+  "dep:managed-agent",
+  "dep:kernel",
+  "dep:engine-host",
+  "dep:anyhow",
+]
 
 [dependencies]
 # The daemon itself — every flag, every service, every boot path of
 # `nexusd-cluster`, entered through `run_with_services` so this binary chooses
 # the service set instead of forking the composition root.
-nexus-cluster = { workspace = true }
+nexus-cluster = { workspace = true, optional = true }
 # The two services it declares. `a2a` is the messaging substrate a co-hosted
 # agent receives on; `managed-agent` is the control plane whose spawn provider
 # this binary supplies.
-a2a = { workspace = true }
-managed-agent = { workspace = true }
+a2a = { workspace = true, optional = true }
+managed-agent = { workspace = true, optional = true }
 # `ServiceDecl` — the shape a service is handed to the kernel in. The co-host
 # builds one by hand because the provider is the assembly's choice, not the
 # service's.
-kernel = { workspace = true }
+kernel = { workspace = true, optional = true }
 # `SudoCodeSpawnAdapter` — the agent runtime this daemon hosts. A path dep, not a
 # git one, which is the whole reason this crate lives here: the nexus-vfs rev is
 # named once for the workspace, and the runtime cannot be a rev older than the
 # kernel it is handed.
-engine-host = { path = "../engine-host" }
-anyhow = "1"
+engine-host = { path = "../engine-host", optional = true }
+anyhow = { version = "1", optional = true }
 
 # The raw ACP-subprocess tunnel (sudowork / hydra `spawn_spec`) is unix-only at
 # the module gate, so the feature is too. Without this a co-host node would be a
 # DOWNGRADE from `nexusd-cluster`, which ships it: this binary has to be a
 # superset of the one it replaces, not a trade.
 [target.'cfg(unix)'.dependencies]
-managed-agent = { workspace = true, features = ["subprocess-host"] }
+managed-agent = { workspace = true, optional = true, features = ["subprocess-host"] }
 
 [lints]
 workspace = true

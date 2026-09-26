@@ -58,7 +58,10 @@ CARGO_TEST=(cargo test "${MANIFEST[@]}" -q -p runtime --test mailbox_nexus_live)
 echo "== 0. the co-host daemon binary =="
 BIN="${NEXUSD_COHOST_BIN:-}"
 if [ -z "$BIN" ]; then
-  cargo build "${MANIFEST[@]}" -q -p nexusd-cohost
+  # `--features daemon`: the bin is behind it so the workspace's own test and
+  # clippy jobs do not compile a raft + tonic tree on three platforms (and do not
+  # need `protoc`, which the macOS runners have not got).
+  cargo build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon
   BIN="$(cargo metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
          | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/nexusd-cohost"
   [ -x "$BIN" ] || BIN="$BIN.exe"

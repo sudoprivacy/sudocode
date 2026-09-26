@@ -7,8 +7,13 @@ on:
       - 'gaebal/**'
       - 'omx-issue-*'
     paths:
-      - .github/workflows/rust-ci.yml
-      - .github/workflows/release.yml
+      # Every workflow, not two named ones. A `paths:` list that enumerates
+      # workflow FILES gives a PR adding a new one zero checks — and with required
+      # status checks that PR can only land by admin override, which is the
+      # "skipped reads as passed" shape this repo keeps stamping out. Matching the
+      # directory costs one cheap run per workflow edit and makes a new gate
+      # arrive already gated.
+      - .github/workflows/**
       - .github/scripts/check_doc_source_of_truth.py
       - .github/FUNDING.yml
       - README.md
@@ -26,8 +31,13 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/rust-ci.yml
-      - .github/workflows/release.yml
+      # Every workflow, not two named ones. A `paths:` list that enumerates
+      # workflow FILES gives a PR adding a new one zero checks — and with required
+      # status checks that PR can only land by admin override, which is the
+      # "skipped reads as passed" shape this repo keeps stamping out. Matching the
+      # directory costs one cheap run per workflow edit and makes a new gate
+      # arrive already gated.
+      - .github/workflows/**
       - .github/scripts/check_doc_source_of_truth.py
       - .github/FUNDING.yml
       - README.md

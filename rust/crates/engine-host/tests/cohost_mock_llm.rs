@@ -228,22 +228,36 @@ fn run_cohost_turn(
     (body, asked, user_fs)
 }
 
-/// Delivery of one envelope costs a BOUNDED number of turns.
+/// Delivery ADVANCED the agent's durable read position.
 ///
-/// Not exactly one, deliberately. Delivery is at-least-once by contract: the
-/// read position is one offset for a whole batch, so a batch the consumer did not
-/// finish is read again, and an accepted envelope can legitimately arrive twice.
-/// Asserting one turn made this test encode a promise the system does not make —
-/// it passed on Windows and failed on Linux purely on timing.
+/// This replaces a turn-count ceiling, and the reason is worth keeping. Delivery is
+/// at-least-once by contract — the read position is one offset for a whole batch, so
+/// a batch the consumer did not finish is read again — and one scripted turn costs
+/// the model three calls (read, send, closing text). The total is therefore a
+/// property of how fast the runner is, not of the code: `asked <= 15` passed on
+/// Windows and Linux and failed on macOS at 16. A threshold tuned to one machine's
+/// number is a test that goes red on a slower machine for a reason that has nothing
+/// to do with the behaviour under test.
 ///
-/// What it guards is UNBOUNDEDNESS, which is the actual bug: one scripted turn
-/// asks the model three times (read, send, closing text), a re-delivery or two
-/// stays in single figures, and the storm this test exists for asked 1030 times
-/// for the same message. The threshold separates those by a factor of seventy.
-fn assert_delivery_is_bounded(asked: usize) {
+/// The storm this test exists for had a STRUCTURAL signature instead. The DT_REG
+/// fallback carries no `stream_next_offset`, so the durable read position never
+/// advanced and the same envelope was claimed 1030 times in a minute. A position past
+/// zero is the negation of exactly that: it says the consumer COMMITTED what it read,
+/// which is the one thing a storm cannot do. It costs no wall-clock and cannot drift
+/// with a runner's speed.
+///
+/// The count is still PRINTED — it is the first number worth seeing when this fails,
+/// and a regression that re-delivered while advancing would show up there, visible in
+/// the log rather than encoded as a guess.
+fn assert_delivery_advanced_the_cursor(fs: &Arc<dyn FsBackend>, agent_id: &str, asked: usize) {
+    let agent = Mailbox::daemon_absolute(Arc::clone(fs), agent_id.to_string());
+    let position = agent
+        .read_position(USER)
+        .expect("the agent's read register should be readable");
+    eprintln!("[delivery] the model was asked {asked} time(s); read position {position:?}");
     assert!(
-        asked <= 15,
-        "delivering one envelope should cost a few turns at most;          the model was asked {asked} times"
+        matches!(position, Some(offset) if offset > 0),
+        "the agent's durable read position must advance past the envelope it answered          — a position that never moves is the re-claim storm; got {position:?}"
     );
 }
 
@@ -256,12 +270,12 @@ fn assert_delivery_is_bounded(asked: usize) {
 /// appended to the transcript the user reads.
 #[test]
 fn a_cohost_agent_reads_its_workspace_and_replies() {
-    let (body, asked, _fs) = run_cohost_turn("cohost-mock-1", "scode-mock", true, READ_THEN_REPLY);
+    let (body, asked, fs) = run_cohost_turn("cohost-mock-1", "scode-mock", true, READ_THEN_REPLY);
     assert!(
         body.contains(FIXTURE_BODY),
         "the reply should carry what the agent read out of its workspace; got: {body}"
     );
-    assert_delivery_is_bounded(asked);
+    assert_delivery_advanced_the_cursor(&fs, "scode-mock", asked);
 }
 
 /// The same turn, on a transcript that could not become a stream.
@@ -274,13 +288,13 @@ fn a_cohost_agent_reads_its_workspace_and_replies() {
 /// times over (1044 model calls in 60 seconds, measured).
 #[test]
 fn a_conversation_that_is_not_a_stream_still_delivers_once() {
-    let (body, asked, _fs) =
+    let (body, asked, fs) =
         run_cohost_turn("cohost-mock-2", "scode-mock-jsonl", false, READ_THEN_REPLY);
     assert!(
         body.contains(FIXTURE_BODY),
         "a byte-addressed transcript should carry the same reply; got: {body}"
     );
-    assert_delivery_is_bounded(asked);
+    assert_delivery_advanced_the_cursor(&fs, "scode-mock-jsonl", asked);
 }
 
 /// A co-hosted agent's turn is recorded where its filesystem says sessions live.

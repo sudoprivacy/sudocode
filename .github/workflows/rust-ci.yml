@@ -239,6 +239,67 @@ jobs:
       - name: Co-host duet against a daemon built from this checkout
         run: e2e/nexus-a2a/run-cohost.sh
 
+  one-nexus-vfs-pin:
+    name: one nexus-vfs pin
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      # Seconds, no build: this is the invariant the co-host rests on, and it is
+      # cheap enough to answer before anything compiles.
+      #
+      # A co-hosted agent takes the daemon's `Arc<Kernel>` and hands back a
+      # `SpawnTask<Kernel>`. Two nexus-vfs revs in one graph are two `Kernel`
+      # types, and the seam stops unifying — but NOT reliably at compile time: a
+      # probe with `kernel` at one tag and the daemon crate at another compiled
+      # fine, because the type system only objects where a type actually crosses
+      # and Cargo is content to carry both revs. So the graph can hold two kernels
+      # in silence, and the real guarantee is the one this checks — the rev is
+      # named ONCE, in `[workspace.dependencies]`, and the lockfile resolved it to
+      # one commit.
+      #
+      # A TAG, not a rev: `e2e/nexus-a2a/fetch-daemon.sh` downloads the published
+      # daemon matching the pin, and a pin between releases has no daemon to match
+      # (it fails loud saying so). The tag recorded in the lock must be the tag the
+      # manifest asked for.
+      - name: The rev is named once, and the lock agrees
+        run: |
+          set -euo pipefail
+          MANIFEST_TAGS=$(grep 'nexus-vfs' rust/Cargo.toml \
+            | grep -oE 'tag = "[^"]+"' | grep -oE 'v[0-9][0-9.]*' | sort -u)
+          LOCK_PAIRS=$(grep -oE 'nexus-vfs\?tag=[^#]+#[a-f0-9]{40}' rust/Cargo.lock \
+            | sed 's/.*tag=//' | sort -u)
+          LOCK_TAGS=$(echo "$LOCK_PAIRS" | sed 's/#.*//' | sort -u)
+          LOCK_COMMITS=$(echo "$LOCK_PAIRS" | sed 's/.*#//' | sort -u)
+          echo "manifest tags:  $MANIFEST_TAGS"
+          echo "lock tags:      $LOCK_TAGS"
+          echo "lock commits:   $LOCK_COMMITS"
+          # Fail CLOSED on an empty extraction. A pattern that stops matching
+          # compares nothing and passes, which is how a guard becomes decoration
+          # — the same failure mode this check exists to remove.
+          for SET in "$MANIFEST_TAGS" "$LOCK_TAGS" "$LOCK_COMMITS"; do
+            if [ -z "$SET" ]; then
+              echo "::error::a nexus-vfs pin source extracted nothing — the pattern regressed, or the pin stopped being a tag. Fix the extraction, do not delete the check."
+              exit 1
+            fi
+          done
+          for NAME in MANIFEST_TAGS LOCK_TAGS LOCK_COMMITS; do
+            eval "SET=\$$NAME"
+            COUNT=$(echo "$SET" | grep -c .)
+            if [ "$COUNT" -ne 1 ]; then
+              echo "::error::$NAME has $COUNT distinct values, expected 1 — a second nexus-vfs rev is in the graph:"
+              echo "$SET"
+              exit 1
+            fi
+          done
+          if [ "$MANIFEST_TAGS" != "$LOCK_TAGS" ]; then
+            echo "::error::the manifest asks for $MANIFEST_TAGS and the lock resolved $LOCK_TAGS — run cargo update -p kernel, or the build is not the pin you think it is"
+            exit 1
+          fi
+          echo "one nexus-vfs pin: $MANIFEST_TAGS ($LOCK_COMMITS)"
+
   bench-compile:
     name: cargo bench --no-run (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

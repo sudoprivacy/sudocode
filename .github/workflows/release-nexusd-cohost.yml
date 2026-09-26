@@ -65,6 +65,17 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-macos-arm64
             archive_name: nexusd-cohost-macos-arm64.tar.gz
+          # Intel, because the Mac this project actually debugs from is Intel. The
+          # first cut of this matrix left it out reasoning "nothing runs a co-host
+          # there", and the cross-machine bring-up falsified that within the hour:
+          # `bad CPU type in executable`. A platform list is a claim about who runs
+          # this, and that claim is worth checking against the machines in the room
+          # rather than the ones in the design.
+          - name: macos-x64
+            os: macos-15-intel
+            bin: nexusd-cohost
+            package_dir: nexusd-cohost-macos-x64
+            archive_name: nexusd-cohost-macos-x64.tar.gz
           - name: windows-x64
             os: windows-2022
             bin: nexusd-cohost.exe

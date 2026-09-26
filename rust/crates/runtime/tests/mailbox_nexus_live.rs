@@ -641,12 +641,21 @@ fn live_ensure_inbox() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let inbox = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
+    // The PEER matters, not just the inbox. A conversation is addressed by its
+    // pair, and a receiver arms its tail on the conversations its chat list
+    // names at startup — so provisioning `<agent>`↔`PROBE_PEER` and then sending
+    // from someone else leaves the receiver parked on a conversation nobody
+    // speaks in. That is a reader at offset 0 with a valid lease and no message,
+    // which reads exactly like a receive loop that never woke.
+    let peer = std::env::var("NEXUS_A2A_TEST_PEER").unwrap_or_else(|_| PROBE_PEER.to_string());
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
     let client = dial(&endpoint);
+    // One call provisions BOTH sides: `ensure_conversation` files a chat-list
+    // entry under each name.
     mailbox(&client, &inbox, &auth)
-        .ensure_conversation(PROBE_PEER)
+        .ensure_conversation(&peer)
         .expect("ensure inbox");
-    println!("ensured /agents/{inbox}/chat-with-me");
+    println!("ensured the {inbox}<->{peer} conversation");
 }
 
 /// Spawn a co-host responder agent in a running `nexusd-cluster-cohost` daemon

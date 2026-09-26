@@ -137,9 +137,17 @@ jobs:
           set -euo pipefail
           mkdir -p "dist/${{ matrix.package_dir }}"
           cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
-          # The pairing, in the package. A co-host binary is only meaningful with
-          # the nexus-vfs it was built against, and an operator holding a tarball
-          # has no other way to know which one that is.
+          # Provenance, deliberately NOT an instruction. Nothing here is for an
+          # operator to keep in step: the runtime and the kernel are linked into
+          # this one binary, so there is no deploy-time action that could pair them
+          # wrongly. What this answers is the debugging question — "which revs am I
+          # looking at?" — which a tarball otherwise cannot answer at all.
+          #
+          # The invariant it used to WARN about is checked instead, in CI, by the
+          # `one nexus-vfs pin` job: exactly one nexus-vfs tag in the manifest, one
+          # commit in the lock, and the two agreeing. That check exists because the
+          # compiler does not cover it — a probe with two revs in the graph compiled
+          # fine, since the type system only objects where a type actually crosses.
           NEXUS_VFS_TAG="$(grep -m1 -oE 'nexus-vfs", tag = "[^"]+"' Cargo.toml | sed 's/.*tag = "//; s/"//')"
           cat > "dist/${{ matrix.package_dir }}/PAIRING.txt" <<EOF
           nexusd-cohost ${GITHUB_REF_NAME}
@@ -149,6 +157,12 @@ jobs:
           The cluster daemon with an in-process sudocode agent runtime linked in.
           Identical to nexusd-cluster in every flag and boot path; the difference
           is one service declaration (managed-agent WITH a spawn provider).
+
+          These three lines are a record of what went into this build, for reading
+          a log or a bug report against it. They are not something to keep in step:
+          the agent runtime and the kernel are linked together here, and that this
+          build contains exactly ONE nexus-vfs rev is enforced in CI (the
+          "one nexus-vfs pin" job), not by whoever deploys it.
           EOF
           cp "dist/${{ matrix.package_dir }}/PAIRING.txt" "dist/PAIRING-${{ matrix.name }}.txt"
           if [[ "${{ runner.os }}" != "Windows" ]]; then
@@ -201,6 +215,7 @@ jobs:
             the difference is one service declaration.
 
             Each archive carries a `PAIRING.txt` naming the sudocode commit and the
-            nexus-vfs tag it was built against. Those two have to agree with each
-            other — a daemon whose kernel rev differs from the agent runtime's is
-            two `Kernel` types in one process — so deploy the pair, not the halves.
+            nexus-vfs tag it was built against — provenance for reading a log or a
+            bug report, not a deployment step. The runtime and the kernel are linked
+            into the one binary, and that it holds exactly one nexus-vfs rev is
+            enforced by CI's `one nexus-vfs pin` job rather than by an operator.

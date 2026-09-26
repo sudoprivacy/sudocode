@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "a2a"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "blake3",
  "contracts",
@@ -413,7 +413,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "auth"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "contracts",
  "dashmap",
@@ -493,7 +493,7 @@ dependencies = [
 [[package]]
 name = "backends"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "ahash",
  "base64 0.22.1",
@@ -946,7 +946,7 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 [[package]]
 name = "contracts"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "parking_lot",
  "serde",
@@ -1571,7 +1571,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2199,7 +2199,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tokio",
  "tower-service",
  "tracing",
@@ -2443,7 +2443,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2544,7 +2544,7 @@ dependencies = [
 [[package]]
 name = "kernel"
 version = "0.10.1"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2606,7 +2606,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "ahash",
  "arc-swap",
@@ -2721,7 +2721,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 [[package]]
 name = "managed-agent"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "a2a",
  "contracts",
@@ -2865,7 +2865,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 [[package]]
 name = "nexus-cluster"
 version = "0.1.1"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "a2a",
  "anyhow",
@@ -2889,7 +2889,7 @@ dependencies = [
 [[package]]
 name = "nexus-plugin-abi"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 
 [[package]]
 name = "nexus-vfs-client"
@@ -2975,7 +2975,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3761,7 +3761,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -3799,9 +3799,9 @@ dependencies = [
  "cfg_aliases 0.2.2",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3838,7 +3838,7 @@ dependencies = [
 [[package]]
 name = "raft"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -4282,7 +4282,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4904,7 +4904,7 @@ dependencies = [
 [[package]]
 name = "subprocess"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "kernel",
  "libc",
@@ -5031,7 +5031,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5511,7 +5511,7 @@ dependencies = [
 [[package]]
 name = "transport"
 version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.15#bd971948412b7e7b87d05df3b4c43458013b14f5"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.7.16#29058d167ed744aca5dca94f4faf74b21070aebe"
 dependencies = [
  "axum",
  "backends",

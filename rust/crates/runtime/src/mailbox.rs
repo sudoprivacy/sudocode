@@ -83,7 +83,8 @@ pub fn local_agent_name(configured: Option<&str>, workspace_root: &std::path::Pa
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "scode".to_string());
     // Disambiguate same-basename folders with a short hash of the full path.
-    let full = workspace_root.to_string_lossy();
+    let full_raw = workspace_root.to_string_lossy();
+    let full = strip_windows_verbatim_prefix(&full_raw);
     if full.is_empty() {
         return basename;
     }
@@ -93,6 +94,22 @@ pub fn local_agent_name(configured: Option<&str>, workspace_root: &std::path::Pa
         hash = hash.wrapping_mul(1099511628211);
     }
     format!("{basename}-{:06x}", hash & 0xff_ffff)
+}
+
+/// Strip the Windows extended-length verbatim prefix (`\\?\`, and its `\\?\UNC\`
+/// UNC form) from a path string. These prefixes spell the same location as the
+/// plain path, so an identity derived from the string must not depend on which
+/// spelling a call site happened to pass. A no-op on paths without the prefix
+/// (i.e. always, off Windows).
+#[inline]
+fn strip_windows_verbatim_prefix(path: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        std::borrow::Cow::Owned(format!(r"\\{rest}"))
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        std::borrow::Cow::Borrowed(rest)
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
 }
 
 /// Where a pair's conversation lives.
@@ -1664,6 +1681,23 @@ mod tests {
         assert_eq!(
             a,
             local_agent_name(None, std::path::Path::new("/home/me/x/app"))
+        );
+    }
+
+    #[test]
+    fn agent_name_ignores_windows_verbatim_prefix() {
+        let plain = local_agent_name(None, std::path::Path::new(r"C:\Users\me\proj\app"));
+        let verbatim = local_agent_name(None, std::path::Path::new(r"\\?\C:\Users\me\proj\app"));
+        assert_eq!(
+            plain, verbatim,
+            "\\\\?\\ and plain spellings must yield the same name"
+        );
+        let unc_plain = local_agent_name(None, std::path::Path::new(r"\\server\share\app"));
+        let unc_verbatim =
+            local_agent_name(None, std::path::Path::new(r"\\?\UNC\server\share\app"));
+        assert_eq!(
+            unc_plain, unc_verbatim,
+            "UNC verbatim and plain must match too"
         );
     }
 

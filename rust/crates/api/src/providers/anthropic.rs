@@ -118,6 +118,20 @@ pub struct AnthropicClient {
     /// block. Required for OAuth subscription tokens where the server gates
     /// access by checking the first system block for an exact match.
     oauth_system_prefix: bool,
+    /// Ask Anthropic to hold cached prefixes for an hour instead of the
+    /// five-minute default.
+    ///
+    /// Matches Claude Code, which sets `ttl: "1h"` for subscribers and leaves
+    /// metered API keys on the 5m default (`should1hCacheTTL`): a subscription
+    /// pays for a cache write out of its rate-limit window, where re-creating
+    /// a prefix costs far more than holding it, while a metered key pays 2x
+    /// base for a 1h write against 1.25x for a 5m one.
+    ///
+    /// Resolved once at construction and never re-read. Claude Code latches it
+    /// the same way and says why: flipping the TTL mid-session changes the
+    /// `cache_control` block itself, which busts the very prefix it is meant
+    /// to keep — "~20K tokens per flip" in their note.
+    cache_ttl_1h: bool,
 }
 
 impl AnthropicClient {
@@ -132,12 +146,26 @@ impl AnthropicClient {
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             oauth_system_prefix: false,
+            // A bare API key is metered per token: a 1h write bills 2x base
+            // against 1.25x for 5m, so the longer hold has to be asked for.
+            cache_ttl_1h: false,
         }
     }
 
     #[must_use]
     pub fn from_auth(auth: AuthSource) -> Self {
         Self::from_auth_with_mode(auth, None)
+    }
+
+    /// Override the 1h cache TTL decision made at construction.
+    ///
+    /// Set it before the first request or not at all: the value is part of
+    /// every `cache_control` block, so changing it between turns rewrites the
+    /// cached prefix and throws away what it was holding.
+    #[must_use]
+    pub fn with_cache_ttl_1h(mut self, enabled: bool) -> Self {
+        self.cache_ttl_1h = enabled;
+        self
     }
 
     /// Build from an `AuthSource` and an optional explicit `AuthMode`. When
@@ -160,6 +188,7 @@ impl AnthropicClient {
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             oauth_system_prefix: is_subscription,
+            cache_ttl_1h: is_subscription && cache_ttl_1h_enabled(),
         };
         if is_subscription {
             // OAuth subscription tokens require the direct Anthropic API
@@ -439,7 +468,7 @@ impl AnthropicClient {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let mut body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut body, request);
-        apply_cache_hints(&mut body, request);
+        apply_cache_hints(&mut body, request, self.cache_ttl_1h);
         apply_request_metadata(&mut body, request);
         self.prepend_oauth_system_prefix(&mut body);
         let diagnose_cache = cache_diagnostics_enabled();
@@ -571,7 +600,7 @@ impl AnthropicClient {
         );
         let mut request_body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut request_body, request);
-        apply_cache_hints(&mut request_body, request);
+        apply_cache_hints(&mut request_body, request, self.cache_ttl_1h);
         apply_request_metadata(&mut request_body, request);
         self.prepend_oauth_system_prefix(&mut request_body);
         dump_request_body("count_tokens", &request_body);
@@ -1345,6 +1374,22 @@ fn write_request_dump(
     Some(path)
 }
 
+/// Whether subscription requests may ask for the 1h cache TTL.
+///
+/// On by default, matching Claude Code for subscribers. `SUDOCODE_CACHE_TTL_1H=0`
+/// (or `false`/`no`/`off`) opts back out — worth having because the longer hold
+/// spends more of the rate-limit window per cache write, so a workload whose
+/// gaps always exceed an hour pays for a hold it never uses.
+fn cache_ttl_1h_enabled() -> bool {
+    match std::env::var("SUDOCODE_CACHE_TTL_1H") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
 /// Attach `metadata.user_id` when the request carries identity.
 ///
 /// Separate from `apply_cache_hints` because it is not a caching *hint* — it
@@ -1378,7 +1423,21 @@ fn apply_request_metadata(body: &mut Value, request: &MessageRequest) {
 /// - `system_dynamic` → system block with `cache_control: {type: "ephemeral"}`
 /// - `breakpoint_last_message` → `cache_control: {type: "ephemeral"}` on the last
 ///   content block of the last message
-fn apply_cache_hints(body: &mut Value, request: &MessageRequest) {
+fn apply_cache_hints(body: &mut Value, request: &MessageRequest, ttl_1h: bool) {
+    // One helper rather than three literals: the TTL has to be identical on
+    // every block of a request. A request that mixes TTLs splits its own
+    // prefix, which is the failure this is meant to avoid.
+    let cache_control = |scope_global: bool| -> Value {
+        let mut cc = serde_json::Map::new();
+        cc.insert("type".to_string(), Value::String("ephemeral".to_string()));
+        if ttl_1h {
+            cc.insert("ttl".to_string(), Value::String("1h".to_string()));
+        }
+        if scope_global {
+            cc.insert("scope".to_string(), Value::String("global".to_string()));
+        }
+        Value::Object(cc)
+    };
     let Some(hints) = &request.cache_hints else {
         return;
     };
@@ -1393,7 +1452,7 @@ fn apply_cache_hints(body: &mut Value, request: &MessageRequest) {
             system_blocks.push(serde_json::json!({
                 "type": "text",
                 "text": text,
-                "cache_control": { "type": "ephemeral", "scope": "global" },
+                "cache_control": cache_control(true),
             }));
         }
     }
@@ -1402,7 +1461,7 @@ fn apply_cache_hints(body: &mut Value, request: &MessageRequest) {
             system_blocks.push(serde_json::json!({
                 "type": "text",
                 "text": text,
-                "cache_control": { "type": "ephemeral" },
+                "cache_control": cache_control(false),
             }));
         }
     }
@@ -1417,10 +1476,7 @@ fn apply_cache_hints(body: &mut Value, request: &MessageRequest) {
                 if let Some(Value::Array(content)) = last_msg.get_mut("content") {
                     if let Some(last_block) = content.last_mut() {
                         if let Some(block_obj) = last_block.as_object_mut() {
-                            block_obj.insert(
-                                "cache_control".to_string(),
-                                serde_json::json!({ "type": "ephemeral" }),
-                            );
+                            block_obj.insert("cache_control".to_string(), cache_control(false));
                         }
                     }
                 }
@@ -2311,6 +2367,75 @@ mod tests {
         ));
     }
 
+    /// Anthropic holds a cached prefix for five minutes unless the request
+    /// asks for an hour, and the ask lives inside every `cache_control` block.
+    /// A request that carried the TTL on some blocks and not others would
+    /// split its own prefix, so this pins all three together.
+    #[test]
+    fn cache_ttl_1h_marks_every_cache_control_block() {
+        use crate::types::{CacheHints, InputMessage};
+        use telemetry::AnthropicRequestProfile;
+
+        let request = MessageRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages: vec![InputMessage::user_text("question")],
+            system: Some("flat fallback".to_string()),
+            stream: true,
+            cache_hints: Some(CacheHints {
+                system_static: Some("static core instructions".to_string()),
+                system_dynamic: Some("dynamic session context".to_string()),
+                breakpoint_last_message: true,
+            }),
+            ..Default::default()
+        };
+
+        let mut with_ttl = AnthropicRequestProfile::default()
+            .render_json_body(&request)
+            .expect("render body");
+        super::apply_cache_hints(&mut with_ttl, &request, true);
+
+        let sys = with_ttl["system"].as_array().expect("system array");
+        assert_eq!(sys[0]["cache_control"]["ttl"], "1h");
+        assert_eq!(sys[0]["cache_control"]["scope"], "global");
+        assert_eq!(sys[1]["cache_control"]["ttl"], "1h");
+        let last_block = &with_ttl["messages"][0]["content"][0];
+        assert_eq!(last_block["cache_control"]["ttl"], "1h");
+
+        let mut without_ttl = AnthropicRequestProfile::default()
+            .render_json_body(&request)
+            .expect("render body");
+        super::apply_cache_hints(&mut without_ttl, &request, false);
+        let sys = without_ttl["system"].as_array().expect("system array");
+        assert!(
+            sys[0]["cache_control"].get("ttl").is_none(),
+            "5m default must not carry a ttl key"
+        );
+        assert!(without_ttl["messages"][0]["content"][0]["cache_control"]
+            .get("ttl")
+            .is_none());
+    }
+
+    /// A metered API key pays 2x base for a 1h cache write against 1.25x for
+    /// 5m, so it stays on the default; a subscription spends rate-limit
+    /// window instead and is better off holding the prefix.
+    #[test]
+    fn subscription_opts_into_1h_ttl_and_api_key_does_not() {
+        let subscription = AnthropicClient::from_auth_with_mode(
+            AuthSource::BearerToken("sk-ant-oat01-token".to_string()),
+            Some(crate::providers::AuthMode::Subscription),
+        );
+        assert!(
+            subscription.cache_ttl_1h,
+            "subscription should hold cached prefixes for an hour"
+        );
+
+        let api_key = AnthropicClient::new("sk-ant-api03-key");
+        assert!(!api_key.cache_ttl_1h, "metered key stays on the 5m default");
+
+        assert!(!subscription.clone().with_cache_ttl_1h(false).cache_ttl_1h);
+    }
+
     #[test]
     fn apply_cache_hints_produces_system_blocks_and_message_breakpoint() {
         use crate::types::{CacheHints, InputMessage};
@@ -2336,7 +2461,7 @@ mod tests {
         let mut body = AnthropicRequestProfile::default()
             .render_json_body(&request)
             .expect("render body");
-        super::apply_cache_hints(&mut body, &request);
+        super::apply_cache_hints(&mut body, &request, false);
 
         // --- System blocks ---
         let system = body.get("system").expect("system field should exist");

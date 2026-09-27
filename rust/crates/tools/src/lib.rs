@@ -53,6 +53,9 @@ pub mod testing {
         let input = crate::AgentInput {
             description: format!("test-{subagent_type}"),
             prompt: prompt.to_string(),
+            context: String::new(),
+            constraints: String::new(),
+            acceptance: String::new(),
             subagent_type: Some(subagent_type.to_string()),
             name: None,
             model: Some("test-model".to_string()),
@@ -80,6 +83,9 @@ pub mod testing {
         let input = crate::AgentInput {
             description: format!("store-{subagent_type}"),
             prompt: prompt.to_string(),
+            context: String::new(),
+            constraints: String::new(),
+            acceptance: String::new(),
             subagent_type: Some(subagent_type.to_string()),
             name: None,
             model: Some("test-model".to_string()),
@@ -1163,10 +1169,11 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Spawn a sub-agent, returning a pid. ",
                 "The sub-agent runs in an isolated context (its own system prompt + this task) ",
                 "and does not inherit this conversation; it is a throwaway worker that returns a result. ",
+                "Frame the task with `context`, `constraints`, and `acceptance` (they are prepended to the sub-agent's prompt); `prompt` is the work itself. ",
                 "Runs in the background by default; set `run_in_background: false` for synchronous. ",
                 "Use `pid_output(pid, block: true)` to await a background agent."
             ),
-            input_schema: json!({
+            input_schema: with_task_template(json!({
                 "type": "object",
                 "properties": {
                     "agent": { "type": "string", "description": "Agent type specialization. The available types are listed in the <available-agent-types> section of the system prompt; defaults to general-purpose." },
@@ -1180,7 +1187,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["prompt"],
                 "additionalProperties": false
-            }),
+            }), true),
             // Read-only: spawning is a read-only ACT. The child never runs with
             // more authority than the spawning session (it inherits the parent's
             // mode — see `AgentJob.permission_mode`), so the spawn call itself
@@ -1245,21 +1252,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Write an implementation plan and present it to the user for approval before you start changing code.\n\n",
                 "Use this proactively before a non-trivial implementation task — getting sign-off on the approach first prevents wasted effort. Prefer it when ANY of these apply: a new feature, several valid approaches, changes to existing behavior, an architectural choice, edits spanning more than 2-3 files, unclear scope you must explore first, or when the approach could reasonably go multiple ways (if you'd ask a clarifying question about the approach, write a plan instead).\n\n",
                 "Skip it for simple work: one-line or obvious fixes, a single function with clear requirements, tasks the user already specified in detail, or pure research/read-only exploration.\n\n",
-                "Pass the full plan as `content` (markdown). It is saved to the session's plan file and shown to the user, who chooses whether to execute it, comment, or stop. When executing, this plan is the source of truth — write it completely, not a summary.\n\n",
-                "Before writing the plan: thoroughly explore the codebase to understand existing patterns, identify similar features and architectural approaches, and consider multiple approaches with their trade-offs. Then design a concrete implementation strategy — the steps to take, the files involved, and how you will verify the result — so the plan is specific enough to execute directly.\n\n",
+                "Fill every field: `context`, `constraints`, and `acceptance` frame the task; `content` is the plan body (the chosen approach and the ordered, file-level steps). Explore first so the plan is concrete enough to execute directly. The saved plan is the source of truth.\n\n",
                 "Revising a plan that is already partway done: if some steps have been completed, remove or tightly collapse the finished parts and keep or refine only what has not been started. The plan should describe the REMAINING work, not repeat what is done."
             ),
-            input_schema: json!({
+            input_schema: with_task_template(json!({
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The full implementation plan, in markdown."
+                        "description": "The plan body in markdown: the chosen approach and the ordered steps, each naming the file(s) it touches."
                     }
                 },
                 "required": ["content"],
                 "additionalProperties": false
-            }),
+            }), true),
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
@@ -1544,7 +1550,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "When replying to a peer, call this ONLY if you have something to say — ",
                 "staying silent lets the conversation end instead of bouncing forever."
             ),
-            input_schema: json!({
+            input_schema: with_task_template(json!({
                 "type": "object",
                 "properties": {
                     "to": {
@@ -1582,7 +1588,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["to", "message"],
                 "additionalProperties": false
-            }),
+            }), false),
             required_permission: PermissionMode::WorkspaceWrite,
         },
     ];
@@ -2836,7 +2842,7 @@ fn reject_dead_pid(to: &str) -> Result<(), String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_send_message(input: SendMessageInput) -> Result<String, String> {
+fn run_send_message(mut input: SendMessageInput) -> Result<String, String> {
     if input.to.trim().is_empty() {
         return Err("to must not be empty".to_string());
     }
@@ -2855,6 +2861,22 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
     // agent id is refused. Not a second send path: a guard, then the same send.
     if input.to != "*" {
         reject_dead_pid(&input.to)?;
+    }
+
+    // Optional task-framing: when the caller supplied context/constraints/
+    // acceptance (a task hand-off, not a chat message) and `message` is plain
+    // text, prepend the same Context/Constraints/Acceptance block write_plan and
+    // agent_spawn use, so a handed-off task carries identical structure. Chat
+    // messages omit the fields and are untouched; structured messages ignore it.
+    {
+        let framing = compose_optional_task_framing(
+            input.context.as_deref(),
+            input.constraints.as_deref(),
+            input.acceptance.as_deref(),
+        );
+        if let (Some(framing), Some(text)) = (framing, input.message.as_str()) {
+            input.message = Value::String(format!("{framing}\n{text}"));
+        }
     }
 
     // Resolved once for the whole call. `send` has one destination namespace
@@ -3641,6 +3663,89 @@ fn run_config(input: ConfigInput) -> Result<String, String> {
     to_pretty_json(execute_config(input)?)
 }
 
+/// The three task-framing fields shared by every task-shaped tool
+/// (`write_plan`, `agent_spawn`, and optionally `send`). Defined once so the
+/// field names, descriptions, and section headings can't drift between tools.
+fn task_template_properties() -> serde_json::Value {
+    json!({
+        "context": {
+            "type": "string",
+            "description": "Necessary background: what the doer needs to know to start (relevant code, prior decisions, the problem)."
+        },
+        "constraints": {
+            "type": "string",
+            "description": "Special restrictions or limits on this task (what NOT to touch, required patterns, dependencies to avoid, scope boundaries)."
+        },
+        "acceptance": {
+            "type": "string",
+            "description": "Acceptance criteria: how we know it succeeded (tests, commands, observable behavior)."
+        }
+    })
+}
+
+/// The names `task_template_properties` requires. Used to splice into a schema's
+/// `required` list on the tools that enforce the template (`write_plan`,
+/// `agent_spawn`); `send` merges the properties but leaves them optional.
+const TASK_TEMPLATE_REQUIRED: [&str; 3] = ["context", "constraints", "acceptance"];
+
+/// Merge the shared task-template properties into a tool's `input_schema`
+/// object, and (when `required`) add them to its `required` array. One place so
+/// `write_plan`/`agent_spawn`/`send` stay in lock-step.
+fn with_task_template(mut schema: serde_json::Value, required: bool) -> serde_json::Value {
+    if let Some(props) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if let Some(fields) = task_template_properties().as_object() {
+            for (k, v) in fields {
+                props.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    if required {
+        if let Some(req) = schema
+            .get_mut("required")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for name in TASK_TEMPLATE_REQUIRED {
+                if !req.iter().any(|v| v.as_str() == Some(name)) {
+                    req.push(Value::String(name.to_string()));
+                }
+            }
+        }
+    }
+    schema
+}
+
+/// Compose the shared task-framing sections into a markdown block, prepended to
+/// a plan body or a handed-off task prompt so both carry the same structure.
+fn compose_task_framing(context: &str, constraints: &str, acceptance: &str) -> String {
+    format!(
+        "## Context\n{}\n\n## Constraints\n{}\n\n## Acceptance Criteria\n{}\n",
+        context.trim(),
+        constraints.trim(),
+        acceptance.trim(),
+    )
+}
+
+/// Like [`compose_task_framing`] but for the optional `send` path: returns
+/// `None` when none of the three fields carry content (a plain chat message),
+/// so only a genuine task hand-off gets the framing block. Empty fields are
+/// treated as absent.
+fn compose_optional_task_framing(
+    context: Option<&str>,
+    constraints: Option<&str>,
+    acceptance: Option<&str>,
+) -> Option<String> {
+    let context = context.unwrap_or("").trim();
+    let constraints = constraints.unwrap_or("").trim();
+    let acceptance = acceptance.unwrap_or("").trim();
+    if context.is_empty() && constraints.is_empty() && acceptance.is_empty() {
+        return None;
+    }
+    Some(compose_task_framing(context, constraints, acceptance))
+}
+
 fn run_write_plan(input: WritePlanInput, fs: &Arc<dyn FsBackend>) -> Result<String, String> {
     let content = input.content.trim();
     if content.is_empty() {
@@ -3648,7 +3753,11 @@ fn run_write_plan(input: WritePlanInput, fs: &Arc<dyn FsBackend>) -> Result<Stri
             "write_plan requires a non-empty `content`: write the full plan before presenting it.",
         ));
     }
-    let path = runtime::plan_store::write_plan(&input.content, fs)?;
+    // The plan file is the SSOT — always structured: the three framing sections
+    // (enforced as required params) then the plan body.
+    let framing = compose_task_framing(&input.context, &input.constraints, &input.acceptance);
+    let document = format!("{framing}\n{content}\n");
+    let path = runtime::plan_store::write_plan(&document, fs)?;
     to_pretty_json(json!({
         "ok": true,
         "planFile": path.display().to_string(),
@@ -3819,6 +3928,12 @@ struct SkillInput {
 struct AgentInput {
     description: String,
     prompt: String,
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    constraints: String,
+    #[serde(default)]
+    acceptance: String,
     subagent_type: Option<String>,
     name: Option<String>,
     model: Option<String>,
@@ -3867,6 +3982,12 @@ struct ConfigInput {
 #[derive(Debug, Deserialize)]
 struct WritePlanInput {
     content: String,
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    constraints: String,
+    #[serde(default)]
+    acceptance: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4078,6 +4199,12 @@ struct SendMessageInput {
     summary: Option<String>,
     #[serde(default)]
     sender: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    constraints: Option<String>,
+    #[serde(default)]
+    acceptance: Option<String>,
 }
 
 /// Default sender name used when the caller doesn't supply one.
@@ -5171,7 +5298,7 @@ struct PreparedAgent {
 }
 
 fn prepare_agent_job(
-    input: AgentInput,
+    mut input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
     fs: Arc<dyn FsBackend>,
 ) -> Result<PreparedAgent, String> {
@@ -5180,6 +5307,19 @@ fn prepare_agent_job(
     }
     if input.prompt.trim().is_empty() {
         return Err(String::from("prompt must not be empty"));
+    }
+
+    // Frame the task the same way write_plan structures a plan: prepend the
+    // shared Context/Constraints/Acceptance sections (required schema params) to
+    // the child's prompt so the sub-agent receives a fully-framed task. Skip for
+    // a fork child, which inherits the parent's context rather than a fresh task.
+    if normalize_subagent_type(input.subagent_type.as_deref()) != "fork"
+        && !(input.context.trim().is_empty()
+            && input.constraints.trim().is_empty()
+            && input.acceptance.trim().is_empty())
+    {
+        let framing = compose_task_framing(&input.context, &input.constraints, &input.acceptance);
+        input.prompt = format!("{framing}\n{}", input.prompt);
     }
 
     let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
@@ -10927,6 +11067,9 @@ mod tests {
             AgentInput {
                 description: "Audit the branch".to_string(),
                 prompt: "Check tests and outstanding work.".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("ship-audit".to_string()),
                 model: None,
@@ -11019,6 +11162,9 @@ mod tests {
             AgentInput {
                 description: "Complete the task".to_string(),
                 prompt: "Do the work".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("complete-task".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
@@ -11080,6 +11226,9 @@ mod tests {
             AgentInput {
                 description: "Fail the task".to_string(),
                 prompt: "Do the failing work".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Verification".to_string()),
                 name: Some("fail-task".to_string()),
                 model: None,
@@ -11131,6 +11280,9 @@ mod tests {
             AgentInput {
                 description: "Sweep the next backlog item".to_string(),
                 prompt: "Produce a low-signal stop summary".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("summary-floor".to_string()),
                 model: None,
@@ -11180,6 +11332,9 @@ mod tests {
             AgentInput {
                 description: "Recover the stalled audit lane".to_string(),
                 prompt: "Normalize OMX reinjection control prose".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("recovery-lane".to_string()),
                 model: None,
@@ -11232,6 +11387,9 @@ mod tests {
             AgentInput {
                 description: "Review commit 1234abcd for ROADMAP #67".to_string(),
                 prompt: "Review the scoped diff".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Verification".to_string()),
                 name: Some("review-lane".to_string()),
                 model: None,
@@ -11276,6 +11434,9 @@ mod tests {
             AgentInput {
                 description: "Scan ROADMAP Immediate Backlog for the next repo-local item".to_string(),
                 prompt: "Choose the next backlog target".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("backlog-scan".to_string()),
                 model: None,
@@ -11326,6 +11487,9 @@ mod tests {
             AgentInput {
                 description: "Land ROADMAP #64 provenance hardening".to_string(),
                 prompt: "Ship structured artifact provenance".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("artifact-lane".to_string()),
                 model: None,
@@ -11400,6 +11564,9 @@ mod tests {
             AgentInput {
                 description: "Close ROADMAP #66 reminder shutdown".to_string(),
                 prompt: "Finish the cron shutdown fix".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("cron-closeout".to_string()),
                 model: None,
@@ -11445,6 +11612,9 @@ mod tests {
             AgentInput {
                 description: "Spawn error task".to_string(),
                 prompt: "Never starts".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: None,
                 name: Some("spawn-error".to_string()),
                 model: None,
@@ -11779,6 +11949,9 @@ mod tests {
             AgentInput {
                 description: "Calculate 2+2".to_string(),
                 prompt: "What is 2+2?".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("calc-task".to_string()),
                 model: None,
@@ -11831,6 +12004,9 @@ mod tests {
             AgentInput {
                 description: "Failing calc".to_string(),
                 prompt: "Divide by zero".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("fail-calc".to_string()),
                 model: None,
@@ -11880,6 +12056,9 @@ mod tests {
             AgentInput {
                 description: "Slow calculation".to_string(),
                 prompt: "What is 6*7?".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("slow-calc".to_string()),
                 model: None,
@@ -11933,6 +12112,9 @@ mod tests {
             AgentInput {
                 description: "Slow task".to_string(),
                 prompt: "Run slowly".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: None,
                 name: None,
                 model: None,
@@ -11969,6 +12151,9 @@ mod tests {
             AgentInput {
                 description: "Never completes".to_string(),
                 prompt: "Spin forever".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: None,
                 name: None,
                 model: None,
@@ -12035,6 +12220,9 @@ mod tests {
         AgentInput {
             description: format!("auto-bg test: {label}"),
             prompt: format!("scenario={label}"),
+            context: String::new(),
+            constraints: String::new(),
+            acceptance: String::new(),
             subagent_type: None,
             name: Some(format!("auto-bg-{label}")),
             model: Some("test-model".to_string()),
@@ -12459,6 +12647,9 @@ mod tests {
             AgentInput {
                 description: "Never completes".to_string(),
                 prompt: "Spin forever".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: None,
                 name: None,
                 model: None,
@@ -12532,6 +12723,9 @@ mod tests {
             AgentInput {
                 description: "Path test".to_string(),
                 prompt: "Test path".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: None,
                 model: None,
@@ -13485,5 +13679,73 @@ printf 'pwsh:%s' "$1"
         let out = normalize_pid_input(&input);
         assert_eq!(out["task_id"], "existing");
         assert_eq!(out["pid"], "ignored", "pid kept when task_id exists");
+    }
+
+    fn spec_named(name: &str) -> super::ToolSpec {
+        mvp_tool_specs()
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} spec must exist"))
+    }
+
+    fn required_names(spec: &super::ToolSpec) -> Vec<String> {
+        spec.input_schema["required"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn task_template_fields_required_on_write_plan_and_agent_spawn() {
+        // Enforcement + DRY: the three framing fields are properties AND required
+        // on both task-shaped tools, sourced from the one shared fragment.
+        for name in ["write_plan", "agent_spawn"] {
+            let spec = spec_named(name);
+            let props = spec.input_schema["properties"].as_object().unwrap();
+            let req = required_names(&spec);
+            for field in super::TASK_TEMPLATE_REQUIRED {
+                assert!(props.contains_key(field), "{name} missing property {field}");
+                assert!(
+                    req.contains(&field.to_string()),
+                    "{name} must require {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn task_template_fields_optional_on_send() {
+        // send stays general: fields are available but NOT required (a chat
+        // message needn't carry them).
+        let spec = spec_named("send");
+        let props = spec.input_schema["properties"].as_object().unwrap();
+        let req = required_names(&spec);
+        for field in super::TASK_TEMPLATE_REQUIRED {
+            assert!(props.contains_key(field), "send missing property {field}");
+            assert!(
+                !req.contains(&field.to_string()),
+                "send must NOT require {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn compose_task_framing_orders_sections() {
+        let out = super::compose_task_framing("C", "K", "A");
+        assert_eq!(
+            out,
+            "## Context\nC\n\n## Constraints\nK\n\n## Acceptance Criteria\nA\n"
+        );
+    }
+
+    #[test]
+    fn compose_optional_task_framing_none_when_all_empty() {
+        assert!(super::compose_optional_task_framing(None, None, None).is_none());
+        assert!(super::compose_optional_task_framing(Some(""), Some("  "), None).is_none());
+        assert!(super::compose_optional_task_framing(Some("ctx"), None, None).is_some());
     }
 }

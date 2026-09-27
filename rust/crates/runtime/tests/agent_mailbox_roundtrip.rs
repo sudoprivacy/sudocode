@@ -236,3 +236,45 @@ fn structured_shutdown_envelope_survives_roundtrip() {
         Some("user cancelled")
     );
 }
+
+/// The two hosts tell an agent the SAME things, and differ only in framing.
+///
+/// Equivalence between standalone `scode` and the co-host is the point of the shared
+/// engine, and a prompt is part of the contract a model is held to: the co-host once
+/// carried the reply contract and not the discovery one, so a co-hosted agent could
+/// answer a message but had no way to find out who else was reachable. Asserted on the
+/// rendered sections rather than trusted to the refactor, because the failure mode is
+/// two strings drifting and that is invisible at a call site.
+#[test]
+fn both_hosts_tell_an_agent_the_same_a2a_contract() {
+    let repl = agent_mailbox::repl_a2a_prompt_section("win-ai", &[]);
+    let cohost = runtime::spawn_task::cohost_a2a_prompt_section("win-ai");
+
+    // The shared halves, verbatim in both.
+    let reply = agent_mailbox::a2a_reply_contract("win-ai");
+    let discovery = agent_mailbox::a2a_discovery_contract();
+    for (host, text) in [("repl", &repl), ("cohost", &cohost)] {
+        assert!(
+            text.contains(&reply),
+            "{host} must carry the reply contract verbatim"
+        );
+        assert!(
+            text.contains(discovery),
+            "{host} must carry the discovery contract verbatim"
+        );
+        assert!(
+            text.contains("agent_list"),
+            "{host} must name the tool that answers 'who can I reach'"
+        );
+    }
+
+    // And each carries only ITS framing — the one host-specific value.
+    assert!(
+        cohost.contains("[message from <sender>]") && !cohost.contains("<mailbox-message"),
+        "the co-host describes its own framing and not the REPL's:\n{cohost}"
+    );
+    assert!(
+        repl.contains("<mailbox-message") && !repl.contains("[message from <sender>]"),
+        "the REPL describes its own framing and not the co-host's:\n{repl}"
+    );
+}

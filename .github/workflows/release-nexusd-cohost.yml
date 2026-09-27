@@ -139,6 +139,22 @@ jobs:
       # `--locked`: a release artifact resolves to the revs the lockfile records
       # and nothing else. That is the same discipline the pin serves — the daemon
       # and the agent runtime inside it have to agree on one nexus-vfs.
+      # `NEXUSD_BUILD_VERSION` is what `--version` prints after the binary's own
+      # name, so it is where this build states which revs it carries. Without it the
+      # daemon reports the version of the crate that owns the clap derive — the same
+      # number for every build of it, which reads as an answer while telling an
+      # operator nothing about the artifact in front of them. `PAIRING.txt` says the
+      # same thing in the archive; this says it to a running pod.
+      - name: Stamp the build identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEXUS_VFS_TAG="$(grep -m1 -oE 'nexus-vfs", tag = "[^"]+"' Cargo.toml | sed 's/.*tag = "//; s/"//')"
+          # Strip the binary name the tag carries: clap prefixes the name itself, so
+          # `nexusd-cohost-v0.2.21` would print as `nexusd-cohost nexusd-cohost-v0.2.21`.
+          BUILD="${GITHUB_REF_NAME#nexusd-cohost-}"
+          echo "NEXUSD_BUILD_VERSION=${BUILD} (sudocode $(git rev-parse --short HEAD), nexus-vfs ${NEXUS_VFS_TAG})" >> "$GITHUB_ENV"
+
       - name: Build release binary
         run: cargo build --locked --release -p nexusd-cohost --features daemon --bin nexusd-cohost
 

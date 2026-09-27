@@ -158,6 +158,28 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release -p nexusd-cohost --features daemon --bin nexusd-cohost
 
+      # Asserted here because this is the only job where the stamp exists at all. The
+      # co-host gate already checks the NAME (`e2e/nexus-a2a/run-cohost.sh`), which
+      # lives in the code and cannot differ per platform; what only a release build
+      # can get wrong is the stamp. `NEXUSD_BUILD_VERSION` is read at COMPILE time, so
+      # a stamping step that lands after the build, an env var that fails to reach
+      # rustc, or a cache serving a binary compiled without it all produce a daemon
+      # that boots perfectly and names the wrong revs — the failure this whole stamp
+      # exists to prevent, arriving as a confident answer.
+      #
+      # Compared against the value this job computed rather than a re-derived one: a
+      # second spelling of the expected string is a second thing that can be wrong.
+      - name: The stamp reached the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$("target/release/${{ matrix.bin }}" --version)"
+          echo "$out"
+          case "$out" in
+            *"$NEXUSD_BUILD_VERSION"*) ;;
+            *) echo "::error::--version must carry the stamp '$NEXUSD_BUILD_VERSION', got: $out"; exit 1 ;;
+          esac
+
       - name: Stage release payload
         shell: bash
         run: |

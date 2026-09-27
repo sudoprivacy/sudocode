@@ -52,11 +52,19 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// * `desc` — the descriptor `ManagedAgentService` planted
 /// * `state_callback` — fired on every transition so the caller can forward to
 ///   `AgentRegistry::update_state`
+/// # Errors
+///
+/// When this host cannot run an agent at all: no sudocode configuration to resolve a
+/// model and its credentials, or a host-side directory it cannot create. The caller
+/// (`ManagedAgentService::start_session`) answers the RPC with it — which is the only
+/// place an operator can see it. These used to be `expect`s, so a daemon started
+/// without sudocode configuration died on its own thread and printed a backtrace
+/// about a missing file in place of a refusal naming it.
 pub fn spawn_managed_agent<K, F>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
     state_callback: F,
-) -> SpawnHandle
+) -> Result<SpawnHandle, String>
 where
     K: KernelSyscall + Send + Sync + 'static,
     F: Fn(AgentState, Option<String>) + Send + 'static,
@@ -103,7 +111,7 @@ where
     // `runtime_build`, so the difference between them is readable in one place
     // instead of assembled here and inferred there.
     let host = HostContext::for_cohost_agent(fs, &desc.name, Arc::clone(&mailbox))
-        .expect("co-host: the agent's host-side directory must be creatable");
+        .map_err(|e| format!("co-host: create the agent's host-side directory: {e}"))?;
 
     // Permissions are enforced by the kernel — ReBAC plus the workspace
     // boundary hook — on the far side of every one of these tools. A second
@@ -112,10 +120,14 @@ where
     // Auth and provider configuration resolve exactly as they do for the CLI,
     // from the daemon's own config root. Defaulting them here would be a second
     // answer to a question `resolve_auth_mode` already owns.
-    let sudocode_config = require_sudocode_config_for_cwd(&host.config_root)
-        .expect("co-host: sudocode configuration is required to build an agent");
+    let sudocode_config = require_sudocode_config_for_cwd(&host.config_root).map_err(|e| {
+        format!(
+            "co-host: no usable sudocode configuration for {}: {e} — a co-hosted agent              resolves its model and credentials the way the CLI does, from              SUDO_CODE_CONFIG_HOME (or ~/.nexus/sudocode) plus this daemon's working              directory",
+            host.config_root.display(),
+        )
+    })?;
     let auth_mode = resolve_auth_mode(&model, None, &sudocode_config)
-        .expect("co-host: failed to resolve auth mode");
+        .map_err(|e| format!("co-host: resolve auth mode for model {model:?}: {e}"))?;
 
     // The one prompt section this host contributes, for the same reason the
     // CLI contributes its skills listing: it describes something only this host
@@ -187,14 +199,14 @@ where
 
     // `built` goes with it: its `Drop` shuts down the MCP servers and plugins
     // this engine is using, so it has to outlive the loop rather than the call.
-    spawn_task(
+    Ok(spawn_task(
         &desc,
         mailbox,
         engine,
         built,
         host.shell_root.clone(),
         state_callback,
-    )
+    ))
 }
 
 /// The session store a co-hosted agent records into.
@@ -233,11 +245,11 @@ where
         kernel: Arc<K>,
         desc: AgentDescriptor,
         state_observer: Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>,
-    ) -> Box<dyn ManagedSpawnHandle> {
+    ) -> Result<Box<dyn ManagedSpawnHandle>, String> {
         let handle = spawn_managed_agent(kernel, desc, move |state, reason| {
             state_observer(state, reason);
-        });
-        Box::new(SudoCodeSpawnHandle { inner: handle })
+        })?;
+        Ok(Box::new(SudoCodeSpawnHandle { inner: handle }))
     }
 }
 

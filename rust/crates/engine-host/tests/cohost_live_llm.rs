@@ -80,7 +80,8 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
     // printed, so the agent's lifecycle is observable.
     let handle = spawn_managed_agent(Arc::clone(&kernel), desc, |state, reason| {
         eprintln!("[agent state] {state:?} reason={reason:?}");
-    });
+    })
+    .expect("this host can run an agent: the live test supplies a real config home");
 
     let ctx = user_ctx();
     let prompt = "You are being tested over a nexus A2A mailbox. \

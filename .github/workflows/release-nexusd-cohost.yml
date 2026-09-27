@@ -51,11 +51,13 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-linux-x64
             archive_name: nexusd-cohost-linux-x64.tar.gz
+            max_size_bytes: 54525952  # 52 MiB — measured 51,997,848 bytes, 4.9% headroom
           - name: linux-arm64
             os: ubuntu-22.04-arm
             bin: nexusd-cohost
             package_dir: nexusd-cohost-linux-arm64
             archive_name: nexusd-cohost-linux-arm64.tar.gz
+            max_size_bytes: 50331648  # 48 MiB — measured 48,620,624 bytes, 3.5% headroom
           # Not for deployment — for the cross-machine duet, which runs a real
           # co-host on a developer Mac and a developer Windows box. A daemon you
           # cannot run on the machines you debug from is a daemon you debug by
@@ -65,6 +67,7 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-macos-arm64
             archive_name: nexusd-cohost-macos-arm64.tar.gz
+            max_size_bytes: 44040192  # 42 MiB — measured 42,226,080 bytes, 4.3% headroom
           # Intel, because the Mac this project actually debugs from is Intel. The
           # first cut of this matrix left it out reasoning "nothing runs a co-host
           # there", and the cross-machine bring-up falsified that within the hour:
@@ -76,11 +79,13 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-macos-x64
             archive_name: nexusd-cohost-macos-x64.tar.gz
+            max_size_bytes: 46137344  # 44 MiB — measured 43,750,416 bytes, 5.5% headroom
           - name: windows-x64
             os: windows-2022
             bin: nexusd-cohost.exe
             package_dir: nexusd-cohost-windows-x64
             archive_name: nexusd-cohost-windows-x64.zip
+            max_size_bytes: 41943040  # 40 MiB — measured 39,765,504 bytes, 5.5% headroom
     defaults:
       run:
         working-directory: rust
@@ -222,13 +227,39 @@ jobs:
           fi
           ls -la "dist/${{ matrix.archive_name }}"
 
-      # Printed, not asserted. The binary links an LLM agent runtime, so it is
-      # several times the slim `nexusd-cluster` by construction; what matters is
-      # that the number is visible in the log when it moves, and that the cluster
-      # binary's own budget lives in nexus-vfs where that artifact is built.
-      - name: Report artifact size
+      # This binary gets its OWN budget, several times the slim `nexusd-cluster` one
+      # — it links an LLM agent runtime, so a cluster-sized cap here would fail on the
+      # first honest build and teach everyone to raise it. Separate numbers in separate
+      # repositories, because the two artifacts answer to different constraints:
+      # `nexusd-cluster` is the production daemon that must stay small (its budget lives
+      # in nexus-vfs, where it is built), and this is the node that hosts agents.
+      #
+      # A printed number was the previous state, and printing is not a gate — nobody
+      # diffs `du` output across releases, so the first build to double would have
+      # shipped. What a cap at ~4% headroom catches is the step change (a dependency
+      # arriving with a second TLS stack, an accidental `debug = true`) while leaving
+      # the ordinary drift of a moving runtime alone.
+      #
+      # Exact bytes, not `du`, which rounds to a block and cannot see a 200 KB move.
+      # Every cap in the matrix is measured on these same runners, not estimated.
+      - name: Check binary size
         shell: bash
-        run: du -h "dist/${{ matrix.archive_name }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+        env:
+          MAX_SIZE_BYTES: ${{ matrix.max_size_bytes }}
+        run: |
+          set -euo pipefail
+          path="dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            actual=$(stat -f '%z' "$path")
+          else
+            actual=$(stat -c '%s' "$path")
+          fi
+          archive=$(wc -c < "dist/${{ matrix.archive_name }}" | tr -d ' ')
+          echo "binary: $actual bytes (max $MAX_SIZE_BYTES) · archive: $archive bytes"
+          if [[ "$actual" -gt "$MAX_SIZE_BYTES" ]]; then
+            echo "::error::${{ matrix.package_dir }} exceeds its size budget ($actual > $MAX_SIZE_BYTES bytes)"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

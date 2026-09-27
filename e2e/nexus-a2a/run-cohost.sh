@@ -69,6 +69,18 @@ fi
 [ -x "$BIN" ] || { echo "!! no nexusd-cohost binary at $BIN" >&2; exit 1; }
 echo "   $BIN"
 
+# The binary says which binary it is. This daemon and `nexusd-cluster` fail the same
+# way when the wrong one is deployed — a session sits in `warming_up`, because the one
+# that hosts agents is this one — so "which binary is this pod running?" has to have an
+# answer, and it used to be `nexusd-cluster`. Asserted in this job because it is the
+# only one that builds the daemon: the workspace jobs leave it behind `--features
+# daemon` on purpose.
+VERSION_SAID="$("$BIN" --version 2>&1 || true)"
+case "$VERSION_SAID" in
+  "nexusd-cohost "*) echo "   identity: $VERSION_SAID" ;;
+  *) echo "!! --version must name this binary, got: $VERSION_SAID" >&2; exit 1 ;;
+esac
+
 MOCK_PID=
 DAEMON_PID=
 WORK_DIR=

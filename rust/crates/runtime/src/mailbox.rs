@@ -354,8 +354,10 @@ impl Mailbox {
     /// inbox would be written and read as JSONL. The call is cheap — a string
     /// test for the VFS backend, a constant `false` for the file one.
     #[inline]
-    fn backend_frames(&self, path: &str) -> bool {
-        self.backend.is_append_stream(path).unwrap_or(false)
+    fn backend_frames(&self, path: &str) -> Result<bool, String> {
+        self.backend
+            .is_append_stream(path)
+            .map_err(|error| format!("inspect mailbox backend at {path}: {error}"))
     }
 
     /// A nexus A2A mailbox for `agent` over an already-dialled client.
@@ -596,7 +598,7 @@ impl Mailbox {
         // success.
         self.ensure_provisioned(&envelope.to)?;
 
-        if self.backend_frames(&path) {
+        if self.backend_frames(&path)? {
             return self
                 .backend
                 .append(&path, &envelope.to_bytes())
@@ -655,7 +657,7 @@ impl Mailbox {
         block_ms: u64,
     ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
         let path = self.transcript_path(peer);
-        let is_stream = self.backend_frames(&path);
+        let is_stream = self.backend_frames(&path)?;
         let (mut messages, next) = if is_stream {
             self.poll_stream(&path, cursor, block_ms)
         } else {
@@ -736,7 +738,7 @@ impl Mailbox {
     /// coordinator's multi-turn loop, which drains between turns.
     pub fn read_conversation(&self, peer: &str) -> Result<Vec<MailboxEnvelope>, String> {
         let path = self.transcript_path(peer);
-        let is_stream = self.backend_frames(&path);
+        let is_stream = self.backend_frames(&path)?;
         if is_stream {
             let (envs, _cursor) = self.poll_stream(&path, 0, 0)?;
             Ok(envs)

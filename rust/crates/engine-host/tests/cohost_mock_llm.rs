@@ -196,7 +196,8 @@ fn run_cohost_turn(
 
     let handle = spawn_managed_agent(Arc::clone(&kernel), desc, |state, reason| {
         eprintln!("[agent state] {state:?} reason={reason:?}");
-    });
+    })
+    .expect("this host can run an agent: the mock test supplies a config home");
 
     let ctx = user_ctx();
     send_prompt(&user_mb, agent_id, prompt);
@@ -364,7 +365,8 @@ fn a_cohost_is_not_offered_crons_this_daemon_will_never_fire() {
         Arc::clone(&kernel),
         make_desc("pid-cron", "cron-agent", MODEL),
         |_, _| {},
-    );
+    )
+    .expect("this host can run an agent: the mock test supplies a config home");
     assert!(
         tools::cron_tools_disabled(),
         "spawning a co-hosted agent should declare that this host fires no crons"

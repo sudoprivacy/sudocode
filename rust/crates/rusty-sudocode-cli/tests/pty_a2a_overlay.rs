@@ -115,6 +115,74 @@ fn a2a_received_while_idle_surfaces_in_scrollback() {
     let _ = sess.expect_eof();
 }
 
+/// `↑` with a human message and an a2a message both queued must pop the
+/// HUMAN one back into the input slot and leave the a2a (peer) item queued —
+/// a peer message is machine-delivered, not something the user typed, so it
+/// must never be pulled into the edit buffer.
+///
+/// Regression guard for the kind-blind `pop_back` bug: with that bug, ↑ would
+/// pop the peer item (queued last) instead, splicing the a2a body into the
+/// input and dropping its overlay chip. This test queues a human line, then
+/// injects a peer message so the peer sits at the queue tail, presses ↑, and
+/// asserts (a) the human marker surfaces in the input line and (b) the peer
+/// chip is still in the overlay.
+#[test]
+fn up_arrow_pops_human_and_skips_queued_a2a() {
+    const HUMAN_MARKER: &str = "HUMAN-EDIT-MARKER";
+
+    let env = TestEnv::new("a2a-up-skip");
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(BUDGET);
+    sess.resize(50, 100).expect("resize pty");
+    sess.expect("❯").expect("async REPL initial prompt");
+
+    let receiver = wait_for_receiver(&env);
+
+    // Long-running turn so both the human submit and the injected a2a queue
+    // behind it rather than running immediately.
+    let prompt = env.prompt(
+        "Run exactly this bash command, nothing else: \
+         printf 'interrupt-start'; sleep 30",
+        "bash_interrupt_long_running",
+    );
+    sess.send(&format!("{prompt}\r")).expect("send long prompt");
+    sess.expect("interrupt-start")
+        .expect("bash tool should start before we queue anything");
+
+    // Queue a HUMAN message during the turn.
+    sess.send(&format!("{HUMAN_MARKER}\r"))
+        .expect("queue human marker during turn");
+    sess.expect(HUMAN_MARKER)
+        .expect("human message should appear as a queued overlay chip");
+
+    // Then a peer a2a lands AFTER it — now the queue tail is the peer item.
+    inject(&env, &receiver, "mac-ai", "A2A-SKIP-MARKER");
+    sess.expect("\u{21b3} queued: \u{1f4e8} A2A from mac-ai")
+        .expect("a2a should be queued behind the human message");
+
+    // Press ↑ on the empty buffer. Must pop the HUMAN item (skipping the peer
+    // at the tail) and splice its text into the input line.
+    std::thread::sleep(Duration::from_millis(300));
+    sess.send("\x1b[A").expect("send Up-arrow");
+    sess.expect(HUMAN_MARKER)
+        .expect("↑ should splice the human message into the input, skipping the a2a");
+
+    // The peer item was NOT dequeued: its overlay chip is still present.
+    let screen = sess.render(|s| s.contents());
+    assert!(
+        screen.contains("A2A from mac-ai"),
+        "the a2a peer chip must remain queued after ↑ popped the human item; \
+         screen:\n{screen}"
+    );
+
+    sess.send("/exit\r").expect("send /exit");
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
+    let _ = sess.expect_eof();
+}
+
 /// During-turn receipt: the message is held in the pending overlay, not
 /// scrollback, as a `↳ queued: 📨 …` line.
 #[test]

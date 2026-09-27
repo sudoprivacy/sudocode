@@ -560,6 +560,7 @@ pub enum UiCommand {
     /// wholesale list) so tools and messages keep their true interleaving.
     QueuedMessagePush {
         display: String,
+        is_human: bool,
     },
     /// Clear all queued-message items from the pending overlay (tool cards
     /// stay). Sent by the coordinator when the queue drains at a turn boundary.
@@ -604,9 +605,10 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ToolFinished { id: id.to_string() });
     }
 
-    pub fn queued_message_push(&self, display: &str) {
+    pub fn queued_message_push(&self, display: &str, is_human: bool) {
         let _ = self.tx.send(UiCommand::QueuedMessagePush {
             display: display.to_string(),
+            is_human,
         });
     }
 
@@ -1154,7 +1156,10 @@ pub enum PendingItem {
     /// A message queued for the next turn — `display` is the compact one-line
     /// form (`❯ …` for human, `📨 A2A from X: …` for a peer). Purely transient:
     /// the coordinator echoes the real line to scrollback when it flushes.
-    QueuedMessage { display: String },
+    /// `is_human` distinguishes a typed input from an inbound A2A/peer message
+    /// so the empty-buffer `↑` can pop the newest human chip to match the
+    /// coordinator's `dequeue_last_human`, leaving peer chips in place.
+    QueuedMessage { display: String, is_human: bool },
 }
 
 /// Render the pending overlay: in-flight tool cards and queued messages in one
@@ -1199,7 +1204,7 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
     let mut tools_total = 0usize;
     for item in items {
         match item {
-            PendingItem::QueuedMessage { display } => {
+            PendingItem::QueuedMessage { display, .. } => {
                 // Always render (one line, collapsed), in arrival position.
                 let first = display.lines().next().unwrap_or("");
                 lines.push(format!("{DIM}↳ queued: {first}{RESET}"));
@@ -1361,7 +1366,16 @@ struct ReplContext {
     /// the queued messages. Same `Arc<Mutex>` rationale as `context_todos` —
     /// avoids shifting hook indices.
     pending: Arc<Mutex<Vec<PendingItem>>>,
+    /// Empty-buffer `↑` hook: pops the newest **human** queued item out of the
+    /// coordinator's staging area and returns its text for the input slot,
+    /// skipping inbound A2A/peer items. `None` when no queue is wired (the
+    /// handler then walks prompt history as before). Backed by the shared
+    /// `Arc<Mutex<TurnInputCoordinator>>` the coordinator loop also holds.
+    dequeue_hook: Option<UpArrowDequeueHook>,
 }
+
+/// Empty-buffer `↑` dequeue hook — see [`ReplContext::dequeue_hook`].
+pub type UpArrowDequeueHook = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 #[component]
 fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -1377,6 +1391,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let context_todos_for_future = Arc::clone(&ctx.context_todos);
     let pending = Arc::clone(&ctx.pending);
     let pending_for_future = Arc::clone(&ctx.pending);
+    let pending_for_dequeue = Arc::clone(&ctx.pending);
+    let dequeue_hook = ctx.dequeue_hook.clone();
     drop(ctx);
 
     // use_terminal_size must be called before use_future and use_terminal_events
@@ -1537,11 +1553,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     .retain(|p| !matches!(p, PendingItem::Tool(c) if c.id == id));
                             }
                         }
-                        Ok(UiCommand::QueuedMessagePush { display }) => {
+                        Ok(UiCommand::QueuedMessagePush { display, is_human }) => {
                             // Append in arrival order, interleaved with tool
                             // cards, so the overlay mirrors what happened.
                             if let Ok(mut pending) = pending_for_future.lock() {
-                                pending.push(PendingItem::QueuedMessage { display });
+                                pending.push(PendingItem::QueuedMessage { display, is_human });
                             }
                         }
                         Ok(UiCommand::QueuedMessagesClear) => {
@@ -1838,11 +1854,37 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 .unwrap_or(&val)
                                 .contains('\n');
                             if val.is_empty() || (on_first_line && cursor_pos == 0) {
-                                let h = history.read();
-                                if !h.is_empty() {
-                                    saved_input.set(val);
-                                    input_value.set(h[h.len() - 1].clone());
-                                    history_cursor.set(Some(h.len() - 1));
+                                // Queue-first: if the staging area holds a
+                                // human message, `↑` pops the newest one back
+                                // into the input slot for editing (skipping
+                                // a2a/peer items, which stay queued). Only when
+                                // there is no human queued do we fall through to
+                                // walking prompt history.
+                                if let Some(text) = dequeue_hook
+                                    .as_ref()
+                                    .and_then(|hook| hook())
+                                {
+                                    input_value.set(text);
+                                    // Drop the newest human chip from the overlay
+                                    // to match the item just popped from the queue;
+                                    // peer chips are left in place.
+                                    if let Ok(mut pending) = pending_for_dequeue.lock() {
+                                        if let Some(pos) = pending.iter().rposition(|p| {
+                                            matches!(
+                                                p,
+                                                PendingItem::QueuedMessage { is_human: true, .. }
+                                            )
+                                        }) {
+                                            pending.remove(pos);
+                                        }
+                                    }
+                                } else {
+                                    let h = history.read();
+                                    if !h.is_empty() {
+                                        saved_input.set(val);
+                                        input_value.set(h[h.len() - 1].clone());
+                                        history_cursor.set(Some(h.len() - 1));
+                                    }
                                 }
                             } else if on_first_line {
                                 text_input_handle.write().set_cursor_offset(0);
@@ -2255,6 +2297,7 @@ pub fn spawn_repl_ui(
     permission_mode: &str,
     startup_banner: &str,
     context_todos: Vec<runtime::Todo>,
+    dequeue_hook: Option<UpArrowDequeueHook>,
 ) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
@@ -2274,6 +2317,7 @@ pub fn spawn_repl_ui(
         stderr_redir: Arc::clone(&stderr_redir),
         context_todos: Arc::new(Mutex::new(context_todos)),
         pending: Arc::new(Mutex::new(Vec::new())),
+        dequeue_hook,
     };
 
     let banner = startup_banner.to_string();
@@ -2387,6 +2431,7 @@ mod tests {
             PendingItem::Tool(tool_card("1", "bash")),
             PendingItem::QueuedMessage {
                 display: "📨 A2A from mac-ai: hi".to_string(),
+                is_human: false,
             },
             PendingItem::Tool(tool_card("2", "read_file")),
         ];

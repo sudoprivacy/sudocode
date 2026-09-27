@@ -38,7 +38,17 @@ use anyhow::Result;
 use engine_host::managed_agent::SudoCodeSpawnAdapter;
 
 fn main() -> Result<()> {
-    nexus_cluster::run_with_services(|ctx| {
+    // The name clap prints for `--version`, `--help` and usage errors. Left to the
+    // library it is `nexusd-cluster`, because that is the crate the clap derive lives
+    // in — so the one binary whose whole reason to exist is hosting agents introduced
+    // itself as the binary that cannot. The two fail identically when the wrong one is
+    // deployed (sessions sit in `warming_up`), which made "which binary is this?" the
+    // first question of an incident and the one nothing could answer.
+    //
+    // `CARGO_BIN_NAME` rather than a literal: the name is already stated once, in this
+    // crate's `[[bin]]`, and a second spelling here is one that can disagree with the
+    // file an operator actually ran.
+    nexus_cluster::run_with_services(env!("CARGO_BIN_NAME"), |ctx| {
         let mut services = nexus_cluster::default_service_decls(ctx);
         // By NAME, not by position: the default set's order is nexus-vfs's
         // business, and an index would silently pick the wrong service the first

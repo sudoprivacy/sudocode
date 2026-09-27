@@ -11,7 +11,7 @@ const DEFAULT_COMPLETION_TTL_SECS: u64 = 30;
 const DEFAULT_PROMPT_TTL_SECS: u64 = 5 * 60;
 const DEFAULT_BREAK_MIN_DROP: u32 = 2_000;
 const MAX_SANITIZED_LENGTH: usize = 80;
-const REQUEST_FINGERPRINT_VERSION: u32 = 1;
+const REQUEST_FINGERPRINT_VERSION: u32 = 2;
 const REQUEST_FINGERPRINT_PREFIX: &str = "v1";
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -273,7 +273,16 @@ struct TrackedPromptState {
     model_hash: u64,
     system_hash: u64,
     tools_hash: u64,
-    messages_hash: u64,
+    /// Cumulative hash after each message, so two turns can be compared by
+    /// their common prefix rather than by one hash over the whole array.
+    ///
+    /// A single `messages_hash` cannot tell the two apart, and they are not
+    /// remotely equivalent: appending a turn leaves the cached prefix intact,
+    /// while rewriting an earlier message invalidates everything after it.
+    /// Because messages grow on every turn the whole-array hash always
+    /// differed, so "message payload changed" was reported on every break and
+    /// carried no information.
+    message_hashes: Vec<u64>,
     cache_read_input_tokens: u32,
 }
 
@@ -286,7 +295,7 @@ impl TrackedPromptState {
             model_hash: hashes.model,
             system_hash: hashes.system,
             tools_hash: hashes.tools,
-            messages_hash: hashes.messages,
+            message_hashes: message_prefix_hashes(request),
             cache_read_input_tokens: usage.cache_read_input_tokens,
         }
     }
@@ -297,7 +306,6 @@ struct RequestFingerprints {
     model: u64,
     system: u64,
     tools: u64,
-    messages: u64,
 }
 
 impl RequestFingerprints {
@@ -306,7 +314,6 @@ impl RequestFingerprints {
             model: hash_serializable(&request.model),
             system: hash_serializable(&request.system),
             tools: hash_serializable(&request.tools),
-            messages: hash_serializable(&request.messages),
         }
     }
 }
@@ -348,8 +355,21 @@ fn detect_cache_break(
     if previous.tools_hash != current.tools_hash {
         reasons.push("tool definitions changed");
     }
-    if previous.messages_hash != current.messages_hash {
-        reasons.push("message payload changed");
+    // Appending a turn is the normal case and leaves the cached prefix
+    // whole; only a rewrite *inside* the prefix invalidates it. Reporting
+    // both as "message payload changed" made the reason useless, because the
+    // whole-array hash differs on every single turn.
+    let shared = common_prefix_len(&previous.message_hashes, &current.message_hashes);
+    let rewritten = shared < previous.message_hashes.len();
+    let rewrite_detail = rewritten.then(|| {
+        format!(
+            "message history rewritten at index {shared} (had {}, now {})",
+            previous.message_hashes.len(),
+            current.message_hashes.len()
+        )
+    });
+    if let Some(detail) = &rewrite_detail {
+        reasons.push(detail.as_str());
     }
 
     let elapsed = current
@@ -437,6 +457,37 @@ fn request_hash_hex(request: &MessageRequest) -> String {
         "{REQUEST_FINGERPRINT_PREFIX}-{:016x}",
         hash_serializable(request)
     )
+}
+
+/// Cumulative hash after each message: element `k` covers `messages[0..=k]`.
+///
+/// Chaining rather than hashing each message alone so that a single
+/// comparison finds the first index where two turns diverge — which is
+/// exactly where the provider's cached prefix stops matching.
+fn message_prefix_hashes(request: &MessageRequest) -> Vec<u64> {
+    let mut acc = FNV_OFFSET_BASIS;
+    request
+        .messages
+        .iter()
+        .map(|message| {
+            let json = serde_json::to_vec(message).unwrap_or_default();
+            for byte in &json {
+                acc ^= u64::from(*byte);
+                acc = acc.wrapping_mul(FNV_PRIME);
+            }
+            acc
+        })
+        .collect()
+}
+
+/// Length of the longest shared leading run — the part of the conversation
+/// both requests agree on byte for byte.
+fn common_prefix_len(previous: &[u64], current: &[u64]) -> usize {
+    previous
+        .iter()
+        .zip(current.iter())
+        .take_while(|(a, b)| a == b)
+        .count()
 }
 
 fn hash_serializable<T: Serialize>(value: &T) -> u64 {
@@ -557,6 +608,10 @@ mod tests {
         assert!(event.reason.contains("stable"));
     }
 
+    /// Rewriting an earlier message is the expensive case: the provider's
+    /// prefix stops matching at that index and everything after it is rebuilt.
+    /// The reason has to name the index, otherwise it is indistinguishable
+    /// from the harmless case below.
     #[test]
     fn changed_prompt_marks_break_as_expected() {
         let previous_request = sample_request("first");
@@ -584,7 +639,47 @@ mod tests {
         let event = detect_cache_break(&PromptCacheConfig::default(), Some(&previous), &current)
             .expect("break should be detected");
         assert!(!event.unexpected);
-        assert!(event.reason.contains("message payload changed"));
+        assert!(
+            event.reason.contains("message history rewritten at index 0"),
+            "reason should name where the prefix diverged, got: {}",
+            event.reason
+        );
+    }
+
+    /// Appending a turn is what every normal request does, and it leaves the
+    /// cached prefix whole. Before prefix comparison the whole-array hash
+    /// always differed, so this case was reported identically to a rewrite —
+    /// which made the reason field carry no information at all.
+    #[test]
+    fn appended_turn_is_not_reported_as_a_rewrite() {
+        let previous_request = sample_request("first");
+        let mut current_request = sample_request("first");
+        current_request
+            .messages
+            .push(crate::types::InputMessage::user_text("second"));
+
+        let previous = TrackedPromptState::from_usage(
+            &previous_request,
+            &Usage {
+                cache_read_input_tokens: 6_000,
+                ..Usage::default()
+            },
+        );
+        let current = TrackedPromptState::from_usage(
+            &current_request,
+            &Usage {
+                cache_read_input_tokens: 1_000,
+                ..Usage::default()
+            },
+        );
+
+        let event = detect_cache_break(&PromptCacheConfig::default(), Some(&previous), &current)
+            .expect("a 5k drop still counts as a break");
+        assert!(
+            !event.reason.contains("rewritten"),
+            "an append must not be reported as a rewrite, got: {}",
+            event.reason
+        );
     }
 
     #[test]

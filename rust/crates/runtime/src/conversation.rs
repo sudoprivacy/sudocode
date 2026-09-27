@@ -2258,23 +2258,39 @@ where
                     // `&self.tool_executor`) is already dropped and `&mut self`
                     // is free.
                     let abort_signal = self.hook_abort_signal.clone();
-                    dispatch_context.tool_use_id = None;
                     // Bounded, not `join_all`: `buffered` keeps at most
                     // `max_tool_use_concurrency()` executes in flight and still
                     // yields results in batch order, which phase 3 indexes by.
-                    let batch_exec = futures::stream::iter(prepared.iter().map(|p| async {
-                        if p.deny_reason.is_some() {
-                            None
-                        } else {
-                            Some(
-                                self.tool_executor
-                                    .execute_with_attachments(
-                                        &p.tool_name,
-                                        &p.effective_input,
-                                        &dispatch_context,
-                                    )
-                                    .await,
-                            )
+                    //
+                    // Each tool gets its own context carrying its own
+                    // `tool_use_id`. The batch used to share one with the id
+                    // blanked — harmless for reads, but a sub-agent spawn needs
+                    // it: `SubagentLink::from_dispatch` gives up without one, so
+                    // a spawn in a batch would run and emit no lifecycle event
+                    // at all. The clone is an `Arc` shuffle, once per tool.
+                    //
+                    // The executor is borrowed once up front: each future is
+                    // `async move` so it can own its context, and moving `self`
+                    // in as well would not compile (nor be wanted — phase 3
+                    // needs `&mut self` right after).
+                    let executor = &self.tool_executor;
+                    let batch_exec = futures::stream::iter(prepared.iter().map(|p| {
+                        let mut ctx = dispatch_context.clone();
+                        ctx.tool_use_id = Some(p.tool_use_id.clone());
+                        async move {
+                            if p.deny_reason.is_some() {
+                                None
+                            } else {
+                                Some(
+                                    executor
+                                        .execute_with_attachments(
+                                            &p.tool_name,
+                                            &p.effective_input,
+                                            &ctx,
+                                        )
+                                        .await,
+                                )
+                            }
                         }
                     }))
                     .buffered(max_tool_use_concurrency())

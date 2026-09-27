@@ -25,7 +25,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::SystemPrompt;
+use crate::{section_order, SystemPrompt};
 
 /// Environment variable that toggles coordinator mode. Mirrors CC-fork's
 /// `CLAUDE_CODE_COORDINATOR_MODE`.
@@ -323,18 +323,24 @@ Additional tips:
 "#
 }
 
-/// Prepend the coordinator system prompt to `prompt.dynamic_sections`
-/// when coordinator mode is enabled. Otherwise leaves `prompt`
-/// untouched. Callers should invoke this after `load_system_prompt()`
-/// so the coordinator instructions take primacy over the default
-/// identity.
+/// Name of the dynamic section coordinator mode registers.
+pub const COORDINATOR_SECTION_NAME: &str = "coordinator-role";
+
+/// Register the coordinator system prompt as the [`section_order::ROLE`]
+/// dynamic section when coordinator mode is enabled. Otherwise leaves
+/// `prompt` untouched. Callers should invoke this after
+/// `load_system_prompt()` so the coordinator instructions take primacy over
+/// the default identity; the `ROLE` slot renders ahead of every other
+/// dynamic section regardless of when this runs.
 pub fn apply_coordinator_prompt_if_enabled(prompt: &mut SystemPrompt) {
     if !is_coordinator_mode() {
         return;
     }
-    prompt
-        .dynamic_sections
-        .insert(0, coordinator_system_prompt().to_string());
+    prompt.set_dynamic_section(
+        COORDINATOR_SECTION_NAME,
+        section_order::ROLE,
+        coordinator_system_prompt(),
+    );
 }
 
 /// Fields required to render a [`task-notification`][render_task_notification]

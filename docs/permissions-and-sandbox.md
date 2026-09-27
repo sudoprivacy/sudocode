@@ -1,7 +1,8 @@
 # Permissions and Sandbox
 
 `scode` gates every filesystem and shell tool call through a permission
-mode and, on Linux, optionally through a user-namespace sandbox.
+mode and, where the platform provides one, through a process sandbox:
+Linux user namespaces or macOS Seatbelt.
 
 ## Permission modes
 
@@ -58,12 +59,56 @@ Filesystem modes:
 
 Network isolation is independently configurable.
 
+On Linux the filesystem mode is advisory: it redirects `HOME` and
+`TMPDIR` into the workspace and is exported to the command as
+`SUDOCODE_SANDBOX_FILESYSTEM_MODE`, but the kernel does not enforce it.
+
+## macOS sandbox (Seatbelt)
+
+On macOS `scode` can wrap `bash` in `/usr/bin/sandbox-exec` with a
+generated Seatbelt profile. Unlike the Linux backend this one is
+enforced: with `filesystemMode` `workspace-only` or `allow-list`, writes
+outside the workspace are denied by the OS, and `networkIsolation`
+denies all network access.
+
+The writable set is the workspace, the repository's shared `.git`
+directory (so `git commit` works from a linked worktree), the system and
+per-user temp trees, the `/dev` devices a shell needs, and any
+`allowedMounts`. Reads are never restricted.
+
+Seatbelt is **opt-in**. A default install leaves `sandbox.enabled` unset
+and macOS sessions run unconfined, so turning it on for everyone would
+start denying writes to package caches and global installs overnight.
+Enable it per project or per user:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "filesystemMode": "workspace-only",
+    "networkIsolation": false,
+    "allowedMounts": ["~/.cargo", "~/.npm"]
+  }
+}
+```
+
+Passing `filesystemMode` or `isolateNetwork` on a single `bash` call also
+counts as opting in for that call. `scode sandbox` shows the
+resolved backend (`none`, `linux-namespaces`, or `macos-seatbelt`) and,
+while Seatbelt is off, the fallback reason says how to turn it on.
+
+A denied write surfaces to the model as `Operation not permitted` in the
+command's stderr. The bash tool description tells the model that this is
+policy rather than a bug in the command, and that
+`dangerouslyDisableSandbox` is only for runs the user explicitly asked to
+be unsandboxed.
+
 `scode` detects Docker, Podman, and other container markers via
 `/.dockerenv`, `/run/.containerenv`, env hints, and `/proc/1/cgroup`, and
 surfaces the detection through `scode sandbox` and `scode doctor`.
 
 ```bash
-scode sandbox --status
+scode sandbox
 ```
 
 ## Inspecting the current state

@@ -399,6 +399,19 @@ pub fn edit_file(
     let updated = if replace_all {
         original_file.replace(&effective_old, &effective_new)
     } else {
+        // A non-unique `old_string` used to silently rewrite the first
+        // occurrence, which is the wrong one often enough that the model
+        // could not trust the edit without re-reading the file. Refuse
+        // instead and say how to disambiguate.
+        let occurrences = original_file.matches(&effective_old).count();
+        if occurrences > 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "old_string appears {occurrences} times in the file; include more surrounding context so it matches exactly once, or set replace_all to true"
+                ),
+            ));
+        }
         original_file.replacen(&effective_old, &effective_new, 1)
     };
 
@@ -1074,6 +1087,38 @@ mod tests {
         let output = edit_file(fs, path.to_string_lossy().as_ref(), "alpha", "omega", true)
             .expect("edit should succeed");
         assert!(output.replace_all);
+    }
+
+    #[test]
+    fn edit_rejects_ambiguous_old_string_unless_replace_all() {
+        let fs = &StdFsBackend;
+        let path = temp_path("edit-ambiguous.txt");
+        write_file(fs, path.to_string_lossy().as_ref(), "alpha beta alpha")
+            .expect("initial write should succeed");
+
+        let error = edit_file(fs, path.to_string_lossy().as_ref(), "alpha", "omega", false)
+            .expect_err("two matches without replace_all must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("appears 2 times"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "alpha beta alpha",
+            "a refused edit must not touch the file"
+        );
+
+        // Enough context makes the match unique again.
+        edit_file(
+            fs,
+            path.to_string_lossy().as_ref(),
+            "beta alpha",
+            "beta omega",
+            false,
+        )
+        .expect("unique match should succeed");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "alpha beta omega"
+        );
     }
 
     #[test]

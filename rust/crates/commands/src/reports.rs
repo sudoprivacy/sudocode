@@ -701,6 +701,7 @@ pub fn format_sandbox_report(status: &runtime::SandboxStatus) -> String {
   Active net        {}
   Filesystem mode   {}
   Filesystem active {}
+  Backend           {}
   Allowed mounts    {}
   Markers           {}
   Fallback reason   {}",
@@ -714,6 +715,7 @@ pub fn format_sandbox_report(status: &runtime::SandboxStatus) -> String {
         status.network_active,
         status.filesystem_mode.as_str(),
         status.filesystem_active,
+        status.backend.as_str(),
         if status.allowed_mounts.is_empty() {
             "<none>".to_string()
         } else {
@@ -1479,6 +1481,7 @@ fn check_sandbox_health(status: &runtime::SandboxStatus) -> DiagnosticCheck {
         format!("Supported        {}", status.supported),
         format!("Filesystem mode  {}", status.filesystem_mode.as_str()),
         format!("Filesystem live  {}", status.filesystem_active),
+        format!("Backend          {}", status.backend.as_str()),
     ];
     if let Some(reason) = &status.fallback_reason {
         details.push(format!("Fallback reason  {reason}"));
@@ -1524,6 +1527,7 @@ fn check_sandbox_health(status: &runtime::SandboxStatus) -> DiagnosticCheck {
             "filesystem_active".to_string(),
             json!(status.filesystem_active),
         ),
+        ("backend".to_string(), json!(status.backend.as_str())),
         ("allowed_mounts".to_string(), json!(status.allowed_mounts)),
         ("in_container".to_string(), json!(status.in_container)),
         (

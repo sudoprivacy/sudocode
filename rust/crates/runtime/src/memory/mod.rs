@@ -39,7 +39,7 @@ pub use provider::{
     DisabledMemoryProvider, FileMemoryProvider, MemoryContext, MemoryMode, MemoryProvider,
 };
 
-use crate::prompt::SystemPromptBuilder;
+use crate::prompt::{section_order, SystemPromptBuilder};
 
 /// Cap individual entry body at 2000 chars when rendering.
 pub const ENTRY_BODY_CHAR_CAP: usize = 2_000;
@@ -111,7 +111,8 @@ impl MemoryIndex {
 
     /// Render the memory store as a single prompt section using the
     /// [`Compact`](MemoryPromptVariant::Compact) instructions. The caller is
-    /// expected to pass this through [`SystemPromptBuilder::append_section`].
+    /// expected to register it via [`SystemPromptBuilder::with_dynamic_section`]
+    /// under the `memory` name at [`section_order::MEMORY`].
     ///
     /// `memory_dir` is the resolved path to the memory directory, templated
     /// into the instructions so the model knows where to write.
@@ -202,7 +203,7 @@ pub fn append_from_provider(
         return builder;
     }
     match provider.system_prompt_block(ctx) {
-        Some(block) => builder.append_section(block),
+        Some(block) => builder.with_dynamic_section("memory", section_order::MEMORY, block),
         None => builder,
     }
 }

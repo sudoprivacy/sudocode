@@ -172,6 +172,19 @@ impl AnthropicClient {
         self
     }
 
+    /// Whether this client asks Anthropic to hold cached prefixes for an hour.
+    ///
+    /// Readable so the seam every caller shares can be asserted on. The main
+    /// loop and every sub-agent build their client through
+    /// `ProviderClient::from_resolved`, and a sub-agent that disagreed with its
+    /// parent here would emit a different `cache_control` block for the same
+    /// system prompt and tools — it could not read the prefix its parent had
+    /// already paid to create.
+    #[must_use]
+    pub fn cache_ttl_1h(&self) -> bool {
+        self.cache_ttl_1h
+    }
+
     /// Build from an `AuthSource` and an optional explicit `AuthMode`. When
     /// the mode is `Some(Subscription)` the OAuth system prefix and beta
     /// header are always applied; when `None` the legacy env-sniffer

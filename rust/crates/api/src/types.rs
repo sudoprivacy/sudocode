@@ -1,6 +1,9 @@
 use runtime::{parse_usage_cost_currency, pricing_for_model, TokenUsage, UsageCostEstimate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::env;
+use std::sync::OnceLock;
+use uuid::Uuid;
 
 /// Top-level request-body fields that sudocode computes itself.
 ///
@@ -130,11 +133,48 @@ impl RequestMetadata {
         // Serialised through serde so field order and escaping are fixed; a
         // hand-built string would be a second source of truth for the shape.
         serde_json::json!({
+            "device_id": device_id(),
             "session_id": self.session_id,
             "account_uuid": self.account_uuid.clone().unwrap_or_default(),
         })
         .to_string()
     }
+}
+
+/// Stable, opaque identifier for this machine and user.
+///
+/// It is not optional padding. A pooling upstream that takes the JSON branch
+/// on the leading `{` requires **both** `device_id` and `session_id` to be
+/// non-empty before it will use the object at all — sub2api rejects it with
+/// `if j.DeviceID == "" || j.SessionID == "" { return nil }` — and then falls
+/// back to hashing the request's *cacheable content*. That content includes
+/// the breakpoint on the last message, so it changes every turn: the session
+/// re-picks an upstream account on every request, which is precisely what
+/// this metadata exists to prevent. Sending `session_id` without a
+/// `device_id` therefore buys nothing at all.
+///
+/// Verified against a live pool on 2026-09-27: every turn logged
+/// `sticky.hash_metadata_parse_failed` with `parsed_nil: true`, and
+/// `sticky.hash_source` was `cacheable_content` rather than the session id.
+///
+/// Derived rather than persisted, so this adds no on-disk state; hashed
+/// through UUIDv5 so the hostname and username never leave the machine.
+fn device_id() -> &'static str {
+    static DEVICE_ID: OnceLock<String> = OnceLock::new();
+    DEVICE_ID.get_or_init(|| {
+        let host = env::var("COMPUTERNAME")
+            .or_else(|_| env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "unknown-host".to_owned());
+        let user = env::var("USERNAME")
+            .or_else(|_| env::var("USER"))
+            .unwrap_or_else(|_| "unknown-user".to_owned());
+        // U+0001 cannot occur in either value, so two different (host, user)
+        // pairs cannot collapse into the same seed.
+        let seed = format!("{host}\u{1}{user}");
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, seed.as_bytes())
+            .simple()
+            .to_string()
+    })
 }
 
 /// Provider-agnostic description of what to cache in a request.
@@ -565,5 +605,26 @@ mod tests {
         assert_eq!(usage.cost_currency.as_deref(), Some("usd"));
         assert_eq!(usage.token_usage().cost_units, Some(43_700));
         assert_eq!(usage.token_usage().cost_currency, None);
+    }
+
+    /// The routing key is useless to a pooling upstream unless every field it
+    /// gates on is present. sub2api rejects the whole JSON object when either
+    /// `device_id` or `session_id` is empty and silently falls back to a hash
+    /// that changes every turn — so a missing field does not degrade routing,
+    /// it removes it. Hence asserting the fields, not just that it parses.
+    #[test]
+    fn user_id_carries_device_session_and_account() {
+        use super::RequestMetadata;
+
+        let meta = RequestMetadata::for_session("session-abc");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&meta.user_id()).expect("user_id should be JSON");
+
+        assert_eq!(parsed["session_id"], "session-abc");
+        assert_eq!(parsed["account_uuid"], "");
+        assert!(
+            !parsed["device_id"].as_str().unwrap_or_default().is_empty(),
+            "device_id must be non-empty or the upstream discards the object"
+        );
     }
 }

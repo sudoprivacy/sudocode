@@ -157,7 +157,11 @@ impl AnthropicClient {
         Self::from_auth_with_mode(auth, None)
     }
 
-    /// Override the 1h cache TTL decision made at construction.
+    /// Override the 1h cache TTL decision the auth mode made.
+    ///
+    /// The single override seam — `sudocode.json: cache_ttl_1h` reaches the
+    /// client through here and nowhere else, so there is one place to look for
+    /// why a request carries the TTL it does.
     ///
     /// Set it before the first request or not at all: the value is part of
     /// every `cache_control` block, so changing it between turns rewrites the
@@ -188,7 +192,7 @@ impl AnthropicClient {
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             oauth_system_prefix: is_subscription,
-            cache_ttl_1h: is_subscription && cache_ttl_1h_enabled(),
+            cache_ttl_1h: is_subscription,
         };
         if is_subscription {
             // OAuth subscription tokens require the direct Anthropic API
@@ -1372,22 +1376,6 @@ fn write_request_dump(
     let path = dir.join(format!("{stamp}-{nanos:09}-{kind}.json"));
     std::fs::write(&path, text).ok()?;
     Some(path)
-}
-
-/// Whether subscription requests may ask for the 1h cache TTL.
-///
-/// On by default, matching Claude Code for subscribers. `SUDOCODE_CACHE_TTL_1H=0`
-/// (or `false`/`no`/`off`) opts back out — worth having because the longer hold
-/// spends more of the rate-limit window per cache write, so a workload whose
-/// gaps always exceed an hour pays for a hold it never uses.
-fn cache_ttl_1h_enabled() -> bool {
-    match std::env::var("SUDOCODE_CACHE_TTL_1H") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        ),
-        Err(_) => true,
-    }
 }
 
 /// Attach `metadata.user_id` when the request carries identity.

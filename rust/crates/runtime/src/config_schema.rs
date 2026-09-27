@@ -379,6 +379,11 @@ pub const SUDOCODE_SCHEMA: &[FieldSchema] = &[
         "Authentication mode configurations",
     ),
     FieldSchema::leaf("models", FieldType::Object, "Model alias definitions"),
+    FieldSchema::leaf(
+        "cache_ttl_1h",
+        FieldType::Bool,
+        "Hold Anthropic prompt caches for 1h instead of the 5m default (subscription auth only; a metered API key ignores this and stays on 5m). Unset follows Claude Code: on for subscriptions, off for API keys",
+    ),
     FieldSchema::object(
         "web_search",
         &[
@@ -581,7 +586,7 @@ mod tests {
 
     #[test]
     fn sudocode_schema_covers_known_keys() {
-        let expected = ["auth_modes", "models", "web_search"];
+        let expected = ["auth_modes", "models", "web_search", "cache_ttl_1h"];
         let keys: Vec<&str> = SUDOCODE_SCHEMA.iter().map(|f| f.key).collect();
         for key in &expected {
             assert!(keys.contains(key), "SUDOCODE_SCHEMA missing key: {key}");

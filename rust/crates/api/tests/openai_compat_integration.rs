@@ -493,6 +493,7 @@ async fn provider_client_dispatches_xai_requests() {
         credential: Credential::ApiKey("xai-test-key".to_string()),
         model_id: "grok-3".to_string(),
         extra_body: serde_json::Map::new(),
+        cache_ttl_1h: None,
     };
     let client = ProviderClient::from_resolved(&resolved, None)
         .expect("xAI provider client should be constructed");
@@ -714,6 +715,7 @@ async fn capture_chat_completion_body(
         credential: Credential::ApiKey("xai-test-key".to_string()),
         model_id: "grok-3".to_string(),
         extra_body,
+        cache_ttl_1h: None,
     };
     let client = ProviderClient::from_resolved(&resolved, None).expect("client should build");
     client

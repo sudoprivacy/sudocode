@@ -14,6 +14,7 @@ fn provider_client_routes_xai_through_from_resolved() {
         credential: Credential::ApiKey("xai-test-key".to_string()),
         model_id: "grok-3-mini".to_string(),
         extra_body: serde_json::Map::new(),
+        cache_ttl_1h: None,
     };
 
     let client = ProviderClient::from_resolved(&resolved, None)
@@ -31,6 +32,7 @@ fn provider_client_routes_generic_openai_responses_through_from_resolved() {
         credential: Credential::ApiKey("openai-test-key".to_string()),
         model_id: "gpt-5.5".to_string(),
         extra_body: serde_json::Map::new(),
+        cache_ttl_1h: None,
     };
 
     let client = ProviderClient::from_resolved(&resolved, None)
@@ -48,6 +50,7 @@ fn provider_client_routes_anthropic_through_from_resolved() {
         credential: Credential::ApiKey("anthropic-test-key".to_string()),
         model_id: "claude-sonnet-4-6".to_string(),
         extra_body: serde_json::Map::new(),
+        cache_ttl_1h: None,
     };
 
     let client = ProviderClient::from_resolved(&resolved, None)

@@ -51,11 +51,13 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-linux-x64
             archive_name: nexusd-cohost-linux-x64.tar.gz
+            max_size_bytes: 54525952  # 52 MiB — measured 51,997,848 bytes, 4.9% headroom
           - name: linux-arm64
             os: ubuntu-22.04-arm
             bin: nexusd-cohost
             package_dir: nexusd-cohost-linux-arm64
             archive_name: nexusd-cohost-linux-arm64.tar.gz
+            max_size_bytes: 50331648  # 48 MiB — measured 48,620,624 bytes, 3.5% headroom
           # Not for deployment — for the cross-machine duet, which runs a real
           # co-host on a developer Mac and a developer Windows box. A daemon you
           # cannot run on the machines you debug from is a daemon you debug by
@@ -65,6 +67,7 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-macos-arm64
             archive_name: nexusd-cohost-macos-arm64.tar.gz
+            max_size_bytes: 44040192  # 42 MiB — measured 42,226,080 bytes, 4.3% headroom
           # Intel, because the Mac this project actually debugs from is Intel. The
           # first cut of this matrix left it out reasoning "nothing runs a co-host
           # there", and the cross-machine bring-up falsified that within the hour:
@@ -76,11 +79,13 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-macos-x64
             archive_name: nexusd-cohost-macos-x64.tar.gz
+            max_size_bytes: 46137344  # 44 MiB — measured 43,750,416 bytes, 5.5% headroom
           - name: windows-x64
             os: windows-2022
             bin: nexusd-cohost.exe
             package_dir: nexusd-cohost-windows-x64
             archive_name: nexusd-cohost-windows-x64.zip
+            max_size_bytes: 41943040  # 40 MiB — measured 39,765,504 bytes, 5.5% headroom
     defaults:
       run:
         working-directory: rust
@@ -143,8 +148,9 @@ jobs:
       # name, so it is where this build states which revs it carries. Without it the
       # daemon reports the version of the crate that owns the clap derive — the same
       # number for every build of it, which reads as an answer while telling an
-      # operator nothing about the artifact in front of them. `PAIRING.txt` says the
-      # same thing in the archive; this says it to a running pod.
+      # operator nothing about the artifact in front of them. This is the ONLY place
+      # those revs are stated — a sidecar file saying the same thing was deleted, so
+      # there is nothing for this to drift from.
       - name: Stamp the build identity
         shell: bash
         run: |
@@ -158,40 +164,42 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release -p nexusd-cohost --features daemon --bin nexusd-cohost
 
+      # Asserted here because this is the only job where the stamp exists at all. The
+      # co-host gate already checks the NAME (`e2e/nexus-a2a/run-cohost.sh`), which
+      # lives in the code and cannot differ per platform; what only a release build
+      # can get wrong is the stamp. `NEXUSD_BUILD_VERSION` is read at COMPILE time, so
+      # a stamping step that lands after the build, an env var that fails to reach
+      # rustc, or a cache serving a binary compiled without it all produce a daemon
+      # that boots perfectly and names the wrong revs — the failure this whole stamp
+      # exists to prevent, arriving as a confident answer.
+      #
+      # Compared against the value this job computed rather than a re-derived one: a
+      # second spelling of the expected string is a second thing that can be wrong.
+      - name: The stamp reached the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$("target/release/${{ matrix.bin }}" --version)"
+          echo "$out"
+          case "$out" in
+            *"$NEXUSD_BUILD_VERSION"*) ;;
+            *) echo "::error::--version must carry the stamp '$NEXUSD_BUILD_VERSION', got: $out"; exit 1 ;;
+          esac
+
       - name: Stage release payload
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "dist/${{ matrix.package_dir }}"
           cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
-          # Provenance, deliberately NOT an instruction. Nothing here is for an
-          # operator to keep in step: the runtime and the kernel are linked into
-          # this one binary, so there is no deploy-time action that could pair them
-          # wrongly. What this answers is the debugging question — "which revs am I
-          # looking at?" — which a tarball otherwise cannot answer at all.
-          #
-          # The invariant it used to WARN about is checked instead, in CI, by the
-          # `one nexus-vfs pin` job: exactly one nexus-vfs tag in the manifest, one
-          # commit in the lock, and the two agreeing. That check exists because the
-          # compiler does not cover it — a probe with two revs in the graph compiled
-          # fine, since the type system only objects where a type actually crosses.
-          NEXUS_VFS_TAG="$(grep -m1 -oE 'nexus-vfs", tag = "[^"]+"' Cargo.toml | sed 's/.*tag = "//; s/"//')"
-          cat > "dist/${{ matrix.package_dir }}/PAIRING.txt" <<EOF
-          nexusd-cohost ${GITHUB_REF_NAME}
-          sudocode      $(git rev-parse HEAD)
-          nexus-vfs     ${NEXUS_VFS_TAG}
-
-          The cluster daemon with an in-process sudocode agent runtime linked in.
-          Identical to nexusd-cluster in every flag and boot path; the difference
-          is one service declaration (managed-agent WITH a spawn provider).
-
-          These three lines are a record of what went into this build, for reading
-          a log or a bug report against it. They are not something to keep in step:
-          the agent runtime and the kernel are linked together here, and that this
-          build contains exactly ONE nexus-vfs rev is enforced in CI (the
-          "one nexus-vfs pin" job), not by whoever deploys it.
-          EOF
-          cp "dist/${{ matrix.package_dir }}/PAIRING.txt" "dist/PAIRING-${{ matrix.name }}.txt"
+          # No sidecar provenance file. `PAIRING.txt` carried the tag, the sudocode
+          # commit and the nexus-vfs pin beside the executable — the same three facts
+          # the binary now states itself, and nothing checks the two agree. A file
+          # answers "which revs is this?" only while it stays next to what it
+          # describes, and what gets copied to a pod, a laptop or /usr/local/bin is the
+          # executable; `--version` travels with it. The invariant the file narrated in
+          # prose (exactly one nexus-vfs rev in the graph) is the `one nexus-vfs pin`
+          # job, which is where an invariant belongs.
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
             tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.package_dir }}"
@@ -200,13 +208,39 @@ jobs:
           fi
           ls -la "dist/${{ matrix.archive_name }}"
 
-      # Printed, not asserted. The binary links an LLM agent runtime, so it is
-      # several times the slim `nexusd-cluster` by construction; what matters is
-      # that the number is visible in the log when it moves, and that the cluster
-      # binary's own budget lives in nexus-vfs where that artifact is built.
-      - name: Report artifact size
+      # This binary gets its OWN budget, several times the slim `nexusd-cluster` one
+      # — it links an LLM agent runtime, so a cluster-sized cap here would fail on the
+      # first honest build and teach everyone to raise it. Separate numbers in separate
+      # repositories, because the two artifacts answer to different constraints:
+      # `nexusd-cluster` is the production daemon that must stay small (its budget lives
+      # in nexus-vfs, where it is built), and this is the node that hosts agents.
+      #
+      # A printed number was the previous state, and printing is not a gate — nobody
+      # diffs `du` output across releases, so the first build to double would have
+      # shipped. What a cap at ~4% headroom catches is the step change (a dependency
+      # arriving with a second TLS stack, an accidental `debug = true`) while leaving
+      # the ordinary drift of a moving runtime alone.
+      #
+      # Exact bytes, not `du`, which rounds to a block and cannot see a 200 KB move.
+      # Every cap in the matrix is measured on these same runners, not estimated.
+      - name: Check binary size
         shell: bash
-        run: du -h "dist/${{ matrix.archive_name }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+        env:
+          MAX_SIZE_BYTES: ${{ matrix.max_size_bytes }}
+        run: |
+          set -euo pipefail
+          path="dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            actual=$(stat -f '%z' "$path")
+          else
+            actual=$(stat -c '%s' "$path")
+          fi
+          archive=$(wc -c < "dist/${{ matrix.archive_name }}" | tr -d ' ')
+          echo "binary: $actual bytes (max $MAX_SIZE_BYTES) · archive: $archive bytes"
+          if [[ "$actual" -gt "$MAX_SIZE_BYTES" ]]; then
+            echo "::error::${{ matrix.package_dir }} exceeds its size budget ($actual > $MAX_SIZE_BYTES bytes)"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -241,8 +275,9 @@ jobs:
             agent runtime linked in. Every flag and boot path of `nexusd-cluster`;
             the difference is one service declaration.
 
-            Each archive carries a `PAIRING.txt` naming the sudocode commit and the
-            nexus-vfs tag it was built against — provenance for reading a log or a
-            bug report, not a deployment step. The runtime and the kernel are linked
+            Ask the binary what it is — `nexusd-cohost --version` names this build,
+            the sudocode commit and the nexus-vfs tag it was linked against. That is
+            the provenance for reading a log or a bug report, and it travels with the
+            executable rather than beside it. The runtime and the kernel are linked
             into the one binary, and that it holds exactly one nexus-vfs rev is
             enforced by CI's `one nexus-vfs pin` job rather than by an operator.

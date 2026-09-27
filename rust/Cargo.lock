@@ -4522,7 +4522,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sudo-contracts"
 version = "0.2.0-rc.1"
-source = "git+https://github.com/sudoprivacy/sudostack?rev=f0c586477694f054c8a31fe682e7481593c16948#f0c586477694f054c8a31fe682e7481593c16948"
+source = "git+https://github.com/sudoprivacy/sudostack?rev=8323b0f6ac50270594dd76120919c20cc57318dd#8323b0f6ac50270594dd76120919c20cc57318dd"
 dependencies = [
  "serde",
  "serde_json",

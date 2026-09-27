@@ -17,10 +17,13 @@ use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::DT_LINK;
 use kernel::{Permission, PermissionProvider};
-use runtime::zone_context::{ContextSource, HostZoneContext, ENV_NEXUS_DELEGATION_REF};
+use runtime::zone_context::{
+    ContextSource, HostZoneContext, ResourceAccessKind, RuntimeResourceAuthorizer,
+    ENV_NEXUS_DELEGATION_REF, ENV_NEXUS_RESOURCE_SCOPE,
+};
 use runtime::{
     edit_file, glob_search, grep_search, read_file, write_file, FsBackend, GrepSearchInput,
-    KernelFsBackend, Session, SessionStore,
+    KernelFsBackend, NexusVfsFsBackend, Session, SessionStore,
 };
 use sudo_contracts::ResourceRef;
 
@@ -122,7 +125,11 @@ fn kernel_with_backend(zone_id: &str) -> Arc<Kernel> {
 
 /// A `KernelFsBackend` rooted at `/ws`, over the given kernel.
 fn vfs_backend(kernel: &Arc<Kernel>) -> KernelFsBackend<Kernel> {
-    KernelFsBackend::for_agent(Arc::clone(kernel), "test-owner", "root", "agent-x", "/ws")
+    KernelFsBackend::new(
+        Arc::clone(kernel),
+        OperationContext::new("system", "root", true, None, true),
+        "/ws",
+    )
 }
 
 #[test]
@@ -159,12 +166,25 @@ fn p1a_resource_targets_require_the_same_delegated_zone_for_cohost_and_subproces
         ENV_NEXUS_DELEGATION_REF.to_string(),
         "dlg-short-lived".to_string(),
     );
+    let scope = serde_json::json!({
+        "schema_version": 1,
+        "zone_id": "tenant-zone",
+        "rules": [
+            {"capability": "zone.data.read", "resource_prefixes": ["/ws"]},
+            {"capability": "zone.data.write", "resource_prefixes": ["/ws"]}
+        ]
+    })
+    .to_string();
+    descriptor
+        .labels
+        .insert(ENV_NEXUS_RESOURCE_SCOPE.to_string(), scope.clone());
     let cohost = HostZoneContext::from_planted_descriptor(&descriptor);
-    let subprocess = HostZoneContext::from_trusted_parts(
+    let subprocess = HostZoneContext::from_parts_with_scope(
         "tenant-zone",
         Some("https://nexus.example/v2".to_string()),
         Some("dlg-short-lived".to_string()),
-        ContextSource::HostEnvironment,
+        Some(&scope),
+        ContextSource::UnverifiedDelegationRef,
     );
     assert_eq!(cohost.delegation_ref(), Some("dlg-short-lived"));
     assert_eq!(
@@ -182,21 +202,23 @@ fn p1a_resource_targets_require_the_same_delegated_zone_for_cohost_and_subproces
         media_type: None,
         size_bytes: None,
     };
-    assert!(cohost.authorize_resource_ref(&own_ref).is_ok());
     assert_eq!(
         cohost.authorize_resource_ref(&own_ref),
         subprocess.authorize_resource_ref(&own_ref),
         "cohost and subprocess must make the same ResourceRef decision",
     );
+    assert!(matches!(
+        cohost.authorize_resource_ref(&own_ref),
+        Err(runtime::zone_context::ZoneAuthError::DelegationInvalid)
+    ));
 
     let backend = KernelFsBackend::for_agent_descriptor(Arc::clone(&kernel), &descriptor, "/ws");
-    backend
-        .write("/ws/allowed.txt", b"zone-scoped")
-        .expect("delegated cohost access should reach the VFS");
-    assert!(
-        permission_checks.load(Ordering::Relaxed) > 0,
-        "cohost access must not use an is_system bypass"
+    let denied = backend.write("/ws/allowed.txt", b"zone-scoped");
+    assert_eq!(
+        denied.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
     );
+    assert_eq!(permission_checks.load(Ordering::Relaxed), 0);
 
     let foreign_ref = ResourceRef {
         zone_id: "other-zone".to_string(),
@@ -209,9 +231,99 @@ fn p1a_resource_targets_require_the_same_delegated_zone_for_cohost_and_subproces
         "INVALID ZONE",
         Some("https://nexus.example/v2".to_string()),
         Some("dlg-short-lived".to_string()),
-        ContextSource::HostEnvironment,
+        ContextSource::UnverifiedDelegationRef,
     );
     assert!(malformed_host.authorize_path("/ws/denied.txt").is_err());
+}
+
+#[test]
+fn trusted_local_scope_enforces_capability_and_canonical_prefixes() {
+    let scope = serde_json::json!({
+        "schema_version": 1,
+        "zone_id": "tenant-zone",
+        "rules": [
+            {"capability": "zone.data.read", "resource_prefixes": ["/proc/pid/workspace"]}
+        ]
+    })
+    .to_string();
+    let context = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        None,
+        None,
+        Some(&scope),
+        ContextSource::TrustedLocal,
+    );
+    let resource = ResourceRef {
+        api_version: "common.sudo.dev/v1".to_string(),
+        kind: "ResourceRef".to_string(),
+        zone_id: "tenant-zone".to_string(),
+        path: "/proc/pid/workspace/file.txt".to_string(),
+        version: None,
+        digest: None,
+        media_type: None,
+        size_bytes: None,
+    };
+    let authorizer = RuntimeResourceAuthorizer::new(&context);
+    assert!(authorizer
+        .authorize(ResourceAccessKind::Read, "zone.data.read", &resource)
+        .is_ok());
+    assert!(matches!(
+        authorizer.authorize(ResourceAccessKind::Write, "zone.data.write", &resource),
+        Err(runtime::zone_context::ZoneAuthError::OutOfScope(_))
+    ));
+    let trailing = ResourceRef {
+        path: "/proc/pid/workspace/".to_string(),
+        ..resource
+    };
+    assert!(matches!(
+        authorizer.authorize(ResourceAccessKind::Read, "zone.data.read", &trailing),
+        Err(runtime::zone_context::ZoneAuthError::InvalidPath(_))
+    ));
+}
+
+#[test]
+fn every_remote_backend_constructor_fails_before_rpc() {
+    fn denied<T>(result: std::io::Result<T>) {
+        match result {
+            Ok(_) => panic!("unverified remote access must fail closed"),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+        }
+    }
+
+    let client = nexus_vfs_client::NexusVfsClient::connect("http://127.0.0.1:9")
+        .expect("lazy client construction");
+    let backend = NexusVfsFsBackend::new(client, "arbitrary-api-key".to_string());
+    denied(backend.read("/agents/a/inbox"));
+    denied(backend.write("/agents/a/inbox", b"x"));
+    denied(backend.append("/agents/a/inbox", b"x"));
+    denied(backend.stat("/agents/a/inbox"));
+    denied(backend.readdir("/agents"));
+    denied(backend.exists("/agents/a/inbox"));
+    denied(backend.rename("/agents/a/inbox", "/agents/b/inbox"));
+    denied(backend.link("/agents/a/alias", "/agents/a/target"));
+
+    let shared = Arc::new(
+        nexus_vfs_client::NexusVfsClient::connect("http://127.0.0.1:9")
+            .expect("lazy shared client construction"),
+    );
+    let from_arc = NexusVfsFsBackend::from_arc(Arc::clone(&shared), String::new());
+    denied(from_arc.read("/agents/a/inbox"));
+
+    let mailbox = runtime::mailbox::Mailbox::over_nexus(shared, "sender", "any-token");
+    let delivery = mailbox.send(runtime::agent_mailbox::MailboxEnvelope {
+        from: "sender".to_string(),
+        to: "receiver".to_string(),
+        body: "must not reach RPC".to_string(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: "message".to_string(),
+        request_id: None,
+    });
+    assert!(
+        delivery.is_err(),
+        "mailbox production construction must fail closed"
+    );
 }
 
 fn grep_input(pattern: &str, path: &str) -> GrepSearchInput {

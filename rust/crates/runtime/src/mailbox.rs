@@ -228,8 +228,10 @@ impl Mailbox {
     /// inbox would be written and read as JSONL. The call is cheap — a string
     /// test for the VFS backend, a constant `false` for the file one.
     #[inline]
-    fn backend_frames(&self, path: &str) -> bool {
-        self.backend.is_append_stream(path).unwrap_or(false)
+    fn backend_frames(&self, path: &str) -> Result<bool, String> {
+        self.backend
+            .is_append_stream(path)
+            .map_err(|error| format!("inspect mailbox backend at {path}: {error}"))
     }
 
     /// A nexus A2A mailbox for `agent` over an already-dialled client.
@@ -346,7 +348,7 @@ impl Mailbox {
         }
         let path = self.convention.inbox_path(&envelope.to);
 
-        if self.backend_frames(&path) {
+        if self.backend_frames(&path)? {
             self.ensure_recipient_stream(&envelope.to, &path)?;
             return self
                 .backend
@@ -402,7 +404,7 @@ impl Mailbox {
     /// never echoes back to us, and skips senderless or empty-body frames.
     pub fn poll(&self, cursor: u64, block_ms: u64) -> Result<(Vec<MailboxEnvelope>, u64), String> {
         let path = self.own_inbox_path();
-        let is_stream = self.backend_frames(&path);
+        let is_stream = self.backend_frames(&path)?;
         if is_stream {
             self.poll_stream(&path, cursor, block_ms)
         } else {
@@ -480,7 +482,7 @@ impl Mailbox {
     /// turns.
     pub fn read_all(&self, recipient: &str) -> Result<Vec<MailboxEnvelope>, String> {
         let path = self.convention.inbox_path(recipient);
-        let is_stream = self.backend_frames(&path);
+        let is_stream = self.backend_frames(&path)?;
         if is_stream {
             let (envs, _cursor) = self.poll_stream(&path, 0, 0)?;
             Ok(envs)
@@ -506,13 +508,12 @@ impl Mailbox {
     /// which is the silent kind of failure. Saying so at the source means no
     /// caller has to remember to ask first.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
+        let is_stream = self.backend_frames(&self.own_inbox_path())?;
         match &self.convention {
             // Only enumerable when the backend leaves paths on the host FS.
             // Over a framed (DT_STREAM) backend the same convention is the
             // replicated /agents namespace, enumerated through the registry.
-            InboxConvention::PerRecipient { root }
-                if !self.backend_frames(&self.own_inbox_path()) =>
-            {
+            InboxConvention::PerRecipient { root } if !is_stream => {
                 crate::agent_mailbox::list_recipients_under(std::path::Path::new(root))
             }
             InboxConvention::PerRecipient { .. } => Err(

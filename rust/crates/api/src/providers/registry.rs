@@ -1105,7 +1105,7 @@ mod tests {
         );
 
         SudoCodeConfig {
-        cache_ttl_1h: None,
+            cache_ttl_1h: None,
             auth_modes,
             models,
             web_search: Default::default(),

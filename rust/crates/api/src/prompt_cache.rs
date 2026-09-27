@@ -1,3 +1,15 @@
+//! Per-session record of how the provider's prompt cache behaved.
+//!
+//! **Only the Anthropic provider feeds this.** The OpenAI-compatible, Gemini
+//! and Codex clients never call in, so a session routed through them leaves
+//! no record here — empty stats mean "not measured", not "no cache problems".
+//!
+//! Extending it is not just wiring. OpenAI reports `cached_tokens` but has no
+//! cache-write concept, so `cache_creation_input_tokens` is always zero there
+//! and a read/(read+write) ratio over mixed providers would read 100% no
+//! matter what actually happened. Break detection would still work; the
+//! totals would not be comparable.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -515,6 +527,15 @@ fn hash_string(value: &str) -> u64 {
     stable_hash_bytes(value.as_bytes())
 }
 
+/// Directory holding one subdirectory of stats per session.
+///
+/// Public so a command can enumerate past sessions without each caller
+/// rebuilding the same path and drifting from it.
+#[must_use]
+pub fn cache_root() -> PathBuf {
+    base_cache_root()
+}
+
 fn base_cache_root() -> PathBuf {
     if let Some(config_home) = std::env::var_os("SUDO_CODE_CONFIG_HOME") {
         return PathBuf::from(config_home)
@@ -640,7 +661,9 @@ mod tests {
             .expect("break should be detected");
         assert!(!event.unexpected);
         assert!(
-            event.reason.contains("message history rewritten at index 0"),
+            event
+                .reason
+                .contains("message history rewritten at index 0"),
             "reason should name where the prefix diverged, got: {}",
             event.reason
         );

@@ -26,6 +26,7 @@ your first contribution.
 - [Prerequisites](#prerequisites)
 - [Building](#building)
 - [Required checks](#required-checks)
+- [Measuring prompt-cache behaviour](#measuring-prompt-cache-behaviour)
 - [Running the CLI locally](#running-the-cli-locally)
 - [Working on a single crate](#working-on-a-single-crate)
 - [Commit style](#commit-style)
@@ -319,6 +320,43 @@ cargo build -p mock-anthropic-service
 # Documentation build (catches broken intra-doc links)
 cargo doc --workspace --no-deps
 ```
+
+## Measuring prompt-cache behaviour
+
+Anthropic's prompt cache matches a **byte-exact prefix**, so anything that
+rewrites an earlier part of a request throws away everything cached after it.
+That failure is invisible in normal output — the run still succeeds, it just
+costs several times more input. Two places report it:
+
+- **Live, per turn** — the status line's `⚡NN%` (hit rate, higher is better)
+  and `✎NN%` (write rate, lower is steadier; red on a spike ≥25%).
+- **After the fact, across sessions** — `scode cache stats`
+  (`--output-format json` for a machine-readable version):
+
+```bash
+scode cache stats
+```
+
+It reads per-session records under
+`~/.nexus/sudocode/cache/prompt-cache/<session-id>/stats.json` and reports
+reads, writes, hit rate and cache breaks. A break is classified: `system
+prompt changed` / `tool definitions changed` / `model changed` / `message
+history rewritten at index N`, or **`unexpected`** when reads dropped while
+the request fingerprint held steady — that last one means the prefix went
+cold for a reason the request does not explain, and is worth chasing.
+
+Two limits worth knowing before reading the numbers:
+
+- **Only the Anthropic provider records.** A session on an OpenAI-compatible,
+  Gemini or Codex model leaves nothing here, so empty stats mean "not
+  measured", not "no problems".
+- **Appending is not rewriting.** Every turn appends messages, so a reason
+  naming a *rewritten* index is the one that matters; it is the signature of
+  code mutating history that the provider has already cached.
+
+If you change anything that touches the system prompt, the tool list, or the
+message history, take a reading before and after — the cost of getting this
+wrong does not show up as a failure.
 
 ## Running the CLI locally
 

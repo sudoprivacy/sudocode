@@ -1337,7 +1337,9 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             None => tool_use_sse(
                 "toolu_write_plan",
                 "write_plan",
-                &[r##"{"content":"# Plan\n1. First step\n2. Second step"}"##],
+                &[
+                    r##"{"content":"# Plan\n1. First step\n2. Second step","context":"mock context","constraints":"mock constraints","acceptance":"mock acceptance"}"##,
+                ],
             ),
         },
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
@@ -1926,7 +1928,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "msg_write_plan_tool",
                 "toolu_write_plan",
                 "write_plan",
-                json!({"content": "# Plan\n1. First step\n2. Second step"}),
+                json!({"content": "# Plan\n1. First step\n2. Second step", "context": "mock context", "constraints": "mock constraints", "acceptance": "mock acceptance"}),
             ),
         },
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {

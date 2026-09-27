@@ -47,9 +47,17 @@ fn write_plan_persists_the_plan_file() {
         let saved =
             common::read_file_with_retry(&plan_file, 10, std::time::Duration::from_millis(100))
                 .expect("plan file should exist after write_plan");
+        // The plan file is now always structured: the three framing sections
+        // (from the required schema params) precede the plan body.
+        assert!(
+            saved.contains("## Context")
+                && saved.contains("## Constraints")
+                && saved.contains("## Acceptance Criteria"),
+            "plan file must carry the composed framing sections; got: {saved}"
+        );
         assert!(
             saved.contains("# Plan") && saved.contains("First step"),
-            "plan file must hold the written content verbatim; got: {saved}"
+            "plan file must hold the written body verbatim; got: {saved}"
         );
     }
 }

@@ -2128,12 +2128,30 @@ pub struct AgentListRow {
 /// The sub-agent half is read through `fs` for the same reason: the workers this
 /// session spawned live in ITS store, which for a co-hosted agent is a subtree
 /// of the VFS and not a directory on the daemon's disk.
-pub fn collect_agent_list(active_only: bool, fs: &dyn FsBackend) -> Vec<AgentListRow> {
+/// # Errors
+///
+/// When either source cannot be read. Both used to be `unwrap_or_default()`, which
+/// turned "I could not look" into "there is nobody" — and this is the one caller a
+/// model ever sees, so that answer went straight into a reply to an operator.
+/// `list_recipients` returns an `Err` precisely so a caller cannot report an empty
+/// namespace it never managed to read; discarding it here defeated the only place
+/// that distinction exists. Observed live: an agent said it had no peers while the
+/// peer was up and addressable from the other machine.
+///
+/// Failing the whole call rather than answering partially, because the question is
+/// "who can I reach" — half of that, presented as all of it, is what sends a model
+/// looking for an agent it was told does not exist. (A missing sub-agent store is
+/// not an error: `list_agent_snapshots_from_store_with` already maps `NotFound` to
+/// an empty list, so a fresh session answers normally.)
+pub fn collect_agent_list(
+    active_only: bool,
+    fs: &dyn FsBackend,
+) -> Result<Vec<AgentListRow>, String> {
     let mailbox = runtime::mailbox::sending_mailbox();
     let self_name = mailbox.self_id().to_string();
-    let peers = mailbox.list_recipients().unwrap_or_default();
-    let subagents = list_agent_snapshots_from_store_with(true, fs).unwrap_or_default();
-    merge_agent_list(&peers, &self_name, subagents, active_only)
+    let peers = mailbox.list_recipients()?;
+    let subagents = list_agent_snapshots_from_store_with(true, fs)?;
+    Ok(merge_agent_list(&peers, &self_name, subagents, active_only))
 }
 
 /// Pure core of [`collect_agent_list`], sources injected so it is testable
@@ -2212,7 +2230,9 @@ fn run_agent_list(input: &Value, fs: &dyn FsBackend) -> Result<String, String> {
         .get("active_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let agents = collect_agent_list(active_only, fs);
+    // Propagated, not defaulted: the tool result a model reads has to be able to
+    // say "I could not look" instead of "there is nobody".
+    let agents = collect_agent_list(active_only, fs)?;
     to_pretty_json(json!({
         "agents": agents,
         "count": agents.len(),

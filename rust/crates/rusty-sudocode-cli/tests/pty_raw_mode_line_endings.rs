@@ -20,7 +20,7 @@
 //!
 //! Both tests assert on the rendered screen — "what the user actually sees" —
 //! because that is the layer these bugs live at. Synchronization is on the
-//! turn status line (`ctx `), which the CLI prints after all turn output has
+//! turn status line (`· turn `), which the CLI prints after all turn output has
 //! been flushed through the same FIFO channel; no sleeps.
 //!
 //! ```bash
@@ -85,7 +85,7 @@ fn screen_rows(sess: &pty_expect::PtySession) -> Vec<String> {
 ///
 /// Anchors are chosen to be absent from the echoed prompt: the prompt
 /// contains `printf 'alpha from bash'`, so `alpha from bash` would match the
-/// echo — `╭─`, `│`, and `ctx ` cannot.
+/// echo — `╭─`, `│`, and `· turn ` cannot.
 #[test]
 fn bash_turn_uses_crlf_and_does_not_staircase() {
     let env = TestEnv::new("raw-lf-bash");
@@ -112,7 +112,7 @@ fn bash_turn_uses_crlf_and_does_not_staircase() {
     // The status line is rendered in the StatusSlot::TurnResult ChromeSlot,
     // above the upper separator. (It is no longer echoed to scrollback — that
     // duplicated the line in history.) The ChromeSlot line is the sync point.
-    sess.expect("ctx ").expect("turn status line");
+    sess.expect("· turn ").expect("turn status line");
     sess.expect("─{20,}")
         .expect("separator redrawn after the status line");
 

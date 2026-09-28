@@ -284,7 +284,9 @@ impl Mailbox {
         Self::new(
             Arc::new(crate::fs_backend::StdFsBackend),
             self_id,
-            InboxConvention::new(root.to_string_lossy().into_owned()),
+            InboxConvention::new(
+                strip_windows_verbatim_prefix(&root.to_string_lossy()).into_owned(),
+            ),
         )
     }
 
@@ -1618,6 +1620,24 @@ mod tests {
         assert_eq!(names, vec!["alpha", "beta", "coordinator"]);
 
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_mailbox_accepts_verbatim_windows_root() {
+        let root = std::env::temp_dir().join(format!("mailbox-verbatim-{}", std::process::id()));
+        let verbatim = std::path::PathBuf::from(format!(r"\\?\{}", root.display()));
+        let sender = Mailbox::workspace_local(&verbatim, "parent".to_string());
+        let receiver = Mailbox::workspace_local(&verbatim, "worker".to_string());
+        sender
+            .send(note("parent", "worker", "follow-up"))
+            .expect("a verbatim root must support creating chat-list paths");
+        let unread = receiver
+            .take_unread("parent")
+            .expect("worker receives mail");
+        assert_eq!(unread.len(), 1);
+        assert_eq!(unread[0].body, "follow-up");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

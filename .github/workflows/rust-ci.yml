@@ -249,9 +249,14 @@ jobs:
       #
       # `check`, not `build`: what can break is resolution and types, and this job
       # has already built the daemon once.
+      #
+      # `--locked` is the point of the step, not a detail. Without it cargo silently
+      # resolves the feature's new crates and updates the lockfile in the runner, so
+      # the check passes while the COMMITTED lock cannot build this feature at all —
+      # and a release builds `--locked`, so that gap only shows up in a release.
       - name: The driver-ai co-host still resolves
         working-directory: rust
-        run: cargo check -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost
+        run: cargo check -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost --locked
 
   one-nexus-vfs-pin:
     name: one nexus-vfs pin

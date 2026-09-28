@@ -18,6 +18,13 @@ const DT_STREAM: i32 = 4;
 /// DT_DIR entry-type code, for reading `Readdir` results back.
 const DT_DIR: u32 = 1;
 
+/// The same DT_DIR code as `Setattr` takes it. `Readdir` reports entry types as
+/// `u32` and `Setattr` accepts them as `i32`, so the one value needs both spellings;
+/// naming the second rather than casting at the call site keeps the cast off the
+/// path where a wrong entry type is a silent mis-provision (`DT_LINK = 3` and
+/// `DT_PIPE = 3` once cost this project a chat-list index that was a pipe).
+const DT_DIR_SETATTR: i32 = DT_DIR as i32;
+
 enum VfsOp {
     Read {
         path: String,
@@ -60,10 +67,15 @@ enum VfsOp {
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<(Vec<u8>, u64, bool)>>,
     },
-    /// `sys_setattr(DT_STREAM)` — create (or no-op if present) a DT_STREAM
-    /// container at `path`. Returns whether it was freshly created.
-    EnsureStream {
+    /// `sys_setattr(<entry_type>)` — create (or no-op if present) a typed entry at
+    /// `path`. Returns whether it was freshly created.
+    ///
+    /// One op for every typed provision rather than one per type: a stream and a
+    /// directory differ only by the `entry_type` the kernel dispatches on, and a
+    /// second arm would be the same request assembled a second way.
+    EnsureEntry {
         path: String,
+        entry_type: i32,
         io_profile: String,
         capacity: u64,
         auth_token: String,
@@ -369,8 +381,9 @@ impl NexusVfsClient {
                                         }
                                     }));
                                 }
-                                VfsOp::EnsureStream {
+                                VfsOp::EnsureEntry {
                                     path,
+                                    entry_type,
                                     io_profile,
                                     capacity,
                                     auth_token,
@@ -381,7 +394,7 @@ impl NexusVfsClient {
                                             SetattrRequest {
                                                 path,
                                                 auth_token,
-                                                entry_type: DT_STREAM,
+                                                entry_type,
                                                 io_profile,
                                                 capacity,
                                                 ..Default::default()
@@ -574,10 +587,36 @@ impl NexusVfsClient {
     ) -> io::Result<bool> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
-            .send(VfsOp::EnsureStream {
+            .send(VfsOp::EnsureEntry {
                 path: path.to_owned(),
+                entry_type: DT_STREAM,
                 io_profile: io_profile.to_owned(),
                 capacity,
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+    }
+
+    /// `sys_setattr(DT_DIR)` on `path` — create the directory entry, idempotently.
+    /// Returns whether it was freshly created.
+    ///
+    /// A directory here is a metastore row, not a side effect of writing into it.
+    /// The backend's `create_dir_all` used to be a no-op on the reasoning that "VFS
+    /// servers typically auto-create intermediate paths on write" — which leaves
+    /// nothing at all behind when there is no write, and announcing an agent is
+    /// exactly that case: presence IS the directory. So `ensure_presence` reported
+    /// success and created nothing, and an agent that had announced itself but not
+    /// yet conversed was invisible to every `agent_list` in the cluster.
+    pub fn ensure_dir(&self, path: &str, auth_token: &str) -> io::Result<bool> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::EnsureEntry {
+                path: path.to_owned(),
+                entry_type: DT_DIR_SETATTR,
+                io_profile: String::new(),
+                capacity: 0,
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
             })

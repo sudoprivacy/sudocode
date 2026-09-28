@@ -737,7 +737,23 @@ impl Mailbox {
             .backend
             .readdir(&dir)
             .map_err(|e| format!("list recipients at {dir}: {e}"))?;
-        let mut names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+        // A recipient is an agent that ANNOUNCED presence, and presence is a
+        // `conversations` subdir under `agents_dir/<name>/` (the
+        // `ensure_presence` contract). Filter to that shape so infrastructure
+        // siblings a mount can expose under `/agents` (e.g. `raft`, `sm` on a
+        // co-host topology) are not mistaken for peers. Checking the contract
+        // rather than a denylist means a future infra entry needs no upkeep.
+        let mut names: Vec<String> = entries
+            .into_iter()
+            .filter(|e| {
+                e.is_dir
+                    && self
+                        .backend
+                        .exists(&self.convention.chat_list_dir(&e.name))
+                        .unwrap_or(false)
+            })
+            .map(|e| e.name)
+            .collect();
         names.sort();
         Ok(names)
     }
@@ -1618,6 +1634,43 @@ mod tests {
         // message go to" are different questions.
         let names = mb.list_recipients().unwrap();
         assert_eq!(names, vec!["alpha", "beta", "coordinator"]);
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn list_recipients_skips_non_agent_entries() {
+        // A mount can expose infrastructure siblings under `/agents` (e.g. `raft`,
+        // `sm` on a co-host topology). They are directories but never announced
+        // presence, so they have no `conversations` child and must not be listed
+        // as peers.
+        let ws = temp_workspace("list-recip-shape");
+        let mb = local_mailbox(&ws, "coordinator");
+        mb.send(MailboxEnvelope {
+            from: "coordinator".to_string(),
+            to: "alpha".to_string(),
+            body: "hi".to_string(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: String::new(),
+            request_id: None,
+        })
+        .unwrap();
+
+        // Plant a non-agent dir directly in the agents namespace, plus a stray
+        // file — neither has a `conversations` child.
+        let agents_dir = mb.convention.agents_dir();
+        std::fs::create_dir_all(format!("{agents_dir}/raft")).unwrap();
+        std::fs::create_dir_all(format!("{agents_dir}/sm")).unwrap();
+        std::fs::write(format!("{agents_dir}/stray-file"), b"x").unwrap();
+
+        let names = mb.list_recipients().unwrap();
+        assert_eq!(
+            names,
+            vec!["alpha", "coordinator"],
+            "only presence-announced agents are recipients; infra dirs are skipped"
+        );
 
         let _ = std::fs::remove_dir_all(&ws);
     }

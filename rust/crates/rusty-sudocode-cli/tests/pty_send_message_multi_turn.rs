@@ -11,8 +11,8 @@
 //! 1. Parent spawns a background sub-agent via
 //!    `Agent(subagent_type="general-purpose", run_in_background=true)`;
 //!    obtains an `agent_id` back.
-//! 2. Parent calls `SendMessage(to=<agent_id>, message="…")` — the
-//!    envelope lands under `<workspace>/.sudocode-inbox/<agent_id>.jsonl`.
+//! 2. Parent calls `send(to=<agent_id>, message="…", summary="…")` — the
+//!    envelope lands in the workspace-local conversation shared with the worker.
 //! 3. The sub-agent's multi-turn loop reads the envelope on its
 //!    next drain and processes it as a NEW user turn — the sub-agent
 //!    then completes with a reply that references the follow-up.
@@ -81,31 +81,19 @@ fn send_message_resumes_subagent_and_next_turn_acks_followup() {
     // link is if anything tighter: the token can only appear if the SendMessage
     // envelope actually reached the worker and it took another turn.
     //
-    // The worker sleeps first, and that is load-bearing rather than padding.
-    // `run_multi_turn_loop` drains the inbox only AFTER a turn returns, and
-    // exits immediately when it finds nothing there (`tools/src/lib.rs`). A
-    // worker told to answer and stop finishes its first turn in a second or
-    // two — long before the parent has taken its own next turn to call
-    // SendMessage — so the drain saw an empty mailbox, the worker exited, and
-    // the envelope landed with nobody left to read it. The screen said exactly
-    // that: "the follow-up message landed in its mailbox but was not picked up
-    // (the agent had exited)". Keeping the first turn busy for 30s is what puts
-    // the envelope in the mailbox before the drain looks, which is the
-    // behaviour this test exists to check.
-    //
-    // `Sleep` is in the general-purpose pool and needs only read-only
-    // permission, so this asks the worker for nothing it is not already allowed
-    // to do.
+    // The worker stays busy long enough for the parent to deliver the message
+    // before its one-shot mailbox drain; delivery is checked by the result.
     let prompt = format!(
         "Start a helper in the background and then check in on it. \
          Use Agent(subagent_type=\"general-purpose\", description=\"standby helper\", \
-         prompt=\"First call Sleep with duration_ms=30000 so you stay busy for a \
+         prompt=\"First call Sleep with duration_ms=60000 so you stay busy for a \
          while, then reply with the single word READY. If a follow-up message \
          arrives while you are working, answer that follow-up with \
          {FOLLOW_UP_SENTINEL}.\", run_in_background=true). \
-         Then use SendMessage to ask the helper whether it is still standing by, \
-         and use pid_output with block=true to wait for its answer and tell me \
-         what it came back with."
+         Then use send(to=<the spawned pid>, message=\"Are you still standing by?\", \
+         summary=\"Check helper standby status\") while the helper is sleeping. \
+         Check that the send succeeded before using pid_output with block=true \
+         to wait for its answer and tell me what it came back with."
     );
 
     // danger-full-access because the Agent tool itself requires it —
@@ -113,11 +101,8 @@ fn send_message_resumes_subagent_and_next_turn_acks_followup() {
     // test. The subagent's WORK stays under whatever the child preset
     // allows.
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
-    // `* 8`, matching the other parent→child→report chains. The worker's first
-    // turn now holds for 30s by design, and the chain still has the parent's
-    // SendMessage turn and the resumed worker turn to go after that, so the
-    // previous `* 4` left no headroom: the failing run hit the 120s ceiling
-    // with the work still in flight.
+    // The worker's first turn holds for 60s; the resumed turn and the
+    // parent's report also need room under live-model latency.
     let long = LIVE_TIMEOUT.saturating_mul(8);
     sess.set_default_timeout(long);
 
@@ -127,18 +112,7 @@ fn send_message_resumes_subagent_and_next_turn_acks_followup() {
     // resume prompt was malformed, the sentinel WILL NOT be there.
     sess.expect(FOLLOW_UP_SENTINEL).unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
-        panic!(
-            "follow-up sentinel did not surface — subagent did not consume the SendMessage envelope: {e}\n\
-             tail of PTY screen (last 800 chars):\n{tail}",
-            tail = screen
-                .chars()
-                .rev()
-                .take(800)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>(),
-        );
+        panic!("follow-up sentinel did not surface: {e}\nPTY:\n{screen}");
     });
 
     // Then clean exit.
@@ -158,4 +132,37 @@ fn send_message_resumes_subagent_and_next_turn_acks_followup() {
         );
     });
     assert_eq!(exit, 0);
+
+    let manifests: Vec<serde_json::Value> =
+        std::fs::read_dir(env.workspace_root().join(".sudocode-agents"))
+            .expect("agent manifests")
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap())
+            .collect();
+    let worker = manifests
+        .iter()
+        .find(|m| m["subagentType"] == "general-purpose")
+        .expect("general-purpose worker manifest");
+    assert!(
+        worker["result"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(FOLLOW_UP_SENTINEL),
+        "worker's final reply must acknowledge the follow-up: {worker}"
+    );
+    let session_path = env.workspace_root().join(".sudocode-agents").join(format!(
+        "{}.session.jsonl",
+        worker["agentId"].as_str().unwrap()
+    ));
+    let user_turns = std::fs::read_to_string(session_path)
+        .expect("worker session")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["message"]["role"] == "user")
+        .count();
+    assert!(
+        user_turns >= 2,
+        "worker must run a second user turn; got {user_turns}"
+    );
 }

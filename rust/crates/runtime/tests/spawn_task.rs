@@ -278,6 +278,20 @@ fn write_envelope(
     to: &str,
     body: &str,
 ) {
+    write_envelope_of_kind(kernel, path, ctx, from, to, body, "");
+}
+
+/// Same, with the envelope's `kind` — which decides whether a prose answer is
+/// delivered: an `auto_reply` must not produce another one.
+fn write_envelope_of_kind(
+    kernel: &Kernel,
+    path: &str,
+    ctx: &OperationContext,
+    from: &str,
+    to: &str,
+    body: &str,
+    kind: &str,
+) {
     let env = MailboxEnvelope {
         from: from.to_string(),
         to: to.to_string(),
@@ -285,7 +299,7 @@ fn write_envelope(
         summary: None,
         timestamp: 0,
         color: None,
-        kind: String::new(),
+        kind: kind.to_string(),
         request_id: None,
     };
     let reqs = [WriteRequest {
@@ -692,11 +706,19 @@ fn the_loop_survives_a_conversation_that_does_not_exist_yet() {
 }
 
 #[test]
-fn text_only_turn_writes_no_reply_the_ping_pong_fix() {
-    // THE ping-pong fix: a turn that produces TEXT but does NOT call `send`
-    // must write nothing back. The old loop harvested the turn's text and
-    // auto-forwarded it, so every message bounced a reply forever; now silence
-    // lets the exchange end.
+fn a_prose_answer_is_delivered_once_and_never_cascades() {
+    // Both halves of the rule, in the order they matter.
+    //
+    // Delivery: a turn that answers in prose without calling `send` must still reach
+    // the sender. Co-hosted there is no human reading the turn, so the alternative is
+    // an answer that reaches nobody — which is what the live duet hit, one agent
+    // writing "PONG" into its own transcript while the other waited.
+    //
+    // The BOUND is why delivery is safe, and it is the half that the old
+    // forward-everything loop lacked: an auto-reply must not produce another one, or
+    // two agents that both answer in prose exchange pleasantries until something
+    // stops them. This test would pass on an unbounded implementation if it only
+    // checked the first half, so it checks the second.
     let kernel = Arc::new(Kernel::new());
     mount_conversations(&kernel);
     plant_conversation(&kernel, "win-ai", "user-test");
@@ -707,21 +729,50 @@ fn text_only_turn_writes_no_reply_the_ping_pong_fix() {
     let ctx = user_ctx();
     let transcript = transcript_of("win-ai", "user-test");
     write_envelope(&kernel, &transcript, &ctx, "user-test", "win-ai", "hi");
-    // Ample time for the loop to run the turn and (wrongly) auto-forward. NOT
-    // `HAPPENS_BUDGET`: this asserts that nothing arrives, so the wall-clock is
-    // the test and every second of it is paid on every green run.
-    let leaked = wait_for_reply(&kernel, &transcript, &ctx, "win-ai", Duration::from_secs(2));
-    handle.abort_signal.abort();
-    let _ = handle.join.join();
 
+    let delivered = wait_for_reply(&kernel, &transcript, &ctx, "win-ai", HAPPENS_BUDGET);
     assert!(
-        leaked.is_none(),
-        "a text-only turn auto-forwarded a reply: the ping-pong is back"
+        delivered.is_some(),
+        "a prose answer has to reach the one who asked"
     );
     assert_eq!(
         count_from(&kernel, &transcript, &ctx, "win-ai"),
-        0,
-        "the agent wrote to the transcript on a silent turn"
+        1,
+        "exactly one answer, not one per iteration of anything"
+    );
+
+    // Now the bound: an inbound AUTO_REPLY drives a turn that again produces prose
+    // and calls no `send`. Nothing new may be written.
+    write_envelope_of_kind(
+        &kernel,
+        &transcript,
+        &ctx,
+        "user-test",
+        "win-ai",
+        "thanks!",
+        runtime::agent_mailbox::kinds::AUTO_REPLY,
+    );
+    // Gate on the READ POSITION, not a clock: once it has passed that envelope the
+    // loop has driven the turn and acknowledged it, so "nothing new was written" is a
+    // statement about a turn that RAN. A fixed two-second sleep here let an UNBOUNDED
+    // implementation pass — the second delivery had not happened yet, so the test
+    // reported a bound it never exercised.
+    let inbound_end = tail_offset(&kernel, &transcript, &ctx);
+    let deadline = Instant::now() + HAPPENS_BUDGET;
+    while read_position(&kernel, "win-ai", "user-test") < inbound_end {
+        assert!(
+            Instant::now() < deadline,
+            "the loop never consumed the auto_reply envelope, so this proves nothing"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+
+    assert_eq!(
+        count_from(&kernel, &transcript, &ctx, "win-ai"),
+        1,
+        "an auto-reply answered an auto-reply: the ping-pong is back"
     );
 }
 

@@ -241,6 +241,15 @@ pub struct Mailbox {
     /// identity nothing deletes, whereas `is_append_stream` changes its answer
     /// the moment a stream is created.
     provisioned: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// How many envelopes this mailbox has sent.
+    ///
+    /// Not a metric for its own sake: the co-host loop needs it to tell "the agent
+    /// answered its peer" from "the agent answered into the void". Silence is a legal
+    /// reply there — the loop deliberately does not forward a turn's text, or two
+    /// agents bounce output at each other forever — so a turn that PRODUCED text and
+    /// sent nothing is the one shape worth reporting, and this counter is what makes
+    /// that detectable from outside a turn.
+    sends: std::sync::atomic::AtomicU64,
 }
 
 impl Mailbox {
@@ -250,7 +259,15 @@ impl Mailbox {
             self_id,
             convention,
             provisioned: std::sync::Mutex::new(std::collections::HashSet::new()),
+            sends: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Envelopes sent through this mailbox so far. See the field's docstring for the
+    /// one caller that needs it.
+    #[must_use]
+    pub fn sends_so_far(&self) -> u64 {
+        self.sends.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// A mailbox addressing the daemon's own path space: `self_id`'s
@@ -546,6 +563,12 @@ impl Mailbox {
     /// load-bearing; the reason for going through one writer is that the format
     /// has one definition.
     pub fn send(&self, mut envelope: MailboxEnvelope) -> Result<(), String> {
+        // Counted on ENTRY, not on success: the question this answers is "did the
+        // agent try to answer its peer", and a send that failed is still an agent
+        // that meant to speak. Counting only successes would report a delivery
+        // failure as the model's silence.
+        self.sends
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if envelope.from.is_empty() {
             envelope.from = self.self_id.clone();
         }

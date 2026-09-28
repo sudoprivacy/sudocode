@@ -346,7 +346,9 @@ impl EngineEventRenderer {
             }
             // No direct terminal effect: lifecycle/state/telemetry events. The
             // spinner already tracks progress from the deltas above.
-            EngineEvent::TurnStarted { .. }
+            EngineEvent::PermissionDenied { .. }
+            | EngineEvent::MessageComplete
+            | EngineEvent::TurnStarted { .. }
             | EngineEvent::State(_)
             | EngineEvent::ModelResolved { .. }
             | EngineEvent::Usage(_)

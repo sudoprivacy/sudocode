@@ -612,6 +612,14 @@ fn main() {
 
     if let Err(error) = run() {
         // (error handling below — success path returns from main normally)
+        if let Some(exit) = error.downcast_ref::<cli::headless::ReportedExit>() {
+            std::process::exit(exit.0);
+        }
+        let argv: Vec<String> = std::env::args().skip(1).collect();
+        if cli::headless::requested(&argv) {
+            cli::headless::report_argument_error(&argv, &error.to_string());
+            std::process::exit(2);
+        }
         let message = error.to_string();
         // When --output-format json is active, emit errors as JSON so downstream
         // tools can parse failures the same way they parse successes (ROADMAP #42).
@@ -850,6 +858,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // If an ensure_authenticated() call is ever added below this point it
     // MUST be guarded by `if !action.is_informational()`.
     match action {
+        CliAction::Headless(options) => cli::headless::run(options)?,
         CliAction::DumpManifests {
             output_format,
             manifests_dir,

@@ -131,6 +131,18 @@ pub struct EngineHandle {
     pub commands: std_mpsc::Sender<EngineCommand>,
     /// Receive [`EngineEvent`]s from the engine (deltas, requests, completion, …).
     pub events: std_mpsc::Receiver<EngineEvent>,
+    stopped: std_mpsc::Receiver<()>,
+}
+
+impl EngineHandle {
+    /// Close and await engine teardown, including delegate-owned resources.
+    /// The caller must release any other lifecycle/delegate owners first.
+    #[must_use]
+    pub fn shutdown(self, timeout: std::time::Duration) -> bool {
+        let _ = self.commands.send(EngineCommand::Close);
+        drop(self.commands);
+        self.stopped.recv_timeout(timeout).is_ok()
+    }
 }
 
 /// The pump. Spawns a dedicated engine thread that owns a Tokio runtime, routes
@@ -147,6 +159,7 @@ impl EngineSession {
     pub fn spawn(delegate: Arc<dyn EngineDelegate>) -> EngineHandle {
         let (cmd_tx, cmd_rx) = std_mpsc::channel::<EngineCommand>();
         let (evt_tx, evt_rx) = std_mpsc::channel::<EngineEvent>();
+        let (stopped_tx, stopped_rx) = std_mpsc::channel();
 
         std::thread::Builder::new()
             .name("engine-session".into())
@@ -156,12 +169,15 @@ impl EngineSession {
                     .build()
                     .expect("engine-session tokio runtime");
                 rt.block_on(drive(delegate, cmd_rx, evt_tx));
+                drop(rt);
+                let _ = stopped_tx.send(());
             })
             .expect("spawn engine-session thread");
 
         EngineHandle {
             commands: cmd_tx,
             events: evt_rx,
+            stopped: stopped_rx,
         }
     }
 }
@@ -555,9 +571,17 @@ impl RuntimeObserver for ObserverAdapter {
         let _ = self.tx.send(EngineEvent::PromptCache(event.clone()));
     }
 
+    fn on_permission_denied(&mut self, id: &str, name: &str, input: &str, reason: &str) {
+        let _ = self.tx.send(EngineEvent::PermissionDenied {
+            id: id.into(),
+            name: name.into(),
+            input: input.into(),
+            reason: reason.into(),
+        });
+    }
+
     fn on_message_stop(&mut self) {
-        // MessageStop has no distinct renderer effect on its own; the turn
-        // boundary is carried by TurnComplete.
+        let _ = self.tx.send(EngineEvent::MessageComplete);
     }
 
     fn tool_progress_sink(&self) -> Option<runtime::ProgressSink> {

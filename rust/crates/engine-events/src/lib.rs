@@ -153,12 +153,21 @@ pub enum EngineEvent {
     ThinkingDelta { text: String },
     /// Incremental assistant text (was `RuntimeObserver::on_text_delta`).
     TextDelta { text: String },
+    /// End of one provider assistant message, before tool execution.
+    MessageComplete,
     /// The model requested a tool call (was `RuntimeObserver::on_tool_use`).
     /// `input` is the raw JSON arguments string.
     ToolCall {
         id: String,
         name: String,
         input: String,
+    },
+    /// An invocation was denied by policy, a hook, or the renderer's answer.
+    PermissionDenied {
+        id: String,
+        name: String,
+        input: String,
+        reason: String,
     },
     /// A tool finished (was `RuntimeObserver::on_tool_result`). `output` is the
     /// tool's textual result; `is_error` distinguishes failures.

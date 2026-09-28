@@ -1747,6 +1747,31 @@ pub fn execute_tool_with_abort(
 /// name the CLI, the engine host and the ACP server already call.
 pub use runtime::tool_names::canonicalize_tool_name;
 
+// A standalone print invocation has no owner after it exits. Do not launch
+// detached jobs there; synchronous agents retain the normal tool/policy path.
+static FINITE_TASK_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Declare that this standalone process serves a finite headless task.
+/// Must be called before building the engine; never set by multi-session hosts.
+pub fn declare_finite_task_mode() {
+    FINITE_TASK_MODE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn enforce_finite_task_mode(name: &str, input: &Value) -> Result<(), String> {
+    if FINITE_TASK_MODE.load(std::sync::atomic::Ordering::SeqCst) {
+        let defaults_background = matches!(name, "agent_spawn" | "pid_fork");
+        if (defaults_background || matches!(name, "bash" | "PowerShell"))
+            && input
+                .get("run_in_background")
+                .and_then(Value::as_bool)
+                .unwrap_or(defaults_background)
+        {
+            return Err("background jobs are unavailable in print mode; retry with run_in_background: false".into());
+        }
+    }
+    Ok(())
+}
+
 fn execute_tool_with_enforcer(
     enforcer: Option<&PermissionEnforcer>,
     name: &str,
@@ -1759,6 +1784,7 @@ fn execute_tool_with_enforcer(
 ) -> Result<String, String> {
     let name = canonicalize_tool_name(name);
     let name = name.as_str();
+    enforce_finite_task_mode(name, input)?;
     // Coordinator hard tool-gate — belt-and-suspenders against a
     // non-compliant model that hallucinates a forbidden tool name
     // even though the LLM schema hides it (see

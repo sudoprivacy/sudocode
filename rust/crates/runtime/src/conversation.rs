@@ -378,6 +378,9 @@ pub trait RuntimeObserver {
 
     fn on_tool_use(&mut self, _id: &str, _name: &str, _input: &str) {}
 
+    /// A policy or hook denied a specific invocation, without requiring UI.
+    fn on_permission_denied(&mut self, _id: &str, _name: &str, _input: &str, _reason: &str) {}
+
     fn on_tool_result(
         &mut self,
         _tool_use_id: &str,
@@ -2320,7 +2323,17 @@ where
                                 self.record_tool_started(iterations, &tool_name);
                                 None
                             }
-                            PermissionOutcome::Deny { reason } => Some(reason),
+                            PermissionOutcome::Deny { reason } => {
+                                if let Some(obs) = observer.as_mut() {
+                                    obs.on_permission_denied(
+                                        &tool_use_id,
+                                        &tool_name,
+                                        &effective_input,
+                                        &reason,
+                                    );
+                                }
+                                Some(reason)
+                            }
                         };
                         prepared.push(PreparedTool {
                             tool_use_id,
@@ -2599,6 +2612,16 @@ where
                     )
                 };
 
+                if let PermissionOutcome::Deny { reason } = &permission_outcome {
+                    if let Some(obs) = observer.as_mut() {
+                        obs.on_permission_denied(
+                            &tool_use_id,
+                            &tool_name,
+                            &effective_input,
+                            reason,
+                        );
+                    }
+                }
                 let result_message = match permission_outcome {
                     PermissionOutcome::Allow => {
                         self.record_tool_started(iterations, &tool_name);

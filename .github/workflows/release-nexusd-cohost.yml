@@ -141,16 +141,14 @@ jobs:
         with:
           workspaces: rust -> target
 
-      # `--locked`: a release artifact resolves to the revs the lockfile records
-      # and nothing else. That is the same discipline the pin serves — the daemon
-      # and the agent runtime inside it have to agree on one nexus-vfs.
       # `NEXUSD_BUILD_VERSION` is what `--version` prints after the binary's own
       # name, so it is where this build states which revs it carries. Without it the
       # daemon reports the version of the crate that owns the clap derive — the same
       # number for every build of it, which reads as an answer while telling an
-      # operator nothing about the artifact in front of them. This is the ONLY place
-      # those revs are stated — a sidecar file saying the same thing was deleted, so
-      # there is nothing for this to drift from.
+      # operator nothing about the artifact in front of them.
+      #
+      # The artifact states these revs here and nowhere else, so there is no second
+      # copy to disagree with the binary.
       - name: Stamp the build identity
         shell: bash
         run: |
@@ -161,6 +159,9 @@ jobs:
           BUILD="${GITHUB_REF_NAME#nexusd-cohost-}"
           echo "NEXUSD_BUILD_VERSION=${BUILD} (sudocode $(git rev-parse --short HEAD), nexus-vfs ${NEXUS_VFS_TAG})" >> "$GITHUB_ENV"
 
+      # `--locked`: a release artifact resolves to the revs the lockfile records and
+      # nothing else. That is the same discipline the pin serves — the daemon and the
+      # agent runtime inside it have to agree on one nexus-vfs.
       - name: Build release binary
         run: cargo build --locked --release -p nexusd-cohost --features daemon --bin nexusd-cohost
 
@@ -192,14 +193,12 @@ jobs:
           set -euo pipefail
           mkdir -p "dist/${{ matrix.package_dir }}"
           cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
-          # No sidecar provenance file. `PAIRING.txt` carried the tag, the sudocode
-          # commit and the nexus-vfs pin beside the executable — the same three facts
-          # the binary now states itself, and nothing checks the two agree. A file
-          # answers "which revs is this?" only while it stays next to what it
-          # describes, and what gets copied to a pod, a laptop or /usr/local/bin is the
-          # executable; `--version` travels with it. The invariant the file narrated in
-          # prose (exactly one nexus-vfs rev in the graph) is the `one nexus-vfs pin`
-          # job, which is where an invariant belongs.
+          # The archive carries the executable and nothing else. Provenance belongs in
+          # the binary, where `--version` keeps it: a text file answers "which revs is
+          # this?" only while it stays beside what it describes, and what gets copied
+          # to a pod, a laptop or /usr/local/bin is the executable. The pairing
+          # invariant — exactly one nexus-vfs rev in the graph — is the
+          # `one nexus-vfs pin` job, which is where an invariant belongs.
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
             tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.package_dir }}"

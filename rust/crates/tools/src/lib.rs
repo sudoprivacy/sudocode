@@ -2128,12 +2128,21 @@ pub struct AgentListRow {
 /// The sub-agent half is read through `fs` for the same reason: the workers this
 /// session spawned live in ITS store, which for a co-hosted agent is a subtree
 /// of the VFS and not a directory on the daemon's disk.
-pub fn collect_agent_list(active_only: bool, fs: &dyn FsBackend) -> Vec<AgentListRow> {
+pub fn collect_agent_list(
+    active_only: bool,
+    fs: &dyn FsBackend,
+) -> Result<Vec<AgentListRow>, String> {
     let mailbox = runtime::mailbox::sending_mailbox();
     let self_name = mailbox.self_id().to_string();
-    let peers = mailbox.list_recipients().unwrap_or_default();
+    // Surface an enumeration failure instead of swallowing it: `list_recipients`
+    // returns `Err` precisely so "I could not read the namespace" stays distinct
+    // from "no one is there". `unwrap_or_default()` collapsed the two, telling the
+    // model nobody exists when the truth is the read failed.
+    let peers = mailbox.list_recipients()?;
+    // The sub-agent store is a local dir; a read failure there is soft — an empty
+    // worker list is a reasonable degrade, and the peers above are the tool's point.
     let subagents = list_agent_snapshots_from_store_with(true, fs).unwrap_or_default();
-    merge_agent_list(&peers, &self_name, subagents, active_only)
+    Ok(merge_agent_list(&peers, &self_name, subagents, active_only))
 }
 
 /// Pure core of [`collect_agent_list`], sources injected so it is testable
@@ -2212,7 +2221,7 @@ fn run_agent_list(input: &Value, fs: &dyn FsBackend) -> Result<String, String> {
         .get("active_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let agents = collect_agent_list(active_only, fs);
+    let agents = collect_agent_list(active_only, fs)?;
     to_pretty_json(json!({
         "agents": agents,
         "count": agents.len(),

@@ -889,6 +889,7 @@ impl ChatStreamState {
                     cost_currency: None,
                 },
                 request_id: None,
+                gateway_request_id: None,
             },
         }));
     }
@@ -1117,6 +1118,7 @@ impl ResponsesStreamState {
                             stop_sequence: None,
                             usage: Usage::default(),
                             request_id: None,
+                            gateway_request_id: None,
                         },
                     }));
                 }
@@ -1293,6 +1295,7 @@ impl ResponsesStreamState {
                     stop_sequence: None,
                     usage: Usage::default(),
                     request_id: None,
+                    gateway_request_id: None,
                 },
             }));
         }
@@ -2303,6 +2306,7 @@ fn normalize_response(
             OpenAiUsage::to_api_usage,
         ),
         request_id: None,
+        gateway_request_id: None,
     })
 }
 
@@ -2368,6 +2372,7 @@ async fn collect_response_stream(
         stop_sequence: None,
         usage,
         request_id: stream.request_id().map(ToString::to_string),
+        gateway_request_id: None,
     })
 }
 

@@ -905,3 +905,79 @@ fn signal(pid: i32, sig: &str) {
         .unwrap_or_else(|e| panic!("could not run kill -{sig} {pid}: {e}"));
     assert!(status.success(), "kill -{sig} {pid} failed: {status}");
 }
+
+/// Discovery, from BOTH nodes. The live failure this guards was not "nobody was
+/// listed" — it was that each node listed a DIFFERENT set: Windows saw `mac-ai` and
+/// not `operator`, the Mac saw `operator` and not `mac-ai`, while `stat` found all
+/// of them from either machine. A single-node test cannot see that class at all, so
+/// the assertion has to be made twice, once per endpoint.
+///
+/// The set is asserted EXACTLY, not by `contains`: the same enumeration used to
+/// offer a zone's own storage directories (`raft`, `sm`) as addressable peers, and
+/// "everyone I announced is present" would pass while `raft` sat in the list beside
+/// them.
+///
+/// Needs a two-node cluster; `e2e/nexus-a2a/run-cross-node.sh` stands one up.
+#[test]
+#[ignore = "requires a two-node cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_PEER_ENDPOINT"]
+fn live_agent_list_sees_every_peer_from_either_node() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let peer_endpoint = std::env::var("NEXUS_A2A_TEST_PEER_ENDPOINT")
+        .expect("set NEXUS_A2A_TEST_PEER_ENDPOINT to the OTHER node");
+    assert_ne!(
+        endpoint, peer_endpoint,
+        "both endpoints name the same node, which proves nothing about replication"
+    );
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let here = dial(&endpoint);
+    let there = dial(&peer_endpoint);
+
+    // Two agents, each announcing itself through a DIFFERENT node — which is the
+    // asymmetry the duet had, and the one a single-node run cannot produce.
+    let run = fresh();
+    let local_agent = format!("disco-local-{run}");
+    let remote_agent = format!("disco-remote-{run}");
+    mailbox(&here, &local_agent, &auth)
+        .ensure_presence()
+        .expect("announce the local agent on this node");
+    mailbox(&there, &remote_agent, &auth)
+        .ensure_presence()
+        .expect("announce the remote agent on the other node");
+
+    // Replication is not instantaneous; poll rather than sleep a guess, and fail
+    // with what each node actually returned.
+    for (label, client) in [("this node", &here), ("the other node", &there)] {
+        let mut listed = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(DELIVERY_WAIT_MS);
+        while Instant::now() < deadline {
+            listed = mailbox(client, &local_agent, &auth)
+                .list_recipients()
+                .expect("enumerate agents");
+            if listed.contains(&local_agent) && listed.contains(&remote_agent) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let mut mine: Vec<String> = listed
+            .iter()
+            .filter(|n| n.ends_with(&run.to_string()))
+            .cloned()
+            .collect();
+        mine.sort();
+        let mut expected = vec![local_agent.clone(), remote_agent.clone()];
+        expected.sort();
+        assert_eq!(
+            mine, expected,
+            "{label} must list both agents, whichever node they announced through; \
+             the full listing was {listed:?}"
+        );
+        for not_an_agent in ["raft", "sm"] {
+            assert!(
+                !listed.iter().any(|n| n == not_an_agent),
+                "{label} offered {not_an_agent} as a peer — the zone's own storage is \
+                 not an agent; the full listing was {listed:?}"
+            );
+        }
+    }
+}

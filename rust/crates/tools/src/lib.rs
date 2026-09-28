@@ -2879,9 +2879,25 @@ fn run_send_message(mut input: SendMessageInput) -> Result<String, String> {
         }
     }
 
-    // Resolved once for the whole call. `send` has one destination namespace
-    // per session, and a broadcast must not re-resolve it per recipient.
-    let mailbox = runtime::mailbox::sending_mailbox();
+    // Resolve the destination once: live in-process pids read workspace-local
+    // conversations; named peers keep the session's shared mailbox.
+    // A running in-process sub-agent reads the workspace-local mailbox.
+    // The standalone session mailbox lives under the config home so separate
+    // scode processes can talk across workspaces; using it for a spawned pid
+    // reports a successful send into a conversation the worker never drains.
+    let local_pid = input.to != "*"
+        && global_agent_abort_signals()
+            .lock()
+            .map(|agents| agents.contains_key(&input.to))
+            .unwrap_or(false);
+    let mailbox = if local_pid {
+        std::sync::Arc::new(runtime::mailbox::Mailbox::workspace_local(
+            &current_workspace_root().map_err(|e| e.to_string())?,
+            runtime::mailbox::sending_mailbox().self_id().to_string(),
+        ))
+    } else {
+        runtime::mailbox::sending_mailbox()
+    };
     let sender = resolve_sender(&input, &mailbox);
 
     // ── Plain text branch ──────────────────────────────────────────

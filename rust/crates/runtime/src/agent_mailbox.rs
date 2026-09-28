@@ -444,43 +444,6 @@ pub fn read_all_from_path(path: &str) -> Result<Vec<MailboxEnvelope>, String> {
     Ok(out)
 }
 
-/// Convenience: enumerate every recipient that currently has a
-/// mailbox. Used by the broadcast path to skip self.
-///
-/// # Errors
-///
-/// Returns a `String` error when the mailbox dir exists but can't be
-/// read. A missing dir is treated as no recipients (fresh workspace).
-pub fn list_recipients(workspace_root: &Path) -> Result<Vec<String>, String> {
-    list_recipients_under(workspace_root)
-}
-
-/// Enumerate recipients under a unified per-recipient root by listing
-/// `{root}/agents/<name>/chat-with-me`. The new-shape counterpart of
-/// [`list_recipients`] (which scanned the legacy `.sudocode-inbox/*.jsonl`).
-///
-/// # Errors
-///
-/// Returns a `String` error when the `agents` dir exists but can't be read. A
-/// missing dir is treated as no recipients (nothing has been sent yet).
-pub fn list_recipients_under(root: &Path) -> Result<Vec<String>, String> {
-    let agents_dir = root.join("agents");
-    if !agents_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in fs::read_dir(&agents_dir).map_err(|e| format!("read agents dir: {e}"))? {
-        let entry = entry.map_err(|e| format!("read agents dir entry: {e}"))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        // A recipient is a dir whose `chat-with-me` inbox exists.
-        if entry.path().join("chat-with-me").exists() {
-            out.push(name);
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
 #[cfg(test)]
 mod prompt_tests {
     use super::{a2a_reply_contract, repl_a2a_prompt_section};

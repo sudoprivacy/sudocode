@@ -15,11 +15,13 @@ use runtime::mailbox::{Mailbox, MailboxScope};
 
 /// A unique temp dir for one test's mailbox root + agent store.
 fn temp_root(label: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("agent-list-e2e-{label}-{nanos}"))
+    // pid plus a counter, not a clock. These tests run on threads of one binary and
+    // a nanosecond read is not guaranteed to differ between them — on macOS it
+    // measurably does not. Two tests sharing a root would see each other's agents,
+    // and this file's whole subject is which agents are visible.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("agent-list-e2e-{label}-{}-{n}", std::process::id()))
 }
 
 #[test]

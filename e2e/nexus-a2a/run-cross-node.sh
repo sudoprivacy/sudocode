@@ -168,4 +168,13 @@ NEXUS_A2A_TEST_ENDPOINT="$JOINER" NEXUS_A2A_TEST_PEER_ENDPOINT="$FOUNDER" \
   cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
   --test pty_agent_duet -- --nocapture
 
+# Discovery, asserted from BOTH endpoints. The live bug was not an empty listing
+# but a DIFFERENT listing per node, which only a second endpoint can catch — and
+# the set is asserted exactly, because the same call used to offer a zone's own
+# storage directories as peers.
+echo "== [cross-node] every peer is discoverable from either node =="
+NEXUS_A2A_TEST_ENDPOINT="$JOINER" NEXUS_A2A_TEST_PEER_ENDPOINT="$FOUNDER" \
+  cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime \
+  --test mailbox_nexus_live live_agent_list_sees_every_peer_from_either_node -- --ignored --nocapture
+
 echo "CROSS-NODE E2E OK"

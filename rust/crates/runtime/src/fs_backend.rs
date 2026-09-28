@@ -1337,8 +1337,35 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(self.client.stat(path, &self.auth_token).is_ok())
     }
 
-    fn create_dir_all(&self, _path: &str) -> io::Result<()> {
-        // VFS servers typically auto-create intermediate paths on write.
+    /// Provision each component as a DT_DIR, idempotently.
+    ///
+    /// This used to return `Ok(())` having done nothing, on the reasoning that "VFS
+    /// servers typically auto-create intermediate paths on write". A write does plant
+    /// rows — but there is no write here, and the one caller that matters is
+    /// `Mailbox::ensure_presence`, whose whole job is to announce an agent by
+    /// creating a directory. So it reported success and created nothing: an agent
+    /// that had announced itself but not yet conversed was invisible to every
+    /// `agent_list` in the cluster, on every node, and the call that was supposed to
+    /// make it visible said it had.
+    ///
+    /// Per component rather than the leaf alone, which is what `create_dir_all`
+    /// promises and what the in-process a2a provisioner does for the same paths.
+    ///
+    /// The `exists` fast path is there because most callers are writes asking for a
+    /// parent that is already present — the same steady-state exit
+    /// `a2a::ensure_conversation` takes, and for the same reason: one `stat` beats N
+    /// `setattr` round trips on a path that is already provisioned. A write does
+    /// plant its own rows, so the cost this adds to a write is that one `stat`.
+    fn create_dir_all(&self, path: &str) -> io::Result<()> {
+        if self.exists(path)? {
+            return Ok(());
+        }
+        let mut prefix = String::with_capacity(path.len());
+        for component in path.split('/').filter(|c| !c.is_empty()) {
+            prefix.push('/');
+            prefix.push_str(component);
+            self.client.ensure_dir(&prefix, &self.auth_token)?;
+        }
         Ok(())
     }
 

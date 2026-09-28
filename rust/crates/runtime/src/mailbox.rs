@@ -726,11 +726,12 @@ impl Mailbox {
     ///
     /// # Errors
     ///
-    /// An `Err` when the namespace cannot be enumerated, rather than an empty
-    /// list. The difference matters to the one caller that needs this: a
-    /// broadcast over "no recipients" reports success having delivered nothing,
-    /// which is the silent kind of failure. Saying so at the source means no
-    /// caller has to remember to ask first.
+    /// An `Err` when the namespace cannot be enumerated, or when an entry's
+    /// presence cannot be determined — never an empty list, and never a silently
+    /// shortened one. The difference matters to every caller: a broadcast over "no
+    /// recipients" reports success having delivered nothing, and an agent told it
+    /// has no peers tells its operator so. Saying it at the source means no caller
+    /// has to remember to ask first.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
         let dir = self.convention.agents_dir();
         let entries = self
@@ -743,17 +744,28 @@ impl Mailbox {
         // siblings a mount can expose under `/agents` (e.g. `raft`, `sm` on a
         // co-host topology) are not mistaken for peers. Checking the contract
         // rather than a denylist means a future infra entry needs no upkeep.
-        let mut names: Vec<String> = entries
-            .into_iter()
-            .filter(|e| {
-                e.is_dir
-                    && self
-                        .backend
-                        .exists(&self.convention.chat_list_dir(&e.name))
-                        .unwrap_or(false)
-            })
-            .map(|e| e.name)
-            .collect();
+        // An entry whose presence cannot be DETERMINED is an error, not a
+        // non-agent. Swallowing that check (`unwrap_or(false)`) would drop a real
+        // agent whenever the probe itself failed — the same "I could not look"
+        // reported as "nobody is there" that this call returns `Err` to prevent,
+        // one level down and harder to see, because the list still looks plausible.
+        // `is_dir` first, so a stray file costs no round trip.
+        let mut names: Vec<String> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !entry.is_dir {
+                continue;
+            }
+            let chat_list = self.convention.chat_list_dir(&entry.name);
+            if self.backend.exists(&chat_list).map_err(|e| {
+                format!(
+                    "list recipients at {dir}: cannot tell whether {} announced presence \
+                     ({chat_list}): {e}",
+                    entry.name
+                )
+            })? {
+                names.push(entry.name);
+            }
+        }
         names.sort();
         Ok(names)
     }

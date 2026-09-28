@@ -31,6 +31,23 @@ daemon = [
   "dep:anyhow",
 ]
 
+# Forwarded, not re-declared. `driver-ai` is nexus-vfs's switch for model egress
+# through the VFS: a model call becomes a write that crosses the kernel's mutating
+# write hooks instead of leaving the process as HTTP no hook can see, and it brings
+# the `llm_mount` service with it.
+#
+# Without this line the feature is unreachable from here, and that quietly breaks
+# the rule this crate is built on: a co-host has to be a SUPERSET of the daemon it
+# replaces, not a trade. A tier deploying `nexus-cluster --features driver-ai` had
+# no co-host counterpart — the service simply could not exist in this binary, which
+# a boot-log comparison shows and nothing else does.
+#
+# OFF by default, matching nexus-vfs: the connectors cost ~1.36 MiB of HTTP client
+# stack that a deployment not mounting a model has no use for. `daemon` is pulled in
+# because there is no half-state worth having — this feature only means anything in
+# the binary the daemon feature builds.
+driver-ai = ["daemon", "nexus-cluster/driver-ai"]
+
 [dependencies]
 # The daemon itself — every flag, every service, every boot path of
 # `nexusd-cluster`, entered through `run_with_services` so this binary chooses

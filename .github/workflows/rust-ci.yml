@@ -239,6 +239,20 @@ jobs:
       - name: Co-host duet against a daemon built from this checkout
         run: e2e/nexus-a2a/run-cohost.sh
 
+      # The one feature combination nothing else builds. `driver-ai` forwards to
+      # nexus-cluster so a co-host can carry `llm_mount` — the co-host has to be a
+      # superset of the daemon it replaces — and a feature combination no job
+      # compiles is one that stops compiling without anyone noticing. Feature
+      # unification is the specific risk: this workspace pins `backends` with only
+      # `driver-local-connector`, so turning on the Anthropic/OpenAI connectors
+      # resolves a graph no other job here has ever built.
+      #
+      # `check`, not `build`: what can break is resolution and types, and this job
+      # has already built the daemon once.
+      - name: The driver-ai co-host still resolves
+        working-directory: rust
+        run: cargo check -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost
+
   one-nexus-vfs-pin:
     name: one nexus-vfs pin
     runs-on: ubuntu-latest

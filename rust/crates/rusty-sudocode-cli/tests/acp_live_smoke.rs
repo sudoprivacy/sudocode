@@ -629,6 +629,15 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         .collect();
 
     if agent_starts.is_empty() {
+        // A rejected credential lands HERE, not in the assertion below: no Agent tool
+        // call was made because no turn happened, so the "model bypassed Agent" branch
+        // is exactly the path a dead credential takes — and then reports its refusal
+        // text as a wrong answer. This is the sibling of the guard at the `pong`
+        // assertion; missing it left the same failure misfiled on `main`, which is how
+        // it was found (the run said "text output is also wrong (expected 203, 403,
+        // 603)" and quoted an authentication failure).
+        fail_clearly_if_the_credential_was_rejected(&text_output);
+
         // Model bypassed Agent and answered directly.  Verify it at least
         // produced the correct numbers so we know the prompt/session works —
         // but warn that the subagent pipeline was not exercised.

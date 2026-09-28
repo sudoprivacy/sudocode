@@ -1,10 +1,13 @@
 //! Managed-agent loop spawn entry: the co-hosted agent's conversation loop.
 //!
 //! Wires the per-pid agent loop to the agent's mailbox receiver and drives each
-//! inbound [`MailboxEnvelope`] through a [`crate::ConversationRuntime`]. The
-//! loop does NOT auto-reply: the agent decides whether to respond by calling
-//! the `send` tool during the turn. Not calling it = silence, so a two-agent
-//! conversation ends instead of ping-ponging every turn forever.
+//! inbound [`MailboxEnvelope`] through a [`crate::ConversationRuntime`].
+//!
+//! An agent replies by calling the `send` tool during the turn. If it answers in
+//! prose instead, that text is delivered to the sender ONCE and an auto-reply never
+//! produces another one — the bound is what keeps two agents from bouncing output at
+//! each other forever, and delivery is what keeps an answer from reaching nobody at
+//! all (co-hosted there is no human reading the turn). See `auto_reply_body`.
 //!
 //! ## One receiver, one sender
 //!
@@ -73,11 +76,15 @@ use crate::hooks::HookAbortSignal;
 const READ_BLOCK_MS: u64 = 500;
 
 /// A type-erased "send a message to a peer's mailbox" capability handed to the
-/// co-hosted agent's `send` tool. This is the ONE place a co-hosted
-/// agent's reply is written: the poll loop no longer auto-forwards turn output,
-/// so a reply happens ONLY when the agent deliberately calls the tool. It writes
-/// a [`MailboxEnvelope`] (the a2a SSOT) to the recipient's inbox; the a2a stamp
-/// hook overwrites `from` with the authenticated caller when auth is armed.
+/// co-hosted agent's `send` tool. It writes a [`MailboxEnvelope`] (the a2a SSOT) to
+/// the recipient's inbox; the a2a stamp hook overwrites `from` with the authenticated
+/// caller when auth is armed.
+///
+/// The tool is how an agent ADDRESSES someone — any peer, any number of them. It is
+/// not the only way a message leaves a turn: prose written instead of a tool call is
+/// delivered to the sender once (`auto_reply_body`), because co-hosted there is no
+/// human reading the turn. Calling this is what a turn does when it means to speak to
+/// someone in particular.
 pub type MailboxSender = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
 
 /// Shared handler for the `send` A2A tool: read `{to, message}` from the
@@ -119,8 +126,9 @@ pub fn handle_send_message(
 /// in step with them:
 /// * inbound framing 鈥?`run_loop` hands each message to the turn as
 ///   `[message from <sender>]\n\n<body>`, so `<sender>` is the reply target;
-/// * the reply path 鈥?[`crate::mailbox::Mailbox::sender`] wires the `send` tool as the
-///   ONLY way a co-hosted agent replies (appending to the shared transcript).
+/// * the reply path — [`crate::mailbox::Mailbox::sender`] wires the `send` tool, which
+///   is how an agent addresses a peer it names; prose written instead reaches the
+///   sender once (`auto_reply_body`), so the prompt must not promise silence.
 ///
 /// Kept next to those two so the wording cannot drift from the framing/tool it
 /// describes. `self_id` is the agent's own name (`Mailbox::self_id`).
@@ -138,8 +146,10 @@ pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
 
 /// How the co-host frames an inbound message: `run_loop` wraps each one as
 /// `[message from <sender>]`. The one value that differs from the REPL hosts'.
-const COHOST_FRAMING: &str =
-    "Each message you receive is shown as `[message from <sender>]` followed by its text.";
+const COHOST_FRAMING: &str = "Each message you receive is shown as \
+     `[message from <sender>]` followed by its text. Nobody is reading your turn \
+     directly, so if you answer without calling `send`, your answer is delivered to \
+     that sender once — use `send` when you mean to address anyone else.";
 
 /// What a co-hosted agent is told about where its shell runs.
 ///
@@ -237,6 +247,45 @@ where
 // v2 loop 鈥?ConversationRuntime integration
 // ---------------------------------------------------------------------------
 
+/// The text to deliver to the sender because the agent answered in prose instead of
+/// calling `send` — or `None` when there is nothing to deliver.
+///
+/// # Why an answer is delivered at all, and why exactly once
+///
+/// A co-hosted agent has no other audience. In the REPL hosts a turn's text goes to
+/// the human who asked; co-hosted, it went nowhere, so an agent that wrote its answer
+/// rather than calling the tool answered into a void. That is not a hypothetical: in
+/// the live duet one agent wrote "PONG" into its own transcript while the other sat
+/// waiting and told its operator it would relay as soon as a reply arrived.
+///
+/// Forwarding unconditionally is the other failure, and it is why this loop used to
+/// forward nothing: two agents bounce every turn's output at each other forever. The
+/// bound is what makes delivery safe — an auto-reply is delivered, and an auto-reply
+/// never produces another one ([`crate::agent_mailbox::kinds::AUTO_REPLY`]). One hop,
+/// so the answer arrives and the chain cannot run.
+///
+/// The other two conditions are about not speaking for the agent. A turn that called
+/// `send` already said what it meant to say, to whoever it chose — including a peer
+/// that is not this sender — so its prose is working notes, not a reply. A turn with
+/// no text at all is an agent deliberately staying quiet, which the contract allows.
+///
+/// Pure, so the rule is testable without a running loop.
+fn auto_reply_body(
+    inbound_kind: &str,
+    assistant_text: &str,
+    sends_before: u64,
+    sends_after: u64,
+) -> Option<String> {
+    if inbound_kind == crate::agent_mailbox::kinds::AUTO_REPLY {
+        return None;
+    }
+    if sends_after != sends_before {
+        return None;
+    }
+    let trimmed = assistant_text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn run_loop<C, T, F>(
     mailbox: Arc<Mailbox>,
     mut runtime: ConversationRuntime<C, T>,
@@ -260,6 +309,9 @@ fn run_loop<C, T, F>(
     state_cb(AgentState::Ready, None);
 
     let self_id = mailbox.self_id().to_string();
+    // Kept before the mailbox moves into the poller: the loop needs to ask it, after
+    // each turn, whether the agent said anything to its peer.
+    let sends = Arc::clone(&mailbox);
 
     // Inbound delivery runs on the receiver's tails, one per conversation, but a
     // turn must run HERE: there is one `ConversationRuntime` and `run_turn`
@@ -307,10 +359,8 @@ fn run_loop<C, T, F>(
 
         state_cb(AgentState::Busy, None);
 
-        // The agent decides whether to reply by calling the `send` tool DURING
-        // the turn - the loop does NOT harvest the turn's text and forward it.
-        // Not calling `send` means silence, so the conversation ends instead of
-        // two agents bouncing every turn's output back at each other forever.
+        // The agent replies by calling `send` during the turn; prose it writes instead
+        // is delivered once, by `auto_reply_body` below.
         //
         // The body is a peer's text - another organisation's on a cross-org hop
         // - so its harness markup is made inert before it becomes part of a
@@ -318,7 +368,49 @@ fn run_loop<C, T, F>(
         // tag the system prompt tells this model to treat as authoritative.
         let body = crate::agent_mailbox::neutralize_untrusted_markup(&env.body);
         let turn_input = format!("[message from {}]\n\n{body}", env.from);
+        let sends_before = sends.sends_so_far();
         let outcome = rt.block_on(runtime.run_turn(&turn_input, None, None));
+
+        // An answer written as prose still reaches the one who asked — once. See
+        // `auto_reply_body` for why delivery is bounded rather than unconditional or
+        // absent.
+        if let Ok(summary) = &outcome {
+            let assistant_text: String = summary
+                .assistant_messages
+                .iter()
+                .flat_map(|m| m.blocks.iter())
+                .filter_map(|b| match b {
+                    crate::session::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if let Some(body) = auto_reply_body(
+                &env.kind,
+                &assistant_text,
+                sends_before,
+                sends.sends_so_far(),
+            ) {
+                let reply = MailboxEnvelope {
+                    from: self_id.clone(),
+                    to: env.from.clone(),
+                    body,
+                    summary: None,
+                    timestamp: 0,
+                    color: None,
+                    kind: crate::agent_mailbox::kinds::AUTO_REPLY.to_string(),
+                    request_id: None,
+                };
+                // A delivery failure is reported and dropped, not retried: the turn
+                // itself succeeded and re-running it would re-answer a message the
+                // agent has already handled.
+                if let Err(e) = sends.send(reply) {
+                    eprintln!(
+                        "[managed-agent {self_id}] could not deliver the turn's answer to {}: {e}",
+                        env.from
+                    );
+                }
+            }
+        }
 
         // A turn that ERRORED was still delivered and driven, so it counts as
         // handled: redelivering it re-runs a turn that already failed, forever.
@@ -363,5 +455,44 @@ mod tests {
         // 鈥?and encodes the fix: reply target is the sender, never a word
         // lifted from the message body (the exact mistake this prevents).
         assert!(section.contains("never a word copied"));
+    }
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod auto_reply_tests {
+    use super::auto_reply_body;
+    use crate::agent_mailbox::kinds;
+
+    #[test]
+    fn prose_with_no_send_is_delivered() {
+        assert_eq!(
+            auto_reply_body(kinds::MESSAGE, "  PONG\n", 7, 7).as_deref(),
+            Some("PONG"),
+            "an answer written as prose has to reach the one who asked"
+        );
+    }
+
+    #[test]
+    fn an_auto_reply_never_produces_another_one() {
+        // THE bound. Without it two agents that both answer in prose exchange
+        // pleasantries until something stops them.
+        assert_eq!(auto_reply_body(kinds::AUTO_REPLY, "thanks!", 7, 7), None);
+    }
+
+    #[test]
+    fn a_turn_that_called_send_speaks_for_itself() {
+        // It already addressed whoever it chose — possibly not this sender — so its
+        // prose is working notes, not a reply to forward.
+        assert_eq!(
+            auto_reply_body(kinds::MESSAGE, "done, told bob", 7, 8),
+            None
+        );
+    }
+
+    #[test]
+    fn silence_stays_silence() {
+        assert_eq!(auto_reply_body(kinds::MESSAGE, "", 7, 7), None);
+        assert_eq!(auto_reply_body(kinds::MESSAGE, "  \n\t ", 7, 7), None);
     }
 }

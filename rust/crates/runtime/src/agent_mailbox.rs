@@ -252,6 +252,20 @@ pub mod kinds {
     /// drains these between turns and prepends them to the next
     /// user prompt so the model sees them mid-conversation.
     pub const TASK_NOTIFICATION: &str = "task_notification";
+    /// A co-hosted agent's turn text, delivered to the sender because the agent
+    /// answered in prose without calling `send`.
+    ///
+    /// The marker is what bounds the exchange. Forwarding a turn's text used to be
+    /// unconditional and two agents bounced output at each other forever; the fix
+    /// then was to forward nothing, which lost every answer a model wrote instead of
+    /// calling the tool. This kind is the third option: an auto-reply is delivered,
+    /// and an auto-reply never produces another one. One hop, so the answer arrives
+    /// and the chain cannot run.
+    ///
+    /// On the wire it survives because the substrate does not police the envelope
+    /// schema — the a2a stamp hook parses the JSON, rewrites `from`, and
+    /// re-serialises everything else untouched.
+    pub const AUTO_REPLY: &str = "auto_reply";
 }
 
 pub(crate) fn now_secs() -> u64 {

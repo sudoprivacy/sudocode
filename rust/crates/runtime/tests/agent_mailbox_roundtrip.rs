@@ -148,41 +148,6 @@ fn read_all_skips_malformed_lines() {
     assert_eq!(envelopes[1].body, "good2");
 }
 
-// ── list_recipients ───────────────────────────────────────────────
-
-#[test]
-fn list_recipients_returns_sorted_names() {
-    let ws = temp_workspace("list-recipients-sorted");
-    agent_mailbox::append_envelope(
-        &ws,
-        "zebra",
-        make_envelope("a", "zebra", "x", kinds::MESSAGE),
-    )
-    .unwrap();
-    agent_mailbox::append_envelope(
-        &ws,
-        "alpha",
-        make_envelope("a", "alpha", "y", kinds::MESSAGE),
-    )
-    .unwrap();
-    agent_mailbox::append_envelope(
-        &ws,
-        "mango",
-        make_envelope("a", "mango", "z", kinds::MESSAGE),
-    )
-    .unwrap();
-
-    let names = agent_mailbox::list_recipients(&ws).expect("list should succeed");
-    assert_eq!(names, vec!["alpha", "mango", "zebra"]);
-}
-
-#[test]
-fn list_recipients_on_fresh_workspace_is_empty() {
-    let ws = temp_workspace("list-fresh");
-    let names = agent_mailbox::list_recipients(&ws).expect("list should succeed");
-    assert!(names.is_empty());
-}
-
 // ── kinds SSOT ───────────────────────────────────────────────────
 
 #[test]

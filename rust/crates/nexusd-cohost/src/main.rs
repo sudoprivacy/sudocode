@@ -37,8 +37,18 @@ use std::sync::Arc;
 use anyhow::Result;
 use engine_host::managed_agent::SudoCodeSpawnAdapter;
 
+/// What this binary calls itself — in `--version`, in `--help`, and in the usage line
+/// a bad flag prints.
+///
+/// It is not `nexusd-cluster`, and saying so is the point. This daemon and that one
+/// fail the same way when the wrong one is deployed — a session sits in `warming_up`,
+/// because the binary that hosts agents is this one — so "which binary is this pod
+/// running?" is the first question an incident asks. It used to have no answer:
+/// `nexusd-cohost --version` said `nexusd-cluster`.
+const BINARY_NAME: &str = "nexusd-cohost";
+
 fn main() -> Result<()> {
-    nexus_cluster::run_with_services(|ctx| {
+    nexus_cluster::run_with_services(BINARY_NAME, |ctx| {
         let mut services = nexus_cluster::default_service_decls(ctx);
         // By NAME, not by position: the default set's order is nexus-vfs's
         // business, and an index would silently pick the wrong service the first

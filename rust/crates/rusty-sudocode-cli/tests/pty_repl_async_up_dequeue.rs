@@ -16,14 +16,14 @@
 //! 2. **Queue during the turn.** Send `MARKER_QUEUED_INPUT\r` while A is
 //!    still executing → coordinator's `submit_during_turn` returns Queued;
 //!    the item lives in the shared queue behind the running turn.
-//! 3. **Press `↑` with empty buffer.** Sends the `ESC[A` sequence → input
-//!    thread's rustyline routes to `UpArrowDequeueHandler` → hook calls
-//!    `dequeue_last` → returns `MARKER_QUEUED_INPUT` → rustyline
-//!    `Cmd::Insert`s it into the buffer.
-//! 4. **Observe the re-rendered buffer.** The Insert rerenders the prompt
-//!    line WITH the dequeued text — pty-expect finds `MARKER_QUEUED_INPUT`
-//!    in the stream. This is the strong end-to-end signal that the whole
-//!    Arc-shared queue → hook → Cmd::Insert path works.
+//! 3. **Press `↑` with empty buffer.** Sends the `ESC[A` sequence → the
+//!    iocraft `↑` handler calls the shared dequeue hook →
+//!    `dequeue_last_human` → returns `MARKER_QUEUED_INPUT` → the input slot
+//!    is set to it.
+//! 4. **Observe the re-rendered buffer.** The input line rerenders WITH the
+//!    dequeued text — pty-expect finds `MARKER_QUEUED_INPUT` in the stream.
+//!    This is the strong end-to-end signal that the whole Arc-shared queue →
+//!    hook → input-slot path works.
 //! 5. **Clean exit.** `/exit` — same as `pty_repl_async_queue::async_repl_processes_single_turn_and_exits`
 //!    proves the coordinator loop still tears down cleanly after the `↑`
 //!    interaction (no rustyline / mutex leaks left over).

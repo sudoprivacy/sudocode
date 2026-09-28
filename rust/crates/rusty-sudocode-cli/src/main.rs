@@ -3087,7 +3087,21 @@ fn run_repl_iocraft_dispatch(
     // The panel starts from whatever the session's filesystem has persisted —
     // its own, so a resumed session shows its todos and not the CLI's cwd.
     let seed_todos = tools::todo_list(&cli.lifecycle.session_snapshot().fs_handle());
-    let repl = repl_ui::spawn_repl_ui(&permission_label, &banner, seed_todos);
+    // The staging-area queue, shared between this coordinator loop and the UI
+    // thread's `↑` handler: on empty-buffer `↑` the UI pops the newest human
+    // queued message back into the input slot (skipping a2a/peer). Created
+    // before the UI so the dequeue hook can capture it.
+    let coord = Arc::new(Mutex::new(input_queue::TurnInputCoordinator::new()));
+    let dequeue_hook: repl_ui::UpArrowDequeueHook = {
+        let coord = Arc::clone(&coord);
+        Arc::new(move || {
+            coord
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .dequeue_last_human()
+        })
+    };
+    let repl = repl_ui::spawn_repl_ui(&permission_label, &banner, seed_todos, Some(dequeue_hook));
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
     if let Some(status) = resume_status {
         repl_ui_cmd.set_turn_result(&status);
@@ -3160,7 +3174,6 @@ fn run_repl_iocraft_dispatch(
 
     // Coordinator loop on the current thread. All events arrive through
     // `coord_rx` — no timeout-based polling needed.
-    let coord = Arc::new(Mutex::new(input_queue::TurnInputCoordinator::new()));
     let mut turn_active = false;
     let mut runner_handle: Option<thread::JoinHandle<()>> = None;
     // Pending interactive slash command state: when a slash command needs
@@ -3248,7 +3261,7 @@ fn run_repl_iocraft_dispatch(
                         input_queue::QueuedInput::peer(prompt, display.clone()),
                         input_queue::QueueMode::Queue,
                     );
-                    repl_ui_cmd.queued_message_push(&display);
+                    repl_ui_cmd.queued_message_push(&display, false);
                     let _ = peer_from;
                 }
                 // Taken: the message is this process's responsibility now, so
@@ -3454,7 +3467,7 @@ fn run_repl_iocraft_dispatch(
                         );
                         match outcome {
                             input_queue::SubmitOutcome::Queued => {
-                                repl_ui_cmd.queued_message_push(&display);
+                                repl_ui_cmd.queued_message_push(&display, true);
                             }
                             input_queue::SubmitOutcome::Rejected => {
                                 repl_output.println(

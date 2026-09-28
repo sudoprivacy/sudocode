@@ -126,13 +126,20 @@ pub fn handle_send_message(
 /// describes. `self_id` is the agent's own name (`Mailbox::self_id`).
 #[must_use]
 pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
-    format!(
-        "# Agent-to-agent messaging\n\
-         Each message you receive is shown as `[message from <sender>]` followed \
-         by its text. {}",
-        crate::agent_mailbox::a2a_reply_contract(self_id)
-    )
+    // The SAME builder the REPL hosts use, with this host's framing as the one value
+    // that differs — see `agent_mailbox::a2a_prompt_section`. Nothing about the reply
+    // contract or peer discovery is restated here, which is what keeps the two hosts
+    // saying the same thing without anyone having to check.
+    //
+    // No peer list: a co-hosted agent is given no configured peers, so it finds them
+    // the way the contract tells every agent to — by asking.
+    crate::agent_mailbox::a2a_prompt_section(self_id, "#", COHOST_FRAMING, &[])
 }
+
+/// How the co-host frames an inbound message: `run_loop` wraps each one as
+/// `[message from <sender>]`. The one value that differs from the REPL hosts'.
+const COHOST_FRAMING: &str =
+    "Each message you receive is shown as `[message from <sender>]` followed by its text.";
 
 /// What a co-hosted agent is told about where its shell runs.
 ///

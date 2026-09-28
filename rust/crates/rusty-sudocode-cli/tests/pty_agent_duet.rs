@@ -61,14 +61,12 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
 use mock_anthropic_service::{UNIFIED_SEND_BODY, UNIFIED_SEND_RECIPIENT};
-use nexus_vfs_client::NexusVfsClient;
 use runtime::mailbox::Mailbox;
 
 /// The receiver's mailbox identity, for every transport.
@@ -154,11 +152,23 @@ fn receiver_mailbox(transport: &Transport, _config_home: &Path) -> Mailbox {
         Transport::OneNode { endpoint }
         | Transport::TwoNodes {
             receiver: endpoint, ..
-        } => Mailbox::over_nexus(
-            Arc::new(NexusVfsClient::connect(endpoint).expect("dial the receiver's node")),
-            RECEIVER,
-            String::new(),
-        ),
+        } => {
+            // Cert-only, like production: dial the receiver's node with its
+            // minted credential; the node stamps identity from the cert.
+            let credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
+                .expect("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<minted bundle dir>");
+            let credential = runtime::nexus_mailbox::AgentCredential::load(&credential)
+                .expect("load the receiver credential bundle");
+            let client = runtime::nexus_mailbox::Config {
+                endpoint: endpoint.to_string(),
+                agent: credential.agent.clone(),
+                peers: Vec::new(),
+                tls: credential.tls,
+            }
+            .connect()
+            .expect("dial the receiver's node");
+            Mailbox::over_nexus(client, RECEIVER, String::new())
+        }
     }
 }
 
@@ -214,6 +224,10 @@ fn run_duet(transport: &Transport) {
         .poll_conversation(&sender_name, 0, 0)
         .expect("seek the transcript to its tail");
 
+    // Cert-only: the receiver dials with its minted credential; its A2A name
+    // comes from the cert, so RECEIVER is the name that bundle must carry.
+    let receiver_credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
+        .expect("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<minted bundle dir>");
     let mut receiver_env_vars = vec![("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
     if let Transport::OneNode { endpoint }
     | Transport::TwoNodes {
@@ -221,7 +235,7 @@ fn run_duet(transport: &Transport) {
     } = transport
     {
         receiver_env_vars.push(("NEXUS_A2A_ENDPOINT", endpoint.as_str()));
-        receiver_env_vars.push(("NEXUS_A2A_AGENT", RECEIVER));
+        receiver_env_vars.push(("NEXUS_A2A_CREDENTIAL", receiver_credential.as_str()));
         receiver_env_vars.push(("NEXUS_A2A_PEER", sender_name.as_str()));
     }
     let mut receiver = env.spawn_with_env(&["--permission-mode", "read-only"], &receiver_env_vars);
@@ -246,6 +260,8 @@ fn run_duet(transport: &Transport) {
         ),
         transport.scenario(),
     );
+    let sender_credential = std::env::var("NEXUS_A2A_TEST_SENDER_CREDENTIAL")
+        .expect("set NEXUS_A2A_TEST_SENDER_CREDENTIAL=<minted bundle dir>");
     let mut sender_env_vars = Vec::new();
     match transport {
         Transport::OneNode { endpoint }
@@ -253,7 +269,7 @@ fn run_duet(transport: &Transport) {
             sender: endpoint, ..
         } => {
             sender_env_vars.push(("NEXUS_A2A_ENDPOINT", endpoint.as_str()));
-            sender_env_vars.push(("NEXUS_A2A_AGENT", sender_name.as_str()));
+            sender_env_vars.push(("NEXUS_A2A_CREDENTIAL", sender_credential.as_str()));
             sender_env_vars.push(("NEXUS_A2A_PEER", RECEIVER));
         }
     }

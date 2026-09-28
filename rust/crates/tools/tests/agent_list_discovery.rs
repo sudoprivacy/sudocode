@@ -44,7 +44,8 @@ fn agent_list_discovers_a_peer_provisioned_through_the_mailbox() {
     // The host filesystem, because `SUDOCODE_AGENT_STORE` above names a host
     // directory: the sub-agent half of the list is read through the session's
     // backend, which for this test's session is the host.
-    let rows = tools::collect_agent_list(false, &runtime::fs_backend::StdFsBackend);
+    let rows = tools::collect_agent_list(false, &runtime::fs_backend::StdFsBackend)
+        .expect("collect_agent_list should succeed when the namespace is readable");
     let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
 
     assert!(
@@ -57,6 +58,32 @@ fn agent_list_discovers_a_peer_provisioned_through_the_mailbox() {
     );
     let alice_row = rows.iter().find(|r| r.name == "alice").unwrap();
     assert_eq!(alice_row.kind, "peer");
+
+    std::env::remove_var("SUDOCODE_AGENT_STORE");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn collect_agent_list_surfaces_a_read_failure_instead_of_empty() {
+    // "Can't read the namespace" must NOT masquerade as "nobody is here" — the
+    // regression sudocode#786 flagged (unwrap_or_default swallowing the Err).
+    // Force a genuine read error by making the agents path a regular FILE, so
+    // readdir fails rather than returning an empty listing.
+    let root = temp_root("readfail");
+    std::fs::create_dir_all(&root).unwrap();
+    let store = root.join("agent-store");
+    std::env::set_var("SUDOCODE_AGENT_STORE", &store);
+
+    let me = Arc::new(Mailbox::workspace_local(&root, "me".to_string()));
+    // agents_dir is `<root>/agents`; plant a file there so readdir errors.
+    std::fs::write(root.join("agents"), b"not a directory").unwrap();
+    let _scope = MailboxScope::enter(me);
+
+    let result = tools::collect_agent_list(false, &runtime::fs_backend::StdFsBackend);
+    assert!(
+        result.is_err(),
+        "a namespace read failure must surface as Err, not an empty list; got {result:?}"
+    );
 
     std::env::remove_var("SUDOCODE_AGENT_STORE");
     let _ = std::fs::remove_dir_all(&root);

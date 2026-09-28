@@ -69,7 +69,22 @@ daemon_env=(
   "RUST_LOG=${RUST_LOG:-info}"
 )
 
+# Where this boot's output starts. The log is opened in append mode so that a
+# failure can be read across both boots, which also means every line the first
+# boot wrote is still in the file when the second one starts — and
+# `wait_for_log` below used to grep the whole file. Step 4 therefore matched
+# boot 1's "Zone ... registered" and returned two milliseconds after asking,
+# having waited for nothing:
+#
+#   == 4. restart TLS-on ==
+#      Zone 'sharedzone' registered (after ~1s)     <- 2ms after the line above
+#
+# The test then dialled a listener that had not bound yet and failed with
+# `tcp connect error`, about one CI run in three.
+LOG_FROM=1
+
 boot() {
+  LOG_FROM=$(( $(wc -c <"$DATA_DIR/daemon.log" 2>/dev/null || echo 0) + 1 ))
   env $NO_CONV "${daemon_env[@]}" \
     "$NEXUSD_BIN" --bind-addr "0.0.0.0:${PORT}" >>"$DATA_DIR/daemon.log" 2>&1 &
   DAEMON_PID=$!
@@ -78,13 +93,35 @@ boot() {
 wait_for_log() {
   local needle="$1" budget="$2" i
   for i in $(seq 1 "$budget"); do
-    if grep -q "$needle" "$DATA_DIR/daemon.log" 2>/dev/null; then
+    # Only what this boot wrote — see LOG_FROM.
+    if tail -c "+$LOG_FROM" "$DATA_DIR/daemon.log" 2>/dev/null | grep -q "$needle"; then
       echo "   $needle (after ~${i}s)"
       return 0
     fi
     sleep 1
   done
   echo "!! daemon never logged '$needle'" >&2
+  tail -40 "$DATA_DIR/daemon.log" >&2
+  return 1
+}
+
+# A log line says the daemon reached some internal state; it does not say the
+# socket is accepting, and "accepting" is exactly what the next step needs —
+# `tcp connect error` is the failure it reports when it dials too early. So
+# dial it here first. Bash's own /dev/tcp is used rather than nc or a TLS
+# client because it needs no extra tool on any runner, and a bare TCP connect
+# is the whole question: an mTLS listener refuses the handshake, which is a
+# different error and means the socket was up.
+wait_for_port() {
+  local budget="$1" i
+  for i in $(seq 1 "$budget"); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
+      echo "   :${PORT} accepting (after ~${i}s)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "!! :${PORT} never accepted a connection" >&2
   tail -40 "$DATA_DIR/daemon.log" >&2
   return 1
 }
@@ -118,6 +155,7 @@ done
 echo "== 4. restart TLS-on =="
 boot
 wait_for_log "Zone '$ZONE' registered" 45
+wait_for_port 45
 
 echo "== [auth-on] the node decides who a message is from =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \

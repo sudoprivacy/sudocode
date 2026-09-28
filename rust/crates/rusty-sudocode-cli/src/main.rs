@@ -1011,6 +1011,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ws_port,
             )?;
         }
+        CliAction::CacheStats { output_format } => run_cache_stats(output_format)?,
         CliAction::State { output_format } => run_worker_state(output_format)?,
         CliAction::Init { output_format } => run_init(output_format)?,
         // #146: dispatch pure-local introspection. Text mode uses existing
@@ -1118,6 +1119,104 @@ use cli::doctor::{render_doctor_report, run_doctor};
 /// This is the file-based worker observability surface: `push_event()` in `worker_boot.rs`
 /// atomically writes state transitions here so external observers (sudocodehip, orchestrators)
 /// can poll current `WorkerStatus` without needing an HTTP route on the opencode binary.
+/// Summarise what the provider's prompt cache did, across recorded sessions.
+///
+/// The live `⚡`/`✎` indicators on the status line answer "is it working right
+/// now"; this answers "what has it been doing", which is the question you have
+/// after changing something that touches the cached prefix.
+fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+    let root = engine_core::cache_root();
+    let mut sessions: Vec<(String, engine_core::PromptCacheStats)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let stats_path = entry.path().join("stats.json");
+            let Ok(text) = std::fs::read_to_string(&stats_path) else {
+                continue;
+            };
+            if let Ok(stats) = serde_json::from_str::<engine_core::PromptCacheStats>(&text) {
+                sessions.push((entry.file_name().to_string_lossy().into_owned(), stats));
+            }
+        }
+    }
+    if sessions.is_empty() {
+        // Say which of the two reasons this is, because they need opposite
+        // fixes: nothing recorded yet, versus a provider that never records.
+        return Err(format!(
+            "no prompt-cache records under {root}\n  Hint: only the Anthropic provider records cache behaviour; sessions on an OpenAI-compatible, Gemini or Codex model leave nothing here.\n  Run:   scode prompt <text>   # one turn on an Anthropic model\n  Then rerun: scode cache stats [--output-format json]",
+            root = root.display()
+        )
+        .into());
+    }
+    sessions.sort_by(|a, b| b.1.tracked_requests.cmp(&a.1.tracked_requests));
+
+    let reads: u64 = sessions
+        .iter()
+        .map(|(_, s)| s.total_cache_read_input_tokens)
+        .sum();
+    let writes: u64 = sessions
+        .iter()
+        .map(|(_, s)| s.total_cache_creation_input_tokens)
+        .sum();
+    let requests: u64 = sessions.iter().map(|(_, s)| s.tracked_requests).sum();
+    let unexpected: u64 = sessions
+        .iter()
+        .map(|(_, s)| s.unexpected_cache_breaks)
+        .sum();
+    let expected: u64 = sessions.iter().map(|(_, s)| s.expected_invalidations).sum();
+    let hit_rate = (reads + writes > 0).then(|| {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            100.0 * reads as f64 / (reads + writes) as f64
+        }
+    });
+
+    if matches!(output_format, CliOutputFormat::Json) {
+        let payload = serde_json::json!({
+            "sessions": sessions.len(),
+            "tracked_requests": requests,
+            "cache_read_input_tokens": reads,
+            "cache_creation_input_tokens": writes,
+            "hit_rate_percent": hit_rate,
+            "unexpected_cache_breaks": unexpected,
+            "expected_invalidations": expected,
+            "root": root.display().to_string(),
+            "coverage": "anthropic-provider only",
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!(
+        "prompt cache — {} sessions, {requests} requests",
+        sessions.len()
+    );
+    println!("  cache read      {reads}");
+    println!("  cache written   {writes}");
+    match hit_rate {
+        Some(rate) => println!("  hit rate        {rate:.1}%  (read / (read + written))"),
+        None => println!("  hit rate        n/a"),
+    }
+    println!("  breaks          {unexpected} unexpected, {expected} expected");
+    if unexpected > 0 {
+        println!("  note            an unexpected break means cache reads dropped while the");
+        println!("                  request fingerprint held steady — the prefix went cold for");
+        println!("                  a reason the request itself does not explain.");
+    }
+    println!("\n  busiest sessions:");
+    for (name, stats) in sessions.iter().take(5) {
+        let last = stats.last_break_reason.as_deref().unwrap_or("-");
+        println!(
+            "    {name}  {} req  read {} / written {}  last break: {last}",
+            stats.tracked_requests,
+            stats.total_cache_read_input_tokens,
+            stats.total_cache_creation_input_tokens
+        );
+    }
+    println!("\n  records under {}", root.display());
+    println!("  only the Anthropic provider records here; other providers leave nothing.");
+    Ok(())
+}
+
 fn run_worker_state(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let state_path = cwd

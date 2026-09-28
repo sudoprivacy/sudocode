@@ -2,7 +2,8 @@ use std::ffi::OsString;
 use std::sync::{Mutex, OnceLock};
 
 use api::{
-    read_xai_base_url, ApiFormat, Credential, ProviderClient, ProviderKind, ResolvedProvider,
+    read_xai_base_url, ApiFormat, AuthMode, Credential, ProviderClient, ProviderKind,
+    ResolvedProvider,
 };
 
 #[test]
@@ -14,12 +15,48 @@ fn provider_client_routes_xai_through_from_resolved() {
         credential: Credential::ApiKey("xai-test-key".to_string()),
         model_id: "grok-3-mini".to_string(),
         extra_body: serde_json::Map::new(),
+        cache_ttl_1h: None,
     };
 
     let client = ProviderClient::from_resolved(&resolved, None)
         .expect("xai resolved provider should construct");
 
     assert_eq!(client.provider_kind(), ProviderKind::Xai);
+}
+
+/// The 1h TTL decision has to survive `from_resolved`, because that is the one
+/// construction path both the main loop and every sub-agent take
+/// (`build_agent_runtime` -> `new_with_config` -> `build_provider_entry_with_config`).
+///
+/// An API key defaults to 5m, so `Some(true)` here also proves the config
+/// override beats the auth mode rather than being quietly dropped — and that a
+/// sub-agent spawned with an explicit `auth_mode` still lands on the same TTL
+/// as its parent whenever the config pins one.
+#[test]
+fn resolved_cache_ttl_reaches_the_client_both_ways() {
+    for pinned in [Some(true), Some(false), None] {
+        let resolved = ResolvedProvider {
+            kind: ProviderKind::Anthropic,
+            api_format: ApiFormat::AnthropicMessages,
+            base_url: "https://api.anthropic.com".to_string(),
+            credential: Credential::ApiKey("sk-ant-test-key".to_string()),
+            model_id: "claude-opus-5".to_string(),
+            extra_body: serde_json::Map::new(),
+            cache_ttl_1h: pinned,
+        };
+
+        let client = ProviderClient::from_resolved(&resolved, Some(AuthMode::ApiKey))
+            .expect("anthropic resolved provider should construct");
+        let ProviderClient::Anthropic(anthropic) = &client else {
+            panic!("AnthropicMessages must build an Anthropic client");
+        };
+        assert_eq!(
+            anthropic.cache_ttl_1h(),
+            // Unpinned: the API key's own default, which is 5m.
+            pinned.unwrap_or(false),
+            "config value {pinned:?} must reach the client unchanged"
+        );
+    }
 }
 
 #[test]
@@ -31,6 +68,7 @@ fn provider_client_routes_generic_openai_responses_through_from_resolved() {
         credential: Credential::ApiKey("openai-test-key".to_string()),
         model_id: "gpt-5.5".to_string(),
         extra_body: serde_json::Map::new(),
+        cache_ttl_1h: None,
     };
 
     let client = ProviderClient::from_resolved(&resolved, None)
@@ -48,6 +86,7 @@ fn provider_client_routes_anthropic_through_from_resolved() {
         credential: Credential::ApiKey("anthropic-test-key".to_string()),
         model_id: "claude-sonnet-4-6".to_string(),
         extra_body: serde_json::Map::new(),
+        cache_ttl_1h: None,
     };
 
     let client = ProviderClient::from_resolved(&resolved, None)

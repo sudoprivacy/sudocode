@@ -61,6 +61,13 @@ impl ProviderClient {
                 };
                 let mut client = AnthropicClient::from_auth_with_mode(auth, mode)
                     .with_base_url(resolved.base_url.clone());
+                // `sudocode.json: cache_ttl_1h` overrides the default the auth
+                // mode picked. Applied here, once, before any request: the TTL
+                // is part of every `cache_control` block, so a value that moved
+                // between turns would rewrite the prefix it was holding.
+                if let Some(ttl_1h) = resolved.cache_ttl_1h {
+                    client = client.with_cache_ttl_1h(ttl_1h);
+                }
                 // Per-model `extraBody` (sudocode.json) — same additive rule
                 // as the OpenAI-compatible path: sudocode's own fields win.
                 // `render_json_body` skips keys the serialized request already
@@ -359,6 +366,7 @@ mod tests {
         );
 
         SudoCodeConfig {
+            cache_ttl_1h: None,
             auth_modes,
             models,
             web_search: Default::default(),

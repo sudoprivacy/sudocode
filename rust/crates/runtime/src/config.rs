@@ -161,6 +161,16 @@ pub struct SudoCodeConfig {
     /// commands someone needs to fix this. Diagnostics report these and offer to
     /// move the key; the spending path refuses (see `select_proxy_account`).
     pub auth_profile_conflicts: Vec<PathBuf>,
+    /// `cache_ttl_1h` — hold Anthropic prompt caches for an hour rather than
+    /// the five-minute default.
+    ///
+    /// `None` means "follow Claude Code", which turns it on for subscription
+    /// auth and leaves a metered API key on 5m; the two pay for a cache write
+    /// differently (window versus 2x base against 1.25x). Set it only to
+    /// override that, and set it once: the TTL travels inside every
+    /// `cache_control` block, so changing it mid-session rewrites the prefix
+    /// it was holding.
+    pub cache_ttl_1h: Option<bool>,
 }
 
 impl SudoCodeConfig {
@@ -2032,6 +2042,7 @@ fn parse_sudocode_from_object(
     let auth_modes = parse_auth_modes_section(root_obj, sentinel)?;
     let models = parse_sudocode_models_section(root_obj, sentinel, extra_bodies)?;
     let web_search = parse_web_search_section(root_obj);
+    let cache_ttl_1h = root_obj.get("cache_ttl_1h").and_then(JsonValue::as_bool);
 
     Ok(SudoCodeConfig {
         auth_modes,
@@ -2041,6 +2052,7 @@ fn parse_sudocode_from_object(
         // `sudocode.json` alone cannot see them.
         selected_account: None,
         auth_profile_conflicts: Vec::new(),
+        cache_ttl_1h,
     })
 }
 

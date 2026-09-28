@@ -8201,12 +8201,57 @@ fn persist_agent_session(manifest: &AgentOutput, session: &Session, fs: &dyn FsB
     }
 }
 
+/// A fresh agent id, unique even when two spawns land in the same clock tick.
+///
+/// The id is the primary key for everything an agent owns: its manifest
+/// (`{agent_id}.json`), its output (`{agent_id}.md`), its entry in the
+/// completion registry, its abort signal, and the `agentId` every lifecycle
+/// event carries. A duplicate is not a cosmetic clash — one agent's manifest
+/// overwrites the other's and one of the two results is simply lost.
+///
+/// A bare `SystemTime::now()` was not enough for that. Windows' system clock
+/// commonly advances in ~15.6 ms ticks, so two calls inside one tick read the
+/// *same* nanosecond count. That stayed hidden while sibling spawns were
+/// separated by a whole sub-agent run, and stops being hidden the moment two
+/// spawns are dispatched together — which is now the normal case, and was
+/// already the case for two background spawns.
+///
+/// So the counter is clamped to be strictly increasing: the timestamp still
+/// supplies ordering and rough wall-clock meaning, while the clamp supplies
+/// uniqueness without changing the `agent-<digits>` shape that fixtures and
+/// id-derived colours depend on. Uniqueness is per process; two processes
+/// sharing one agent store could still collide on the same nanosecond, exactly
+/// as before.
 fn make_agent_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("agent-{nanos}")
+    let nanos = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    )
+    .unwrap_or(u64::MAX);
+    format!("agent-{}", monotonic_agent_nanos(nanos))
+}
+
+/// The clamp behind [`make_agent_id`], split out so it can be tested against a
+/// clock that does not move — which is the only interesting case and the one a
+/// real clock will not reproduce on demand.
+///
+/// Every return value is strictly greater than every value returned before it,
+/// process-wide, so ids are distinct however coarse the clock is.
+fn monotonic_agent_nanos(nanos: u64) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+
+    let mut previous = LAST.load(Ordering::Relaxed);
+    loop {
+        let candidate = nanos.max(previous.saturating_add(1));
+        match LAST.compare_exchange_weak(previous, candidate, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return candidate,
+            Err(actual) => previous = actual,
+        }
+    }
 }
 
 fn slugify_agent_name(description: &str) -> String {
@@ -9792,6 +9837,30 @@ mod tests {
         assert_eq!(canonicalize_tool_name("send_message"), "send");
         assert_eq!(canonicalize_tool_name("send"), "send");
         assert_eq!(canonicalize_tool_name("TodoWrite"), "TodoWrite");
+    }
+
+    /// Two agents spawned inside one clock tick must not share an id. The id
+    /// names the manifest, the output file, the registry entry and every
+    /// lifecycle event, so a duplicate silently loses one agent's result.
+    ///
+    /// Driven with a frozen timestamp because that is the failing case and a
+    /// real clock will not hold still on request: Windows advances its system
+    /// clock in ~15.6 ms steps, so sibling spawns genuinely read the same
+    /// nanosecond count there.
+    ///
+    /// Asserting a strict increase rather than mere distinctness because the
+    /// counter is process-wide: another test drawing ids concurrently shifts
+    /// the values but cannot break "every id exceeds every earlier id".
+    #[test]
+    fn agent_ids_differ_when_the_clock_stands_still() {
+        let frozen = 1_790_000_000_000_000_000_u64;
+        let drawn: Vec<u64> = (0..64)
+            .map(|_| super::monotonic_agent_nanos(frozen))
+            .collect();
+        assert!(
+            drawn.windows(2).all(|pair| pair[0] < pair[1]),
+            "ids must keep increasing even with a stopped clock, got: {drawn:?}"
+        );
     }
 
     #[test]

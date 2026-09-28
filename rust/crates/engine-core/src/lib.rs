@@ -96,6 +96,8 @@ pub use engine_events::{EngineCommand, EngineEvent, EngineState, RequestId, Turn
 pub use api::{
     // Provider/base-url resolution + constants.
     base_url_for_mode,
+    // Prompt-cache records: where they live and what a session's look like.
+    cache_root,
     // Error surface (raw type + the human-facing formatter the CLI renders).
     format_user_visible_api_error,
     max_tokens_for_model,
@@ -113,6 +115,7 @@ pub use api::{
     // Config SSOT (these are themselves re-exported by `api` from `runtime`).
     ModelConfigEntry,
     ModelProviderMapping,
+    PromptCacheStats,
     ProviderConnectionConfig,
     ProviderKind,
     // Transport retry hook (implemented by the CLI spinner bridge).

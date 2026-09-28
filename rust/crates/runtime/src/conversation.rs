@@ -2258,22 +2258,43 @@ where
                     // `&self.tool_executor`) is already dropped and `&mut self`
                     // is free.
                     let abort_signal = self.hook_abort_signal.clone();
-                    dispatch_context.tool_use_id = None;
-                    let batch_exec = futures::future::join_all(prepared.iter().map(|p| async {
-                        if p.deny_reason.is_some() {
-                            None
-                        } else {
-                            Some(
-                                self.tool_executor
-                                    .execute_with_attachments(
-                                        &p.tool_name,
-                                        &p.effective_input,
-                                        &dispatch_context,
-                                    )
-                                    .await,
-                            )
+                    // Bounded, not `join_all`: `buffered` keeps at most
+                    // `max_tool_use_concurrency()` executes in flight and still
+                    // yields results in batch order, which phase 3 indexes by.
+                    //
+                    // Each tool gets its own context carrying its own
+                    // `tool_use_id`. The batch used to share one with the id
+                    // blanked — harmless for reads, but a sub-agent spawn needs
+                    // it: `SubagentLink::from_dispatch` gives up without one, so
+                    // a spawn in a batch would run and emit no lifecycle event
+                    // at all. The clone is an `Arc` shuffle, once per tool.
+                    //
+                    // The executor is borrowed once up front: each future is
+                    // `async move` so it can own its context, and moving `self`
+                    // in as well would not compile (nor be wanted — phase 3
+                    // needs `&mut self` right after).
+                    let executor = &self.tool_executor;
+                    let batch_exec = futures::stream::iter(prepared.iter().map(|p| {
+                        let mut ctx = dispatch_context.clone();
+                        ctx.tool_use_id = Some(p.tool_use_id.clone());
+                        async move {
+                            if p.deny_reason.is_some() {
+                                None
+                            } else {
+                                Some(
+                                    executor
+                                        .execute_with_attachments(
+                                            &p.tool_name,
+                                            &p.effective_input,
+                                            &ctx,
+                                        )
+                                        .await,
+                                )
+                            }
                         }
-                    }));
+                    }))
+                    .buffered(max_tool_use_concurrency())
+                    .collect::<Vec<_>>();
                     let maybe_results: Option<
                         Vec<Option<Result<crate::image_input::ToolOutput, ToolError>>>,
                     > = tokio::select! {
@@ -3629,7 +3650,46 @@ fn is_concurrency_safe_tool(tool_name: &str) -> bool {
             // Process-status reads
             | "pid_status"
             | "pid_output"
+            // Sub-agent spawns. Each child gets its own session, manifest,
+            // client and filesystem handle, so two spawns share no mutable
+            // state of ours. Claude Code declares the same
+            // (`AgentTool.isConcurrencySafe() => true`) and tells the model to
+            // launch several in one message; serialising them here made that
+            // instruction a lie — N delegations cost N sequential runs, each
+            // holding the turn open until it finished or auto-backgrounded at
+            // 120s.
+            | "agent_spawn"
+            | "pid_fork"
     )
+}
+
+/// Ceiling on how many tools of one concurrency-safe batch execute at once.
+///
+/// Claude Code's number (`toolOrchestration.ts`:
+/// `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY || 10`). Until sub-agents joined the
+/// set above there was no ceiling at all — the batch went to `join_all` whole —
+/// which was survivable for file reads and greps and is not now that one batch
+/// entry can be a full model session: an unbounded fan-out arrives upstream as
+/// that many simultaneous requests against a single account.
+const MAX_TOOL_USE_CONCURRENCY: usize = 10;
+
+/// `SUDOCODE_MAX_TOOL_USE_CONCURRENCY` overrides [`MAX_TOOL_USE_CONCURRENCY`].
+///
+/// Worth a knob for the reason Claude Code has one: the useful ceiling is set
+/// by what the upstream account will run at once, not by this process. Past
+/// that point the surplus does not merely wait — a pooled deployment can route
+/// the overflow to a different account, where the system prompt and tools this
+/// batch is sharing have never been cached, so every spilled sub-agent pays to
+/// create the prefix again.
+///
+/// `0` and unparseable values fall back to the default rather than meaning
+/// "no limit": a zero would stall the batch forever.
+fn max_tool_use_concurrency() -> usize {
+    std::env::var("SUDOCODE_MAX_TOOL_USE_CONCURRENCY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(MAX_TOOL_USE_CONCURRENCY)
 }
 
 /// Per-tool state carried from the serial pre-pass (hooks + permission) of a
@@ -3751,9 +3811,10 @@ fn offload_preview_end(output: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_compact_threshold_for_model, build_assistant_message, ApiClient, ApiRequest,
-        AssistantEvent, AssistantEventStream, AutoCompactionEvent, ConversationRuntime,
-        PromptCacheEvent, RuntimeError, RuntimeObserver, StaticToolExecutor, ToolExecutor,
+        auto_compact_threshold_for_model, build_assistant_message, is_concurrency_safe_tool,
+        max_tool_use_concurrency, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream,
+        AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError, RuntimeObserver,
+        StaticToolExecutor, ToolExecutor, MAX_TOOL_USE_CONCURRENCY,
     };
     use crate::compact::CompactionConfig;
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
@@ -3998,6 +4059,113 @@ mod tests {
             self.active.fetch_sub(1, SeqCst);
             Ok("ok".to_string())
         }
+    }
+
+    /// One assistant message emitting `calls` read-only tool calls, then
+    /// end-turn. Parameterised so a test can ask for a batch deliberately
+    /// wider than the concurrency ceiling.
+    struct WideBatchClient {
+        call_count: usize,
+        calls: usize,
+    }
+
+    #[async_trait]
+    impl ApiClient for WideBatchClient {
+        async fn stream(
+            &mut self,
+            _request: ApiRequest,
+        ) -> Result<AssistantEventStream, RuntimeError> {
+            self.call_count += 1;
+            if self.call_count == 1 {
+                let uses = (0..self.calls)
+                    .map(|i| AssistantEvent::ToolUse {
+                        id: format!("r{i}"),
+                        name: "read_file".to_string(),
+                        input: format!("{{\"path\":\"f{i}\"}}"),
+                        thought_signature: None,
+                    })
+                    .chain(std::iter::once(AssistantEvent::MessageStop))
+                    .collect();
+                Ok(events_to_stream(uses))
+            } else {
+                Ok(events_to_stream(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+    }
+
+    /// Claude Code caps a concurrency-safe batch at 10
+    /// (`toolOrchestration.ts`). Pinned in its own test so the parity is a
+    /// stated fact rather than a coincidence, and so a change to the number
+    /// has to be deliberate.
+    #[test]
+    fn tool_use_concurrency_ceiling_matches_claude_code() {
+        assert_eq!(MAX_TOOL_USE_CONCURRENCY, 10);
+    }
+
+    /// A batch wider than the ceiling must not run wide. Before the ceiling
+    /// existed this peaked at the batch size, which only became dangerous once
+    /// `agent_spawn` joined the concurrency-safe set: each entry is then a full
+    /// model session, and the surplus lands upstream as simultaneous requests
+    /// on one account.
+    ///
+    /// Sized from `max_tool_use_concurrency()` rather than the constant so an
+    /// environment that overrides the limit still exercises the cap instead of
+    /// failing for the wrong reason.
+    #[tokio::test]
+    async fn a_batch_wider_than_the_ceiling_is_capped() {
+        let limit = max_tool_use_concurrency();
+        let calls = limit + 3;
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            WideBatchClient {
+                call_count: 0,
+                calls,
+            },
+            PeakConcurrencyProbe {
+                active: std::sync::Arc::clone(&active),
+                peak: std::sync::Arc::clone(&peak),
+            },
+            PermissionPolicy::new(PermissionMode::Allow),
+            SystemPromptBuilder::new().with_os("linux", "6.8").build(),
+        );
+
+        let summary = runtime
+            .run_turn("read many files", None, None)
+            .await
+            .expect("turn should succeed");
+
+        assert_eq!(
+            summary.tool_results.len(),
+            calls,
+            "every tool in the batch still produces a result"
+        );
+        assert_eq!(
+            peak.load(std::sync::atomic::Ordering::SeqCst),
+            limit,
+            "the batch must be throttled to the ceiling, not run {calls} wide"
+        );
+    }
+
+    /// Sub-agent spawns run in parallel, as they do in Claude Code
+    /// (`AgentTool.isConcurrencySafe() => true`). Named spellings included
+    /// because the model chooses the spelling and canonicalization is what
+    /// makes the set match.
+    #[test]
+    fn sub_agent_spawns_are_concurrency_safe() {
+        for name in ["agent_spawn", "Agent", "pid_fork"] {
+            assert!(
+                is_concurrency_safe_tool(name),
+                "{name} must batch concurrently: serialising delegations makes \
+                 the prompt's \"launch several at once\" advice false"
+            );
+        }
+        // The counter-case: a writer still partitions the run.
+        assert!(!is_concurrency_safe_tool("write_file"));
     }
 
     #[tokio::test]

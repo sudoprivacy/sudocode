@@ -62,6 +62,10 @@ pub struct ResolvedProvider {
     /// Merged additively into the outbound payload by the provider client;
     /// empty for models that do not configure it.
     pub extra_body: Map<String, Value>,
+    /// `cache_ttl_1h` from `sudocode.json`; `None` = follow the auth mode.
+    /// Only the Anthropic client reads it — no other provider exposes a
+    /// cache TTL to ask for.
+    pub cache_ttl_1h: Option<bool>,
 }
 
 /// Token-limit metadata for a wire model ID.
@@ -620,6 +624,7 @@ pub fn resolve_provider_from_config(
         credential,
         model_id: mapping.model.clone(),
         extra_body: model_config.extra_body.clone(),
+        cache_ttl_1h: config.cache_ttl_1h,
     })
 }
 
@@ -667,6 +672,7 @@ fn try_proxy_passthrough(
         model_id: model_id.to_string(),
         // Proxy passthrough has no `models.<alias>` entry to read from.
         extra_body: Map::new(),
+        cache_ttl_1h: config.cache_ttl_1h,
     }))
 }
 
@@ -893,6 +899,42 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// `cache_ttl_1h` has exactly one home — `sudocode.json` — and one route
+    /// to the client that acts on it. This pins that route: a value set in
+    /// config has to survive resolution, because the only other way to reach
+    /// the same effect would be a second switch somewhere else.
+    #[test]
+    fn cache_ttl_1h_travels_from_config_to_resolved_provider() {
+        let mut config = sample_config();
+        // `sample_config` reads the subscription token from the environment;
+        // inline it so resolution does not depend on the shell.
+        config
+            .auth_modes
+            .get_mut("subscription")
+            .unwrap()
+            .get_mut("claude")
+            .unwrap()
+            .token = Some("sk-inline-oauth-token".to_string());
+
+        // Unset: the Anthropic client falls back to the auth mode's default,
+        // so resolution must not invent one here.
+        let resolved = resolve_provider_from_config("opus", Some(AuthMode::Subscription), &config)
+            .expect("resolve");
+        assert_eq!(resolved.cache_ttl_1h, None);
+
+        for wanted in [true, false] {
+            config.cache_ttl_1h = Some(wanted);
+            let resolved =
+                resolve_provider_from_config("opus", Some(AuthMode::Subscription), &config)
+                    .expect("resolve");
+            assert_eq!(
+                resolved.cache_ttl_1h,
+                Some(wanted),
+                "config must reach the provider unchanged"
+            );
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn sample_config() -> SudoCodeConfig {
         let mut auth_modes = BTreeMap::new();
@@ -1063,6 +1105,7 @@ mod tests {
         );
 
         SudoCodeConfig {
+            cache_ttl_1h: None,
             auth_modes,
             models,
             web_search: Default::default(),

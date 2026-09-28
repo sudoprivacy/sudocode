@@ -185,7 +185,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "api"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "base64",
  "criterion",
@@ -764,6 +764,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -781,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "commands"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "plugins",
  "runtime",
@@ -790,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "compat-harness"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "commands",
  "runtime",
@@ -1725,6 +1731,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2117,12 +2133,25 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",
  "tiff",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "image-webp"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+dependencies = [
+ "byteorder-lite",
+ "quick-error",
 ]
 
 [[package]]
@@ -2574,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-service"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "api",
  "serde_json",
@@ -2604,7 +2633,7 @@ source = "git+https://github.com/nexi-lab/nexus-vfs?rev=ec1497591e44fc573585ff69
 
 [[package]]
 name = "nexus-vfs-client"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -3057,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3758,7 +3787,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "a2a",
  "agent-client-protocol",
@@ -3899,7 +3928,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty-sudocode-cli"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "api",
  "arboard",
@@ -4516,7 +4545,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -4870,7 +4899,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.2.0"
+version = "0.2.0-ruigu.1"
 dependencies = [
  "api",
  "async-trait",

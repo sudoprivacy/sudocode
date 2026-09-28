@@ -1005,7 +1005,7 @@ pub(crate) fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMes
                     && last
                         .content
                         .iter()
-                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
+                        .any(|block| matches!(block, InputContentBlock::ToolResult { .. }))
                 {
                     last.content.extend(content);
                     continue;
@@ -1017,6 +1017,13 @@ pub(crate) fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMes
             role: role.to_string(),
             content,
         });
+    }
+    for message in &mut result {
+        // Keep every tool result before its attachments. OpenAI tool messages
+        // must answer the whole assistant batch before a user image message.
+        message
+            .content
+            .sort_by_key(|block| !matches!(block, InputContentBlock::ToolResult { .. }));
     }
     result
 }
@@ -1193,6 +1200,43 @@ mod tests {
             converted[2].content[0],
             InputContentBlock::ToolResult { .. }
         ));
+    }
+
+    #[test]
+    fn convert_messages_keeps_tool_results_ahead_of_read_image_attachments() {
+        // Two parallel Reads of screenshots: each tool_result message carries
+        // its image after the result. The merged user message must list both
+        // tool_results before any image, or OpenAI-compatible transports see an
+        // unanswered tool_call when the image message is emitted.
+        let mut first = tool_result("call_a", "read_file", "Image read from a.png");
+        first.blocks.push(ContentBlock::Image {
+            data: "AAAA".to_string(),
+            mime_type: "image/png".to_string(),
+        });
+        let mut second = tool_result("call_b", "read_file", "Image read from b.png");
+        second.blocks.push(ContentBlock::Image {
+            data: "BBBB".to_string(),
+            mime_type: "image/png".to_string(),
+        });
+        let messages = vec![
+            tool_use_multi(&[("call_a", "read_file"), ("call_b", "read_file")]),
+            first,
+            second,
+        ];
+
+        let converted = convert_messages(&messages);
+
+        assert_eq!(converted.len(), 2, "both results merge into one user message");
+        let kinds: Vec<&str> = converted[1]
+            .content
+            .iter()
+            .map(|block| match block {
+                InputContentBlock::ToolResult { .. } => "result",
+                InputContentBlock::Image { .. } => "image",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["result", "result", "image", "image"]);
     }
 
     #[test]

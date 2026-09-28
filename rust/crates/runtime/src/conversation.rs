@@ -222,6 +222,21 @@ impl ToolDispatchContext {
 /// state (spinner, prompter) lives behind single-threaded interior mutability
 /// in the impl.
 pub trait ToolExecutor: Send {
+    async fn execute_with_attachments(
+        &self,
+        tool_name: &str,
+        input: &str,
+        ctx: &ToolDispatchContext,
+    ) -> Result<crate::image_input::ToolOutput, ToolError> {
+        let output = self.execute_with_context(tool_name, input, ctx).await?;
+        let model = ctx
+            .parent_assistant_message
+            .as_ref()
+            .and_then(|m| m.model.as_deref())
+            .unwrap_or("");
+        crate::image_input::ToolOutput::from_dispatch(tool_name, output, model)
+    }
+
     async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 
     /// Dispatch with per-call context. Default forwards to
@@ -1325,14 +1340,15 @@ where
                     // Phase 2 (concurrent, &self): overlap the executes of the
                     // permitted tools — only `&self.tool_executor` and the owned
                     // inputs enter the futures, never `&mut self`.
-                    let exec_results: Vec<Option<Result<String, ToolError>>> =
-                        futures::future::join_all(prepared.iter().map(|p| async {
+                    let exec_results: Vec<
+                        Option<Result<crate::image_input::ToolOutput, ToolError>>,
+                    > = futures::future::join_all(prepared.iter().map(|p| async {
                             if p.deny_reason.is_some() {
                                 None
                             } else {
                                 Some(
                                     self.tool_executor
-                                        .execute_with_context(
+                                        .execute_with_attachments(
                                             &p.tool_name,
                                             &p.effective_input,
                                             &dispatch_context,
@@ -1353,12 +1369,14 @@ where
                                 true,
                             )
                         } else {
-                            let (mut output, mut is_error) = match exec_results[offset]
+                            let (mut output, attachments, mut is_error) = match exec_results[offset]
                                 .as_ref()
                                 .expect("permitted tool has an execute result")
                             {
-                                Ok(output) => (output.clone(), false),
-                                Err(error) => (error.to_string(), true),
+                                Ok(output) => {
+                                    (output.text.clone(), output.attachments.clone(), false)
+                                }
+                                Err(error) => (error.to_string(), Vec::new(), true),
                             };
                             if self.hook_abort_signal.is_aborted() {
                                 output =
@@ -1418,10 +1436,13 @@ where
                                     || post_hook_result.is_failed()
                                     || post_hook_result.is_cancelled(),
                             );
-                            ConversationMessage::tool_result(
+                            crate::image_input::ToolOutput {
+                                text: output,
+                                attachments,
+                            }
+                            .into_message(
                                 p.tool_use_id,
                                 p.tool_name,
-                                output,
                                 is_error,
                             )
                         };
@@ -1522,13 +1543,13 @@ where
                 let result_message = match permission_outcome {
                     PermissionOutcome::Allow => {
                         self.record_tool_started(iterations, &tool_name);
-                        let (mut output, mut is_error) = match self
+                        let (mut output, attachments, mut is_error) = match self
                             .tool_executor
-                            .execute_with_context(&tool_name, &effective_input, &dispatch_context)
+                            .execute_with_attachments(&tool_name, &effective_input, &dispatch_context)
                             .await
                         {
-                            Ok(output) => (output, false),
-                            Err(error) => (error.to_string(), true),
+                            Ok(output) => (output.text, output.attachments, false),
+                            Err(error) => (error.to_string(), Vec::new(), true),
                         };
                         if self.hook_abort_signal.is_aborted() {
                             output = merge_hook_feedback(pre_hook_result.messages(), output, true);
@@ -1590,7 +1611,11 @@ where
 
                         let output =
                             self.maybe_offload_tool_output(&tool_use_id, &tool_name, output);
-                        ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error)
+                        crate::image_input::ToolOutput {
+                            text: output,
+                            attachments,
+                        }
+                        .into_message(tool_use_id, tool_name, is_error)
                     }
                     PermissionOutcome::Deny { reason } => ConversationMessage::tool_result(
                         tool_use_id,

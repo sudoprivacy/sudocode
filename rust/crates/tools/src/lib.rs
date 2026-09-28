@@ -775,7 +775,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file from the workspace. Reads up to 2000 lines by default; a page that would exceed the size cap is shrunk automatically and ends with a [Truncated: PARTIAL view …] banner telling you the offset/limit for the next page. When you already know which part of the file you need, only read that part.",
+            description: "Read a text file or a PNG/JPEG/GIF/WebP image from the workspace. Images are attached for visual inspection; a vision-capable model is required. After a screenshot command, call Read on its saved image path. Text reads up to 2000 lines by default; a page that would exceed the size cap is shrunk automatically and ends with a [Truncated: PARTIAL view …] banner telling you the offset/limit for the next page. When you already know which part of the file you need, only read that part.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2783,6 +2783,11 @@ fn branch_divergence_output(
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_read_file(input: ReadFileInput, fs: &dyn FsBackend) -> Result<String, String> {
+    if runtime::image_input::is_image_path(&input.path) {
+        return to_pretty_json(
+            runtime::image_input::read_image(fs, &input.path).map_err(io_to_string)?,
+        );
+    }
     to_pretty_json(read_file(fs, &input.path, input.offset, input.limit).map_err(io_to_string)?)
 }
 
@@ -6605,7 +6610,7 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                     && last
                         .content
                         .iter()
-                        .all(|block| matches!(block, InputContentBlock::ToolResult { .. }))
+                        .any(|block| matches!(block, InputContentBlock::ToolResult { .. }))
                 {
                     last.content.extend(content);
                     continue;
@@ -6616,6 +6621,13 @@ fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
             role: role.to_string(),
             content,
         });
+    }
+    for message in &mut result {
+        // Keep every tool result before its attachments. OpenAI tool messages
+        // must answer the whole assistant batch before a user image message.
+        message
+            .content
+            .sort_by_key(|block| !matches!(block, InputContentBlock::ToolResult { .. }));
     }
     result
 }

@@ -724,20 +724,46 @@ impl Mailbox {
 
     /// Every agent with a presence in this namespace — who a broadcast reaches.
     ///
+    /// An entry is an agent when it carries what [`Self::ensure_presence`] creates,
+    /// and that check is not optional bookkeeping. The agents directory is a MOUNT,
+    /// and for a co-host it is a zone: `readdir` there also returns the zone's own
+    /// storage directories (`raft`, `sm`), and where the agent and conversation
+    /// trees alias one zone, conversation ids and session ids come back beside them.
+    /// Live, this returned `raft` and `sm` as addressable peers — which is worse
+    /// than returning nothing, because a model told those are its peers will
+    /// address them, and the failure arrives looking like an answer.
+    ///
+    /// The test asks through `chat_list_dir`, the same function `ensure_presence`
+    /// writes through, so "what presence looks like" has one definition instead of
+    /// a filter here that can drift from the announcement there.
+    ///
     /// # Errors
     ///
-    /// An `Err` when the namespace cannot be enumerated, rather than an empty
-    /// list. The difference matters to the one caller that needs this: a
-    /// broadcast over "no recipients" reports success having delivered nothing,
-    /// which is the silent kind of failure. Saying so at the source means no
-    /// caller has to remember to ask first.
+    /// An `Err` when the namespace cannot be enumerated, or when an entry's
+    /// presence cannot be determined — never an empty list, and never a silently
+    /// shortened one. The difference matters to every caller: a broadcast over "no
+    /// recipients" reports success having delivered nothing, and an agent told it
+    /// has no peers reports that to its operator as fact. An entry dropped because
+    /// the check itself failed would be the same blindness one layer down.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
         let dir = self.convention.agents_dir();
         let entries = self
             .backend
             .readdir(&dir)
             .map_err(|e| format!("list recipients at {dir}: {e}"))?;
-        let mut names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+        let mut names: Vec<String> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let chat_list = self.convention.chat_list_dir(&entry.name);
+            let announced = self.backend.exists(&chat_list).map_err(|e| {
+                format!(
+                    "list recipients at {dir}: cannot tell whether {} is an agent ({chat_list}): {e}",
+                    entry.name
+                )
+            })?;
+            if announced {
+                names.push(entry.name);
+            }
+        }
         names.sort();
         Ok(names)
     }

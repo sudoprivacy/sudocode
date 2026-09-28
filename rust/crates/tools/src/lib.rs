@@ -1169,7 +1169,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Spawn a sub-agent, returning a pid. ",
                 "The sub-agent runs in an isolated context (its own system prompt + this task) ",
                 "and does not inherit this conversation; it is a throwaway worker that returns a result. ",
-                "Frame the task with `context`, `constraints`, and `acceptance` (they are prepended to the sub-agent's prompt); `prompt` is the work itself. ",
+                "For a substantial task you may frame it with `context`, `constraints`, and `acceptance` (prepended to the sub-agent's prompt); a quick or read-only spawn can just use `prompt`. ",
                 "Runs in the background by default; set `run_in_background: false` for synchronous. ",
                 "Use `pid_output(pid, block: true)` to await a background agent."
             ),
@@ -1187,7 +1187,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["prompt"],
                 "additionalProperties": false
-            }), true),
+            }), false),
             // Read-only: spawning is a read-only ACT. The child never runs with
             // more authority than the spawning session (it inherits the parent's
             // mode — see `AgentJob.permission_mode`), so the spawn call itself
@@ -13785,36 +13785,40 @@ printf 'pwsh:%s' "$1"
     }
 
     #[test]
-    fn task_template_fields_required_on_write_plan_and_agent_spawn() {
+    fn task_template_fields_required_on_write_plan() {
         // Enforcement + DRY: the three framing fields are properties AND required
-        // on both task-shaped tools, sourced from the one shared fragment.
-        for name in ["write_plan", "agent_spawn"] {
+        // on write_plan (always a heavyweight plan), from the one shared fragment.
+        let spec = spec_named("write_plan");
+        let props = spec.input_schema["properties"].as_object().unwrap();
+        let req = required_names(&spec);
+        for field in super::TASK_TEMPLATE_REQUIRED {
+            assert!(
+                props.contains_key(field),
+                "write_plan missing property {field}"
+            );
+            assert!(
+                req.contains(&field.to_string()),
+                "write_plan must require {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_template_fields_optional_on_agent_spawn_and_send() {
+        // agent_spawn and send span lightweight tasks/chat too, so the fields are
+        // available (DRY, same descriptions) but NOT required — the model frames
+        // a substantial task and omits them for a quick spawn or plain message.
+        for name in ["agent_spawn", "send"] {
             let spec = spec_named(name);
             let props = spec.input_schema["properties"].as_object().unwrap();
             let req = required_names(&spec);
             for field in super::TASK_TEMPLATE_REQUIRED {
                 assert!(props.contains_key(field), "{name} missing property {field}");
                 assert!(
-                    req.contains(&field.to_string()),
-                    "{name} must require {field}"
+                    !req.contains(&field.to_string()),
+                    "{name} must NOT require {field}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn task_template_fields_optional_on_send() {
-        // send stays general: fields are available but NOT required (a chat
-        // message needn't carry them).
-        let spec = spec_named("send");
-        let props = spec.input_schema["properties"].as_object().unwrap();
-        let req = required_names(&spec);
-        for field in super::TASK_TEMPLATE_REQUIRED {
-            assert!(props.contains_key(field), "send missing property {field}");
-            assert!(
-                !req.contains(&field.to_string()),
-                "send must NOT require {field}"
-            );
         }
     }
 

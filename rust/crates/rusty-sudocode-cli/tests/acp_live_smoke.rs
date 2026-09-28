@@ -34,6 +34,38 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const RECV_TIMEOUT: Duration = Duration::from_secs(120);
 const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Fail with the real cause when the provider answered with a credential rejection
+/// instead of a model reply.
+///
+/// These assertions are about model BEHAVIOUR, and a rejected credential arrives in
+/// the same place a reply would: the provider returns its refusal as the assistant's
+/// text, so `expected 'pong' … but got: "认证失败…"` reads as "the model gave a wrong
+/// answer". On main that misfiled the same failure for days while the actual fix was
+/// to rotate a secret.
+///
+/// Prose matching is the weak part and it is deliberate: the refusal comes back as
+/// the answer, so there is no status code or error object to read. The markers stay
+/// narrow, and a miss only means the old, vaguer message — this can mislabel nothing
+/// that was not already unlabelled.
+fn fail_clearly_if_the_credential_was_rejected(text: &str) {
+    const MARKERS: [&str; 5] = [
+        "认证失败",
+        "authentication failed",
+        "invalid api key",
+        "invalid_api_key",
+        "unauthorized",
+    ];
+    let lowered = text.to_lowercase();
+    if MARKERS.iter().any(|m| lowered.contains(m)) {
+        panic!(
+            "the provider rejected this run's credential — it answered with an \
+             authentication failure instead of a model reply, so this is NOT a \
+             model-behaviour failure. Rotate the live API credential this job uses. \
+             The provider said: {text:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Token guard
 // ---------------------------------------------------------------------------
@@ -423,6 +455,7 @@ async fn scenario_session_prompt(client: &mut AcpTestClient, session_id: &str) {
             }
         })
         .collect();
+    fail_clearly_if_the_credential_was_rejected(&response_text);
     assert!(
         response_text.to_lowercase().contains("pong"),
         "expected 'pong' in model response but got: {response_text:?}"

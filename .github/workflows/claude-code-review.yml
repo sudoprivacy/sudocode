@@ -40,3 +40,29 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
+      # A review that never reached a model is an INFRASTRUCTURE failure, and it must
+      # not read like a finding about the diff. Unannotated, this job fails with
+      # `Claude execution failed: result is_error:true` — which sent three separate
+      # PRs looking for a code problem that did not exist, while the real cause was a
+      # rejected credential.
+      #
+      # The signal is structured, not prose: the action's own result log carries
+      # `num_turns` and `total_cost_usd`, and a run that was refused before the first
+      # turn has `num_turns <= 1` with zero cost. Still a failure — a review that did
+      # not happen is not a review that passed — but one that names its cause.
+      - name: Say when the review never reached a model
+        if: failure()
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/claude-execution-output.json"
+          if [ ! -f "$log" ]; then
+            echo "::warning::no execution log at $log — the action failed before it wrote one"
+            exit 0
+          fi
+          turns=$(jq -r '[..|objects|select(has("num_turns"))|.num_turns]|first // empty' "$log")
+          cost=$(jq -r '[..|objects|select(has("total_cost_usd"))|.total_cost_usd]|first // empty' "$log")
+          echo "num_turns=${turns:-unknown} total_cost_usd=${cost:-unknown}"
+          if [ "${turns:-99}" -le 1 ] 2>/dev/null && [ "${cost:-1}" = "0" ]; then
+            echo "::error::The code review never reached a model (num_turns=$turns, cost=$cost) — the repository's CLAUDE_CODE_OAUTH_TOKEN is being rejected. This is an infrastructure failure, NOT a finding about this pull request; rotate the secret. The same credential takes the 'Live API smoke test' job down on main."
+          fi
+

@@ -819,6 +819,7 @@ impl StreamState {
                     stop_sequence: None,
                     usage: Usage::default(),
                     request_id: None,
+                    gateway_request_id: None,
                 },
             }));
         }
@@ -1032,6 +1033,7 @@ async fn collect_stream(
         stop_sequence: None,
         usage,
         request_id: None,
+        gateway_request_id: None,
     })
 }
 

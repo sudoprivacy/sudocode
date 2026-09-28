@@ -338,6 +338,15 @@ pub struct MessageResponse {
     pub usage: Usage,
     #[serde(default)]
     pub request_id: Option<String>,
+    /// The gateway's correlation id for this call, taken from the response
+    /// headers rather than the body — hence `#[serde(default)]`, and never sent.
+    ///
+    /// Named for the gateway rather than the client on purpose: the streaming
+    /// path already has a `client_request_id`, which is an id *we* generate for
+    /// our own tracing. Confusing the two would silently break the join this
+    /// field exists for.
+    #[serde(default, skip_serializing)]
+    pub gateway_request_id: Option<String>,
 }
 
 impl MessageResponse {
@@ -551,6 +560,7 @@ mod tests {
                 ..Usage::default()
             },
             request_id: None,
+            gateway_request_id: None,
         };
 
         let cost = response.usage.estimated_cost_usd(&response.model);

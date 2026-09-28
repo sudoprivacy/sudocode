@@ -2330,6 +2330,7 @@ fn text_message_response(id: &str, text: &str) -> MessageResponse {
             ..Usage::default()
         },
         request_id: None,
+        gateway_request_id: None,
     }
 }
 
@@ -2357,6 +2358,7 @@ fn text_message_response_with_usage(
             ..Usage::default()
         },
         request_id: None,
+        gateway_request_id: None,
     }
 }
 
@@ -2407,6 +2409,7 @@ fn tool_message_response_many(id: &str, tool_uses: &[ToolUseMessage<'_>]) -> Mes
             ..Usage::default()
         },
         request_id: None,
+        gateway_request_id: None,
     }
 }
 

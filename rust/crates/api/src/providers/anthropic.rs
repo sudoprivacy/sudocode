@@ -13,7 +13,8 @@ use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, Session
 
 use crate::error::ApiError;
 use crate::http_transport::{
-    parse_retry_after, request_id_from_headers, HttpTransport, RetryPolicy,
+    gateway_trace_from_headers, parse_retry_after, request_id_from_headers, HttpTransport,
+    RetryPolicy,
 };
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 
@@ -371,6 +372,11 @@ impl AnthropicClient {
 
         let result = self.send_request(&request, trace_id).await?;
         let request_id = request_id_from_headers(result.response.headers());
+        // A gateway's own correlation id, kept alongside the provider's: it is
+        // what a pooling gateway records against the upstream account it chose,
+        // so it is the only way a cache break here can be attributed to an
+        // account change rather than guessed at.
+        let gateway_request_id = gateway_trace_from_headers(result.response.headers());
         let body = result.response.text().await.map_err(ApiError::from)?;
         let mut response = serde_json::from_str::<MessageResponse>(&body).map_err(|error| {
             ApiError::json_deserialize("Anthropic", &request.model, &body, error)
@@ -378,6 +384,7 @@ impl AnthropicClient {
         if response.request_id.is_none() {
             response.request_id = request_id;
         }
+        response.gateway_request_id = gateway_request_id;
 
         if let Some(prompt_cache) = &self.prompt_cache {
             let record = prompt_cache.record_response(&request, &response);
@@ -417,6 +424,7 @@ impl AnthropicClient {
             .await?;
         Ok(MessageStream {
             request_id: request_id_from_headers(result.response.headers()),
+            gateway_request_id: gateway_trace_from_headers(result.response.headers()),
             client_request_id: Some(result.request_id),
             response: result.response,
             parser: SseParser::new().with_context("Anthropic", request.model.clone()),
@@ -924,6 +932,10 @@ impl Provider for AnthropicClient {
 pub struct MessageStream {
     /// Provider-returned request ID (from response header).
     request_id: Option<String>,
+    /// The gateway's correlation id for this stream — distinct from
+    /// `client_request_id` below, which this client generates for its own
+    /// tracing. Kept so the prompt-cache ledger can carry it.
+    gateway_request_id: Option<String>,
     /// Client-generated request ID for tracking.
     client_request_id: Option<String>,
     response: reqwest::Response,
@@ -1045,7 +1057,11 @@ impl MessageStream {
                 if !self.usage_recorded {
                     if let Some(usage) = self.latest_usage.as_ref() {
                         if let Some(prompt_cache) = &self.prompt_cache {
-                            let record = prompt_cache.record_usage(&self.request, usage);
+                            let record = prompt_cache.record_usage(
+                                &self.request,
+                                usage,
+                                self.gateway_request_id.as_deref(),
+                            );
                             *self
                                 .last_prompt_cache_record
                                 .lock()

@@ -61,6 +61,11 @@ pub struct PromptCachePaths {
     pub completion_dir: PathBuf,
     pub session_state_path: PathBuf,
     pub stats_path: PathBuf,
+    /// Append-only, one line per tracked request. `stats.json` is a rollup and
+    /// answers "how is the cache doing"; this answers "what happened, in what
+    /// order, and on whose account" — which a rollup structurally cannot,
+    /// because the moment a prefix goes cold is a point in a sequence.
+    pub requests_path: PathBuf,
 }
 
 impl PromptCachePaths {
@@ -73,6 +78,7 @@ impl PromptCachePaths {
             root,
             session_state_path: session_dir.join("session-state.json"),
             stats_path: session_dir.join("stats.json"),
+            requests_path: session_dir.join("requests.jsonl"),
             session_dir,
             completion_dir,
         }
@@ -109,6 +115,36 @@ pub struct CacheBreakEvent {
     pub previous_cache_read_input_tokens: u32,
     pub current_cache_read_input_tokens: u32,
     pub token_drop: u32,
+}
+
+/// One line of [`PromptCachePaths::requests_path`].
+///
+/// Deliberately small: enough to reconstruct a session's cache history and to
+/// join it against a gateway's own ledger, and nothing else. The join key is
+/// `gateway_request_id` — a pooling gateway records that same value against the
+/// upstream account it picked, so this is what turns "the prefix went cold" into
+/// "the prefix went cold *because the account changed*". Without it those two
+/// are indistinguishable from here, which is why a rollup was never going to be
+/// enough.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheRequestRow {
+    pub at_unix_secs: u64,
+    /// The gateway's correlation id, absent when talking straight to a provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_request_id: Option<String>,
+    /// The provider's (or gateway's own) request id, as the response reported it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+    pub model: String,
+    pub input_tokens: u32,
+    pub cache_read_input_tokens: u32,
+    pub cache_creation_input_tokens: u32,
+    /// Present only when this request broke the cache; `unexpected` separates
+    /// "the request changed, so of course it did" from "it should have hit".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub break_reason: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub break_unexpected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,12 +246,28 @@ impl PromptCache {
         request: &MessageRequest,
         response: &MessageResponse,
     ) -> PromptCacheRecord {
-        self.record_usage_internal(request, &response.usage, Some(response))
+        self.record_usage_internal(
+            request,
+            &response.usage,
+            Some(response),
+            response.gateway_request_id.as_deref(),
+        )
     }
 
+    /// The streaming path, where there is no assembled `MessageResponse`.
+    ///
+    /// `gateway_request_id` is a parameter here rather than being read off
+    /// something, because the stream holds it separately — and passing `None`
+    /// silently costs the account attribution this records, so it is not
+    /// defaulted away.
     #[must_use]
-    pub fn record_usage(&self, request: &MessageRequest, usage: &Usage) -> PromptCacheRecord {
-        self.record_usage_internal(request, usage, None)
+    pub fn record_usage(
+        &self,
+        request: &MessageRequest,
+        usage: &Usage,
+        gateway_request_id: Option<&str>,
+    ) -> PromptCacheRecord {
+        self.record_usage_internal(request, usage, None, gateway_request_id)
     }
 
     fn record_usage_internal(
@@ -223,6 +275,7 @@ impl PromptCache {
         request: &MessageRequest,
         usage: &Usage,
         response: Option<&MessageResponse>,
+        gateway_request_id: Option<&str>,
     ) -> PromptCacheRecord {
         let request_hash = request_hash_hex(request);
         let mut inner = self.lock();
@@ -242,6 +295,20 @@ impl PromptCache {
         }
 
         inner.previous = Some(current);
+        append_request_row(
+            &inner.paths,
+            &PromptCacheRequestRow {
+                at_unix_secs: now_unix_secs(),
+                gateway_request_id: gateway_request_id.map(ToOwned::to_owned),
+                provider_request_id: response.and_then(|r| r.request_id.clone()),
+                model: request.model.clone(),
+                input_tokens: usage.input_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                break_reason: cache_break.as_ref().map(|event| event.reason.clone()),
+                break_unexpected: cache_break.as_ref().is_some_and(|event| event.unexpected),
+            },
+        );
         if let Some(response) = response {
             write_completion_entry(&inner.paths, &request_hash, response);
             inner.stats.completion_cache_writes += 1;
@@ -433,6 +500,28 @@ fn persist_state(inner: &PromptCacheInner) {
     if let Some(previous) = &inner.previous {
         let _ = write_json(&inner.paths.session_state_path, previous);
     }
+}
+
+/// Append one line to the request ledger.
+///
+/// Append rather than rewrite, and one line rather than a document, because the
+/// file has to survive being written by a process that is killed mid-session —
+/// which is the normal way an agent run ends. A partial final line costs one
+/// row; a truncated JSON document would cost the session.
+///
+/// Failures are ignored for the same reason the other writes here are: this is
+/// observability, and losing a row must never fail the request that produced it.
+fn append_request_row(paths: &PromptCachePaths, row: &PromptCacheRequestRow) {
+    let _ = ensure_cache_dirs(paths);
+    let Ok(mut line) = serde_json::to_vec(row) else {
+        return;
+    };
+    line.push(b'\n');
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.requests_path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, &line));
 }
 
 fn write_completion_entry(
@@ -705,6 +794,67 @@ mod tests {
         );
     }
 
+    /// The ledger is the only thing that can tie a session's cache history to
+    /// the upstream account that served it, so the join key has to survive into
+    /// the file — and the rows have to stay in order, because "the prefix went
+    /// cold here" is a position in a sequence, not an aggregate.
+    #[test]
+    fn request_ledger_records_the_gateway_id_in_order() {
+        let _guard = test_env_lock();
+        let temp_root = std::env::temp_dir().join(format!(
+            "prompt-cache-ledger-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::env::set_var("SUDO_CODE_CONFIG_HOME", &temp_root);
+        let cache = PromptCache::new("ledger-session");
+
+        // Two turns on the same gateway, then one where the gateway said
+        // nothing — the last is what talking straight to a provider looks like,
+        // and it must still produce a row rather than be dropped.
+        for (text, gateway) in [
+            ("first", Some("client:aaa")),
+            ("second", Some("client:bbb")),
+            ("third", None),
+        ] {
+            let mut response = sample_response(100, 5, "ok");
+            response.gateway_request_id = gateway.map(ToOwned::to_owned);
+            let _ = cache.record_response(&sample_request(text), &response);
+        }
+
+        let path = PromptCachePaths::for_session("ledger-session").requests_path;
+        let text = std::fs::read_to_string(&path).expect("the ledger should exist");
+        let rows: Vec<super::PromptCacheRequestRow> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("each line is one row"))
+            .collect();
+
+        assert_eq!(rows.len(), 3, "one row per tracked request");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.gateway_request_id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("client:aaa".to_string()),
+                Some("client:bbb".to_string()),
+                None
+            ],
+            "the join key must reach the file, in request order, and an absent \
+             gateway must not drop the row"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.cache_read_input_tokens == 100 && row.at_unix_secs > 0),
+            "each row carries the usage and a timestamp: {rows:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+    }
+
     #[test]
     fn completion_cache_round_trip_persists_recent_response() {
         let _guard = test_env_lock();
@@ -851,6 +1001,7 @@ mod tests {
                 ..Usage::default()
             },
             request_id: Some("req_test".to_string()),
+            gateway_request_id: None,
         }
     }
 }

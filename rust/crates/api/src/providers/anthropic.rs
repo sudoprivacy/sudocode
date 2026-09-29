@@ -987,6 +987,10 @@ impl MessageStream {
                 };
                 self.pending.extend(remaining);
                 if let Some(event) = self.pending.pop_front() {
+                    // Observe it like any other event: a frame recovered here
+                    // is still a frame upstream sent, and skipping this is how
+                    // a trailing `message_stop` used to go unaccounted for.
+                    self.observe_event(&event);
                     return Ok(Some(event));
                 }
                 return Ok(None);
@@ -1049,46 +1053,70 @@ impl MessageStream {
                 if delta.stop_reason.is_some() {
                     self.done = true;
                     self.logically_complete = true;
+                    // Record the usage *here*, not only on `message_stop`.
+                    // Setting `done` stops next_event from reading another
+                    // chunk, so a `message_stop` upstream sent in a later TCP
+                    // frame is never parsed and never observed — and whether it
+                    // shares a frame with this event is a packet-boundary
+                    // accident. A live 3-turn session recorded only its first
+                    // request for exactly this reason (the gateway framed turn 1
+                    // together and turns 2 and 3 apart), which silently dropped
+                    // two thirds of both the usage telemetry and the prompt-cache
+                    // ledger those numbers are diagnosed from.
+                    self.record_usage_once();
                 }
             }
             StreamEvent::MessageStop(_) => {
                 self.done = true;
                 self.logically_complete = true;
-                if !self.usage_recorded {
-                    if let Some(usage) = self.latest_usage.as_ref() {
-                        if let Some(prompt_cache) = &self.prompt_cache {
-                            let record = prompt_cache.record_usage(
-                                &self.request,
-                                usage,
-                                self.gateway_request_id.as_deref(),
-                            );
-                            *self
-                                .last_prompt_cache_record
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(record);
-                        }
-                        if let Some(tracer) = &self.session_tracer {
-                            // Use client_request_id if available, otherwise generate a fallback
-                            let request_id = self
-                                .client_request_id
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string());
-                            tracer.record_usage_with_cost(
-                                request_id,
-                                usage.input_tokens,
-                                usage.output_tokens,
-                                usage.cache_creation_input_tokens,
-                                usage.cache_read_input_tokens,
-                                usage.cost_units,
-                                usage.cost_currency.as_deref(),
-                            );
-                        }
-                    }
-                    self.usage_recorded = true;
-                }
+                self.record_usage_once();
             }
             _ => {}
         }
+    }
+
+    /// Report the final usage of this message exactly once.
+    ///
+    /// Idempotent because the logical end of a message can be observed twice —
+    /// `message_delta` carrying a `stop_reason` and then `message_stop` — and
+    /// which of the two arrives is not guaranteed.
+    fn record_usage_once(&mut self) {
+        if self.usage_recorded {
+            return;
+        }
+        // No usage seen yet means there is nothing to report; leave the flag
+        // clear so a later frame that does carry usage still gets recorded.
+        let Some(usage) = self.latest_usage.clone() else {
+            return;
+        };
+        if let Some(prompt_cache) = &self.prompt_cache {
+            let record = prompt_cache.record_usage(
+                &self.request,
+                &usage,
+                self.gateway_request_id.as_deref(),
+            );
+            *self
+                .last_prompt_cache_record
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(record);
+        }
+        if let Some(tracer) = &self.session_tracer {
+            // Use client_request_id if available, otherwise generate a fallback
+            let request_id = self
+                .client_request_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            tracer.record_usage_with_cost(
+                request_id,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+                usage.cost_units,
+                usage.cost_currency.as_deref(),
+            );
+        }
+        self.usage_recorded = true;
     }
 }
 

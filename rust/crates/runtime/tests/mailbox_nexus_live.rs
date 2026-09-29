@@ -3,25 +3,36 @@
 //! thing they can't: that `ensure_stream` + `stream_write` + `stream_read_at`
 //! actually move an envelope through a real gRPC server and a real DT_STREAM.
 //!
-//! Run it with a daemon up (e.g. `nexusd-cluster serve-local --port 12022`):
+//! Run them through `e2e/nexus-a2a/run.sh`, which boots the daemon TLS-on and
+//! mints the bundle every test here needs. Driving one by hand takes both:
 //!
 //! ```text
-//! NEXUS_A2A_TEST_ENDPOINT=127.0.0.1:12022 \
-//!   cargo test -p runtime --test nexus_mailbox_live -- --ignored --nocapture
+//! NEXUS_A2A_TEST_ENDPOINT=https://127.0.0.1:2143 \
+//! NEXUS_A2A_TEST_CERT_DIR=<minted bundle> \
+//!   cargo test -p runtime --test mailbox_nexus_live -- --ignored --nocapture
 //! ```
 //!
-//! ## Both auth postures, one suite
+//! ## One dial, and the node decides who you are
 //!
-//! `dial` picks mTLS or plaintext from `NEXUS_A2A_TEST_CERT_DIR`, so every test
-//! here runs against an auth-off `serve-local` daemon AND against an auth-on
-//! federated one. Two rules follow, and breaking either produces a test that
-//! passes on one daemon and fails on the other for reasons that look like
-//! product bugs:
+//! `dial` is cert-only — `NEXUS_A2A_TEST_CERT_DIR` is mandatory, because the
+//! client has no plaintext dial left — so every harness here boots the daemon
+//! TLS-on and mints a bundle before running a line of this file. Three rules
+//! follow, and breaking any of them produces a test that fails for reasons that
+//! look like product bugs:
 //!
-//! * **Never assert the authored `from`.** Auth-on stamps it with the
-//!   authenticated identity; auth-off preserves what the sender wrote. Only
-//!   `live_authenticated_from_cannot_be_forged` may speak about `from`, and it
-//!   demands a bundle so it cannot run auth-off by accident.
+//! * **Never assert the authored `from`.** The node stamps it with the dialling
+//!   cert's agent id, and it does so in BOTH postures: `--insecure-no-auth`
+//!   makes authentication optional, not the stamp absent. (Measured against
+//!   v0.7.20. This doc used to say auth-off "preserves what the sender wrote",
+//!   which is what a bundle minted as `peer-x` disproves — the envelope arrives
+//!   authored by the cert.) Only `live_authenticated_from_cannot_be_forged` may
+//!   speak about `from`.
+//! * **Never mint a bundle named after an inbox a test READS.** Same stamp, read
+//!   side: a read skips `from == self_id` so a shared read/write stream never
+//!   echoes to its owner, so a probe dialling as the name it reads hides its own
+//!   write from itself. Nothing about that failure mentions certs — the dial
+//!   succeeds, the write is accepted, the stream's offset advances, and the
+//!   assertion reports `got []` with a cursor that moved.
 //! * **Never read a just-sent frame without blocking.** See
 //!   [`DELIVERY_WAIT_MS`].
 
@@ -373,13 +384,13 @@ fn live_send_provisions_an_inbox_that_never_existed() {
     let (msgs, _next) = mailbox(&client, &never_ran, &auth)
         .poll_conversation("offline-probe", 0, DELIVERY_WAIT_MS)
         .expect("the recipient must be able to read its own inbox");
-    // Delivery is the claim; the SENDER's name deliberately is not. Under
-    // auth-on the node overwrites the authored `from` with the authenticated
-    // identity, so pinning "offline-probe" here asserted the auth-OFF posture as
-    // a side effect and failed against every mTLS daemon — with the envelope
-    // sitting right there in the failure message. What `from` must contain has
-    // its own test (`live_authenticated_from_cannot_be_forged`); this one is
-    // about a message waiting for a reader who has never run.
+    // Delivery is the claim; the SENDER's name deliberately is not. The node
+    // overwrites the authored `from` with the dialling cert's identity, so
+    // pinning "offline-probe" here asserted a posture no daemon serves and
+    // failed against every one of them — with the envelope sitting right there
+    // in the failure message. What `from` must contain has its own test
+    // (`live_authenticated_from_cannot_be_forged`); this one is about a message
+    // waiting for a reader who has never run.
     assert!(
         msgs.iter().any(|m| m.body == body),
         "the envelope must be readable by the recipient, got {msgs:?}"
@@ -396,10 +407,18 @@ fn live_send_provisions_an_inbox_that_never_existed() {
 /// Under auth-on the daemon decides who a message is FROM.
 ///
 /// `from` is an address — the convention turns it straight back into a path —
-/// so a forgeable one is a way to make replies go somewhere else. Auth-off
-/// cannot show this: the stamp hook is fail-open there, and the authored value
-/// is preserved by design, which is why the other tests in this file assert the
-/// value they wrote.
+/// so a forgeable one is a way to make replies go somewhere else.
+///
+/// What auth-off cannot show is not the stamp. The stamp is there too: measured
+/// against v0.7.20, a client dialling an `--insecure-no-auth` node still has its
+/// frames stamped with its cert's agent id, because the flag makes
+/// authentication optional rather than the stamp absent. (This doc used to say
+/// the hook was "fail-open there, and the authored value preserved by design",
+/// and that the other tests therefore "assert the value they wrote" — they do
+/// not, and cannot: they read back a `from` they never authored.) What auth-on
+/// adds is the posture the stamp is CONTRACTUAL in: an identity recorded under
+/// `--insecure-no-auth` is not an identity required, and one a node applies
+/// without requiring guarantees nothing.
 ///
 /// Here the client holds a minted agent cert and authors a DIFFERENT name. The
 /// envelope that lands must carry the cert's identity, because the node
@@ -416,9 +435,10 @@ fn live_send_provisions_an_inbox_that_never_existed() {
 fn live_authenticated_from_cannot_be_forged() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
-    // Asserted rather than merely used: `dial` falls back to plaintext when no
-    // bundle is named, and a plaintext run of THIS test would pass against a
-    // daemon that stamps nothing — green, and proving the opposite of the point.
+    // Asserted rather than merely used, and it is the IDENTITY that needs the
+    // guard: `dial` already fails without a bundle, but a bundle whose agent id
+    // is not `NEXUS_A2A_TEST_IDENTITY` makes this test assert the wrong name.
+    // The pair has to come from one mint.
     std::env::var("NEXUS_A2A_TEST_CERT_DIR")
         .expect("set NEXUS_A2A_TEST_CERT_DIR=<bundle dir>; without mTLS this asserts nothing");
     let identity = std::env::var("NEXUS_A2A_TEST_IDENTITY")
@@ -815,9 +835,23 @@ fn live_collect_conversations() {
 /// returns an `Err` instead of parking is the bound working; that a poll AFTER
 /// `SIGCONT` succeeds is the recovery, which is what makes the receive loop
 /// self-healing rather than permanently deaf.
+///
+/// Windows has no such fault to inject, and the skip is HERE rather than in the
+/// harness because the harness cannot tell: MSYS `kill -STOP` exits 0 and
+/// suspends nothing, so the daemon keeps answering, the poll returns
+/// `Ok(([], 0))`, and the assertion below fails claiming the bound is broken on
+/// a platform where the fault was never injected.
 #[test]
 #[ignore = "requires a running nexusd-cluster the harness can stop; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_DAEMON_PID"]
 fn live_a_silent_server_errors_and_then_recovers() {
+    if cfg!(windows) {
+        eprintln!(
+            "SKIP(silent server): no SIGSTOP that leaves the socket open — \
+             MSYS `kill -STOP` succeeds and suspends nothing"
+        );
+        return;
+    }
+
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let pid: i32 = std::env::var("NEXUS_A2A_TEST_DAEMON_PID")

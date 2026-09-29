@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
 # Auth ON: mTLS, a minted agent cert, and a `from` the sender cannot choose.
 #
-# `run.sh` and `run-cross-node.sh` both boot `--insecure-no-auth`, where the
-# daemon's stamp hook is fail-open and the authored `from` is preserved by
-# design. That is fine for proving delivery, and useless for proving identity:
-# `from` is an address — the convention turns it straight back into a path — so
-# a forgeable one is a way to make a peer's reply go somewhere the sender chose.
+# `run.sh` and its siblings prove DELIVERY: an envelope moves, a blocking tail
+# wakes, two nodes agree. None of them asserts identity, and `from` is an
+# address — the convention turns it straight back into a path — so a forgeable
+# one is a way to make a peer's reply go somewhere the sender chose. That is the
+# one property asserted here.
 #
-# Only an auth-on node decides who a message is from, so only an auth-on run can
-# show that it does. The bring-up is the one `nexus-vfs`'s own
-# `agent_signed_authorship` uses, so a failure here is about scode rather than
-# about a posture this repo invented:
+# What auth-on changes is NOT whether the node stamps `from`. Measured against
+# v0.7.20, a node stamps it with the dialling cert's agent id in both postures:
+# `--insecure-no-auth` makes authentication optional, not the stamp absent. What
+# it changes is whether that stamp is worth anything — under the flag an identity
+# is recorded but not required, and an identity a node applies without requiring
+# guarantees nothing. Auth-on is the posture with the credential store bound,
+# which is the only posture the property can be CLAIMED in; the reason to run it
+# is not that auth-off would show the forgery succeeding.
+#
+# The bring-up is the one `nexus-vfs`'s own `agent_signed_authorship` uses, so a
+# failure here is about scode rather than about a posture this repo invented:
 #
 #   1. boot TLS-on — the CA and node cert bootstrap themselves into <data>/tls
 #   2. STOP, because the mint is offline: it opens the data dir the daemon locks
 #   3. mint a CA-signed agent bundle (agent.pem / agent-key.pem / ca.pem)
 #   4. restart, and dial the mTLS plane with that bundle
 #
-# Auth-ON is also why this cannot reuse the other scripts' daemon: a plaintext
-# client is rejected outright, which the run below relies on rather than works
-# around.
+# Its own daemon, port and data dir, because the mint is offline against that
+# dir and the test pins `NEXUS_A2A_TEST_IDENTITY` to the id this script minted:
+# the pair has to come from one mint. Sharing another script's daemon would mean
+# sharing its bundle name too.
 #
 # Usage:
 #   e2e/nexus-a2a/run-auth-on.sh

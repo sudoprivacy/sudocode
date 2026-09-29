@@ -197,9 +197,10 @@ jobs:
       # opinion about whether the stream exists.
       #
       # `run.sh` downloads the daemon the lockfile pins (see fetch-daemon.sh),
-      # boots it auth-off on loopback, waits for a writable single-voter leader,
-      # and runs the deterministic live tests. No secrets: the LLM duet inside
-      # the same script gates on SUDOROUTER_API_KEY, which this job has not got.
+      # boots it TLS-on on loopback, mints a client bundle offline, waits for a
+      # writable single-voter leader, and runs the deterministic live tests. No
+      # secrets: the LLM duet inside the same script gates on SUDOROUTER_API_KEY,
+      # which this job has not got.
       #
       # One OS on purpose. What this catches is the client/daemon contract,
       # which does not vary by host — platform-specific daemon behaviour is
@@ -218,11 +219,17 @@ jobs:
       - name: Cross-node A2A against two nodes
         run: e2e/nexus-a2a/run-cross-node.sh
 
-      # Both scripts above boot `--insecure-no-auth`, where the stamp hook is
-      # fail-open and the authored `from` is preserved by design. That proves
-      # delivery and says nothing about identity — and `from` is an address, so
-      # a forgeable one sends a peer's reply wherever the sender chose. Only an
-      # auth-on node decides who a message is from.
+      # The steps above prove DELIVERY and assert nothing about identity — and
+      # `from` is an address, so a forgeable one sends a peer's reply wherever the
+      # sender chose. This step asserts the node overrides what the sender wrote.
+      #
+      # Every harness here is auth-on, so this step is not a second POSTURE; it is
+      # the one that asserts the property. A node stamps `from` with the dialling
+      # cert's id even under `--insecure-no-auth` (measured, v0.7.20) — that flag
+      # makes authentication optional, not the stamp absent — and an identity a
+      # node applies without requiring guarantees nothing. Auth-on is the posture
+      # with the credential store bound, which is the only one the property can be
+      # claimed in.
       - name: Auth-on A2A — the node decides who a message is from
         run: e2e/nexus-a2a/run-auth-on.sh
 

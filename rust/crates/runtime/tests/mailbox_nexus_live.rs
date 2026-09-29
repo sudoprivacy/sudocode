@@ -54,17 +54,18 @@ fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
 /// the posture from the environment lets the SAME body assert the SAME property
 /// against both daemons.
 fn dial(endpoint: &str) -> Arc<NexusVfsClient> {
+    // Cert-only, like production: the test dials with a minted credential.
+    // `connect` does not read the agent name (the node reads identity off the
+    // cert handshake), but a credential is mandatory - there is no plaintext dial.
+    let dir = std::env::var("NEXUS_A2A_TEST_CERT_DIR")
+        .expect("set NEXUS_A2A_TEST_CERT_DIR=<minted bundle dir>");
+    let credential = runtime::nexus_mailbox::AgentCredential::load(&dir)
+        .unwrap_or_else(|e| panic!("load test credential: {e}"));
     runtime::nexus_mailbox::Config {
         endpoint: endpoint.to_string(),
-        // Dial-only: `connect` does not read the agent name. The identity that
-        // matters here is the CERT's, which the node reads off the handshake.
-        agent: String::new(),
+        agent: credential.agent,
         peers: Vec::new(),
-        api_key: String::new(),
-        tls: std::env::var("NEXUS_A2A_TEST_CERT_DIR")
-            .ok()
-            .filter(|d| !d.is_empty())
-            .map(|dir| runtime::nexus_mailbox::TlsPaths::from_bundle_dir(&dir)),
+        tls: credential.tls,
     }
     .connect()
     .unwrap_or_else(|e| panic!("{e}"))

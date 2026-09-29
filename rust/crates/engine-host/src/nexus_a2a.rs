@@ -56,7 +56,9 @@ pub fn session() -> Result<Option<&'static Session>, String> {
             None => Ok(None),
             Some(config) => {
                 let client = config.connect()?;
-                let backend = NexusVfsFsBackend::from_arc(client, config.api_key.clone());
+                // Cert-only auth: the client cert IS the authorization (the node derives
+                // identity from its SAN), so no per-request token is sent.
+                let backend = NexusVfsFsBackend::from_arc(client, String::new());
                 let mailbox = Arc::new(Mailbox::daemon_absolute(
                     Arc::new(backend),
                     config.agent.clone(),

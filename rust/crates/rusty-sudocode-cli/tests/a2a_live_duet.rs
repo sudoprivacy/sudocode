@@ -59,17 +59,11 @@ const CERTS: &str = r"C:\Users\songym\authon-certs";
 /// A live turn against a real gateway, plus a real raft commit.
 const BUDGET: Duration = Duration::from_secs(180);
 
-fn cert(file: &str) -> String {
-    format!(r"{CERTS}\{file}")
-}
-
-/// The identity files for one agent, as the binary expects them.
-fn tls_env(agent: &str) -> Vec<(&'static str, String)> {
-    vec![
-        ("NEXUS_CA_PEM", cert(&format!("{agent}-ca.pem"))),
-        ("NEXUS_CLIENT_CERT", cert(&format!("{agent}-agent.pem"))),
-        ("NEXUS_CLIENT_KEY", cert(&format!("{agent}-agent-key.pem"))),
-    ]
+/// The minted credential bundle directory for one agent - the directory
+/// `nexusd-cluster auth mint` writes (ca.pem + agent.pem + agent-key.pem +
+/// credential.json). Cert-only: the binary reads its identity + TLS from here.
+fn credential_dir(agent: &str) -> String {
+    format!(r"{CERTS}\{agent}")
 }
 
 /// Block until the receiver records its read position.
@@ -148,9 +142,11 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
          recipient and never opens a connection to the broker"
     );
     for agent in [RECEIVER, SENDER] {
-        for (_, path) in tls_env(agent) {
+        let manifest = format!(r"{}\credential.json", credential_dir(agent));
+        {
+            let path = &manifest;
             assert!(
-                Path::new(&path).exists(),
+                Path::new(path).exists(),
                 "missing identity file {path} — mint it with `nexusd-cluster auth mint`"
             );
         }
@@ -160,7 +156,7 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
     let config_home = env.config_home().to_path_buf();
 
     // ── The RECEIVER: a real REPL, parked on its own inbox ──────────────────
-    let recv_tls = tls_env(RECEIVER);
+    let recv_cred = credential_dir(RECEIVER);
     let mut receiver_env: Vec<(&str, &str)> = vec![
         // NOT optional, and nothing says so at the failure site. The A2A
         // receiver lives on the coordinator loop, and that loop only exists in
@@ -172,10 +168,9 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
         // it connects to nothing and says nothing about it.
         ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
         ("NEXUS_A2A_ENDPOINT", BROKER),
-        ("NEXUS_A2A_AGENT", RECEIVER),
+        ("NEXUS_A2A_CREDENTIAL", recv_cred.as_str()),
         ("NEXUS_A2A_PEER", SENDER),
     ];
-    receiver_env.extend(recv_tls.iter().map(|(k, v)| (*k, v.as_str())));
 
     let mut receiver = env.spawn_with_env(&["--permission-mode", "read-only"], &receiver_env);
     receiver.set_default_timeout(BUDGET);
@@ -191,13 +186,12 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
     );
 
     // ── The SENDER: another real scode, whose model decides to call `send` ──
-    let send_tls = tls_env(SENDER);
+    let send_cred = credential_dir(SENDER);
     let mut sender_env: Vec<(&str, &str)> = vec![
         ("NEXUS_A2A_ENDPOINT", BROKER),
-        ("NEXUS_A2A_AGENT", SENDER),
+        ("NEXUS_A2A_CREDENTIAL", send_cred.as_str()),
         ("NEXUS_A2A_PEER", RECEIVER),
     ];
-    sender_env.extend(send_tls.iter().map(|(k, v)| (*k, v.as_str())));
 
     let prompt = env.prompt(
         &format!(

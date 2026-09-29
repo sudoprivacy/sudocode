@@ -7519,6 +7519,21 @@ impl ApiClient for ProviderRuntimeClient {
         self.chain.first().map(|entry| entry.model.as_str())
     }
 
+    /// The routing key this sub-agent's own requests carry, so anything it
+    /// spawns keeps it.
+    ///
+    /// Left to the trait default this returned `None`, which is not merely a
+    /// missing convenience: `ConversationRuntime` reads it to fill
+    /// `parent_routing_session_id` on every tool dispatch, so a sub-agent that
+    /// spawned a further agent handed the child nothing, and the grandchild's
+    /// requests went out with no `metadata.user_id` at all. A pooled upstream
+    /// then has no stable session key for them and re-picks an account per
+    /// turn — the grandchild pays a full prefix rebuild each time, on a family
+    /// of requests whose whole point is that they share the parent's prefix.
+    fn routing_session_id(&self) -> Option<&str> {
+        self.execution.routing_session_id.as_deref()
+    }
+
     /// The runtime's default cannot see the tool definitions attached to
     /// every request, and this client attaches the subagent's whole allowed
     /// set. Left to the default the budget would be too generous by exactly
@@ -9464,6 +9479,50 @@ mod tests {
         .for_child(false);
         assert_eq!(ordinary.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(ordinary.routing_session_id.as_deref(), Some("sess-1"));
+    }
+
+    /// A sub-agent has to hand its routing key on, not just use it.
+    ///
+    /// `ConversationRuntime` fills `parent_routing_session_id` from
+    /// `ApiClient::routing_session_id()`, whose trait default is `None`. While
+    /// this client took that default, a sub-agent that spawned a further agent
+    /// gave the child nothing: the grandchild's requests carried no
+    /// `metadata.user_id`, so a pooled upstream had no stable session key and
+    /// re-picked an account per turn — a full prefix rebuild each time, for a
+    /// family of requests whose entire purpose is sharing the parent's prefix.
+    ///
+    /// Asserted through the trait, not the field, because the default is what
+    /// was wrong: reading the struct directly would pass either way.
+    #[test]
+    fn subagent_client_hands_its_routing_key_to_what_it_spawns() {
+        use runtime::ApiClient;
+
+        let client = super::ProviderRuntimeClient {
+            chain: Vec::new(),
+            allowed_tools: std::collections::BTreeSet::new(),
+            execution: super::ParentExecution {
+                reasoning_effort: None,
+                thinking_enabled: false,
+                routing_session_id: Some("session-parent".to_string()),
+            },
+        };
+        assert_eq!(
+            ApiClient::routing_session_id(&client),
+            Some("session-parent"),
+            "the trait default is None; taking it silently unroutes every \
+             grandchild request"
+        );
+
+        let anonymous = super::ProviderRuntimeClient {
+            chain: Vec::new(),
+            allowed_tools: std::collections::BTreeSet::new(),
+            execution: super::ParentExecution::default(),
+        };
+        assert_eq!(
+            ApiClient::routing_session_id(&anonymous),
+            None,
+            "no parent key means none to pass on — not an invented one"
+        );
     }
 
     /// The inline setter is the single place both fields cross onto a

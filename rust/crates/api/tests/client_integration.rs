@@ -436,6 +436,78 @@ async fn stream_message_parses_sse_events_with_tool_use() {
     std::env::remove_var("SUDO_CODE_CONFIG_HOME");
 }
 
+/// Usage must be recorded even when `message_stop` lands in a later TCP frame.
+///
+/// A `message_delta` carrying a `stop_reason` ends the message logically, and
+/// the stream stops reading the socket at that point — so a `message_stop` that
+/// upstream sent in a separate frame is never parsed. Recording only on
+/// `message_stop` therefore made accounting depend on where the gateway's frame
+/// boundaries happened to fall. A live three-turn session against the pool
+/// recorded exactly one of its three requests this way: turn 1 arrived
+/// coalesced, turns 2 and 3 did not, and both the usage telemetry and the
+/// prompt-cache ledger — the instrument cache breaks are diagnosed from — lost
+/// two thirds of their rows without any error anywhere.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn usage_is_recorded_when_message_stop_arrives_in_a_later_frame() {
+    let _guard = env_lock();
+    let temp_root = std::env::temp_dir().join(format!(
+        "api-stream-split-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::env::set_var("SUDO_CODE_CONFIG_HOME", &temp_root);
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let head = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_split\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":13,\"cache_read_input_tokens\":21,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":34,\"cache_read_input_tokens\":55,\"output_tokens\":1}}\n\n",
+    );
+    let tail = concat!(
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server =
+        spawn_split_body_server(state.clone(), "200 OK", "text/event-stream", head, tail).await;
+
+    let client = ApiClient::new("test-key")
+        .with_auth_token(Some("proxy-token".to_string()))
+        .with_base_url(server.base_url())
+        .with_prompt_cache(PromptCache::new("split-frame-session"));
+    let mut stream = client
+        .stream_message(&sample_request(true), None)
+        .await
+        .expect("stream should start");
+
+    while let Some(_event) = stream
+        .next_event()
+        .await
+        .expect("stream event should parse")
+    {}
+
+    let cache_stats = client
+        .prompt_cache_stats()
+        .expect("prompt cache stats should exist");
+    assert_eq!(
+        cache_stats.tracked_requests, 1,
+        "the request went unrecorded because message_stop was in a second frame"
+    );
+    assert_eq!(cache_stats.last_cache_creation_input_tokens, Some(34));
+    assert_eq!(cache_stats.last_cache_read_input_tokens, Some(55));
+
+    let _ = std::fs::remove_dir_all(temp_root);
+    std::env::remove_var("SUDO_CODE_CONFIG_HOME");
+}
+
 #[tokio::test]
 async fn retries_retryable_failures_before_succeeding() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
@@ -849,67 +921,8 @@ async fn spawn_server(
     let join_handle = tokio::spawn(async move {
         for response in responses {
             let (mut socket, _) = listener.accept().await.expect("server should accept");
-            let mut buffer = Vec::new();
-            let mut header_end = None;
-
-            loop {
-                let mut chunk = [0_u8; 1024];
-                let read = socket
-                    .read(&mut chunk)
-                    .await
-                    .expect("request read should succeed");
-                if read == 0 {
-                    break;
-                }
-                buffer.extend_from_slice(&chunk[..read]);
-                if let Some(position) = find_header_end(&buffer) {
-                    header_end = Some(position);
-                    break;
-                }
-            }
-
-            let header_end = header_end.expect("request should include headers");
-            let (header_bytes, remaining) = buffer.split_at(header_end);
-            let header_text =
-                String::from_utf8(header_bytes.to_vec()).expect("headers should be utf8");
-            let mut lines = header_text.split("\r\n");
-            let request_line = lines.next().expect("request line should exist");
-            let mut parts = request_line.split_whitespace();
-            let method = parts.next().expect("method should exist").to_string();
-            let path = parts.next().expect("path should exist").to_string();
-            let mut headers = HashMap::new();
-            let mut content_length = 0_usize;
-            for line in lines {
-                if line.is_empty() {
-                    continue;
-                }
-                let (name, value) = line.split_once(':').expect("header should have colon");
-                let value = value.trim().to_string();
-                if name.eq_ignore_ascii_case("content-length") {
-                    content_length = value.parse().expect("content length should parse");
-                }
-                headers.insert(name.to_ascii_lowercase(), value);
-            }
-
-            let mut body = remaining[4..].to_vec();
-            while body.len() < content_length {
-                let mut chunk = vec![0_u8; content_length - body.len()];
-                let read = socket
-                    .read(&mut chunk)
-                    .await
-                    .expect("body read should succeed");
-                if read == 0 {
-                    break;
-                }
-                body.extend_from_slice(&chunk[..read]);
-            }
-
-            state.lock().await.push(CapturedRequest {
-                method,
-                path,
-                headers,
-                body: String::from_utf8(body).expect("body should be utf8"),
-            });
+            let captured = capture_request(&mut socket).await;
+            state.lock().await.push(captured);
 
             socket
                 .write_all(response.as_bytes())
@@ -921,6 +934,120 @@ async fn spawn_server(
     TestServer {
         base_url: format!("http://{address}"),
         join_handle,
+    }
+}
+
+/// Serves one response whose body is written in two pieces, with a gap between
+/// them, so the client reads `head` and `tail` as separate chunks.
+///
+/// A single `write_all` of a small body arrives coalesced, which is the one
+/// framing under which nothing goes wrong — so no single-write server can catch
+/// a defect that only appears when a frame boundary falls in the wrong place.
+async fn spawn_split_body_server(
+    state: Arc<Mutex<Vec<CapturedRequest>>>,
+    status: &'static str,
+    content_type: &'static str,
+    head: &'static str,
+    tail: &'static str,
+) -> TestServer {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should have local addr");
+    let join_handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("server should accept");
+        let captured = capture_request(&mut socket).await;
+        state.lock().await.push(captured);
+
+        let headers = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            head.len() + tail.len()
+        );
+        socket
+            .write_all(headers.as_bytes())
+            .await
+            .expect("header write should succeed");
+        socket
+            .write_all(head.as_bytes())
+            .await
+            .expect("head write should succeed");
+        socket.flush().await.expect("head flush should succeed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        socket
+            .write_all(tail.as_bytes())
+            .await
+            .expect("tail write should succeed");
+        socket.flush().await.expect("tail flush should succeed");
+    });
+
+    TestServer {
+        base_url: format!("http://{address}"),
+        join_handle,
+    }
+}
+
+async fn capture_request(socket: &mut tokio::net::TcpStream) -> CapturedRequest {
+    let mut buffer = Vec::new();
+    let mut header_end = None;
+
+    loop {
+        let mut chunk = [0_u8; 1024];
+        let read = socket
+            .read(&mut chunk)
+            .await
+            .expect("request read should succeed");
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(position) = find_header_end(&buffer) {
+            header_end = Some(position);
+            break;
+        }
+    }
+
+    let header_end = header_end.expect("request should include headers");
+    let (header_bytes, remaining) = buffer.split_at(header_end);
+    let header_text = String::from_utf8(header_bytes.to_vec()).expect("headers should be utf8");
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().expect("request line should exist");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().expect("method should exist").to_string();
+    let path = parts.next().expect("path should exist").to_string();
+    let mut headers = HashMap::new();
+    let mut content_length = 0_usize;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line.split_once(':').expect("header should have colon");
+        let value = value.trim().to_string();
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.parse().expect("content length should parse");
+        }
+        headers.insert(name.to_ascii_lowercase(), value);
+    }
+
+    let mut body = remaining[4..].to_vec();
+    while body.len() < content_length {
+        let mut chunk = vec![0_u8; content_length - body.len()];
+        let read = socket
+            .read(&mut chunk)
+            .await
+            .expect("body read should succeed");
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+
+    CapturedRequest {
+        method,
+        path,
+        headers,
+        body: String::from_utf8(body).expect("body should be utf8"),
     }
 }
 

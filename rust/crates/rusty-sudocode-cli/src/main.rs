@@ -1163,6 +1163,12 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
         .map(|(_, s)| s.unexpected_cache_breaks)
         .sum();
     let expected: u64 = sessions.iter().map(|(_, s)| s.expected_invalidations).sum();
+    let mut by_cause: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for (_, stats) in &sessions {
+        for (cause, count) in &stats.breaks_by_cause {
+            *by_cause.entry(cause.clone()).or_insert(0) += count;
+        }
+    }
     let hit_rate = (reads + writes > 0).then(|| {
         #[allow(clippy::cast_precision_loss)]
         {
@@ -1179,6 +1185,7 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
             "hit_rate_percent": hit_rate,
             "unexpected_cache_breaks": unexpected,
             "expected_invalidations": expected,
+            "breaks_by_cause": by_cause,
             "root": root.display().to_string(),
             "coverage": "anthropic-provider only",
         });
@@ -1197,6 +1204,39 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
         None => println!("  hit rate        n/a"),
     }
     println!("  breaks          {unexpected} unexpected, {expected} expected");
+    if !by_cause.is_empty() {
+        // The counts that tell you what to go fix. "Expected" only means the
+        // request explains the break, not that it was supposed to happen: a
+        // mid-session `tools` or `system` change is explained *and* throws the
+        // whole prefix away, which is the shape of every cache bug found here
+        // so far.
+        let tallied: u64 = by_cause.values().sum();
+        // Sessions recorded before cause tracking counted their breaks but not
+        // what caused them. Without this row the breakdown appears to contradict
+        // the total above it, and the reader has no way to tell which of the two
+        // numbers to trust.
+        let untracked_label = "(cause not recorded)";
+        let widest = by_cause
+            .keys()
+            .map(String::len)
+            .chain(std::iter::once(untracked_label.len()))
+            .max()
+            .unwrap_or(0);
+        println!("  by cause");
+        for (cause, count) in &by_cause {
+            println!("    {cause:<widest$}  {count}");
+        }
+        if let Some(untracked) = (unexpected + expected).checked_sub(tallied) {
+            if untracked > 0 {
+                println!("    {untracked_label:<widest$}  {untracked}  (sessions older than cause tracking)");
+            }
+        }
+    } else if unexpected + expected > 0 {
+        // Otherwise the breakdown's absence reads as "no causes found", when it
+        // means "these rows are older than cause tracking". Working that out
+        // from the reason strings cost an afternoon once already.
+        println!("  by cause        not recorded — these sessions predate cause tracking");
+    }
     if unexpected > 0 {
         println!("  note            an unexpected break means cache reads dropped while the");
         println!("                  request fingerprint held steady — the prefix went cold for");

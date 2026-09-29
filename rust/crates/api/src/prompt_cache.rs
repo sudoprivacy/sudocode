@@ -10,6 +10,7 @@
 //! matter what actually happened. Break detection would still work; the
 //! totals would not be comparable.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -98,6 +99,15 @@ pub struct PromptCacheStats {
     pub completion_cache_writes: u64,
     pub expected_invalidations: u64,
     pub unexpected_cache_breaks: u64,
+    /// How many breaks each cause took part in, keyed by [`cache_break_cause`].
+    ///
+    /// One break can have several causes, so these do not sum to the two
+    /// counters above. This is the breakdown `scode cache stats` reports:
+    /// without it the rollup keeps only `last_break_reason`, so a session that
+    /// threw its prefix away ten times over changed tool definitions looked
+    /// the same as one that never did.
+    #[serde(default)]
+    pub breaks_by_cause: BTreeMap<String, u64>,
     pub total_cache_creation_input_tokens: u64,
     pub total_cache_read_input_tokens: u64,
     pub last_cache_creation_input_tokens: Option<u32>,
@@ -108,10 +118,33 @@ pub struct PromptCacheStats {
     pub last_cache_source: Option<String>,
 }
 
+/// Stable, index-free names for what changed, for tallying across sessions.
+///
+/// `reason` is prose and carries message indices, so counting raw reason
+/// strings never aggregates. These do.
+pub mod cache_break_cause {
+    pub const MODEL: &str = "model";
+    pub const SYSTEM: &str = "system";
+    pub const TOOLS: &str = "tools";
+    pub const MESSAGES_REWRITTEN: &str = "messages-rewritten";
+    pub const TTL_EXPIRY: &str = "ttl-expiry";
+    pub const FINGERPRINT_VERSION: &str = "fingerprint-version";
+    pub const UNEXPLAINED: &str = "unexplained";
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheBreakEvent {
     pub unexpected: bool,
     pub reason: String,
+    /// Which parts of the request changed, from [`cache_break_cause`].
+    ///
+    /// Separate from `unexpected`, which asks only whether the request
+    /// explains the break. A break we can explain is still a break we may be
+    /// inflicting on ourselves: a mid-session `tools` change is "explained",
+    /// and it throws away the whole prefix, so bucketing it as expected hid
+    /// exactly the class of defect this record exists to find.
+    #[serde(default)]
+    pub causes: Vec<String>,
     pub previous_cache_read_input_tokens: u32,
     pub current_cache_read_input_tokens: u32,
     pub token_drop: u32,
@@ -292,6 +325,13 @@ impl PromptCache {
                 inner.stats.expected_invalidations += 1;
             }
             inner.stats.last_break_reason = Some(event.reason.clone());
+            for cause in &event.causes {
+                *inner
+                    .stats
+                    .breaks_by_cause
+                    .entry(cause.clone())
+                    .or_insert(0) += 1;
+            }
         }
 
         inner.previous = Some(current);
@@ -410,6 +450,7 @@ fn detect_cache_break(
                 "fingerprint version changed (v{} -> v{})",
                 previous.fingerprint_version, current.fingerprint_version
             ),
+            causes: vec![cache_break_cause::FINGERPRINT_VERSION.to_string()],
             previous_cache_read_input_tokens: previous.cache_read_input_tokens,
             current_cache_read_input_tokens: current.cache_read_input_tokens,
             token_drop: previous
@@ -420,19 +461,20 @@ fn detect_cache_break(
     let token_drop = previous
         .cache_read_input_tokens
         .saturating_sub(current.cache_read_input_tokens);
-    if token_drop < config.cache_break_min_drop {
-        return None;
-    }
 
     let mut reasons = Vec::new();
+    let mut causes = Vec::new();
     if previous.model_hash != current.model_hash {
         reasons.push("model changed");
+        causes.push(cache_break_cause::MODEL.to_string());
     }
     if previous.system_hash != current.system_hash {
         reasons.push("system prompt changed");
+        causes.push(cache_break_cause::SYSTEM.to_string());
     }
     if previous.tools_hash != current.tools_hash {
         reasons.push("tool definitions changed");
+        causes.push(cache_break_cause::TOOLS.to_string());
     }
     // Appending a turn is the normal case and leaves the cached prefix
     // whole; only a rewrite *inside* the prefix invalidates it. Reporting
@@ -449,6 +491,7 @@ fn detect_cache_break(
     });
     if let Some(detail) = &rewrite_detail {
         reasons.push(detail.as_str());
+        causes.push(cache_break_cause::MESSAGES_REWRITTEN.to_string());
     }
 
     let elapsed = current
@@ -456,12 +499,27 @@ fn detect_cache_break(
         .saturating_sub(previous.observed_at_unix_secs);
 
     let (unexpected, reason) = if reasons.is_empty() {
+        // Nothing in the request explains a break, so the only evidence left is
+        // the token counts — and they have to have moved enough to mean
+        // something. This gate belongs *here*, not above the fingerprint
+        // comparison where it used to sit: a prefix thrown away before it was
+        // ever read shows no drop at all. A live 3-turn session revealed a
+        // deferred tool on turn 2, which rewrote the whole prefix (read 0,
+        // written 8421, right after turn 1 wrote 7926) — reads went 0 -> 0, the
+        // drop was zero, and the break this record exists to catch was never
+        // recorded. When the fingerprint says what changed, that IS the
+        // evidence; the drop is only severity.
+        if token_drop < config.cache_break_min_drop {
+            return None;
+        }
         if elapsed > config.prompt_ttl.as_secs() {
+            causes.push(cache_break_cause::TTL_EXPIRY.to_string());
             (
                 false,
                 format!("possible prompt cache TTL expiry after {elapsed}s"),
             )
         } else {
+            causes.push(cache_break_cause::UNEXPLAINED.to_string());
             (
                 true,
                 "cache read tokens dropped while prompt fingerprint remained stable".to_string(),
@@ -474,6 +532,7 @@ fn detect_cache_break(
     Some(CacheBreakEvent {
         unexpected,
         reason,
+        causes,
         previous_cache_read_input_tokens: previous.cache_read_input_tokens,
         current_cache_read_input_tokens: current.cache_read_input_tokens,
         token_drop,

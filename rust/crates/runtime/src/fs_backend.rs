@@ -12,7 +12,8 @@ use std::io;
 use std::sync::Arc;
 
 use crate::workspace_root::current_workspace_root;
-use kernel::kernel::syscall::{KernelSyscall, ReaddirOpts};
+use kernel::kernel::convenience::KernelConvenience;
+use kernel::kernel::syscall::ReaddirOpts;
 use kernel::kernel::OperationContext;
 use kernel::meta_store::{DT_LINK, DT_STREAM};
 
@@ -648,11 +649,11 @@ impl FsBackend for StdFsBackend {
 
 /// Kernel-backed filesystem for in-process execution inside nexusd.
 ///
-/// Forwards every operation through the [`KernelSyscall`] trait so managed
+/// Forwards every operation through the [`KernelConvenience`] trait so managed
 /// agents read/write the VFS trie via `sys_read` / `sys_write` /
 /// `sys_stat` / `sys_readdir` instead of touching the host
 /// filesystem.
-pub struct KernelFsBackend<K: KernelSyscall> {
+pub struct KernelFsBackend<K: KernelConvenience> {
     kernel: Arc<K>,
     ctx: OperationContext,
     /// Absolute VFS path that relative tool paths resolve against and that
@@ -670,7 +671,7 @@ pub struct KernelFsBackend<K: KernelSyscall> {
     host_root: Option<String>,
 }
 
-impl<K: KernelSyscall> KernelFsBackend<K> {
+impl<K: KernelConvenience> KernelFsBackend<K> {
     pub fn new(kernel: Arc<K>, ctx: OperationContext, workspace_root: impl Into<String>) -> Self {
         Self {
             kernel,
@@ -714,6 +715,26 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
     /// mapped by [`vfs_path_for_host_path`]'s rule.
     fn to_kernel(&self, path: &str) -> io::Result<String> {
         lexical_join(&self.workspace_root, path)
+    }
+
+    /// Turn a not-found into a transparent error when the cause is that no
+    /// mount covers the path, rather than a missing file. `err` is the
+    /// original not-found (its detail preserved for the missing-file case);
+    /// `caller_path` is the path as the caller spelled it, `vfs` its routed
+    /// form. Only reclassifies `NotFound`; every other error passes through.
+    #[inline]
+    fn explain_not_found(&self, caller_path: &str, vfs: &str, err: io::Error) -> io::Error {
+        if err.kind() == io::ErrorKind::NotFound && !self.kernel.is_mounted(vfs, &self.ctx.zone_id)
+        {
+            return io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{caller_path} is outside this session's mounts \
+                     (add its drive/root to mountRoots or additionalDirectories)"
+                ),
+            );
+        }
+        err
     }
 
     /// `<agents base>/<this agent>/<segment>` — a subtree of the agent itself.
@@ -821,7 +842,7 @@ fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
     io::Error::other(text)
 }
 
-impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
+impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         // The message this builds names the path as the CALLER spelled it: an
         // error a user reads should name the file the way they named it.
@@ -839,6 +860,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
                     io::Error::new(io::ErrorKind::NotFound, format!("{path}: no data"))
                 })
             })
+            .map_err(|e| self.explain_not_found(path, vfs, e))
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -1052,7 +1074,13 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         let vfs = &self.to_kernel(path)?;
         self.kernel
             .sys_stat(vfs, &self.ctx.zone_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path}: not found")))
+            .ok_or_else(|| {
+                self.explain_not_found(
+                    path,
+                    vfs,
+                    io::Error::new(io::ErrorKind::NotFound, format!("{path}: not found")),
+                )
+            })
             .map(|s| FsMetadata {
                 len: s.size,
                 is_dir: s.is_directory,

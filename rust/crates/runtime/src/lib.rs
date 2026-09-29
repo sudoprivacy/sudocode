@@ -23,7 +23,6 @@ pub mod experiments;
 mod file_intent;
 mod file_ops;
 mod file_redirect;
-mod file_snapshot;
 mod file_tracker;
 pub mod fs_backend;
 mod git_context;
@@ -86,9 +85,8 @@ pub mod workspace_root;
 
 pub use bash::{
     clear_bash_progress_callback, execute_bash, execute_bash_with_abort,
-    execute_bash_with_progress, execute_bash_with_tracking, set_bash_progress_callback,
-    BashCommandInput, BashCommandOutput, BashProgress, BashProgressCallback,
-    BashWithTrackingResult, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
+    execute_bash_with_progress, set_bash_progress_callback, BashCommandInput, BashCommandOutput,
+    BashProgress, BashProgressCallback, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
@@ -133,7 +131,6 @@ pub use file_ops::{
     WriteFileOutput,
 };
 pub use file_redirect::{get_drafts_dir, is_in_drafts, redirect_to_drafts, DRAFTS_DIR_NAME};
-pub use file_snapshot::{FileChangeSnapshot, FileChangeSnapshotWithMtime};
 pub use file_tracker::{CleanupResult, CleanupStrategy, FileOp, TurnFileTracker};
 pub use fs_backend::ManagedRoot;
 pub use fs_backend::{

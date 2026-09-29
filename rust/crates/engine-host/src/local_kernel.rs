@@ -26,10 +26,15 @@
 //!
 //! ## What the session can reach
 //!
-//! Exactly the mounted roots — the workspace, plus any the session declares.
-//! An absolute path outside them routes to no mount and is refused, which is
-//! the containment the co-hosted agent already has (its workspace-boundary
-//! hook) arriving at the CLI through the same mechanism: a mount table.
+//! The whole filesystem root is mounted (the drive root on Windows, `/` on
+//! unix), so an absolute path anywhere on disk resolves through the one VFS
+//! the file tools drive -- a session is not confined to its launch
+//! directory. The workspace and any declared `additionalDirectories` mount ON
+//! TOP of it; the router's longest-prefix match means a path under the
+//! workspace still hits the workspace mount, and only paths outside fall
+//! through to the filesystem-root mount. This is reach, not security: the
+//! sandbox is gvisor's, and this kernel is the access path (hooks, audit, the
+//! one VFS the co-host also speaks), not a containment boundary.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -61,6 +66,17 @@ pub fn boot_session_fs(
     agent_name: &str,
 ) -> io::Result<Arc<dyn FsBackend>> {
     let kernel = Arc::new(Kernel::new());
+    // Mount the whole filesystem root (drive root on Windows, / on unix)
+    // FIRST, so an absolute path anywhere on disk routes to a mount instead
+    // of being refused. Workspace + extra roots mount ON TOP: the router
+    // matches the longest prefix, so a path under the workspace still hits
+    // the workspace mount, and only paths outside it fall through to the
+    // filesystem-root mount. A reach, not a security boundary: gvisor is the
+    // sandbox; this kernel is the access path (hooks, audit, the one VFS the
+    // co-host also speaks), not the containment.
+    if let Some(fs_root) = filesystem_root_of(workspace) {
+        mount_host_root(&kernel, &fs_root)?;
+    }
     let workspace_root = mount_host_root(&kernel, workspace)?;
     for root in extra_roots {
         mount_host_root(&kernel, root)?;
@@ -89,4 +105,20 @@ fn mount_host_root(kernel: &Arc<Kernel>, root: &Path) -> io::Result<String> {
         .vfs_router_arc()
         .add_mount(&mount_point, ZONE, Some(Arc::new(backend)), false);
     Ok(mount_point)
+}
+
+/// The filesystem root that contains path: the drive root on Windows
+/// (C:\ for C:\a\b), or / on unix. None when path has no root
+/// component to lift (a relative path); the caller then mounts only the
+/// workspace and extras as before.
+///
+/// Mounting this makes every on-disk absolute path reachable through the one
+/// VFS a session drives, so the file tools are not confined to the launch
+/// directory. Not `cfg(windows)`-gated: `Path::ancestors().last()` yields
+/// the root on both platforms, so a unix test exercises the same code.
+fn filesystem_root_of(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    path.ancestors().last().map(Path::to_path_buf)
 }

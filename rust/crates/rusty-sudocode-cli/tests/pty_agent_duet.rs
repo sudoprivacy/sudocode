@@ -62,7 +62,6 @@
 mod common;
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -132,20 +131,6 @@ impl Transport {
     }
 }
 
-/// An agent name no other run can be using.
-///
-/// The nexus cases match the envelope on it, and it reaches the binary only as
-/// `NEXUS_A2A_AGENT` — so an envelope carrying it can only have been written by
-/// that process, through the tool, over that transport.
-fn unique_sender_name() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!(
-        "scode-sender-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
 /// The receiver's mailbox, as the test reads it.
 fn receiver_mailbox(transport: &Transport, _config_home: &Path) -> Mailbox {
     match transport {
@@ -200,7 +185,14 @@ fn one_scode_sends_and_another_surfaces_it_on_every_transport() {
 }
 
 fn run_duet(transport: &Transport) {
-    let sender_name = unique_sender_name();
+    // Cert-only: the sender dials with its minted credential, so its A2A name -
+    // the `from` the node stamps - is the credential's agent, not a name the
+    // test invents. Reading it here keeps the assertion pinned to what shipped.
+    let sender_credential = std::env::var("NEXUS_A2A_TEST_SENDER_CREDENTIAL")
+        .expect("set NEXUS_A2A_TEST_SENDER_CREDENTIAL=<minted bundle dir>");
+    let sender_name = runtime::nexus_mailbox::AgentCredential::load(&sender_credential)
+        .expect("load the sender credential bundle")
+        .agent;
     let expected_from = sender_name.clone();
 
     // ── 2. The RECEIVER: a real scode REPL ─────────────────────────────────
@@ -228,16 +220,18 @@ fn run_duet(transport: &Transport) {
     // comes from the cert, so RECEIVER is the name that bundle must carry.
     let receiver_credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
         .expect("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<minted bundle dir>");
-    let mut receiver_env_vars = vec![("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
-    if let Transport::OneNode { endpoint }
-    | Transport::TwoNodes {
-        receiver: endpoint, ..
-    } = transport
-    {
-        receiver_env_vars.push(("NEXUS_A2A_ENDPOINT", endpoint.as_str()));
-        receiver_env_vars.push(("NEXUS_A2A_CREDENTIAL", receiver_credential.as_str()));
-        receiver_env_vars.push(("NEXUS_A2A_PEER", sender_name.as_str()));
-    }
+    let receiver_endpoint = match transport {
+        Transport::OneNode { endpoint }
+        | Transport::TwoNodes {
+            receiver: endpoint, ..
+        } => endpoint,
+    };
+    let receiver_env_vars = vec![
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+        ("NEXUS_A2A_ENDPOINT", receiver_endpoint.as_str()),
+        ("NEXUS_A2A_CREDENTIAL", receiver_credential.as_str()),
+        ("NEXUS_A2A_PEER", sender_name.as_str()),
+    ];
     let mut receiver = env.spawn_with_env(&["--permission-mode", "read-only"], &receiver_env_vars);
     receiver.set_default_timeout(BUDGET);
     receiver

@@ -21,7 +21,7 @@ use runtime::mailbox::Mailbox;
 use runtime::session_control::SessionStore;
 use runtime::spawn_task::{
     cohost_a2a_prompt_section, cohost_shell_prompt_section, spawn_task, AgentDescriptor,
-    AgentState, KernelSyscall, SpawnHandle,
+    AgentState, KernelConvenience, SpawnHandle,
 };
 use runtime::{FsBackend, KernelFsBackend, PermissionMode, Session, SystemPrompt};
 
@@ -66,7 +66,7 @@ pub fn spawn_managed_agent<K, F>(
     state_callback: F,
 ) -> Result<SpawnHandle, String>
 where
-    K: KernelSyscall + Send + Sync + 'static,
+    K: KernelConvenience + Send + Sync + 'static,
     F: Fn(AgentState, Option<String>) + Send + 'static,
 {
     // Nothing in this daemon ticks `crons.json`: the scode scheduler is the
@@ -238,7 +238,7 @@ pub struct SudoCodeSpawnAdapter;
 
 impl<K> SpawnTask<K> for SudoCodeSpawnAdapter
 where
-    K: KernelSyscall + Send + Sync + 'static,
+    K: KernelConvenience + Send + Sync + 'static,
 {
     fn spawn(
         &self,

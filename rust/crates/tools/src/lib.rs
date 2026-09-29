@@ -10973,6 +10973,10 @@ mod tests {
 
     #[test]
     fn deferred_tools_prompt_section_has_xml_tags() {
+        // The deferred-tools listing includes the cron tools unless a peer test has
+        // set `SUDOCODE_DISABLE_CRON_TOOLS`; that env var is process-global, so share
+        // the same lock those tests take rather than race their set/remove window.
+        let _guard = env_guard();
         let registry = GlobalToolRegistry::builtin();
         let section = registry.deferred_tools_prompt_section();
         assert!(section.starts_with("<available-deferred-tools>"));

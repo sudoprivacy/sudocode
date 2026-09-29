@@ -38,3 +38,77 @@ shell_path() {
     printf '%s' "$p"
   fi
 }
+
+# ── Auth-on bring-up, shared by every A2A harness ──────────────────────────────
+#
+# scode is cert-only: it dials mTLS with a minted credential and never plaintext,
+# so dev exercises exactly what production does. These helpers factor out the
+# bring-up run-auth-on.sh proved: boot TLS-on, mint each agent's bundle offline
+# (the mint opens the data dir the daemon locks, so the daemon must be down for
+# it), then restart and dial the mTLS plane.
+#
+# A caller sets AUTHON_DATA_DIR, AUTHON_PORT and AUTHON_ZONE, sources this, and
+# uses: authon_daemon_env / authon_boot / authon_wait_log / authon_mint.
+
+# MSYS must not rewrite `/agents=<zone>` or the daemon's path args (see top).
+AUTHON_NO_CONV="MSYS_NO_PATHCONV=1"
+
+# The daemon environment for an auth-on founder. TLS is ON by NEXUS_NO_TLS being
+# unset; the api-key secret must match between the daemon and the offline mint or
+# a minted credential authenticates as nobody.
+authon_daemon_env() {
+  printf '%s\n' \
+    "NEXUS_DATA_DIR=$(native_path "$AUTHON_DATA_DIR/data")" \
+    "NEXUS_IDENTITY_DIR=$(native_path "$AUTHON_DATA_DIR/id")" \
+    "NEXUS_API_KEY_SECRET=${NEXUS_API_KEY_SECRET:-scode-e2e-secret}" \
+    "NEXUS_ADVERTISE_ADDR=127.0.0.1:${AUTHON_PORT}" \
+    "NEXUS_CLUSTER_INIT=$AUTHON_ZONE" \
+    "NEXUS_CLUSTER_INIT_MOUNTS=/agents=$AUTHON_ZONE" \
+    "RUST_LOG=${RUST_LOG:-info}"
+}
+
+# Boot the founder in the background, setting AUTHON_DAEMON_PID. Reads the daemon
+# binary from AUTHON_NEXUSD_BIN.
+authon_boot() {
+  local env_lines
+  mapfile -t env_lines < <(authon_daemon_env)
+  env $AUTHON_NO_CONV "${env_lines[@]}" \
+    "$AUTHON_NEXUSD_BIN" --bind-addr "0.0.0.0:${AUTHON_PORT}" \
+    >>"$AUTHON_DATA_DIR/daemon.log" 2>&1 &
+  AUTHON_DAEMON_PID=$!
+}
+
+# Wait until the daemon log contains a needle, or fail loud with a tail.
+authon_wait_log() {
+  local needle="$1" budget="${2:-45}" i
+  for i in $(seq 1 "$budget"); do
+    if grep -q "$needle" "$AUTHON_DATA_DIR/daemon.log" 2>/dev/null; then
+      echo "   $needle (after ~${i}s)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "!! daemon never logged '$needle'" >&2
+  tail -40 "$AUTHON_DATA_DIR/daemon.log" >&2
+  return 1
+}
+
+# Mint a CA-signed agent bundle offline and print its directory (daemon form).
+# The daemon must be stopped first: the mint opens the data dir it locks. The
+# printed path is the daemon's own spelling; a Rust `File::open` reads it as-is,
+# so callers hand it straight to NEXUS_A2A_TEST_CERT_DIR.
+authon_mint() {
+  local agent="$1" env_lines bundle
+  mapfile -t env_lines < <(authon_daemon_env)
+  bundle="$(env $AUTHON_NO_CONV "${env_lines[@]}" RUST_LOG=error \
+    "$AUTHON_NEXUSD_BIN" auth mint --subject-type agent --subject-id "$agent" \
+    --name e2e --allow-existing 2>/dev/null | tail -1 | tr -d '\r')"
+  [ -n "$bundle" ] || { echo "!! mint printed no bundle path for $agent" >&2; return 1; }
+  local local_dir
+  local_dir="$(shell_path "$bundle")"
+  local f
+  for f in agent.pem agent-key.pem ca.pem credential.json; do
+    [ -f "$local_dir/$f" ] || { echo "!! the $agent bundle has no $f" >&2; return 1; }
+  done
+  printf '%s' "$bundle"
+}

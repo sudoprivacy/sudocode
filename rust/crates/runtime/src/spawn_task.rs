@@ -49,6 +49,7 @@ use std::thread;
 // Re-export kernel types so downstream crates (e.g. `tools`) can
 // reference them without adding a direct `kernel` dependency.
 pub use kernel::core::agents::registry::{AgentDescriptor, AgentState};
+pub use kernel::kernel::convenience::KernelConvenience;
 pub use kernel::kernel::syscall::KernelSyscall;
 
 pub use crate::agent_mailbox::MailboxEnvelope;

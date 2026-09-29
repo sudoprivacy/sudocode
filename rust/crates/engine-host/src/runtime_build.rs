@@ -100,7 +100,14 @@ impl HostContext {
     /// touch.
     pub fn for_cli_session(cwd: impl Into<PathBuf>) -> io::Result<Self> {
         let cwd = cwd.into();
-        let extra_roots = additional_directories(&cwd)?;
+        // Extra mounts beyond cwd (which boot_session_fs already covers via the
+        // filesystem-root mount): `additionalDirectories` names extra working
+        // dirs; `mountRoots` names extra filesystem roots (e.g. `D:\` on a
+        // Windows machine with a second drive -- the cwd drive root is mounted
+        // automatically, other drives are not). Both are per-machine and merge
+        // into one mount list.
+        let mut extra_roots = additional_directories(&cwd)?;
+        extra_roots.extend(mount_roots(&cwd)?);
         // The name has to be known before the kernel is built: it is the
         // identity every syscall from this session carries, and resolving it
         // afterwards would leave the kernel's view of who is writing and the
@@ -181,28 +188,45 @@ fn cohost_shell_root(agent_name: &str) -> PathBuf {
         .join("shell")
 }
 
-/// Directories a session under `root` may reach beyond `root` itself, from the
-/// `additionalDirectories` configuration key.
-///
-/// A malformed value is an error rather than an empty list: the key exists to
-/// widen what a session can read, so silently ignoring it would present the
-/// containment refusal as if the directory were forbidden — with the setting
-/// that was meant to allow it sitting right there, apparently applied.
+/// Directories a session may reach beyond the cwd's drive root, from the
+/// `additionalDirectories` configuration key. See [`string_list_config`] for
+/// the parse contract.
+#[inline]
 fn additional_directories(root: &Path) -> io::Result<Vec<PathBuf>> {
-    // Configuration that will not parse is an error here, not an empty list:
-    // what a session may reach comes out of this file, and a session that
-    // quietly falls back to "the workspace only" because of a typo elsewhere in
-    // it would refuse a directory the config plainly grants.
+    string_list_config(root, "additionalDirectories")
+}
+
+/// Filesystem roots to mount beyond the cwd's own drive root, from the
+/// `mountRoots` configuration key. Per-machine: the cwd drive root is mounted
+/// automatically, so this exists for the Windows case of a second drive
+/// (`D:\`) a session also needs. Empty on the common single-root setup and on
+/// unix, where the one `/` root already covers everything.
+#[inline]
+fn mount_roots(root: &Path) -> io::Result<Vec<PathBuf>> {
+    string_list_config(root, "mountRoots")
+}
+
+/// Parse a configuration key whose value is a list of paths, shared by
+/// [`additional_directories`] and [`mount_roots`].
+///
+/// A malformed value is an error rather than an empty list: these keys exist to
+/// widen what a session can reach, so silently ignoring one would present the
+/// mount miss as if the directory were forbidden -- with the setting that was
+/// meant to allow it sitting right there, apparently applied. A key that is
+/// absent is a legitimate empty list; only a present-but-wrong-shape value is
+/// the error.
+#[inline]
+fn string_list_config(root: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
     let config = ConfigLoader::default_for(root)
         .load()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let Some(value) = config.get("additionalDirectories").cloned() else {
+    let Some(value) = config.get(key).cloned() else {
         return Ok(Vec::new());
     };
     let malformed = || {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "additionalDirectories must be a list of directory paths",
+            format!("{key} must be a list of directory paths"),
         )
     };
     value

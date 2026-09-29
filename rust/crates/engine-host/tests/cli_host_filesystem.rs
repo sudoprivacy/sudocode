@@ -87,33 +87,33 @@ fn a_session_reads_and_writes_the_real_files_in_its_workspace() {
     assert_eq!(on_disk, "through the kernel\n");
 }
 
-/// A path outside the session's mounts is refused.
+/// A session reaches a sibling path outside its workspace.
 ///
-/// This is the containment a co-hosted agent has always had, arriving at the
-/// CLI: the session's world is its workspace, and a sibling checkout — or an
-/// ssh key — is not in it. Asserted against a directory that exists and is
-/// readable by the process, so a pass means the mount table refused it, not
-/// that the file was missing.
+/// The CLI session mounts the whole filesystem root under the workspace, so an
+/// absolute path to a sibling checkout resolves and reads through the same VFS
+/// the file tools use. A reach, not a hole: security is gvisor's job, not the
+/// mount table's; the kernel is the access path (hooks, audit, the one VFS the
+/// co-host also speaks). The workspace still mounts ON TOP, so a path under it
+/// keeps hitting the workspace mount (the round-trip test above); this asserts
+/// the fall-through to the filesystem-root mount works.
 #[test]
-fn a_session_cannot_reach_outside_its_mounts() {
-    let dir = sandbox("outside");
+fn a_session_reaches_a_sibling_outside_its_workspace() {
+    let dir = sandbox("sibling");
     let workspace = dir.path().join("project");
     std::fs::create_dir_all(&workspace).expect("workspace");
-    let outside = dir.path().join("elsewhere").join("secret.txt");
-    write(&outside, "not yours\n");
-    assert!(
-        std::fs::read_to_string(&outside).is_ok(),
-        "the file must be readable on disk, or this proves nothing"
-    );
+    let sibling = dir.path().join("elsewhere").join("shared.txt");
+    write(&sibling, "reachable\n");
 
     let host = HostContext::for_cli_session(&workspace).expect("boot the session host");
     let path = host
         .fs
-        .normalize(&outside.to_string_lossy())
+        .normalize(&sibling.to_string_lossy())
         .expect("an absolute host path normalizes");
-    assert!(
-        host.fs.read_to_string(&path).is_err(),
-        "a path outside the session's mounts must be refused"
+    assert_eq!(
+        host.fs
+            .read_to_string(&path)
+            .expect("a sibling under the filesystem-root mount is readable"),
+        "reachable\n",
     );
 }
 

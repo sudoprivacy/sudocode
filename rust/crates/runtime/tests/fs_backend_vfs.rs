@@ -537,3 +537,28 @@ fn a_cohosted_agents_plan_lives_in_its_own_workspace() {
         "and the agent next to it has no plan at all"
     );
 }
+
+/// A path outside every mount reads back a transparent error, not a bare
+/// not-found. The mount table covers `/mnt`; a read under `/elsewhere` routes
+/// to no mount, and the backend uses `is_mounted` to say so — the message
+/// names the fix (mount its root) instead of implying the file is missing.
+#[test]
+fn a_path_outside_all_mounts_reads_a_transparent_error() {
+    let kernel = Arc::new(Kernel::new());
+    let backend: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
+    // Mount a SUBTREE, not `/`, so `/elsewhere` is genuinely unmounted.
+    kernel
+        .vfs_router_arc()
+        .add_mount("/mnt", "root", Some(backend), false);
+    let fs =
+        KernelFsBackend::for_agent(Arc::clone(&kernel), "test-owner", "root", "agent-x", "/mnt");
+
+    let err = fs
+        .read("/elsewhere/secret.txt")
+        .expect_err("a path under no mount must be an error");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        err.to_string().contains("outside this session's mounts"),
+        "unmounted path must read as a transparent mounts error, got: {err}",
+    );
+}

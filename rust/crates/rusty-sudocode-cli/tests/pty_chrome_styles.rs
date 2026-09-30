@@ -6,21 +6,40 @@ use std::time::{Duration, Instant};
 
 use common::TestEnv;
 use pty_expect::PtySession;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::UnicodeWidthChar;
 
 // Lowest matching row: a todo/queued label can also occur in scrollback above
 // the live chrome. Coordinates use terminal columns, not UTF-8 byte offsets.
 fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
     sess.render(|screen| {
-        // contents() joins soft-wrapped rows; use physical rows for cell
-        // coordinates, including after a terminal resize.
+        // Search logical text across wrapping, but retain physical coordinates
+        // for the cell assertion. rows() alone misses a needle split by a
+        // wrap; contents() alone gives the wrong row/column after soft-wraps.
         let lines: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
-        lines.iter().enumerate().rev().find_map(|(row, line)| {
-            let byte = line.find(needle)?;
-            let col = u16::try_from(line[..byte].width()).ok()?;
-            let cell = screen.raw().cell(u16::try_from(row).ok()?, col)?;
-            Some((format!("{:?}", cell.fgcolor()), cell.bold(), cell.dim()))
-        })
+        let mut text = String::new();
+        let mut positions = Vec::new();
+        for (row, line) in lines.iter().enumerate() {
+            let row = u16::try_from(row).ok()?;
+            let mut col = 0;
+            for ch in line.chars() {
+                let normalized = if ch.is_whitespace() { ' ' } else { ch };
+                if normalized != ' ' || !text.ends_with(' ') {
+                    positions.push((text.len(), row, col));
+                    text.push(normalized);
+                }
+                col += u16::try_from(ch.width().unwrap_or(0)).ok()?;
+            }
+            // Word wrapping can consume the separating space; soft-wraps can
+            // instead split a word. Preserve that distinction when searching.
+            if !screen.raw().row_wrapped(row) && !text.ends_with(' ') {
+                text.push(' ');
+            }
+        }
+        let needle = needle.split_whitespace().collect::<Vec<_>>().join(" ");
+        let (start, _) = text.rmatch_indices(needle.as_str()).next()?;
+        let (_, row, col) = positions.iter().find(|(byte, _, _)| *byte == start)?;
+        let cell = screen.raw().cell(*row, *col)?;
+        Some((format!("{:?}", cell.fgcolor()), cell.bold(), cell.dim()))
     })
 }
 
@@ -54,7 +73,7 @@ fn settle_chrome(sess: &PtySession) {
     let mut previous = String::new();
     let mut stable = 0;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(|s| s.raw().contents());
         stable = if screen == previous { stable + 1 } else { 0 };
         if stable >= 4 {
             return;
@@ -334,7 +353,12 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
             sess.resize(40, 240).unwrap();
             for width in [240, 100] {
                 resize_idle_chrome(&mut sess, 40, width);
-                for label in ["turn 1", "ctx ", "chrome-style-branch"] {
+                for label in [
+                    "turn 1",
+                    "ctx ",
+                    "tokens · +1m14s Σ1m14s · ctx 10.0k",
+                    "chrome-style-branch",
+                ] {
                     expect_style(&sess, label, (muted, false, false));
                 }
                 let healthy_color = if background == "15;0" {

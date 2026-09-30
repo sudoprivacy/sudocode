@@ -143,9 +143,31 @@ pub trait FsBackend: Send + Sync + 'static {
         None
     }
 
-    /// Create a link `alias` → `target` (a pointer, not a byte-copy). On the
-    /// VFS this is a `DT_LINK` (e.g. the `/agents/{name}/sessions/<sid>` enum
-    /// index); on a host FS there is no equivalent, so it is a no-op.
+    /// Create a link `alias` → `target` (a pointer, not a byte-copy).
+    ///
+    /// # The NAME is the cross-backend contract; the SHAPE is not
+    ///
+    /// Every backend must make `alias` appear in a `readdir` of its parent, because
+    /// that listing is what the chat-list index is FOR — a receiver enumerates its
+    /// conversations by name and derives the transcript from the peer name, never from
+    /// this entry's content or type. What the entry IS differs by backend and callers
+    /// must not branch on it:
+    ///
+    /// * the VFS (`KernelFsBackend`, `NexusVfsFsBackend`) makes a real `DT_LINK`, the
+    ///   destination in metadata — which a mount with no content store keeps, while it
+    ///   drops bytes;
+    /// * a host FS makes a pointer FILE holding the target, because a real symlink on
+    ///   Windows needs Developer Mode or admin. A no-op would be the other option and is
+    ///   worse than it sounds: the name would not appear, so a receiver on a host FS
+    ///   could not enumerate its conversations at all.
+    ///
+    /// So `ls -l` on a host FS shows a small text file where the VFS shows a link. That
+    /// is deliberate. [`Self::read_link`] is the follow half and resolves both, which is
+    /// the only way production should ever ask where one points.
+    ///
+    /// The default is a no-op so a backend with no namespace of its own stays silent —
+    /// but a backend that serves a chat list MUST override it, or the index is empty and
+    /// nothing errors.
     fn link(&self, _alias: &str, _target: &str) -> io::Result<()> {
         Ok(())
     }

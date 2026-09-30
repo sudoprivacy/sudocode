@@ -147,7 +147,6 @@ fn receiver_mailbox(transport: &Transport, _config_home: &Path) -> Mailbox {
             let client = runtime::nexus_mailbox::Config {
                 endpoint: endpoint.to_string(),
                 agent: credential.agent.clone(),
-                peers: Vec::new(),
                 tls: credential.tls,
             }
             .connect()
@@ -230,7 +229,6 @@ fn run_duet(transport: &Transport) {
         ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
         ("NEXUS_A2A_ENDPOINT", receiver_endpoint.as_str()),
         ("NEXUS_A2A_CREDENTIAL", receiver_credential.as_str()),
-        ("NEXUS_A2A_PEER", sender_name.as_str()),
     ];
     let mut receiver = env.spawn_with_env(&["--permission-mode", "read-only"], &receiver_env_vars);
     receiver.set_default_timeout(BUDGET);
@@ -264,7 +262,6 @@ fn run_duet(transport: &Transport) {
         } => {
             sender_env_vars.push(("NEXUS_A2A_ENDPOINT", endpoint.as_str()));
             sender_env_vars.push(("NEXUS_A2A_CREDENTIAL", sender_credential.as_str()));
-            sender_env_vars.push(("NEXUS_A2A_PEER", RECEIVER));
         }
     }
     // No `--allowedTools send`. Narrowing the tool set changes which channel the

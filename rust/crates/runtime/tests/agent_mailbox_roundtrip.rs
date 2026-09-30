@@ -212,7 +212,7 @@ fn structured_shutdown_envelope_survives_roundtrip() {
 /// two strings drifting and that is invisible at a call site.
 #[test]
 fn both_hosts_tell_an_agent_the_same_a2a_contract() {
-    let repl = agent_mailbox::repl_a2a_prompt_section("win-ai", &[]);
+    let repl = agent_mailbox::repl_a2a_prompt_section("win-ai");
     let cohost = runtime::spawn_task::cohost_a2a_prompt_section("win-ai");
 
     // The shared halves, verbatim in both.

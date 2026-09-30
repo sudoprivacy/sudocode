@@ -75,7 +75,6 @@ fn dial(endpoint: &str) -> Arc<NexusVfsClient> {
     runtime::nexus_mailbox::Config {
         endpoint: endpoint.to_string(),
         agent: credential.agent,
-        peers: Vec::new(),
         tls: credential.tls,
     }
     .connect()

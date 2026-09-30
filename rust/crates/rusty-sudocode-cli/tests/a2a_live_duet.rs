@@ -169,7 +169,6 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
         ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
         ("NEXUS_A2A_ENDPOINT", BROKER),
         ("NEXUS_A2A_CREDENTIAL", recv_cred.as_str()),
-        ("NEXUS_A2A_PEER", SENDER),
     ];
 
     let mut receiver = env.spawn_with_env(&["--permission-mode", "read-only"], &receiver_env);
@@ -190,7 +189,6 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
     let mut sender_env: Vec<(&str, &str)> = vec![
         ("NEXUS_A2A_ENDPOINT", BROKER),
         ("NEXUS_A2A_CREDENTIAL", send_cred.as_str()),
-        ("NEXUS_A2A_PEER", RECEIVER),
     ];
 
     let prompt = env.prompt(

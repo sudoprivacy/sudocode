@@ -85,11 +85,17 @@ pub struct ModelTokenLimit {
 /// sudorouter `/v1/models` or the bundled fallback JSON). Handles
 /// provider-prefixed model IDs (e.g. `openai/gpt-4.1-mini`) by stripping
 /// the prefix before lookup.
+///
+/// `None` also covers "listed, but with no documented limits" — the SSOT can
+/// say it doesn't know. The only caller is the preflight guard, and skipping
+/// the guard is the right answer there: rejecting a request against an
+/// invented window fails a request the model would have accepted.
 #[must_use]
 pub fn model_token_limit(model_id: &str) -> Option<ModelTokenLimit> {
-    runtime::model_capabilities::lookup(model_id).map(|cap| ModelTokenLimit {
-        max_output_tokens: cap.max_output_tokens,
-        context_window_tokens: cap.context_window,
+    let cap = runtime::model_capabilities::lookup(model_id)?;
+    Some(ModelTokenLimit {
+        max_output_tokens: cap.max_output_tokens?,
+        context_window_tokens: cap.context_window?,
     })
 }
 

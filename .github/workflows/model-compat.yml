@@ -37,7 +37,7 @@ jobs:
       - name: Fetch model list from sudorouter
         id: models
         env:
-          SUDOROUTER_API_KEY: ${{ secrets.SUDOROUTER_API_KEY }}
+          SUDOROUTER_API_KEY: ${{ secrets.SUDOROUTER_CI_API_KEY }}
         run: |
           set -euo pipefail
 
@@ -49,15 +49,18 @@ jobs:
             exit 0
           fi
 
+          # Every failure below is fatal. This job reported success daily for
+          # days while sweeping zero models: the secret name was wrong, the
+          # fetch failed, and `|| true` + `::warning::` + `exit 0` turned that
+          # into green. A sweep that tests nothing is not a passing sweep.
+          if [ -z "${SUDOROUTER_API_KEY:-}" ]; then
+            echo "::error::SUDOROUTER_CI_API_KEY secret is not set — cannot fetch the model list"
+            exit 1
+          fi
+
           # Fetch all models from sudorouter /v1/models.
           RESPONSE=$(curl -sf -H "Authorization: Bearer $SUDOROUTER_API_KEY" \
-            "https://hk.sudorouter.ai/v1/models" || true)
-
-          if [ -z "$RESPONSE" ]; then
-            echo "::warning::Failed to fetch model list from sudorouter"
-            echo "models=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+            "https://hk.sudorouter.ai/v1/models")
 
           # Filter to chat-completion-capable models.
           # Exclude: embedding, image-gen, video, speech, search, moderation, tts, whisper, dall-e.
@@ -71,14 +74,18 @@ jobs:
               )
           ' | paste -sd ',' -)
 
+          if [ -z "$MODELS" ]; then
+            echo "::error::sudorouter returned no text-capable models"
+            exit 1
+          fi
+
           MODEL_COUNT=$(echo "$MODELS" | tr ',' '\n' | wc -l | tr -d ' ')
           echo "Discovered $MODEL_COUNT text-capable models"
           echo "models=$MODELS" >> "$GITHUB_OUTPUT"
 
       - name: Write proxy config
-        if: steps.models.outputs.models != ''
         env:
-          SUDOROUTER_API_KEY: ${{ secrets.SUDOROUTER_API_KEY }}
+          SUDOROUTER_API_KEY: ${{ secrets.SUDOROUTER_CI_API_KEY }}
         run: |
           set -euo pipefail
           CONFIG_DIR="$HOME/.nexus/sudocode"
@@ -102,7 +109,6 @@ jobs:
           echo "Proxy config written to $CONFIG_DIR/sudocode.json"
 
       - name: Run model compatibility tests
-        if: steps.models.outputs.models != ''
         env:
           SCODE_TEST_BACKEND: live
           SCODE_COMPAT_MODELS: ${{ steps.models.outputs.models }}
@@ -110,7 +116,7 @@ jobs:
         timeout-minutes: 30
 
       - name: Collect report
-        if: always() && steps.models.outputs.models != ''
+        if: always()
         run: |
           # Find the JSON report in any temp directory.
           REPORT=$(find /tmp -name "model-compat-report.json" -type f 2>/dev/null | head -1)
@@ -124,7 +130,7 @@ jobs:
           fi
 
       - name: Upload report artifact
-        if: always() && steps.models.outputs.models != ''
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: model-compat-report
@@ -132,6 +138,3 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Skip notice
-        if: steps.models.outputs.models == ''
-        run: echo "::notice::No models to test — skipping compatibility sweep"

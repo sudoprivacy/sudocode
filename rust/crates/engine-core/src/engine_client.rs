@@ -90,6 +90,17 @@ impl EngineApiClient {
             .ok()
             .map(|selected| selected.name.to_string());
 
+        // Publish the mode for subagents, here in the one place every session
+        // (REPL, ACP, co-host) and every `/auth` / `/model` rebuild passes
+        // through holding a concrete `AuthMode` — and only on the success path,
+        // so "published" means a session is actually running on it. A subagent
+        // resolves its provider on its own thread and cannot see this session's
+        // `--auth`; left to auto-detect it picks `subscription` and dies on "no
+        // token available for subscription provider". The note on
+        // `request_metadata` above says why the two must agree: two credential
+        // paths are two upstream accounts, and the prompt cache is per-account.
+        tools::set_global_auth_mode(auth_mode);
+
         Ok(Self {
             client,
             session_id: session_id.to_string(),

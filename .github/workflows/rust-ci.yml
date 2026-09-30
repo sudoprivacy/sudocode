@@ -382,5 +382,9 @@ jobs:
       - name: Run live API smoke tests
         working-directory: rust
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Proxy-mode credential: a dedicated unlimited sudorouter New-API key
+          # (secret SUDOROUTER_CI_API_KEY), not a personal subscription OAuth
+          # token that expires/gets suspended and takes this job red on main.
+          PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+          PROXY_BASE_URL: https://api.sudorouter.ai/v1
         run: cargo test -p rusty-sudocode-cli --test acp_live_smoke -- --test-threads=1

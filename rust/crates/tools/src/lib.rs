@@ -311,14 +311,49 @@ pub fn todo_list(fs: &Arc<dyn FsBackend>) -> Vec<runtime::Todo> {
     TodoStore::open(fs).list()
 }
 
-/// Global auth mode set by the CLI at startup. Subagents inherit this so they
-/// use the same credential path as the main agent.
-static GLOBAL_AUTH_MODE: std::sync::OnceLock<api::AuthMode> = std::sync::OnceLock::new();
+/// The auth mode the session's provider resolved to, so a subagent spawned
+/// from it uses the same credential path. A subagent resolves its own provider
+/// on a fresh thread with no handle on the session; with this slot empty it
+/// falls back to `resolve_provider_from_config`'s auto-detect, which prefers
+/// `subscription` and fails outright on a proxy / api-key session.
+///
+/// Overwritable rather than write-once: `/auth` and `/model` rebuild the
+/// runtime, and a subagent spawned after the switch has to use the mode now in
+/// effect. A process hosting several sessions under *different* modes (the
+/// co-host) still has only this one slot — last build wins — which is a limit
+/// of keeping this global at all, not of who writes it.
+static GLOBAL_AUTH_MODE: std::sync::RwLock<Option<api::AuthMode>> = std::sync::RwLock::new(None);
 
-/// Called by the CLI at startup to set the auth mode for the entire process.
-/// Subagents automatically inherit this unless explicitly overridden.
+/// Publish the resolved auth mode for subagents to inherit. Called by whoever
+/// builds a session's api client — not by a startup path: `--auth` reaches the
+/// REPL and the ACP server by different routes, and when only the REPL
+/// published it, every ACP session's subagents died on "no token available for
+/// subscription provider".
 pub fn set_global_auth_mode(mode: api::AuthMode) {
-    let _ = GLOBAL_AUTH_MODE.set(mode);
+    let mut slot = GLOBAL_AUTH_MODE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = Some(mode);
+}
+
+/// The published auth mode, if a session has built its client yet.
+fn global_auth_mode() -> Option<api::AuthMode> {
+    *GLOBAL_AUTH_MODE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The credential path a spawned subagent gets: an explicit `auth_mode` on the
+/// Agent tool call, else whatever mode the session's own client resolved to.
+///
+/// `None` out of here means "let the child auto-detect", which is only correct
+/// when no session has built a client yet — auto-detect prefers `subscription`
+/// and errors on a proxy / api-key session.
+fn subagent_auth_mode(explicit: Option<&str>) -> Result<Option<api::AuthMode>, String> {
+    match explicit {
+        Some(value) => api::AuthMode::parse(value).map(Some),
+        None => Ok(global_auth_mode()),
+    }
 }
 
 /// In-process registry that tracks running agent threads and allows callers
@@ -4391,8 +4426,9 @@ struct AgentJob {
     /// config as the parent, regardless of CWD changes.
     sudocode_config: SudoCodeConfig,
     fallback_config: ProviderFallbackConfig,
-    /// Auth mode detected from env vars at spawn time so the subagent uses the
-    /// same credential path (api-key / proxy / subscription) as the parent.
+    /// Auth mode captured at spawn time so the subagent uses the same
+    /// credential path (api-key / proxy / subscription) as the parent — see
+    /// [`subagent_auth_mode`]. `None` only when no session has published one.
     auth_mode: Option<api::AuthMode>,
     /// Pre-seeded conversation prefix. Threaded into the child's `Session`
     /// via [`Session::with_messages`] before the first API call. Empty for
@@ -5492,14 +5528,9 @@ fn prepare_agent_job(
     // parent's auth/credential settings rather than re-loading from CWD.
     let sudocode_config = load_sudocode_config();
     let fallback_config = load_provider_fallback_config();
-    // Explicit override from the Agent tool call, falling back to the
-    // process-wide auth mode set by the CLI at startup.
-    let auth_mode = input
-        .auth_mode
-        .as_deref()
-        .map(api::AuthMode::parse)
-        .transpose()?
-        .or_else(|| GLOBAL_AUTH_MODE.get().copied());
+    // Explicit override from the Agent tool call, falling back to the mode the
+    // session's own client resolved to.
+    let auth_mode = subagent_auth_mode(input.auth_mode.as_deref())?;
     // Match CC's two rules exactly (tools/AgentTool/runAgent.ts):
     //
     //   effort:   agentDefinition.effort ?? state.effortValue
@@ -9305,6 +9336,41 @@ mod tests {
         let parsed = super::from_value::<super::AgentInput>(&input)
             .expect("a stray `fresh` field must be tolerated, not rejected");
         assert_eq!(parsed.subagent_type.as_deref(), Some("Explore"));
+    }
+
+    /// A subagent must spawn onto the credential path its session is already
+    /// using. It resolves its own provider on a fresh thread with no handle on
+    /// the session, so the mode has to arrive through the published slot; with
+    /// that slot empty the child auto-detects, and auto-detect prefers
+    /// `subscription` and dies with "no token available for subscription
+    /// provider" on a `--auth proxy` session. That was every ACP session until
+    /// the publish moved into the api-client constructor.
+    ///
+    /// Also a cache invariant, not only an auth one: two credential paths are
+    /// two upstream accounts, and the prompt cache is per-account.
+    #[test]
+    fn subagent_inherits_the_mode_the_session_published() {
+        super::set_global_auth_mode(api::AuthMode::Proxy);
+        assert_eq!(
+            super::subagent_auth_mode(None),
+            Ok(Some(api::AuthMode::Proxy)),
+            "a spawn with no explicit mode must inherit the session's, not auto-detect",
+        );
+
+        // An explicit mode on the Agent tool call still wins over the session's.
+        assert_eq!(
+            super::subagent_auth_mode(Some("api-key")),
+            Ok(Some(api::AuthMode::ApiKey)),
+        );
+        assert!(super::subagent_auth_mode(Some("nonsense")).is_err());
+
+        // `/auth` and `/model` rebuild the client, so the slot overwrites: a
+        // child spawned after the switch uses the mode now in effect.
+        super::set_global_auth_mode(api::AuthMode::ApiKey);
+        assert_eq!(
+            super::subagent_auth_mode(None),
+            Ok(Some(api::AuthMode::ApiKey)),
+        );
     }
     /// Effort and thinking follow CC's two rules, which are deliberately
     /// asymmetric (`tools/AgentTool/runAgent.ts`):

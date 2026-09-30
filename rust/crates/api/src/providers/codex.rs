@@ -285,9 +285,12 @@ fn translate_input_message(message: &InputMessage, input: &mut Vec<Value>) {
                         "arguments": args.to_string(),
                     }));
                 }
+                // `redacted_thinking` is an Anthropic block: this provider never
+                // issued one, so there is nothing here it could recognise.
                 InputContentBlock::ToolResult { .. }
                 | InputContentBlock::Image { .. }
-                | InputContentBlock::Thinking { .. } => {}
+                | InputContentBlock::Thinking { .. }
+                | InputContentBlock::RedactedThinking { .. } => {}
             }
         }
         flush_text(&mut text_buf, "assistant", input);
@@ -324,7 +327,9 @@ fn translate_input_message(message: &InputMessage, input: &mut Vec<Value>) {
                         "output": flatten_tool_result(content),
                     }));
                 }
-                InputContentBlock::ToolUse { .. } | InputContentBlock::Thinking { .. } => {}
+                InputContentBlock::ToolUse { .. }
+                | InputContentBlock::Thinking { .. }
+                | InputContentBlock::RedactedThinking { .. } => {}
             }
         }
         // Flush remaining user parts.

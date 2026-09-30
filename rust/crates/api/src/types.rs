@@ -252,6 +252,10 @@ pub enum InputContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
+    /// Encrypted thinking, replayed exactly as the server issued it.
+    RedactedThinking {
+        data: Value,
+    },
     ToolUse {
         id: String,
         name: String,

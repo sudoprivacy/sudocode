@@ -120,6 +120,12 @@ pub(crate) fn render_session_markdown(
                         lines.push(String::new());
                     }
                 }
+                // Noted, not dumped: the payload is ciphertext, and a reader
+                // should still see that the turn reasoned about something.
+                ContentBlock::RedactedThinking { .. } => {
+                    lines.push("**Thinking** _(redacted by the provider)_".to_string());
+                    lines.push(String::new());
+                }
             }
         }
         if let Some(usage) = message.usage {
@@ -301,6 +307,9 @@ pub(crate) fn render_export_text(session: &Session) -> String {
                     if !thinking.trim().is_empty() {
                         lines.push(format!("[thinking]\n{thinking}"));
                     }
+                }
+                ContentBlock::RedactedThinking { .. } => {
+                    lines.push("[thinking: redacted]".to_string());
                 }
             }
         }

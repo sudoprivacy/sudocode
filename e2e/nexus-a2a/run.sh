@@ -80,10 +80,19 @@ authon_boot
 authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
 
 echo "== waiting for a writable single-voter leader =="
+# The probe's output is KEPT, not discarded. This loop retries because a fresh
+# founder needs a moment to become writable, so every early failure is expected
+# and printing each one is noise - but the LAST one is the diagnosis, and
+# `2>/dev/null` threw it away. Everything that can go wrong before the daemon is
+# reachable lands in this loop and used to read as "daemon never became
+# writable": a panic on a missing `NEXUS_A2A_TEST_CERT_DIR`, and a build that
+# never produced the test binary at all (`failed to find tool "cl.exe"`).
 ready=
+probe=
 for i in $(seq 1 30); do
-  if NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-      "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored 2>/dev/null | grep -q "1 passed"; then
+  if probe=$(NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+      "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored 2>&1) \
+      && printf '%s' "$probe" | grep -q "1 passed"; then
     echo "   writable after ~$((i * 4))s"
     ready=1
     break
@@ -91,7 +100,8 @@ for i in $(seq 1 30); do
   sleep 4
 done
 if [ -z "$ready" ]; then
-  echo "!! daemon never became writable" >&2
+  echo "!! daemon never became writable - the last probe said:" >&2
+  printf '%s\n' "$probe" >&2
   daemon_logs
   exit 1
 fi
@@ -120,8 +130,12 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
 # and answers nothing, which is how a standing receiver went deaf for four hours
 # while looking idle (#696). `SIGSTOP` reproduces exactly that, and only the
 # harness can do it, because only the harness knows the pid of the daemon it
-# started. Windows has no SIGSTOP that leaves the socket open, so this is
-# skipped loudly there rather than silently.
+# started - which is all the gate below checks.
+#
+# The PLATFORM skip lives in the test, not here. Windows has no SIGSTOP that
+# leaves the socket open, and this script cannot tell: `AUTHON_DAEMON_PID` is set
+# there like anywhere else, so a gate on it skips nothing. The test prints its
+# own SKIP line and returns.
 if [ -n "$AUTHON_DAEMON_PID" ]; then
   echo "== [deterministic] a silent server errors, then recovers =="
   NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \

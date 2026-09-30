@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use crate::error::ApiError;
 use crate::http_transport::{parse_retry_after, HttpTransport, RetryPolicy};
 use crate::providers::registry::Credential;
+use crate::stream_collect::ResponseAccumulator;
 use crate::types::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
     InputContentBlock, InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest,
@@ -986,77 +987,11 @@ async fn collect_stream(
     stream: &mut MessageStream,
     request: &MessageRequest,
 ) -> Result<MessageResponse, ApiError> {
-    let mut content: Vec<OutputContentBlock> = Vec::new();
-    let mut model = request.model.clone();
-    let mut id = String::new();
-    let mut usage = Usage::default();
-    let mut stop_reason = None;
-
+    let mut accumulator = ResponseAccumulator::new("gemini", &request.model);
     while let Some(event) = stream.next_event().await? {
-        match event {
-            StreamEvent::MessageStart(start) => {
-                id = start.message.id;
-                model.clone_from(&start.message.model);
-            }
-            StreamEvent::ContentBlockStart(start) => {
-                content.push(start.content_block);
-            }
-            StreamEvent::ContentBlockDelta(delta) => {
-                apply_delta(&mut content, &delta);
-            }
-            StreamEvent::ContentBlockStop(_) | StreamEvent::MessageStop(_) => {}
-            StreamEvent::MessageDelta(d) => {
-                stop_reason = d.delta.stop_reason;
-                usage = d.usage;
-            }
-        }
+        accumulator.push(event);
     }
-
-    // Parse accumulated JSON strings in tool-use blocks.
-    for block in &mut content {
-        if let OutputContentBlock::ToolUse { input, .. } = block {
-            if let Some(s) = input.as_str() {
-                if let Ok(parsed) = serde_json::from_str(s) {
-                    *input = parsed;
-                }
-            }
-        }
-    }
-
-    Ok(MessageResponse {
-        id,
-        kind: "message".to_string(),
-        role: "assistant".to_string(),
-        content,
-        model,
-        stop_reason,
-        stop_sequence: None,
-        usage,
-        request_id: None,
-        gateway_request_id: None,
-    })
-}
-
-fn apply_delta(content: &mut [OutputContentBlock], delta: &ContentBlockDeltaEvent) {
-    let Some(block) = content.last_mut() else {
-        return;
-    };
-    match (&mut *block, &delta.delta) {
-        (OutputContentBlock::Text { text }, ContentBlockDelta::TextDelta { text: new_text }) => {
-            text.push_str(new_text);
-        }
-        (
-            OutputContentBlock::ToolUse { input, .. },
-            ContentBlockDelta::InputJsonDelta { partial_json },
-        ) => {
-            if let Some(existing) = input.as_str() {
-                *input = Value::String(format!("{existing}{partial_json}"));
-            } else {
-                *input = Value::String(partial_json.clone());
-            }
-        }
-        _ => {}
-    }
+    accumulator.finish(stream.request_id().map(ToString::to_string))
 }
 
 // ---------------------------------------------------------------------------

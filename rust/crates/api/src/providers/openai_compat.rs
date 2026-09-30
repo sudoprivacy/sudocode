@@ -8,6 +8,7 @@ use crate::error::ApiError;
 use crate::http_transport::{
     parse_retry_after, request_id_from_headers, HttpTransport, RetryPolicy,
 };
+use crate::stream_collect::ResponseAccumulator;
 use crate::types::{
     is_reserved_request_body_key, ContentBlockDelta, ContentBlockDeltaEvent,
     ContentBlockStartEvent, ContentBlockStopEvent, InputContentBlock, InputMessage, MessageDelta,
@@ -2326,84 +2327,11 @@ async fn collect_response_stream(
     stream: &mut MessageStream,
     request: &MessageRequest,
 ) -> Result<MessageResponse, ApiError> {
-    let mut content: Vec<OutputContentBlock> = Vec::new();
-    let mut model = request.model.clone();
-    let mut id = String::new();
-    let mut usage = Usage::default();
-    let mut stop_reason = None;
-
+    let mut accumulator = ResponseAccumulator::new("openai-responses", &request.model);
     while let Some(event) = stream.next_event().await? {
-        match event {
-            StreamEvent::MessageStart(start) => {
-                id = start.message.id;
-                model = start.message.model;
-            }
-            StreamEvent::ContentBlockStart(start) => {
-                content.push(start.content_block);
-            }
-            StreamEvent::ContentBlockDelta(delta) => {
-                apply_delta(&mut content, &delta);
-            }
-            StreamEvent::ContentBlockStop(_) | StreamEvent::MessageStop(_) => {}
-            StreamEvent::MessageDelta(d) => {
-                stop_reason = d.delta.stop_reason;
-                usage = d.usage;
-            }
-        }
+        accumulator.push(event);
     }
-
-    for block in &mut content {
-        if let OutputContentBlock::ToolUse { input, .. } = block {
-            if let Some(s) = input.as_str() {
-                if let Ok(parsed) = serde_json::from_str(s) {
-                    *input = parsed;
-                }
-            }
-        }
-    }
-
-    Ok(MessageResponse {
-        id,
-        kind: "message".to_string(),
-        role: "assistant".to_string(),
-        content,
-        model,
-        stop_reason,
-        stop_sequence: None,
-        usage,
-        request_id: stream.request_id().map(ToString::to_string),
-        gateway_request_id: None,
-    })
-}
-
-fn apply_delta(content: &mut [OutputContentBlock], delta: &ContentBlockDeltaEvent) {
-    let Some(block) = content.get_mut(delta.index as usize) else {
-        return;
-    };
-    match (block, &delta.delta) {
-        (OutputContentBlock::Text { text }, ContentBlockDelta::TextDelta { text: new_text }) => {
-            text.push_str(new_text);
-        }
-        (
-            OutputContentBlock::Thinking { thinking, .. },
-            ContentBlockDelta::ThinkingDelta {
-                thinking: new_thinking,
-            },
-        ) => {
-            thinking.push_str(new_thinking);
-        }
-        (
-            OutputContentBlock::ToolUse { input, .. },
-            ContentBlockDelta::InputJsonDelta { partial_json },
-        ) => {
-            if let Some(existing) = input.as_str() {
-                *input = Value::String(format!("{existing}{partial_json}"));
-            } else {
-                *input = Value::String(partial_json.clone());
-            }
-        }
-        _ => {}
-    }
+    accumulator.finish(stream.request_id().map(ToString::to_string))
 }
 
 fn next_sse_frame(buffer: &mut Vec<u8>) -> Option<String> {

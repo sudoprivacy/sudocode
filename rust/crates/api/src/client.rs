@@ -8,6 +8,7 @@ use crate::providers::gemini::{self, GeminiClient};
 use crate::providers::openai_compat::{self, OpenAiCompatClient, OpenAiCompatConfig};
 use crate::providers::registry::{ApiFormat, Credential, ResolvedProvider};
 use crate::providers::{AuthMode, ProviderKind};
+use crate::stream_collect::ResponseAccumulator;
 use crate::types::{MessageRequest, MessageResponse, StreamEvent};
 
 #[allow(clippy::large_enum_variant)]
@@ -271,6 +272,34 @@ impl ProviderClient {
                 .map(MessageStream::Gemini),
         }
     }
+
+    /// Get one whole response, transported as a stream.
+    ///
+    /// Prefer this over [`ProviderClient::send_message`] for any request whose
+    /// duration is not bounded — which in practice means any request carrying a
+    /// whole conversation. A non-streaming request puts no bytes on the socket
+    /// until generation has finished, and on our path a connection that stays
+    /// byte-quiet for ~50s is closed with no HTTP response at all: measured with
+    /// the same prompt, model and route and only `stream` changed, `stream:
+    /// false` died at 50.3s while `stream: true` had its first byte at 1.7s and
+    /// ran to completion in 201.8s. The failure therefore scales with how slow
+    /// the answer is, and the requests most likely to be slow are the big ones
+    /// we least want to lose.
+    ///
+    /// Callers keep their shape: this returns the same `MessageResponse` the
+    /// non-streaming call did, and goes through the same retrying transport.
+    pub async fn send_message_streamed(
+        &self,
+        request: &MessageRequest,
+        trace_id: Option<&str>,
+    ) -> Result<MessageResponse, ApiError> {
+        let streaming = MessageRequest {
+            stream: true,
+            ..request.clone()
+        };
+        let mut stream = self.stream_message(&streaming, trace_id).await?;
+        stream.collect_response(&request.model).await
+    }
 }
 
 #[derive(Debug)]
@@ -300,6 +329,34 @@ impl MessageStream {
             Self::Codex(stream) => stream.next_event().await,
             Self::Gemini(stream) => stream.next_event().await,
         }
+    }
+
+    /// Which provider this stream came from, for error messages only.
+    #[must_use]
+    pub const fn provider_label(&self) -> &'static str {
+        match self {
+            Self::Anthropic(_) => "anthropic",
+            Self::OpenAiCompat(_) => "openai-compatible",
+            Self::Codex(_) => "codex",
+            Self::Gemini(_) => "gemini",
+        }
+    }
+
+    /// Drain this stream and assemble the single `MessageResponse` an
+    /// equivalent non-streaming request would have returned.
+    ///
+    /// `request_model` is only a fallback for providers whose `message_start`
+    /// does not name the model; the stream's own answer wins when it has one.
+    pub async fn collect_response(
+        &mut self,
+        request_model: &str,
+    ) -> Result<MessageResponse, ApiError> {
+        let request_id = self.request_id().map(ToString::to_string);
+        let mut accumulator = ResponseAccumulator::new(self.provider_label(), request_model);
+        while let Some(event) = self.next_event().await? {
+            accumulator.push(event);
+        }
+        accumulator.finish(request_id)
     }
 }
 

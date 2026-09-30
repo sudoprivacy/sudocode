@@ -265,6 +265,39 @@ fn every_method_takes_the_host_spelling() {
         fs.read_link(&at("alias.lnk")).expect("read_link"),
         at("seed.txt")
     );
+
+    // A DIRECTORY target is the shape that matters: the chat-list index points at a
+    // conversation root, so that is what a session actually plants.
+    fs.create_dir_all(&at("conv-root")).expect("target dir");
+    fs.link(&at("idx"), &at("conv-root")).expect("link a dir");
+    assert_eq!(
+        fs.read_link(&at("idx")).expect("read_link a dir"),
+        at("conv-root"),
+        "a directory link must resolve to its target"
+    );
+    // And it reports AS a link. This backend plants a DT_LINK and `symlink_metadata`
+    // used to answer a hardcoded `false` for one, so "is this a link?" depended on
+    // which backend was underneath — for an entry both create from the one shared
+    // `link()` call. The host-FS half of the same question, where the answer comes
+    // from a real symlink or junction, is asserted in
+    // `runtime/tests/fs_backend_vfs.rs::host_backend_links_a_directory_without_a_privilege`.
+    assert!(
+        fs.symlink_metadata(&at("idx"))
+            .expect("symlink_metadata the index")
+            .is_symlink,
+        "a planted link must report as one, on this backend as on a host FS"
+    );
+
+    // And the NAME is what the index contract is: it has to appear in a listing
+    // whichever shape the platform produced.
+    let listed = fs
+        .readdir(&workspace.to_string_lossy())
+        .expect("list the dir the index lives in");
+    assert!(
+        listed.iter().any(|e| e.name == "idx"),
+        "the index must be listable by name; got {:?}",
+        listed.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
 }
 
 /// Every stored concern follows the BACKEND, for both hosts.

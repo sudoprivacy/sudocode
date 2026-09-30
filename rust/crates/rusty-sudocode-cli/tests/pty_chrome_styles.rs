@@ -75,16 +75,7 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
         ],
     );
     sess.resize(40, 100).expect("resize");
-    // The PTY's vt100 model has neither a strikethrough field nor independent
-    // bold/dim (set_dim clears bold). Verify those attributes on the wire,
-    // not through a screen model that cannot represent them simultaneously.
-    let summary_wire = sess.expect("todos").expect("summary appears");
-    // ConPTY may defer the newline until after emitting the new SGR.
-    let normalized_summary = summary_wire.replace("\r\n", "");
-    assert!(
-        normalized_summary.contains("\x1b[1m\x1b[2m3") || normalized_summary.contains("\x1b[1;2m3"),
-        "summary must retain bold and dim: {summary_wire:?}"
-    );
+    // The PTY's vt100 model has no strikethrough field; verify it on the wire.
     sess.expect(r"\x1b\[9mFinished parser")
         .expect("completed label is crossed out");
     sess.expect("❯").expect("input ready");
@@ -157,6 +148,7 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
     let env = TestEnv::new("chrome-rich-styles");
     let store = env.workspace_root().join("todos.json");
     let labels = [
+        "\x1b[1;2mBoldDimSample\x1b[0m",
         "\x1b[38;2;42;142;210mTrueColorSample\x1b[39m DefaultSample",
         "\x1b[38:2::128:64:32mColonRgbSample\x1b[0m",
         "\x1b[38:5:79mIndexedSample\x1b[0m",
@@ -187,6 +179,17 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         ],
     );
     sess.resize(40, 100).expect("resize");
+    // The screen model cannot represent bold and dim simultaneously; keep
+    // that bridge regression on the wire even though summaries no longer dim.
+    let wire = sess
+        .expect("BoldDimSample")
+        .expect("combined styles appear");
+    let normalized = wire.replace("\r\n", "");
+    assert!(
+        normalized.contains("\x1b[1m\x1b[2mBoldDimSample")
+            || normalized.contains("\x1b[1;2mBoldDimSample"),
+        "rich text must retain bold and dim: {wire:?}"
+    );
     sess.expect("❯").expect("input ready");
     expect_style(
         &sess,
@@ -202,4 +205,152 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         .render(|screen| screen.raw().contents())
         .contains("HiddenTitle"));
     exit(&mut sess);
+}
+
+#[test]
+fn todo_summary_scopes_every_count_and_label_in_both_themes() {
+    for (background, muted) in [("15;0", "Idx(243)"), ("0;15", "Idx(245)")] {
+        for statuses in [
+            vec!["completed"],
+            vec!["completed", "in_progress", "pending"],
+        ] {
+            let env = TestEnv::new("chrome-summary-spans");
+            let store = env.workspace_root().join("todos.json");
+            let todos: Vec<_> = statuses.iter().enumerate().map(|(i, status)| {
+                serde_json::json!({"content": format!("Task {i}"), "activeForm": format!("Working {i}"), "status": status})
+            }).collect();
+            std::fs::write(&store, serde_json::to_vec(&todos).unwrap()).unwrap();
+            let mut sess = env.spawn_with_env(
+                &["--permission-mode", "read-only"],
+                &[
+                    ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+                    ("SUDOCODE_TODO_STORE", store.to_str().unwrap()),
+                    ("NO_COLOR", ""),
+                    ("TERM", "xterm-256color"),
+                    ("COLORFGBG", background),
+                ],
+            );
+            sess.resize(40, 100).unwrap();
+            sess.expect("❯").expect("input ready");
+            for width in [100, 60] {
+                sess.resize(40, width).unwrap();
+                for label in [" todos (", " done, ", " open)"] {
+                    expect_style(&sess, label, (muted, false, false));
+                }
+                for count in [
+                    format!("{} todos", statuses.len()),
+                    "1 done".into(),
+                    format!("{} open", statuses.len() - 1),
+                ] {
+                    expect_style(&sess, &count, (muted, true, false));
+                }
+                if statuses.len() > 1 {
+                    expect_style(&sess, "1 in progress", (muted, true, false));
+                    expect_style(&sess, " in progress, ", (muted, false, false));
+                }
+            }
+            sess.send("/exit").unwrap();
+            common::expect_input_line(
+                &sess,
+                "/exit",
+                common::DEFAULT_TIMEOUT,
+                "editable after summary",
+            );
+            expect_style(&sess, "❯ /exit", ("Default", false, false));
+            sess.send("\r").unwrap();
+            assert_eq!(sess.expect_eof().unwrap(), 0);
+        }
+    }
+}
+
+#[test]
+fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
+    use runtime::{ContentBlock, ConversationMessage, Session, TokenUsage};
+
+    // No API needed: resume real persisted usage through the production REPL.
+    // Exercise both palettes and the warning/error -> muted transition as well
+    // as the healthy-cache -> muted transition.
+    for (background, muted, hit_color, error_color) in [
+        ("15;0", "Idx(243)", "Idx(79)", "Idx(9)"),
+        ("0;15", "Idx(245)", "Idx(30)", "Idx(1)"),
+    ] {
+        for (read, creation, hit, write) in
+            [(7500, 2500, "⚡75%", "✎25%"), (9000, 1000, "⚡90%", "✎10%")]
+        {
+            let env = TestEnv::new("chrome-status-spans");
+            assert!(std::process::Command::new("git")
+                .args(["init", "-b", "chrome-style-branch"])
+                .current_dir(env.workspace_root())
+                .output()
+                .unwrap()
+                .status
+                .success());
+            let mut session = Session::new().with_workspace_root(env.workspace_root());
+            session
+                .push_user_text("Saved conversation".to_string())
+                .unwrap();
+            let mut message = ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Saved answer".into(),
+            }]);
+            message.usage = Some(TokenUsage {
+                cache_read_input_tokens: read,
+                cache_creation_input_tokens: creation,
+                output_tokens: 100,
+                ..TokenUsage::default()
+            });
+            message.duration_ms = Some(74_000);
+            session.push_message(message).unwrap();
+            let path = env.workspace_root().join("styled-session.jsonl");
+            session.save_to_path(&path).unwrap();
+            let mut sess = env.spawn_with_env(
+                &[
+                    "--resume",
+                    path.to_str().unwrap(),
+                    "--permission-mode",
+                    "read-only",
+                ],
+                &[
+                    ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+                    ("NO_COLOR", ""),
+                    ("TERM", "xterm-256color"),
+                    ("COLORFGBG", background),
+                ],
+            );
+            sess.resize(40, 240).unwrap();
+            for width in [240, 100] {
+                sess.resize(40, width).unwrap();
+                for label in ["turn 1", "ctx ", "chrome-style-branch"] {
+                    expect_style(&sess, label, (muted, false, false));
+                }
+                let healthy_color = if background == "15;0" {
+                    "Idx(10)"
+                } else {
+                    "Idx(2)"
+                };
+                expect_style(
+                    &sess,
+                    hit,
+                    (
+                        if read == 7500 {
+                            hit_color
+                        } else {
+                            healthy_color
+                        },
+                        false,
+                        false,
+                    ),
+                );
+                expect_style(
+                    &sess,
+                    write,
+                    (
+                        if creation == 2500 { error_color } else { muted },
+                        false,
+                        false,
+                    ),
+                );
+            }
+            exit(&mut sess);
+        }
+    }
 }

@@ -48,7 +48,11 @@ The live UI retains the existing formatter colors and supported text styles:
 running tool cards use the amber accent, queued messages are dimmed, and Todo
 items distinguish active and completed states. This uses the same palette as
 the transcript; it does not introduce a new color theme. Completed Todo labels
-retain their dim strikethrough, and bold and dim can be combined in the summary.
+retain their dim strikethrough. Todo summaries use one muted foreground for all
+labels and punctuation, with every count bold. Per-turn status uses the same
+theme-selected muted foreground without an additional dim attribute; cache
+health indicators keep their semantic colors. Emphasis and color are scoped
+to individual spans so they do not leak into following labels or input.
 
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:

@@ -48,12 +48,24 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # sonnet, not opus-4-7, because sonnet is the model this key is *proven*
-          # to reach: it is what `acp_live_smoke` requests, and that job passes on
-          # main with this same secret. Whether this key's group can reach
-          # opus-4-7 is unverified, and an unreachable model would fail exactly
-          # like a rejected credential — another red job that reads as a finding.
-          claude_args: '--model claude-sonnet-4-6'
+          # The cheapest Claude model this key can reach, by the gateway's own
+          # numbers — not the strongest.
+          #
+          # Cost: a real review of #819 ran 24 turns for $1.26 on claude-sonnet-4-6.
+          # The gateway's own model_ratio is 1.5 for claude-sonnet-4-6 and 0.5 for
+          # claude-haiku-4-5-20251001 (completion_ratio 5 for both), so this is
+          # exactly 3x cheaper — roughly $0.42 a review. A PR review is a
+          # read-the-diff-and-comment job; it does not need the strongest model.
+          #
+          # Reachability is not assumed. An unreachable model fails exactly like a
+          # rejected credential — a red job that reads as a finding about the diff,
+          # which is the trap this workflow already has two guards for. Checked
+          # against the gateway instead: every channel serving claude-sonnet-4-6
+          # (the model a review is *proven* to have reached) also serves
+          # claude-haiku-4-5-20251001, same channel and same group, so any key that
+          # reached the one reaches the other. The alias `claude-haiku-4-5` is NOT
+          # on every one of those channels; the dated id is.
+          claude_args: '--model claude-haiku-4-5-20251001'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
@@ -82,4 +94,30 @@ jobs:
           if [ "${turns:-99}" -le 1 ] 2>/dev/null && [ "${cost:-1}" = "0" ]; then
             echo "::error::The code review never reached a model (num_turns=$turns, cost=$cost) — the credential or model this job uses is being rejected. This is an infrastructure failure, NOT a finding about this pull request. Check SUDOROUTER_CI_API_KEY and whether its group can reach the model in claude_args; do not read this as a comment on the diff."
           fi
+
+      # The other way a review can not happen — and the dangerous one, because it
+      # is GREEN. The action validates that the workflow file on the head branch
+      # is byte-identical to the one on the default branch; when it is not, it
+      # `return`s before the first model call and the composite step still
+      # succeeds. So a stale branch, or any PR that edits this very file, gets a
+      # passing `claude-review` check for a review that never ran. It does set
+      # `skipped_due_to_workflow_validation_mismatch`, but `action.yml` never
+      # declares that output, so a composite caller cannot see it — the readable
+      # signal is that `execution_file` was never set.
+      #
+      # Warning rather than failure, deliberately: a PR that changes this
+      # workflow cannot make the check pass from inside the PR (the mismatch is
+      # the change), so failing here would leave such PRs permanently red with no
+      # fixable cause. A stale branch, by contrast, is fixable — merge the
+      # default branch — and the message says so.
+      - name: Say when the review was skipped before it started
+        if: success() && steps.claude-review.outputs.execution_file == ''
+        run: |
+          echo "::warning::claude-review did not run: the action skipped before its first model call, so this green check is NOT a passing code review. Cause is almost always workflow validation — the copy of .github/workflows/claude-code-review.yml on this branch differs from the one on the default branch. If this PR does not edit that file, merge the default branch into this branch and the review will run. If it does edit it, the review can only run once the PR is merged."
+          {
+            echo "### :warning: No code review happened"
+            echo
+            echo "\`claude-review\` exited before its first model call, so this job being green"
+            echo "does not mean the diff was reviewed. See the warning annotation for the cause."
+          } >> "$GITHUB_STEP_SUMMARY"
 

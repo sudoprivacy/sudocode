@@ -663,8 +663,7 @@ impl AnthropicClient {
             Ok(counted) => counted,
             Err(error) => {
                 if error_means_endpoint_absent(&error) {
-                    self.count_tokens_unsupported
-                        .store(true, Ordering::Relaxed);
+                    self.count_tokens_unsupported.store(true, Ordering::Relaxed);
                 }
                 return Ok(());
             }

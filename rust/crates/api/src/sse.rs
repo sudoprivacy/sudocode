@@ -1,5 +1,8 @@
 use crate::error::ApiError;
-use crate::types::StreamEvent;
+use crate::types::{
+    MessageDelta, MessageDeltaEvent, MessageResponse, MessageStartEvent, MessageStopEvent,
+    StreamEvent,
+};
 
 #[derive(Debug, Default)]
 pub struct SseParser {
@@ -27,6 +30,15 @@ impl SseParser {
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<StreamEvent>, ApiError> {
         self.buffer.extend_from_slice(chunk);
+        if body_opens_as_json(&self.buffer) {
+            // Not an SSE stream at all — an upstream that ignored
+            // `stream: true` and is answering with one JSON object. Frame
+            // splitting must not run over it: a blank line anywhere inside a
+            // pretty-printed body would be read as a frame terminator and cut
+            // the object in half. Hold everything for `finish`, which knows
+            // how to read a whole body.
+            return Ok(Vec::new());
+        }
         let mut events = Vec::new();
 
         while let Some(frame) = self.next_frame() {
@@ -53,7 +65,10 @@ impl SseParser {
         // JSON "failed to parse ... for model X" error that blames the model.
         match self.parse_frame_with_context(&tail) {
             Ok(Some(event)) => Ok(vec![event]),
-            Ok(None) => Ok(Vec::new()),
+            // Nothing SSE-shaped and no error envelope. Before giving up on
+            // the bytes, check whether they are a complete message the
+            // upstream sent unframed.
+            Ok(None) => Ok(non_sse_message_events(tail.trim()).unwrap_or_default()),
             // The tail did not parse. If it is the *start* of a terminal frame
             // (a `message_stop` — the last event Anthropic emits), the stream
             // reached its logical end and only the closing `}\n\n` bytes were
@@ -101,6 +116,53 @@ impl SseParser {
 
 pub fn parse_frame(frame: &str) -> Result<Option<StreamEvent>, ApiError> {
     parse_frame_with_provider(frame, "unknown", "unknown")
+}
+
+/// Whether the body starts with a JSON value rather than SSE framing.
+///
+/// An SSE stream's first non-whitespace bytes are always a field name
+/// (`event:`, `data:`) or a comment (`:`), never `{` or `[`.
+fn body_opens_as_json(buffer: &[u8]) -> bool {
+    matches!(
+        buffer.iter().find(|byte| !byte.is_ascii_whitespace()),
+        Some(b'{' | b'[')
+    )
+}
+
+/// Turn a complete `/v1/messages` JSON body into the events a stream would
+/// have produced, for an upstream that ignored `stream: true` and answered
+/// with the whole object.
+///
+/// The answer is already generated and already paid for. Dropping it — which
+/// is what happened before, since the body matches no SSE frame — reported an
+/// empty response to the caller, whose only recourse was to re-send the entire
+/// conversation: a second upload, a second generation, and on this path in the
+/// one request shape that a ~50s byte-quiet close kills.
+///
+/// Emits `message_start` (carrying the content, so consumers that read blocks
+/// from it need no special case), then `message_delta` for the stop reason and
+/// usage, then `message_stop` — so a consumer counting a completed message
+/// sees one.
+fn non_sse_message_events(trimmed: &str) -> Option<Vec<StreamEvent>> {
+    let raw = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
+    // Require the discriminator rather than relying on a permissive
+    // deserialize: every field of `MessageResponse` except `content` has a
+    // default, so some unrelated JSON object would otherwise be accepted as an
+    // empty assistant message and reported as a successful empty turn.
+    if raw.get("type").and_then(serde_json::Value::as_str) != Some("message") {
+        return None;
+    }
+    let message = serde_json::from_value::<MessageResponse>(raw).ok()?;
+    let delta = MessageDelta {
+        stop_reason: message.stop_reason.clone(),
+        stop_sequence: message.stop_sequence.clone(),
+    };
+    let usage = message.usage.clone();
+    Some(vec![
+        StreamEvent::MessageStart(MessageStartEvent { message }),
+        StreamEvent::MessageDelta(MessageDeltaEvent { delta, usage }),
+        StreamEvent::MessageStop(MessageStopEvent {}),
+    ])
 }
 
 /// Whether an unparseable trailing frame is the *beginning* of a terminal
@@ -241,6 +303,130 @@ mod tests {
     use super::{parse_frame, SseParser};
     use crate::error::ApiError;
     use crate::types::{ContentBlockDelta, MessageDelta, OutputContentBlock, StreamEvent, Usage};
+
+    /// An upstream that ignores `stream: true` and answers with the whole
+    /// message body. The answer is complete and already paid for; matching no
+    /// frame and reporting nothing left the caller re-sending the entire
+    /// conversation to get a reply it had already received.
+    #[test]
+    fn a_whole_message_body_sent_instead_of_a_stream_becomes_events() {
+        let body = concat!(
+            "{\"id\":\"msg_json\",\"type\":\"message\",\"role\":\"assistant\",",
+            "\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}],",
+            "\"model\":\"claude-sonnet-4-6\",\"stop_reason\":\"end_turn\",\"stop_sequence\":null,",
+            "\"usage\":{\"input_tokens\":11,\"cache_read_input_tokens\":7,\"output_tokens\":3}}"
+        );
+
+        let mut parser = SseParser::new();
+        assert!(
+            parser
+                .push(body.as_bytes())
+                .expect("a whole body is not an error")
+                .is_empty(),
+            "an unframed body cannot be read until the stream ends"
+        );
+        let events = parser.finish().expect("a complete body should parse");
+
+        assert_eq!(events.len(), 3, "{events:?}");
+        match &events[0] {
+            StreamEvent::MessageStart(start) => {
+                assert_eq!(start.message.id, "msg_json");
+                assert_eq!(
+                    start.message.content,
+                    vec![OutputContentBlock::Text {
+                        text: "Hello".to_string(),
+                    }]
+                );
+                assert_eq!(start.message.usage.cache_read_input_tokens, 7);
+            }
+            other => panic!("expected message_start, got {other:?}"),
+        }
+        match &events[1] {
+            StreamEvent::MessageDelta(delta) => {
+                assert_eq!(delta.delta.stop_reason.as_deref(), Some("end_turn"));
+                assert_eq!(delta.usage.input_tokens, 11);
+            }
+            other => panic!("expected message_delta, got {other:?}"),
+        }
+        assert!(
+            matches!(events[2], StreamEvent::MessageStop(_)),
+            "a consumer waiting for message_stop has to see one: {:?}",
+            events[2]
+        );
+    }
+
+    /// A blank line inside a pretty-printed body is not a frame terminator.
+    /// Splitting on it would cut the object in half and lose the answer.
+    #[test]
+    fn a_pretty_printed_body_is_not_shredded_by_frame_splitting() {
+        let body = concat!(
+            "{\n  \"id\": \"msg_pretty\",\n  \"type\": \"message\",\n\n",
+            "  \"role\": \"assistant\",\n",
+            "  \"content\": [{\"type\": \"text\", \"text\": \"Hi\"}],\n",
+            "  \"model\": \"m\",\n  \"usage\": {\"output_tokens\": 2}\n}"
+        );
+        let (head, tail) = body.split_at(40);
+
+        let mut parser = SseParser::new();
+        assert!(parser.push(head.as_bytes()).expect("head").is_empty());
+        assert!(parser.push(tail.as_bytes()).expect("tail").is_empty());
+        let events = parser.finish().expect("a complete body should parse");
+
+        assert_eq!(events.len(), 3, "{events:?}");
+        match &events[0] {
+            StreamEvent::MessageStart(start) => assert_eq!(
+                start.message.content,
+                vec![OutputContentBlock::Text {
+                    text: "Hi".to_string(),
+                }]
+            ),
+            other => panic!("expected message_start, got {other:?}"),
+        }
+    }
+
+    /// Holding an unframed body back until the stream ends must not swallow an
+    /// error body: reporting that as an empty success is how a failed turn
+    /// becomes a silently empty answer.
+    #[test]
+    fn an_unframed_error_envelope_is_still_reported_as_an_error() {
+        let body =
+            "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}";
+        let mut parser = SseParser::new();
+
+        let error = match parser.push(body.as_bytes()) {
+            Err(error) => error,
+            Ok(events) => {
+                assert!(events.is_empty(), "{events:?}");
+                parser
+                    .finish()
+                    .expect_err("an error body must not read as a successful empty turn")
+            }
+        };
+
+        assert!(
+            format!("{error}").contains("Overloaded"),
+            "the error has to name the upstream's reason: {error:?}"
+        );
+    }
+
+    /// Only a body that says it is a message becomes one. Every field of a
+    /// message response except `content` has a serde default, so a permissive
+    /// parse would turn unrelated JSON into a successful empty turn.
+    #[test]
+    fn an_unrelated_json_object_does_not_become_an_empty_message() {
+        let mut parser = SseParser::new();
+        parser
+            .push(b"{\"detail\":\"not found\"}")
+            .expect("push should not error");
+
+        assert!(
+            parser
+                .finish()
+                .expect("no error envelope, no message")
+                .is_empty(),
+            "an unrecognized body must stay unrecognized, not be invented into a reply"
+        );
+    }
 
     #[test]
     fn parses_single_frame() {

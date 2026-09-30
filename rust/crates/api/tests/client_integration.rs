@@ -852,6 +852,100 @@ async fn send_message_tracks_unexpected_prompt_cache_breaks() {
     std::env::remove_var("SUDO_CODE_CONFIG_HOME");
 }
 
+/// One whole response, transported as a stream. Every caller that used to send
+/// a conversation-sized request non-streaming now goes through this, so the
+/// wire shape is the thing worth pinning: `stream: true` regardless of what the
+/// caller's request said, and the same `MessageResponse` back.
+#[tokio::test]
+async fn send_message_streamed_streams_the_request_and_returns_one_response() {
+    let sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_collected\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":13,\"cache_read_input_tokens\":21,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Summary.\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":4}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "text/event-stream", sse)],
+    )
+    .await;
+
+    let client =
+        ProviderClient::Anthropic(ApiClient::new("test-key").with_base_url(server.base_url()));
+    // The caller's request says `stream: false` — the transport decision is
+    // not the caller's to make.
+    let response = client
+        .send_message_streamed(&sample_request(false), None)
+        .await
+        .expect("a streamed request should collect into one response");
+
+    assert_eq!(
+        response.content,
+        vec![OutputContentBlock::Text {
+            text: "Summary.".to_string(),
+        }]
+    );
+    assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
+    // The prompt-cache numbers only ever arrive on `message_start`; losing
+    // them would make every collected turn look like a cache miss.
+    assert_eq!(response.usage.cache_read_input_tokens, 21);
+    assert_eq!(response.usage.cache_creation_input_tokens, 13);
+    assert_eq!(response.usage.output_tokens, 4);
+
+    let requests = state.lock().await;
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value =
+        serde_json::from_str(&requests[0].body).expect("body should be json");
+    assert_eq!(body["stream"], json!(true));
+}
+
+/// An upstream that ignores `stream: true` and answers with the whole message
+/// body. The answer is complete and paid for: read it. Re-sending the
+/// conversation to get a reply we already have is what this used to do.
+#[tokio::test]
+async fn a_json_body_answered_to_a_streaming_request_is_read_not_re_sent() {
+    let body = concat!(
+        "{\"id\":\"msg_unframed\",\"type\":\"message\",\"role\":\"assistant\",",
+        "\"content\":[{\"type\":\"text\",\"text\":\"Unframed but complete.\"}],",
+        "\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":\"end_turn\",",
+        "\"usage\":{\"input_tokens\":30,\"cache_read_input_tokens\":4000,\"output_tokens\":6}}"
+    );
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    // One queued response: a second request would find the server gone, which
+    // is the assertion — the body we already have is enough.
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "application/json", body)],
+    )
+    .await;
+
+    let client =
+        ProviderClient::Anthropic(ApiClient::new("test-key").with_base_url(server.base_url()));
+    let response = client
+        .send_message_streamed(&sample_request(false), None)
+        .await
+        .expect("a complete body is a complete answer, whatever framing it used");
+
+    assert_eq!(
+        response.content,
+        vec![OutputContentBlock::Text {
+            text: "Unframed but complete.".to_string(),
+        }]
+    );
+    assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
+    assert_eq!(response.usage.cache_read_input_tokens, 4000);
+    assert_eq!(captured_paths(&state).await, vec!["/v1/messages"]);
+}
+
 /// The exact-count preflight uploads the whole conversation a second time —
 /// the `count_tokens` body *is* the message body. A turn using a fraction of
 /// its window cannot be pushed over the line by estimator error, so buying the

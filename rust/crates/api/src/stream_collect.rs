@@ -104,6 +104,20 @@ impl ResponseAccumulator {
                 if start.message.stop_reason.is_some() {
                     self.stop_reason = start.message.stop_reason;
                 }
+                if start.message.stop_sequence.is_some() {
+                    self.stop_sequence = start.message.stop_sequence;
+                }
+                // Anthropic's own streams start with an empty `content`, but an
+                // upstream that answered `stream: true` with a whole JSON body
+                // carries the entire message here (see `sse::finish`). Dropping
+                // it would report a completed, paid-for turn as empty. Indices
+                // follow the order the blocks arrived in; a later
+                // `content_block_start` for the same index overwrites, which is
+                // the right answer for anything that sends both.
+                for (index, block) in start.message.content.into_iter().enumerate() {
+                    let index = u32::try_from(index).unwrap_or(u32::MAX);
+                    self.blocks.insert(index, block);
+                }
             }
             StreamEvent::ContentBlockStart(start) => {
                 self.blocks.insert(start.index, start.content_block);
@@ -180,7 +194,9 @@ impl ResponseAccumulator {
                 // Arrives in one piece today, appended anyway: a signature that
                 // is silently truncated is indistinguishable from a valid one
                 // until the *next* request rejects the replayed thinking block.
-                signature.get_or_insert_with(String::new).push_str(&fragment);
+                signature
+                    .get_or_insert_with(String::new)
+                    .push_str(&fragment);
             }
             // Mismatched pairs (a text delta for a tool block, say) are a
             // provider bug we cannot repair here; dropping the fragment is the
@@ -208,7 +224,8 @@ impl ResponseAccumulator {
         for (index, raw) in std::mem::take(&mut self.tool_input_json) {
             let provider = self.provider.clone();
             let model = self.model.clone();
-            let Some(OutputContentBlock::ToolUse { input, .. }) = self.blocks.get_mut(&index) else {
+            let Some(OutputContentBlock::ToolUse { input, .. }) = self.blocks.get_mut(&index)
+            else {
                 continue;
             };
             *input = parse_tool_input(&raw).map_err(|_| {
@@ -342,6 +359,59 @@ mod tests {
             accumulator.push(event);
         }
         accumulator.finish(Some("req_1".to_string()))
+    }
+
+    /// A `message_start` that already carries the whole message — what
+    /// `sse::finish` synthesizes for an upstream that answered `stream: true`
+    /// with one JSON body. Real Anthropic streams send an empty `content` here,
+    /// so dropping it looked free; on that path it discarded the entire answer.
+    #[test]
+    fn keeps_content_that_arrives_on_message_start() {
+        // given
+        let start_with_content = MessageResponse {
+            id: "msg_json".to_string(),
+            kind: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                OutputContentBlock::Text {
+                    text: "Done.".to_string(),
+                },
+                tool_block("toolu_1", "get_weather"),
+            ],
+            model: "claude-haiku-4-5-20251001".to_string(),
+            stop_reason: Some("tool_use".to_string()),
+            stop_sequence: None,
+            usage: Usage {
+                input_tokens: 40,
+                cache_read_input_tokens: 9_000,
+                output_tokens: 12,
+                ..Usage::default()
+            },
+            request_id: None,
+            gateway_request_id: None,
+        };
+        let events = vec![
+            StreamEvent::MessageStart(MessageStartEvent {
+                message: start_with_content,
+            }),
+            StreamEvent::MessageStop(MessageStopEvent {}),
+        ];
+
+        // when
+        let response = collect(events).expect("a whole message is a complete stream");
+
+        // then
+        assert_eq!(
+            response.content,
+            vec![
+                OutputContentBlock::Text {
+                    text: "Done.".to_string(),
+                },
+                tool_block("toolu_1", "get_weather"),
+            ],
+        );
+        assert_eq!(response.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(response.usage.cache_read_input_tokens, 9_000);
     }
 
     #[test]

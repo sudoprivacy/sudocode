@@ -177,6 +177,8 @@ fn row_of(rows: &[String], needle: &str) -> usize {
 /// * unordered items carry a `•` marker;
 /// * a bullet nested under an ordered item aligns under the parent's text;
 /// * a nested list does not open a blank hole before the next sibling.
+/// * the response prefix is a text bullet, not an emoji-capable record symbol,
+///   and subsequent streamed blocks retain the two-column response margin.
 #[test]
 fn markdown_showcase_renders_without_spacing_artifacts() {
     let env = TestEnv::new("md-showcase");
@@ -206,6 +208,19 @@ fn markdown_showcase_renders_without_spacing_artifacts() {
     // Binding: "Intro:" introduces the list, so "• alpha" is the very next
     // row — the blank line the renderer used to inject is gone.
     let intro = row_of(&rows, "Intro:");
+    assert_eq!(
+        rows[intro], "• Intro:",
+        "response must start with a text bullet at column zero: {rows:#?}"
+    );
+    assert!(
+        rows.iter().all(|row| !row.contains('\u{23fa}')),
+        "response prefix must not use the emoji-capable record symbol: {rows:#?}"
+    );
+    let done = row_of(&rows, "Done.");
+    assert_eq!(
+        rows[done], "  Done.",
+        "later streamed blocks must keep the two-column response margin: {rows:#?}"
+    );
     assert!(
         rows[intro + 1].contains("• alpha"),
         "adjacent list must bind to its label: {rows:#?}"

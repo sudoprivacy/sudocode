@@ -1653,7 +1653,7 @@ fn strip_ansi(input: &str) -> String {
     output
 }
 
-/// Stateful processor that prefixes the first line with ⏺ (bold) and indents
+/// Stateful processor that prefixes the first line with • (bold) and indents
 /// all continuation lines by two spaces so that column 0 is reserved
 /// exclusively for status glyphs. Hard-wraps text at the terminal width so the
 /// terminal never soft-wraps into column 0. Pure terminal-UI state — shared by
@@ -1702,7 +1702,9 @@ impl ResponseGlyphState {
                     out.push_str("  ");
                 } else {
                     self.started = true;
-                    out.push_str(&format!("\r\x1b[2K{BOLD}⏺{RESET} "));
+                    // Use the text bullet, not the emoji-capable U+23FA record
+                    // symbol: terminal font fallback can distort the latter.
+                    out.push_str(&format!("\r\x1b[2K{BOLD}\u{2022}{RESET} "));
                 }
                 self.visible_col = 2;
             }

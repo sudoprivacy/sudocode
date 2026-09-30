@@ -29,6 +29,9 @@ use std::time::{Duration, Instant};
 use commands::suggest_slash_commands;
 use iocraft::prelude::*;
 
+mod ansi_text;
+use ansi_text::AnsiText;
+
 // ── stderr redirect ───────────────────────────────────────────────────
 
 /// Windows stub — stderr redirect is a no-op on non-Unix platforms.
@@ -2211,25 +2214,25 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(if pending_text.is_empty() {
                 None
             } else {
-                Some(element! { Text(content: pending_text) })
+                Some(element! { AnsiText(content: pending_text) })
             })
             // StatusSlot
             #(match &status_slot {
-                StatusSlot::Spinner(s) => Some(element! { Text(content: s.clone()) }),
-                StatusSlot::TurnResult(s) => Some(element! { Text(content: s.clone(), color: Color::DarkGrey) }),
-                StatusSlot::Tips => Some(element! { Text(content: tips_text.clone(), color: Color::DarkGrey) }),
+                StatusSlot::Spinner(s) => Some(element! { AnsiText(content: s.clone()) }),
+                StatusSlot::TurnResult(s) => Some(element! { AnsiText(content: s.clone(), color: Color::DarkGrey) }),
+                StatusSlot::Tips => Some(element! { AnsiText(content: tips_text.clone(), color: Color::DarkGrey) }),
                 StatusSlot::Empty => None,
             })
             // Upper chrome: separator (+ ContextSlot + separator when tasks exist)
-            Text(content: upper_sep, color: Color::DarkGrey)
+            AnsiText(content: upper_sep, color: Color::DarkGrey)
             // InputSlot
             #(panel_text.map(|panel| element! {
-                Text(content: panel, color: Color::Cyan)
+                AnsiText(content: panel, color: Color::Cyan)
             }))
             #(if let InputSlot::Hint(ref hint_text) = current_input_slot {
                 element! {
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: hint_text.clone(), color: Color::DarkGrey)
+                        AnsiText(content: hint_text.clone(), color: Color::DarkGrey)
                     }
                 }
             } else if matches!(current_input_slot, InputSlot::DialPad(_)) {
@@ -2282,7 +2285,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Separator
             Text(content: sep, color: Color::DarkGrey)
             // FooterSlot
-            Text(content: footer_text, color: Color::DarkGrey)
+            AnsiText(content: footer_text, color: Color::DarkGrey)
         }
     }
 }

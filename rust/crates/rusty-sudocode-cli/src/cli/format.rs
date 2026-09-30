@@ -958,7 +958,7 @@ impl ToolCardContent {
 /// and CJK width, so a closed box's right edge is unreliable — a left frame
 /// keeps output copy-pasteable and pipe-safe, matching Sudo Code's scrollback
 /// ethos. The frame carries the status color; the tool name inside `header`
-/// keeps its own identity color. There is no `⏺` glyph — the frame is the cue.
+/// keeps its own identity color. There is no response bullet — the frame is the cue.
 pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
     use std::fmt::Write as _;
     let t = theme();

@@ -514,21 +514,24 @@ impl Mailbox {
             self.backend
                 .create_dir_all(&dir)
                 .map_err(|e| format!("create chat list {dir}: {e}"))?;
-            // A plain entry holding the conversation's root, NOT a link.
+            // A link, which is what this is: an index pointing into the flat
+            // conversation store rather than a copy of where it lives.
             //
-            // A link would read better — it is what this is — but only one of
-            // the three backends can make one: the gRPC surface carries no link
-            // target on `Setattr`, so over that transport `link` falls to the
-            // trait's silent no-op and the entry never appears at all. A
-            // receiver finds its conversations by listing this directory, so an
-            // entry that never appears is a receiver that never hears anything.
+            // It was a plain entry holding the root as bytes, because only one of the
+            // three backends could make a link — the gRPC `Setattr` carried no link
+            // target, so over that transport `link` fell to the trait's no-op and the
+            // entry never appeared at all. A receiver finds its conversations by
+            // listing this directory, so an entry that never appears is a receiver
+            // that never hears anything.
             //
-            // Every backend can write bytes. The NAME is what `readdir` needs,
-            // and putting the root in the body keeps `cat` able to answer
-            // "pointing at which conversation?".
+            // The wire carries a link target now, so all three backends realise this
+            // one call: a DT_LINK on the VFS (the destination in metadata, which a
+            // mount with no content store keeps) and a pointer file on the host FS,
+            // where a privilege-free symlink does not exist. `read_link` is the follow
+            // half on both, so a caller resolving the index is backend-agnostic.
             let alias = self.convention.chat_list_path(owner, other);
             self.backend
-                .write(&alias, root.as_bytes())
+                .link(&alias, &root)
                 .map_err(|e| format!("index conversation for {owner} at {alias}: {e}"))?;
         }
         let path = self.transcript_path(peer);

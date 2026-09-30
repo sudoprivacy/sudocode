@@ -1365,6 +1365,58 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(self.client.stat(path, &self.auth_token).is_ok())
     }
 
+    /// A DT_LINK, with the destination in the entry's metadata.
+    ///
+    /// This backend was the one that could not do it: `Setattr` carried no link target
+    /// on the wire, so `link` fell through to the trait's silent no-op and a standalone
+    /// agent over this transport planted no chat-list index at all — a receiver that
+    /// never learned the conversation existed. That is why the index was a plain file
+    /// holding a path, on every backend, including the two that could do better.
+    ///
+    /// The wire carries it now (nexi-lab/nexus-vfs#362), so all three backends realise
+    /// the same shared `link()` call: a DT_LINK here and on the in-process kernel, a
+    /// pointer file on the host FS where no privilege-free symlink exists.
+    fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        if let Some(parent) = std::path::Path::new(alias).parent() {
+            let _ = self.create_dir_all(&parent.to_string_lossy());
+        }
+        self.client.ensure_link(alias, target, &self.auth_token)?;
+        // Read the target back, because a daemon that predates the wire field ignores
+        // it: `Setattr` would succeed, the entry would exist as a link to NOWHERE, and
+        // the chat-list index would list a peer whose conversation cannot be found.
+        // An unknown proto field is dropped silently by design, so the only way to know
+        // it landed is to ask. One stat, on a provisioning path that runs once per
+        // conversation.
+        match self.read_link(alias) {
+            Ok(got) if got == target => Ok(()),
+            Ok(got) => Err(io::Error::other(format!(
+                "{alias}: link target came back as {got:?}, expected {target:?}"
+            ))),
+            Err(e) => Err(io::Error::other(format!(
+                "{alias}: the daemon accepted the link but reports no target ({e}) — it \
+                 is older than the `Setattr` link_target field, so the index would name \
+                 a conversation nobody can follow"
+            ))),
+        }
+    }
+
+    /// Follow a link planted by [`Self::link`] — the target out of its metadata.
+    ///
+    /// Reads `link_target`, not the body: a pointer whose destination is content is
+    /// unreadable on a mount that keeps metadata and drops bytes, which is the mount
+    /// shape federation uses.
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        self.client
+            .stat(alias, &self.auth_token)?
+            .link_target
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{alias}: not a link or no target"),
+                )
+            })
+    }
+
     /// Provision each component as a DT_DIR, idempotently.
     ///
     /// This used to return `Ok(())` having done nothing, on the reasoning that "VFS

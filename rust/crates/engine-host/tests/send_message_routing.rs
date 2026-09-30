@@ -53,6 +53,23 @@ struct RecordingBackend {
 }
 
 impl FsBackend for RecordingBackend {
+    /// Record the link, because every real backend creates something here.
+    ///
+    /// Left to the trait's no-op default, this mock would report an empty chat list
+    /// while all three real backends planted an index — a mock more permissive than the
+    /// thing it stands for, and the assertions below would be measuring the mock. The
+    /// chat-list index IS a link now (nexi-lab/nexus-vfs#362: a DT_LINK on the VFS, a
+    /// pointer file on a host FS), so it is recorded where the entry used to be
+    /// recorded when a plain write made it — beside the stream a send provisions,
+    /// because both answer "what did this send create?".
+    fn link(&self, alias: &str, _target: &str) -> io::Result<()> {
+        self.provisions
+            .lock()
+            .expect("provisions poisoned")
+            .push(alias.to_string());
+        Ok(())
+    }
+
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
         self.appends
             .lock()
@@ -88,11 +105,11 @@ impl FsBackend for RecordingBackend {
     fn read(&self, _: &str) -> io::Result<Vec<u8>> {
         unreachable!("a send does not read")
     }
-    /// The chat-list ENTRY a send writes so the conversation is discoverable.
+    /// A plain write, recorded alongside the rest of what a send creates.
     ///
-    /// Recorded next to the stream it provisions, because both answer "what did
-    /// this send create?" — and a test that cannot see the index cannot tell
-    /// whether the recipient would ever find the message.
+    /// The chat-list entry used to arrive here; it is a link now, so [`Self::link`]
+    /// records it instead. Both land in the same list on purpose — the assertions ask
+    /// what a send created, not which method created it.
     fn write(&self, path: &str, _: &[u8]) -> io::Result<()> {
         self.provisions
             .lock()

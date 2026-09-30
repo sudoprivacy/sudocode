@@ -75,6 +75,19 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
         ],
     );
     sess.resize(40, 100).expect("resize");
+    // The PTY's vt100 model has neither a strikethrough field nor independent
+    // bold/dim (set_dim clears bold). Verify those attributes on the wire,
+    // not through a screen model that cannot represent them simultaneously.
+    let summary_wire = sess.expect("todos").expect("summary appears");
+    // ConPTY may defer the newline until after emitting the new SGR.
+    let normalized_summary = summary_wire.replace("\r\n", "");
+    assert!(
+        normalized_summary.contains("\x1b[1m\x1b[2m3")
+            || normalized_summary.contains("\x1b[1;2m3"),
+        "summary must retain bold and dim: {summary_wire:?}"
+    );
+    sess.expect(r"\x1b\[9mFinished parser")
+        .expect("completed label is crossed out");
     sess.expect("❯").expect("input ready");
     expect_style(&sess, "✓", ("Idx(10)", false, false));
     expect_style(&sess, "■", ("Idx(36)", false, false));

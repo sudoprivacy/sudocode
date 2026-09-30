@@ -3,9 +3,8 @@
 //! `Text` and `MixedText` deliberately strip embedded ANSI. Decode SGR into
 //! spans first, so layout still measures plain text and the canvas owns all
 //! terminal writes. Cursor movement, erase commands and OSC are never replayed.
-//! The pinned iocraft version has no strikethrough or per-span background,
-//! and represents bold/dim as mutually exclusive weights. Those attributes
-//! require an iocraft extension; this bridge does not claim to preserve them.
+//! Per-span backgrounds are not supported by MixedText; their operands are
+//! consumed without being interpreted as unrelated text attributes.
 
 use iocraft::prelude::*;
 use vte::{Params, Perform};
@@ -64,14 +63,19 @@ impl StyledText {
             match code {
                 0 => self.reset(),
                 1 => self.style.weight = Weight::Bold,
-                2 => self.style.weight = Weight::Light,
+                2 => self.style.dim = true,
                 3 => self.style.italic = true,
                 4 => self.style.decoration = TextDecoration::Underline,
                 7 => self.style.invert = true,
-                22 => self.style.weight = Weight::Normal,
+                9 => self.style.strikethrough = true,
+                22 => {
+                    self.style.weight = Weight::Normal;
+                    self.style.dim = false;
+                }
                 23 => self.style.italic = false,
                 24 => self.style.decoration = TextDecoration::None,
                 27 => self.style.invert = false,
+                29 => self.style.strikethrough = false,
                 30..=37 => self.style.color = Some(indexed_color(code - 30)),
                 90..=97 => self.style.color = Some(indexed_color(code - 90 + 8)),
                 39 => self.style.color = self.default_color,

@@ -545,7 +545,9 @@ fn translate_input_message(
                     }
                 }));
             }
-            InputContentBlock::Thinking { .. } => {}
+            // Gemini carries reasoning as `thoughtSignature` on the call itself,
+            // and `redacted_thinking` is an Anthropic block it never issued.
+            InputContentBlock::Thinking { .. } | InputContentBlock::RedactedThinking { .. } => {}
         }
     }
 

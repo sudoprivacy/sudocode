@@ -135,6 +135,10 @@ pub enum AssistantEvent {
         thinking: String,
         signature: Option<String>,
     },
+    /// Encrypted thinking, carried so it can be replayed. Nothing renders it.
+    RedactedThinking {
+        data: String,
+    },
     TextDelta(String),
     ToolUse {
         id: String,
@@ -1433,6 +1437,10 @@ where
                     flush_text_block(&mut text, &mut blocks);
                     push_thinking_block(&mut blocks, thinking, signature);
                 }
+                AssistantEvent::RedactedThinking { data } => {
+                    flush_text_block(&mut text, &mut blocks);
+                    blocks.push(ContentBlock::RedactedThinking { data });
+                }
                 AssistantEvent::TextDelta(delta) => text.push_str(&delta),
                 AssistantEvent::ToolUse {
                     id,
@@ -1998,6 +2006,10 @@ where
                                                     obs.on_thinking_delta(thinking);
                                                 }
                                             }
+                                            // Ciphertext — there is no delta a
+                                            // renderer could show. It is kept on
+                                            // the message, not surfaced here.
+                                            AssistantEvent::RedactedThinking { .. } => {}
                                             AssistantEvent::TextDelta(delta) => {
                                                 obs.on_text_delta(delta);
                                             }
@@ -3433,6 +3445,12 @@ fn build_assistant_message(
             } => {
                 flush_text_block(&mut text, &mut blocks);
                 push_thinking_block(&mut blocks, thinking, signature);
+            }
+            // Kept, not rendered: there is nothing legible in it, but the next
+            // request has to replay it or the cached prefix is rebuilt.
+            AssistantEvent::RedactedThinking { data } => {
+                flush_text_block(&mut text, &mut blocks);
+                blocks.push(ContentBlock::RedactedThinking { data });
             }
             AssistantEvent::TextDelta(delta) => {
                 text.push_str(&delta);

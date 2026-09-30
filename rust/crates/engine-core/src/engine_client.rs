@@ -622,7 +622,11 @@ fn push_output_block(
                 signature,
             });
         }
-        OutputContentBlock::RedactedThinking { .. } => {}
+        OutputContentBlock::RedactedThinking { data } => {
+            buffer.push_back(AssistantEvent::RedactedThinking {
+                data: data.to_string(),
+            });
+        }
     }
 }
 

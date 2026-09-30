@@ -405,6 +405,7 @@ fn estimate_single_block_tokens(block: &ContentBlock) -> usize {
             thinking,
             signature,
         } => thinking.len() / 4 + signature.as_ref().map_or(0, |value| value.len() / 4 + 1),
+        ContentBlock::RedactedThinking { data } => data.len() / 4 + 1,
     }
 }
 
@@ -601,7 +602,11 @@ fn build_compaction_messages(
                         output: output.clone(),
                         is_error: *is_error,
                     }),
-                    ContentBlock::Thinking { .. } => None,
+                    // Neither form of thinking goes into the summarization
+                    // request: it asks for no thinking of its own, and reasoning
+                    // from the turns being summarized is not part of what the
+                    // summary has to preserve.
+                    ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => None,
                 })
                 .collect();
 
@@ -1035,7 +1040,8 @@ fn summarize_messages_local(messages: &[ConversationMessage]) -> String {
             ContentBlock::ToolResult { tool_name, .. } => Some(tool_name.as_str()),
             ContentBlock::Text { .. }
             | ContentBlock::Image { .. }
-            | ContentBlock::Thinking { .. } => None,
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. } => None,
         })
         .collect::<Vec<_>>();
     tool_names.sort_unstable();
@@ -1192,6 +1198,7 @@ fn first_text_block(message: &ConversationMessage) -> Option<&str> {
         ContentBlock::ToolUse { .. }
         | ContentBlock::ToolResult { .. }
         | ContentBlock::Thinking { .. }
+        | ContentBlock::RedactedThinking { .. }
         | ContentBlock::Text { .. }
         | ContentBlock::Image { .. } => None,
     })

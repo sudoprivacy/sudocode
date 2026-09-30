@@ -141,6 +141,18 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
                         thinking: thinking.clone(),
                         signature: Some(signature.clone()),
                     }),
+                // Encrypted thinking needs no signature check — the ciphertext
+                // is its own proof — so it goes back unconditionally. Same
+                // probe, trigger string in the prompt: dropped it gave turn 2
+                // `read 0 / write 3121`, replayed it gave `read 3083 / write
+                // 109`. `data` is stored as JSON text; a payload that is not
+                // valid JSON can only have been a bare string.
+                ContentBlock::RedactedThinking { data } => {
+                    Some(InputContentBlock::RedactedThinking {
+                        data: serde_json::from_str(data)
+                            .unwrap_or_else(|_| serde_json::Value::String(data.clone())),
+                    })
+                }
                 ContentBlock::ToolUse {
                     id,
                     name,
@@ -321,5 +333,46 @@ mod tests {
             converted.is_empty(),
             "a message whose blocks were all dropped must be skipped: {converted:?}"
         );
+    }
+
+    #[test]
+    fn redacted_thinking_block_is_replayed_with_its_payload_intact() {
+        // No signature to check — the ciphertext is its own proof — so unlike an
+        // unsigned thinking block this one always goes back. Dropping it cost
+        // the whole prefix on every round-trip: measured turn 2 `read 0 / write
+        // 3121` dropped versus `read 3083 / write 109` replayed.
+        let converted = convert_messages(&[assistant(vec![
+            ContentBlock::RedactedThinking {
+                data: "\"opaque-ciphertext\"".to_string(),
+            },
+            tool_use(),
+        ])]);
+
+        assert_eq!(converted.len(), 1);
+        match &converted[0].content[..] {
+            [InputContentBlock::RedactedThinking { data }, InputContentBlock::ToolUse { .. }] => {
+                assert_eq!(data, &serde_json::json!("opaque-ciphertext"));
+            }
+            other => panic!("expected the redacted block then the tool use, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_redacted_payload_that_is_not_json_is_sent_as_a_string() {
+        // Defensive: the stored form is JSON text, but a provider that handed us
+        // a bare token must not turn into a dropped block.
+        let converted = convert_messages(&[assistant(vec![
+            ContentBlock::RedactedThinking {
+                data: "not-json-at-all".to_string(),
+            },
+            tool_use(),
+        ])]);
+
+        match &converted[0].content[..] {
+            [InputContentBlock::RedactedThinking { data }, InputContentBlock::ToolUse { .. }] => {
+                assert_eq!(data, &serde_json::json!("not-json-at-all"));
+            }
+            other => panic!("expected the redacted block then the tool use, got {other:?}"),
+        }
     }
 }

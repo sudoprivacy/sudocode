@@ -7924,7 +7924,11 @@ fn push_output_block(
                 signature,
             });
         }
-        OutputContentBlock::RedactedThinking { .. } => {}
+        OutputContentBlock::RedactedThinking { data } => {
+            events.push(AssistantEvent::RedactedThinking {
+                data: data.to_string(),
+            });
+        }
     }
 }
 
@@ -10487,6 +10491,29 @@ mod tests {
                 assert_eq!(signature.as_deref(), Some("sig-abc"));
             }
             other => panic!("expected one signed thinking event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subagent_redacted_thinking_block_is_carried_not_dropped() {
+        let mut events = Vec::new();
+        let mut pending_tools = BTreeMap::new();
+
+        push_output_block(
+            OutputContentBlock::RedactedThinking {
+                data: serde_json::Value::String("opaque-ciphertext".to_string()),
+            },
+            0,
+            &mut events,
+            &mut pending_tools,
+            true,
+        );
+
+        match &events[..] {
+            [runtime::AssistantEvent::RedactedThinking { data }] => {
+                assert_eq!(data, "\"opaque-ciphertext\"");
+            }
+            other => panic!("expected one redacted thinking event, got {other:?}"),
         }
     }
 

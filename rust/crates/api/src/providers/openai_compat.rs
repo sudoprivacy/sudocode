@@ -1901,7 +1901,10 @@ fn translate_responses_input_message(message: &InputMessage, input: &mut Vec<Val
                 | InputContentBlock::Image { .. }
                 | InputContentBlock::Thinking {
                     signature: None, ..
-                } => {}
+                }
+                // Anthropic ciphertext: this provider issued no such block and
+                // has no field to put one in.
+                | InputContentBlock::RedactedThinking { .. } => {}
                 InputContentBlock::Thinking {
                     signature: Some(signature),
                     ..
@@ -1946,7 +1949,9 @@ fn translate_responses_input_message(message: &InputMessage, input: &mut Vec<Val
                         "output": flatten_tool_result_content(content),
                     }));
                 }
-                InputContentBlock::ToolUse { .. } | InputContentBlock::Thinking { .. } => {}
+                InputContentBlock::ToolUse { .. }
+                | InputContentBlock::Thinking { .. }
+                | InputContentBlock::RedactedThinking { .. } => {}
             }
         }
         if !user_parts.is_empty() {
@@ -2052,6 +2057,9 @@ pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
                     saw_thinking = true;
                     reasoning.push_str(value);
                 }
+                // Nothing to add to `reasoning_content`: the payload is opaque
+                // to everyone but the Anthropic account that produced it.
+                InputContentBlock::RedactedThinking { .. } => {}
                 InputContentBlock::ToolUse {
                     id, name, input, ..
                 } => tool_calls.push(json!({
@@ -2135,7 +2143,9 @@ pub fn translate_message(message: &InputMessage, model: &str) -> Vec<Value> {
                     }
                     messages.push(msg);
                 }
-                InputContentBlock::Thinking { .. } | InputContentBlock::ToolUse { .. } => {}
+                InputContentBlock::Thinking { .. }
+                | InputContentBlock::RedactedThinking { .. }
+                | InputContentBlock::ToolUse { .. } => {}
             }
         }
 

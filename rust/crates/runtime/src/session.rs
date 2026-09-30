@@ -45,6 +45,23 @@ pub enum ContentBlock {
         thinking: String,
         signature: Option<String>,
     },
+    /// Thinking the server chose to encrypt instead of returning in the clear.
+    ///
+    /// There is nothing to render — `data` is opaque ciphertext — but it has to
+    /// be replayed for the same reason a signed thinking block does: it is part
+    /// of the assistant turn the server produced, and a turn replayed without it
+    /// invalidates the whole cached prefix on every tool round-trip. Measured on
+    /// a live route (`ladder/tools/cache_prefix_probe.py`, trigger string in the
+    /// prompt): dropping it gave turn 2 `read 0 / write 3121`, replaying it gave
+    /// `read 3083 / write 109`.
+    ///
+    /// `data` holds the JSON *text* of whatever the provider sent, the same
+    /// idiom [`ContentBlock::ToolUse::input`] uses, so an opaque payload
+    /// survives a round-trip through session storage without this enum having
+    /// to carry a `serde_json::Value` (which is not `Eq`).
+    RedactedThinking {
+        data: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -1176,6 +1193,13 @@ impl ContentBlock {
                     );
                 }
             }
+            Self::RedactedThinking { data } => {
+                object.insert(
+                    "type".to_string(),
+                    JsonValue::String("redacted_thinking".to_string()),
+                );
+                object.insert("data".to_string(), JsonValue::String(data.clone()));
+            }
             Self::ToolUse {
                 id,
                 name,
@@ -1243,6 +1267,9 @@ impl ContentBlock {
                     .get("signature")
                     .and_then(JsonValue::as_str)
                     .map(String::from),
+            }),
+            "redacted_thinking" => Ok(Self::RedactedThinking {
+                data: required_string(object, "data")?,
             }),
             "tool_use" => Ok(Self::ToolUse {
                 id: required_string(object, "id")?,
@@ -1743,6 +1770,19 @@ mod tests {
         };
 
         let restored = ContentBlock::from_json(&block.to_json()).expect("thinking block parses");
+
+        assert_eq!(restored, block);
+    }
+
+    #[test]
+    fn redacted_thinking_block_survives_persistence() {
+        // Same stake as the signed block above: a resumed session has to replay
+        // the ciphertext it was given, or the prefix is rebuilt every round-trip.
+        let block = ContentBlock::RedactedThinking {
+            data: "\"EroBCkYIBBgCKkBw…opaque…\"".to_string(),
+        };
+
+        let restored = ContentBlock::from_json(&block.to_json()).expect("redacted block parses");
 
         assert_eq!(restored, block);
     }

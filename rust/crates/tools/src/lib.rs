@@ -7680,8 +7680,27 @@ async fn stream_with_provider(
                         input.push_str(&partial_json);
                     }
                 }
-                ContentBlockDelta::ThinkingDelta { .. }
-                | ContentBlockDelta::SignatureDelta { .. } => {}
+                // A sub-agent's thinking was dropped on the floor here, which
+                // cost it twice: its own thinking never reached a renderer, and
+                // its assistant turns were replayed without the blocks the
+                // server issued — the prefix-invalidating shape that makes every
+                // tool round-trip a cold cache write. Same contract as the main
+                // path: text deltas stream, the signature follows as a text-less
+                // event so the block it belongs to picks it up.
+                ContentBlockDelta::ThinkingDelta { thinking } => {
+                    if !thinking.is_empty() {
+                        events.push(AssistantEvent::Thinking {
+                            thinking,
+                            signature: None,
+                        });
+                    }
+                }
+                ContentBlockDelta::SignatureDelta { signature } => {
+                    events.push(AssistantEvent::Thinking {
+                        thinking: String::new(),
+                        signature: Some(signature),
+                    });
+                }
             },
             ApiStreamEvent::ContentBlockStop(stop) => {
                 if let Some((id, name, input, thought_signature)) =
@@ -7890,7 +7909,22 @@ fn push_output_block(
             };
             pending_tools.insert(block_index, (id, name, initial_input, thought_signature));
         }
-        OutputContentBlock::Thinking { .. } | OutputContentBlock::RedactedThinking { .. } => {}
+        // Same contract as the main path (`engine_client::push_output_block`):
+        // a thinking block arriving whole — from `message_start`, or from the
+        // non-streaming fallback below — carries its signature, and that
+        // signature is what lets the next request replay this turn as the
+        // server issued it. Dropping it here left the sub-agent rebuilding its
+        // whole cached prefix on every tool round-trip.
+        OutputContentBlock::Thinking {
+            thinking,
+            signature,
+        } => {
+            events.push(AssistantEvent::Thinking {
+                thinking,
+                signature,
+            });
+        }
+        OutputContentBlock::RedactedThinking { .. } => {}
     }
 }
 
@@ -10422,6 +10456,38 @@ mod tests {
             error.contains("apiKey") || error.contains("API key"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn subagent_thinking_block_keeps_its_signature() {
+        // The sub-agent path gets whole thinking blocks from `message_start` and
+        // from the non-streaming fallback. Dropping them here cost the sub-agent
+        // its whole cached prefix on every tool round-trip, because the turn it
+        // replayed was not the turn the server issued.
+        let mut events = Vec::new();
+        let mut pending_tools = BTreeMap::new();
+
+        push_output_block(
+            OutputContentBlock::Thinking {
+                thinking: "weighing the options".to_string(),
+                signature: Some("sig-abc".to_string()),
+            },
+            0,
+            &mut events,
+            &mut pending_tools,
+            true,
+        );
+
+        match &events[..] {
+            [runtime::AssistantEvent::Thinking {
+                thinking,
+                signature,
+            }] => {
+                assert_eq!(thinking, "weighing the options");
+                assert_eq!(signature.as_deref(), Some("sig-abc"));
+            }
+            other => panic!("expected one signed thinking event, got {other:?}"),
+        }
     }
 
     #[test]

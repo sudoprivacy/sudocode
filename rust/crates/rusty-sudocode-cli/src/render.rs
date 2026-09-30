@@ -12,6 +12,9 @@ use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
+mod styled_line;
+pub(crate) use styled_line::StyledLine;
+
 /// Terminal color capability tier, detected from environment variables.
 ///
 /// `syntect` emits 24-bit truecolor escapes unconditionally; on terminals that

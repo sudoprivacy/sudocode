@@ -1270,20 +1270,22 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
     let open_count = todos.len() - completed_count;
 
     // Header summary line
-    let mut header_parts = vec![format!("{BOLD}{completed_count}{RESET} done")];
+    let mut header = crate::render::StyledLine::muted();
+    header.push_bold(todos.len().to_string());
+    header.push(" todos (");
+    header.push_bold(completed_count.to_string());
+    header.push(" done");
     if in_progress_count > 0 {
-        header_parts.push(format!("{BOLD}{in_progress_count}{RESET} in progress"));
+        header.push(", ");
+        header.push_bold(in_progress_count.to_string());
+        header.push(" in progress");
     }
-    header_parts.push(format!("{BOLD}{open_count}{RESET} open"));
-    let header = format!(
-        "{DIM}{BOLD}{}{RESET}{DIM} todos ({}){}",
-        todos.len(),
-        header_parts.join(", "),
-        RESET
-    );
+    header.push(", ");
+    header.push_bold(open_count.to_string());
+    header.push(" open)");
 
     let mut lines = Vec::with_capacity(todos.len() + 2);
-    lines.push(header);
+    lines.push(header.to_string());
 
     // Sort by priority: in_progress first, then pending, then completed.
     let mut sorted: Vec<&runtime::Todo> = todos.iter().collect();
@@ -2219,7 +2221,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // StatusSlot
             #(match &status_slot {
                 StatusSlot::Spinner(s) => Some(element! { AnsiText(content: s.clone()) }),
-                StatusSlot::TurnResult(s) => Some(element! { AnsiText(content: s.clone(), color: Color::DarkGrey) }),
+                StatusSlot::TurnResult(s) => Some(element! { AnsiText(content: s.clone()) }),
                 StatusSlot::Tips => Some(element! { AnsiText(content: tips_text.clone(), color: Color::DarkGrey) }),
                 StatusSlot::Empty => None,
             })

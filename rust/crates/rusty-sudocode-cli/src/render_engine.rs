@@ -1,6 +1,6 @@
 //! The terminal renderer for the engine↔renderer seam: it consumes
 //! [`engine_events::EngineEvent`]s from an `EngineHandle` and draws them (the
-//! markdown/ANSI stream, the ⏺ glyph margin, the spinner's byte counter +
+//! markdown/ANSI stream, the • glyph margin, the spinner's byte counter +
 //! "Reasoning…" cue, and tool call/result lines). This is the render *half* of
 //! the old `CliStreamState`, now cleanly separated: the engine produces events,
 //! this draws them, and nothing engine-side renders.
@@ -238,7 +238,7 @@ impl EngineEventRenderer {
                 // in-flight cue is the spinner + the tool's own streamed stdout.
                 //
                 // The glyph reset still runs: the tool line reset column 0, so
-                // the next assistant text starts a fresh ⏺-margined block.
+                // the next assistant text starts a fresh •-margined block.
                 self.glyph.visible_col = 0;
                 self.resume_spinner();
                 RenderOutcome::Continue

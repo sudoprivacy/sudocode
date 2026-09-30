@@ -40,6 +40,10 @@ scode
 The REPL accepts prose and slash commands. Tab completion expands slash
 command names, model aliases, permission modes, and recent session IDs.
 
+Assistant responses start with a bold text bullet (`•`, U+2022); continuation
+lines use a two-column margin. The marker is a text character rather than an
+emoji-capable record symbol, avoiding emoji font fallback for this prefix.
+
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:
 

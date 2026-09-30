@@ -449,48 +449,106 @@ impl Session {
         Ok(session.with_persistence_path(path.to_path_buf()))
     }
 
-    /// Backfill a synthetic `tool_result` immediately after any `tool_use` that
-    /// has no matching `tool_result` anywhere in the transcript. Returns the
-    /// number of synthetic results inserted (0 when the history is already
-    /// well-formed). See [`Self::load_from_path_with`] for why this is needed.
+    /// Repair unfinished tool batches before a new turn uses this history.
+    /// Persist the repair so later turns and resumed sessions see the same order.
+    pub fn repair_orphan_tool_uses(&mut self) -> Result<usize, SessionError> {
+        if !self.has_orphan_tool_uses() {
+            return Ok(0);
+        }
+        let original = self.messages.clone();
+        let inserted = self.sanitize_orphan_tool_uses();
+        if inserted > 0 {
+            if let Err(error) = self.rewrite_persisted() {
+                self.messages = original;
+                return Err(error);
+            }
+        }
+        Ok(inserted)
+    }
+
+    fn has_orphan_tool_uses(&self) -> bool {
+        let mut index = 0;
+        while index < self.messages.len() {
+            let message = &self.messages[index];
+            index += 1;
+            if message.role != MessageRole::Assistant {
+                continue;
+            }
+            let mut pending: std::collections::HashSet<&str> = message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if pending.is_empty() {
+                continue;
+            }
+            while index < self.messages.len() && self.messages[index].role == MessageRole::Tool {
+                for block in &self.messages[index].blocks {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        pending.remove(tool_use_id.as_str());
+                    }
+                }
+                index += 1;
+            }
+            if !pending.is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Backfill results after the contiguous Tool messages answering each
+    /// assistant batch, before any later user or assistant message.
     fn sanitize_orphan_tool_uses(&mut self) -> usize {
         const ORPHAN_TOOL_RESULT_MESSAGE: &str =
             "[Tool call was interrupted before it returned — no result was produced. Treated as cancelled.]";
 
-        // Every tool_use id that is already answered somewhere in the history.
-        let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for message in &self.messages {
-            for block in &message.blocks {
-                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                    answered.insert(tool_use_id.clone());
-                }
-            }
-        }
-
         let mut repaired: Vec<ConversationMessage> = Vec::with_capacity(self.messages.len());
         let mut inserted = 0usize;
-        for message in std::mem::take(&mut self.messages) {
-            let orphans: Vec<(String, String)> = message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::ToolUse { id, name, .. } if !answered.contains(id) => {
-                        Some((id.clone(), name.clone()))
-                    }
-                    _ => None,
-                })
-                .collect();
+        let mut messages = std::mem::take(&mut self.messages).into_iter().peekable();
+        while let Some(message) = messages.next() {
+            let calls: Vec<(String, String)> = if message.role == MessageRole::Assistant {
+                message
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::ToolUse { id, name, .. } => Some((id.clone(), name.clone())),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             repaired.push(message);
-            for (tool_use_id, tool_name) in orphans {
-                // Mark answered so a later duplicate id is not filled twice.
-                answered.insert(tool_use_id.clone());
-                repaired.push(ConversationMessage::tool_result(
-                    tool_use_id,
-                    tool_name,
-                    ORPHAN_TOOL_RESULT_MESSAGE,
-                    true,
-                ));
-                inserted += 1;
+            if calls.is_empty() {
+                continue;
+            }
+            let mut answered = std::collections::HashSet::new();
+            while messages
+                .peek()
+                .is_some_and(|next| next.role == MessageRole::Tool)
+            {
+                let result = messages.next().expect("peeked tool message");
+                for block in &result.blocks {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        answered.insert(tool_use_id.clone());
+                    }
+                }
+                repaired.push(result);
+            }
+            for (tool_use_id, tool_name) in calls {
+                if answered.insert(tool_use_id.clone()) {
+                    repaired.push(ConversationMessage::tool_result(
+                        tool_use_id,
+                        tool_name,
+                        ORPHAN_TOOL_RESULT_MESSAGE,
+                        true,
+                    ));
+                    inserted += 1;
+                }
             }
         }
         self.messages = repaired;
@@ -1835,6 +1893,50 @@ mod tests {
             )),
             "a synthetic error tool_result must immediately follow the orphan tool_use"
         );
+    }
+
+    #[test]
+    fn repairs_partial_batch_before_later_user_and_is_idempotent() {
+        let mut session = Session::new();
+        let path = temp_session_path("partial-batch");
+        session = session.with_persistence_path(path.clone());
+        session
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: "first".to_string(),
+                    name: "bash".to_string(),
+                    input: "{}".to_string(),
+                    thought_signature: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "second".to_string(),
+                    name: "bash".to_string(),
+                    input: "{}".to_string(),
+                    thought_signature: None,
+                },
+            ]))
+            .expect("assistant append");
+        session
+            .push_message(ConversationMessage::tool_result(
+                "first", "bash", "ok", false,
+            ))
+            .expect("first result append");
+        session.push_user_text("still there?").expect("user append");
+
+        assert_eq!(session.repair_orphan_tool_uses().expect("repair"), 1);
+        assert_eq!(session.repair_orphan_tool_uses().expect("second repair"), 0);
+        assert_eq!(session.messages.len(), 4);
+        assert_eq!(session.messages[3].role, MessageRole::User);
+        assert!(matches!(
+            &session.messages[2].blocks[0],
+            ContentBlock::ToolResult { tool_use_id, is_error, .. }
+                if tool_use_id == "second" && *is_error
+        ));
+        let persisted = fs::read_to_string(&path).expect("repair persisted");
+        assert!(persisted.contains("\"tool_use_id\":\"second\""));
+        let restored = Session::load_from_path(&path).expect("reload repaired session");
+        assert_eq!(restored.messages, session.messages);
+        fs::remove_file(&path).expect("remove test session");
     }
 
     #[test]

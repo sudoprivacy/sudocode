@@ -690,6 +690,11 @@ impl engine_core::EngineDelegate for SessionEngine {
         let mut session = self.lock_session();
         session.abort_signal.reset();
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        session
+            .runtime
+            .session_mut()
+            .repair_orphan_tool_uses()
+            .map_err(|error| runtime::RuntimeError::new(error.to_string()))?;
 
         // Pre-send auto-compaction, budgeted the way the API preflight is
         // (context window minus max output, the fixed per-request overhead, and

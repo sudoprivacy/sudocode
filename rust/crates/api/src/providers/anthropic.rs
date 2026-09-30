@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,6 +26,34 @@ use crate::types::{MessageDeltaEvent, MessageRequest, MessageResponse, StreamEve
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const OAUTH_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// How much of the context window the local estimate has to have consumed
+/// before an exact remote count is worth a network round trip.
+///
+/// Below this, heuristic error cannot flip the verdict, so the exact number
+/// would be bought and thrown away. The local estimate is
+/// serialized-bytes-based and typically within a few percent; 80% leaves it
+/// four times that much room to be wrong before the check stops firing.
+const EXACT_COUNT_WINDOW_PERCENT: u64 = 80;
+
+/// The estimated total at which we start asking the gateway for an exact count.
+fn exact_count_threshold(context_window_tokens: u32) -> u32 {
+    u32::try_from(u64::from(context_window_tokens) * EXACT_COUNT_WINDOW_PERCENT / 100)
+        .unwrap_or(u32::MAX)
+}
+
+/// Whether this error says the endpoint is not implemented here, as opposed to
+/// having failed this once.
+///
+/// Deliberately narrow. A timeout, a 429, or a 5xx are all reasons to skip the
+/// refinement for this request and try again later; only "there is nothing at
+/// this path" is a property of the gateway worth remembering.
+fn error_means_endpoint_absent(error: &ApiError) -> bool {
+    matches!(
+        error,
+        ApiError::Api { status, .. } if matches!(status.as_u16(), 404 | 405 | 501)
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthSource {
@@ -133,6 +162,15 @@ pub struct AnthropicClient {
     /// `cache_control` block itself, which busts the very prefix it is meant
     /// to keep — "~20K tokens per flip" in their note.
     cache_ttl_1h: bool,
+    /// Set once this base URL has answered `/v1/messages/count_tokens` with a
+    /// status that means the endpoint is not there.
+    ///
+    /// Shared across clones so the answer is learned once per session rather
+    /// than once per client. Anthropic's own API implements the endpoint;
+    /// gateways in front of it frequently do not — `api.sudorouter.ai` returns
+    /// 404 — and re-asking a question that has already been answered "no" is a
+    /// wasted upload of the entire conversation on every turn.
+    count_tokens_unsupported: Arc<AtomicBool>,
 }
 
 impl AnthropicClient {
@@ -150,6 +188,7 @@ impl AnthropicClient {
             // A bare API key is metered per token: a 1h write bills 2x base
             // against 1.25x for 5m, so the longer hold has to be asked for.
             cache_ttl_1h: false,
+            count_tokens_unsupported: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -207,6 +246,7 @@ impl AnthropicClient {
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             oauth_system_prefix: is_subscription,
             cache_ttl_1h: is_subscription,
+            count_tokens_unsupported: Arc::new(AtomicBool::new(false)),
         };
         if is_subscription {
             // OAuth subscription tokens require the direct Anthropic API
@@ -593,11 +633,40 @@ impl AnthropicClient {
             return Ok(());
         };
 
-        // Best-effort refinement using the Anthropic count_tokens endpoint.
-        // On any failure (network, parse, auth), fall back to the local
-        // byte-estimate result which already passed above.
-        let Ok(counted_input_tokens) = self.count_tokens(request).await else {
+        // Refine with the remote count only when an exact answer could change
+        // the verdict.
+        //
+        // This preflight used to fire on every single request, which meant
+        // uploading the whole conversation twice per turn — the count_tokens
+        // body is the same body — to refine a number that had already passed
+        // its check with room to spare. The local estimate is a
+        // serialized-bytes heuristic, so it can be wrong in either direction,
+        // but that only matters near the line: a turn using half its window
+        // cannot be pushed over by heuristic error, and paying a full upload
+        // to confirm that is a cost with no possible benefit.
+        let estimated_total_tokens = registry::estimate_message_request_input_tokens(request)
+            .saturating_add(request.max_tokens);
+        if estimated_total_tokens < exact_count_threshold(limit.context_window_tokens) {
             return Ok(());
+        }
+
+        // A gateway that does not implement the endpoint will not start: once
+        // it has said so, asking again every turn is the same wasted upload
+        // with a known answer.
+        if self.count_tokens_unsupported.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        // Best-effort refinement. On any failure (network, parse, auth), fall
+        // back to the local byte-estimate result which already passed above.
+        let counted_input_tokens = match self.count_tokens(request).await {
+            Ok(counted) => counted,
+            Err(error) => {
+                if error_means_endpoint_absent(&error) {
+                    self.count_tokens_unsupported.store(true, Ordering::Relaxed);
+                }
+                return Ok(());
+            }
         };
         let estimated_total_tokens = counted_input_tokens.saturating_add(request.max_tokens);
         if estimated_total_tokens > limit.context_window_tokens {

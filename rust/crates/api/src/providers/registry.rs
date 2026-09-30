@@ -176,7 +176,13 @@ pub fn preflight_message_request(request: &MessageRequest) -> Result<(), ApiErro
     Ok(())
 }
 
-fn estimate_message_request_input_tokens(request: &MessageRequest) -> u32 {
+/// Locally estimated input tokens for a request, from serialized bytes.
+///
+/// `pub(crate)` so the Anthropic preflight can decide, with the same number
+/// this guard used, whether an exact remote count could still change the
+/// verdict — the two must agree about where the line is or the cheap check and
+/// the expensive one disagree about when the expensive one is needed.
+pub(crate) fn estimate_message_request_input_tokens(request: &MessageRequest) -> u32 {
     let mut estimate = estimate_serialized_tokens(&request.messages);
     estimate = estimate.saturating_add(estimate_request_overhead_tokens(
         request.system.as_deref(),

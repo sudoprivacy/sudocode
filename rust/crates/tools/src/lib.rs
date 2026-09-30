@@ -7723,15 +7723,15 @@ async fn stream_with_provider(
         return Ok(events);
     }
 
-    let response = client
-        .send_message(
-            &MessageRequest {
-                stream: false,
-                ..message_request.clone()
-            },
-            None,
-        )
-        .await?;
+    // Nothing usable came out of the stream. Ask once more — same request,
+    // still streamed. This used to re-send with `stream: false`, which on this
+    // path is the shape a connection close kills: a non-streaming request puts
+    // no bytes on the socket until generation has finished, and a connection
+    // that stays byte-quiet for ~50s is closed with no HTTP response at all
+    // (measured: `stream: false` died at 50.3s where `stream: true` had its
+    // first byte at 1.7s and ran 201.8s to completion). A sub-agent's request
+    // carries a whole conversation, so it is exactly the slow kind.
+    let response = client.send_message_streamed(message_request, None).await?;
     let mut events = response_to_events(response);
     push_prompt_cache_record(client, &mut events);
     Ok(events)

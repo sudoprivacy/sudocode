@@ -8,17 +8,44 @@ const NO_PROXY_KEYS: [&str; 2] = ["NO_PROXY", "no_proxy"];
 
 const CONNECT_TIMEOUT_ENV: &str = "SUDOCODE_API_CONNECT_TIMEOUT";
 const READ_TIMEOUT_ENV: &str = "SUDOCODE_API_READ_TIMEOUT";
+const POOL_IDLE_TIMEOUT_ENV: &str = "SUDOCODE_API_POOL_IDLE_TIMEOUT";
+const TCP_KEEPALIVE_ENV: &str = "SUDOCODE_API_TCP_KEEPALIVE";
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long we may keep an unused connection before discarding it.
+///
+/// This has to stay below the shortest idle timeout anywhere on the path, and
+/// a client cannot discover what that is — so the default is set from a
+/// measurement and left conservative. Against `api.sudorouter.ai`, reusing an
+/// idle kept-alive connection succeeds after a 45s pause and fails *instantly*
+/// after 55s with `Remote end closed connection without response`; the peer
+/// hangs up somewhere around 50s. hyper's own default is 90 seconds, i.e.
+/// wider than that window, which is exactly how a client ends up writing a
+/// request onto a socket the peer closed forty seconds ago.
+///
+/// 20s leaves room for a peer stricter than the one measured, and the cost is
+/// at most one extra TCP+TLS handshake per 20s of genuine idleness — paid only
+/// when the alternative was a dead socket anyway.
+const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+/// TCP keepalive probe interval.
+///
+/// Insurance rather than a fix, and worth naming as such: keepalive probes put
+/// packets on a connection that is established but quiet, which resets the
+/// timers of stateful middleboxes (NAT tables, TCP relays) counting silent
+/// seconds. They do *not* reset an application-layer idle timer, so they
+/// cannot be relied on to rescue a request that is waiting on a slow first
+/// byte — that is what streaming is for.
+const DEFAULT_TCP_KEEPALIVE: Duration = Duration::from_secs(15);
 
 /// Timeout configuration for the outbound HTTP client.
 ///
 /// Deliberately *not* a whole-request timeout: streaming responses may
 /// legitimately run for many minutes while tokens arrive, so an overall
-/// deadline would kill long answers. Instead we bound the two ways a dead
-/// connection can hang forever: establishing the TCP connection, and
-/// waiting for the next byte to arrive.
+/// deadline would kill long answers. Instead we bound the three ways a dead
+/// connection can hang or fail a request: establishing the TCP connection,
+/// waiting for the next byte to arrive, and reusing a pooled connection the
+/// peer has already closed.
 ///
 /// A `None` field disables that timeout entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +58,16 @@ pub struct TimeoutConfig {
     /// keep-alive ping cadence of streaming providers while still unblocking
     /// a session stuck on a dead connection.
     pub read_timeout: Option<Duration>,
+    /// How long an unused connection may sit in the pool before we drop it.
+    /// Defaults to 20 seconds; see [`DEFAULT_POOL_IDLE_TIMEOUT`] for why that
+    /// number and not hyper's 90. `None` keeps connections until the peer or
+    /// the OS ends them, which is the behaviour that produced the failure the
+    /// default exists to prevent.
+    pub pool_idle_timeout: Option<Duration>,
+    /// TCP keepalive probe interval for established connections. Defaults to
+    /// 15 seconds; `None` leaves the OS default (typically hours, i.e. off in
+    /// practice).
+    pub tcp_keepalive: Option<Duration>,
 }
 
 impl Default for TimeoutConfig {
@@ -38,6 +75,8 @@ impl Default for TimeoutConfig {
         Self {
             connect_timeout: Some(DEFAULT_CONNECT_TIMEOUT),
             read_timeout: Some(DEFAULT_READ_TIMEOUT),
+            pool_idle_timeout: Some(DEFAULT_POOL_IDLE_TIMEOUT),
+            tcp_keepalive: Some(DEFAULT_TCP_KEEPALIVE),
         }
     }
 }
@@ -46,6 +85,10 @@ impl TimeoutConfig {
     /// Read timeout settings from the process environment.
     /// - `SUDOCODE_API_CONNECT_TIMEOUT` — connect timeout in whole seconds
     /// - `SUDOCODE_API_READ_TIMEOUT` — idle read timeout in whole seconds
+    /// - `SUDOCODE_API_POOL_IDLE_TIMEOUT` — how long to keep an idle pooled
+    ///   connection, in whole seconds
+    /// - `SUDOCODE_API_TCP_KEEPALIVE` — TCP keepalive probe interval, in whole
+    ///   seconds
     ///
     /// A value of `0` disables that timeout. Unset or unparseable values
     /// fall back to the defaults.
@@ -68,16 +111,25 @@ impl TimeoutConfig {
         Self {
             connect_timeout: parse(CONNECT_TIMEOUT_ENV, DEFAULT_CONNECT_TIMEOUT),
             read_timeout: parse(READ_TIMEOUT_ENV, DEFAULT_READ_TIMEOUT),
+            pool_idle_timeout: parse(POOL_IDLE_TIMEOUT_ENV, DEFAULT_POOL_IDLE_TIMEOUT),
+            tcp_keepalive: parse(TCP_KEEPALIVE_ENV, DEFAULT_TCP_KEEPALIVE),
         }
     }
 
     /// Create from explicit second values. `0` disables that timeout.
+    ///
+    /// Connection-pool settings are intentionally not parameters: they protect
+    /// against a property of the network path rather than of the caller, so a
+    /// caller that only wants a short read timeout should not silently lose
+    /// them. Override [`TimeoutConfig::pool_idle_timeout`] on the returned
+    /// value if you really need to.
     #[must_use]
     pub fn from_seconds(connect_secs: u64, read_secs: u64) -> Self {
         let to_timeout = |seconds: u64| (seconds > 0).then(|| Duration::from_secs(seconds));
         Self {
             connect_timeout: to_timeout(connect_secs),
             read_timeout: to_timeout(read_secs),
+            ..Self::default()
         }
     }
 }
@@ -158,6 +210,23 @@ pub fn build_http_client_with_opts(
         builder = builder.read_timeout(read_timeout);
     }
 
+    // The pool hands out an idle connection without probing it first, so a
+    // connection the peer closed while it sat idle is only discovered when a
+    // request is written onto it. That surfaces as
+    // `client error (SendRequest): peer closed connection without sending TLS
+    // close_notify` — no status code, returned instantly, and identically for
+    // every retry, because each retry draws another equally stale socket from
+    // the same pool. Expiring our own idle connections before the peer does is
+    // the only defence a client has; nothing in the response tells us the
+    // peer's limit.
+    //
+    // Passed as `Option` on purpose: reqwest takes `Into<Option<Duration>>`, so
+    // `None` means "never expire" rather than "leave hyper's 90s default", and
+    // `SUDOCODE_API_POOL_IDLE_TIMEOUT=0` therefore means what it says.
+    builder = builder
+        .pool_idle_timeout(timeout.pool_idle_timeout)
+        .tcp_keepalive(timeout.tcp_keepalive);
+
     let no_proxy = config
         .no_proxy
         .as_deref()
@@ -224,8 +293,12 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
-    use super::{build_http_client_with, ProxyConfig};
+    use super::{
+        build_http_client_with, build_http_client_with_opts, ProxyConfig, TimeoutConfig,
+        DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT,
+    };
 
     fn config_from_map(pairs: &[(&str, &str)]) -> ProxyConfig {
         let map: HashMap<String, String> = pairs
@@ -441,5 +514,117 @@ mod tests {
             matches!(result, Err(crate::error::ApiError::Http(_))),
             "invalid unified proxy URL should fail: {result:?}"
         );
+    }
+
+    fn timeouts_from_map(pairs: &[(&str, &str)]) -> TimeoutConfig {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        TimeoutConfig::from_lookup(|key| map.get(key).cloned())
+    }
+
+    #[test]
+    fn default_pool_idle_timeout_stays_under_the_measured_close_threshold() {
+        // given – the measurement this default exists to respect. Against
+        // api.sudorouter.ai, reuse after a 45s idle gap succeeded and reuse
+        // after 55s failed instantly, so the peer closes somewhere between.
+        let longest_gap_that_survived = Duration::from_secs(45);
+        let shortest_gap_that_died = Duration::from_secs(55);
+
+        // when
+        let pool_idle_timeout = TimeoutConfig::default()
+            .pool_idle_timeout
+            .expect("the default must expire idle connections, not keep them forever");
+
+        // then – strictly under the surviving gap, not merely under the fatal
+        // one: equal-to-45s would be betting that the peer we measured is the
+        // strictest hop on every path, which is not something a client can know.
+        assert!(
+            pool_idle_timeout < longest_gap_that_survived,
+            "pool idle timeout {pool_idle_timeout:?} must leave margin below the {longest_gap_that_survived:?} \
+             gap that was observed to still work (peer closed by {shortest_gap_that_died:?})"
+        );
+    }
+
+    #[test]
+    fn timeout_config_defaults_when_no_env_vars_are_set() {
+        // given / when
+        let timeouts = timeouts_from_map(&[]);
+
+        // then
+        assert_eq!(timeouts, TimeoutConfig::default());
+        assert!(timeouts.tcp_keepalive.is_some());
+    }
+
+    #[test]
+    fn timeout_config_reads_pool_idle_and_keepalive_from_env() {
+        // given
+        let pairs = [
+            ("SUDOCODE_API_POOL_IDLE_TIMEOUT", "7"),
+            ("SUDOCODE_API_TCP_KEEPALIVE", "3"),
+        ];
+
+        // when
+        let timeouts = timeouts_from_map(&pairs);
+
+        // then
+        assert_eq!(timeouts.pool_idle_timeout, Some(Duration::from_secs(7)));
+        assert_eq!(timeouts.tcp_keepalive, Some(Duration::from_secs(3)));
+        // untouched keys keep their defaults
+        assert_eq!(timeouts.connect_timeout, Some(DEFAULT_CONNECT_TIMEOUT));
+        assert_eq!(timeouts.read_timeout, Some(DEFAULT_READ_TIMEOUT));
+    }
+
+    #[test]
+    fn zero_disables_pool_idle_timeout_and_keepalive() {
+        // given – the escape hatch for a path where expiring connections is
+        // the wrong trade (a peer that never closes, an expensive handshake).
+        let pairs = [
+            ("SUDOCODE_API_POOL_IDLE_TIMEOUT", "0"),
+            ("SUDOCODE_API_TCP_KEEPALIVE", "0"),
+        ];
+
+        // when
+        let timeouts = timeouts_from_map(&pairs);
+
+        // then
+        assert_eq!(timeouts.pool_idle_timeout, None);
+        assert_eq!(timeouts.tcp_keepalive, None);
+    }
+
+    #[test]
+    fn from_seconds_keeps_the_connection_pool_defaults() {
+        // given / when – a caller tuning only connect and read behaviour
+        let timeouts = TimeoutConfig::from_seconds(5, 1);
+
+        // then – it must not silently inherit hyper's 90s pool idle timeout,
+        // which is the setting that made stale-connection reuse possible.
+        assert_eq!(timeouts.connect_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(timeouts.read_timeout, Some(Duration::from_secs(1)));
+        assert_eq!(
+            timeouts.pool_idle_timeout,
+            TimeoutConfig::default().pool_idle_timeout
+        );
+        assert_eq!(
+            timeouts.tcp_keepalive,
+            TimeoutConfig::default().tcp_keepalive
+        );
+    }
+
+    #[test]
+    fn build_http_client_succeeds_with_pool_settings_disabled() {
+        // given
+        let timeouts = TimeoutConfig {
+            pool_idle_timeout: None,
+            tcp_keepalive: None,
+            ..TimeoutConfig::default()
+        };
+
+        // when
+        let result = build_http_client_with_opts(&ProxyConfig::default(), &timeouts);
+
+        // then
+        assert!(result.is_ok());
     }
 }

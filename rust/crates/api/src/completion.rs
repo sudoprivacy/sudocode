@@ -1,5 +1,15 @@
-//! Shared non-streaming text transport for main-agent and subagent clients.
+//! Shared text transport for main-agent and subagent clients.
 //! Summarization prompts, retries, and checkpoint validation stay in runtime.
+//!
+//! Streamed, despite returning one whole value. This is the path compaction
+//! takes, so its requests carry the entire conversation and are the slowest
+//! and largest we ever send — and a non-streaming request writes nothing to
+//! the socket until generation finishes, which on our path gets the connection
+//! closed at ~50s with no HTTP response to explain it (`stream: false` died at
+//! 50.3s where the identical `stream: true` request had its first byte at 1.7s
+//! and finished at 201.8s). The symptom was
+//! `Context compaction failed: compaction API error: api failed after 9
+//! attempts`, where all nine attempts were the same doomed shape.
 
 use crate::{
     CacheHints, InputContentBlock, InputMessage, MessageRequest, OutputContentBlock,
@@ -46,14 +56,14 @@ impl ProviderClient {
             } else {
                 None
             },
-            stream: false,
+            stream: true,
             thinking_enabled: false,
             cache_hints,
             metadata,
             ..Default::default()
         };
         let response = self
-            .send_message(&message_request, None)
+            .send_message_streamed(&message_request, None)
             .await
             .map_err(|error| {
                 if error.is_context_window_failure() {

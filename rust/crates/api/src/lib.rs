@@ -7,6 +7,7 @@ mod http_transport;
 mod prompt_cache;
 mod providers;
 mod sse;
+mod stream_collect;
 mod types;
 
 pub use client::{
@@ -51,6 +52,7 @@ pub use providers::registry::{
 };
 pub use providers::{detect_provider_kind, AuthMode, ProviderKind};
 pub use sse::{parse_frame, SseParser};
+pub use stream_collect::ResponseAccumulator;
 pub use types::{
     CacheHints, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
     ContentBlockStopEvent, ImageSource, InputContentBlock, InputMessage, MessageDelta,

@@ -9,7 +9,7 @@
 //! arrives) — unlike `tools::stream_with_provider`, which collects the whole
 //! response before returning and drops thinking deltas (fine for subagents, but
 //! it would lose live token streaming and the "Reasoning…" cue for a human
-//! renderer). It keeps the post-tool stall timeout + non-streaming fallback +
+//! renderer). It keeps the post-tool stall timeout + empty-response retry +
 //! prompt-cache extraction, since those change *which events* are produced (core
 //! behavior), not how they look.
 
@@ -211,7 +211,7 @@ impl EngineApiClient {
             session_id: self.session_id.clone(),
             account: self.account.clone(),
             model: self.model.clone(),
-            fallback_request: Some(build_non_streaming_fallback_request(
+            retry_request: Some(build_empty_response_retry_request(
                 message_request,
                 is_post_tool,
             )),
@@ -243,8 +243,8 @@ impl EngineApiClient {
 
                     let Some(event) = next else {
                         // Provider stream ended — emit prompt cache + a synthetic
-                        // stop if needed, then fall back to a non-streaming
-                        // request if the stream produced nothing usable.
+                        // stop if needed, then retry once if the stream produced
+                        // nothing usable.
                         if let Some(record) = state.client.take_last_prompt_cache_record() {
                             if let Some(evt) = prompt_cache_record_to_event(record) {
                                 state.buffer.push_back(AssistantEvent::PromptCache(evt));
@@ -254,10 +254,10 @@ impl EngineApiClient {
                             state.buffer.push_back(AssistantEvent::MessageStop);
                         }
                         if state.buffer.is_empty() && !state.saw_stop {
-                            if let Some(fallback_request) = state.fallback_request.take() {
+                            if let Some(retry_request) = state.retry_request.take() {
                                 let response = state
                                     .client
-                                    .send_message(&fallback_request, None)
+                                    .send_message_streamed(&retry_request, None)
                                     .await
                                     .map_err(|error| {
                                         runtime_error_from_api(
@@ -497,7 +497,9 @@ struct StreamState {
     /// way as failures raised before it — one wording, not two.
     account: Option<String>,
     model: String,
-    fallback_request: Option<MessageRequest>,
+    /// Sent once if the stream ends having produced nothing usable. `None` once
+    /// spent, so an empty answer costs at most one extra turn.
+    retry_request: Option<MessageRequest>,
 }
 
 /// Translate one provider event into zero or more [`AssistantEvent`]s. Pure — no
@@ -659,20 +661,35 @@ fn request_ends_with_tool_result(request: &ApiRequest) -> bool {
         .is_some_and(|message| message.role == MessageRole::Tool)
 }
 
-fn build_non_streaming_fallback_request(
+/// The one retry for a stream that ended having produced nothing usable.
+///
+/// This used to re-send the request non-streaming, on the theory that the
+/// streaming transport was what had failed. It is the wrong remedy twice over.
+/// A non-streaming request writes nothing to the socket until generation has
+/// finished, and on this path a connection that stays byte-quiet for ~50s is
+/// closed with no HTTP response at all (measured: `stream: false` died at 50.3s
+/// where `stream: true` had its first byte at 1.7s and ran 201.8s to
+/// completion) — so the retry was in the one shape least likely to survive, and
+/// most likely to be slow, since it carries the whole conversation. And the
+/// transport was rarely the problem in the first place: an upstream that
+/// answers `stream: true` with a whole JSON body is now read directly
+/// (`api::sse`), leaving this retry for the case it actually addresses — the
+/// model returned no usable content.
+///
+/// So the shape is unchanged and the remedy is about content: after a tool
+/// result, drop the tools and ask for a plain final message, which is what
+/// turns a stalled tool loop into an answer.
+fn build_empty_response_retry_request(
     request: &MessageRequest,
     is_post_tool: bool,
 ) -> MessageRequest {
-    let mut fallback = MessageRequest {
-        stream: false,
-        ..request.clone()
-    };
+    let mut retry = request.clone();
     if is_post_tool {
-        fallback.tools = None;
-        fallback.tool_choice = None;
-        fallback
+        retry.tools = None;
+        retry.tool_choice = None;
+        retry
             .messages
             .push(InputMessage::user_text(POST_TOOL_FINAL_SYNTHESIS_PROMPT));
     }
-    fallback
+    retry
 }

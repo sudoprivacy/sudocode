@@ -82,8 +82,7 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     // ConPTY may defer the newline until after emitting the new SGR.
     let normalized_summary = summary_wire.replace("\r\n", "");
     assert!(
-        normalized_summary.contains("\x1b[1m\x1b[2m3")
-            || normalized_summary.contains("\x1b[1;2m3"),
+        normalized_summary.contains("\x1b[1m\x1b[2m3") || normalized_summary.contains("\x1b[1;2m3"),
         "summary must retain bold and dim: {summary_wire:?}"
     );
     sess.expect(r"\x1b\[9mFinished parser")

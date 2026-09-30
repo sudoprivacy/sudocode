@@ -127,6 +127,22 @@ pub(crate) fn render_message(
                         }
                         out.push_str(&rendered);
                     }
+                    runtime::ContentBlock::Thinking { thinking, .. }
+                        if !thinking.trim().is_empty() =>
+                    {
+                        // Replay has to show reasoning for the same reason live
+                        // does: it was paid for. Rendered as plain dim text, not
+                        // through `render_markdown` — reasoning is prose the
+                        // model wrote for itself, and letting a stray `#` or
+                        // `*` in it become a heading or emphasis would make it
+                        // louder than the answer it belongs under.
+                        if !out.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(&thinking_header());
+                        out.push_str(&dim_thinking(thinking.trim_end()));
+                        out.push('\n');
+                    }
                     runtime::ContentBlock::ToolUse { id, input, .. } => {
                         // Mirror the live render engine exactly: a ToolUse only
                         // *remembers* its input so the matching ToolResult can
@@ -216,6 +232,34 @@ fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Wrap one chunk of extended-thinking text in the dim attribute.
+///
+/// Deliberately one self-contained `DIM`…`RESET` pair per call rather than a
+/// single run held open across a whole reasoning block. The live path receives
+/// thinking as deltas that split mid-word, and [`ResponseGlyphState::apply`]
+/// injects its margin at every line start — so a run left open across a delta
+/// boundary would be closed by whichever writer comes next. Per-chunk pairs are
+/// idempotent under both, at the cost of one escape pair per delta.
+///
+/// [`ResponseGlyphState::apply`]: crate::render::ResponseGlyphState::apply
+#[inline]
+pub(crate) fn dim_thinking(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    format!("{DIM}{text}{RESET}")
+}
+
+/// Header that opens a reasoning block.
+///
+/// Without it dim text is ambiguous — it reads as a faded *answer* rather than
+/// as reasoning, and a turn that opens on thinking would look like the model
+/// started replying in the wrong style.
+#[inline]
+pub(crate) fn thinking_header() -> String {
+    format!("{DIM}✻ Thinking…{RESET}\n")
 }
 
 // NOTE: DISPLAY_TRUNCATION_NOTICE uses DIM + RESET which are theme-invariant

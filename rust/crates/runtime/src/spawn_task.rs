@@ -142,7 +142,7 @@ pub fn cohost_a2a_prompt_section(self_id: &str) -> String {
     //
     // No peer list: a co-hosted agent is given no configured peers, so it finds them
     // the way the contract tells every agent to — by asking.
-    crate::agent_mailbox::a2a_prompt_section(self_id, "#", COHOST_FRAMING, &[])
+    crate::agent_mailbox::a2a_prompt_section(self_id, "#", COHOST_FRAMING)
 }
 
 /// How the co-host frames an inbound message: `run_loop` wraps each one as

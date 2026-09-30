@@ -163,7 +163,7 @@ if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
     NEXUS_A2A_TEST_SPAWN="$R" NEXUS_A2A_TEST_MODEL="$MODEL" \
     "${CARGO_TEST[@]}" live_spawn_cohost -- --ignored --nocapture
   sleep 8
-  NEXUS_A2A_ENDPOINT="$ENDPOINT" NEXUS_A2A_CREDENTIAL="$SELF_BUNDLE" NEXUS_A2A_PEER="$R" \
+  NEXUS_A2A_ENDPOINT="$ENDPOINT" NEXUS_A2A_CREDENTIAL="$SELF_BUNDLE" \
     "$SCODE_BIN" --auth proxy --model "$MODEL" --permission-mode danger-full-access \
     --print "Call send once: to=$R message='reply with exactly one word: PONG' summary='ping'. Then stop."
   echo "   polling ${SELF}'s inbox for the co-host reply..."

@@ -64,7 +64,6 @@ fn main() {
     let client = runtime::nexus_mailbox::Config {
         endpoint: endpoint.clone(),
         agent: credential.agent.clone(),
-        peers: Vec::new(),
         tls: credential.tls,
     }
     .connect()

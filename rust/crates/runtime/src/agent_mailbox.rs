@@ -83,24 +83,13 @@ pub fn a2a_reply_contract(self_id: &str) -> String {
 /// remembering to keep two strings in step. They did not: the co-host was told the reply
 /// contract and never told `agent_list` exists, so a co-hosted agent could answer a
 /// message but could not start a conversation.
-///
-/// `peers` is an advisory list a host may already know (the standalone REPL takes one
-/// from its configuration). Additive: a host that knows nobody still gets an agent that
-/// can ask.
 #[must_use]
-pub fn a2a_prompt_section(self_id: &str, heading: &str, framing: &str, peers: &[String]) -> String {
-    let mut s = format!(
+pub fn a2a_prompt_section(self_id: &str, heading: &str, framing: &str) -> String {
+    format!(
         "{heading} Agent-to-agent messaging\n\n{}\n\n{framing}\n\n{}",
         a2a_reply_contract(self_id),
         a2a_discovery_contract(),
-    );
-    if !peers.is_empty() {
-        s.push_str(&format!(
-            "\n\nKnown peers you can address: {}.",
-            peers.join(", ")
-        ));
-    }
-    s
+    )
 }
 
 /// How an agent finds out who it can address.
@@ -126,8 +115,8 @@ const REPL_FRAMING: &str = "Messages from other agents are delivered into this \
 
 /// A2A section for the REPL receive paths (nexus and standalone local pair).
 #[must_use]
-pub fn repl_a2a_prompt_section(self_id: &str, peers: &[String]) -> String {
-    a2a_prompt_section(self_id, "##", REPL_FRAMING, peers)
+pub fn repl_a2a_prompt_section(self_id: &str) -> String {
+    a2a_prompt_section(self_id, "##", REPL_FRAMING)
 }
 
 /// Unified mailbox envelope — the ONE envelope type for all inter-agent
@@ -508,7 +497,7 @@ mod prompt_tests {
 
     #[test]
     fn repl_section_warns_against_echoing_the_tags() {
-        let s = repl_a2a_prompt_section("win-ai", &[]);
+        let s = repl_a2a_prompt_section("win-ai");
         assert!(s.contains("\"win-ai\""));
         assert!(s.contains("send"));
         assert!(
@@ -524,14 +513,5 @@ mod prompt_tests {
             "must point the model at agent_list for discovery: {s}"
         );
         assert!(!s.contains("Known peers"), "no peer line when empty: {s}");
-    }
-
-    #[test]
-    fn repl_section_lists_known_peers_when_present() {
-        let s = repl_a2a_prompt_section("win-ai", &["mac-ai".to_string(), "op".to_string()]);
-        assert!(
-            s.contains("Known peers you can address: mac-ai, op."),
-            "must list peers: {s}"
-        );
     }
 }

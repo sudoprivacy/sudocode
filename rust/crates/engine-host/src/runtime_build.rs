@@ -705,10 +705,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         let self_name = host.resolved_agent_name();
         system_prompt
             .dynamic_sections
-            .push(runtime::agent_mailbox::repl_a2a_prompt_section(
-                &self_name,
-                &[],
-            ));
+            .push(runtime::agent_mailbox::repl_a2a_prompt_section(&self_name));
     }
     let client = match EngineApiClient::new(
         session_id,

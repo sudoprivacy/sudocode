@@ -26,10 +26,6 @@ pub const ENDPOINT_ENV: &str = "NEXUS_A2A_ENDPOINT";
 /// mint` writes (or its `credential.json` manifest). It carries this agent's
 /// identity (name + mTLS material), so it is the single "who you are" input.
 pub const CREDENTIAL_ENV: &str = "NEXUS_A2A_CREDENTIAL";
-/// Comma-separated peer names, surfaced to the model in the system prompt so it
-/// knows who it can address (advisory - any name is dialable, and discovery
-/// finds the rest).
-pub const PEERS_ENV: &str = "NEXUS_A2A_PEER";
 
 /// Resolved TLS material paths for an mTLS dial (all three mandatory - the
 /// cluster serves mutual TLS, so a CA alone cannot authenticate the transport).
@@ -118,8 +114,6 @@ pub struct Config {
     pub endpoint: String,
     /// This agent's own A2A name, from the credential.
     pub agent: String,
-    /// Known peer names (advisory prompt hint; discovery finds the rest).
-    pub peers: Vec<String>,
     /// mTLS material. `from_env` always fills this from the credential; `None`
     /// is only the plaintext loopback dial an auth-off dev cluster allows (used
     /// by live tests), never a silent downgrade of a credentialed session.
@@ -146,19 +140,9 @@ impl Config {
             )
         })?;
         let credential = AgentCredential::load(&credential_path)?;
-        let peers = non_empty_env(PEERS_ENV)
-            .map(|s| {
-                s.split(',')
-                    .map(str::trim)
-                    .filter(|p| !p.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
         Ok(Some(Self {
             endpoint,
             agent: credential.agent,
-            peers,
             tls: credential.tls,
         }))
     }
@@ -190,7 +174,7 @@ impl Config {
     /// receive path renders) and prepends the nexus-specific network note.
     #[must_use]
     pub fn peer_system_prompt(&self) -> String {
-        let base = crate::agent_mailbox::repl_a2a_prompt_section(&self.agent, &self.peers);
+        let base = crate::agent_mailbox::repl_a2a_prompt_section(&self.agent);
         format!(
             "{base}\n\nThis conversation is on a nexus A2A network, so a peer may \
              be on another machine; addressing it by name still reaches it."
@@ -258,7 +242,6 @@ mod tests {
         let clear = || {
             std::env::remove_var(ENDPOINT_ENV);
             std::env::remove_var(CREDENTIAL_ENV);
-            std::env::remove_var(PEERS_ENV);
         };
 
         clear();
@@ -276,10 +259,8 @@ mod tests {
         // Full: a real bundle dir (manifest + PEMs) resolves name + TLS.
         let bundle = write_test_bundle("operator");
         std::env::set_var(CREDENTIAL_ENV, &bundle);
-        std::env::set_var(PEERS_ENV, "win-ai, mac-ai");
         let cfg = Config::from_env().unwrap().unwrap();
         assert_eq!(cfg.agent, "operator");
-        assert_eq!(cfg.peers, vec!["win-ai".to_string(), "mac-ai".to_string()]);
         let tls = cfg.tls;
         assert_eq!(tls.server_name, "nexus-node");
         assert!(tls.ca_pem.ends_with("ca.pem"));
@@ -308,33 +289,23 @@ mod tests {
     }
 
     #[test]
-    fn peer_prompt_names_self_and_lists_known_peers() {
+    fn peer_prompt_names_self_and_points_at_discovery() {
         let cfg = Config {
             endpoint: "127.0.0.1:2126".into(),
             agent: "operator".into(),
-            peers: vec!["win-ai".into(), "mac-ai".into()],
             tls: test_tls(),
         };
         let p = cfg.peer_system_prompt();
         assert!(p.contains("\"operator\""), "prompt must name self: {p}");
         assert!(p.contains("send"), "prompt must teach the tool: {p}");
         assert!(
-            p.contains("win-ai, mac-ai"),
-            "prompt must list known peers: {p}"
+            p.contains("agent_list"),
+            "prompt must point at agent_list for discovery: {p}"
         );
-    }
-
-    #[test]
-    fn peer_prompt_omits_peer_list_when_none_known() {
-        let cfg = Config {
-            endpoint: "127.0.0.1:2126".into(),
-            agent: "operator".into(),
-            peers: vec![],
-            tls: test_tls(),
-        };
-        let p = cfg.peer_system_prompt();
-        assert!(p.contains("\"operator\""));
-        assert!(!p.contains("Known peers"), "no peer line when empty: {p}");
+        assert!(
+            p.contains("another machine"),
+            "prompt must carry the nexus network note: {p}"
+        );
     }
 
     #[test]

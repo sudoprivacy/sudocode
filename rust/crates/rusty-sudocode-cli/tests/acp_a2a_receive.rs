@@ -79,7 +79,6 @@ fn dial_test_daemon(endpoint: &str) -> Arc<NexusVfsClient> {
     runtime::nexus_mailbox::Config {
         endpoint: endpoint.to_string(),
         agent: credential.agent,
-        peers: Vec::new(),
         tls: credential.tls,
     }
     .connect()
@@ -211,7 +210,6 @@ fn spawn_acp(
         .env("SUDO_CODE_CONFIG_HOME", config_home.path())
         .env("NEXUS_A2A_ENDPOINT", endpoint)
         .env("NEXUS_A2A_CREDENTIAL", receiver_credential)
-        .env("NEXUS_A2A_PEER", peer)
         .env("SUDOCODE_INTERRUPT_QUEUE_MODE", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

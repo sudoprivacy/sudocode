@@ -22,6 +22,10 @@ jobs:
       issues: read
       id-token: write
 
+    env:
+      # Job-level env is forwarded into the action's Claude subprocess.
+      ANTHROPIC_BASE_URL: https://api.sudorouter.ai
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,11 +36,12 @@ jobs:
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          claude_args: '--model claude-opus-4-7'
+          # Use the model already exercised by the repository's proxy smoke test.
+          claude_args: '--model claude-sonnet-4-6'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
@@ -63,6 +68,6 @@ jobs:
           cost=$(jq -r '[..|objects|select(has("total_cost_usd"))|.total_cost_usd]|first // empty' "$log")
           echo "num_turns=${turns:-unknown} total_cost_usd=${cost:-unknown}"
           if [ "${turns:-99}" -le 1 ] 2>/dev/null && [ "${cost:-1}" = "0" ]; then
-            echo "::error::The code review never reached a model (num_turns=$turns, cost=$cost) — the repository's CLAUDE_CODE_OAUTH_TOKEN is being rejected. This is an infrastructure failure, NOT a finding about this pull request; rotate the secret. The same credential takes the 'Live API smoke test' job down on main."
+            echo "::error::The code review failed before reporting model usage (num_turns=$turns, cost=$cost). Check SUDOROUTER_CI_API_KEY, ANTHROPIC_BASE_URL, and access to the model in claude_args. This is not a review finding; the counters alone do not identify the precise cause."
           fi
 

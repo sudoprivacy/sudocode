@@ -455,7 +455,24 @@ impl Display for ApiError {
             Self::InvalidApiKeyEnv(error) => {
                 write!(f, "failed to read credential environment variable: {error}")
             }
-            Self::Http(error) => write!(f, "http error: {error}"),
+            Self::Http(error) => {
+                write!(f, "http error: {error}")?;
+                // reqwest's own `Display` stops at "error sending request for
+                // url (…)": since 0.12 it deliberately omits the source chain,
+                // and `ApiError`'s `Error` impl exposes no `source()` — so the
+                // only text that says *why* the send failed (connection reset,
+                // TLS handshake failure, operation timed out) was unreachable
+                // from anywhere. That is what eight identical retry lines
+                // naming nothing but the URL cost us: a proxy cutting the
+                // connection, a dead upstream and a plain timeout all rendered
+                // the same, and the retry line is the only record a user has.
+                let mut cause = std::error::Error::source(error);
+                while let Some(source) = cause {
+                    write!(f, ": {source}")?;
+                    cause = source.source();
+                }
+                Ok(())
+            }
             Self::Io(error) => write!(f, "io error: {error}"),
             Self::Json {
                 provider,
@@ -848,6 +865,45 @@ mod tests {
                 "is_retryable must equal (action == Transport) for {err:?}"
             );
         }
+    }
+
+    /// A transport failure must render its cause, not just the URL it failed
+    /// to reach. Built from a real `reqwest::Error` because that type cannot be
+    /// constructed directly, and a synthetic stand-in would prove nothing about
+    /// what reqwest's own `Display` does and does not include.
+    #[tokio::test]
+    async fn http_error_display_carries_the_transport_cause() {
+        // `no_proxy()` keeps this hermetic: with a system proxy configured,
+        // reqwest would dial the proxy instead of the closed port and could
+        // come back with a response rather than a transport error.
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client builds")
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .expect_err("port 1 on loopback must refuse the connection");
+
+        // The instrument has to be able to fail. If reqwest ever stops
+        // attaching a cause, this test must say so instead of passing vacuously
+        // against an error that has nothing to append.
+        let cause = std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .expect("a connect failure must carry its cause as a source");
+        let reqwest_summary = error.to_string();
+
+        let rendered = ApiError::Http(error).to_string();
+        assert!(
+            rendered.contains(&reqwest_summary),
+            "must keep reqwest's own summary: {rendered}"
+        );
+        assert!(
+            rendered.contains(&cause),
+            "must append the source chain, else a timeout, a refused connection \
+             and a proxy cutting the stream all render identically: {rendered} \
+             (cause was {cause})"
+        );
     }
 
     #[test]

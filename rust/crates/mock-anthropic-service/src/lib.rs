@@ -169,6 +169,14 @@ impl Drop for MockAnthropicService {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     StreamingText,
+    /// A `thinking` block streamed as several `thinking_delta`s (one of them
+    /// spanning a newline, one splitting mid-word) followed by a `signature_delta`
+    /// and then a normal text block. The only scenario that exercises the
+    /// renderer's reasoning path, and the split deltas are the point: the CLI
+    /// writes thinking through on every delta, so a bug that clears the line or
+    /// drops the margin between deltas only shows up when they do not align
+    /// with line boundaries.
+    ThinkingThenText,
     ReadFileRoundtrip,
     ImageReadRoundtrip,
     BrowserImageRoundtrip,
@@ -297,6 +305,7 @@ impl Scenario {
     fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "streaming_text" => Some(Self::StreamingText),
+            "thinking_then_text" => Some(Self::ThinkingThenText),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
             "image_read_roundtrip" => Some(Self::ImageReadRoundtrip),
             "browser_image_roundtrip" => Some(Self::BrowserImageRoundtrip),
@@ -359,6 +368,7 @@ impl Scenario {
     fn name(self) -> &'static str {
         match self {
             Self::StreamingText => "streaming_text",
+            Self::ThinkingThenText => "thinking_then_text",
             Self::ReadFileRoundtrip => "read_file_roundtrip",
             Self::ImageReadRoundtrip => "image_read_roundtrip",
             Self::BrowserImageRoundtrip => "browser_image_roundtrip",
@@ -1082,6 +1092,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             streaming_text_sse()
         }
         Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(),
+        Scenario::ThinkingThenText => thinking_then_text_sse(),
         Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
             Some((output, is_error)) => {
                 final_text_sse(&format!("search roundtrip error={is_error}: {output}"))
@@ -1605,6 +1616,23 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
 #[allow(clippy::too_many_lines)]
 fn build_message_response(request: &MessageRequest, scenario: Scenario) -> MessageResponse {
     match scenario {
+        Scenario::ThinkingThenText => {
+            // The non-streaming twin of `thinking_then_text_sse`, so the
+            // mock-parity harness sees the same two blocks on both paths.
+            let mut response = text_message_response(
+                "msg_thinking_then_text",
+                "The answer follows the reasoning.",
+            );
+            response.content.insert(
+                0,
+                OutputContentBlock::Thinking {
+                    thinking: "Reasoning step one.\nReasoning step two continues the same line."
+                        .to_string(),
+                    signature: Some("sig_mock_thinking".to_string()),
+                },
+            );
+            response
+        }
         Scenario::MarkdownRenderingShowcase => {
             text_message_response("msg_markdown_showcase", MARKDOWN_SHOWCASE_DOC)
         }
@@ -2241,6 +2269,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
 fn request_id_for(scenario: Scenario) -> &'static str {
     match scenario {
         Scenario::StreamingText => "req_streaming_text",
+        Scenario::ThinkingThenText => "req_thinking_then_text",
         Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
@@ -2553,6 +2582,106 @@ fn streaming_text_sse() -> String {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn", "stop_sequence": null},
             "usage": usage_json(11, 8)
+        }),
+    );
+    append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));
+    body
+}
+
+/// A `thinking` block followed by a text block.
+///
+/// The thinking deltas are deliberately not line-aligned: one carries an
+/// embedded newline and the next resumes mid-sentence, because the renderer
+/// writes reasoning to the terminal on every delta and the failures worth
+/// catching (a spinner clear landing mid-line, a lost margin, a dim run left
+/// open) only appear at those boundaries. A `signature_delta` closes the block,
+/// matching what the real API sends.
+fn thinking_then_text_sse() -> String {
+    let mut body = String::new();
+    append_sse(
+        &mut body,
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_thinking_then_text",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": DEFAULT_MODEL,
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": usage_json(12, 0)
+            }
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_start",
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": null}
+        }),
+    );
+    for chunk in [
+        "Reasoning step one.\nReasoning ",
+        "step two continues the same line.",
+    ] {
+        append_sse(
+            &mut body,
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": chunk}
+            }),
+        );
+    }
+    append_sse(
+        &mut body,
+        "content_block_delta",
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "sig_mock_thinking"}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": 0}),
+    );
+    append_sse(
+        &mut body,
+        "content_block_start",
+        json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_delta",
+        json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "The answer follows the reasoning."}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": 1}),
+    );
+    append_sse(
+        &mut body,
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+            "usage": usage_json(12, 9)
         }),
     );
     append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));

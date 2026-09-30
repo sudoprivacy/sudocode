@@ -53,6 +53,10 @@ pub(crate) struct EngineEventRenderer {
     /// `true` while inside a thinking block, so the "Reasoning…" spinner cue is
     /// raised once and lowered when real content resumes.
     thinking_active: bool,
+    /// `true` once this thinking block has written text to the terminal, so
+    /// leaving the block can close it off. Distinct from `thinking_active`:
+    /// a block that produced only empty deltas needs no separator.
+    thinking_printed: bool,
     /// Tool-call arguments remembered from `ToolCall` and paired with the
     /// matching `ToolResult`, so the completed card can show what was requested
     /// — the result payload does not echo command/path/strings. Shared type
@@ -69,6 +73,7 @@ impl EngineEventRenderer {
             spinner,
             output_writer,
             thinking_active: false,
+            thinking_printed: false,
             tool_inputs: crate::cli::format::ToolInputRegistry::default(),
         }
     }
@@ -136,6 +141,20 @@ impl EngineEventRenderer {
                 s.set_thinking(false);
             }
         }
+        if self.thinking_printed {
+            self.thinking_printed = false;
+            // Close the dim block with a blank line so the answer does not
+            // continue the last reasoning line. `visible_col` says whether that
+            // line was left open: mid-line needs one newline to end it and a
+            // second to make the gap, at column 0 the first is already spent.
+            let separator = if self.glyph.visible_col > 0 {
+                "\n\n"
+            } else {
+                "\n"
+            };
+            let closed = self.glyph.apply(separator);
+            self.write_out(&closed);
+        }
     }
 
     pub(crate) fn render(&mut self, event: EngineEvent) -> RenderOutcome {
@@ -158,13 +177,43 @@ impl EngineEventRenderer {
                 if let Some(s) = &self.spinner {
                     s.add_response_bytes(text.len() as u32);
                 }
-                // Thinking is not surfaced in the transcript; the spinner's
-                // "Reasoning…" mode is the only cue.
                 if !self.thinking_active {
                     self.thinking_active = true;
                     if let Some(s) = &self.spinner {
                         s.set_thinking(true);
                     }
+                }
+                // Surface the reasoning instead of dropping it. Extended
+                // thinking is billed either way, and these deltas only arrive
+                // when the `thinking` setting is on (with it off the request
+                // carries no thinking parameter at all), so the single setting
+                // means both "spend the tokens" and "show what they bought" —
+                // paying for reasoning and then hiding it is the one
+                // combination with no argument for it.
+                //
+                // Not fed through `self.markdown`: thinking is prose the model
+                // wrote for itself, and interleaving it with the answer's
+                // markdown stream would corrupt that parser's state across the
+                // block boundary.
+                if !text.is_empty() {
+                    if !self.thinking_printed {
+                        // Pause (and write the header) exactly once per block,
+                        // not once per delta. `SpinnerRef::pause` emits a
+                        // carriage return + erase-line to clear its own row;
+                        // per-delta that lands mid-line and wipes the thinking
+                        // text already drawn on it. `TextDelta` can afford to
+                        // pause every delta only because it writes at markdown
+                        // block boundaries, so its erase always lands at column
+                        // 0. Reasoning is written through on every delta and has
+                        // no such protection.
+                        self.pause_spinner();
+                        let header = self.glyph.apply(&crate::cli::format::thinking_header());
+                        self.write_out(&header);
+                        self.thinking_printed = true;
+                    }
+                    let dimmed = crate::cli::format::dim_thinking(&text);
+                    let prefixed = self.glyph.apply(&dimmed);
+                    self.write_out(&prefixed);
                 }
                 RenderOutcome::Continue
             }
@@ -235,6 +284,10 @@ impl EngineEventRenderer {
             }
             EngineEvent::Error { message } => {
                 // Flush any partial assistant text first, then surface the error.
+                // `end_thinking` first so a turn that failed while still
+                // reasoning closes its dim block rather than letting the error
+                // line inherit the dim attribute.
+                self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
                     let prefixed = self.glyph.apply(&rendered);
                     self.write_out(&prefixed);
@@ -244,6 +297,10 @@ impl EngineEventRenderer {
                 RenderOutcome::Done
             }
             EngineEvent::TurnComplete(_) => {
+                // A turn can end on a thinking block (the model reasoned and
+                // then produced no text, e.g. it was interrupted): close it so
+                // the next prompt is not written into an open dim run.
+                self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
                     let prefixed = self.glyph.apply(&rendered);
                     self.write_out(&prefixed);

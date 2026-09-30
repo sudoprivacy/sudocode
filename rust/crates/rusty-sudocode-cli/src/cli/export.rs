@@ -104,7 +104,22 @@ pub(crate) fn render_session_markdown(
                     lines.push(format!("_[image: {mime_type}]_"));
                     lines.push(String::new());
                 }
-                ContentBlock::Thinking { .. } => {}
+                ContentBlock::Thinking { thinking, .. } => {
+                    // Exported as a blockquote rather than with the terminal's
+                    // dim attribute: an export is a file, and ANSI escapes in it
+                    // are noise. The quote carries the same "subordinate to the
+                    // answer" reading dim carries on screen, and matches how
+                    // tool payloads are already quoted above.
+                    let trimmed = thinking.trim();
+                    if !trimmed.is_empty() {
+                        lines.push("**Thinking**".to_string());
+                        lines.push(String::new());
+                        for line in trimmed.lines() {
+                            lines.push(format!("> {line}"));
+                        }
+                        lines.push(String::new());
+                    }
+                }
             }
         }
         if let Some(usage) = message.usage {
@@ -279,7 +294,14 @@ pub(crate) fn render_export_text(session: &Session) -> String {
                 ContentBlock::Image { mime_type, .. } => {
                     lines.push(format!("[image: {mime_type}]"));
                 }
-                ContentBlock::Thinking { .. } => {}
+                ContentBlock::Thinking { thinking, .. } => {
+                    // Bracketed tag to match the `[tool_use …]` / `[image: …]`
+                    // convention of this renderer; no ANSI, same reason as the
+                    // markdown export.
+                    if !thinking.trim().is_empty() {
+                        lines.push(format!("[thinking]\n{thinking}"));
+                    }
+                }
             }
         }
         lines.push(String::new());

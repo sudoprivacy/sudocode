@@ -738,11 +738,10 @@ impl GlobalToolRegistry {
         self.runtime_tools.iter().any(|tool| tool.name == name)
     }
 
-    /// Return all tool definitions for the API `tools` array. Core tools
-    /// and previously-discovered tools have `defer_loading: false` (always
-    /// active); other deferred tools have `defer_loading: true` (the API
-    /// knows their schemas but doesn't count them against context until
-    /// the model discovers them through ToolSearch).
+    /// Return all tool definitions for the API `tools` array. Before the first
+    /// ToolSearch, core tools have `defer_loading: false` and everything else
+    /// has `true` — the API knows those schemas but doesn't count them against
+    /// context. After the first ToolSearch, every tool is active.
     /// Requires the `advanced-tool-use` beta header.
     ///
     /// `discovered_tools` comes from [`extract_discovered_tool_names`], which
@@ -750,16 +749,37 @@ impl GlobalToolRegistry {
     /// mechanism: the flag flipping here is what puts a searched-for tool's
     /// schema on the wire. See [`convert_messages`] for why it is not also done
     /// with in-band `tool_reference` blocks.
+    ///
+    /// ONE reveal per session, not one per tool, and the names in
+    /// `discovered_tools` are therefore only read for emptiness. `tools` sits at
+    /// the very front of the cached prefix, so flipping a single `defer_loading`
+    /// invalidates every token behind it — the system blocks and the entire
+    /// message history — and the provider re-bills that rebuild at write price.
+    /// Per-tool reveal costs one full rebuild per ToolSearch, each larger than
+    /// the last; a session that searches five times pays five. The first
+    /// discovery is the only one that buys anything, because it is the one that
+    /// says the model has reached past the core set. After it, the cheapest
+    /// stable state is the whole array on the wire once and read from cache
+    /// afterwards. `<available-deferred-tools>` does not vary with discovery
+    /// (see [`deferred_tool_listing`](Self::deferred_tool_listing)), so the
+    /// system blocks stay byte-identical and the reveal is a single event.
+    ///
+    /// What early reveal costs is small and measurable. The builtin registry is
+    /// 28 tools, 9 of them deferred, and those 9 schemas are 3.3 KB — under a
+    /// thousand tokens of context that now counts from the first search instead
+    /// of the one that named them. `defer_loading` does not withhold the schema
+    /// from the wire either way: the whole array is 21.5 KB deferred and 21.3 KB
+    /// revealed, the difference being nine `"defer_loading":true` keys. Against
+    /// that, a prefix rebuild measured against production traffic is ~310k
+    /// tokens billed at write price. The ratio is not close.
     #[must_use]
     pub fn core_definitions(
         &self,
         allowed_tools: Option<&BTreeSet<String>>,
         discovered_tools: Option<&BTreeSet<String>>,
     ) -> Vec<ToolDefinition> {
-        let is_active = |name: &str| {
-            is_core_tool(name)
-                || discovered_tools.is_some_and(|discovered| discovered.contains(name))
-        };
+        let anything_discovered = discovered_tools.is_some_and(|discovered| !discovered.is_empty());
+        let is_active = |name: &str| is_core_tool(name) || anything_discovered;
         let coord_gate =
             |name: &str| runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode(name);
         let builtin = mvp_tool_specs()
@@ -7770,9 +7790,12 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
 
 /// Scan conversation history for tool names the model has already
 /// discovered via ToolSearch. Returns the set of tool names that
-/// appeared in ToolSearch result `matches` arrays — these should get
-/// `defer_loading: false` in subsequent API calls so the model can
-/// call them directly without re-searching.
+/// appeared in ToolSearch result `matches` arrays. Only whether this set is
+/// EMPTY decides anything: the first non-empty result clears `defer_loading`
+/// for every deferred tool at once (see
+/// [`GlobalToolRegistry::core_definitions`] for why one reveal is cheaper than
+/// one per tool). The names themselves are kept because they are what survives
+/// compaction.
 ///
 /// Mirrors CC's `extractDiscoveredToolNames()`.
 pub fn extract_discovered_tool_names(messages: &[ConversationMessage]) -> BTreeSet<String> {
@@ -7909,9 +7932,9 @@ fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
 /// Tools always visible in the API `tools` array — the LLM sees their
 /// full schema on every turn. Everything else is "deferred": listed by
 /// name in `<available-deferred-tools>` and discovered via `ToolSearch`.
-/// Once discovered, [`GlobalToolRegistry::core_definitions`] clears their
-/// `defer_loading` so the next request carries the full schema and the model
-/// calls them directly.
+/// The FIRST ToolSearch clears `defer_loading` on all of them at once (see
+/// [`GlobalToolRegistry::core_definitions`]), so the next request carries every
+/// schema and the model calls any of them directly.
 const CORE_TOOLS: &[&str] = &[
     "bash",
     "read_file",
@@ -11022,9 +11045,10 @@ mod tests {
     /// turn that followed a ToolSearch died in production while this passed.
     ///
     /// Discovery does not need the references: `extract_discovered_tool_names`
-    /// reads `matches` out of this same text and `core_definitions` clears
-    /// `defer_loading` for those names, so the next request carries their full
-    /// schemas. One mechanism, and the text survives for the model to read.
+    /// reads `matches` out of this same text, and a non-empty result is what
+    /// clears `defer_loading` in `core_definitions`, so the next request carries
+    /// the full schemas. One mechanism, and the text survives for the model to
+    /// read.
     #[test]
     fn a_tool_search_result_carries_text_and_no_tool_definitions() {
         use super::extract_discovered_tool_names;
@@ -11123,8 +11147,19 @@ mod tests {
         assert!(discovered.contains("CronList"));
     }
 
+    /// The first ToolSearch reveals EVERY deferred tool, and the second reveals
+    /// nothing because there is nothing left.
+    ///
+    /// Per-tool reveal was the obvious reading of `defer_loading` and the
+    /// expensive one: `tools` is the first thing in the cached prefix, so each
+    /// flag flip invalidates the system blocks and the whole message history
+    /// behind it, and the rebuild is billed at write price. One reveal per
+    /// session bounds that at one rebuild no matter how often the model
+    /// searches. The tools array being byte-identical across the second
+    /// discovery is the property; `defer_loading` on an unsearched tool is just
+    /// how it is spelled.
     #[test]
-    fn discovered_tools_get_defer_loading_false() {
+    fn the_first_discovery_reveals_every_deferred_tool() {
         // Held because this reads the registry, and the registry reads the
         // environment: `cron_tools_hidden_when_host_owns_scheduling` sets
         // `SUDOCODE_DISABLE_CRON_TOOLS` to prove cron tools disappear. Landing
@@ -11136,17 +11171,43 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let registry = GlobalToolRegistry::builtin();
-        let discovered: BTreeSet<String> = ["CronCreate".to_string()].into_iter().collect();
-        let defs = registry.core_definitions(None, Some(&discovered));
-        let cron_create = defs.iter().find(|d| d.name == "CronCreate").unwrap();
+
+        // Nothing searched for yet: core on, the rest deferred.
+        let cold = registry.core_definitions(None, None);
         assert!(
-            !cron_create.defer_loading,
-            "discovered tool should have defer_loading=false"
+            cold.iter().any(|d| d.defer_loading),
+            "before any ToolSearch some tools must still be deferred, or the \
+             mechanism is doing nothing"
         );
-        let cron_list = defs.iter().find(|d| d.name == "CronList").unwrap();
+        let cron_list_cold = cold.iter().find(|d| d.name == "CronList").unwrap();
         assert!(
-            cron_list.defer_loading,
-            "undiscovered deferred tool should still have defer_loading=true"
+            cron_list_cold.defer_loading,
+            "an unsearched deferred tool must stay deferred"
+        );
+
+        let one: BTreeSet<String> = ["CronCreate".to_string()].into_iter().collect();
+        let after_first = registry.core_definitions(None, Some(&one));
+        assert!(
+            after_first.iter().all(|d| !d.defer_loading),
+            "the first discovery reveals everything, not just what was matched: {:?}",
+            after_first
+                .iter()
+                .filter(|d| d.defer_loading)
+                .map(|d| &d.name)
+                .collect::<Vec<_>>()
+        );
+
+        // The bill this exists to avoid: a second discovery must not move a
+        // byte of the array, because `tools` is the head of the cached prefix.
+        let two: BTreeSet<String> = ["CronCreate".to_string(), "CronList".to_string()]
+            .into_iter()
+            .collect();
+        let after_second = registry.core_definitions(None, Some(&two));
+        assert_eq!(
+            serde_json::to_string(&after_first).unwrap(),
+            serde_json::to_string(&after_second).unwrap(),
+            "a later ToolSearch must not change the tools array — every change \
+             there invalidates the whole prefix behind it"
         );
     }
 

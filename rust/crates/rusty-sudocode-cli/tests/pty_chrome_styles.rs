@@ -42,6 +42,38 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
     }
 }
 
+fn settle_chrome(sess: &PtySession) {
+    // A styled label (or the prompt byte itself) can arrive before the frame
+    // finishes. Resizing in that window reflows the startup banner while the
+    // renderer is still establishing its inline cursor origin. Wait for the
+    // visible input AND a settled frame, not a fixed sleep. Do not use the
+    // input-buffer parser here: after resize, terminal soft-wraps can join the
+    // empty input row to the following separator, which is not typed content.
+    expect_style(sess, "❯", ("Default", false, false));
+    let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
+    let mut previous = String::new();
+    let mut stable = 0;
+    loop {
+        let screen = sess.render(|s| s.contents());
+        stable = if screen == previous { stable + 1 } else { 0 };
+        if stable >= 4 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "chrome did not settle:\n{screen}"
+        );
+        previous = screen;
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn resize_idle_chrome(sess: &mut PtySession, rows: u16, cols: u16) {
+    settle_chrome(sess);
+    sess.resize(rows, cols).expect("resize settled chrome");
+    settle_chrome(sess);
+}
+
 fn exit(sess: &mut PtySession) {
     sess.send("/exit").expect("type exit");
     common::expect_input_line(
@@ -50,6 +82,7 @@ fn exit(sess: &mut PtySession) {
         common::DEFAULT_TIMEOUT,
         "exit must reach input",
     );
+    expect_style(sess, "❯ /exit", ("Default", false, false));
     sess.send("\r").expect("submit exit");
     assert_eq!(sess.expect_eof().expect("exit cleanly"), 0);
 }
@@ -85,18 +118,9 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     expect_style(&sess, "Finished parser", ("Idx(8)", false, true));
     expect_style(&sess, "Review output", ("Idx(8)", false, false));
     // Reflow must not merge differently styled spans or lose their attributes.
-    sess.resize(30, 68).expect("resize smaller");
+    resize_idle_chrome(&mut sess, 30, 68);
     expect_style(&sess, "Checking styles", ("Idx(8)", true, false));
-    sess.send("/exit").expect("type exit");
-    common::expect_input_line(
-        &sess,
-        "/exit",
-        common::DEFAULT_TIMEOUT,
-        "draft remains editable",
-    );
-    expect_style(&sess, "❯ /exit", ("Default", false, false));
-    sess.send("\r").expect("submit exit");
-    assert_eq!(sess.expect_eof().expect("exit cleanly"), 0);
+    exit(&mut sess);
 }
 
 #[test]
@@ -233,7 +257,7 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
             sess.resize(40, 100).unwrap();
             sess.expect("❯").expect("input ready");
             for width in [100, 60] {
-                sess.resize(40, width).unwrap();
+                resize_idle_chrome(&mut sess, 40, width);
                 for label in [" todos (", " done, ", " open)"] {
                     expect_style(&sess, label, (muted, false, false));
                 }
@@ -249,16 +273,7 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                     expect_style(&sess, " in progress, ", (muted, false, false));
                 }
             }
-            sess.send("/exit").unwrap();
-            common::expect_input_line(
-                &sess,
-                "/exit",
-                common::DEFAULT_TIMEOUT,
-                "editable after summary",
-            );
-            expect_style(&sess, "❯ /exit", ("Default", false, false));
-            sess.send("\r").unwrap();
-            assert_eq!(sess.expect_eof().unwrap(), 0);
+            exit(&mut sess);
         }
     }
 }
@@ -318,7 +333,7 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
             );
             sess.resize(40, 240).unwrap();
             for width in [240, 100] {
-                sess.resize(40, width).unwrap();
+                resize_idle_chrome(&mut sess, 40, width);
                 for label in ["turn 1", "ctx ", "chrome-style-branch"] {
                     expect_style(&sess, label, (muted, false, false));
                 }

@@ -520,8 +520,9 @@ fn available_command_from_spec(spec: &AcpSlashCommandSpec) -> AvailableCommand {
 /// peer mail apart from a human's typing.
 ///
 /// Broadcast to every registered session, because the inbox belongs to the
-/// PROCESS: `NEXUS_A2A_AGENT` names one agent, and every session this server
-/// hosts is that agent. There is no per-session mailbox to route to.
+/// PROCESS: the agent this server is comes from `NEXUS_A2A_CREDENTIAL` — one
+/// bundle, one name — and every session it hosts is that agent. There is no
+/// per-session mailbox to route to.
 ///
 /// Started on the first `session/new` rather than at boot — before a session
 /// exists there is nobody to notify — and only once, since the poller parks on

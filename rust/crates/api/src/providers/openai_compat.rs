@@ -616,6 +616,15 @@ impl OpenAiSseParser {
 
     fn push(&mut self, chunk: &[u8]) -> Result<Vec<ChatCompletionChunk>, ApiError> {
         self.buffer.extend_from_slice(chunk);
+        if crate::sse::body_opens_as_json(&self.buffer) {
+            // Not an SSE stream at all — a gateway that ignored `stream: true`
+            // and is answering with one JSON object. Frame splitting must not
+            // run over it: a blank line anywhere inside a pretty-printed body
+            // would be read as a frame terminator and cut the object in half.
+            // Hold everything for `finish`, which knows how to read a whole
+            // body.
+            return Ok(Vec::new());
+        }
         let mut events = Vec::new();
 
         while let Some(frame) = next_sse_frame(&mut self.buffer) {
@@ -629,21 +638,37 @@ impl OpenAiSseParser {
 
     /// Flush whatever is left in the buffer once the HTTP stream ends. A
     /// well-formed SSE stream ends on a frame separator, so leftovers are
-    /// usually a non-SSE body (HTML error page, bare JSON error) that never
-    /// contained a separator — parse it so the error surfaces instead of
-    /// being dropped.
+    /// either a whole non-streaming completion from a gateway that ignored
+    /// `stream: true`, or a non-SSE body (HTML error page, bare JSON error)
+    /// that never contained a separator — read the first, surface the second,
+    /// drop neither.
     fn finish(&mut self) -> Result<Vec<ChatCompletionChunk>, ApiError> {
         if self.buffer.is_empty() {
             return Ok(Vec::new());
         }
         let trailing = std::mem::take(&mut self.buffer);
         let tail = String::from_utf8_lossy(&trailing);
+        if let Some(chunk) = whole_completion_as_chunk(&tail) {
+            return Ok(vec![chunk]);
+        }
         // A leftover frame at end-of-stream that fails to parse is a
         // truncation, not a malformed model payload: surface it as a retryable
         // IncompleteStream instead of a JSON error that blames the model.
         match parse_sse_frame(&tail, &self.provider, &self.model) {
             Ok(Some(event)) => Ok(vec![event]),
+            // An unframed body that does not parse as JSON at all was cut off
+            // mid-object. Nothing else sees these bytes — `push` holds whole
+            // bodies for this method — so returning empty would drop a
+            // truncation silently and report a successful empty turn.
+            Ok(None) if crate::sse::unframed_body_was_truncated(tail.trim()) => Err(
+                ApiError::incomplete_stream(&self.provider, &self.model, &tail),
+            ),
             Ok(None) => Ok(Vec::new()),
+            // An error envelope is a real answer about a real problem — keep it
+            // rather than marking it a retryable truncation and re-uploading the
+            // conversation to be told the same thing. Reachable for any JSON
+            // body now that `push` holds those back for this method.
+            Err(error @ ApiError::Api { .. }) => Err(error),
             Err(_) => Err(ApiError::incomplete_stream(
                 &self.provider,
                 &self.model,
@@ -651,6 +676,57 @@ impl OpenAiSseParser {
             )),
         }
     }
+}
+
+/// Re-shape a whole non-streaming chat completion into the single chunk the
+/// stream would have carried, for a gateway that ignored `stream: true` and
+/// answered with the entire object.
+///
+/// The answer is already generated and already paid for. Dropping it — which is
+/// what happened before, since the body matches no SSE frame — reported an empty
+/// response to the caller, whose only recourse was to re-send the whole
+/// conversation: a second upload and a second generation, both billed.
+///
+/// Going back through `ChatCompletionChunk` rather than straight to a
+/// `MessageResponse` means the ordinary streaming state machine does the
+/// translation, so content, reasoning, tool calls, the stop reason and usage all
+/// take exactly the path they take for a real stream.
+fn whole_completion_as_chunk(body: &str) -> Option<ChatCompletionChunk> {
+    let raw = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    // Discriminate on the one shape only a non-streaming completion has: a
+    // `message` on the choice, where a chunk carries a `delta`. `object` would
+    // be the documented discriminator, but plenty of OpenAI-compatible gateways
+    // omit it, and an over-permissive match here would turn some unrelated JSON
+    // object into a successful empty turn.
+    raw.pointer("/choices/0/message")?;
+    let response = serde_json::from_str::<ChatCompletionResponse>(body).ok()?;
+    let choice = response.choices.into_iter().next()?;
+    Some(ChatCompletionChunk {
+        id: response.id,
+        model: Some(response.model),
+        choices: vec![ChunkChoice {
+            delta: ChunkDelta {
+                content: choice.message.content,
+                reasoning_content: choice.message.reasoning_content,
+                tool_calls: choice
+                    .message
+                    .tool_calls
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, call)| DeltaToolCall {
+                        index: u32::try_from(index).unwrap_or(u32::MAX),
+                        id: Some(call.id),
+                        function: DeltaFunction {
+                            name: Some(call.function.name),
+                            arguments: Some(call.function.arguments),
+                        },
+                    })
+                    .collect(),
+            },
+            finish_reason: choice.finish_reason,
+        }],
+        usage: response.usage,
+    })
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -2860,6 +2936,120 @@ mod tests {
             .expect("message delta usage");
         assert_eq!(usage.cost_units, Some(698));
         assert_eq!(usage.cost_currency.as_deref(), Some("sudo_point"));
+    }
+
+    /// A gateway that ignores `stream: true` and answers with the whole chat
+    /// completion. The answer is complete and already billed; matching no SSE
+    /// frame and reporting nothing left the caller re-sending the entire
+    /// conversation to get a reply it had already received.
+    #[test]
+    fn a_whole_chat_completion_sent_instead_of_a_stream_becomes_events() {
+        let body = concat!(
+            "{\"id\":\"chatcmpl_unframed\",\"object\":\"chat.completion\",",
+            "\"model\":\"deepseek-v4-pro\",\"choices\":[{\"index\":0,\"message\":{",
+            "\"role\":\"assistant\",\"content\":\"Summary.\",\"tool_calls\":[{",
+            "\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"glob_search\",",
+            "\"arguments\":\"{\\\"pattern\\\":\\\"**/*\\\"}\"}}]},",
+            "\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":40,",
+            "\"completion_tokens\":6,\"prompt_tokens_details\":{\"cached_tokens\":32}}}"
+        );
+
+        let mut parser = super::OpenAiSseParser::with_context("Sudorouter", "deepseek-v4-pro");
+        assert!(
+            parser
+                .push(body.as_bytes())
+                .expect("a whole body is not an error")
+                .is_empty(),
+            "an unframed body cannot be read until the stream ends"
+        );
+        let mut state = ChatStreamState::new("deepseek-v4-pro".to_string());
+        let mut events = Vec::new();
+        for chunk in parser.finish().expect("a complete completion should parse") {
+            events.extend(state.ingest_chunk(chunk).expect("ingest"));
+        }
+        events.extend(state.finish().expect("finish"));
+
+        let text = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                    delta: ContentBlockDelta::TextDelta { text },
+                    ..
+                }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(text, "Summary.");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                    content_block: OutputContentBlock::ToolUse { name, .. },
+                    ..
+                }) if name == "glob_search"
+            )),
+            "the tool call must survive the reshaping: {events:?}"
+        );
+        let delta = events
+            .iter()
+            .find_map(|event| match event {
+                StreamEvent::MessageDelta(delta) => Some(delta),
+                _ => None,
+            })
+            .expect("message delta");
+        assert_eq!(delta.delta.stop_reason.as_deref(), Some("tool_use"));
+        // The cache read is the whole reason this matters: reporting nothing and
+        // re-sending would have thrown away a 32-token hit and paid to write it
+        // again.
+        assert_eq!(delta.usage.cache_read_input_tokens, 32);
+        assert_eq!(delta.usage.output_tokens, 6);
+    }
+
+    /// The other thing a gateway answers a streaming request with: an error
+    /// envelope, unframed. Reporting that as an incomplete stream would mark it
+    /// retryable and re-upload the conversation to be told the same thing.
+    #[test]
+    fn an_unframed_error_body_surfaces_the_error_not_a_truncation() {
+        let mut parser = super::OpenAiSseParser::with_context("Sudorouter", "deepseek-v4-pro");
+        let body = "{\"error\":{\"message\":\"context too long\",\
+                    \"type\":\"invalid_request_error\",\"code\":400}}";
+        assert!(parser.push(body.as_bytes()).expect("held back").is_empty());
+
+        let error = parser.finish().expect_err("an error body is an error");
+
+        match error {
+            ApiError::Api {
+                status,
+                message,
+                retryable,
+                ..
+            } => {
+                assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+                assert_eq!(message.as_deref(), Some("context too long"));
+                assert!(!retryable, "a 400 must not be retried");
+            }
+            other => panic!("expected the provider's error, got {other:?}"),
+        }
+    }
+
+    /// A whole body that got cut off mid-object is the one unframed case worth
+    /// retrying, and `finish` is the only place it can be noticed — `push`
+    /// holds whole JSON bodies back, so nothing else ever sees these bytes.
+    #[test]
+    fn a_truncated_unframed_body_is_reported_as_an_incomplete_stream() {
+        let mut parser = super::OpenAiSseParser::with_context("Sudorouter", "deepseek-v4-pro");
+        let body = "{\"id\":\"chatcmpl_cut\",\"choices\":[{\"message\":{\"content\":\"half a re";
+        assert!(parser.push(body.as_bytes()).expect("held back").is_empty());
+
+        let error = parser
+            .finish()
+            .expect_err("a truncated body must not read as a successful empty turn");
+
+        assert!(
+            matches!(error, ApiError::IncompleteStream { .. }),
+            "expected IncompleteStream, got {error:?}"
+        );
+        assert!(error.is_retryable(), "a truncation is transient");
     }
 
     #[test]

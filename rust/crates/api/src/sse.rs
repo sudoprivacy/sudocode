@@ -68,7 +68,25 @@ impl SseParser {
             // Nothing SSE-shaped and no error envelope. Before giving up on
             // the bytes, check whether they are a complete message the
             // upstream sent unframed.
+            Ok(None) if unframed_body_was_truncated(tail.trim()) => {
+                // Except when they are not complete: an unframed body that does
+                // not parse as JSON at all was cut off mid-object. Nothing else
+                // sees these bytes — `push` holds whole bodies for this method —
+                // so an empty return here would drop a truncation silently.
+                Err(ApiError::incomplete_stream(
+                    self.provider.as_deref().unwrap_or("unknown"),
+                    self.model.as_deref().unwrap_or("unknown"),
+                    &tail,
+                ))
+            }
             Ok(None) => Ok(non_sse_message_events(tail.trim()).unwrap_or_default()),
+            // An error envelope the upstream sent instead of a stream is a real
+            // answer about a real problem — keep it. Rewriting it as a
+            // truncation would mark a `400 invalid_request` retryable and
+            // re-upload the whole conversation eight times to be told the same
+            // thing. Reachable for any JSON body now that `push` holds those
+            // back for this method rather than frame-splitting them.
+            Err(error @ ApiError::Api { .. }) => Err(error),
             // The tail did not parse. If it is the *start* of a terminal frame
             // (a `message_stop` — the last event Anthropic emits), the stream
             // reached its logical end and only the closing `}\n\n` bytes were
@@ -122,11 +140,25 @@ pub fn parse_frame(frame: &str) -> Result<Option<StreamEvent>, ApiError> {
 ///
 /// An SSE stream's first non-whitespace bytes are always a field name
 /// (`event:`, `data:`) or a comment (`:`), never `{` or `[`.
-fn body_opens_as_json(buffer: &[u8]) -> bool {
+pub(crate) fn body_opens_as_json(buffer: &[u8]) -> bool {
     matches!(
         buffer.iter().find(|byte| !byte.is_ascii_whitespace()),
         Some(b'{' | b'[')
     )
+}
+
+/// Whether an unframed trailing body is a JSON value that got cut off.
+///
+/// `push` hands whole JSON bodies to `finish` untouched, so every body no
+/// reader recognized arrives here for a verdict, and the two kinds need
+/// opposite answers. A body that is not even valid JSON was cut off
+/// mid-object — transient, worth one retry. A body that parses but is some
+/// other object (a bare `{"detail": "..."}` from a proxy) is a complete answer
+/// we do not understand; retrying that re-uploads the whole conversation eight
+/// times to be told the same thing.
+pub(crate) fn unframed_body_was_truncated(trimmed: &str) -> bool {
+    body_opens_as_json(trimmed.as_bytes())
+        && serde_json::from_str::<serde_json::Value>(trimmed).is_err()
 }
 
 /// Turn a complete `/v1/messages` JSON body into the events a stream would
@@ -355,6 +387,38 @@ mod tests {
         );
     }
 
+    /// The other thing an upstream answers a streaming request with: an error
+    /// envelope, unframed. Holding JSON bodies back for `finish` routed these
+    /// through the arm that rewrites an unparseable tail as a truncation, which
+    /// would mark a `400` retryable and re-upload the whole conversation eight
+    /// times to be told the same thing.
+    #[test]
+    fn an_unframed_error_body_surfaces_the_error_not_a_truncation() {
+        let body = concat!(
+            "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",",
+            "\"message\":\"prompt is too long\",\"code\":400}}"
+        );
+
+        let mut parser = SseParser::new().with_context("anthropic", "claude-sonnet-4-6");
+        assert!(parser.push(body.as_bytes()).expect("held back").is_empty());
+
+        let error = parser.finish().expect_err("an error body is an error");
+
+        match error {
+            ApiError::Api {
+                status,
+                message,
+                retryable,
+                ..
+            } => {
+                assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+                assert_eq!(message.as_deref(), Some("prompt is too long"));
+                assert!(!retryable, "a 400 must not be retried");
+            }
+            other => panic!("expected the upstream's error, got {other:?}"),
+        }
+    }
+
     /// A blank line inside a pretty-printed body is not a frame terminator.
     /// Splitting on it would cut the object in half and lose the answer.
     #[test]
@@ -426,6 +490,29 @@ mod tests {
                 .is_empty(),
             "an unrecognized body must stay unrecognized, not be invented into a reply"
         );
+    }
+
+    /// The other half of that rule: a body cut off mid-object is *not* a
+    /// complete answer, and `finish` is the only place it can be noticed —
+    /// `push` holds whole JSON bodies back, so nothing else ever sees these
+    /// bytes. Reporting empty here would turn a truncation into a successful
+    /// empty turn.
+    #[test]
+    fn a_truncated_unframed_body_is_reported_as_an_incomplete_stream() {
+        let mut parser = SseParser::new().with_context("anthropic", "claude-opus-5");
+        parser
+            .push(b"{\"type\":\"message\",\"content\":[{\"type\":\"text\",\"text\":\"half a re")
+            .expect("push should not error");
+
+        let err = parser
+            .finish()
+            .expect_err("a truncated body must not read as a successful empty turn");
+
+        assert!(
+            matches!(err, ApiError::IncompleteStream { .. }),
+            "expected IncompleteStream, got: {err:?}"
+        );
+        assert!(err.is_retryable(), "a truncation is transient");
     }
 
     #[test]

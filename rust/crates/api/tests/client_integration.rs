@@ -852,6 +852,152 @@ async fn send_message_tracks_unexpected_prompt_cache_breaks() {
     std::env::remove_var("SUDO_CODE_CONFIG_HOME");
 }
 
+/// The exact-count preflight uploads the whole conversation a second time —
+/// the `count_tokens` body *is* the message body. A turn using a fraction of
+/// its window cannot be pushed over the line by estimator error, so buying the
+/// exact number there is a round trip that cannot change the outcome. It used
+/// to happen on every single turn.
+#[tokio::test]
+async fn preflight_does_not_count_tokens_when_the_request_is_far_from_the_window() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response(
+            "200 OK",
+            "application/json",
+            &ok_message_body(),
+        )],
+    )
+    .await;
+
+    let client = ApiClient::new("test-key").with_base_url(server.base_url());
+    client
+        .send_message(&small_known_model_request(), None)
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(captured_paths(&state).await, vec!["/v1/messages"]);
+}
+
+/// Near the line the exact number does change the verdict, so it is still
+/// worth the upload — and it still rejects the request before it is sent.
+#[tokio::test]
+async fn preflight_counts_tokens_when_an_exact_answer_could_change_the_verdict() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response(
+            "200 OK",
+            "application/json",
+            "{\"input_tokens\":190000}",
+        )],
+    )
+    .await;
+
+    let client = ApiClient::new("test-key").with_base_url(server.base_url());
+    let error = client
+        .send_message(&near_window_request(), None)
+        .await
+        .expect_err("190K counted plus a 32K reservation is over the 200K window");
+
+    assert!(
+        matches!(
+            error,
+            ApiError::ContextWindowExceeded {
+                estimated_input_tokens: 190_000,
+                requested_output_tokens: 32_000,
+                context_window_tokens: 200_000,
+                ..
+            }
+        ),
+        "expected the exact count to drive the rejection, got {error:?}"
+    );
+    assert_eq!(
+        captured_paths(&state).await,
+        vec!["/v1/messages/count_tokens"],
+        "the message itself must never be sent once the count rules it out"
+    );
+}
+
+/// `api.sudorouter.ai` answers `/v1/messages/count_tokens` with 404. A gateway
+/// that does not implement the endpoint will not start mid-session, so asking
+/// again every turn is the same wasted upload with an answer we already have.
+#[tokio::test]
+async fn a_gateway_without_count_tokens_is_asked_once_and_then_left_alone() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![
+            http_response(
+                "404 Not Found",
+                "application/json",
+                "{\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"not_found\"}}",
+            ),
+            http_response("200 OK", "application/json", &ok_message_body()),
+            http_response("200 OK", "application/json", &ok_message_body()),
+        ],
+    )
+    .await;
+
+    let client = ApiClient::new("test-key").with_base_url(server.base_url());
+    let request = near_window_request();
+    client
+        .send_message(&request, None)
+        .await
+        .expect("a missing count endpoint must fall back to the local estimate, not fail the turn");
+    client
+        .send_message(&request, None)
+        .await
+        .expect("second turn should succeed");
+
+    assert_eq!(
+        captured_paths(&state).await,
+        vec!["/v1/messages/count_tokens", "/v1/messages", "/v1/messages"],
+    );
+}
+
+/// The latch has to stay narrow: a rate limit or a 5xx says this attempt
+/// failed, not that the endpoint is absent. Disabling the check on those would
+/// silently drop the context-window guard for the rest of the session.
+#[tokio::test]
+async fn a_transient_count_tokens_failure_does_not_disable_the_check() {
+    let rate_limited = http_response(
+        "429 Too Many Requests",
+        "application/json",
+        "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}",
+    );
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![
+            rate_limited.clone(),
+            http_response("200 OK", "application/json", &ok_message_body()),
+            rate_limited,
+            http_response("200 OK", "application/json", &ok_message_body()),
+        ],
+    )
+    .await;
+
+    let client = ApiClient::new("test-key").with_base_url(server.base_url());
+    let request = near_window_request();
+    for turn in 0..2 {
+        client
+            .send_message(&request, None)
+            .await
+            .unwrap_or_else(|error| panic!("turn {turn} should fall back and succeed: {error:?}"));
+    }
+
+    assert_eq!(
+        captured_paths(&state).await,
+        vec![
+            "/v1/messages/count_tokens",
+            "/v1/messages",
+            "/v1/messages/count_tokens",
+            "/v1/messages",
+        ],
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires ANTHROPIC_API_KEY and network access"]
 async fn live_stream_smoke_test() {
@@ -1171,4 +1317,63 @@ fn sample_request(stream: bool) -> MessageRequest {
         stream,
         ..Default::default()
     }
+}
+
+/// A model the bundled capabilities table knows: 200K context window, 64K max
+/// output. The preflight returns immediately for a model with no registered
+/// limits, so an unknown model would let these tests pass without ever
+/// reaching the decision they are about.
+const KNOWN_WINDOW_MODEL: &str = "claude-sonnet-4-6";
+
+/// Same conversation as [`sample_request`], pointed at a model whose window is
+/// known — and using a negligible slice of it.
+fn small_known_model_request() -> MessageRequest {
+    MessageRequest {
+        model: KNOWN_WINDOW_MODEL.to_string(),
+        ..sample_request(false)
+    }
+}
+
+/// A request whose local byte estimate lands past 80% of the 200K window:
+/// ~150K tokens of message text (the estimate is serialized-bytes / 4) plus a
+/// 32K output reservation, so ~182K of 200K. The local guard still passes it,
+/// but it is close enough that estimator error could flip the verdict — which
+/// is exactly when an exact remote count earns its round trip.
+fn near_window_request() -> MessageRequest {
+    MessageRequest {
+        model: KNOWN_WINDOW_MODEL.to_string(),
+        max_tokens: 32_000,
+        messages: vec![InputMessage {
+            role: "user".to_string(),
+            content: vec![InputContentBlock::Text {
+                text: "x".repeat(600_000),
+            }],
+        }],
+        ..sample_request(false)
+    }
+}
+
+fn ok_message_body() -> String {
+    json!({
+        "id": "msg_preflight",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "ok"}],
+        "model": KNOWN_WINDOW_MODEL,
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 5, "output_tokens": 2},
+    })
+    .to_string()
+}
+
+/// Request paths in arrival order — what the client actually spent round trips
+/// on, which is the whole subject of the preflight tests.
+async fn captured_paths(state: &Arc<Mutex<Vec<CapturedRequest>>>) -> Vec<String> {
+    state
+        .lock()
+        .await
+        .iter()
+        .map(|request| request.path.clone())
+        .collect()
 }

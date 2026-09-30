@@ -1732,6 +1732,22 @@ mod tests {
     }
 
     #[test]
+    fn thinking_block_signature_survives_persistence() {
+        // A resumed session replays its history. If the signature is lost on
+        // disk, `convert_messages` drops the thinking block and the resumed
+        // session silently rebuilds its whole cached prefix on every tool
+        // round-trip — the failure this field exists to prevent.
+        let block = ContentBlock::Thinking {
+            thinking: "weighing the options".to_string(),
+            signature: Some("sig-abc".to_string()),
+        };
+
+        let restored = ContentBlock::from_json(&block.to_json()).expect("thinking block parses");
+
+        assert_eq!(restored, block);
+    }
+
+    #[test]
     fn offload_tool_result_writes_full_blob_and_returns_path_and_size() {
         let session_file = temp_session_path("offload");
         let session = Session::new().with_persistence_path(session_file.clone());

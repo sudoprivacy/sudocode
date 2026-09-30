@@ -541,7 +541,20 @@ fn process_provider_event(
                     signature: None,
                 });
             }
-            ContentBlockDelta::SignatureDelta { .. } => {}
+            // The signature arrives in its own delta, after the thinking text.
+            // Dropping it used to be free-looking — nothing renders it — but it
+            // is what makes the thinking block replayable: `convert_messages`
+            // only sends a thinking block back when it is signed, and a turn
+            // replayed without its thinking block invalidates the whole cached
+            // prefix on every tool round-trip. Carried as a Thinking event with
+            // no text so the block it belongs to picks it up in order; the
+            // observer skips empty deltas so nothing renders.
+            ContentBlockDelta::SignatureDelta { signature } => {
+                buffer.push_back(AssistantEvent::Thinking {
+                    thinking: String::new(),
+                    signature: Some(signature),
+                });
+            }
         },
         StreamEvent::ContentBlockStop(_) => {
             if let Some((id, name, input, thought_signature)) = pending_tool.take() {

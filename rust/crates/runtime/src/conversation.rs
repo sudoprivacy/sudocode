@@ -1990,7 +1990,13 @@ where
                                     if let Some(obs) = observer.as_mut() {
                                         match &event {
                                             AssistantEvent::Thinking { thinking, .. } => {
-                                                obs.on_thinking_delta(thinking);
+                                                // A signature-only event carries
+                                                // no text; forwarding it would
+                                                // make renderers open a thinking
+                                                // section with nothing in it.
+                                                if !thinking.is_empty() {
+                                                    obs.on_thinking_delta(thinking);
+                                                }
                                             }
                                             AssistantEvent::TextDelta(delta) => {
                                                 obs.on_text_delta(delta);
@@ -3611,9 +3617,20 @@ fn push_thinking_block(
     }) = blocks.last_mut()
     {
         existing.push_str(&thinking);
-        if existing_signature.is_none() {
-            *existing_signature = signature;
+        // Append, don't just fill: a signature can arrive in several deltas, and
+        // keeping only the first chunk produces a block the server rejects as
+        // unverifiable — worse than having none, because it looks signed.
+        if let Some(chunk) = signature {
+            existing_signature
+                .get_or_insert_with(String::new)
+                .push_str(&chunk);
         }
+        return;
+    }
+
+    // A signature with no thinking block to attach to is not a block of its own:
+    // an empty-but-signed thinking block is not something the API will take back.
+    if thinking.is_empty() {
         return;
     }
 
@@ -3812,9 +3829,9 @@ fn offload_preview_end(output: &str) -> usize {
 mod tests {
     use super::{
         auto_compact_threshold_for_model, build_assistant_message, is_concurrency_safe_tool,
-        max_tool_use_concurrency, ApiClient, ApiRequest, AssistantEvent, AssistantEventStream,
-        AutoCompactionEvent, ConversationRuntime, PromptCacheEvent, RuntimeError, RuntimeObserver,
-        StaticToolExecutor, ToolExecutor, MAX_TOOL_USE_CONCURRENCY,
+        max_tool_use_concurrency, push_thinking_block, ApiClient, ApiRequest, AssistantEvent,
+        AssistantEventStream, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent,
+        RuntimeError, RuntimeObserver, StaticToolExecutor, ToolExecutor, MAX_TOOL_USE_CONCURRENCY,
     };
     use crate::compact::CompactionConfig;
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
@@ -5280,6 +5297,91 @@ mod tests {
                 ObservedRuntimeEvent::TextDelta("done".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn thinking_signature_is_assembled_from_its_deltas_and_never_rendered() {
+        /// The real stream shape: thinking text in several deltas, then the
+        /// signature in its own delta(s), which the provider layer carries as
+        /// text-less `Thinking` events. Both halves have to survive — a block
+        /// whose signature is truncated looks signed and is rejected, and a
+        /// block with no signature at all is dropped before the wire, which is
+        /// what made every tool round-trip rebuild the whole cached prefix.
+        struct SignedThinkingApiClient;
+
+        #[async_trait]
+        impl ApiClient for SignedThinkingApiClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Ok(events_to_stream(vec![
+                    AssistantEvent::Thinking {
+                        thinking: "first half ".to_string(),
+                        signature: None,
+                    },
+                    AssistantEvent::Thinking {
+                        thinking: "second half".to_string(),
+                        signature: None,
+                    },
+                    AssistantEvent::Thinking {
+                        thinking: String::new(),
+                        signature: Some("sig-part-1".to_string()),
+                    },
+                    AssistantEvent::Thinking {
+                        thinking: String::new(),
+                        signature: Some("-sig-part-2".to_string()),
+                    },
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            SignedThinkingApiClient,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+        let mut observer = RecordingRuntimeObserver::default();
+
+        runtime
+            .run_turn("think briefly", None, Some(&mut observer))
+            .await
+            .expect("conversation loop should succeed");
+
+        match &runtime.session().messages[1].blocks[0] {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "first half second half");
+                assert_eq!(signature.as_deref(), Some("sig-part-1-sig-part-2"));
+            }
+            other => panic!("expected a signed thinking block, got {other:?}"),
+        }
+
+        // A signature-only event carries no text, so it must not reach a
+        // renderer as an empty thinking delta.
+        assert_eq!(
+            observer.events,
+            vec![
+                ObservedRuntimeEvent::ThinkingDelta("first half ".to_string()),
+                ObservedRuntimeEvent::ThinkingDelta("second half".to_string()),
+                ObservedRuntimeEvent::TextDelta("done".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_signature_with_no_thinking_block_creates_nothing() {
+        // Defensive: a stream that somehow signs nothing must not produce an
+        // empty-but-signed block, which the API will not take back.
+        let mut blocks = Vec::new();
+        push_thinking_block(&mut blocks, String::new(), Some("orphan".to_string()));
+        assert!(blocks.is_empty(), "unexpected blocks: {blocks:?}");
     }
 
     #[tokio::test]

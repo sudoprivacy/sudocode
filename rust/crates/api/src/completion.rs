@@ -104,7 +104,43 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(InputContentBlock::Text { text: text.clone() }),
-                ContentBlock::Thinking { .. } => None,
+                // Send a signed thinking block back. Dropping it is what a
+                // client is tempted to do — the block is not addressed to the
+                // user and costs bytes — but the assistant turn we replay then
+                // differs from the one the server produced, and on Anthropic
+                // that invalidates the cached prefix *from the start*, not from
+                // the assistant turn. Measured on a live route, same shape, one
+                // factor changed at a time (`ladder/tools/cache_prefix_probe.py`):
+                //
+                //   thinking off .............. turn 2 read 6275 / write 74
+                //   thinking on, block dropped  turn 2 read    0 / write 6351
+                //   thinking on, block returned turn 2 read 6315 / write 109
+                //
+                // So with thinking enabled, dropping the block re-wrote the
+                // whole prefix on *every* tool round-trip — a cold write (1.25x)
+                // in place of a read (0.1x), which is where an agentic session's
+                // cache_creation share comes from.
+                //
+                // Unsigned blocks are dropped instead of sent: they are accepted
+                // (no 400) but buy nothing — the same probe measured read 0 with
+                // the signature stripped, because the server cannot validate the
+                // block and does not count it as the turn it issued. A route that
+                // strips signatures therefore degrades to today's behaviour
+                // rather than sending junk the provider has to reason about.
+                //
+                // Providers that have no thinking channel already ignore this
+                // variant (gemini, codex); the OpenAI-compatible provider maps it
+                // to a reasoning item or `reasoning_content` — code that was
+                // written for these blocks and was unreachable until now.
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => signature
+                    .as_ref()
+                    .map(|signature| InputContentBlock::Thinking {
+                        thinking: thinking.clone(),
+                        signature: Some(signature.clone()),
+                    }),
                 ContentBlock::ToolUse {
                     id,
                     name,
@@ -196,4 +232,94 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
             .sort_by_key(|block| !matches!(block, InputContentBlock::ToolResult { .. }));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::convert_messages;
+    use crate::InputContentBlock;
+    use runtime::{ContentBlock, ConversationMessage, MessageRole};
+
+    fn assistant(blocks: Vec<ContentBlock>) -> ConversationMessage {
+        ConversationMessage {
+            role: MessageRole::Assistant,
+            blocks,
+            usage: None,
+            model: None,
+            duration_ms: None,
+        }
+    }
+
+    fn tool_use() -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: "toolu_1".to_string(),
+            name: "Read".to_string(),
+            input: "{\"path\":\"a.txt\"}".to_string(),
+            thought_signature: None,
+        }
+    }
+
+    #[test]
+    fn signed_thinking_block_is_replayed_ahead_of_its_tool_use() {
+        let converted = convert_messages(&[assistant(vec![
+            ContentBlock::Thinking {
+                thinking: "weighing the options".to_string(),
+                signature: Some("sig-abc".to_string()),
+            },
+            tool_use(),
+        ])]);
+
+        assert_eq!(converted.len(), 1);
+        // Order matters as much as presence: the API takes the thinking block
+        // only as the first block of the assistant turn that produced it.
+        match &converted[0].content[..] {
+            [InputContentBlock::Thinking {
+                thinking,
+                signature,
+            }, InputContentBlock::ToolUse { .. }] => {
+                assert_eq!(thinking, "weighing the options");
+                assert_eq!(signature.as_deref(), Some("sig-abc"));
+            }
+            other => panic!("expected a signed thinking block then the tool use, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsigned_thinking_block_is_dropped() {
+        // An unsigned block is accepted by the API but counts for nothing — the
+        // server cannot verify it, so the prefix is rebuilt anyway. Sending it
+        // would only add tokens to a request that is already paying for a miss.
+        let converted = convert_messages(&[assistant(vec![
+            ContentBlock::Thinking {
+                thinking: "unverifiable".to_string(),
+                signature: None,
+            },
+            tool_use(),
+        ])]);
+
+        assert_eq!(converted.len(), 1);
+        assert!(
+            matches!(
+                converted[0].content[..],
+                [InputContentBlock::ToolUse { .. }]
+            ),
+            "an unsigned thinking block must not reach the wire: {:?}",
+            converted[0].content
+        );
+    }
+
+    #[test]
+    fn an_assistant_turn_of_only_unsigned_thinking_is_not_sent_as_an_empty_message() {
+        // Dropping the only block would otherwise leave an empty content array,
+        // which the API rejects outright.
+        let converted = convert_messages(&[assistant(vec![ContentBlock::Thinking {
+            thinking: "unverifiable".to_string(),
+            signature: None,
+        }])]);
+
+        assert!(
+            converted.is_empty(),
+            "a message whose blocks were all dropped must be skipped: {converted:?}"
+        );
+    }
 }

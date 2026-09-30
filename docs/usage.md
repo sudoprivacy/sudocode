@@ -44,6 +44,12 @@ Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
+The live UI retains the existing formatter colors and supported text styles:
+running tool cards use the amber accent, queued messages are dimmed, and Todo
+items distinguish active and completed states. This uses the same palette as
+the transcript; it does not introduce a new color theme. The current live UI
+does not yet support strikethrough or simultaneous bold and dim text.
+
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:
 

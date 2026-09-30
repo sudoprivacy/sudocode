@@ -42,6 +42,7 @@ fn strip_ansi_codes(input: &str) -> String {
     output
 }
 
+use crate::render::StyledLine;
 use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, PROMPT_PREFIX, RESET};
 use crate::{
     load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
@@ -2193,7 +2194,7 @@ pub(crate) struct TurnStatus<'a> {
 /// The values are fixed for the whole turn (the provider reports cache counts
 /// at message_start; only output tokens grow while streaming), so this renders
 /// once at turn end and never needs in-turn refresh.
-fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<String> {
+fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<StyledLine> {
     let read = u64::from(usage.cache_read_input_tokens);
     let creation = u64::from(usage.cache_creation_input_tokens);
     let fresh = u64::from(usage.input_tokens);
@@ -2215,32 +2216,27 @@ fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<String> {
     } else {
         theme.error
     };
-    let hit = format!(
-        "{}\u{26a1}{hit_pct}%{}{DIM}",
-        crate::render::ansi_fg(hit_color),
-        RESET,
-    );
-
-    // Write rate: dim normally, red on a spike (a cache break).
-    let write = if write_pct >= 25 {
-        format!(
-            "{}\u{270e}{write_pct}%{}{DIM}",
-            crate::render::ansi_fg(theme.error),
-            RESET,
-        )
+    let mut segment = StyledLine::muted();
+    segment.push_colored(format!("\u{26a1}{hit_pct}%"), hit_color);
+    segment.push(" ");
+    // Write rate: muted normally, red on a spike (a cache break).
+    let write = format!("\u{270e}{write_pct}%");
+    if write_pct >= 25 {
+        segment.push_colored(write, theme.error);
     } else {
-        format!("\u{270e}{write_pct}%")
-    };
+        segment.push(write);
+    }
 
-    Some(format!("{hit} {write}"))
+    Some(segment)
 }
 
-/// Render the dim per-turn status line shown after each interactive turn.
+/// Render the muted per-turn status line shown after each interactive turn.
 ///
 /// Contains, in order: model name, billing account, turn number, cumulative
 /// token count, estimated cost (when pricing for the model is known), elapsed
 /// wall-clock time for the turn, context-window occupancy, and the current git
-/// branch (when one is available). All fields are dimmed; turn and tokens are
+/// branch (when one is available). Labels use the theme's muted foreground;
+/// cache indicators retain their semantic colors without added dim. Turn and tokens are
 /// kept compact (`turn 3`, `3.2k tokens`) so the line stays single-row even at
 /// narrow widths.
 pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
@@ -2295,15 +2291,19 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
             segments.push(segment);
         }
     }
+    let mut line = StyledLine::muted();
+    line.push(segments.join(" · "));
     // KV-cache efficiency: hit rate + write rate over the most recent turn's
     // prompt total.
     if let Some(segment) = format_cache_efficiency_segment(usage) {
-        segments.push(segment);
+        line.push(" · ");
+        line.append(segment);
     }
     if let Some(branch) = branch.filter(|b| !b.is_empty()) {
-        segments.push(branch.to_string());
+        line.push(" · ");
+        line.push(branch);
     }
-    format!("{DIM}{}{RESET}", segments.join(" · "))
+    line.to_string()
 }
 
 /// The cost of one `usage`, as a display string without any prefix: the real
@@ -3131,7 +3131,11 @@ mod tests {
             cache_read_input_tokens: 8000,
             ..TokenUsage::default()
         };
-        let seg = strip_ansi(&format_cache_efficiency_segment(&usage).expect("segment present"));
+        let seg = strip_ansi(
+            &format_cache_efficiency_segment(&usage)
+                .expect("segment present")
+                .to_string(),
+        );
         assert_eq!(seg, "\u{26a1}80% \u{270e}10%", "{seg}");
     }
 
@@ -3145,7 +3149,11 @@ mod tests {
             output_tokens: 50_000,
             ..TokenUsage::default()
         };
-        let seg = strip_ansi(&format_cache_efficiency_segment(&usage).expect("segment present"));
+        let seg = strip_ansi(
+            &format_cache_efficiency_segment(&usage)
+                .expect("segment present")
+                .to_string(),
+        );
         assert_eq!(seg, "\u{26a1}90% \u{270e}0%", "{seg}");
     }
 

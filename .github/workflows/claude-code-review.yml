@@ -22,6 +22,12 @@ jobs:
       issues: read
       id-token: write
 
+    env:
+      # Must be job-level: the action re-declares ANTHROPIC_BASE_URL from the
+      # workflow `env` context into its own step, and a step-level `env:` on that
+      # step would be shadowed rather than merged.
+      ANTHROPIC_BASE_URL: https://api.sudorouter.ai
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,11 +38,22 @@ jobs:
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # A proxy-mode gateway key, not a personal subscription OAuth token.
+          # The OAuth token this job used to carry expired on 2026-04-30 and its
+          # account was suspended on 2026-09-27, which took every review in the
+          # repository silently dead — the job failed in 23-36s having made zero
+          # model calls. Same secret, same reason the 'Live API smoke test' job
+          # went red on main; that one moved to this key and recovered.
+          anthropic_api_key: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          claude_args: '--model claude-opus-4-7'
+          # sonnet, not opus-4-7, because sonnet is the model this key is *proven*
+          # to reach: it is what `acp_live_smoke` requests, and that job passes on
+          # main with this same secret. Whether this key's group can reach
+          # opus-4-7 is unverified, and an unreachable model would fail exactly
+          # like a rejected credential — another red job that reads as a finding.
+          claude_args: '--model claude-sonnet-4-6'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
@@ -63,6 +80,6 @@ jobs:
           cost=$(jq -r '[..|objects|select(has("total_cost_usd"))|.total_cost_usd]|first // empty' "$log")
           echo "num_turns=${turns:-unknown} total_cost_usd=${cost:-unknown}"
           if [ "${turns:-99}" -le 1 ] 2>/dev/null && [ "${cost:-1}" = "0" ]; then
-            echo "::error::The code review never reached a model (num_turns=$turns, cost=$cost) — the repository's CLAUDE_CODE_OAUTH_TOKEN is being rejected. This is an infrastructure failure, NOT a finding about this pull request; rotate the secret. The same credential takes the 'Live API smoke test' job down on main."
+            echo "::error::The code review never reached a model (num_turns=$turns, cost=$cost) — the credential or model this job uses is being rejected. This is an infrastructure failure, NOT a finding about this pull request. Check SUDOROUTER_CI_API_KEY and whether its group can reach the model in claude_args; do not read this as a comment on the diff."
           fi
 

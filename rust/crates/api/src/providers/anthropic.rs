@@ -1263,6 +1263,20 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
         // `1024 <= budget_tokens < max_tokens`. Enable it only when the output
         // budget is large enough to host a thinking budget; otherwise fall back
         // to no thinking (a model whose max output is <= 1024 cannot think).
+        //
+        // Do not "modernize" this to `thinking: {"type": "adaptive"}`.
+        // Anthropic's own guidance deprecates `budget_tokens` in favour of
+        // adaptive on 4.6+ models, so this block reads like stale code — but
+        // that guidance describes the first-party API, and we do not talk to
+        // it. Every request here goes out over a proxy route, and on that route
+        // adaptive was measured to bill `thinking_tokens` as usual while
+        // returning an empty string as the visible text. Paying for reasoning
+        // and rendering nothing is strictly worse than not thinking at all,
+        // which is exactly what a documentation-driven cleanup would ship.
+        // `thinking_budget_is_explicit_not_adaptive` pins the wire shape so the
+        // swap cannot land silently; if you are here to make adaptive work,
+        // verify end-to-end that non-empty text comes back on the proxy route
+        // first, and change the test in the same commit as the code.
         if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
             // Grant up to half of the output budget to thinking — generous
             // enough for deep reasoning on large-context models (32k on a 64k
@@ -2124,6 +2138,47 @@ mod tests {
                 "budget {budget} must be < max_tokens {max_tokens}"
             );
         }
+    }
+
+    #[test]
+    fn thinking_budget_is_explicit_not_adaptive() {
+        // Guards a regression that a reader would otherwise introduce *by
+        // following the documentation*. Anthropic deprecates `budget_tokens` in
+        // favour of `thinking: {"type": "adaptive"}` on 4.6+ models, which makes
+        // the explicit budget in `strip_unsupported_beta_body_fields` look like
+        // code nobody updated.
+        //
+        // We do not reach the first-party API. Every request goes out over a
+        // proxy route, and adaptive was measured there to bill `thinking_tokens`
+        // as usual while returning an empty string as the visible text — we pay
+        // for reasoning and render nothing. That is worse than not thinking, and
+        // it fails silently: the request still returns 200.
+        //
+        // So this asserts the wire shape, not just the budget arithmetic. If
+        // you are changing it, prove non-empty text comes back over the proxy
+        // route first.
+        let mut body = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64_000,
+        });
+        let request = MessageRequest {
+            max_tokens: 64_000,
+            thinking_enabled: true,
+            ..MessageRequest::default()
+        };
+
+        super::strip_unsupported_beta_body_fields(&mut body, &request);
+
+        let thinking = body.get("thinking").expect("thinking must be injected");
+        assert_eq!(
+            thinking["type"], "enabled",
+            "thinking must stay explicitly budgeted; adaptive returns empty \
+             text on the proxy route while still billing thinking tokens"
+        );
+        assert!(
+            thinking.get("budget_tokens").is_some(),
+            "an explicit budget is the point: {thinking}"
+        );
     }
 
     #[test]

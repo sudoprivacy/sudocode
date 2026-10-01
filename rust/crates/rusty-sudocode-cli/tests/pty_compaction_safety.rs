@@ -508,11 +508,21 @@ fn failed_empty_truncated_and_growing_summaries_preserve_durable_history() {
 
 #[test]
 fn compaction_uses_fixed_output_ceiling_and_summary_length_guidance() {
+    // `expected_limit` is the summary's own allowance (`COMPACT_MAX_OUTPUT_TOKENS`
+    // capped by the model) plus the thinking budget the request has to declare to
+    // match the turn whose cached prefix it replays. Anthropic requires
+    // `budget_tokens < max_tokens`, so a request that must declare the turn's
+    // budget cannot also cap its output at 12K: with a 12K cap the provider
+    // clamped the budget to 6000 against the turn's 32000, and the one request
+    // built to reuse the cache read none of it — at HTTP 200, so the only
+    // symptom was the bill. What stays fixed is the *summary* allowance: it
+    // still does not scale with the model's output ceiling, and the prompt still
+    // carries the 8,000-token guidance that actually governs summary length.
     for (mode, configured_limit, expected_limit) in [
-        ("long-summary", None, 12_000),
-        ("long-summary", Some(16_384), 12_000),
+        ("long-summary", None, 12_000 + 32_000),
+        ("long-summary", Some(16_384), 16_384),
         ("long-summary", Some(10_000), 10_000),
-        ("long-summary-fallback", Some(16_384), 12_000),
+        ("long-summary-fallback", Some(16_384), 16_384),
     ] {
         let provider = Provider::new(mode);
         let workspace = HarnessWorkspace::new(mode);
@@ -535,15 +545,20 @@ fn compaction_uses_fixed_output_ceiling_and_summary_length_guidance() {
             requests.len(),
             if mode.ends_with("fallback") { 2 } else { 1 }
         );
-        assert!(requests.iter().all(|r| r["max_tokens"] == expected_limit));
         assert!(requests.iter().all(|r| {
             r["messages"].as_array().unwrap().last().unwrap()["content"]
                 .to_string()
                 .contains("Aim to keep the entire summary within 8,000 tokens")
         }));
+        assert_eq!(requests[0]["max_tokens"], json!(expected_limit));
         assert!(requests[0]["tools"].is_array());
         if mode.ends_with("fallback") {
+            // The standard-compaction fallback builds a prefix of its own — its
+            // own system prompt, no tools, thinking off — so it has nothing to
+            // match and keeps the summary's own ceiling.
             assert!(requests[1]["tools"].is_null());
+            assert_eq!(requests[1]["max_tokens"], json!(12_000));
+            assert!(requests[1]["thinking"].is_null());
         }
     }
 }
@@ -750,14 +765,40 @@ fn automatic_compaction_continues_after_a_long_summary() {
         requests.iter().filter(|r| is_compaction_request(r)).count(),
         1
     );
-    assert!(requests.iter().all(|r| {
-        r["max_tokens"]
-            == if is_compaction_request(r) {
-                12_000
-            } else {
-                16_384
-            }
-    }));
+    // The cache-safe compaction request borrows the turn's cached prefix, and
+    // the value of `thinking` is part of Anthropic's cache key — so it has to
+    // declare the turn's budget, not one derived from its own smaller output
+    // cap. That derivation made this request declare 8192 against the turn's
+    // 8192 only by accident of arithmetic on other models; on a 64K model it
+    // declared 6000 against 32000 and read none of the history it had just
+    // sent byte-for-byte, at HTTP 200. Pin the budget rather than the cap: the
+    // budget is what the cache keys on, and the API only requires the cap to
+    // be large enough to hold it (`budget_tokens < max_tokens`).
+    let budget = |r: &Value| r["thinking"]["budget_tokens"].clone();
+    let turn = requests
+        .iter()
+        .find(|r| !is_compaction_request(r))
+        .expect("a turn request");
+    let compaction = requests
+        .iter()
+        .find(|r| is_compaction_request(r))
+        .expect("a compaction request");
+    assert_eq!(budget(turn), json!(8_192));
+    assert_eq!(
+        budget(compaction),
+        budget(turn),
+        "compaction must declare the turn's thinking budget or it cannot read \
+         the turn's prefix"
+    );
+    assert!(
+        compaction["max_tokens"].as_u64().unwrap() > 8_192,
+        "the cap has to be able to hold the budget: {}",
+        compaction["max_tokens"]
+    );
+    assert!(
+        requests.iter().all(|r| r["max_tokens"] == 16_384),
+        "every request caps output at the model's configured maxOutputTokens"
+    );
     assert!(requests
         .iter()
         .any(|r| !is_compaction_request(r)

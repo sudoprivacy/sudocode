@@ -1309,7 +1309,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
 /// Anthropic's minimum `thinking.budget_tokens`. The API rejects a smaller
 /// budget, and additionally requires `budget_tokens < max_tokens` (thinking
 /// tokens are drawn from the same `max_tokens` pool as the visible response).
-const MIN_THINKING_BUDGET: u32 = 1024;
+const MIN_THINKING_BUDGET: u32 = runtime::model_capabilities::MIN_THINKING_BUDGET_TOKENS;
 
 /// Remove beta-only body fields that the standard `/v1/messages` and
 /// `/v1/messages/count_tokens` endpoints reject as `Extra inputs are not
@@ -1347,14 +1347,32 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
         // verify end-to-end that non-empty text comes back on the proxy route
         // first, and change the test in the same commit as the code.
         if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
-            // Grant up to half of the output budget to thinking — generous
-            // enough for deep reasoning on large-context models (32k on a 64k
-            // model) while reserving the other half for the visible response so
-            // a coding agent's large edits are never truncated. Clamp into the
-            // API-valid range `[1024, max_tokens)`.
-            let budget_tokens = (request.max_tokens / 2)
-                .max(MIN_THINKING_BUDGET)
-                .min(request.max_tokens - 1);
+            // The budget is a property of the *model*, not of this request's
+            // output cap, because the value of the thinking parameter is part
+            // of Anthropic's cache key. Deriving it here from
+            // `request.max_tokens / 2` is what made a cache-safe compaction
+            // request — same system, same tools, byte-identical message prefix,
+            // but a smaller `max_tokens` — declare `budget_tokens: 6000` where
+            // the turn it was replaying had declared 32000, and read nothing
+            // for it. See `runtime::model_capabilities::thinking_budget_tokens`
+            // for the measurement; both arms were HTTP 200, so this failure has
+            // no symptom other than the bill.
+            //
+            // The clamp below is the API's `budget_tokens < max_tokens` rule.
+            // It keeps the old `max_tokens / 2` split for a cap too small to
+            // host the model's budget, so a small request still reserves half
+            // its output for the visible response instead of spending all but
+            // one token on thinking. Requests in that range (titles, one-line
+            // classifications) have a prefix of their own and nothing to share
+            // with a turn.
+            let model_budget = runtime::model_capabilities::thinking_budget_tokens(&request.model);
+            let budget_tokens = if model_budget < request.max_tokens {
+                model_budget
+            } else {
+                (request.max_tokens / 2)
+                    .max(MIN_THINKING_BUDGET)
+                    .min(request.max_tokens - 1)
+            };
             object.insert(
                 "thinking".to_string(),
                 serde_json::json!({
@@ -2207,6 +2225,53 @@ mod tests {
                 "budget {budget} must be < max_tokens {max_tokens}"
             );
         }
+    }
+
+    #[test]
+    fn thinking_budget_does_not_move_with_the_requests_output_cap() {
+        // The value of `thinking` is part of Anthropic's prompt-cache key, so
+        // two requests that share a prefix have to declare the same budget even
+        // when they ask for different output caps. Deriving it from
+        // `max_tokens / 2` broke precisely that: a turn asking for 64000
+        // declared 32000, and the cache-safe compaction request replaying that
+        // turn's prefix byte-for-byte asked for 12000, declared 6000, and read
+        // none of it — at HTTP 200. Measured, three interleaved repetitions per
+        // arm (`ladder/tools/cache_prefix_probe.py --pairs
+        // budget-changed-on-turn2 thinking-on-returned`): budget changed on turn
+        // 2 -> read 0 / write 3132, 3153; budget unchanged -> read 3041 / 3026 /
+        // 3020.
+        let budget_for = |max_tokens: u32| {
+            let mut body = serde_json::json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": max_tokens,
+            });
+            let request = MessageRequest {
+                model: "claude-sonnet-4-6".to_string(),
+                max_tokens,
+                thinking_enabled: true,
+                ..MessageRequest::default()
+            };
+            super::strip_unsupported_beta_body_fields(&mut body, &request);
+            body["thinking"]["budget_tokens"]
+                .as_u64()
+                .expect("budget_tokens must be a number") as u32
+        };
+
+        let turn = budget_for(64_000);
+        assert_eq!(
+            turn, 32_000,
+            "a turn declares half of the model's request output budget"
+        );
+        assert_eq!(
+            budget_for(44_000),
+            turn,
+            "a request with a smaller cap that can still host the budget must \
+             declare the same number, or it cannot read the turn's prefix"
+        );
+        // A cap too small to host the budget still splits the output in half
+        // rather than spending all but one token on thinking. Such requests
+        // (titles, one-line classifications) have a prefix of their own.
+        assert_eq!(budget_for(12_000), 6_000);
     }
 
     #[test]

@@ -39,7 +39,7 @@ refreshes retain the previous catalog; an empty successful response clears it.
 Catalogs live under `cache/model-catalogs/` in the config directory, keyed by a
 hash of the endpoint and authentication headers. Accounts on the same endpoint
 have separate caches. Credentials are never written into these catalog files.
-Provider-managed credential-file connections and native Gemini discovery retain
+Provider-managed credential-file connections and native Gemini/Codex discovery retain
 their existing behavior.
 
 ## Config IDs, display names, and deployment IDs

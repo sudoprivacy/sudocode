@@ -13,6 +13,12 @@ pub fn model_catalog_for_resolved(resolved: &ResolvedProvider) -> Option<ModelCa
 }
 
 fn discovery_source(resolved: &ResolvedProvider) -> Option<DiscoverySource> {
+    // Native providers own their catalog protocol and credential lifecycle.
+    if resolved.kind == crate::providers::ProviderKind::Codex
+        || resolved.api_format == ApiFormat::GeminiGenerateContent
+    {
+        return None;
+    }
     let mut headers = BTreeMap::new();
     match &resolved.credential {
         Credential::ApiKey(key) => {
@@ -31,9 +37,6 @@ fn discovery_source(resolved: &ResolvedProvider) -> Option<DiscoverySource> {
         // Provider-owned credential-file refresh remains on its native path.
         Credential::AuthFile(_) => return None,
         Credential::None => {}
-    }
-    if resolved.api_format == ApiFormat::GeminiGenerateContent {
-        return None;
     }
     if resolved.api_format == ApiFormat::AnthropicMessages {
         headers.insert("anthropic-version".into(), "2023-06-01".into());

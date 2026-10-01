@@ -7,6 +7,11 @@
 //! are validated end to end. The paths used (`/ws/…`) do not exist on the
 //! host, so a host-`std::fs` regression would surface as a NotFound
 //! rather than silently passing.
+//!
+//! One test here is deliberately NOT about the VFS: `link` is a contract both
+//! backends answer, and the kernel half used to claim parity with the host half
+//! in a comment while nothing exercised it. The two live next to each other so
+//! the claim is checked rather than asserted.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -278,6 +283,84 @@ fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
             .expect("read_link should resolve the DT_LINK"),
         "/sessions/sid-1"
     );
+}
+
+/// The host backend answers `link` with a REAL OS link, needing no privilege.
+///
+/// The other half of the parity the test above claims. It is asserted here
+/// because the kernel half cannot show it: `KernelFsBackend` plants a DT_LINK,
+/// which says nothing about what `StdFsBackend` does on a host filesystem, and
+/// the co-host and a plain `scode` have to behave the same way — the chat-list
+/// index is a pointer at a conversation root on both.
+///
+/// A DIRECTORY target is the case that matters, and is the reason this passes
+/// on Windows without elevation. A native symlink there needs
+/// `SeCreateSymbolicLinkPrivilege` (admin, or Developer Mode); a junction does
+/// not, works for directories, and is a reparse point — so `symlink_metadata`
+/// reports `is_symlink` for it exactly as it does for a Unix symlink. One
+/// assertion therefore covers both platforms, and the daemon never needs a UAC
+/// prompt to index a conversation.
+///
+/// `is_symlink` is the binding assertion: with the platform call removed and
+/// only the pointer-file fallback left, `read_link` still round-trips, so every
+/// other assertion here passes against an implementation that creates no link
+/// at all.
+#[test]
+fn host_backend_links_a_directory_without_a_privilege() {
+    use runtime::StdFsBackend;
+
+    let root = tmp_dir("host-link");
+    let target = root.join("conv-root");
+    std::fs::create_dir_all(&target).expect("target dir");
+    let alias = root.join("idx");
+    let (alias, target) = (
+        alias.to_string_lossy().into_owned(),
+        target.to_string_lossy().into_owned(),
+    );
+
+    let fs = StdFsBackend;
+    fs.link(&alias, &target).expect("link a directory");
+
+    assert!(
+        fs.symlink_metadata(&alias)
+            .expect("lstat the alias")
+            .is_symlink,
+        "a directory target must get a real OS link — a symlink on Unix, a \
+         junction on Windows, neither of which needs a privilege"
+    );
+    assert_eq!(
+        fs.read_link(&alias).expect("read_link the alias"),
+        target,
+        "and it must resolve back to what it points at"
+    );
+    // The NAME is the index contract: it has to be listable whichever shape the
+    // platform produced, because that listing IS the chat list.
+    assert!(
+        fs.readdir(&root.to_string_lossy())
+            .expect("list the directory the index lives in")
+            .iter()
+            .any(|e| e.name == "idx"),
+        "the index must appear in a listing by name"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A private temp directory per test.
+///
+/// Keyed on a counter rather than the clock: these tests run in parallel, and a
+/// nanosecond stamp is not unique on every platform — two tests that take the
+/// same one share a directory and delete each other's fixtures.
+fn tmp_dir(label: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let p = std::env::temp_dir().join(format!(
+        "scode-{label}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&p).expect("temp dir");
+    p
 }
 
 #[test]

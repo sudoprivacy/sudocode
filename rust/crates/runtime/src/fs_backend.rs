@@ -143,9 +143,31 @@ pub trait FsBackend: Send + Sync + 'static {
         None
     }
 
-    /// Create a link `alias` → `target` (a pointer, not a byte-copy). On the
-    /// VFS this is a `DT_LINK` (e.g. the `/agents/{name}/sessions/<sid>` enum
-    /// index); on a host FS there is no equivalent, so it is a no-op.
+    /// Create a link `alias` → `target` (a pointer, not a byte-copy).
+    ///
+    /// # The NAME is the cross-backend contract; the SHAPE is not
+    ///
+    /// Every backend must make `alias` appear in a `readdir` of its parent, because
+    /// that listing is what the chat-list index is FOR — a receiver enumerates its
+    /// conversations by name and derives the transcript from the peer name, never from
+    /// this entry's content or type. What the entry IS differs by backend and callers
+    /// must not branch on it:
+    ///
+    /// * the VFS (`KernelFsBackend`, `NexusVfsFsBackend`) makes a real `DT_LINK`, the
+    ///   destination in metadata — which a mount with no content store keeps, while it
+    ///   drops bytes;
+    /// * a host FS makes a pointer FILE holding the target, because a real symlink on
+    ///   Windows needs Developer Mode or admin. A no-op would be the other option and is
+    ///   worse than it sounds: the name would not appear, so a receiver on a host FS
+    ///   could not enumerate its conversations at all.
+    ///
+    /// So `ls -l` on a host FS shows a small text file where the VFS shows a link. That
+    /// is deliberate. [`Self::read_link`] is the follow half and resolves both, which is
+    /// the only way production should ever ask where one points.
+    ///
+    /// The default is a no-op so a backend with no namespace of its own stays silent —
+    /// but a backend that serves a chat list MUST override it, or the index is empty and
+    /// nothing errors.
     fn link(&self, _alias: &str, _target: &str) -> io::Result<()> {
         Ok(())
     }
@@ -468,37 +490,102 @@ impl FsBackend for Arc<dyn FsBackend> {
 /// down to a direct `std::fs` syscall wrapper with no indirection.
 pub struct StdFsBackend;
 
+/// The unprivileged OS link for this platform: a symlink on Unix, a junction on Windows.
+///
+/// Separated from the caller so the fallback decision reads as one line there. An error
+/// is the caller's signal to fall back, not something to report — a filesystem without
+/// reparse points is a legitimate place to run.
+#[cfg(unix)]
+fn platform_link(alias: &str, target: &str) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, alias)
+}
+
+/// Windows: a JUNCTION, not a symlink.
+///
+/// A symlink needs `SeCreateSymbolicLinkPrivilege` — administrator, or Developer Mode.
+/// A junction needs nothing at all, can be created before its target exists, and reads
+/// back as a link both to PowerShell (`LinkType: Junction`) and to POSIX-flavoured
+/// tools. Verified non-elevated on Windows 11 before this was written.
+///
+/// Shelled out through `mklink /J` rather than `DeviceIoControl` with
+/// `FSCTL_SET_REPARSE_POINT`: the reparse-buffer dance is dozens of lines of `unsafe`
+/// around a hand-built `REPARSE_DATA_BUFFER`, for a call that runs once per conversation
+/// on a provisioning path. `mklink` ships with Windows, so this adds no dependency, and
+/// any failure lands in the same fallback as every other.
+#[cfg(windows)]
+fn platform_link(alias: &str, target: &str) -> io::Result<()> {
+    let status = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J", alias, target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "mklink /J {alias} -> {target} failed"
+        )))
+    }
+}
+
 impl FsBackend for StdFsBackend {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         std::fs::read(path)
     }
 
-    /// A host FS has no VFS link, so the alias is recorded as a small file
-    /// holding the path it points at.
+    /// A real OS link where the platform gives one without privilege, else a small
+    /// file holding the path it points at.
     ///
-    /// Deliberately NOT the inherited no-op. An index built out of links is
-    /// read back by LISTING it — the chat list that tells a receiver which
-    /// conversations to tail is exactly that — so a backend that silently does
-    /// nothing here yields an empty index and a receiver that hears nothing,
-    /// with no error raised anywhere along the way.
+    /// Deliberately NOT the inherited no-op. An index built out of links is read back
+    /// by LISTING it — the chat list that tells a receiver which conversations to tail
+    /// is exactly that — so a backend that silently does nothing here yields an empty
+    /// index and a receiver that hears nothing, with no error raised anywhere.
     ///
-    /// A plain file rather than an OS symlink: it needs no privilege on Windows
-    /// (native symlinks require Developer Mode / admin), and the entry is read
-    /// two ways, both of which a plain file serves — listed by NAME via
-    /// `readdir` (the enum-index case), and followed via [`Self::read_link`],
-    /// which reads the target back out of the body. So the follow half stays a
-    /// host-FS file op with no privilege, matching the VFS's `DT_LINK` follow.
+    /// # Why a real link, and why no privilege is needed for one
+    ///
+    /// This used to write a pointer file on every platform, because a native Windows
+    /// symlink needs Developer Mode or admin. That reasoning held for symlinks and was
+    /// applied one step too far: both platforms have an unprivileged answer.
+    ///
+    /// * Unix — `std::os::unix::fs::symlink` never needed a privilege.
+    /// * Windows — a **junction** (a directory reparse point) needs none either, and it
+    ///   can be created before its target exists. Verified non-elevated on Windows 11:
+    ///   `LinkType: Junction`, and Git Bash reports it `lrwxrwxrwx` like a symlink.
+    ///
+    /// Elevating the daemon to get `SeCreateSymbolicLinkPrivilege` was the other option
+    /// and is the wrong trade: it changes the ownership and ACL of everything the
+    /// process creates, not just this entry, and it does nothing for a standalone CLI,
+    /// which must not require an administrator.
+    ///
+    /// The pointer file remains as the fallback for when the platform call fails (a
+    /// filesystem without reparse points, a target on another volume). [`Self::read_link`]
+    /// reads both shapes, so a caller never learns which one it got — and entries
+    /// written before this change are still followable.
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         if let Some(parent) = std::path::Path::new(alias).parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // An existing entry is replaced: provisioning is idempotent, and a stale
+        // pointer file would otherwise shadow the link we are asked to plant.
+        if std::fs::symlink_metadata(alias).is_ok() {
+            let _ = std::fs::remove_file(alias);
+            let _ = std::fs::remove_dir(alias);
+        }
+        if platform_link(alias, target).is_ok() {
+            return Ok(());
+        }
         std::fs::write(alias, target)
     }
 
-    /// Follow a link planted by [`Self::link`] — read the target back out of the
-    /// pointer file's body. The host-FS counterpart of the VFS `DT_LINK` follow,
-    /// so a caller resolving a link sees the same target on both backends.
+    /// Follow a link planted by [`Self::link`] — the target, whichever shape it is.
+    ///
+    /// A real link answers from `read_link`; a pointer file answers from its body. Both
+    /// because the second is the fallback and also what entries written before real
+    /// links look like, and a reader that handles one of them strands the other.
     fn read_link(&self, alias: &str) -> io::Result<String> {
+        if let Ok(target) = std::fs::read_link(alias) {
+            return Ok(target.to_string_lossy().into_owned());
+        }
         let bytes = std::fs::read(alias)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
@@ -1085,7 +1172,14 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
                 len: s.size,
                 is_dir: s.is_directory,
                 is_file: !s.is_directory,
-                is_symlink: false,
+                // A DT_LINK is a link, and this backend plants them — the chat-list
+                // index is one. Hardcoding `false` made "is this a link?" answer
+                // differently on the VFS than on a host FS, for an entry the two
+                // create from the ONE shared `link()` call.
+                //
+                // `sys_stat` is lstat, so this describes the entry itself rather than
+                // whatever it points at, which is what the question means.
+                is_symlink: s.entry_type == DT_LINK,
                 modified: s
                     .modified_at_ms
                     .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)),
@@ -1183,7 +1277,10 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
     }
 
     fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
-        // VFS has no symlinks — delegate to regular stat.
+        // `sys_stat` / `Stat` are lstat: they describe the entry, not what it points
+        // at, so a plain delegation IS the no-follow answer. (It used to say "VFS has
+        // no symlinks", which stopped being true the moment these backends started
+        // planting DT_LINKs.)
         self.stat(path)
     }
 
@@ -1330,7 +1427,9 @@ impl FsBackend for NexusVfsFsBackend {
             len: stat.size,
             is_dir: stat.is_directory,
             is_file: !stat.is_directory,
-            is_symlink: false,
+            // A link is one whichever backend answers. `Stat` is lstat, so a target
+            // present means this entry IS the link rather than the thing it points at.
+            is_symlink: stat.link_target.is_some(),
             modified: stat
                 .modified_at_ms
                 .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)),
@@ -1363,6 +1462,58 @@ impl FsBackend for NexusVfsFsBackend {
 
     fn exists(&self, path: &str) -> io::Result<bool> {
         Ok(self.client.stat(path, &self.auth_token).is_ok())
+    }
+
+    /// A DT_LINK, with the destination in the entry's metadata.
+    ///
+    /// This backend was the one that could not do it: `Setattr` carried no link target
+    /// on the wire, so `link` fell through to the trait's silent no-op and a standalone
+    /// agent over this transport planted no chat-list index at all — a receiver that
+    /// never learned the conversation existed. That is why the index was a plain file
+    /// holding a path, on every backend, including the two that could do better.
+    ///
+    /// The wire carries it now (nexi-lab/nexus-vfs#362), so all three backends realise
+    /// the same shared `link()` call: a DT_LINK here and on the in-process kernel, a
+    /// pointer file on the host FS where no privilege-free symlink exists.
+    fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        if let Some(parent) = std::path::Path::new(alias).parent() {
+            let _ = self.create_dir_all(&parent.to_string_lossy());
+        }
+        self.client.ensure_link(alias, target, &self.auth_token)?;
+        // Read the target back, because a daemon that predates the wire field ignores
+        // it: `Setattr` would succeed, the entry would exist as a link to NOWHERE, and
+        // the chat-list index would list a peer whose conversation cannot be found.
+        // An unknown proto field is dropped silently by design, so the only way to know
+        // it landed is to ask. One stat, on a provisioning path that runs once per
+        // conversation.
+        match self.read_link(alias) {
+            Ok(got) if got == target => Ok(()),
+            Ok(got) => Err(io::Error::other(format!(
+                "{alias}: link target came back as {got:?}, expected {target:?}"
+            ))),
+            Err(e) => Err(io::Error::other(format!(
+                "{alias}: the daemon accepted the link but reports no target ({e}) — it \
+                 is older than the `Setattr` link_target field, so the index would name \
+                 a conversation nobody can follow"
+            ))),
+        }
+    }
+
+    /// Follow a link planted by [`Self::link`] — the target out of its metadata.
+    ///
+    /// Reads `link_target`, not the body: a pointer whose destination is content is
+    /// unreadable on a mount that keeps metadata and drops bytes, which is the mount
+    /// shape federation uses.
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        self.client
+            .stat(alias, &self.auth_token)?
+            .link_target
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{alias}: not a link or no target"),
+                )
+            })
     }
 
     /// Provision each component as a DT_DIR, idempotently.
@@ -1410,7 +1561,10 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
-        // VFS has no symlinks — delegate to regular stat.
+        // `sys_stat` / `Stat` are lstat: they describe the entry, not what it points
+        // at, so a plain delegation IS the no-follow answer. (It used to say "VFS has
+        // no symlinks", which stopped being true the moment these backends started
+        // planting DT_LINKs.)
         self.stat(path)
     }
 

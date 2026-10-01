@@ -25,6 +25,14 @@ const DT_DIR: u32 = 1;
 /// `DT_PIPE = 3` once cost this project a chat-list index that was a pipe).
 const DT_DIR_SETATTR: i32 = DT_DIR as i32;
 
+/// DT_LINK entry-type code for `Setattr`.
+///
+/// **6, not 3.** 3 is DT_PIPE's discriminant, and the A2A chat-list index was once
+/// written with it: the syscall dispatches on the integer, so there was no compile
+/// error and no runtime error — the index was simply a pipe, while every
+/// path-composition test stayed green.
+const DT_LINK_SETATTR: i32 = 6;
+
 enum VfsOp {
     Read {
         path: String,
@@ -78,6 +86,9 @@ enum VfsOp {
         entry_type: i32,
         io_profile: String,
         capacity: u64,
+        /// Where a DT_LINK points. `None` for every other type — the wire field is
+        /// optional, so an absent target is absent on the wire too.
+        link_target: Option<String>,
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<bool>>,
     },
@@ -386,6 +397,7 @@ impl NexusVfsClient {
                                     entry_type,
                                     io_profile,
                                     capacity,
+                                    link_target,
                                     auth_token,
                                     resp,
                                 } => {
@@ -397,6 +409,7 @@ impl NexusVfsClient {
                                                 entry_type,
                                                 io_profile,
                                                 capacity,
+                                                link_target,
                                                 ..Default::default()
                                             },
                                             OP_DEADLINE,
@@ -431,6 +444,8 @@ impl NexusVfsClient {
                                                 size: u64::try_from(r.size).unwrap_or(0),
                                                 is_directory: r.is_directory,
                                                 modified_at_ms: None,
+                                                link_target: Some(r.link_target)
+                                                    .filter(|t| !t.is_empty()),
                                             })
                                         } else {
                                             Err(io::Error::new(
@@ -592,6 +607,36 @@ impl NexusVfsClient {
                 entry_type: DT_STREAM,
                 io_profile: io_profile.to_owned(),
                 capacity,
+                link_target: None,
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+    }
+
+    /// `sys_setattr(DT_LINK)` on `path` — a pointer to `target`, idempotently.
+    /// Returns whether it was freshly created.
+    ///
+    /// The destination lives in the entry's METADATA, which is the point: a mount with
+    /// no content store keeps metadata and drops bytes, so a pointer written as content
+    /// is unreadable exactly where the pointer itself is readable. That is why the A2A
+    /// chat-list index is specified as a DT_LINK and not a file holding a path.
+    ///
+    /// This could not exist until `SetattrRequest` carried a link target. Without it
+    /// the backend's `link()` fell through to the trait's no-op, so a standalone agent
+    /// over this transport planted no index at all and its peer never learned the
+    /// conversation existed — which is why the index was a plain file for as long as it
+    /// was.
+    pub fn ensure_link(&self, path: &str, target: &str, auth_token: &str) -> io::Result<bool> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::EnsureEntry {
+                path: path.to_owned(),
+                entry_type: DT_LINK_SETATTR,
+                io_profile: String::new(),
+                capacity: 0,
+                link_target: Some(target.to_owned()),
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
             })
@@ -617,6 +662,7 @@ impl NexusVfsClient {
                 entry_type: DT_DIR_SETATTR,
                 io_profile: String::new(),
                 capacity: 0,
+                link_target: None,
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
             })
@@ -682,6 +728,12 @@ pub struct VfsStat {
     pub size: u64,
     pub is_directory: bool,
     pub modified_at_ms: Option<i64>,
+    /// Where a DT_LINK points; `None` for every other entry type.
+    ///
+    /// Carried because following a link is half of having one: a backend that plants
+    /// links and cannot read them back leaves the caller to guess. The wire has always
+    /// returned this field — only this struct dropped it.
+    pub link_target: Option<String>,
 }
 
 /// Directory entry returned by [`NexusVfsClient::readdir`].

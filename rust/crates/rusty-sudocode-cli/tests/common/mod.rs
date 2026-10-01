@@ -97,6 +97,108 @@ pub const fn at_least(wait: Duration) -> Duration {
 /// line containing it is the line the user types on.
 const PROMPT_MARKER: &str = "\u{276f}";
 
+/// How often a screen wait re-reads the rendered screen.
+///
+/// One constant because every screen wait below is the same loop; three
+/// hand-rolled copies meant three different definitions of "promptly".
+const SCREEN_POLL: Duration = Duration::from_millis(25);
+
+/// Consecutive identical renders that count as "the screen stopped changing".
+const SETTLE_POLLS: u32 = 4;
+
+/// Block until the RENDERED SCREEN satisfies `pred`, and return that screen.
+///
+/// **This, not `expect()`, is how you wait for anything the CHROME draws** — the
+/// status line, a separator, the footer, a todo panel, the input line.
+///
+/// `expect()` matches the unconsumed PTY BYTE STREAM and advances a forward-only
+/// cursor past each match. That is exactly right for append-only output (model
+/// text, tool results) and quietly wrong for chrome. iocraft redraws on every
+/// change, so whether a chrome pattern sits in the stream AFTER your cursor is a
+/// fact about redraw timing, not about the product: match the status line first
+/// and the separator you then wait for may never be re-emitted, because nothing
+/// happened to trigger another redraw. A bigger budget cannot rescue that wait —
+/// it is waiting for bytes that are not coming — which is why
+/// `bash_turn_uses_crlf_and_does_not_staircase` timed out at 30s on CI while
+/// every assertion before it in the same test passed.
+///
+/// The screen has no such ordering: it is the current state, so "does it show X"
+/// is the question the test actually means.
+///
+/// # Panics
+/// When `pred` is not satisfied within `budget`; the message carries `context`
+/// and the rendered screen — which `expect()`'s `Error::Timeout` cannot, so a
+/// timeout here says what the terminal was actually showing.
+pub fn expect_screen<F>(sess: &PtySession, pred: F, budget: Duration, context: &str) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    let deadline = Instant::now() + at_least(budget);
+    loop {
+        let screen = sess.render(|s| s.contents());
+        if pred(&screen) {
+            return screen;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "{context}: the screen never satisfied the wait within {budget:?}\nPTY:\n{screen}"
+            );
+        }
+        std::thread::sleep(SCREEN_POLL);
+    }
+}
+
+/// Block until the screen satisfies `pred` AND has stopped changing.
+///
+/// For assertions that COUNT things ("exactly one status line after a resize"):
+/// mid-repaint the old and new rows can both be on screen, so a count taken
+/// between frames is a race. `pred` first, stillness second — stillness alone is
+/// not enough, because a screen that has not started drawing yet is also still.
+///
+/// # Panics
+/// When the screen never satisfied `pred`, or never settled, within `budget`;
+/// the message says which, and carries the rendered screen.
+pub fn expect_screen_settled<F>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    let deadline = Instant::now() + at_least(budget);
+    let mut previous: Option<String> = None;
+    let mut stable = 0u32;
+    let mut satisfied = false;
+    loop {
+        let screen = sess.render(|s| s.contents());
+        if pred(&screen) {
+            satisfied = true;
+            if previous.as_deref() == Some(screen.as_str()) {
+                stable += 1;
+                if stable >= SETTLE_POLLS {
+                    return screen;
+                }
+            } else {
+                stable = 0;
+            }
+        } else {
+            stable = 0;
+        }
+        if Instant::now() >= deadline {
+            let unmet = if satisfied {
+                "the wait was satisfied but the screen kept changing"
+            } else {
+                "the screen never satisfied the wait"
+            };
+            panic!("{context}: {unmet} after {budget:?}\nPTY:\n{screen}");
+        }
+        previous = Some(screen);
+        std::thread::sleep(SCREEN_POLL);
+    }
+}
+
 /// Block until the REPL's input line shows `text`, then return.
 ///
 /// Use this — not `expect()` — to prove that typed characters landed.
@@ -118,24 +220,17 @@ const PROMPT_MARKER: &str = "\u{276f}";
 /// When the input line has not shown `text` within `budget`; the message
 /// carries `context` and the rendered screen.
 pub fn expect_input_line(sess: &PtySession, text: &str, budget: Duration, context: &str) {
-    let deadline = Instant::now() + budget;
-    loop {
-        // The LIVE input row only — `input_line_of` takes the lowest row that
-        // carries the marker. Scanning every marker-bearing row would also match
-        // a replayed history line, and on `--resume` it matched typed characters
-        // that had landed IN the transcript rather than on the input line, which
-        // is the bug this narrowing exists to catch rather than confirm.
-        if sess.render(|s| input_line_of(&s.contents()).contains(text)) {
-            return;
-        }
-        if Instant::now() >= deadline {
-            let screen = sess.render(|s| s.contents());
-            panic!(
-                "{context}: the input line never showed {text:?} within {budget:?}\nPTY:\n{screen}"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    // The LIVE input row only — `input_line_of` takes the lowest row that carries
+    // the marker. Scanning every marker-bearing row would also match a replayed
+    // history line, and on `--resume` it matched typed characters that had landed
+    // IN the transcript rather than on the input line, which is the bug this
+    // narrowing exists to catch rather than confirm.
+    expect_screen(
+        sess,
+        |screen| input_line_of(screen).contains(text),
+        budget,
+        &format!("{context}: the input line never showed {text:?}"),
+    );
 }
 
 /// What the REPL's input buffer holds: the text after the last prompt marker on
@@ -221,33 +316,12 @@ pub fn screen_tail(sess: &PtySession, chars: usize) -> String {
 /// When the input line never emptied, or never settled, within `budget`; the
 /// message says which and carries the rendered screen.
 pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &str) {
-    /// Identical consecutive renders required before calling the screen settled.
-    const SETTLE_POLLS: u32 = 4;
-    let deadline = Instant::now() + budget;
-    let mut previous: Option<String> = None;
-    let mut stable = 0u32;
-    loop {
-        let screen = sess.render(|s| s.contents());
-        let line = input_line_of(&screen);
-        if line.is_empty() && previous.as_deref() == Some(screen.as_str()) {
-            stable += 1;
-            if stable >= SETTLE_POLLS {
-                return;
-            }
-        } else {
-            stable = 0;
-        }
-        if Instant::now() >= deadline {
-            let unmet = if line.is_empty() {
-                "the input line emptied but the screen kept changing"
-            } else {
-                "the input line still held content"
-            };
-            panic!("{context}: {unmet} after {budget:?}\nPTY:\n{screen}");
-        }
-        previous = Some(screen);
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    expect_screen_settled(
+        sess,
+        |screen| input_line_of(screen).is_empty(),
+        budget,
+        &format!("{context}: the input line never cleared"),
+    );
 }
 
 /// `true` if the rendered screen contains `text`, ignoring terminal line wraps

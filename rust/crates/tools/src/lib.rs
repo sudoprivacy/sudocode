@@ -9481,50 +9481,6 @@ mod tests {
         assert_eq!(ordinary.routing_session_id.as_deref(), Some("sess-1"));
     }
 
-    /// A sub-agent has to hand its routing key on, not just use it.
-    ///
-    /// `ConversationRuntime` fills `parent_routing_session_id` from
-    /// `ApiClient::routing_session_id()`, whose trait default is `None`. While
-    /// this client took that default, a sub-agent that spawned a further agent
-    /// gave the child nothing: the grandchild's requests carried no
-    /// `metadata.user_id`, so a pooled upstream had no stable session key and
-    /// re-picked an account per turn — a full prefix rebuild each time, for a
-    /// family of requests whose entire purpose is sharing the parent's prefix.
-    ///
-    /// Asserted through the trait, not the field, because the default is what
-    /// was wrong: reading the struct directly would pass either way.
-    #[test]
-    fn subagent_client_hands_its_routing_key_to_what_it_spawns() {
-        use runtime::ApiClient;
-
-        let client = super::ProviderRuntimeClient {
-            chain: Vec::new(),
-            allowed_tools: std::collections::BTreeSet::new(),
-            execution: super::ParentExecution {
-                reasoning_effort: None,
-                thinking_enabled: false,
-                routing_session_id: Some("session-parent".to_string()),
-            },
-        };
-        assert_eq!(
-            ApiClient::routing_session_id(&client),
-            Some("session-parent"),
-            "the trait default is None; taking it silently unroutes every \
-             grandchild request"
-        );
-
-        let anonymous = super::ProviderRuntimeClient {
-            chain: Vec::new(),
-            allowed_tools: std::collections::BTreeSet::new(),
-            execution: super::ParentExecution::default(),
-        };
-        assert_eq!(
-            ApiClient::routing_session_id(&anonymous),
-            None,
-            "no parent key means none to pass on — not an invented one"
-        );
-    }
-
     /// The inline setter is the single place both fields cross onto a
     /// subagent's client. Asserting it round-trips guards the asymmetry that
     /// caused the original bug: a field set on the main-loop client and

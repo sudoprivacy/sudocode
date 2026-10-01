@@ -3881,6 +3881,36 @@ async fn acp_subagent_events_nested() {
     let (notifs, _) = prompt_scenario(&mut client, &session_id, "subagent_events_nested").await;
     dump_subagent_events("nested", &notifs);
 
+    let requests = server.captured_requests().await;
+    let parent = requests
+        .iter()
+        .find(|request| request.scenario == "subagent_events_nested")
+        .expect("the parent calls the provider");
+    let parent_body: Value = serde_json::from_str(&parent.raw_body).unwrap();
+    let routing_key = parent_body["metadata"]["user_id"]
+        .as_str()
+        .filter(|key| !key.is_empty())
+        .expect("the parent carries a routing identity");
+    for scenario in [
+        "subagent_events_nested",
+        "subagent_nest_child",
+        "subagent_tool_child",
+    ] {
+        let turns: Vec<_> = requests
+            .iter()
+            .filter(|request| request.scenario == scenario)
+            .collect();
+        assert!(!turns.is_empty(), "{scenario} must call the provider");
+        for turn in turns {
+            let body: Value = serde_json::from_str(&turn.raw_body).unwrap();
+            assert_eq!(
+                body["metadata"]["user_id"].as_str(),
+                Some(routing_key),
+                "{scenario} must retain the parent's routing identity",
+            );
+        }
+    }
+
     let traces = assert_subagent_invariants(&notifs);
     assert_eq!(traces.len(), 2, "child + grandchild: {traces:#?}");
     let (child, child_trace) = traces

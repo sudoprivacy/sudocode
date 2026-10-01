@@ -60,6 +60,17 @@ conversation. The current input draft is retained. For UI that fits within
 the viewport, resize clears only the live UI from its retained start position,
 without clearing the preceding conversation or purging terminal scrollback.
 
+While a turn is running, messages you submit wait in the staging area.
+Press ↑ on an empty input to recall the newest queued human message for
+editing; its staging entry disappears. Further ↑ presses prepend older
+queued human messages, preserving their original submit order. The cursor
+stays at the end of the recalled text. Peer/A2A messages remain queued.
+Typing, pasting, or pressing ↓ ends this recall sequence and restores
+normal cursor navigation. When no human messages remain queued, further
+↑ presses preserve the recalled text; submitting it queues the edited
+text again. On an empty input with no queued human message, ↑ recalls
+prompt history.
+
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:
 

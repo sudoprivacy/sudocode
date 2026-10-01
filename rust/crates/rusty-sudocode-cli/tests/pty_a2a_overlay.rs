@@ -26,10 +26,80 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
+use pty_expect::PtySession;
 use runtime::agent_mailbox::{self, MailboxEnvelope};
 use runtime::mailbox::{local_pair_root_in, Mailbox};
 
 const BUDGET: Duration = Duration::from_secs(30);
+
+/// Wait for a rendered state, rather than guessing how long a redraw takes.
+fn wait_for_screen(sess: &PtySession, context: &str, predicate: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + BUDGET;
+    loop {
+        let screen = sess.render(|screen| screen.raw().contents());
+        if predicate(&screen) {
+            return screen;
+        }
+        assert!(Instant::now() < deadline, "{context}\nPTY:\n{screen}");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Only the live input region, excluding queued chips and prior scrollback.
+fn input_text(screen: &str) -> String {
+    screen
+        .rsplit_once('❯')
+        .map_or_else(String::new, |(_, tail)| {
+            tail.lines()
+                .take_while(|line| !line.trim().starts_with('─'))
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+        })
+}
+
+fn has_chip(screen: &str, marker: &str) -> bool {
+    screen
+        .lines()
+        .any(|line| line.contains("queued:") && line.contains(marker))
+}
+
+/// Ctrl-D exits even when the input contains recalled text.
+fn exit(sess: &mut PtySession) {
+    sess.send("\x04").expect("exit REPL");
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
+    sess.expect_eof().expect("REPL should exit cleanly");
+}
+
+/// Keep the model busy and wait until each submitted item is actually queued.
+fn queued_session(label: &str, messages: &[&str]) -> (TestEnv, PtySession) {
+    let env = TestEnv::new(label);
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.set_default_timeout(BUDGET);
+    sess.resize(50, 100).expect("resize pty");
+    sess.expect("❯").expect("initial prompt");
+    let prompt = env.prompt(
+        "Run exactly this bash command, nothing else: printf 'interrupt-start'; sleep 30",
+        "bash_interrupt_long_running",
+    );
+    sess.send(&format!("{prompt}\r")).expect("start long turn");
+    sess.expect("interrupt-start").expect("tool started");
+    for message in messages {
+        sess.send(&format!("{message}\r"))
+            .expect("queue human message");
+        wait_for_screen(
+            &sess,
+            "human message must be queued and input cleared",
+            |screen| has_chip(screen, message) && input_text(screen).is_empty(),
+        );
+    }
+    (env, sess)
+}
 
 /// Wait until the receiver has announced itself under the pair root, then
 /// return its name - discovered from the filesystem so the test never has to
@@ -152,10 +222,11 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
     sess.expect("interrupt-start")
         .expect("bash tool should start before we queue anything");
 
-    // Queue a HUMAN message during the turn.
+    // Queue a HUMAN message during the turn. Its overlay chip renders as
+    // `↳ queued: HUMAN-EDIT-MARKER` (no `❯` in the chip display).
     sess.send(&format!("{HUMAN_MARKER}\r"))
         .expect("queue human marker during turn");
-    sess.expect(HUMAN_MARKER)
+    sess.expect(&format!("\u{21b3} queued: {HUMAN_MARKER}"))
         .expect("human message should appear as a queued overlay chip");
 
     // Then a peer a2a lands AFTER it — now the queue tail is the peer item.
@@ -163,24 +234,22 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
     sess.expect("\u{21b3} queued: \u{1f4e8} A2A from mac-ai")
         .expect("a2a should be queued behind the human message");
 
-    // Press ↑ on the empty buffer. Must pop the HUMAN item (skipping the peer
-    // at the tail) and splice its text into the input line.
-    std::thread::sleep(Duration::from_millis(300));
+    wait_for_screen(&sess, "both chips must be queued before recall", |screen| {
+        has_chip(screen, HUMAN_MARKER)
+            && has_chip(screen, "A2A from mac-ai")
+            && input_text(screen).is_empty()
+    });
     sess.send("\x1b[A").expect("send Up-arrow");
-    sess.expect(HUMAN_MARKER)
-        .expect("↑ should splice the human message into the input, skipping the a2a");
-
-    // The peer item was NOT dequeued: its overlay chip is still present.
-    let screen = sess.render(|s| s.contents());
-    assert!(
-        screen.contains("A2A from mac-ai"),
-        "the a2a peer chip must remain queued after ↑ popped the human item; \
-         screen:\n{screen}"
+    wait_for_screen(
+        &sess,
+        "recall must move only the human item out of staging",
+        |screen| {
+            input_text(screen) == HUMAN_MARKER
+                && !has_chip(screen, HUMAN_MARKER)
+                && has_chip(screen, "A2A from mac-ai")
+        },
     );
-
-    sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
-    let _ = sess.expect_eof();
+    exit(&mut sess);
 }
 
 /// During-turn receipt: the message is held in the pending overlay, not
@@ -217,4 +286,106 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
+}
+
+/// Typing after recall must append to the last line, including UTF-8 text.
+#[test]
+fn up_arrow_recall_places_caret_at_end_of_text() {
+    const MARKER: &str = "CARET-召回";
+    let (_env, mut sess) = queued_session("a2a-up-caret", &[MARKER]);
+    sess.send("\x1b[A").expect("recall human");
+    wait_for_screen(&sess, "human recalled", |screen| {
+        input_text(screen) == MARKER && !has_chip(screen, MARKER)
+    });
+    sess.send("!").expect("type sentinel");
+    wait_for_screen(&sess, "caret must append on the same line", |screen| {
+        input_text(screen) == format!("{MARKER}!")
+    });
+    exit(&mut sess);
+}
+
+/// Repeated recall preserves submit order and stops at a drained queue.
+#[test]
+fn up_arrow_twice_stacks_two_queued_humans_in_order() {
+    const FIRST: &str = "FIRST-QUEUED";
+    const SECOND: &str = "SECOND-QUEUED";
+    let (_env, mut sess) = queued_session("a2a-up-stack", &[FIRST, SECOND]);
+    sess.send("\x1b[A").expect("recall newest");
+    wait_for_screen(&sess, "newest recalled first", |screen| {
+        input_text(screen) == SECOND && !has_chip(screen, SECOND) && has_chip(screen, FIRST)
+    });
+    sess.send("\x1b[A").expect("recall older");
+    let stacked = format!("{FIRST}\n{SECOND}");
+    wait_for_screen(&sess, "both messages stacked in submit order", |screen| {
+        input_text(screen) == stacked && !has_chip(screen, FIRST) && !has_chip(screen, SECOND)
+    });
+    sess.send("!").expect("type at end of stacked input");
+    wait_for_screen(&sess, "stack caret must remain on final line", |screen| {
+        input_text(screen) == format!("{stacked}!")
+    });
+    // Submit and recall again: verify that the composed multiline text goes
+    // through the real queue without losing either message or its newline.
+    sess.send("\r").expect("resubmit stack");
+    wait_for_screen(&sess, "edited stack queued", |screen| {
+        input_text(screen).is_empty() && has_chip(screen, FIRST)
+    });
+    sess.send("\x1b[A").expect("recall edited stack");
+    wait_for_screen(&sess, "stack survives resubmission", |screen| {
+        input_text(screen) == format!("{stacked}!") && !has_chip(screen, FIRST)
+    });
+    exit(&mut sess);
+}
+
+/// Editing or pasting ends recall mode: ↑ moves the cursor, not another item.
+#[test]
+fn editing_recalled_input_keeps_older_message_queued() {
+    for (label, edit) in [("typed", "!"), ("pasted", "\x1b[200~!\x1b[201~")] {
+        const OLDER: &str = "OLDER-QUEUED";
+        const NEWER: &str = "NEWER-QUEUED";
+        let (_env, mut sess) = queued_session(label, &[OLDER, NEWER]);
+        sess.send("\x1b[A").expect("recall newest");
+        wait_for_screen(&sess, "newest recalled", |screen| {
+            input_text(screen) == NEWER
+        });
+        sess.send(edit).expect("edit recalled input");
+        wait_for_screen(&sess, "edit applied", |screen| {
+            input_text(screen) == format!("{NEWER}!")
+        });
+        sess.send("\x1b[A@").expect("Up then type sentinel");
+        wait_for_screen(
+            &sess,
+            "edited input must leave older item queued",
+            |screen| {
+                let input = input_text(screen);
+                input.contains(NEWER)
+                    && input.contains('!')
+                    && input.contains('@')
+                    && !input.contains(OLDER)
+                    && has_chip(screen, OLDER)
+            },
+        );
+        exit(&mut sess);
+    }
+}
+
+/// Down exits recall mode and restores ordinary cursor navigation.
+#[test]
+fn down_after_recall_keeps_older_message_queued() {
+    const OLDER: &str = "OLDER-QUEUED";
+    const NEWER: &str = "NEWER-QUEUED";
+    let (_env, mut sess) = queued_session("a2a-up-down", &[OLDER, NEWER]);
+    sess.send("\x1b[A").expect("recall newest");
+    wait_for_screen(&sess, "newest recalled", |screen| {
+        input_text(screen) == NEWER
+    });
+    sess.send("\x1b[B\x1b[A@")
+        .expect("Down, Up then type sentinel");
+    wait_for_screen(&sess, "Down must end queue recall", |screen| {
+        let input = input_text(screen);
+        input.contains(NEWER)
+            && input.contains('@')
+            && !input.contains(OLDER)
+            && has_chip(screen, OLDER)
+    });
+    exit(&mut sess);
 }

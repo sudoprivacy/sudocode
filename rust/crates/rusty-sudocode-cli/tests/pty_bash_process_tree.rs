@@ -1,5 +1,5 @@
 //! Live regression: cancelling a foreground tool must stop its descendants.
-//! Run with SCODE_TEST_BACKEND=live and Node.js on PATH.
+//! Run with `SCODE_TEST_BACKEND=live` and Node.js on PATH.
 mod common;
 
 use std::fs;
@@ -84,34 +84,6 @@ fn write_fixture(root: &Path) -> (String, String) {
     (node, token)
 }
 
-fn spawn_session(env: &common::TestEnv) -> pty_expect::PtySession {
-    let mut paths: Vec<_> =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
-    if cfg!(windows) {
-        let shell = common::resolve_sh();
-        paths.insert(
-            0,
-            Path::new(&shell)
-                .parent()
-                .expect("Git Bash directory")
-                .to_path_buf(),
-        );
-    }
-    let tool_path = std::env::join_paths(paths)
-        .expect("tool PATH")
-        .to_string_lossy()
-        .into_owned();
-    env.spawn_with_env(
-        &[
-            "--permission-mode",
-            "danger-full-access",
-            "--allowedTools",
-            "bash",
-        ],
-        &[("PATH", &tool_path)],
-    )
-}
-
 fn run_bash_tree_workflow(is_cancel: bool) {
     let env = common::TestEnv::new("bash-tree-cancel");
     if !env.is_live() {
@@ -125,15 +97,21 @@ fn run_bash_tree_workflow(is_cancel: bool) {
     let command = format!("\"{node}\" parent.cjs");
     let timeout_ms = if is_cancel { 120_000 } else { 5_000 };
     let prompt = format!("Use the bash tool to run exactly: {command}. Run once in the foreground with timeout={timeout_ms}. Do not retry, read or edit either script.");
-    let mut session = spawn_session(&env);
+    let mut session = env.spawn(&[
+        "--permission-mode",
+        "danger-full-access",
+        "--allowedTools",
+        "bash",
+    ]);
     session.set_default_timeout(Duration::from_secs(90));
     session.expect("❯").expect("initial prompt");
+    let first_marker = common::turn_status_marker(&session);
     session.send(&format!("{prompt}\r")).expect("start tool");
     let started = root.join("started.json");
     assert!(
         wait_for(|| started.exists(), Duration::from_secs(90)),
         "real grandchild did not start: {}",
-        session.render(|screen| screen.contents())
+        common::screen_tail(&session, 4000)
     );
     let marker: serde_json::Value =
         serde_json::from_slice(&fs::read(&started).expect("marker")).expect("marker JSON");
@@ -157,9 +135,19 @@ fn run_bash_tree_workflow(is_cancel: bool) {
     assert!(
         wait_for(|| is_exited(&node, pid), Duration::from_secs(10)),
         "cancelled descendant still alive: {}",
-        session.render(|screen| screen.contents())
+        common::screen_tail(&session, 4000)
     );
 
+    if !is_cancel {
+        // A tool timeout still lets the model finish its reply. Wait for that
+        // turn, otherwise the follow-up can arrive while input is disabled.
+        common::expect_turn_complete_after(
+            &session,
+            &first_marker,
+            common::LIVE_TURN_BUDGET,
+            "initial tool turn completed",
+        );
+    }
     common::expect_input_line_cleared(
         &session,
         Duration::from_secs(90),
@@ -179,7 +167,7 @@ fn run_bash_tree_workflow(is_cancel: bool) {
             Duration::from_secs(90),
         ),
         "next turn did not write the recovered token: {}",
-        session.render(|screen| screen.contents())
+        common::screen_tail(&session, 4000)
     );
     common::expect_turn_complete_after(
         &session,

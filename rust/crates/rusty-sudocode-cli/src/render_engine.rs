@@ -46,6 +46,13 @@ pub(crate) enum RenderOutcome {
 /// Stateful terminal renderer for one turn's event stream.
 pub(crate) struct EngineEventRenderer {
     markdown: MarkdownStreamState,
+    /// Buffers thinking deltas until a line is complete so reasoning is emitted
+    /// one dim line at a time, not one `\x1b[2m…\x1b[0m` pair per streamed delta
+    /// (the fragmentation bug). Kept separate from `markdown` because thinking is
+    /// shown as raw dim prose, deliberately not run through the answer's markdown
+    /// renderer (its ANSI resets would cancel the dim, and its parser state must
+    /// not interleave with the answer across the block boundary).
+    thinking_pending: String,
     renderer: TerminalRenderer,
     glyph: ResponseGlyphState,
     spinner: Option<SpinnerRef>,
@@ -68,6 +75,7 @@ impl EngineEventRenderer {
     pub(crate) fn new(spinner: Option<SpinnerRef>, output_writer: Option<OutputSender>) -> Self {
         Self {
             markdown: MarkdownStreamState::default(),
+            thinking_pending: String::new(),
             renderer: TerminalRenderer::new(),
             glyph: ResponseGlyphState::new(query_terminal_width()),
             spinner,
@@ -132,6 +140,20 @@ impl EngineEventRenderer {
         }
     }
 
+    /// Emit buffered thinking text up to the last complete line, one dim line
+    /// at a time, leaving any trailing partial line in `thinking_pending` for
+    /// the next delta (or the `end_thinking` flush). Dimming per line — rather
+    /// than per delta — is what collapses the stream of `\x1b[2m…\x1b[0m`
+    /// fragments into clean, copy-safe reasoning lines while staying live.
+    fn flush_thinking_lines(&mut self) {
+        while let Some(newline) = self.thinking_pending.find('\n') {
+            let line: String = self.thinking_pending.drain(..=newline).collect();
+            let rendered = render_thinking_line(&line);
+            let prefixed = self.glyph.apply(&rendered);
+            self.write_out(&prefixed);
+        }
+    }
+
     /// Leave the thinking state (lower the "Reasoning…" cue) when real content
     /// resumes after a thinking block.
     fn end_thinking(&mut self) {
@@ -143,6 +165,16 @@ impl EngineEventRenderer {
         }
         if self.thinking_printed {
             self.thinking_printed = false;
+            // Emit any trailing partial line (a block that ended without a final
+            // newline) before closing, so the last reasoning sentence is not
+            // dropped. `flush_thinking_lines` only emits up to the last newline;
+            // the remainder lives in `thinking_pending` until here.
+            if !self.thinking_pending.is_empty() {
+                let rendered = render_thinking_line(&self.thinking_pending);
+                self.thinking_pending.clear();
+                let prefixed = self.glyph.apply(&rendered);
+                self.write_out(&prefixed);
+            }
             // Close the dim block with a blank line so the answer does not
             // continue the last reasoning line. `visible_col` says whether that
             // line was left open: mid-line needs one newline to end it and a
@@ -204,16 +236,15 @@ impl EngineEventRenderer {
                         // text already drawn on it. `TextDelta` can afford to
                         // pause every delta only because it writes at markdown
                         // block boundaries, so its erase always lands at column
-                        // 0. Reasoning is written through on every delta and has
-                        // no such protection.
+                        // 0. Reasoning is written at line boundaries and has the
+                        // same protection.
                         self.pause_spinner();
                         let header = self.glyph.apply(&crate::cli::format::thinking_header());
                         self.write_out(&header);
                         self.thinking_printed = true;
                     }
-                    let dimmed = crate::cli::format::dim_thinking(&text);
-                    let prefixed = self.glyph.apply(&dimmed);
-                    self.write_out(&prefixed);
+                    self.thinking_pending.push_str(&text);
+                    self.flush_thinking_lines();
                 }
                 RenderOutcome::Continue
             }
@@ -439,9 +470,23 @@ fn format_hook_progress(event: &HookProgressEvent) -> String {
     )
 }
 
+/// Render one complete thinking line for the transcript: dim prose, but a
+/// blank line emitted raw. Dimming is applied once per line here — the single
+/// place that decides it — instead of once per streamed delta, which is what
+/// turned reasoning into a stream of `\x1b[2m…\x1b[0m` fragments. A whitespace-
+/// only line has no text to tint, so wrapping it would only add escape noise.
+fn render_thinking_line(line: &str) -> String {
+    if line.trim().is_empty() {
+        line.to_string()
+    } else {
+        crate::cli::format::dim_thinking(line)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_hook_progress;
+    use super::{format_hook_progress, render_thinking_line};
+    use crate::render::{DIM, RESET};
     use engine_events::HookProgressEvent;
     use runtime::HookEvent;
 
@@ -532,5 +577,26 @@ mod tests {
         };
         let line = format_hook_progress(&event);
         assert!(!line.ends_with('\n'), "unexpected newline in {line:?}");
+    }
+
+    /// A non-empty reasoning line is dimmed exactly once — one `DIM…RESET` pair
+    /// for the whole line, which is the fix for the per-delta fragmentation that
+    /// wrapped every streamed chunk in its own escape pair.
+    #[test]
+    fn a_reasoning_line_is_dimmed_once_as_a_whole() {
+        let rendered = render_thinking_line("checking 17 is prime\n");
+        assert_eq!(rendered, format!("{DIM}checking 17 is prime\n{RESET}"));
+        assert_eq!(rendered.matches(DIM).count(), 1, "one dim open per line");
+        assert_eq!(rendered.matches(RESET).count(), 1, "one reset per line");
+    }
+
+    /// A blank separator line between reasoning paragraphs is emitted raw: it
+    /// has no text to tint, so wrapping it would only add escape noise to the
+    /// scrollback the user copies out.
+    #[test]
+    fn a_blank_reasoning_line_is_emitted_without_escapes() {
+        let rendered = render_thinking_line("  \n");
+        assert_eq!(rendered, "  \n");
+        assert!(!rendered.contains(DIM), "blank line carries no dim escape");
     }
 }

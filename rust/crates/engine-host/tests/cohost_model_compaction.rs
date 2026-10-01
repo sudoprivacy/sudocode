@@ -163,3 +163,76 @@ fn model_client(home: &std::path::Path, model: &str, kernel: Arc<Kernel>) -> Eng
     )
     .unwrap()
 }
+
+/// A real checkpoint crosses the model mount; revoking the same route then
+/// refuses the next checkpoint even though the upstream key remains valid.
+#[test]
+#[ignore = "funded model: ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL"]
+fn live_checkpoint_preserves_facts_and_honors_model_refusal() {
+    let home = tempfile::tempdir().unwrap();
+    std::env::set_var("SUDO_CODE_CONFIG_HOME", home.path());
+    let key = std::env::var("ANTHROPIC_API_KEY").expect("live model key");
+    let url = std::env::var("ANTHROPIC_BASE_URL").expect("live model URL");
+    let model =
+        std::env::var("SUDOCODE_TEST_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
+    let kernel = Arc::new(Kernel::new());
+    common::mount_agent_world(&kernel);
+    let _storage = common::mount_model(&kernel, "anthropic", &url, &key);
+    let writes = Arc::new(AtomicUsize::new(0));
+    let deny = Arc::new(AtomicBool::new(false));
+    let hook = kernel.enlist_hook_only_service("live-model-gate").unwrap();
+    kernel.register_service_hook(
+        &hook,
+        Box::new(ModelGate {
+            writes: writes.clone(),
+            deny: deny.clone(),
+        }),
+    );
+    let mut client = model_client(home.path(), &model, kernel);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let code = format!("CHECKPOINT-{nonce}");
+    let amount = nonce % 900 + 100;
+    let history = vec![ConversationMessage::user_text(format!(
+        "Keep these task facts: quote code {code}; subtotal {amount}; pending discount 11. \
+         Next step: write approved.json with the code and the discounted total."
+    ))];
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let summary = rt
+        .block_on(client.send_compaction(
+            &model,
+            "Summarize all task facts exactly and preserve pending work in one short paragraph.",
+            history,
+            4096,
+        ))
+        .unwrap();
+    assert!(
+        summary.contains(&code) && summary.contains(&amount.to_string()),
+        "{summary}"
+    );
+    let completed_writes = writes.load(Ordering::SeqCst);
+    assert!(completed_writes > 0, "the checkpoint must cross the mount");
+    deny.store(true, Ordering::SeqCst);
+    let error = rt
+        .block_on(client.send_compaction(
+            &model,
+            "Summarize the checkpoint.",
+            vec![ConversationMessage::user_text(summary)],
+            4096,
+        ))
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("model policy refused"),
+        "{error}"
+    );
+    assert_eq!(
+        writes.load(Ordering::SeqCst),
+        completed_writes,
+        "revocation must not reach the model"
+    );
+    eprintln!(
+        "LIVE COHOST: real checkpoint retained fresh facts; revoked mount refused the next request"
+    );
+}

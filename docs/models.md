@@ -21,11 +21,26 @@ scode --model sonnet --auth subscription
 
 For the canonical live alias list, run `scode --help`.
 
-> **These are convenience aliases, not the full model list.** `scode`
-> routes through the backend (sudorouter), whose live catalog has 170+
-> models - including Gemini (`gemini-3.5-flash`, ...), GPT-5, DeepSeek,
-> GLM, Kimi, MiniMax, and more. Use any catalog model by its full name,
-> e.g. `scode --model gemini-3.5-flash`.
+The aliases are shortcuts. Use `/model` to see models exposed by the current
+endpoint and account, or pass a full model ID with `scode --model <id>`.
+
+## Automatic discovery
+
+For Anthropic and OpenAI-compatible connections, scode queries `/v1/models`
+(or `/models` below a base URL that already includes `/v1`) using the same
+resolved endpoint and credentials as inference. It does not require an account
+named `sudorouter`.
+
+CLI and ACP refresh in the background at startup and when active use finds a
+catalog older than five minutes. A successful refresh updates the running
+session's model picker, completions and capability lookups. Failed or incomplete
+refreshes retain the previous catalog; an empty successful response clears it.
+
+Catalogs live under `cache/model-catalogs/` in the config directory, keyed by a
+hash of the endpoint and authentication headers. Accounts on the same endpoint
+have separate caches. Credentials are never written into these catalog files.
+Provider-managed credential-file connections and native Gemini discovery retain
+their existing behavior.
 
 ## Config IDs, display names, and deployment IDs
 
@@ -138,9 +153,9 @@ Add the fields to the model entry in `sudocode.json`:
 ## Per-model token limits — `maxOutputTokens` / `contextWindow`
 
 `scode` reads each model's context window and output-token ceiling from a
-capabilities table that is **compiled into the binary** (refreshed from
-sudorouter's `/v1/models` when available). A model the table has never
-heard of inherits the table's `default` entry — and when the real provider
+active endpoint's catalog. Missing capabilities for known models fall back to
+the bundled table. A model with no published limits uses the table's `default`
+entry — and when the real provider
 ceiling is lower, every request fails:
 
 ```
@@ -171,8 +186,8 @@ Two optional fields on the model entry override the table:
 - Both are keyed by the **wire model ID** the entry maps to, so the override
   reaches every code path that asks the capabilities table — main loop,
   subagents, preflight — not just the request builder.
-- Absent means unchanged: the compiled table's numbers apply, exactly as
-  before.
+- When absent, the endpoint's published limits apply, with bundled defaults
+  for missing fields.
 
 ### Subagents and compaction
 

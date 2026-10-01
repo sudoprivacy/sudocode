@@ -586,6 +586,16 @@ impl TestEnv {
         }
     }
 
+    /// Configure discovery for mock mode; live mode reads the real endpoint.
+    pub fn set_model_catalog(&self, catalog: serde_json::Value) {
+        if let Backend::Mock {
+            _runtime, server, ..
+        } = &self.backend
+        {
+            _runtime.block_on(server.set_model_catalog(catalog));
+        }
+    }
+
     /// How many `/v1/messages` requests the mock server captured.
     /// Panics in live mode — request counting is mock-only.
     pub fn captured_message_count(&self) -> usize {

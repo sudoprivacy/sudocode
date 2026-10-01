@@ -106,6 +106,7 @@ pub struct CapturedRequest {
 pub struct MockAnthropicService {
     base_url: String,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
+    model_catalog: Arc<Mutex<Option<Value>>>,
     shutdown: Option<oneshot::Sender<()>>,
     join_handle: JoinHandle<()>,
 }
@@ -119,6 +120,8 @@ impl MockAnthropicService {
         let listener = TcpListener::bind(bind_addr).await?;
         let address = listener.local_addr()?;
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let model_catalog = Arc::new(Mutex::new(None));
+        let catalog_state = Arc::clone(&model_catalog);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let request_state = Arc::clone(&requests);
 
@@ -131,8 +134,9 @@ impl MockAnthropicService {
                             break;
                         };
                         let request_state = Arc::clone(&request_state);
+                        let catalog_state = Arc::clone(&catalog_state);
                         tokio::spawn(async move {
-                            let _ = handle_connection(socket, request_state).await;
+                            let _ = handle_connection(socket, request_state, catalog_state).await;
                         });
                     }
                 }
@@ -142,6 +146,7 @@ impl MockAnthropicService {
         Ok(Self {
             base_url: format!("http://{address}"),
             requests,
+            model_catalog,
             shutdown: Some(shutdown_tx),
             join_handle,
         })
@@ -150,6 +155,11 @@ impl MockAnthropicService {
     #[must_use]
     pub fn base_url(&self) -> String {
         self.base_url.clone()
+    }
+
+    /// Serve discovery separately from captured inference requests.
+    pub async fn set_model_catalog(&self, catalog: Value) {
+        *self.model_catalog.lock().await = Some(catalog);
     }
 
     pub async fn captured_requests(&self) -> Vec<CapturedRequest> {
@@ -429,8 +439,19 @@ impl Scenario {
 async fn handle_connection(
     mut socket: tokio::net::TcpStream,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
+    model_catalog: Arc<Mutex<Option<Value>>>,
 ) -> io::Result<()> {
     let (method, path, headers, raw_body) = read_http_request(&mut socket).await?;
+    if method == "GET" && path.split('?').next() == Some("/v1/models") {
+        let catalog = model_catalog.lock().await.clone();
+        let (status, body) = catalog.map_or_else(
+            || ("404 Not Found", "{}".to_string()),
+            |catalog| ("200 OK", catalog.to_string()),
+        );
+        let response = http_response(status, "application/json", &body, &[]);
+        socket.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
     // Normalize the "system" field: when it arrives as an array of content
     // blocks (from cache-control-aware clients), flatten it back into a plain
     // string so that `MessageRequest` deserialization succeeds.

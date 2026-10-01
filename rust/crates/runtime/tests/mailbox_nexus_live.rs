@@ -1175,7 +1175,7 @@ fn live_cohost_model_workflow() {
     let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
     println!("LIVE COHOST: sending delegation turn");
     send_to(&client, &user, &agent,
-        &format!("Please prepare our sample quote for review. Ask one Explore agent to read {workspace}/quote.txt and calculate units times unit price plus delivery. Wait for its result, then use the file tool to save {workspace}/result.json containing exactly code and subtotal fields (subtotal a JSON number). Reply with the quote code and subtotal once the file is saved."), "").unwrap();
+        &format!("Please prepare our sample quote for review. Delegate this complete task to one Explore agent: read {workspace}/quote.txt, calculate units times unit price plus delivery, and report both the quote code and the calculated numeric subtotal. The calculation and its reported result are part of the child's task. After the child finishes, use its result to save {workspace}/result.json with exactly code and subtotal fields (subtotal a JSON number). Reply with the quote code and subtotal once the file is saved."), "").unwrap();
     let first = wait_live_reply(&mb, &agent, &mut cursor, &code);
     assert!(first.contains(&total.to_string()), "{first}");
     let result: Value =

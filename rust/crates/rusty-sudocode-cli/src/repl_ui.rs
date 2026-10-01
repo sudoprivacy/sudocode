@@ -7,12 +7,14 @@
 //!
 //! # ChromeSlot pattern
 //!
-//! The REPL chrome uses a **ChromeSlot** convention: each position in the
-//! layout is an enum that renders exactly one variant at a time.  The enum
-//! + match makes the contract visible to any reader:
+//! The REPL chrome uses named slots with explicit content ownership.
+//! `StatusSlot`, `InputSlot`, and `FooterSlot` each select one enum variant;
+//! `PendingSlot` and `TodoSlot` render their current lists and hide when empty:
 //!
 //! ```text
+//! [PendingSlot]   ← in-flight tools and queued messages
 //! [StatusSlot]    ← spinner | turn_result | tips | empty
+//! [TodoSlot]      ← todo summary and items | empty
 //! ──── separator ────
 //! [InputSlot]     ← hint | text_input | question_panel
 //! ──── separator ────
@@ -541,8 +543,8 @@ pub enum UiCommand {
     ClearQuestion,
     SetTurnResult(String),
     ShowInputHint(String),
-    /// Update the ContextSlot's todo panel with the current todo list.
-    UpdateContext(Vec<runtime::Todo>),
+    /// Update the `TodoSlot` panel with the current todo list.
+    UpdateTodos(Vec<runtime::Todo>),
     /// A tool call started — append a running (yellow) card to the pending
     /// overlay, in arrival order relative to queued messages.
     ToolStarted {
@@ -592,8 +594,8 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ShowInputHint(text.to_string()));
     }
 
-    pub fn update_context(&self, todos: Vec<runtime::Todo>) {
-        let _ = self.tx.send(UiCommand::UpdateContext(todos));
+    pub fn update_todos(&self, todos: Vec<runtime::Todo>) {
+        let _ = self.tx.send(UiCommand::UpdateTodos(todos));
     }
 
     pub fn tool_started(&self, id: &str, name: &str, input: &str) {
@@ -1123,27 +1125,8 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
-// ── ContextSlot — persistent area for TodoPanel (+ future sections) ──
+// ── PendingSlot — in-flight tools and queued messages ─────────────────
 
-/// Render the todo panel matching CC's `TodoWrite` layout:
-///
-/// ```text
-/// 5 todos (2 done, 1 in progress, 2 open)
-///   ✓ Update docs
-///   ■ Writing unit tests
-///   □ Fix login bug
-///   … +2 pending, 1 completed
-/// ```
-///
-/// - Header: count summary with done/in_progress/open breakdown
-/// - Each visible todo: icon + label (completed = strikethrough+dim, in_progress = bold activeForm)
-/// - Truncation: dynamic based on terminal height (CC: `min(10, max(3, rows - 14))`)
-/// - Priority order: in_progress > pending > completed; hidden summary
-/// Render the staging overlay: the in-flight tool calls as running (yellow)
-/// L-frame cards, joined into one multi-line string, capped to a height budget
-/// so many concurrent cards can't flood the screen or make every frame redraw
-/// hundreds of lines. Overflow collapses to a `… +N more running` line.
-///
 /// One pending item awaiting the user's eye at a turn boundary: either an
 /// in-flight tool call (rendered as a running L-frame card) or a message queued
 /// for the next turn (a human `❯` line or an inbound A2A `📨` line). They share
@@ -1241,6 +1224,22 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
     lines.join("\n")
 }
 
+// ── TodoSlot — todo summary and items ─────────────────────────────────
+
+/// Render the todo panel matching CC's `TodoWrite` layout:
+///
+/// ```text
+/// 5 todos (2 done, 1 in progress, 2 open)
+///   ✓ Update docs
+///   ■ Writing unit tests
+///   □ Fix login bug
+///   … +2 pending, 1 completed
+/// ```
+///
+/// - Header: count summary with done/in_progress/open breakdown
+/// - Each visible todo: icon + label (completed = strikethrough+dim, in_progress = bold activeForm)
+/// - Truncation: dynamic based on terminal height (CC: `min(10, max(3, rows - 14))`)
+/// - Priority order: in_progress > pending > completed; hidden summary
 fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
     use crate::render::{ansi_fg, theme, BOLD, DIM, RESET};
 
@@ -1359,16 +1358,16 @@ struct ReplContext {
     permission_mode: String,
     tips_line: String,
     stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>>,
-    /// Todo items for the ContextSlot. Updated by `UiCommand::UpdateContext`
+    /// Todo items for the `TodoSlot`. Updated by `UiCommand::UpdateTodos`
     /// in the tick loop, read during the render phase. Uses `Arc<Mutex>`
     /// instead of a `use_state` hook to avoid shifting hook indices.
-    context_todos: Arc<Mutex<Vec<runtime::Todo>>>,
+    todo_items: Arc<Mutex<Vec<runtime::Todo>>>,
     /// Running tool cards for the StagingSlot overlay, in insertion order.
     /// Pending items for the overlay above the StatusSlot: in-flight tool cards
     /// and queued messages (human + inbound A2A) in one ordered list, so the
     /// overlay shows arrival order across both. `ToolStarted`/`QueuedMessagePush`
     /// append; `ToolFinished` removes a tool by id; `QueuedMessagesClear` drops
-    /// the queued messages. Same `Arc<Mutex>` rationale as `context_todos` —
+    /// the queued messages. Same `Arc<Mutex>` rationale as `todo_items` —
     /// avoids shifting hook indices.
     pending: Arc<Mutex<Vec<PendingItem>>>,
     /// Empty-buffer `↑` hook: pops the newest **human** queued item out of the
@@ -1392,8 +1391,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let permission_mode = ctx.permission_mode.clone();
     let tips_text = ctx.tips_line.clone();
     let stderr_redir = Arc::clone(&ctx.stderr_redir);
-    let context_todos = Arc::clone(&ctx.context_todos);
-    let context_todos_for_future = Arc::clone(&ctx.context_todos);
+    let todo_items = Arc::clone(&ctx.todo_items);
+    let todo_items_for_future = Arc::clone(&ctx.todo_items);
     let pending = Arc::clone(&ctx.pending);
     let pending_for_future = Arc::clone(&ctx.pending);
     let pending_for_dequeue = Arc::clone(&ctx.pending);
@@ -1456,7 +1455,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 80ms tick loop: drain output/control channels, update spinner text.
     hooks.use_future(async move {
-        let mut task_hide_deadline: Option<Instant> = None;
+        let mut todo_hide_deadline: Option<Instant> = None;
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
 
@@ -1519,23 +1518,23 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Ok(UiCommand::ShowInputHint(text)) => {
                             input_slot.set(InputSlot::Hint(text));
                         }
-                        Ok(UiCommand::UpdateContext(todos)) => {
-                            if let Ok(mut items) = context_todos_for_future.lock() {
+                        Ok(UiCommand::UpdateTodos(todos)) => {
+                            if let Ok(mut items) = todo_items_for_future.lock() {
                                 let has_incomplete = todos
                                     .iter()
                                     .any(|t| t.status != runtime::TodoStatus::Completed);
                                 if todos.is_empty() {
                                     // Empty list → hide immediately
                                     items.clear();
-                                    task_hide_deadline = None;
+                                    todo_hide_deadline = None;
                                 } else if has_incomplete {
                                     // Has open todos → show, cancel any hide timer
                                     *items = todos;
-                                    task_hide_deadline = None;
-                                } else if task_hide_deadline.is_none() {
+                                    todo_hide_deadline = None;
+                                } else if todo_hide_deadline.is_none() {
                                     // All terminal → start 5s hide timer
                                     *items = todos;
-                                    task_hide_deadline =
+                                    todo_hide_deadline =
                                         Some(Instant::now() + Duration::from_secs(5));
                                 } else {
                                     *items = todos;
@@ -1578,13 +1577,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }
 
-            // Auto-hide task panel 5s after all tasks reach terminal state.
-            if let Some(deadline) = task_hide_deadline {
+            // Auto-hide the TodoSlot 5s after all todos are completed.
+            if let Some(deadline) = todo_hide_deadline {
                 if Instant::now() >= deadline {
-                    if let Ok(mut items) = context_todos_for_future.lock() {
+                    if let Ok(mut items) = todo_items_for_future.lock() {
                         items.clear();
                     }
-                    task_hide_deadline = None;
+                    todo_hide_deadline = None;
                 }
             }
 
@@ -2179,10 +2178,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sep = "\u{2500}".repeat(w);
     let footer_text = format_footer_text(&footer_slot, &perm);
 
-    // Merge ContextSlot into the upper separator as a single
+    // Merge TodoSlot into the upper separator as a single
     // multi-line Text element so the element tree structure stays
     // identical (avoids iocraft hook-index shifts).
-    let todo_line = context_todos
+    let todo_line = todo_items
         .lock()
         .ok()
         .map(|items| render_todo_panel(&items, term_height as usize))
@@ -2225,7 +2224,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 StatusSlot::Tips => Some(element! { AnsiText(content: tips_text.clone(), color: Color::DarkGrey) }),
                 StatusSlot::Empty => None,
             })
-            // Upper chrome: separator (+ ContextSlot + separator when tasks exist)
+            // Upper chrome: TodoSlot (when non-empty), then separator
             AnsiText(content: upper_sep, color: Color::DarkGrey)
             // InputSlot
             #(panel_text.map(|panel| element! {
@@ -2301,7 +2300,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 pub fn spawn_repl_ui(
     permission_mode: &str,
     startup_banner: &str,
-    context_todos: Vec<runtime::Todo>,
+    todo_items: Vec<runtime::Todo>,
     dequeue_hook: Option<UpArrowDequeueHook>,
 ) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
@@ -2320,7 +2319,7 @@ pub fn spawn_repl_ui(
         permission_mode: permission_mode.to_string(),
         tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
         stderr_redir: Arc::clone(&stderr_redir),
-        context_todos: Arc::new(Mutex::new(context_todos)),
+        todo_items: Arc::new(Mutex::new(todo_items)),
         pending: Arc::new(Mutex::new(Vec::new())),
         dequeue_hook,
     };

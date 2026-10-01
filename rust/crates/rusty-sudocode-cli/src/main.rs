@@ -4380,6 +4380,15 @@ impl LiveCli {
             None => {
                 clear_pending_plan_execution();
                 spinner.fail("❌ Request failed");
+                // The text one-shot path shares this renderer with the REPL.
+                // Report its failure to main so scripts receive a nonzero
+                // exit, just as they do with JSON and compact output.
+                if !self.is_repl {
+                    return Err(outcome
+                        .error
+                        .unwrap_or_else(|| "engine ended without completing the turn".into())
+                        .into());
+                }
             }
         }
 

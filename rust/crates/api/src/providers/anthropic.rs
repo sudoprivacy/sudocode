@@ -1077,13 +1077,24 @@ impl MessageStream {
                 return Ok(None);
             }
 
-            match self.response.chunk().await? {
-                Some(chunk) => {
+            match self.response.chunk().await {
+                Ok(Some(chunk)) => {
                     self.scan_chunk_for_cache_diagnosis(&chunk);
                     self.pending.extend(self.parser.push(&chunk)?);
                 }
-                None => {
+                Ok(None) => {
                     self.done = true;
+                }
+                // A body read error before the terminal event is a truncated
+                // stream, just like a partial SSE frame at clean HTTP EOF.
+                // Preserve that transport classification for recovery callers.
+                // Terminal events already set `done` before another read.
+                Err(error) => {
+                    return Err(ApiError::incomplete_stream(
+                        "Anthropic",
+                        &self.request.model,
+                        &error.to_string(),
+                    ));
                 }
             }
         }

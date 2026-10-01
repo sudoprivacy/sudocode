@@ -594,6 +594,66 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
         "a write on {peer_endpoint} woke a tail parked on {endpoint} after {woke:?} \
          (idle timeout was {idle_elapsed:?})"
     );
+
+    // A parked reader alone misses the apply/read lock inversion: apply then
+    // races only a sleeping condvar, never the backend read under its lock.
+    // Keep four tails crossing their read/wait boundary while the other node
+    // commits fresh frames. Every reader must see every body in order.
+    const FRAMES: usize = 128;
+    const READERS: usize = 4;
+    let nonce = fresh();
+    let expected: Vec<_> = (0..FRAMES)
+        .map(|i| format!("replicated-{nonce}-{i}"))
+        .collect();
+    let ready = Arc::new(std::sync::Barrier::new(READERS + 1));
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let client = Arc::clone(&client);
+            let auth = auth.clone();
+            let ready = Arc::clone(&ready);
+            thread::spawn(move || {
+                let inbox = mailbox(&client, me, &auth);
+                let mut cursor = next;
+                let mut received = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(30);
+                ready.wait();
+                while received.len() < FRAMES {
+                    assert!(Instant::now() < deadline, "replication stopped at {cursor}");
+                    let (frames, at) = inbox
+                        .poll_conversation("peer-node", cursor, 1)
+                        .expect("concurrent replicated tail must not deadlock");
+                    received.extend(frames.into_iter().map(|frame| frame.body));
+                    cursor = at;
+                }
+                (received, cursor)
+            })
+        })
+        .collect();
+    ready.wait();
+    for body in &expected {
+        send_to(&peer, "peer-node", me, body, &auth).expect("append during concurrent tails");
+    }
+    let mut end = next;
+    for reader in readers {
+        let (received, cursor) = reader.join().expect("tail reader");
+        assert_eq!(
+            received, expected,
+            "every reader must see the complete ordered transcript"
+        );
+        assert_eq!(cursor, next + FRAMES as u64);
+        end = cursor;
+    }
+
+    // Write an acknowledgement from the receiving node and read it on the
+    // original sender: replication must still make progress in both directions.
+    let ack = format!("ack-{nonce}-{FRAMES}");
+    send_to(&client, me, "peer-node", &ack, &auth).expect("acknowledge replicated batch");
+    let (acknowledgements, _) = mailbox(&peer, "peer-node", &auth)
+        .poll_conversation(me, end, DELIVERY_WAIT_MS)
+        .expect("read acknowledgement on original sender");
+    assert_eq!(acknowledgements.len(), 1);
+    assert_eq!(acknowledgements[0].body, ack);
+    println!("{READERS} concurrent tails read all {FRAMES} ordered frames; reverse acknowledgement arrived");
 }
 
 /// Guard the concurrent-dispatch property that lets the receiver share the ONE

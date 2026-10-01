@@ -13,6 +13,7 @@ default). The transport lives in `runtime::mailbox` +
 |---|---|---|
 | Unit | `cargo test -p runtime --lib mailbox` | no |
 | Live client round-trip | `e2e/nexus-a2a/run.sh` | no |
+| Cross-node replication and PTY duet | `e2e/nexus-a2a/run-cross-node.sh` | scripted by default |
 | 2-LLM co-host duet | `SUDOROUTER_API_KEY=… SCODE_BIN=… e2e/nexus-a2a/run.sh` | yes (gated) |
 
 The **live round-trip** (`mailbox_nexus_live`, an ignored `runtime` integration
@@ -20,6 +21,13 @@ test) is the piece unit tests can't cover: it drives `Mailbox::ensure_inbox` +
 `Mailbox::send` + `Mailbox::poll` through a real gRPC server and a real
 DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
+
+The cross-node harness boots two authenticated daemons. It checks an idle tail,
+a peer write that wakes it, four concurrent tails receiving all 128 ordered
+messages, and a reverse acknowledgement. It then runs two real scode processes
+and verifies that the receiver displays the sender's message. CI runs this
+workflow against the daemon release pinned in Cargo.lock. Failures include
+daemon log tails; set `NEXUS_A2A_KEEP_WORK=1` to retain the temporary data and logs.
 
 ## Prereqs
 

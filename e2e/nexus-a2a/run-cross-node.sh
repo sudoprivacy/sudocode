@@ -44,9 +44,21 @@ DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scode-a2a-xnode.XXXXXX")"
 FOUNDER_PID=
 JOINER_PID=
 cleanup() {
+  local status=$?
   [ -n "$JOINER_PID" ] && kill "$JOINER_PID" 2>/dev/null || true
   [ -n "$FOUNDER_PID" ] && kill "$FOUNDER_PID" 2>/dev/null || true
-  rm -rf "$DATA_DIR" 2>/dev/null || true
+  if [ "$status" -ne 0 ]; then
+    for node in founder joiner; do
+      echo "== $node log after cross-node failure ==" >&2
+      # Startup logs contain a join token. Never expose it in CI output.
+      tail -100 "$DATA_DIR/$node.log" 2>/dev/null | sed -E 's/K10[^[:space:]]+/[REDACTED JOIN TOKEN]/g' >&2 || true
+    done
+  fi
+  if [ "${NEXUS_A2A_KEEP_WORK:-0}" = 1 ]; then
+    echo "Retained cross-node work directory: $DATA_DIR"
+  else
+    rm -rf "$DATA_DIR" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT
 
@@ -137,6 +149,7 @@ RECEIVER_BUNDLE="$(authon_mint "team-lead")" || exit 1
 SENDER_BUNDLE="$(authon_mint "xnode-sender")" || exit 1
 
 echo "== restart the founder =="
+mv "$DATA_DIR/founder.log" "$DATA_DIR/founder-bootstrap.log"
 env $NO_CONV \
 NEXUS_DATA_DIR="$(native_path "$DATA_DIR/a/data")" \
 NEXUS_IDENTITY_DIR="$(native_path "$DATA_DIR/a/id")" \
@@ -144,7 +157,7 @@ NEXUS_API_KEY_SECRET="$SECRET" \
 NEXUS_ADVERTISE_ADDR="$FOUNDER" \
 RUST_LOG=info \
   "$NEXUSD_BIN" --bind-addr "0.0.0.0:${FOUNDER_PORT}" --accept-enrollments \
-  >>"$DATA_DIR/founder.log" 2>&1 &
+  >"$DATA_DIR/founder.log" 2>&1 &
 FOUNDER_PID=$!
 wait_log "$DATA_DIR/founder.log" "stream-wakeup" 45
 

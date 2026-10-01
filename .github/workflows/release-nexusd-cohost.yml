@@ -51,13 +51,13 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-linux-x64
             archive_name: nexusd-cohost-linux-x64.tar.gz
-            max_size_bytes: 54525952  # 52 MiB — measured 51,997,848 bytes, 4.9% headroom
+            max_size_bytes: 57671680  # 55 MiB — with model drivers: 54,701,888 bytes, 5.4% headroom
           - name: linux-arm64
             os: ubuntu-22.04-arm
             bin: nexusd-cohost
             package_dir: nexusd-cohost-linux-arm64
             archive_name: nexusd-cohost-linux-arm64.tar.gz
-            max_size_bytes: 50331648  # 48 MiB — measured 48,620,624 bytes, 3.5% headroom
+            max_size_bytes: 53477376  # 51 MiB — with model drivers: 51,190,552 bytes, 4.5% headroom
           # Not for deployment — for the cross-machine duet, which runs a real
           # co-host on a developer Mac and a developer Windows box. A daemon you
           # cannot run on the machines you debug from is a daemon you debug by
@@ -67,7 +67,7 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-macos-arm64
             archive_name: nexusd-cohost-macos-arm64.tar.gz
-            max_size_bytes: 44040192  # 42 MiB — measured 42,226,080 bytes, 4.3% headroom
+            max_size_bytes: 47185920  # 45 MiB — with model drivers: 44,696,464 bytes, 5.6% headroom
           # Intel, because the Mac this project actually debugs from is Intel. The
           # first cut of this matrix left it out reasoning "nothing runs a co-host
           # there", and the cross-machine bring-up falsified that within the hour:
@@ -79,13 +79,13 @@ jobs:
             bin: nexusd-cohost
             package_dir: nexusd-cohost-macos-x64
             archive_name: nexusd-cohost-macos-x64.tar.gz
-            max_size_bytes: 46137344  # 44 MiB — measured 43,750,416 bytes, 5.5% headroom
+            max_size_bytes: 48234496  # 46 MiB — with model drivers: 46,141,528 bytes, 4.5% headroom
           - name: windows-x64
             os: windows-2022
             bin: nexusd-cohost.exe
             package_dir: nexusd-cohost-windows-x64
             archive_name: nexusd-cohost-windows-x64.zip
-            max_size_bytes: 41943040  # 40 MiB — measured 39,765,504 bytes, 5.5% headroom
+            max_size_bytes: 44040192  # 42 MiB — with model drivers: 42,127,872 bytes, 4.5% headroom
     defaults:
       run:
         working-directory: rust
@@ -221,7 +221,10 @@ jobs:
       # the ordinary drift of a moving runtime alone.
       #
       # Exact bytes, not `du`, which rounds to a block and cannot see a 200 KB move.
-      # Every cap in the matrix is measured on these same runners, not estimated.
+      # Every cap in the matrix is measured on these same runners. The model-mount
+      # release enables driver-ai. Builds with model-mount routing measure roughly
+      # 2.4–2.7 MB above the previous daemon-only release baselines. The caps
+      # retain approximately 4–6% headroom above the measured feature-complete build.
       - name: Check binary size
         shell: bash
         env:

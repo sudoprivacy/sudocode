@@ -40,6 +40,45 @@ SUDOROUTER_API_KEY=sk-…funded… SCODE_BIN=$(pwd)/rust/target/debug/scode \
 
 ## Notes / gotchas
 
+### Model routing acceptance
+
+`run-cohost.sh` builds this checkout's daemon, boots it with mTLS, provisions
+`/model` using the node credential, and spawns a managed agent. Its normal mode
+uses the local scripted provider and runs in Rust CI. For real model acceptance:
+
+```sh
+NEXUS_A2A_MODEL_LIVE=1 \
+NEXUS_A2A_MODEL_URL=https://api.sudorouter.ai \
+NEXUS_A2A_MODEL_KEY="$SUDOROUTER_API_KEY" e2e/nexus-a2a/run-cohost.sh
+```
+
+The live journey delegates a fresh VFS quote to a child, checks the parent's
+JSON artifact, sends a second mailbox message that consumes it, and verifies
+the resulting amount. It also reads the native requests persisted under
+`/model` to prove that the parent and child crossed the mount. Task files live
+in a fresh directory under the agent's replicated content mount; `/proc` alone
+provides process metadata, not task storage. Missing
+credentials fail this explicit live run. The disposable daemon is stopped on
+exit; `NEXUS_A2A_KEEP_WORK=1` retains its logs and data for diagnosis.
+
+The ordinary CLI journey uses the existing PTY harness and its isolated config:
+
+```sh
+cd rust
+SCODE_TEST_BACKEND=live SCODE_LIVE_MODEL=claude-sonnet-4-6 \
+  SCODE_LIVE_AUTH_PROFILE=sudorouter cargo test -p rusty-sudocode-cli \
+  --test pty_model_workflow_live -- --ignored --nocapture
+ANTHROPIC_API_KEY="$SUDOROUTER_API_KEY" ANTHROPIC_BASE_URL=https://api.sudorouter.ai \
+  cargo test -p engine-host --test cohost_model_compaction live_checkpoint \
+  -- --ignored --nocapture
+```
+
+The PTY journey verifies child execution, model result summarization, persisted
+compaction, and a resumed artifact after removing the source file. The second
+command exercises a live checkpoint through a real kernel model mount and
+then refuses the next checkpoint by revoking that route. It covers the co-host
+compaction client; the managed-agent mailbox has no `/compact` command.
+
 **Driving a live `scode` needs a PTY, not a pipe.** `printf 'prompt\n' | scode`
 answers and exits — fine for one shot, and `--print` is the supported form of
 it. A *persistent* receiver is the other half of a duet, and feeding it through

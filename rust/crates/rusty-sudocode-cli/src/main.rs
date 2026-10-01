@@ -4213,7 +4213,7 @@ impl LiveCli {
                     is_error,
                 } => {
                     // A successful TodoWrite replaces the shared todo list.
-                    // The iocraft REPL's context panel derives live from the
+                    // The iocraft REPL's TodoSlot derives live from the
                     // tool-result stream it already receives across the seam —
                     // NOT from an engine-side side-channel into the executor
                     // (that was a boundary leak, removed with `set_ui_sender`).
@@ -4229,7 +4229,7 @@ impl LiveCli {
                             // it read the CLI's own disk even when the session
                             // wrote somewhere else.
                             if let Some(todos) = tools::todos_from_tool_result(output) {
-                                ui.update_context(todos);
+                                ui.update_todos(todos);
                             }
                         }
                         // Staging overlay: this call is done — clear its running

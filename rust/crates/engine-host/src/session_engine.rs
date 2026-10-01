@@ -446,6 +446,13 @@ impl SessionEngine {
     /// Config keys ∪ discovery ids, `current` pinned first — the model list the
     /// seam's `ModelChanged` carries and `/model` (no arg) shows.
     fn available_models(&self, current: &str) -> Vec<String> {
+        let catalog = self.lock_session().runtime.api_client().model_catalog();
+        if let Some(catalog) = &catalog {
+            catalog.refresh_in_background();
+        }
+        let _catalog_scope = catalog
+            .as_ref()
+            .map(runtime::model_discovery::ModelCatalog::enter);
         let config = load_sudocode_config_for_current_dir();
         let config_keys: Vec<String> = config.models.keys().cloned().collect();
         let mut available = runtime::model_capabilities::merge_discovery_ids(&config_keys);
@@ -991,6 +998,12 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     // --- config reads (engine SSOT) ------------------------------------------
     /// The model in effect.
     fn current_model(&self) -> String;
+    fn available_models(&self) -> Vec<String> {
+        vec![self.current_model()]
+    }
+    fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
+        None
+    }
     /// The effective permission mode.
     fn current_permission_mode(&self) -> PermissionMode;
     /// The resolved auth mode in effect.
@@ -1043,6 +1056,12 @@ pub trait SessionLifecycle: Send + Sync + 'static {
 }
 
 impl SessionLifecycle for SessionEngine {
+    fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
+        self.lock_session().runtime.api_client().model_catalog()
+    }
+    fn available_models(&self) -> Vec<String> {
+        SessionEngine::available_models(self, &self.session_model())
+    }
     fn session_snapshot(&self) -> runtime::Session {
         self.lock_session().runtime.session().clone()
     }

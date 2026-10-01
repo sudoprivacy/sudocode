@@ -298,12 +298,31 @@ fn config_limit_for(model_id: &str) -> Option<ModelLimitOverride> {
 #[must_use]
 pub fn lookup(model_id: &str) -> Option<ModelCapability> {
     let base = model_id.rsplit('/').next().unwrap_or(model_id);
-    let caps = CAPABILITIES.get_or_init(ModelCapabilitiesFile::default);
+    let active = crate::model_discovery::active_snapshot();
+    let scoped = active.is_some();
+    let caps = active.unwrap_or_else(|| {
+        CAPABILITIES
+            .get_or_init(ModelCapabilitiesFile::default)
+            .clone()
+    });
     let table_entry = caps
         .models
         .iter()
         .find(|(id, _)| id.eq_ignore_ascii_case(base))
-        .map(|(_, cap)| cap.clone());
+        .map(|(_, cap)| cap.clone())
+        .or_else(|| {
+            // Published limits remain useful before the first response. This
+            // fallback does not add IDs to the account's available-model list.
+            scoped
+                .then(ModelCapabilitiesFile::default)
+                .and_then(|bundle| {
+                    bundle
+                        .models
+                        .into_iter()
+                        .find(|(id, _)| id.eq_ignore_ascii_case(base))
+                        .map(|(_, cap)| cap)
+                })
+        });
     let Some(over) = config_limit_for(model_id) else {
         return table_entry;
     };
@@ -377,7 +396,11 @@ pub fn preferred_endpoint_type(model_id: &str) -> Option<String> {
 /// Used by discovery surfaces (`/model`, tab completion, `get_model_info`).
 #[must_use]
 pub fn all_model_ids() -> Vec<String> {
-    let caps = CAPABILITIES.get_or_init(ModelCapabilitiesFile::default);
+    let caps = crate::model_discovery::active_snapshot().unwrap_or_else(|| {
+        CAPABILITIES
+            .get_or_init(ModelCapabilitiesFile::default)
+            .clone()
+    });
     caps.models.keys().cloned().collect()
 }
 
@@ -413,8 +436,12 @@ pub fn context_window_or_default(model_id: &str) -> u32 {
     lookup(model_id)
         .and_then(|cap| cap.context_window)
         .unwrap_or_else(|| {
-            CAPABILITIES
-                .get_or_init(ModelCapabilitiesFile::default)
+            crate::model_discovery::active_snapshot()
+                .unwrap_or_else(|| {
+                    CAPABILITIES
+                        .get_or_init(ModelCapabilitiesFile::default)
+                        .clone()
+                })
                 .default
                 .context_window
         })
@@ -428,8 +455,12 @@ pub fn max_output_tokens_or_default(model_id: &str) -> u32 {
     lookup(model_id)
         .and_then(|cap| cap.max_output_tokens)
         .unwrap_or_else(|| {
-            CAPABILITIES
-                .get_or_init(ModelCapabilitiesFile::default)
+            crate::model_discovery::active_snapshot()
+                .unwrap_or_else(|| {
+                    CAPABILITIES
+                        .get_or_init(ModelCapabilitiesFile::default)
+                        .clone()
+                })
                 .default
                 .max_output_tokens
         })
@@ -579,22 +610,30 @@ pub fn parse_api_response(json: &serde_json::Value) -> Vec<ApiModelEntry> {
             let context_window = entry
                 .get("context_window")
                 .or_else(|| entry.get("context_length"))
+                .or_else(|| entry.get("max_input_tokens"))
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
+                .and_then(|v| u32::try_from(v).ok().filter(|v| *v > 0));
             let max_output_tokens = entry
                 .get("max_output_tokens")
                 .or_else(|| entry.get("max_tokens"))
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
-            let vision_supported = entry.get("vision_supported").and_then(|v| v.as_bool());
+                .and_then(|v| u32::try_from(v).ok().filter(|v| *v > 0));
+            let vision_supported = entry
+                .get("vision_supported")
+                .and_then(|v| v.as_bool())
+                .or_else(|| {
+                    entry
+                        .pointer("/capabilities/image_input/supported")
+                        .and_then(|v| v.as_bool())
+                });
             let image_max_bytes = entry
                 .get("image_max_bytes")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
+                .and_then(|v| u32::try_from(v).ok().filter(|v| *v > 0));
             let image_max_dimension = entry
                 .get("image_max_dimension")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u32);
+                .and_then(|v| u32::try_from(v).ok().filter(|v| *v > 0));
             let supported_endpoint_types = entry
                 .get("supported_endpoint_types")
                 .and_then(|v| v.as_array())

@@ -4343,6 +4343,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tower-http",
+ "tracing",
  "walkdir",
 ]
 

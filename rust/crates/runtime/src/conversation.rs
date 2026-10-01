@@ -193,6 +193,9 @@ pub type AssistantEventStream =
 /// abort signal for instant cancellation.
 #[async_trait]
 pub trait ApiClient: Send {
+    fn model_catalog(&self) -> Option<crate::model_discovery::ModelCatalog> {
+        None
+    }
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError>;
 
     /// Provider-facing model ID for the active route. Config aliases, display
@@ -1696,9 +1699,14 @@ where
             .as_deref()
             .and_then(RuntimeObserver::hook_progress_sink)
             .is_some();
-        let summary = self
-            .run_turn_with_blocks_inner(blocks, prompter, observer)
-            .await;
+        let catalog = self.api_client.model_catalog();
+        let turn = self.run_turn_with_blocks_inner(blocks, prompter, observer);
+        let summary = if let Some(catalog) = catalog {
+            catalog.refresh_in_background();
+            catalog.scope(turn).await
+        } else {
+            turn.await
+        };
         if summary.is_err() {
             self.finish_current_turn_tracking();
         }

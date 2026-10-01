@@ -32,9 +32,22 @@ use runtime::mailbox::{local_pair_root_in, Mailbox};
 
 const BUDGET: Duration = Duration::from_secs(30);
 
-/// Reuse the shared chrome wait with this file's timeout budget.
-fn wait_for_screen(sess: &PtySession, context: &str, predicate: impl Fn(&str) -> bool) -> String {
-    common::expect_screen(sess, predicate, BUDGET, context)
+/// Match physical screen rows: `contents()` joins rows marked as soft-wrapped
+/// by ConPTY, which can join the input to its separators and footer. Keep the
+/// real row boundaries so caret and multiline-order assertions remain exact.
+fn wait_for_screen(sess: &PtySession, context: &str, predicate: impl Fn(&str) -> bool) {
+    common::expect_screen(
+        sess,
+        |_| {
+            sess.render(|screen| {
+                let (_, cols) = screen.size();
+                let rows = screen.raw().rows(0, cols).collect::<Vec<_>>().join("\n");
+                predicate(&rows)
+            })
+        },
+        BUDGET,
+        context,
+    );
 }
 
 /// Only the live input region, excluding queued chips and prior scrollback.

@@ -675,6 +675,31 @@ pub async fn compact_session<C: ApiClient>(
 
     let existing_usage = session.compaction.as_ref().and_then(|value| value.usage);
     let removed = &session.messages[compacted_prefix_len..keep_from];
+    // The tail keeps its thinking blocks, even though the history in front of
+    // them is about to be replaced by a summary and the blocks are therefore
+    // stranded behind a prefix the server never produced. Stripping them looks
+    // like the careful thing to do and is a measured regression: the prefix
+    // cache is a byte hash, so a stranded block is inert, while removing one
+    // the server *did* issue is exactly the root cause signed replay was added
+    // to fix -- and after a compaction the removal is permanent, so every
+    // later request pays it, not just one round-trip.
+    //
+    // Measured on a live route, three interleaved repetitions of each arm,
+    // reading the third request of a post-compaction session
+    // (`ladder/tools/cache_prefix_probe.py --pairs rewrite-keep-stale-block
+    // rewrite-drop-stale-block`):
+    //
+    //   tail keeps the stranded block ... read 1148 / 1132 / 1135
+    //   tail has it stripped ........... read    0 /    0 /    0
+    //
+    // The same probe showed the replay is accepted -- 200, not the 400 that the
+    // "a block is only valid in its original position" reading predicts. Claude
+    // Code agrees in shape: it strips only *reactively*, after the provider
+    // returns one of the "signature in thinking block" / "invalid data in
+    // redacted_thinking block" / "thinking.signature ... field required"
+    // errors, and records a marker so it does not retry forever. A route that
+    // starts rejecting stranded blocks needs that reactive path, not a
+    // pre-emptive strip here.
     let preserved = session.messages[keep_from..].to_vec();
 
     if removed.is_empty() {
@@ -794,6 +819,8 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
 
     let existing_usage = session.compaction.as_ref().and_then(|value| value.usage);
     let removed = &session.messages[compacted_prefix_len..keep_from];
+    // The tail keeps its thinking blocks on purpose; stripping them is a
+    // measured regression. See the note above `preserved` in `compact_session`.
     let preserved = session.messages[keep_from..].to_vec();
 
     if removed.is_empty() {
@@ -803,10 +830,25 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
     let compacted_usage = aggregate_compaction_usage(existing_usage, removed);
     let prompt = build_compaction_prompt(custom_instructions);
 
-    let max_tokens = std::cmp::min(
-        COMPACT_MAX_OUTPUT_TOKENS,
-        crate::model_capabilities::max_output_tokens_or_default(model),
-    );
+    // A request that borrows a turn's cached prefix has to declare the same
+    // `thinking` parameter, and Anthropic ties the thinking budget to the output
+    // cap (`budget_tokens < max_tokens`). So ask for the summary's own allowance
+    // *on top of* the model's thinking budget, rather than letting the provider
+    // clamp the budget down to fit a 12K cap: clamping is what made this
+    // request — the one request in the client whose entire purpose is reusing
+    // the stream's prefix — declare `budget_tokens: 6000` against the turn's
+    // 32000 and read nothing for it, at HTTP 200, with no symptom but the bill.
+    let model_max_output = crate::model_capabilities::max_output_tokens_or_default(model);
+    let summary_max_tokens = std::cmp::min(COMPACT_MAX_OUTPUT_TOKENS, model_max_output);
+    let max_tokens = if api_client.thinking_enabled() {
+        std::cmp::min(
+            model_max_output,
+            summary_max_tokens
+                .saturating_add(crate::model_capabilities::thinking_budget_tokens(model)),
+        )
+    } else {
+        summary_max_tokens
+    };
 
     let request = crate::conversation::ApiRequest {
         system_prompt: system_prompt.clone(),
@@ -815,10 +857,31 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
         pre_compact_discovered_tools: extract_pre_compact_discovered_tools(session),
     };
 
-    let llm_summary = api_client
-        .send_cache_safe_compaction(request, &prompt, max_tokens)
+    let llm_summary = match api_client
+        .send_cache_safe_compaction(request.clone(), &prompt, max_tokens)
         .await
-        .map_err(|error| CompactionError::ApiError(error.to_string()))?;
+    {
+        Ok(summary) => summary,
+        // Correctness before cache efficiency. The larger cap is what keeps the
+        // thinking budget — and so the cached prefix — identical to the turn's,
+        // but `input + max_tokens` is also what the window admits, and this
+        // function runs *after* a provider window rejection as well as from the
+        // proactive threshold. In that band the reservation itself is what
+        // fails, and failing is not an option: compaction is the only thing that
+        // can shrink the history, and a window rejection here is terminal (see
+        // the retry predicate in `compact_session`). Fall back to the summary's
+        // own cap — the shape that shipped before, which costs the prefix read
+        // and succeeds. The client's local preflight rejects an oversized
+        // request without a round-trip, so the common path pays nothing for
+        // having tried.
+        Err(error) if error.is_context_window_blocked() && max_tokens > summary_max_tokens => {
+            api_client
+                .send_cache_safe_compaction(request, &prompt, summary_max_tokens)
+                .await
+                .map_err(|error| CompactionError::ApiError(error.to_string()))?
+        }
+        Err(error) => return Err(CompactionError::ApiError(error.to_string())),
+    };
 
     let discovered = extract_pre_compact_discovered_tools(session);
 
@@ -904,6 +967,8 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
     let keep_from = find_safe_compaction_boundary(session, raw_keep_from, compacted_prefix_len);
     let existing_usage = session.compaction.as_ref().and_then(|value| value.usage);
     let removed = &session.messages[compacted_prefix_len..keep_from];
+    // The tail keeps its thinking blocks on purpose; stripping them is a
+    // measured regression. See the note above `preserved` in `compact_session`.
     let preserved = session.messages[keep_from..].to_vec();
     let compacted_usage = aggregate_compaction_usage(existing_usage, removed);
     let discovered = extract_pre_compact_discovered_tools(session);
@@ -2657,6 +2722,142 @@ mod tests {
             .contains("Cache-safe compaction test"));
     }
 
+    /// Mock that records the output cap of every cache-safe compaction request
+    /// and can fail the first one the way a blocked context window does.
+    struct CapRecorder {
+        thinking: bool,
+        caps: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+        block_first: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::conversation::ApiClient for CapRecorder {
+        async fn stream(
+            &mut self,
+            _request: crate::conversation::ApiRequest,
+        ) -> Result<crate::conversation::AssistantEventStream, crate::conversation::RuntimeError>
+        {
+            Err(crate::conversation::RuntimeError::new("not used"))
+        }
+
+        fn thinking_enabled(&self) -> bool {
+            self.thinking
+        }
+
+        async fn send_cache_safe_compaction(
+            &mut self,
+            _request: crate::conversation::ApiRequest,
+            _compaction_prompt: &str,
+            max_tokens: u32,
+        ) -> Result<String, crate::conversation::RuntimeError> {
+            let first = {
+                let mut caps = self.caps.lock().expect("caps");
+                caps.push(max_tokens);
+                caps.len() == 1
+            };
+            if first && self.block_first {
+                return Err(crate::conversation::RuntimeError::context_window_blocked(
+                    "input length and `max_tokens` exceed context limit",
+                ));
+            }
+            Ok("<summary>\n1. Primary Request and Intent:\n   cap test.\n</summary>".to_string())
+        }
+    }
+
+    fn session_worth_compacting() -> Session {
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("one ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "two ".repeat(200),
+            }]),
+            ConversationMessage::user_text("three ".repeat(200)),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "four ".repeat(200),
+            }]),
+            ConversationMessage::user_text("recent"),
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "kept".to_string(),
+            }]),
+        ];
+        session
+    }
+
+    async fn caps_for_cache_safe_compaction(thinking: bool, block_first: bool) -> Vec<u32> {
+        let caps = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut client = CapRecorder {
+            thinking,
+            caps: std::sync::Arc::clone(&caps),
+            block_first,
+        };
+        super::compact_session_cache_safe(
+            &session_worth_compacting(),
+            super::CompactionConfig {
+                preserve_recent_messages: 2,
+                max_estimated_tokens: 1,
+            },
+            &mut client,
+            "claude-sonnet-4-6",
+            &crate::prompt::SystemPrompt::default(),
+            None,
+        )
+        .await
+        .expect("cache-safe compaction should succeed");
+        drop(client);
+        std::sync::Arc::try_unwrap(caps)
+            .expect("the client is gone, so this is the last handle")
+            .into_inner()
+            .expect("caps")
+    }
+
+    #[tokio::test]
+    async fn cache_safe_compaction_asks_for_a_cap_that_can_host_the_turns_thinking_budget() {
+        // The value of `thinking` is part of Anthropic's cache key, and the API
+        // ties the budget to the output cap (`budget_tokens < max_tokens`). With
+        // a 12K cap the provider clamped the budget to 6000 while the turn whose
+        // prefix this request replays byte-for-byte had declared 32000 — so the
+        // one request built to reuse the cache read none of it, at HTTP 200.
+        // Measured, three interleaved repetitions per arm
+        // (`ladder/tools/cache_prefix_probe.py --pairs budget-changed-on-turn2
+        // thinking-on-returned`): budget changed -> read 0 / write 3132, 3153;
+        // budget unchanged -> read 3041 / 3026 / 3020.
+        let budget = crate::model_capabilities::thinking_budget_tokens("claude-sonnet-4-6");
+        let caps = caps_for_cache_safe_compaction(true, false).await;
+
+        assert_eq!(caps, vec![super::COMPACT_MAX_OUTPUT_TOKENS + budget]);
+        assert!(
+            budget < caps[0],
+            "the provider must not have to clamp the budget: {budget} vs cap {}",
+            caps[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_safe_compaction_keeps_the_small_cap_when_thinking_is_off() {
+        // Nothing to match, so do not reserve window headroom for it.
+        assert_eq!(
+            caps_for_cache_safe_compaction(false, false).await,
+            vec![super::COMPACT_MAX_OUTPUT_TOKENS]
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_safe_compaction_falls_back_to_the_small_cap_when_the_window_rejects_it() {
+        // `input + max_tokens` is what the window admits, and this path also
+        // runs *after* a provider window rejection, where the extra reservation
+        // is exactly what fails. Compaction is the only thing that can shrink
+        // the history and a window rejection here is terminal, so the prefix
+        // read is what gives way — not the compaction.
+        let budget = crate::model_capabilities::thinking_budget_tokens("claude-sonnet-4-6");
+        assert_eq!(
+            caps_for_cache_safe_compaction(true, true).await,
+            vec![
+                super::COMPACT_MAX_OUTPUT_TOKENS + budget,
+                super::COMPACT_MAX_OUTPUT_TOKENS
+            ],
+        );
+    }
+
     #[tokio::test]
     async fn compaction_retries_a_transport_error_then_succeeds() {
         // Phase 3: the retry loop keys off the typed `RuntimeError.is_retryable()`
@@ -2777,6 +2978,72 @@ mod tests {
             CALLS.load(Ordering::Relaxed),
             1,
             "context-window error must not be retried"
+        );
+    }
+
+    #[test]
+    fn compaction_keeps_the_thinking_blocks_in_the_preserved_tail() {
+        // Guards against a plausible-looking regression. The tail's thinking
+        // blocks end up stranded behind a summary that replaced the history
+        // they were produced against, so stripping them reads as the careful
+        // thing to do. Measured live over three interleaved repetitions, the
+        // third request of a post-compaction session read 1148 / 1132 / 1135
+        // with the blocks kept and 0 / 0 / 0 with them stripped: the prefix
+        // cache is a byte hash, so a stranded block is inert, and removing a
+        // block the server did issue is the root cause signed replay exists to
+        // fix. Here the removal would be permanent, so every later request pays
+        // it. Replaying them is also accepted — the probe measured 200, not the
+        // 400 that "a block is only valid in its original position" predicts.
+        let config = CompactionConfig {
+            preserve_recent_messages: 2,
+            max_estimated_tokens: 1,
+        };
+
+        let mut session = Session::new();
+        session.messages = vec![
+            ConversationMessage::user_text("start ".repeat(200)),
+            ConversationMessage::tool_result("t0", "early-tool", "x".repeat(800), false),
+            ConversationMessage::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: "the tail's own reasoning".to_string(),
+                    signature: Some("sig-tail".to_string()),
+                },
+                ContentBlock::Text {
+                    text: "kept".to_string(),
+                },
+            ]),
+            ConversationMessage::assistant(vec![
+                ContentBlock::RedactedThinking {
+                    data: "\"ciphertext\"".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "also kept".to_string(),
+                },
+            ]),
+        ];
+
+        let result = compact_session_sync(&session, config);
+        assert!(result.removed_message_count > 0, "the session must compact");
+
+        let signed = result
+            .compacted_session
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter(|block| matches!(block, ContentBlock::Thinking { .. }))
+            .count();
+        let redacted = result
+            .compacted_session
+            .messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter(|block| matches!(block, ContentBlock::RedactedThinking { .. }))
+            .count();
+        assert_eq!(
+            (signed, redacted),
+            (1, 1),
+            "compaction must carry the tail's thinking blocks through untouched: {:#?}",
+            result.compacted_session.messages
         );
     }
 }

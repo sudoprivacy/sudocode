@@ -115,6 +115,24 @@ pub struct TextCompletionOptions {
     pub max_tokens: u32,
     pub include_tools: bool,
     pub cache_prefix: bool,
+    /// Whether this completion asks the model to think.
+    ///
+    /// It is not only an output-cost knob: the `thinking` parameter is part of
+    /// Anthropic's cache key. A request that replays a prefix the turn stream
+    /// cached while *omitting* `thinking` reads none of it. Measured on a live
+    /// route (`ladder/tools/cache_prefix_probe.py`), same conversation shape,
+    /// one factor changed:
+    ///
+    ///   thinking on both turns ..... turn 2 read 3025 / write  115
+    ///   thinking dropped on turn 2 . turn 2 read    0 / write 3092
+    ///
+    /// Both returned 200 — the blocks in history are accepted either way, so
+    /// nothing fails loudly. It is purely a silent full re-write.
+    ///
+    /// So a completion that exists to *preserve* a prefix has to match the
+    /// stream it borrows from, and one that builds its own prefix is free to
+    /// turn thinking off and save the output tokens.
+    pub thinking_enabled: bool,
 }
 
 /// Provider-neutral completion data; consumers decide whether the finish
@@ -242,6 +260,12 @@ pub trait ApiClient: Send {
                     max_tokens,
                     include_tools: false,
                     cache_prefix: false,
+                    // This request builds its own prefix: a compaction-specific
+                    // system prompt, no tools, and `build_compaction_messages`
+                    // has already stripped the thinking blocks. There is no
+                    // cached prefix to match, so thinking here would only add
+                    // output tokens to a summarization.
+                    thinking_enabled: false,
                 },
             )
             .await?;
@@ -249,6 +273,14 @@ pub trait ApiClient: Send {
     }
 
     /// Shared cache-preserving adapter over the older message prefix.
+    ///
+    /// Every field of this request exists to be byte-identical to the turn
+    /// stream it borrows the cached prefix from — same system prompt, same
+    /// tools, same messages, one user turn appended. `thinking` is part of that
+    /// key too, so it has to come from the client rather than be hardcoded off:
+    /// omitting it re-wrote the entire prefix on a live route while still
+    /// returning 200, which made the one compaction path designed to preserve
+    /// the cache the most expensive one in the client.
     async fn send_cache_safe_compaction(
         &mut self,
         mut request: ApiRequest,
@@ -258,6 +290,7 @@ pub trait ApiClient: Send {
         request
             .messages
             .push(ConversationMessage::user_text(compaction_prompt));
+        let thinking_enabled = self.thinking_enabled();
         let response = self
             .complete_text(
                 request,
@@ -265,6 +298,7 @@ pub trait ApiClient: Send {
                     max_tokens,
                     include_tools: true,
                     cache_prefix: true,
+                    thinking_enabled,
                 },
             )
             .await?;
@@ -2006,10 +2040,23 @@ where
                                                     obs.on_thinking_delta(thinking);
                                                 }
                                             }
-                                            // Ciphertext — there is no delta a
-                                            // renderer could show. It is kept on
-                                            // the message, not surfaced here.
-                                            AssistantEvent::RedactedThinking { .. } => {}
+                                            // Ciphertext: there is no delta a
+                                            // renderer could show. Printing
+                                            // nothing, though, is
+                                            // indistinguishable from a turn that
+                                            // never thought — so say it once per
+                                            // block, through the same channel the
+                                            // thinking text uses so it lands in
+                                            // the same dim style, and with the
+                                            // wording the export already uses.
+                                            // Display only: the block itself is
+                                            // replayed from the message, not from
+                                            // anything the observer saw.
+                                            AssistantEvent::RedactedThinking { .. } => {
+                                                obs.on_thinking_delta(
+                                                    "[thinking: redacted by the provider]\n",
+                                                );
+                                            }
                                             AssistantEvent::TextDelta(delta) => {
                                                 obs.on_text_delta(delta);
                                             }
@@ -5391,6 +5438,145 @@ mod tests {
                 ObservedRuntimeEvent::TextDelta("done".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn redacted_thinking_is_announced_to_the_renderer_and_still_replayed() {
+        /// The provider encrypts a thinking block when the turn trips a safety
+        /// classifier. There is no plaintext for anyone to print, but printing
+        /// nothing is indistinguishable from a turn that never thought — and the
+        /// export already labels it, so the live view has to as well.
+        struct RedactedThinkingApiClient;
+
+        #[async_trait]
+        impl ApiClient for RedactedThinkingApiClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Ok(events_to_stream(vec![
+                    AssistantEvent::RedactedThinking {
+                        data: "\"ciphertext\"".to_string(),
+                    },
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            RedactedThinkingApiClient,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+        let mut observer = RecordingRuntimeObserver::default();
+
+        runtime
+            .run_turn("think briefly", None, Some(&mut observer))
+            .await
+            .expect("conversation loop should succeed");
+
+        assert_eq!(
+            observer.events,
+            vec![
+                ObservedRuntimeEvent::ThinkingDelta(
+                    "[thinking: redacted by the provider]\n".to_string()
+                ),
+                ObservedRuntimeEvent::TextDelta("done".to_string()),
+            ]
+        );
+        // The note exists for the renderer only. What goes back on the wire is
+        // the ciphertext the server sent — that is what keeps the prefix cached.
+        assert_eq!(
+            runtime.session().messages[1].blocks[0],
+            ContentBlock::RedactedThinking {
+                data: "\"ciphertext\"".to_string()
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_safe_compaction_asks_for_thinking_exactly_when_the_stream_does() {
+        use super::{TextCompletion, TextCompletionOptions};
+        use crate::session::ConversationMessage;
+        use std::collections::BTreeSet;
+
+        /// `thinking` is part of Anthropic's cache key, so the compaction built
+        /// to reuse the turn stream's prefix has to ask for thinking exactly
+        /// when the stream does — omitting it re-writes the whole prefix and
+        /// still returns 200, so nothing would fail loudly. The standard
+        /// compaction builds its own prefix and should not pay for thinking it
+        /// cannot reuse.
+        #[derive(Default)]
+        struct OptionRecorder {
+            seen: Vec<TextCompletionOptions>,
+        }
+
+        #[async_trait]
+        impl ApiClient for OptionRecorder {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            fn thinking_enabled(&self) -> bool {
+                true
+            }
+
+            async fn complete_text(
+                &mut self,
+                _request: ApiRequest,
+                options: TextCompletionOptions,
+            ) -> Result<TextCompletion, RuntimeError> {
+                self.seen.push(options);
+                Ok(TextCompletion {
+                    text: "<summary>a checkpoint</summary>".to_string(),
+                    stop_reason: Some("end_turn".to_string()),
+                    has_tool_calls: false,
+                })
+            }
+        }
+
+        let mut client = OptionRecorder::default();
+        client
+            .send_cache_safe_compaction(
+                ApiRequest {
+                    system_prompt: SystemPrompt::default(),
+                    messages: vec![ConversationMessage::user_text("history")],
+                    trace_id: None,
+                    pre_compact_discovered_tools: BTreeSet::default(),
+                },
+                "summarize",
+                12_000,
+            )
+            .await
+            .expect("cache-safe compaction should succeed");
+        client
+            .send_compaction(
+                "claude-sonnet-4-6",
+                "system",
+                vec![ConversationMessage::user_text("history")],
+                12_000,
+            )
+            .await
+            .expect("standard compaction should succeed");
+
+        assert_eq!(
+            client
+                .seen
+                .iter()
+                .map(|options| options.thinking_enabled)
+                .collect::<Vec<_>>(),
+            vec![true, false],
+        );
+        // The other two fields are the rest of what makes the prefix match;
+        // losing either costs the same read as losing `thinking`.
+        assert!(client.seen[0].include_tools);
+        assert!(client.seen[0].cache_prefix);
     }
 
     #[test]

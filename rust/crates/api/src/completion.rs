@@ -57,7 +57,7 @@ impl ProviderClient {
                 None
             },
             stream: true,
-            thinking_enabled: false,
+            thinking_enabled: options.thinking_enabled,
             cache_hints,
             metadata,
             ..Default::default()

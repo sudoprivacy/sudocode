@@ -244,6 +244,36 @@ pub fn request_max_output_tokens(model_id: &str) -> u32 {
         .map_or(heuristic, |registered| heuristic.min(registered))
 }
 
+/// Anthropic's minimum `thinking.budget_tokens`; a smaller budget is rejected.
+pub const MIN_THINKING_BUDGET_TOKENS: u32 = 1024;
+
+/// The `thinking.budget_tokens` every request in a session declares.
+///
+/// A property of the model, deliberately *not* of the request's own
+/// `max_tokens`, because the value of the thinking parameter is part of
+/// Anthropic's prompt-cache key. Deriving it per request from `max_tokens / 2`
+/// meant a compaction request — which asks for a smaller output cap than a
+/// turn — declared a different budget than the turn whose prefix it was
+/// replaying byte-for-byte, and silently read nothing. Measured on a live
+/// route, three interleaved repetitions of each arm, identical prefixes, both
+/// arms HTTP 200
+/// (`ladder/tools/cache_prefix_probe.py --pairs budget-changed-on-turn2
+/// thinking-on-returned`):
+///
+///   budget 2048 on turn 1, 6000 on turn 2 ... read    0 / write 3132, 3153
+///   budget unchanged (control) ............. read 3041 / 3026 / 3020
+///
+/// Half the output budget is generous enough for deep reasoning on a
+/// large-context model (32K on a 64K model) while leaving the other half for
+/// the visible response. The API additionally requires
+/// `budget_tokens < max_tokens`, so a caller that wants this budget honoured
+/// unclamped must ask for an output cap above it — see
+/// `COMPACT_MAX_OUTPUT_TOKENS`'s use in `compact_session_cache_safe`.
+#[must_use]
+pub fn thinking_budget_tokens(model_id: &str) -> u32 {
+    (request_max_output_tokens(model_id) / 2).max(MIN_THINKING_BUDGET_TOKENS)
+}
+
 /// Look up the configured override for a wire model ID, if any.
 fn config_limit_for(model_id: &str) -> Option<ModelLimitOverride> {
     let guard = CONFIG_LIMITS.read().ok()?;

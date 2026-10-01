@@ -18,6 +18,7 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -109,7 +110,7 @@ fn harness() -> &'static Harness {
             "auth_modes": {
                 "api-key": {
                     "anthropic": {
-                        "baseUrl": service.base_url(),
+                        "baseUrl": "nexus:///model",
                         "apiKey": "test-cohost-key",
                     }
                 }
@@ -139,6 +140,35 @@ fn harness() -> &'static Harness {
     })
 }
 
+struct ModelWrites {
+    count: Arc<AtomicUsize>,
+    agent: String,
+}
+impl kernel::core::dispatch::NativeInterceptHook for ModelWrites {
+    fn name(&self) -> &'static str {
+        "model-egress-observer"
+    }
+    fn mutating_path_suffixes(&self) -> &'static [&'static str] {
+        &[".prompt", ".reply"]
+    }
+    fn on_pre(
+        &self,
+        ctx: &kernel::core::dispatch::HookContext,
+    ) -> Result<kernel::core::dispatch::HookOutcome, String> {
+        if let kernel::core::dispatch::HookContext::Write(w) = ctx {
+            if !w.path.starts_with("/model/") {
+                return Ok(kernel::core::dispatch::HookOutcome::Pass);
+            }
+            assert_eq!(w.identity.user_id, "test-owner");
+            assert_eq!(w.identity.agent_id, self.agent);
+            if w.path.ends_with(".prompt") {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        Ok(kernel::core::dispatch::HookOutcome::Pass)
+    }
+}
+
 /// Drive one co-hosted turn and report what came back, and how many times the
 /// model was asked to produce it.
 ///
@@ -162,6 +192,23 @@ fn run_cohost_turn(
     let asked_before = harness.requests_seen();
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
+    let _model = common::mount_model(
+        &kernel,
+        "anthropic",
+        &harness.service.base_url(),
+        "test-cohost-key",
+    );
+    let model_writes = Arc::new(AtomicUsize::new(0));
+    let hook = kernel
+        .enlist_hook_only_service("model-egress-observer")
+        .expect("model observer");
+    kernel.register_service_hook(
+        &hook,
+        Box::new(ModelWrites {
+            count: Arc::clone(&model_writes),
+            agent: agent_id.to_string(),
+        }),
+    );
     let desc = make_desc(pid, agent_id, MODEL);
 
     // The user's side of the VFS: plants the fixture and provisions the
@@ -212,7 +259,21 @@ fn run_cohost_turn(
     handle.abort_signal.abort();
     let _ = handle.join.join();
 
-    let asked = harness.requests_seen() - asked_before;
+    // A prompt write schedules the provider asynchronously. Aborting the agent
+    // after its mailbox reply can race that last HTTP dispatch, even though the
+    // agent thread has joined. Wait for the writes already recorded by the hook
+    // to reach the mock before comparing the two sides of the transport.
+    let expected = model_writes.load(Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut asked = harness.requests_seen() - asked_before;
+    while asked < expected && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        asked = harness.requests_seen() - asked_before;
+    }
+    assert_eq!(
+        expected, asked,
+        "every upstream model call must cross the session filesystem"
+    );
     let reply = reply.unwrap_or_else(|| {
         let raw = user_fs
             .read(&transcript)
@@ -410,4 +471,19 @@ fn a_cohosted_agents_shell_runs_in_its_own_directory() {
         reported.contains(&format!("agents/{agent_id}/shell")),
         "the agent should report its own shell root; got {reported}"
     );
+}
+
+#[test]
+fn a_cohost_subagent_uses_the_same_model_mount_and_identity() {
+    let (body, asked, _fs) = run_cohost_turn(
+        "cohost-delegate",
+        "scode-mock-delegate",
+        true,
+        "Delegate a calculation and send me the result. PARITY_SCENARIO:cohost_delegate",
+    );
+    assert!(
+        body.contains("203"),
+        "the child must return its calculation, got {body}"
+    );
+    assert!(asked >= 3, "both parent and child must reach the provider");
 }

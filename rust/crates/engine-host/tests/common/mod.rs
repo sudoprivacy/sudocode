@@ -33,7 +33,7 @@ use runtime::mailbox::Mailbox;
 /// model the same set. `/sessions` is in it because a co-hosted agent records
 /// its turns there.
 pub fn mount_agent_world(kernel: &Kernel) {
-    for point in ["/proc", "/conversations", "/agents", "/sessions"] {
+    for point in ["/", "/proc", "/conversations", "/agents", "/sessions"] {
         kernel.vfs_router_arc().add_mount(
             point,
             "root",
@@ -179,4 +179,48 @@ pub fn wait_for_agent_reply(
         thread::sleep(Duration::from_millis(100));
     }
     None
+}
+
+/// Install the same model service and provider mount the co-host daemon uses.
+pub fn mount_model(
+    kernel: &Arc<Kernel>,
+    provider: &str,
+    base_url: &str,
+    key: &str,
+) -> tempfile::TempDir {
+    use kernel::hal::object_store_provider::{ObjectStoreProvider, ObjectStoreProviderArgs};
+    use kernel::kernel::convenience::{KernelConvenience, MountOptions};
+    let storage = tempfile::tempdir().expect("model storage");
+    kernel
+        .bring_up_services(vec![llm_mount::service_decl()])
+        .expect("model mount service");
+    let params = [
+        ("base_url".to_string(), base_url.to_string()),
+        ("api_key".to_string(), key.to_string()),
+        (
+            "blob_root".to_string(),
+            storage.path().to_string_lossy().into_owned(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let peer = kernel::hal::peer::NoopPeerBlobClient::arc();
+    let built = backends::provider::DefaultObjectStoreProvider
+        .build(&ObjectStoreProviderArgs {
+            backend_type: provider,
+            backend_name: "model",
+            mount_path: Some("/model"),
+            backend_params: &params,
+            peer_client: &peer,
+            self_address: None,
+            runtime: kernel.runtime(),
+        })
+        .expect("provider mount");
+    kernel
+        .mount(
+            "/model",
+            MountOptions::new("model").with_backend(built.backend.expect("model backend")),
+        )
+        .expect("mount model");
+    storage
 }

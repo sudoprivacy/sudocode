@@ -40,16 +40,25 @@ fn test_model() -> String {
 #[test]
 #[ignore = "live LLM: set ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL (sudorouter)"]
 fn cohost_agent_replies_via_mailbox_with_real_llm() {
-    if std::env::var("ANTHROPIC_API_KEY").is_err()
-        && std::env::var("PROXY_AUTH_TOKEN").is_err()
-        && std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_err()
-    {
-        eprintln!("SKIP: no LLM credentials in env");
-        return;
-    }
-
+    let key = std::env::var("ANTHROPIC_API_KEY").expect("set ANTHROPIC_API_KEY for the live mount");
+    let base_url =
+        std::env::var("ANTHROPIC_BASE_URL").expect("set ANTHROPIC_BASE_URL for the live mount");
+    let config_home = tempfile::tempdir().expect("isolated config home");
+    let model = test_model();
+    let config = serde_json::json!({
+        "auth_modes": {"api-key": {"anthropic": {"baseUrl": "nexus:///model"}}},
+        "models": {model.clone(): {"alias": model, "name": "live model", "input": ["text"],
+            "providers": {"api-key": {"provider": "anthropic", "model": test_model()}}}}
+    });
+    std::fs::write(
+        config_home.path().join("sudocode.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    std::env::set_var("SUDO_CODE_CONFIG_HOME", config_home.path());
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
+    let _model_storage = common::mount_model(&kernel, "anthropic", &base_url, &key);
     let pid = "cohost-live-1";
     let agent_id = "scode-live";
     let user = "user-test";

@@ -71,6 +71,9 @@ fn the_two_hosts_differ_in_exactly_these_ways() {
     let cli = HostContext::for_cli_session(&workspace).expect("build the CLI context");
     let cohost = cohost();
 
+    assert!(!cli.require_model_mount);
+    assert!(cohost.require_model_mount);
+
     // 1. PATH SPELLING. The CLI answers in host paths because the model hands
     //    them to `bash`, which runs on the host and cannot open a VFS path. The
     //    co-host answers in the VFS spelling its kernel serves.

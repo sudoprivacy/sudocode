@@ -44,7 +44,7 @@ fn run(env: &TestEnv, args: &[&str]) {
 }
 
 #[allow(clippy::redundant_closure_for_method_calls)]
-fn resume_turn(env: &TestEnv, path: &Path, prompt: &str) {
+fn resume_turn(env: &TestEnv, path: &Path, prompt: &str) -> String {
     let mut cli = env.spawn(&[
         "--permission-mode",
         "danger-full-access",
@@ -58,6 +58,7 @@ fn resume_turn(env: &TestEnv, path: &Path, prompt: &str) {
     common::expect_input_line(&cli, &prompt[..20], BUDGET, "resumed prompt entered");
     cli.send("\r").unwrap();
     common::expect_turn_complete_after(&cli, &marker, BUDGET, "resumed turn completed");
+    let completed_screen = cli.render(|s| s.contents());
     cli.send("/exit").unwrap();
     common::expect_input_line(&cli, "/exit", BUDGET, "exit entered");
     cli.send("\r").unwrap();
@@ -67,6 +68,7 @@ fn resume_turn(env: &TestEnv, path: &Path, prompt: &str) {
         "{}",
         cli.render(|s| s.contents())
     );
+    completed_screen
 }
 
 fn live_env() -> TestEnv {
@@ -158,12 +160,20 @@ fn delegate_compact_and_resume_a_fresh_quote() {
     );
 
     let output = env.workspace_root().join("approved.json");
-    resume_turn(&env, path,
+    let screen = resume_turn(&env, path,
         &format!("Continue the quote from our checkpoint. Apply the pending discount of 11 to its subtotal. \
          Using only retained context, use write_file to write {} with exactly the fields code, subtotal, \
          discount, total. All amounts are JSON numbers. The absolute output path is given here; \
          do not search directories or read files because the source was removed.", output.display()));
-    let approved: Value = serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    let bytes = fs::read(&output).unwrap_or_else(|error| {
+        let session = Session::load_from_path(path).unwrap();
+        let last_messages: Vec<_> = session.messages.iter().rev().take(6).collect();
+        panic!(
+            "read {}: {error}\nPTY:\n{screen}\nFinal messages:\n{last_messages:#?}",
+            output.display()
+        );
+    });
+    let approved: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         approved,
         json!({"code": code, "subtotal": subtotal, "discount": 11, "total": subtotal - 11})

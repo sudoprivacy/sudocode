@@ -44,6 +44,36 @@ This is the same filesystem a co-hosted agent runs on inside
 `nexusd-cluster`, reached through the same tools. The two hosts differ in
 which kernel answers, not in what a tool call means.
 
+## Co-hosted model requests
+
+Co-hosted agents require a Nexus model mount. Build `nexusd-cohost` with
+`--features daemon,driver-ai` and provision an `anthropic` or `openai` mount
+through the daemon's typed `Setattr` RPC (`entry_type: 2`). The mount owns
+`base_url`, `api_key` and `blob_root` in its `backend_params`.
+
+Point the corresponding provider in `sudocode.json` at that VFS path:
+
+```json
+{
+  "auth_modes": {
+    "api-key": {
+      "anthropic": { "baseUrl": "nexus:///model" }
+    }
+  }
+}
+```
+
+Keep the normal model-to-provider mapping. Credentials belong to the mount;
+scode does not load a provider credential for a `nexus://` route. Requests
+and streamed responses use the session's filesystem identity and kernel
+hooks. Subagents inherit the same requirement, including fallback models,
+summaries, compaction and Anthropic token estimates. A missing or refused
+mount returns an error; an HTTP fallback is refused.
+
+The supported formats are Anthropic Messages, OpenAI Chat Completions and
+OpenAI Responses. Gemini and Codex subscription routes are refused in a
+co-host. Standalone CLI sessions retain their configured HTTP connections.
+
 ## Linux sandbox
 
 On Linux `scode` can run tools inside a user-namespace sandbox via

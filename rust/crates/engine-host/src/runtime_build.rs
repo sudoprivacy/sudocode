@@ -37,6 +37,8 @@ use crate::tool_executor::{permission_policy, CliToolExecutor};
 /// agent's identity and the skills listing from one would force it to invent a
 /// plausible path and hope all four derivations agreed with each other.
 pub struct HostContext {
+    /// Co-hosted model traffic must use the session's Nexus filesystem.
+    pub require_model_mount: bool,
     /// Filesystem the file tools read and write through, and the SSOT for the
     /// root relative tool paths resolve against ([`runtime::FsBackend::working_root`]).
     ///
@@ -122,6 +124,7 @@ impl HostContext {
             config_root: cwd,
             agent_name: Some(agent_name),
             mailbox: None,
+            require_model_mount: false,
         })
     }
 
@@ -157,6 +160,7 @@ impl HostContext {
             config_root: std::env::current_dir()?,
             agent_name: Some(agent_name.to_string()),
             mailbox: Some(mailbox),
+            require_model_mount: true,
         })
     }
 
@@ -715,6 +719,10 @@ pub(crate) fn build_runtime_with_plugin_state(
         tool_registry.clone(),
         config.enable_tools,
         config.allowed_tools.clone(),
+        &engine_core::ModelAccess {
+            fs: Arc::clone(&host.fs),
+            require_mount: host.require_model_mount,
+        },
     ) {
         Ok(client) => client,
         Err(error) => {

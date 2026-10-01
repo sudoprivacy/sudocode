@@ -292,6 +292,13 @@ impl AnthropicClient {
         self
     }
 
+    pub(crate) fn set_nexus_transport(
+        &mut self,
+        transport: crate::nexus_transport::NexusTransport,
+    ) {
+        self.http.set_nexus_transport(transport);
+    }
+
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         // OAuth subscription tokens must always use the direct Anthropic API.
@@ -698,27 +705,32 @@ impl AnthropicClient {
         apply_request_metadata(&mut request_body, request);
         self.prepend_oauth_system_prefix(&mut request_body);
         dump_request_body("count_tokens", &request_body);
-        let mut builder = self
-            .http
-            .raw()
-            .post(&request_url)
-            .header("content-type", "application/json");
+        let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
         if let Some(api_key) = self.auth.api_key() {
-            builder = builder.header("x-api-key", api_key);
+            headers.push(("x-api-key".to_string(), api_key.to_string()));
         }
         if let Some(token) = self.auth.bearer_token() {
-            builder = builder.bearer_auth(token);
+            headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
-        for (header_name, header_value) in self.request_profile.header_pairs() {
-            builder = builder.header(header_name, header_value);
+        for (name, value) in self.request_profile.header_pairs() {
+            headers.push((name.clone(), value.clone()));
         }
-        let response = builder
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(ApiError::from)?;
+        let response = self
+            .http
+            .send_json(
+                &request_url,
+                &headers,
+                &request_body,
+                &RetryPolicy {
+                    max_retries: 0,
+                    ..RetryPolicy::DEFAULT
+                },
+                expect_success,
+                None,
+            )
+            .await?
+            .response;
 
-        let response = expect_success(response).await?;
         let body = response.text().await.map_err(ApiError::from)?;
         let parsed = serde_json::from_str::<CountTokensResponse>(&body).map_err(|error| {
             ApiError::json_deserialize("Anthropic count_tokens", &request.model, &body, error)

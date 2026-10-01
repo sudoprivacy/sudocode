@@ -193,6 +193,11 @@ pub type AssistantEventStream =
 /// abort signal for instant cancellation.
 #[async_trait]
 pub trait ApiClient: Send {
+    /// Whether this session forbids model HTTP outside its Nexus mount.
+    fn requires_model_mount(&self) -> bool {
+        false
+    }
+
     fn model_catalog(&self) -> Option<crate::model_discovery::ModelCatalog> {
         None
     }
@@ -642,6 +647,8 @@ pub struct ToolDispatchContext {
     pub parent_thinking_enabled: bool,
     /// The parent's routing key, inherited verbatim by spawned subagents.
     pub parent_routing_session_id: Option<String>,
+    /// Host policy inherited by every child, including fallback and summary calls.
+    pub parent_requires_model_mount: bool,
     /// Where a spawned sub-agent reports what it is doing, if the renderer
     /// asked for that (see [`RuntimeObserver::subagent_sink`]).
     pub subagent_sink: Option<crate::subagent_events::SubagentSink>,
@@ -2220,6 +2227,7 @@ where
                 parent_reasoning_effort: self.api_client.reasoning_effort().map(str::to_string),
                 parent_thinking_enabled: self.api_client.thinking_enabled(),
                 parent_routing_session_id: self.api_client.routing_session_id().map(str::to_string),
+                parent_requires_model_mount: self.api_client.requires_model_mount(),
                 subagent_sink: observer.as_deref().and_then(RuntimeObserver::subagent_sink),
                 tool_use_id: None,
                 parent_permission_mode: Some(self.permission_policy.active_mode()),

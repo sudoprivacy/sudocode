@@ -113,6 +113,7 @@ impl RetryPolicy {
 #[derive(Clone)]
 pub struct HttpTransport {
     inner: reqwest::Client,
+    nexus: Option<crate::nexus_transport::NexusTransport>,
     session_tracer: Option<SessionTracer>,
     retry_notifier: Option<std::sync::Arc<dyn RetryNotifier>>,
 }
@@ -138,9 +139,17 @@ impl HttpTransport {
     pub fn new() -> Self {
         Self {
             inner: build_http_client_or_default(),
+            nexus: None,
             session_tracer: None,
             retry_notifier: None,
         }
+    }
+
+    pub(crate) fn set_nexus_transport(
+        &mut self,
+        transport: crate::nexus_transport::NexusTransport,
+    ) {
+        self.nexus = Some(transport);
     }
 
     pub fn set_retry_notifier(&mut self, notifier: Option<std::sync::Arc<dyn RetryNotifier>>) {
@@ -240,7 +249,9 @@ impl HttpTransport {
             }
 
             // Build and send request.
-            let send_result = {
+            let send_result = if let Some(nexus) = &self.nexus {
+                nexus.send(url, headers, body, &request_id).await
+            } else {
                 let mut builder = self.inner.post(url);
                 for (name, value) in headers {
                     builder = builder.header(name.as_str(), value.as_str());

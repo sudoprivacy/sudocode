@@ -31,11 +31,13 @@ daemon log tails; set `NEXUS_A2A_KEEP_WORK=1` to retain the temporary data and l
 
 ## Prereqs
 
-- Docker (a nexus daemon image — a nexus artifact, not built here). Default
-  `nexusd-cluster-cohost:latest`; override with `NEXUS_DAEMON_IMAGE`. Build once
-  from the nexus repo (see `dockerfiles/Dockerfile.nexusd-{cluster,cohost}`).
-- Rust toolchain (the harness runs the `runtime` integration tests on the host
-  against the containerized daemon).
+- Rust toolchain and Bash. The harness runs Rust integration tests and real PTYs
+  against local daemon processes.
+- `run.sh` and `run-cross-node.sh` download the daemon release pinned in
+  Cargo.lock. Set `NEXUSD_BIN` to use an existing matching binary.
+- `run-cohost.sh` builds the co-host from this checkout unless
+  `NEXUSD_COHOST_BIN` is supplied. Building it requires `protoc`; the release
+  workflow uses version 3.20.2 on macOS and Windows.
 
 ## Run
 

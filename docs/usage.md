@@ -54,6 +54,12 @@ theme-selected muted foreground without an additional dim attribute; cache
 health indicators keep their semantic colors. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
 
+Resizing the terminal reflows the live UI in place: status, Todo, and queued
+message panels remain transient rather than leaving duplicate frames in the
+conversation. The current input draft is retained. For UI that fits within
+the viewport, resize clears only the live UI from its retained start position,
+without clearing the preceding conversation or purging terminal scrollback.
+
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:
 

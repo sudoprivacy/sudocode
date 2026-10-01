@@ -190,6 +190,8 @@ version = "0.2.20"
 dependencies = [
  "base64 0.22.1",
  "criterion",
+ "futures-util",
+ "http",
  "httpdate",
  "reqwest 0.12.28",
  "runtime",
@@ -1547,6 +1549,7 @@ dependencies = [
  "commands",
  "engine-core",
  "kernel",
+ "llm-mount",
  "managed-agent",
  "mock-anthropic-service",
  "nexus-vfs-client",

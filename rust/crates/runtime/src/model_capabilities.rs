@@ -1,13 +1,22 @@
-//! Model Capabilities Service — dynamic model metadata from sudorouter.
+//! Model capabilities — context window and max output tokens per wire model ID.
 //!
-//! Maintains a per-agent-type SSOT file at
-//! `{config_home}/cache/model-capabilities.json` that maps wire model IDs to
-//! their context window and max output token limits. The file is refreshed
-//! asynchronously from sudorouter's `/v1/models` endpoint and read
-//! synchronously by `model_token_limit()` on the API hot path.
+//! **Live values do not come from here.** [`crate::model_discovery::ModelCatalog`]
+//! pulls `/v1/models` every few minutes and keeps a *per-route* snapshot under
+//! `{config_home}/cache/model-catalogs/<hash>.json`; [`lookup`] reads that
+//! snapshot first. Two models with the same name on two gateways have different
+//! limits, which is why the live store is keyed by endpoint + credential and
+//! this module is not.
 //!
-//! Fallback chain:
-//!   SSOT file (last pull or bundled initial) → heuristic (opus 32k, others 64k)
+//! What this module owns is the answer when there is no snapshot yet — first
+//! launch, or the gateway unreachable:
+//!
+//! 1. the bundled table compiled into the binary ([`BUNDLED_CAPABILITIES`]),
+//! 2. then `{config_home}/cache/model-capabilities.json`, which only ever holds
+//!    what some *earlier* scode wrote there,
+//! 3. then the bundled `default` entry for a model nobody curates.
+//!
+//! The order of 1 and 2 is the whole point and it used to be the other way
+//! around; see [`load`].
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,12 +26,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs_backend::FsBackend;
 
-/// Bundled model capabilities shipped with the binary. Serves as the initial
-/// SSOT file content on first launch (before the first successful API pull).
+/// Bundled model capabilities shipped with the binary. Authoritative for every
+/// model it curates; see [`load`] for why it outranks the on-disk file.
 const BUNDLED_CAPABILITIES: &str = include_str!("model-capabilities.bundled.json");
-
-/// Stale threshold: refresh if `updated_at` is older than this.
-const TTL_SECS: u64 = 24 * 60 * 60; // 24 hours
 
 /// Token limit + image-cap metadata for a single model.
 ///
@@ -466,25 +472,32 @@ pub fn max_output_tokens_or_default(model_id: &str) -> u32 {
         })
 }
 
-/// Load the SSOT file into the in-memory snapshot. Call once at startup.
+/// Load the on-disk fallback into the in-memory snapshot. Call once at startup.
 ///
-/// If the file doesn't exist, copies the bundled defaults into place and
-/// loads those.
+/// If the file doesn't exist, copies the bundled table into place and loads that.
 ///
-/// The `default` entry always comes from the bundled seed, never from disk:
-/// no refresh writes that field, so the binary is its only author, and reading
-/// the stale on-disk copy froze every install at whatever value its *first*
-/// scode version shipped. `models` is still read from disk — that half really
-/// is refreshed data and the bundle is only its seed.
+/// **The bundled table wins over the file, per model.** The file used to win,
+/// on the stated grounds that "`models` really is refreshed data and the bundle
+/// is only its seed". That stopped being true when discovery moved to the
+/// per-route catalog in [`crate::model_discovery`]: nothing in the product
+/// writes this file's `models` any more, so a disk entry can only be what some
+/// *older binary* left there, and letting it outrank the current binary pins
+/// every install to its own history. Measured on a real install: the file still
+/// said `claude-opus-5-5: 200_000/64_000` — a window copied from a stale
+/// `default` by a pre-fix binary — a day after the bundled table was corrected
+/// to the real 1M, and no code path could ever have healed it. With no catalog
+/// snapshot (first launch, or the gateway down) that is autocompaction at a
+/// fifth of the real budget, i.e. five times the prefix rebuilds.
+///
+/// Entries the bundle does *not* curate are kept: they can only have come from
+/// a gateway that listed a model this binary has never heard of, and dropping
+/// them would lose `endpoint_types`, which picks the wire format.
 pub fn load(config_home: &Path, backend: &dyn FsBackend) {
     let path = cache_path(config_home);
     let file = match read_file(backend, &path) {
-        Some(mut f) => {
-            f.default = ModelCapabilitiesFile::default().default;
-            f
-        }
+        Some(from_disk) => bundled_over_disk(from_disk),
         None => {
-            // First launch: seed with bundled defaults.
+            // First launch: seed with the bundled table.
             let default = ModelCapabilitiesFile::default();
             let _ = write_file(backend, &path, &default);
             default
@@ -494,90 +507,36 @@ pub fn load(config_home: &Path, backend: &dyn FsBackend) {
     let _ = CAPABILITIES.set(file);
 }
 
-/// Returns `true` if the cached data is stale (older than TTL or missing).
-#[must_use]
-pub fn is_stale(config_home: &Path, backend: &dyn FsBackend) -> bool {
-    let path = cache_path(config_home);
-    match read_file(backend, &path) {
-        Some(file) => {
-            let now = now_secs();
-            now.saturating_sub(file.updated_at) > TTL_SECS
-        }
-        None => true,
-    }
-}
-
-/// Merge API response data into the SSOT file and write it atomically.
+/// Overlay the bundled table on what the file holds: the bundle owns `default`
+/// and every model it curates, the file keeps the rest.
 ///
-/// `api_models` is the parsed `/v1/models` response `data` array — each
-/// entry should have `id`, and optionally `context_window` + `max_output_tokens`.
-/// Existing entries from the bundled JSON or previous pulls are preserved for
-/// models the API doesn't cover.
-///
-/// Token limits come from the live response when it documents them, else from
-/// the bundled seed, else nowhere — a listed-but-undocumented model is stored
-/// with its limits unset rather than with a copy of `default`. Note that the
-/// previous on-disk limits are deliberately *not* a fallback: reusing them is
-/// how a fabricated window survived every later refresh.
-///
-/// Returns the number of models with capability metadata that were written.
-pub fn merge_and_write(
-    config_home: &Path,
-    backend: &dyn FsBackend,
-    api_models: &[ApiModelEntry],
-) -> Result<usize, std::io::Error> {
-    let path = cache_path(config_home);
+/// Split out as a pure function so the precedence can be tested without the
+/// `CAPABILITIES` `OnceLock` — which only accepts one value per process and so
+/// cannot express "load this, now load that" in a test.
+fn bundled_over_disk(from_disk: ModelCapabilitiesFile) -> ModelCapabilitiesFile {
     let bundled = ModelCapabilitiesFile::default();
-    let mut file = read_file(backend, &path).unwrap_or_else(|| bundled.clone());
-    // Same rule as `load`: the bundle owns `default`, disk owns `models`.
-    file.default = bundled.default;
-
-    let mut count = 0usize;
-    for entry in api_models {
-        // Models with capability metadata get full entries.
-        if let (Some(cw), Some(mo)) = (entry.context_window, entry.max_output_tokens) {
-            file.models.insert(
-                entry.id.clone(),
-                ModelCapability {
-                    context_window: Some(cw),
-                    max_output_tokens: Some(mo),
-                    vision_supported: entry.vision_supported,
-                    image_max_bytes: entry.image_max_bytes,
-                    image_max_dimension: entry.image_max_dimension,
-                    endpoint_types: entry.supported_endpoint_types.clone(),
-                },
-            );
-            count += 1;
-        } else if entry.supported_endpoint_types.is_some() {
-            // Listed with no token metadata. Record what the gateway did say —
-            // `endpoint_types` decides the wire format, so dropping the model
-            // entirely would cost more than an unknown window does — and take
-            // the limits from the bundled seed if it curates this model,
-            // otherwise leave them unset.
-            //
-            // The limits are recomputed from scratch every refresh rather than
-            // carried over from the previous entry. Carrying them over is what
-            // made this branch's old `default` copy permanent: sudorouter lists
-            // `claude-opus-5-5` with endpoint types and no token metadata, so
-            // every refresh re-confirmed a 200K window on a 1M model.
-            let curated = bundled.models.get(&entry.id);
-            let mut cap = file
-                .models
-                .get(&entry.id)
-                .cloned()
-                .unwrap_or_else(ModelCapability::undocumented);
-            cap.context_window = curated.and_then(|c| c.context_window);
-            cap.max_output_tokens = curated.and_then(|c| c.max_output_tokens);
-            cap.endpoint_types = entry.supported_endpoint_types.clone();
-            file.models.insert(entry.id.clone(), cap);
-            count += 1;
-        }
+    let mut models = from_disk.models;
+    for (id, cap) in bundled.models {
+        models.insert(id, cap);
     }
-
-    file.updated_at = now_secs();
-    write_file(backend, &path, &file)?;
-    Ok(count)
+    ModelCapabilitiesFile {
+        updated_at: from_disk.updated_at,
+        default: bundled.default,
+        models,
+    }
 }
+
+/// `is_stale` and `merge_and_write` used to live here: a 24h TTL on the file and
+/// a merge that folded a `/v1/models` response into it. Both are gone because
+/// neither had a caller outside tests once discovery moved to the per-route
+/// catalog, and their contract -- "the file holds refreshed data" -- is exactly
+/// the premise that let a stale per-model window outrank the binary's own table.
+/// A dead function stating a false invariant is worse than no function: the test
+/// that proved `merge_and_write` healed a fabricated window
+/// (`refresh_heals_a_stale_cache_instead_of_re_confirming_it`) passed for a day
+/// while the install it was written for stayed poisoned, because nothing called
+/// the function under test. The healing now happens in `load`, on the path that
+/// actually runs. `parse_api_response` below stays -- `model_discovery` uses it.
 
 /// A single model entry from the sudorouter `/v1/models` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -754,5 +713,69 @@ mod tests {
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].context_window, Some(200000));
         assert!(entries[1].context_window.is_none());
+    }
+    /// The bundled table outranks a stale per-model entry in the file, and a
+    /// model only the file knows about survives.
+    ///
+    /// The left-hand number is what a real install carried for a day:
+    /// `claude-opus-5-5` at a 200K window, copied from a stale `default` by a
+    /// binary that predated the correction, in a file nothing refreshes. With
+    /// the file winning, the only way out was deleting it by hand.
+    #[test]
+    fn bundled_table_outranks_a_stale_file_entry() {
+        let bundled = ModelCapabilitiesFile::default();
+        let curated = bundled
+            .models
+            .get("claude-opus-5-5")
+            .cloned()
+            .expect("the bundle must curate claude-opus-5-5 for this test to mean anything");
+        assert_ne!(
+            curated.context_window,
+            Some(200_000),
+            "the bundle's own value must differ from the stale one, or this test              cannot tell precedence from coincidence"
+        );
+
+        let mut models = BTreeMap::new();
+        models.insert(
+            "claude-opus-5-5".to_string(),
+            ModelCapability {
+                context_window: Some(200_000),
+                max_output_tokens: Some(64_000),
+                ..ModelCapability::undocumented()
+            },
+        );
+        models.insert(
+            "gateway-only-model".to_string(),
+            ModelCapability {
+                endpoint_types: Some(vec!["anthropic".to_string()]),
+                ..ModelCapability::undocumented()
+            },
+        );
+        let merged = bundled_over_disk(ModelCapabilitiesFile {
+            updated_at: 1,
+            default: DefaultLimits {
+                context_window: 200_000,
+                max_output_tokens: 64_000,
+            },
+            models,
+        });
+
+        assert_eq!(
+            merged.models["claude-opus-5-5"].context_window, curated.context_window,
+            "a curated model must come from the binary, not from the file"
+        );
+        assert_eq!(
+            merged.models["gateway-only-model"].endpoint_types,
+            Some(vec!["anthropic".to_string()]),
+            "a model the bundle does not curate must survive -- endpoint_types              picks the wire format"
+        );
+        assert!(
+            merged.models["gateway-only-model"].context_window.is_none(),
+            "and it must not acquire an invented window on the way through"
+        );
+        assert_eq!(
+            merged.default.context_window, bundled.default.context_window,
+            "`default` follows the binary too"
+        );
     }
 }

@@ -126,6 +126,40 @@ async fn discovery_refreshes_live_limits_and_isolates_endpoint_and_key() {
         same.model_ids(),
         vec!["claude-unseen-2040", "second-page-only"]
     );
+    // A model the gateway lists *without* token metadata. The limits must come
+    // from the bundled table when it curates the model, and from `default` when
+    // it does not -- never from a per-model copy of `default`, which is what
+    // made a fabricated window indistinguishable from a documented one.
+    // `claude-opus-5-5` is the live shape: sudorouter returns only its id and
+    // `supported_endpoint_types`.
+    *state.body.lock().unwrap() = json!({"data":[
+        {"id":"claude-opus-5-5","supported_endpoint_types":["anthropic"]},
+        {"id":"gateway-only-model","supported_endpoint_types":["openai"]}
+    ]});
+    first.refresh(true).await.unwrap();
+    same.scope(async {
+        let curated = runtime::model_capabilities::lookup("claude-opus-5-5")
+            .expect("a listed model must resolve");
+        assert_eq!(
+            curated.context_window,
+            Some(1_000_000),
+            "an undocumented but curated model takes the binary's number"
+        );
+        assert_eq!(curated.max_output_tokens, Some(128_000));
+        let unknown = runtime::model_capabilities::lookup("gateway-only-model")
+            .expect("a listed model must resolve");
+        assert!(
+            unknown.context_window.is_none(),
+            "a model nobody curates must carry no window of its own"
+        );
+        assert_eq!(
+            unknown.endpoint_types,
+            Some(vec!["openai".to_string()]),
+            "what the gateway did say must survive -- it picks the wire format"
+        );
+    })
+    .await;
+
     *state.body.lock().unwrap() = json!({"data":[{"id":"claude-unseen-2040","context_window":2000000,"max_output_tokens":100000}]});
     first.refresh(true).await.unwrap();
     assert_eq!(same.model_ids(), vec!["claude-unseen-2040"]);

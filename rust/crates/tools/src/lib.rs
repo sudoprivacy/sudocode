@@ -7519,6 +7519,21 @@ impl ApiClient for ProviderRuntimeClient {
         self.chain.first().map(|entry| entry.model.as_str())
     }
 
+    /// The routing key this sub-agent's own requests carry, so anything it
+    /// spawns keeps it.
+    ///
+    /// Left to the trait default this returned `None`, which is not merely a
+    /// missing convenience: `ConversationRuntime` reads it to fill
+    /// `parent_routing_session_id` on every tool dispatch, so a sub-agent that
+    /// spawned a further agent handed the child nothing, and the grandchild's
+    /// requests went out with no `metadata.user_id` at all. A pooled upstream
+    /// then has no stable session key for them and re-picks an account per
+    /// turn — the grandchild pays a full prefix rebuild each time, on a family
+    /// of requests whose whole point is that they share the parent's prefix.
+    fn routing_session_id(&self) -> Option<&str> {
+        self.execution.routing_session_id.as_deref()
+    }
+
     /// The runtime's default cannot see the tool definitions attached to
     /// every request, and this client attaches the subagent's whole allowed
     /// set. Left to the default the budget would be too generous by exactly

@@ -93,7 +93,7 @@ for i in $(seq 1 30); do
   if probe=$(NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
       "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored 2>&1) \
       && printf '%s' "$probe" | grep -q "1 passed"; then
-    echo "   writable after ~$((i * 4))s"
+    echo "   writable on attempt $i"
     ready=1
     break
   fi

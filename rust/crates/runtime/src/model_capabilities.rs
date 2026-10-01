@@ -538,7 +538,6 @@ fn bundled_over_disk(from_disk: ModelCapabilitiesFile) -> ModelCapabilitiesFile 
 /// the function under test. The healing now happens in `load`, on the path that
 /// actually runs. `parse_api_response` below stays -- `model_discovery` uses it.
 
-
 /// A single model entry from the sudorouter `/v1/models` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiModelEntry {

@@ -419,4 +419,3 @@ fn context_window_resolves_from_ssot_with_default_fallback() {
 // `model_capabilities::tests::bundled_table_outranks_a_stale_file_entry`, and
 // "a model listed without token metadata gets no invented window" is
 // `model_discovery_http::discovery_refreshes_live_limits_and_isolates_endpoint_and_key`.
-

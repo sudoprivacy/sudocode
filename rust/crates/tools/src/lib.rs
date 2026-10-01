@@ -7575,7 +7575,13 @@ impl ApiClient for ProviderRuntimeClient {
                 request,
                 options,
                 tools,
-                self.execution.request_metadata(),
+                api::SessionRequestFields {
+                    metadata: self.execution.request_metadata(),
+                    // Same value `stream` below sends, for the same reason: a
+                    // subagent's compaction replays the prefix its own turns
+                    // wrote, so the session-level parameters have to match.
+                    reasoning_effort: self.execution.reasoning_effort.clone(),
+                },
             )
             .await
     }

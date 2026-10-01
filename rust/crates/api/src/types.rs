@@ -141,6 +141,35 @@ impl RequestMetadata {
     }
 }
 
+/// Session-level request fields a borrowed transport cannot derive for itself.
+///
+/// [`ProviderClient::complete_text`](crate::ProviderClient::complete_text)
+/// builds its own [`MessageRequest`] rather than borrowing the turn stream's,
+/// so every field the stream fills from session state has to be restated there
+/// or it silently falls back to the type's default. Three measured cache
+/// regressions came from exactly that gap, all on the compaction request whose
+/// only purpose is to reuse the prefix a turn just wrote: `thinking` omitted,
+/// `thinking.budget_tokens` derived from the request's own `max_tokens`
+/// instead of the model's, and `reasoning_effort` omitted. Anthropic's cache
+/// key covers the request parameters and not just the messages, so each of
+/// those rewrote the entire prefix — and returned 200 while doing it, which is
+/// why none of them surfaced as an error.
+///
+/// Grouping them gives a session-level field one obvious home, and
+/// `cache_safe_request_mirrors_the_stream` in `completion.rs` fails to compile
+/// when a new field on `MessageRequest` has not been classified.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionRequestFields {
+    /// Routing key — see [`RequestMetadata`].
+    pub metadata: Option<RequestMetadata>,
+    /// Reasoning effort for OpenAI-compatible reasoning models. Session-level
+    /// state (`--reasoning-effort`, or an agent definition), so a completion
+    /// that replays a turn's prefix has to declare the same value the turns
+    /// declare, and a summary generated at a different effort than the user
+    /// asked for is wrong on its own terms.
+    pub reasoning_effort: Option<String>,
+}
+
 /// Stable, opaque identifier for this machine and user.
 ///
 /// It is not optional padding. A pooling upstream that takes the JSON branch

@@ -873,7 +873,9 @@ version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a68fa787550392a9d58f44c21a3022cfb3ea3e2458b7f85d3b399d0ceeccf409"
 dependencies = [
+ "async-trait",
  "nix 0.27.1",
+ "tokio",
  "winapi",
 ]
 
@@ -4324,6 +4326,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "command-group",
  "contracts",
  "criterion",
  "cron",

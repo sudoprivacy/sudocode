@@ -3,8 +3,9 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use command_group::AsyncCommandGroup;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
 
 use crate::hooks::HookAbortSignal;
@@ -333,12 +334,16 @@ async fn execute_bash_async(
     detect_and_emit_ship_prepared(&input.command, &cwd);
 
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
-    command.stdin(Stdio::null());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     command.kill_on_drop(true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let output = command.output();
-    tokio::pin!(output);
+    let mut child = command.group().kill_on_drop(true).spawn()?;
+    let mut stdout_pipe = child.inner().stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.inner().stderr.take().expect("stderr piped");
     let timeout_sleep = tokio::time::sleep(Duration::from_millis(timeout_ms));
     tokio::pin!(timeout_sleep);
     let abort_wait = async {
@@ -350,25 +355,47 @@ async fn execute_bash_async(
     };
     tokio::pin!(abort_wait);
 
-    let output = tokio::select! {
-        biased;
-        () = &mut abort_wait => {
+    // Keep the group handle outside the output future so cancellation can kill
+    // descendants as well as the shell, including on Windows (Job Object).
+    let result = {
+        let output = async {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let (_, _, status) = tokio::try_join!(
+                stdout_pipe.read_to_end(&mut stdout),
+                stderr_pipe.read_to_end(&mut stderr),
+                child.wait(),
+            )?;
+            Ok::<_, io::Error>(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        };
+        tokio::pin!(output);
+        tokio::select! {
+            biased;
+            () = &mut abort_wait => Err(false),
+            () = &mut timeout_sleep => Err(true),
+            result = &mut output => Ok(result?),
+        }
+    };
+    let output = match result {
+        Ok(output) => output,
+        Err(is_timeout) => {
+            child.kill().await?;
+            let message = if is_timeout {
+                format!("Command exceeded timeout of {timeout_ms} ms")
+            } else {
+                String::from("Command interrupted by user")
+            };
             return Ok(interrupted_bash_output(
-                "Command interrupted by user",
-                "interrupted",
+                &message,
+                if is_timeout { "timeout" } else { "interrupted" },
                 input.dangerously_disable_sandbox,
                 Some(sandbox_status),
             ));
         }
-        () = &mut timeout_sleep => {
-            return Ok(interrupted_bash_output(
-                &format!("Command exceeded timeout of {timeout_ms} ms"),
-                "timeout",
-                input.dangerously_disable_sandbox,
-                Some(sandbox_status),
-            ));
-        }
-        result = &mut output => result?,
     };
 
     let stdout = truncate_output(
@@ -473,10 +500,10 @@ async fn execute_bash_streaming(
     command.kill_on_drop(true);
 
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = command.spawn()?;
+    let mut child = command.group().kill_on_drop(true).spawn()?;
 
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
+    let stdout = child.inner().stdout.take().expect("stdout piped");
+    let stderr = child.inner().stderr.take().expect("stderr piped");
 
     let mut stdout_reader = tokio::io::BufReader::new(stdout);
     let mut stderr_reader = tokio::io::BufReader::new(stderr);
@@ -544,7 +571,7 @@ async fn execute_bash_streaming(
         tokio::select! {
             biased;
             () = &mut abort_wait => {
-                let _ = child.kill().await;
+                child.kill().await?;
                 return Ok(interrupted_bash_output(
                     "Command interrupted by user",
                     "interrupted",
@@ -553,7 +580,7 @@ async fn execute_bash_streaming(
                 ));
             }
             _ = tokio::time::sleep_until(timeout_deadline) => {
-                let _ = child.kill().await;
+                child.kill().await?;
                 return Ok(interrupted_bash_output(
                     &format!("Command exceeded timeout of {timeout_ms} ms"),
                     "timeout",

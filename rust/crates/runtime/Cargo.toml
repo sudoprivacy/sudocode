@@ -13,6 +13,7 @@ async-trait = "0.1"
 axum = { workspace = true }
 base64 = "0.22"
 chrono = "0.4"
+command-group = { version = "5", features = ["with-tokio"] }
 # Cron feature: 5-field POSIX schedule parsing + next-run computation
 # (`cron` takes a 6-field expr, so the scheduler prepends a `0` seconds
 # field to the CC-standard 5-field input) and per-job IANA timezones.

@@ -32,17 +32,9 @@ use runtime::mailbox::{local_pair_root_in, Mailbox};
 
 const BUDGET: Duration = Duration::from_secs(30);
 
-/// Wait for a rendered state, rather than guessing how long a redraw takes.
+/// Reuse the shared chrome wait with this file's timeout budget.
 fn wait_for_screen(sess: &PtySession, context: &str, predicate: impl Fn(&str) -> bool) -> String {
-    let deadline = Instant::now() + BUDGET;
-    loop {
-        let screen = sess.render(|screen| screen.raw().contents());
-        if predicate(&screen) {
-            return screen;
-        }
-        assert!(Instant::now() < deadline, "{context}\nPTY:\n{screen}");
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    common::expect_screen(sess, predicate, BUDGET, context)
 }
 
 /// Only the live input region, excluding queued chips and prior scrollback.

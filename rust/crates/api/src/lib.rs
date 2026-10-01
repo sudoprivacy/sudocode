@@ -58,8 +58,8 @@ pub use types::{
     CacheHints, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
     ContentBlockStopEvent, ImageSource, InputContentBlock, InputMessage, MessageDelta,
     MessageDeltaEvent, MessageRequest, MessageResponse, MessageStartEvent, MessageStopEvent,
-    OutputContentBlock, RequestMetadata, StreamEvent, ToolChoice, ToolDefinition,
-    ToolResultContentBlock, Usage,
+    OutputContentBlock, RequestMetadata, SessionRequestFields, StreamEvent, ToolChoice,
+    ToolDefinition, ToolResultContentBlock, Usage,
 };
 
 pub use telemetry::{

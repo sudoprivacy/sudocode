@@ -13,55 +13,73 @@
 
 use crate::{
     CacheHints, InputContentBlock, InputMessage, MessageRequest, OutputContentBlock,
-    ProviderClient, RequestMetadata, ToolDefinition, ToolResultContentBlock,
+    ProviderClient, SessionRequestFields, ToolDefinition, ToolResultContentBlock,
 };
 use runtime::{
     ApiRequest, ContentBlock, ConversationMessage, MessageRole, RuntimeError, TextCompletion,
     TextCompletionOptions,
 };
 
+/// Build the request `complete_text` sends.
+///
+/// Split out from the send so the parity test below can inspect it without a
+/// live provider: the whole bug class this path keeps hitting is a field the
+/// turn stream sets and this builder forgets, which no amount of testing the
+/// *response* can catch.
+fn cache_safe_request(
+    model: &str,
+    request: &ApiRequest,
+    options: TextCompletionOptions,
+    tools: Option<Vec<ToolDefinition>>,
+    session: SessionRequestFields,
+) -> MessageRequest {
+    let cache_hints =
+        (options.cache_prefix && !request.system_prompt.is_empty()).then(|| CacheHints {
+            system_static: Some(request.system_prompt.static_text()),
+            system_dynamic: Some(request.system_prompt.dynamic_text()),
+            breakpoint_last_message: true,
+        });
+    MessageRequest {
+        model: model.into(),
+        max_tokens: options.max_tokens,
+        messages: convert_messages(&request.messages),
+        system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
+        tools: if options.include_tools {
+            tools.filter(|tools| !tools.is_empty())
+        } else {
+            None
+        },
+        stream: true,
+        thinking_enabled: options.thinking_enabled,
+        reasoning_effort: session.reasoning_effort,
+        cache_hints,
+        metadata: session.metadata,
+        ..Default::default()
+    }
+}
+
 impl ProviderClient {
     /// Build and send a text-only request with caller-selected model and schemas.
     /// Return completion metadata unchanged so the consumer can validate it.
     ///
-    /// `metadata` is the caller's routing key, and it is a parameter rather
-    /// than something this function could derive because this transport has
-    /// no session of its own — it serves whichever client calls it. Omitting
-    /// it is the expensive case: compaction goes through here carrying the
-    /// entire conversation, so a compaction request that routes to a
-    /// different upstream account than the turns around it pays a full cold
-    /// write for the whole history, twice — once here, once when the next
-    /// turn lands back on the original account.
+    /// `session` is the caller's session-level state, and it is a parameter
+    /// rather than something this function could derive because this transport
+    /// has no session of its own — it serves whichever client calls it. Both of
+    /// its fields are load-bearing for the cache. Omitting the routing key is
+    /// the expensive case: compaction goes through here carrying the entire
+    /// conversation, so a compaction request that routes to a different
+    /// upstream account than the turns around it pays a full cold write for the
+    /// whole history, twice — once here, once when the next turn lands back on
+    /// the original account.
     pub async fn complete_text(
         &self,
         model: &str,
         request: ApiRequest,
         options: TextCompletionOptions,
         tools: Option<Vec<ToolDefinition>>,
-        metadata: Option<RequestMetadata>,
+        session: SessionRequestFields,
     ) -> Result<TextCompletion, RuntimeError> {
-        let cache_hints =
-            (options.cache_prefix && !request.system_prompt.is_empty()).then(|| CacheHints {
-                system_static: Some(request.system_prompt.static_text()),
-                system_dynamic: Some(request.system_prompt.dynamic_text()),
-                breakpoint_last_message: true,
-            });
-        let message_request = MessageRequest {
-            model: model.into(),
-            max_tokens: options.max_tokens,
-            messages: convert_messages(&request.messages),
-            system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
-            tools: if options.include_tools {
-                tools.filter(|tools| !tools.is_empty())
-            } else {
-                None
-            },
-            stream: true,
-            thinking_enabled: options.thinking_enabled,
-            cache_hints,
-            metadata,
-            ..Default::default()
-        };
+        let message_request = cache_safe_request(model, &request, options, tools, session);
         let response = self
             .send_message_streamed(&message_request, None)
             .await
@@ -248,9 +266,14 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
 
 #[cfg(test)]
 mod tests {
-    use super::convert_messages;
-    use crate::InputContentBlock;
-    use runtime::{ContentBlock, ConversationMessage, MessageRole};
+    use super::{cache_safe_request, convert_messages};
+    use crate::{
+        InputContentBlock, MessageRequest, RequestMetadata, SessionRequestFields, ToolDefinition,
+    };
+    use runtime::{
+        ApiRequest, ContentBlock, ConversationMessage, MessageRole, SystemPrompt,
+        TextCompletionOptions,
+    };
 
     fn assistant(blocks: Vec<ContentBlock>) -> ConversationMessage {
         ConversationMessage {
@@ -269,6 +292,105 @@ mod tests {
             input: "{\"path\":\"a.txt\"}".to_string(),
             thought_signature: None,
         }
+    }
+
+    fn tool_definition() -> ToolDefinition {
+        ToolDefinition {
+            name: "Read".to_string(),
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            defer_loading: false,
+        }
+    }
+
+    /// Every field the turn stream fills from session state has to be restated
+    /// by [`cache_safe_request`] or it silently falls back to the type's
+    /// default — and on Anthropic a request parameter that differs from the one
+    /// the prefix was cached under rewrites the whole prefix and still returns
+    /// 200. Three measured regressions came from that gap, so this test exists
+    /// to make the next one a compile error rather than a quiet bill.
+    #[test]
+    fn cache_safe_request_mirrors_the_stream() {
+        let mut system_prompt = SystemPrompt::default();
+        system_prompt.static_sections.push("be terse".to_string());
+        let request = ApiRequest {
+            system_prompt,
+            messages: vec![assistant(vec![ContentBlock::Text {
+                text: "hi".to_string(),
+            }])],
+            trace_id: None,
+            pre_compact_discovered_tools: std::collections::BTreeSet::new(),
+        };
+        let options = TextCompletionOptions {
+            max_tokens: 12_000,
+            include_tools: true,
+            cache_prefix: true,
+            thinking_enabled: true,
+        };
+        let session = SessionRequestFields {
+            metadata: Some(RequestMetadata::for_session("session-1")),
+            reasoning_effort: Some("high".to_string()),
+        };
+
+        let built = cache_safe_request(
+            "claude-sonnet-4-6",
+            &request,
+            options,
+            Some(vec![tool_definition()]),
+            session.clone(),
+        );
+
+        // Destructured exhaustively on purpose: a new field on `MessageRequest`
+        // breaks this line, and whoever adds it has to classify it here —
+        // mirrored from the session, derived from the request, or deliberately
+        // left at the provider default.
+        let MessageRequest {
+            model,
+            max_tokens,
+            messages,
+            system,
+            tools,
+            tool_choice,
+            stream,
+            temperature,
+            top_p,
+            frequency_penalty,
+            presence_penalty,
+            stop,
+            reasoning_effort,
+            cache_hints,
+            thinking_enabled,
+            metadata,
+        } = built;
+
+        // Mirrored from the session: these are the cache-key fields.
+        assert_eq!(reasoning_effort, session.reasoning_effort);
+        assert_eq!(metadata, session.metadata);
+        assert!(thinking_enabled);
+
+        // Derived from this call's arguments.
+        assert_eq!(model, "claude-sonnet-4-6");
+        assert_eq!(max_tokens, 12_000);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(system.as_deref(), Some("be terse"));
+        assert_eq!(tools.map(|tools| tools.len()), Some(1));
+        assert!(stream, "a non-streaming request of this size dies at ~50s");
+        assert!(cache_hints.is_some(), "this path exists to reuse a prefix");
+
+        // Deliberately left at the provider default. `tool_choice` is the one
+        // worth a note: the stream sends `auto` and this path sends nothing,
+        // which looks like the same bug as the three above. It is not —
+        // measured on a live route, dropping `tool_choice` on the second of two
+        // otherwise identical requests read the full prefix (2985 / 2982 / 2979
+        // against a control of 2998 / 2985, with a negative control in the same
+        // shape reading 0), and Anthropic's default with tools present is `auto`
+        // anyway. Matching it would be churn, not a fix.
+        assert!(tool_choice.is_none());
+        assert!(temperature.is_none());
+        assert!(top_p.is_none());
+        assert!(frequency_penalty.is_none());
+        assert!(presence_penalty.is_none());
+        assert!(stop.is_none());
     }
 
     #[test]

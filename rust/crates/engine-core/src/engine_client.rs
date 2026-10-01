@@ -387,7 +387,13 @@ impl ApiClient for EngineApiClient {
                     request,
                     options,
                     tools,
-                    Some(self.request_metadata()),
+                    api::SessionRequestFields {
+                        metadata: Some(self.request_metadata()),
+                        // Mirrors the turn stream below. A completion that
+                        // exists to reuse a turn's prefix has to declare the
+                        // same session-level parameters the turn declared.
+                        reasoning_effort: self.reasoning_effort.clone(),
+                    },
                 )
                 .await
         };

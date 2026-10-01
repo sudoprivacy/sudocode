@@ -18,6 +18,8 @@
     "kimi-k2.5": { "context_window": 256000, "max_output_tokens": 16384 },
     "kimi-k1.5": { "context_window": 256000, "max_output_tokens": 16384 },
     "Kimi-K2.6": { "context_window": 256000, "max_output_tokens": 16384 },
+    "gpt-4o": { "context_window": 128000, "max_output_tokens": 16384 },
+    "gpt-4o-mini": { "context_window": 128000, "max_output_tokens": 16384 },
     "gpt-4.1": { "context_window": 1047576, "max_output_tokens": 32768 },
     "gpt-4.1-mini": { "context_window": 1047576, "max_output_tokens": 32768 },
     "gpt-4.1-nano": { "context_window": 1047576, "max_output_tokens": 32768 },

@@ -162,6 +162,13 @@ ceiling is lower, every request fails:
 <400> InternalError.Algo.InvalidParameter: Range of max_tokens should be [1, 32768]
 ```
 
+The bundled GPT-4o and GPT-4o mini entries use the documented 128,000-token
+context window and 16,384-token output ceiling
+([GPT-4o](https://developers.openai.com/api/docs/models/gpt-4o),
+[GPT-4o mini](https://developers.openai.com/api/docs/models/gpt-4o-mini)).
+This prevents an undocumented gateway entry from receiving the 64,000-token
+fallback and rejecting even a short prompt.
+
 Two optional fields on the model entry override the table:
 
 ```jsonc

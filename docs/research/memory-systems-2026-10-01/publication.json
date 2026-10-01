@@ -1,0 +1,19 @@
+{
+  "investigation_date": "2026-10-01",
+  "document_version": "1.1",
+  "theme": "dark",
+  "repository": "sudoprivacy/sudocode",
+  "branch": "main",
+  "share_id": "GjvKdQIaDJwrSNsD",
+  "share_url": "https://s.shareone.vip/s/codex-claude-code-sudocode-memory-systems",
+  "remote_url": "https://github.com/sudoprivacy/sudocode/blob/main/docs/research/memory-systems-2026-10-01/memory-systems-comparison.html",
+  "filename": "codex-claude-code-sudocode-memory-systems.html",
+  "source_html": "memory-systems-comparison.html",
+  "diagram_sources": "diagram-sources.json",
+  "allow_comments": true,
+  "update_existing_share": true,
+  "tables": 12,
+  "diagrams": 5,
+  "sections": 10,
+  "html_sha256": "f0abafa5dbba5861a54e5de4abac14dd4f2b1c3bd2f6f1a7b880455f446042e3"
+}

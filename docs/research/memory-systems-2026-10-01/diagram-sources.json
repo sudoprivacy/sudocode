@@ -1,0 +1,35 @@
+{
+  "renderer": "mermaid@11.12.0",
+  "diagrams": [
+    {
+      "id": "fig-codex",
+      "mermaid": "flowchart LR\n  A[\"memory_summary.md\"] --> B[\"摘要：2,500 tokens\"]\n  B --> C[\"developer 消息\"]\n  C --> D[\"搜索 MEMORY.md\"]\n  D --> E[\"按需读取证据\"]\n  classDef codex fill:#163b35,stroke:#79dec4,color:#dcfff5;\n  class A,B,C,D,E codex;"
+    },
+    {
+      "id": "fig-cc",
+      "mermaid": "flowchart LR\n  A[\"记忆使用规则\"] --> B[\"system prompt\"]\n  C[\"索引的受限前缀\"] --> D[\"instructions 上下文\"]\n  D --> E[\"user meta 消息\"]\n  E --> F[\"Read 记忆正文\"]\n  classDef cc fill:#422e26,stroke:#ffbc99,color:#ffe5d6;\n  class A,B,C,D,E,F cc;"
+    },
+    {
+      "id": "fig-sudo",
+      "mermaid": "flowchart LR\n  A[\"读取 MEMORY.md\"] --> D[\"追加完整索引\"]\n  B[\"扫描并解析条目\"] --> C[\"按 name 排序\"]\n  C --> E[\"正文：每条 2,000 字符\"]\n  D --> F[\"预算内追加条目\"]\n  E --> F\n  F --> G[\"进入 system prompt\"]\n  classDef sudo fill:#2d3156,stroke:#b9bfff,color:#e7e9ff;\n  class A,B,C,D,E,F,G sudo;"
+    },
+    {
+      "id": "fig-background",
+      "mermaid": "flowchart LR\n  A[\"符合条件的旧会话\"] --> B[\"逐会话提取\"]\n  B --> C[\"经验与会话摘要\"]\n  C --> D[\"合并整理\"]\n  D --> E[\"更新摘要与索引\"]\n  E --> F[\"后续会话使用\"]\n  F -. \"使用反馈\" .-> D\n  classDef codex fill:#163b35,stroke:#79dec4,color:#dcfff5;\n  class A,B,C,D,E,F codex;"
+    },
+    {
+      "id": "fig-scope",
+      "mermaid": "flowchart TB\n  U[\"用户：偏好与工作习惯\"] --> R[\"仓库：架构、测试、稳定约定\"]\n  R --> W1[\"worktree A：分支与当前任务\"]\n  R --> W2[\"worktree B：分支与当前任务\"]\n  G[\"agent 类型：专门经验\"] -. \"按任务与权限使用\" .-> R\n  classDef shared fill:#163b35,stroke:#79dec4,color:#dcfff5;\n  classDef local fill:#422e26,stroke:#ffbc99,color:#ffe5d6;\n  classDef agent fill:#2d3156,stroke:#b9bfff,color:#e7e9ff;\n  class U,R shared;\n  class W1,W2 local;\n  class G agent;"
+    }
+  ],
+  "theme": "dark",
+  "theme_variables": {
+    "fontFamily": "Segoe UI, Microsoft YaHei, sans-serif",
+    "fontSize": "18px",
+    "primaryColor": "#163b35",
+    "primaryTextColor": "#e8eef7",
+    "primaryBorderColor": "#79dec4",
+    "lineColor": "#9db1cb",
+    "background": "#111c2b"
+  }
+}

@@ -52,6 +52,7 @@ pub struct EngineApiClient {
     /// an unroutable model in terms of its own routing groups, which the user
     /// never configured; naming the account turns that into an actionable edit.
     account: Option<String>,
+    catalog: Option<runtime::model_discovery::ModelCatalog>,
 }
 
 impl EngineApiClient {
@@ -78,6 +79,10 @@ impl EngineApiClient {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let resolved: ResolvedProvider =
             api::resolve_provider_from_config(model, Some(auth_mode), sudocode_config)?;
+        let catalog = api::model_discovery::model_catalog_for_resolved(&resolved);
+        if let Some(catalog) = &catalog {
+            catalog.refresh_in_background();
+        }
         let mut client = ProviderClient::from_resolved(&resolved, Some(auth_mode))?
             .with_prompt_cache(PromptCache::new(session_id));
         let sink = Arc::new(SudoclawLogSink::new()?);
@@ -111,6 +116,7 @@ impl EngineApiClient {
             reasoning_effort: None,
             thinking_enabled: true,
             account,
+            catalog,
         })
     }
 
@@ -320,6 +326,9 @@ impl api::RetryNotifier for RetrySinkNotifier {
 
 #[async_trait]
 impl ApiClient for EngineApiClient {
+    fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
+        self.catalog.clone()
+    }
     fn wire_model_id(&self) -> Option<&str> {
         Some(&self.model)
     }
@@ -340,6 +349,10 @@ impl ApiClient for EngineApiClient {
         _model: &str,
         system_prompt: &runtime::SystemPrompt,
     ) -> runtime::ContextBudget {
+        let _catalog_scope = self
+            .catalog
+            .as_ref()
+            .map(runtime::model_discovery::ModelCatalog::enter);
         // Keyed on `self.model`, not the caller's model name, because that is
         // provably what the request will carry (`stream` below builds its
         // `MessageRequest` with `self.model` and
@@ -360,21 +373,29 @@ impl ApiClient for EngineApiClient {
         request: ApiRequest,
         options: runtime::TextCompletionOptions,
     ) -> Result<runtime::TextCompletion, RuntimeError> {
-        let tools = (options.include_tools && self.enable_tools).then(|| {
-            let mut discovered = tools::extract_discovered_tool_names(&request.messages);
-            discovered.extend(request.pre_compact_discovered_tools.iter().cloned());
-            self.tool_registry
-                .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
-        });
-        self.client
-            .complete_text(
-                &self.model,
-                request,
-                options,
-                tools,
-                Some(self.request_metadata()),
-            )
-            .await
+        let catalog = self.catalog.clone();
+        let request = async {
+            let tools = (options.include_tools && self.enable_tools).then(|| {
+                let mut discovered = tools::extract_discovered_tool_names(&request.messages);
+                discovered.extend(request.pre_compact_discovered_tools.iter().cloned());
+                self.tool_registry
+                    .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
+            });
+            self.client
+                .complete_text(
+                    &self.model,
+                    request,
+                    options,
+                    tools,
+                    Some(self.request_metadata()),
+                )
+                .await
+        };
+        if let Some(catalog) = catalog {
+            catalog.scope(request).await
+        } else {
+            request.await
+        }
     }
 
     fn reasoning_effort(&self) -> Option<&str> {
@@ -390,50 +411,59 @@ impl ApiClient for EngineApiClient {
     }
 
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
-        let is_post_tool = request_ends_with_tool_result(&request);
-        let discovered = self.enable_tools.then(|| {
-            let mut d = tools::extract_discovered_tool_names(&request.messages);
-            d.extend(request.pre_compact_discovered_tools.iter().cloned());
-            d
-        });
-        let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
-            system_static: Some(request.system_prompt.static_text()),
-            system_dynamic: Some(request.system_prompt.dynamic_text()),
-            breakpoint_last_message: true,
-        });
-        let message_request = MessageRequest {
-            model: self.model.clone(),
-            max_tokens: api::max_tokens_for_model(&self.model),
-            messages: tools::convert_messages(&request.messages),
-            system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
-            tools: self.enable_tools.then(|| {
-                self.tool_registry
-                    .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
-            }),
-            tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
-            stream: true,
-            reasoning_effort: self.reasoning_effort.clone(),
-            cache_hints,
-            thinking_enabled: self.thinking_enabled,
-            metadata: Some(self.request_metadata()),
-            ..Default::default()
-        };
+        let catalog = self.catalog.clone();
+        let request = async {
+            let is_post_tool = request_ends_with_tool_result(&request);
+            let discovered = self.enable_tools.then(|| {
+                let mut d = tools::extract_discovered_tool_names(&request.messages);
+                d.extend(request.pre_compact_discovered_tools.iter().cloned());
+                d
+            });
+            let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
+                system_static: Some(request.system_prompt.static_text()),
+                system_dynamic: Some(request.system_prompt.dynamic_text()),
+                breakpoint_last_message: true,
+            });
+            let message_request = MessageRequest {
+                model: self.model.clone(),
+                max_tokens: api::max_tokens_for_model(&self.model),
+                messages: tools::convert_messages(&request.messages),
+                system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
+                tools: self.enable_tools.then(|| {
+                    self.tool_registry
+                        .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
+                }),
+                tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
+                stream: true,
+                reasoning_effort: self.reasoning_effort.clone(),
+                cache_hints,
+                thinking_enabled: self.thinking_enabled,
+                metadata: Some(self.request_metadata()),
+                ..Default::default()
+            };
 
-        // Post-tool continuations get one stall-timeout retry (a nudge); other
-        // turns run a single attempt.
-        let max_attempts = if is_post_tool { 2 } else { 1 };
-        for attempt in 1..=max_attempts {
-            match self
-                .try_start_stream(&message_request, is_post_tool && attempt == 1, is_post_tool)
-                .await
-            {
-                Ok(stream) => return Ok(stream),
-                Err(error)
-                    if error.to_string().contains("post-tool stall") && attempt < max_attempts => {}
-                Err(error) => return Err(error),
+            // Post-tool continuations get one stall-timeout retry (a nudge); other
+            // turns run a single attempt.
+            let max_attempts = if is_post_tool { 2 } else { 1 };
+            for attempt in 1..=max_attempts {
+                match self
+                    .try_start_stream(&message_request, is_post_tool && attempt == 1, is_post_tool)
+                    .await
+                {
+                    Ok(stream) => return Ok(stream),
+                    Err(error)
+                        if error.to_string().contains("post-tool stall")
+                            && attempt < max_attempts => {}
+                    Err(error) => return Err(error),
+                }
             }
+            Err(RuntimeError::new("post-tool continuation nudge exhausted"))
+        };
+        if let Some(catalog) = catalog {
+            catalog.scope(request).await
+        } else {
+            request.await
         }
-        Err(RuntimeError::new("post-tool continuation nudge exhausted"))
     }
 }
 

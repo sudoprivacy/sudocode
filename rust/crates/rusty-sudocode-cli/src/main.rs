@@ -3389,11 +3389,7 @@ fn run_repl_iocraft_dispatch(
                         Ok(Some(SlashCommand::Model { model: None })) => {
                             // Interactive model picker via iocraft InputSlot.
                             let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
-                            let sudocode_config = load_sudocode_config_for_current_dir();
-                            let config_keys: Vec<String> =
-                                sudocode_config.models.keys().cloned().collect();
-                            let models =
-                                runtime::model_capabilities::merge_discovery_ids(&config_keys);
+                            let models = cli_lock.lifecycle.available_models();
                             let current = cli_lock.lifecycle.current_model();
                             drop(cli_lock);
 
@@ -3897,54 +3893,6 @@ impl LiveCli {
         let auth_resolved = resolve_auth_mode(&model, auth_mode, &sudocode_config)?;
         tools::set_global_auth_mode(auth_resolved);
 
-        // Fire-and-forget: refresh model capabilities from sudorouter if stale.
-        // The engine owns its own tokio runtime; the renderer keeps none, so
-        // this rides a detached thread with its own short-lived current-thread rt.
-        if runtime::model_capabilities::is_stale(&config_home, &runtime::fs_backend::StdFsBackend) {
-            if let Some((base_url, api_key)) =
-                engine_host::config::extract_sudorouter_credentials(&sudocode_config)
-            {
-                let ch = config_home.clone();
-                std::thread::spawn(move || {
-                    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    else {
-                        return;
-                    };
-                    rt.block_on(async move {
-                        let client = match reqwest::Client::builder()
-                            .timeout(std::time::Duration::from_secs(10))
-                            .build()
-                        {
-                            Ok(c) => c,
-                            Err(_) => return,
-                        };
-                        let url = format!("{}/models", base_url.trim_end_matches('/'));
-                        let resp = match client
-                            .get(&url)
-                            .header("Authorization", format!("Bearer {api_key}"))
-                            .send()
-                            .await
-                        {
-                            Ok(r) if r.status().is_success() => r,
-                            _ => return,
-                        };
-                        let body: serde_json::Value = match resp.json().await {
-                            Ok(v) => v,
-                            Err(_) => return,
-                        };
-                        let entries = runtime::model_capabilities::parse_api_response(&body);
-                        let _ = runtime::model_capabilities::merge_and_write(
-                            &ch,
-                            &runtime::fs_backend::StdFsBackend,
-                            &entries,
-                        );
-                    });
-                });
-            }
-        }
-
         // The one engine owns config + session + runtime SSOT (thinking config,
         // persistence, tracer are all applied inside `SessionEngine::build`).
         let mcp_servers = std::collections::BTreeMap::new();
@@ -4140,6 +4088,10 @@ impl LiveCli {
     /// `None` for a session with no recorded turns (nothing to summarize —
     /// StatusSlot falls back to Tips, as for a brand-new session).
     fn resume_status_line(&self) -> Option<String> {
+        let catalog = self.lifecycle.model_catalog();
+        let _scope = catalog
+            .as_ref()
+            .map(runtime::model_discovery::ModelCatalog::enter);
         let session = self.lifecycle.session_snapshot();
         let tracker = runtime::UsageTracker::from_session(&session);
         if tracker.turns() == 0 {
@@ -4176,6 +4128,7 @@ impl LiveCli {
         let handle = self.lifecycle.session_handle();
         Ok(slash_command_completion_candidates_with_sessions(
             &self.lifecycle.current_model(),
+            self.lifecycle.available_models(),
             Some(&handle.id),
             list_managed_sessions()?
                 .into_iter()
@@ -4475,6 +4428,10 @@ impl LiveCli {
         output: Option<&repl_ui::OutputSender>,
         ui: Option<&repl_ui::UiCommandSender>,
     ) {
+        let catalog = self.lifecycle.model_catalog();
+        let _scope = catalog
+            .as_ref()
+            .map(runtime::model_discovery::ModelCatalog::enter);
         let usage_tracker = self.lifecycle.usage_snapshot();
         // Two different needs from one turn:
         //  - context occupancy is the LATEST request's context_tokens (what the
@@ -5103,9 +5060,7 @@ impl LiveCli {
 
     fn set_model(&mut self, model: Option<String>) -> Result<bool, Box<dyn std::error::Error>> {
         let Some(model) = model else {
-            let sudocode_config = load_sudocode_config_for_current_dir();
-            let config_keys: Vec<String> = sudocode_config.models.keys().cloned().collect();
-            let models = runtime::model_capabilities::merge_discovery_ids(&config_keys);
+            let models = self.lifecycle.available_models();
             let current = self.lifecycle.current_model();
             let default_idx = models.iter().position(|m| *m == current).unwrap_or(0);
             let selection = self.out_suspend(|| {
@@ -5133,6 +5088,10 @@ impl LiveCli {
             ));
             Ok(true)
         } else {
+            let catalog = self.lifecycle.model_catalog();
+            let _scope = catalog
+                .as_ref()
+                .map(runtime::model_discovery::ModelCatalog::enter);
             self.out_println(format_model_report(
                 &report.resolved,
                 report.message_count,
@@ -6354,6 +6313,7 @@ pub(crate) const STUB_COMMANDS: &[&str] = &[
 
 fn slash_command_completion_candidates_with_sessions(
     model: &str,
+    available_models: Vec<String>,
     active_session_id: Option<&str>,
     recent_session_ids: Vec<String>,
 ) -> Vec<(String, String)> {
@@ -6416,15 +6376,8 @@ fn slash_command_completion_candidates_with_sessions(
             .or_insert_with(String::new);
     }
 
-    // Add config-driven model aliases to /model completions.
-    let sudocode_config = load_sudocode_config_for_current_dir();
-    for alias in sudocode_config.models.keys() {
-        completions
-            .entry(format!("/model {alias}"))
-            .or_insert_with(String::new);
-    }
-    // Add capabilities SSOT model IDs to /model completions.
-    for id in runtime::model_capabilities::all_model_ids() {
+    // Reuse the live session's account and endpoint for discovery.
+    for id in available_models {
         completions
             .entry(format!("/model {id}"))
             .or_insert_with(String::new);

@@ -586,6 +586,43 @@ impl TestEnv {
         }
     }
 
+    /// Configure discovery for mock mode; live mode reads the real endpoint.
+    pub fn set_model_catalog(&self, catalog: serde_json::Value) {
+        if let Backend::Mock {
+            _runtime, server, ..
+        } = &self.backend
+        {
+            _runtime.block_on(server.set_model_catalog(catalog));
+        }
+    }
+
+    /// Fetch mock discovery before a one-shot command can consume capabilities.
+    pub fn prime_model_catalog(&self) {
+        if let Backend::Mock {
+            _runtime,
+            server,
+            workspace,
+        } = &self.backend
+        {
+            use runtime::model_discovery::{DiscoverySource, ModelCatalog};
+            let catalog = ModelCatalog::open(
+                &workspace.config_home,
+                DiscoverySource {
+                    models_url: format!("{}/v1/models", server.base_url()),
+                    headers: [
+                        ("x-api-key".into(), "test-pty-key".into()),
+                        ("anthropic-version".into(), "2023-06-01".into()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            );
+            _runtime
+                .block_on(catalog.refresh(true))
+                .expect("prime mock catalog");
+        }
+    }
+
     /// How many `/v1/messages` requests the mock server captured.
     /// Panics in live mode — request counting is mock-only.
     pub fn captured_message_count(&self) -> usize {

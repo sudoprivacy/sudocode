@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use runtime::config_schema::{self, ConfigInputKind, FieldSchema, FieldType};
-use runtime::model_capabilities;
 
-use crate::cli::args::load_sudocode_config_for_current_dir;
 use crate::render::{ansi_fg, theme, DIM, RESET};
 use crate::repl_ui::{self, OutputSender, QuestionOptionView, QuestionPromptView, UiCommandSender};
 use crate::{LiveCli, SlashSelectionHandler};
@@ -232,7 +230,7 @@ fn handle_leaf_edit(
     file_path: &Path,
     file_label: &str,
     breadcrumb: &[String],
-    _cli: &Arc<Mutex<LiveCli>>,
+    cli: &Arc<Mutex<LiveCli>>,
     out: &OutputSender,
 ) -> Option<SlashSelectionHandler> {
     let json_content = std::fs::read_to_string(file_path).unwrap_or_else(|_| "{}".to_string());
@@ -316,9 +314,11 @@ fn handle_leaf_edit(
             )))
         }
         ConfigInputKind::DynamicList => {
-            let sudocode_config = load_sudocode_config_for_current_dir();
-            let config_keys: Vec<String> = sudocode_config.models.keys().cloned().collect();
-            let models = model_capabilities::merge_discovery_ids(&config_keys);
+            let models = cli
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .lifecycle
+                .available_models();
             let current_str = current_val.and_then(|v| v.as_str()).unwrap_or("");
             let options: Vec<QuestionOptionView> = models
                 .iter()

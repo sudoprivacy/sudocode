@@ -363,12 +363,11 @@ fn missing_cli_image_fails_before_model_request() {
 mod image_vlm_mock;
 
 fn mark_model_text_only(env: &TestEnv) {
-    let cache = env.config_home().join("cache");
-    fs::create_dir_all(&cache).unwrap();
-    fs::write(cache.join("model-capabilities.json"), serde_json::json!({
-        "updated_at":0, "default":{"context_window":200000,"max_output_tokens":64000},
-        "models":{"claude-sonnet-4-6":{"context_window":200000,"max_output_tokens":64000,"vision_supported":false}}
-    }).to_string()).unwrap();
+    env.set_model_catalog(serde_json::json!({"data": [{
+        "id": "claude-sonnet-4-6", "context_window": 200000,
+        "max_output_tokens": 64000, "vision_supported": false
+    }]}));
+    env.prime_model_catalog();
 }
 
 #[test]

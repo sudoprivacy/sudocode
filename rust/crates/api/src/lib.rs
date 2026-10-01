@@ -1,5 +1,6 @@
 mod client;
 mod completion;
+pub mod model_discovery;
 pub use completion::convert_messages;
 mod error;
 mod http_client;

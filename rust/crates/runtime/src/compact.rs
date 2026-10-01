@@ -657,6 +657,22 @@ pub async fn compact_session<C: ApiClient>(
     model: &str,
     custom_instructions: Option<&str>,
 ) -> Result<CompactionResult, CompactionError> {
+    let catalog = api_client.model_catalog();
+    let operation = compact_session_inner(session, config, api_client, model, custom_instructions);
+    if let Some(catalog) = catalog {
+        catalog.scope(operation).await
+    } else {
+        operation.await
+    }
+}
+
+async fn compact_session_inner<C: ApiClient>(
+    session: &Session,
+    config: CompactionConfig,
+    api_client: &mut C,
+    model: &str,
+    custom_instructions: Option<&str>,
+) -> Result<CompactionResult, CompactionError> {
     if session.messages.len() <= config.preserve_recent_messages
         || estimate_session_tokens(session) < config.max_estimated_tokens
     {
@@ -796,6 +812,30 @@ pub async fn compact_session<C: ApiClient>(
 ///
 /// Matches CC's `streamCompactSummary` path with `tengu_compact_cache_prefix`.
 pub async fn compact_session_cache_safe<C: ApiClient>(
+    session: &Session,
+    config: CompactionConfig,
+    api_client: &mut C,
+    model: &str,
+    system_prompt: &crate::prompt::SystemPrompt,
+    custom_instructions: Option<&str>,
+) -> Result<CompactionResult, CompactionError> {
+    let catalog = api_client.model_catalog();
+    let operation = compact_session_cache_safe_inner(
+        session,
+        config,
+        api_client,
+        model,
+        system_prompt,
+        custom_instructions,
+    );
+    if let Some(catalog) = catalog {
+        catalog.scope(operation).await
+    } else {
+        operation.await
+    }
+}
+
+async fn compact_session_cache_safe_inner<C: ApiClient>(
     session: &Session,
     config: CompactionConfig,
     api_client: &mut C,

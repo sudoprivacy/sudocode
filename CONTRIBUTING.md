@@ -280,6 +280,14 @@ the PR description first.
 
 ## Required checks
 
+The daily `Model Compatibility` workflow discovers gateway models and runs
+live PTYs in batches of at most eight, with three batches running concurrently.
+Each process has one 90-second deadline. A pass requires exit 0 and the expected
+persisted assistant answer; model names and error text cannot satisfy it.
+`SCODE_COMPAT_REPORT=/absolute/path/report.json` keeps a report outside the
+temporary test workspace and updates it after every model. CI retains partial
+reports and rejects incomplete sweeps or a sweep with no passing models.
+
 CI gates these on every PR. Run them locally before pushing:
 
 ```bash

@@ -684,20 +684,33 @@ pub fn cache_root() -> PathBuf {
     base_cache_root()
 }
 
+/// Resolved through [`runtime::config::default_config_home`] rather than from a
+/// private copy of the same rules, because the two disagreeing is not a
+/// cosmetic bug.
+///
+/// The copy this replaced read `SUDO_CODE_CONFIG_HOME`, then `HOME`, then fell
+/// back to the system temp dir — it was the only home resolver in the workspace
+/// that omitted the Windows `USERPROFILE` fallback (`runtime::config` has it,
+/// the CLI's own test harness was fixed for the same omission). `HOME` is set
+/// inside Git Bash and unset in PowerShell, so on Windows the same machine had
+/// two stores: config loaded from `%USERPROFILE%\.nexus\sudocode` while the
+/// cache was written to `%TEMP%\sudocode-prompt-cache`. That cost three things,
+/// in rising order of importance:
+///
+/// 1. The record landed somewhere Windows disk cleanup deletes, so the
+///    per-request ledger — the only instrument that can attribute a cache break
+///    to a TTL expiry — was disposable.
+/// 2. `stats.json` and the ledger were split across two directories, so no
+///    single store described a user's actual traffic.
+/// 3. `session-state.json` is how break detection remembers the *previous*
+///    request's fingerprint. Resuming a session from a different launch context
+///    silently found no previous state, which disables break detection and the
+///    completion cache for that session — the behavior this module exists to
+///    measure, broken by where it chose to write.
 fn base_cache_root() -> PathBuf {
-    if let Some(config_home) = std::env::var_os("SUDO_CODE_CONFIG_HOME") {
-        return PathBuf::from(config_home)
-            .join("cache")
-            .join("prompt-cache");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".nexus")
-            .join("sudocode")
-            .join("cache")
-            .join("prompt-cache");
-    }
-    std::env::temp_dir().join("sudocode-prompt-cache")
+    runtime::config::default_config_home()
+        .join("cache")
+        .join("prompt-cache")
 }
 
 fn now_unix_secs() -> u64 {
@@ -746,6 +759,58 @@ mod tests {
         assert!(paths.completion_dir.ends_with("completions"));
         assert!(paths.stats_path.ends_with("stats.json"));
         assert!(paths.session_state_path.ends_with("session-state.json"));
+    }
+
+    /// With `HOME` unset the cache must still land next to the config, not in a
+    /// temp directory.
+    ///
+    /// PowerShell and cmd do not set `HOME`; Git Bash does. The resolver this
+    /// replaced fell through to `std::env::temp_dir()` in that case, so the same
+    /// machine wrote its cache to two different places depending on which shell
+    /// launched `scode` — and the PowerShell half landed where Windows disk
+    /// cleanup deletes it. `session-state.json` is what break detection reads to
+    /// learn the previous request's fingerprint, so a split store silently
+    /// disables break detection for a resumed session.
+    #[test]
+    fn cache_root_follows_the_config_home_on_windows_without_home() {
+        let _guard = test_env_lock();
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            ["SUDO_CODE_CONFIG_HOME", "HOME", "USERPROFILE"]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect();
+        let profile = std::env::temp_dir().join(format!(
+            "prompt-cache-userprofile-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+
+        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", &profile);
+        let root = PromptCachePaths::for_session("profile-session").root;
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert_eq!(
+            root,
+            profile
+                .join(".nexus")
+                .join("sudocode")
+                .join("cache")
+                .join("prompt-cache"),
+            "with HOME unset the cache root must follow USERPROFILE, exactly as \
+             runtime::config::default_config_home resolves it — never the system \
+             temp dir"
+        );
     }
 
     #[test]

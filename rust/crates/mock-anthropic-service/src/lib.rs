@@ -1284,7 +1284,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 "toolu_bash_interrupt",
                 "bash",
                 &[
-                    r#"{"command":"printf 'interrupt-start'; sleep 30; printf 'interrupt-done'","timeout":120000}"#,
+                    r#"{"command":"printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'","timeout":120000}"#,
                 ],
             ),
         },
@@ -1849,7 +1849,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "toolu_bash_interrupt",
                 "bash",
                 json!({
-                    "command": "printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
+                    "command": "printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
                     "timeout": 120000
                 }),
             ),

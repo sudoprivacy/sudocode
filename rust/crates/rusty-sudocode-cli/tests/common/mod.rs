@@ -817,6 +817,7 @@ fn spawn_with_workspace(
 ) -> PtySession {
     let bin = scode_bin();
     let bin_str = bin.to_string_lossy().to_string();
+    #[cfg(not(windows))]
     let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
     let home_str = workspace.home.display().to_string();
 
@@ -847,7 +848,16 @@ fn spawn_with_workspace(
     ));
     cmd.push_str(&format!(" HOME={}", shell_quote(&home_str)));
     cmd.push_str(" NO_COLOR=1");
+    // Git Bash already translated its inherited PATH for MSYS. Replacing it
+    // with the native Windows string here makes MSYS parse drive-letter colons
+    // as separators when launching scode, corrupting paths and hiding sh.exe.
+    #[cfg(not(windows))]
     cmd.push_str(&format!(" PATH={}", shell_quote(&path)));
+    // ConPTY starts with the Windows system environment, which may contain
+    // Git's cmd/ but not its POSIX tools. Supply the shell's own tool directory
+    // in MSYS spelling; MSYS converts it once when launching the native scode.
+    #[cfg(windows)]
+    cmd.push_str(" PATH=\"/usr/bin:$PATH\"");
     cmd.push_str(" TERM=xterm");
     // Provide a git identity via the environment (which git honors directly,
     // regardless of HOME/.gitconfig resolution). Without it, tests that drive

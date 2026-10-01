@@ -1,33 +1,31 @@
 //! Resizing inline chrome must not commit old frames into terminal history.
 mod common;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use common::TestEnv;
 use pty_expect::PtySession;
 use runtime::{ContentBlock, ConversationMessage, Session, TokenUsage};
 
+/// The screen once the turn has finished AND stopped repainting.
+///
+/// Stillness alone was the bug: this waited for the whole screen to hold
+/// identical for 200ms, with no precondition that the turn was over. While a
+/// turn runs the chrome animates, so on a slow runner the screen never held
+/// still inside the budget and the test failed as "chrome did not settle" —
+/// about a product that was working, just still working. Gating on the turn
+/// status line first makes stillness a short tail instead of a race.
+///
+/// The count assertion in `assert_single_chrome` still does the real work: the
+/// gate only requires the marker to be PRESENT, so a duplicate that never
+/// resolves is caught there rather than hidden here.
 fn settled_screen(sess: &PtySession) -> String {
-    let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
-    let mut previous = String::new();
-    let mut stable = 0;
-    loop {
-        let screen = sess.render(|s| s.raw().contents());
-        stable = if screen == previous && screen.contains('❯') {
-            stable + 1
-        } else {
-            0
-        };
-        if stable >= 8 {
-            return screen;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "chrome did not settle:\n{screen}"
-        );
-        previous = screen;
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    common::expect_screen_settled(
+        sess,
+        |screen| screen.contains('❯') && screen.contains("turn 1"),
+        common::DEFAULT_TIMEOUT,
+        "chrome did not settle",
+    )
 }
 
 fn assert_single_chrome(screen: &str) {

@@ -109,12 +109,25 @@ fn bash_turn_uses_crlf_and_does_not_staircase() {
         .expect("tool card header line should end with CRLF, not a bare LF");
     sess.expect("│[^\n]*\r\n")
         .expect("tool card body line should end with CRLF, not a bare LF");
-    // The status line is rendered in the StatusSlot::TurnResult ChromeSlot,
-    // above the upper separator. (It is no longer echoed to scrollback — that
-    // duplicated the line in history.) The ChromeSlot line is the sync point.
-    sess.expect("· turn ").expect("turn status line");
-    sess.expect("─{20,}")
-        .expect("separator redrawn after the status line");
+    // The status line and the separator are CHROME — drawn by the renderer, not
+    // appended to a log — so they are waited for on the SCREEN. Asking the byte
+    // stream for them asks about redraw timing instead: matching the status line
+    // consumes the cursor past it, and the separator is then only still in the
+    // stream if something happened to trigger another redraw. On CI nothing did,
+    // and this timed out at 30s on a separator that was on screen the whole
+    // time, with every earlier assertion in this test passing.
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("· turn "),
+        Duration::from_secs(30),
+        "turn status line",
+    );
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains(&"─".repeat(20)),
+        Duration::from_secs(30),
+        "separator drawn with the status line",
+    );
 
     let mut box_indents = indents_of_rows_containing(&sess, "╭─ ");
     box_indents.extend(indents_of_rows_containing(&sess, "│ "));
@@ -268,6 +281,58 @@ fn markdown_showcase_renders_without_spacing_artifacts() {
         inner_indent,
         outer_indent + 2,
         "nested bullet must be indented under its parent: {rows:#?}"
+    );
+
+    sess.send("/exit\r").expect("send /exit");
+    let exit = sess.expect_eof().expect("scode should exit");
+    assert_eq!(exit, 0);
+}
+
+/// Chrome is findable on the SCREEN after the stream cursor has passed it — and
+/// is NOT findable with `expect()`.
+///
+/// This pins the MECHANISM behind the flake rather than its symptom. `expect()`
+/// holds a forward-only cursor into the PTY byte stream, so once a match has
+/// consumed past a chrome row, that row is reachable again only if something
+/// triggers another redraw. Nothing in the product guarantees one, so the wait
+/// is decided by redraw timing and no budget can rescue it — which is why
+/// `bash_turn_uses_crlf_and_does_not_staircase` timed out at 30s on a separator
+/// that was on screen throughout.
+///
+/// The test drains the stream deliberately to put the cursor past the chrome,
+/// then shows the two waits disagree. If `expect()` ever starts succeeding here,
+/// this test has stopped describing the bug and the assertion says so.
+#[test]
+fn chrome_is_on_the_screen_after_the_stream_cursor_has_passed_it() {
+    let env = TestEnv::new("chrome-after-cursor");
+    let mut sess = spawn_iocraft_repl(&env, "workspace-write");
+
+    // The permanent footer is chrome: drawn by the renderer, never appended.
+    let footer = "/exit";
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains(footer),
+        common::DEFAULT_TIMEOUT,
+        "the footer should be drawn at startup",
+    );
+
+    // Drain every byte emitted so far, leaving the cursor at the end.
+    let _ = sess.expect(r"(?s)[\s\S]+");
+
+    // The screen still shows it, because the screen is state, not a log.
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains(footer),
+        Duration::from_secs(2),
+        "the footer is still on screen after the stream was drained",
+    );
+
+    // The stream does not, within a budget far larger than it would need if
+    // this were merely slow. That asymmetry is why chrome waits exist.
+    assert!(
+        sess.expect_within(footer, Duration::from_secs(3)).is_err(),
+        "expect() found chrome after the cursor passed it, so this test no \
+         longer demonstrates the bug the screen waits avoid"
     );
 
     sess.send("/exit\r").expect("send /exit");

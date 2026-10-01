@@ -243,6 +243,7 @@ enum Scenario {
     UnifiedSendFromNamedPeer,
     CohostReply,
     CohostReadThenReply,
+    CohostDelegate,
     CohostShellPwd,
     DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
@@ -358,6 +359,7 @@ impl Scenario {
             "unified_send_from_named_peer" => Some(Self::UnifiedSendFromNamedPeer),
             "cohost_reply" => Some(Self::CohostReply),
             "cohost_read_then_reply" => Some(Self::CohostReadThenReply),
+            "cohost_delegate" => Some(Self::CohostDelegate),
             "cohost_shell_pwd" => Some(Self::CohostShellPwd),
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
@@ -419,6 +421,7 @@ impl Scenario {
             Self::UnifiedSendFromNamedPeer => "unified_send_from_named_peer",
             Self::CohostReply => "cohost_reply",
             Self::CohostReadThenReply => "cohost_read_then_reply",
+            Self::CohostDelegate => "cohost_delegate",
             Self::CohostShellPwd => "cohost_shell_pwd",
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
@@ -861,6 +864,27 @@ fn agent_call_input(
 }
 
 fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> SubagentStep {
+    if matches!(scenario, Scenario::CohostDelegate) {
+        let results = tool_results_by_name(request);
+        return if results.contains_key("send") {
+            SubagentStep::Answer("delegation delivered".to_string())
+        } else if let Some((result, _)) = results.get("Agent") {
+            SubagentStep::Tools(vec![(
+                "toolu_delegate_reply",
+                "send",
+                json!({"to": COHOST_REPLY_TO, "message": result, "summary": "child result"}),
+            )])
+        } else {
+            SubagentStep::Tools(vec![(
+                "toolu_delegate",
+                "Agent",
+                json!({
+                    "description": "cohost calculation", "model": "claude-sonnet", "auth_mode": "api-key", "run_in_background": false,
+                    "prompt": "PARITY_SCENARIO:subagent_calc_child What is 101 + 102? Reply with ONLY the number."
+                }),
+            )])
+        };
+    }
     let done = latest_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
     match (scenario, done) {
@@ -1260,7 +1284,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 "toolu_bash_interrupt",
                 "bash",
                 &[
-                    r#"{"command":"printf 'interrupt-start'; sleep 30; printf 'interrupt-done'","timeout":120000}"#,
+                    r#"{"command":"printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'","timeout":120000}"#,
                 ],
             ),
         },
@@ -1622,7 +1646,8 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             let sum = subagent_child_sum(request);
             final_text_sse(&sum.to_string())
         }
-        Scenario::SubagentEventsSync
+        Scenario::CohostDelegate
+        | Scenario::SubagentEventsSync
         | Scenario::SubagentEventsBackground
         | Scenario::SubagentEventsNested
         | Scenario::SubagentEventsCancel
@@ -1824,7 +1849,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "toolu_bash_interrupt",
                 "bash",
                 json!({
-                    "command": "printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
+                    "command": "printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
                     "timeout": 120000
                 }),
             ),
@@ -2275,7 +2300,8 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             let sum = subagent_child_sum(request);
             text_message_response("msg_subagent_calc_child", &sum.to_string())
         }
-        Scenario::SubagentEventsSync
+        Scenario::CohostDelegate
+        | Scenario::SubagentEventsSync
         | Scenario::SubagentEventsBackground
         | Scenario::SubagentEventsNested
         | Scenario::SubagentEventsCancel
@@ -2333,6 +2359,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::UnifiedSendFromNamedPeer => "req_unified_send_from_named_peer",
         Scenario::CohostReply => "req_cohost_reply",
         Scenario::CohostReadThenReply => "req_cohost_read_then_reply",
+        Scenario::CohostDelegate => "req_cohost_delegate",
         Scenario::CohostShellPwd => "req_cohost_shell_pwd",
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",

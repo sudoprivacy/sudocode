@@ -40,6 +40,7 @@ const POST_TOOL_FINAL_SYNTHESIS_PROMPT: &str = "The previous tool execution is c
 /// The engine's provider client. Produces an incremental
 /// [`AssistantEventStream`]; renders nothing.
 pub struct EngineApiClient {
+    require_model_mount: bool,
     client: ProviderClient,
     session_id: String,
     model: String,
@@ -68,6 +69,7 @@ impl EngineApiClient {
     /// Build a client for `model`, resolving the provider from config + auth
     /// mode (identical resolution to the old CLI client, minus the render
     /// plumbing).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: &str,
         sudocode_config: &SudoCodeConfig,
@@ -76,15 +78,21 @@ impl EngineApiClient {
         tool_registry: GlobalToolRegistry,
         enable_tools: bool,
         allowed_tools: Option<BTreeSet<String>>,
+        access: &api::ModelAccess,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let resolved: ResolvedProvider =
             api::resolve_provider_from_config(model, Some(auth_mode), sudocode_config)?;
-        let catalog = api::model_discovery::model_catalog_for_resolved(&resolved);
+        let catalog = if resolved.base_url.starts_with("nexus://") || access.require_mount {
+            None
+        } else {
+            api::model_discovery::model_catalog_for_resolved(&resolved)
+        };
         if let Some(catalog) = &catalog {
             catalog.refresh_in_background();
         }
-        let mut client = ProviderClient::from_resolved(&resolved, Some(auth_mode))?
-            .with_prompt_cache(PromptCache::new(session_id));
+        let mut client =
+            ProviderClient::from_resolved_with_access(&resolved, Some(auth_mode), access)?
+                .with_prompt_cache(PromptCache::new(session_id));
         let sink = Arc::new(SudoclawLogSink::new()?);
         client = client.with_session_tracer(SessionTracer::new(session_id, sink));
 
@@ -107,6 +115,7 @@ impl EngineApiClient {
         tools::set_global_auth_mode(auth_mode);
 
         Ok(Self {
+            require_model_mount: access.require_mount,
             client,
             session_id: session_id.to_string(),
             model: resolved.model_id.clone(),
@@ -326,6 +335,10 @@ impl api::RetryNotifier for RetrySinkNotifier {
 
 #[async_trait]
 impl ApiClient for EngineApiClient {
+    fn requires_model_mount(&self) -> bool {
+        self.require_model_mount
+    }
+
     fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
         self.catalog.clone()
     }

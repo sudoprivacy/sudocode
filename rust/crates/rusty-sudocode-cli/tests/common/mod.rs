@@ -318,7 +318,9 @@ pub fn screen_tail(sess: &PtySession, chars: usize) -> String {
 pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &str) {
     expect_screen_settled(
         sess,
-        |screen| input_line_of(screen).is_empty(),
+        // A process that has not painted its prompt yet also has an empty
+        // screen. It must not accept keystrokes as a ready REPL.
+        |screen| screen.contains(PROMPT_MARKER) && input_line_of(screen).is_empty(),
         budget,
         &format!("{context}: the input line never cleared"),
     );
@@ -405,7 +407,7 @@ pub fn expect_turn_complete_after(
         let screen = sess.render(|screen| screen.contents());
         let status = turn_status_line(&screen);
         let fresh = !status.is_empty() && status != marker;
-        if fresh && input_line_of(&screen).is_empty() {
+        if fresh && screen.contains(PROMPT_MARKER) && input_line_of(&screen).is_empty() {
             return;
         }
         if Instant::now() >= deadline {

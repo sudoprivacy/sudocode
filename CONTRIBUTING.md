@@ -121,6 +121,14 @@ to change the rule before the unit test lands.
 
 ### Running tests
 
+Acceptance for new or changed behavior starts with the most realistic end-to-end
+run available. Prefer live PTY tests with a real API key for scode, and a real
+daemon or local Docker deployment for infrastructure. Exercise connected user
+steps with fresh data and assert the resulting content, not only success text.
+Commit the live tests after actually running them, or add the end-to-end tests
+to CI. Record the command, result and any remaining coverage limits in the PR;
+mock passes or skipped live tests alone do not complete acceptance.
+
 ```bash
 cd rust/
 cargo test --workspace                     # all tests (PTY tests included)

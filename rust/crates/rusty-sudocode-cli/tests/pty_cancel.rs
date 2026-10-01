@@ -12,9 +12,8 @@ use std::time::Duration;
 /// ESC during a tool call in REPL mode cancels the turn and returns to prompt.
 ///
 /// Uses `bash_interrupt_long_running` (mock: `sleep 30` tool call) to create
-/// a window where ESC can be pressed mid-execution. In live mode the model
-/// may call bash or stream text — either way, ESC should cancel and return
-/// to the `❯` prompt.
+/// a window where ESC can be pressed mid-execution. Both live and mock modes
+/// wait for the command's readiness file before cancelling the running turn.
 #[test]
 fn esc_cancels_turn_in_repl() {
     let env = common::TestEnv::new("esc-repl");
@@ -22,7 +21,7 @@ fn esc_cancels_turn_in_repl() {
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     let prompt = env.prompt(
-        "Run this exact bash command: printf 'esc-start'; sleep 30; printf 'esc-done'",
+        "Run this exact bash command: printf 'ready' > cancel-ready; printf 'esc-start'; sleep 30; printf 'esc-done'",
         "bash_interrupt_long_running",
     );
     let mut sess = env.spawn_with_env(
@@ -46,50 +45,34 @@ fn esc_cancels_turn_in_repl() {
     // Submit the prompt — the tool call takes a while (sleep 30).
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    // Wait for an indicator that the turn is in progress.
-    // Mock: "bash" tool call appears. Live: could be thinking indicator
-    // or model name or the tool call.
-    sess.expect("(?i)(bash|thinking|sonnet|auto|claude|❯)")
-        .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
-            panic!("should see turn activity: {e}\nPTY screen:\n{screen}");
-        });
-
-    // In live mode, wait longer for the API stream to actually start.
-    // The abort signal can only cancel once tokio::select! is polling
-    // the stream — during TLS/connection setup the future hasn't yielded
-    // yet, so the cancel has no effect until streaming begins.
-    // Short delay — just enough for the streaming to start. The prompt
-    // asks for `sleep 30` so the turn should still be running.
-    std::thread::sleep(Duration::from_millis(500));
+    // Only the running Bash command can create this marker. The banner and
+    // echoed prompt can match before the abort monitor is armed, and stdout
+    // may remain buffered until the command finishes.
+    common::expect_screen(
+        &sess,
+        |_| fs::read_to_string(root.join("cancel-ready")).is_ok_and(|s| s == "ready"),
+        if env.is_live() {
+            common::LIVE_TURN_BUDGET
+        } else {
+            env.timeout()
+        },
+        "Bash must start before cancellation",
+    );
 
     // Press ESC to cancel the turn.
     sess.send("\x1b").expect("send ESC");
 
-    // Wait for the cancel to complete and REPL prompt to return.
-    // The cancellation marker or prompt confirms the turn was aborted.
-    let cancel_timeout = if env.is_live() {
-        Duration::from_secs(30)
-    } else {
-        Duration::from_secs(15)
-    };
-    sess.set_default_timeout(cancel_timeout);
-    sess.expect("(?i)(cancelled|interrupted|❯)")
-        .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
-            panic!("ESC should cancel the turn: {e}\nPTY screen:\n{screen}");
-        });
-
-    // Wait for the REPL prompt specifically.
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("should return to prompt after cancel: {e}\nPTY screen:\n{screen}");
-    });
-
-    // Small delay to ensure the REPL is fully ready for input.
-    std::thread::sleep(Duration::from_millis(300));
-
-    sess.send("/exit\r").expect("send exit");
+    // A persistent or replayed prompt is not evidence that ESC cancelled.
+    common::expect_screen(
+        &sess,
+        |screen| screen.to_lowercase().contains("cancelled"),
+        env.timeout(),
+        "ESC must cancel the running turn",
+    );
+    common::expect_input_line_cleared(&sess, env.timeout(), "input ready after cancellation");
+    sess.send("/exit").expect("type exit");
+    common::expect_input_line(&sess, "/exit", env.timeout(), "exit entered");
+    sess.send("\r").expect("submit exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

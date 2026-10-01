@@ -5,6 +5,8 @@ pub use completion::convert_messages;
 mod error;
 mod http_client;
 mod http_transport;
+mod nexus_transport;
+pub use nexus_transport::ModelAccess;
 mod prompt_cache;
 mod providers;
 mod sse;

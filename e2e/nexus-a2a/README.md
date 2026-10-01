@@ -13,6 +13,7 @@ default). The transport lives in `runtime::mailbox` +
 |---|---|---|
 | Unit | `cargo test -p runtime --lib mailbox` | no |
 | Live client round-trip | `e2e/nexus-a2a/run.sh` | no |
+| Cross-node replication and PTY duet | `e2e/nexus-a2a/run-cross-node.sh` | scripted by default |
 | 2-LLM co-host duet | `SUDOROUTER_API_KEY=… SCODE_BIN=… e2e/nexus-a2a/run.sh` | yes (gated) |
 
 The **live round-trip** (`mailbox_nexus_live`, an ignored `runtime` integration
@@ -21,13 +22,22 @@ test) is the piece unit tests can't cover: it drives `Mailbox::ensure_inbox` +
 DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
 
+The cross-node harness boots two authenticated daemons. It checks an idle tail,
+a peer write that wakes it, four concurrent tails receiving all 128 ordered
+messages, and a reverse acknowledgement. It then runs two real scode processes
+and verifies that the receiver displays the sender's message. CI runs this
+workflow against the daemon release pinned in Cargo.lock. Failures include
+daemon log tails; set `NEXUS_A2A_KEEP_WORK=1` to retain the temporary data and logs.
+
 ## Prereqs
 
-- Docker (a nexus daemon image — a nexus artifact, not built here). Default
-  `nexusd-cluster-cohost:latest`; override with `NEXUS_DAEMON_IMAGE`. Build once
-  from the nexus repo (see `dockerfiles/Dockerfile.nexusd-{cluster,cohost}`).
-- Rust toolchain (the harness runs the `runtime` integration tests on the host
-  against the containerized daemon).
+- Rust toolchain and Bash. The harness runs Rust integration tests and real PTYs
+  against local daemon processes.
+- `run.sh` and `run-cross-node.sh` download the daemon release pinned in
+  Cargo.lock. Set `NEXUSD_BIN` to use an existing matching binary.
+- `run-cohost.sh` builds the co-host from this checkout unless
+  `NEXUSD_COHOST_BIN` is supplied. Building it requires `protoc`; the release
+  workflow uses version 3.20.2 on macOS and Windows.
 
 ## Run
 
@@ -39,6 +49,45 @@ SUDOROUTER_API_KEY=sk-…funded… SCODE_BIN=$(pwd)/rust/target/debug/scode \
 ```
 
 ## Notes / gotchas
+
+### Model routing acceptance
+
+`run-cohost.sh` builds this checkout's daemon, boots it with mTLS, provisions
+`/model` using the node credential, and spawns a managed agent. Its normal mode
+uses the local scripted provider and runs in Rust CI. For real model acceptance:
+
+```sh
+NEXUS_A2A_MODEL_LIVE=1 \
+NEXUS_A2A_MODEL_URL=https://api.sudorouter.ai \
+NEXUS_A2A_MODEL_KEY="$SUDOROUTER_API_KEY" e2e/nexus-a2a/run-cohost.sh
+```
+
+The live journey delegates a fresh VFS quote to a child, checks the parent's
+JSON artifact, sends a second mailbox message that consumes it, and verifies
+the resulting amount. It also reads the native requests persisted under
+`/model` to prove that the parent and child crossed the mount. Task files live
+in a fresh directory under the agent's replicated content mount; `/proc` alone
+provides process metadata, not task storage. Missing
+credentials fail this explicit live run. The disposable daemon is stopped on
+exit; `NEXUS_A2A_KEEP_WORK=1` retains its logs and data for diagnosis.
+
+The ordinary CLI journey uses the existing PTY harness and its isolated config:
+
+```sh
+cd rust
+SCODE_TEST_BACKEND=live SCODE_LIVE_MODEL=claude-sonnet-4-6 \
+  SCODE_LIVE_AUTH_PROFILE=sudorouter cargo test -p rusty-sudocode-cli \
+  --test pty_model_workflow_live -- --ignored --nocapture
+ANTHROPIC_API_KEY="$SUDOROUTER_API_KEY" ANTHROPIC_BASE_URL=https://api.sudorouter.ai \
+  cargo test -p engine-host --test cohost_model_compaction live_checkpoint \
+  -- --ignored --nocapture
+```
+
+The PTY journey verifies child execution, model result summarization, persisted
+compaction, and a resumed artifact after removing the source file. The second
+command exercises a live checkpoint through a real kernel model mount and
+then refuses the next checkpoint by revoking that route. It covers the co-host
+compaction client; the managed-agent mailbox has no `/compact` command.
 
 **Driving a live `scode` needs a PTY, not a pipe.** `printf 'prompt\n' | scode`
 answers and exits — fine for one shot, and `--print` is the supported form of

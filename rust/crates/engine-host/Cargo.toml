@@ -53,6 +53,8 @@ telemetry = { path = "../telemetry" }
 commands = { path = "../commands" }
 
 [dev-dependencies]
+llm-mount = { workspace = true }
+backends = { workspace = true, features = ["driver-anthropic", "driver-openai"] }
 # `send_message_routing` drives the executor's async trait method to
 # completion and needs a workspace to prove the local delivery path.
 #

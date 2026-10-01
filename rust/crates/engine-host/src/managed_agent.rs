@@ -191,7 +191,7 @@ where
         runtime::HookAbortSignal::default(),
         None,
     )
-    .expect("co-host: failed to build the agent runtime");
+    .map_err(|error| format!("co-host: build the agent runtime: {error}"))?;
     let mut built = built;
     let engine = built
         .take_runtime()

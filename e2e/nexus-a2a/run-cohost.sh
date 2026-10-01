@@ -21,6 +21,9 @@
 #
 #   e2e/nexus-a2a/run-cohost.sh
 #   NEXUSD_COHOST_BIN=/path/to/nexusd-cohost e2e/nexus-a2a/run-cohost.sh
+#   NEXUS_A2A_MODEL_LIVE=1 NEXUS_A2A_MODEL_URL=https://api.sudorouter.ai \
+#     NEXUS_A2A_MODEL_KEY=<key> e2e/nexus-a2a/run-cohost.sh
+# Live mode spends model tokens and fails if its credentials are missing.
 set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=lib.sh
@@ -47,10 +50,10 @@ CARGO_TEST=(cargo test "${MANIFEST[@]}" -q -p runtime --test mailbox_nexus_live)
 echo "== 0. the co-host daemon binary =="
 BIN="${NEXUSD_COHOST_BIN:-}"
 if [ -z "$BIN" ]; then
-  # `--features daemon`: the bin is behind it so the workspace's own test and
+  # `--features daemon,driver-ai`: the bin is behind it so the workspace's own test and
   # clippy jobs do not compile a raft + tonic tree on three platforms (and do not
   # need `protoc`, which the macOS runners have not got).
-  cargo build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon
+  cargo build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon,driver-ai
   BIN="$(cargo metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
          | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/nexusd-cohost"
   [ -x "$BIN" ] || BIN="$BIN.exe"
@@ -91,27 +94,39 @@ AUTHON_NEXUSD_BIN="$BIN"
 AUTHON_DATA_DIR="$WORK_DIR"
 mkdir -p "$AUTHON_DATA_DIR"/{data,id}
 
-echo "== 1. mock model on 127.0.0.1:${MOCK_PORT} =="
-# Built first, then run: `cargo run` would otherwise compile INTO the log this
-# waits on, and a cold build outlasts any sane readiness window.
-cargo build "${MANIFEST[@]}" -q -p mock-anthropic-service
-cargo run "${MANIFEST[@]}" -q -p mock-anthropic-service -- \
-  --bind "127.0.0.1:${MOCK_PORT}" >"$WORK_DIR/mock.log" 2>&1 &
-MOCK_PID=$!
-for _ in $(seq 1 20); do
-  grep -q MOCK_ANTHROPIC_BASE_URL "$WORK_DIR/mock.log" 2>/dev/null && break
-  sleep 1
-done
-grep -q MOCK_ANTHROPIC_BASE_URL "$WORK_DIR/mock.log" \
-  || { echo "!! the mock never came up" >&2; cat "$WORK_DIR/mock.log" >&2; exit 1; }
-echo "   up"
+if [ "${NEXUS_A2A_MODEL_LIVE:-0}" = 1 ]; then
+  : "${NEXUS_A2A_MODEL_URL:?live mode requires the provider URL}"
+  : "${NEXUS_A2A_MODEL_KEY:?live mode requires a funded model key}"
+  echo "== 1. live provider; credentials stay in the model mount =="
+else
+  echo "== 1. mock model on 127.0.0.1:${MOCK_PORT} =="
+  # Built first, then run: `cargo run` would otherwise compile INTO the log this
+  # waits on, and a cold build outlasts any sane readiness window.
+  cargo build "${MANIFEST[@]}" -q -p mock-anthropic-service
+  # Start the executable itself so cleanup owns the server PID. Killing
+  # `cargo run` leaves its child holding the port on Windows.
+  MOCK_BIN="$(cargo metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/mock-anthropic-service"
+  [ -x "$MOCK_BIN" ] || MOCK_BIN="$MOCK_BIN.exe"
+  "$MOCK_BIN" --bind "127.0.0.1:${MOCK_PORT}" >"$WORK_DIR/mock.log" 2>&1 &
+  MOCK_PID=$!
+  for _ in $(seq 1 20); do
+    grep -q MOCK_ANTHROPIC_BASE_URL "$WORK_DIR/mock.log" 2>/dev/null && break
+    sleep 1
+  done
+  grep -q MOCK_ANTHROPIC_BASE_URL "$WORK_DIR/mock.log" \
+    || { echo "!! the mock never came up" >&2; cat "$WORK_DIR/mock.log" >&2; exit 1; }
+  echo "   up"
+
+  NEXUS_A2A_MODEL_URL="http://127.0.0.1:${MOCK_PORT}"
+fi
 
 # ONE auth mode, deliberately. A co-host agent is spawned inside the daemon and
 # never sees an `--auth` flag, so it takes whatever the config offers: hand it
 # `api-key`/`anthropic`, the mode that speaks Anthropic's `/v1/messages`, which
 # is the surface the mock serves. The model is declared from the same variable
 # the spawn uses so the two cannot disagree.
-echo "== 2. provider config pointed at the mock =="
+echo "== 2. co-host config pointed at nexus:///model =="
 CONFIG_HOME="$WORK_DIR/config"
 mkdir -p "$CONFIG_HOME"
 cat >"$CONFIG_HOME/sudocode.json" <<JSON
@@ -119,8 +134,7 @@ cat >"$CONFIG_HOME/sudocode.json" <<JSON
   "auth_modes": {
     "api-key": {
       "anthropic": {
-        "baseUrl": "http://127.0.0.1:${MOCK_PORT}",
-        "apiKey": "mock-key-unused"
+        "baseUrl": "nexus:///model"
       }
     }
   },
@@ -150,7 +164,9 @@ echo "== 3b. stop, mint the client bundle, restart =="
 kill "$AUTHON_DAEMON_PID" 2>/dev/null || true
 wait "$AUTHON_DAEMON_PID" 2>/dev/null || true
 AUTHON_DAEMON_PID=
-CLIENT_BUNDLE="$(authon_mint "live-probe")" || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+CLIENT_ID="live-probe"
+[ "${NEXUS_A2A_MODEL_LIVE:-0}" != 1 ] || CLIENT_ID="$OPERATOR"
+CLIENT_BUNDLE="$(authon_mint "$CLIENT_ID")" || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
 authon_boot
 authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
 
@@ -167,6 +183,14 @@ done
 [ -n "$ready" ] || { echo "!! the co-host daemon never became writable" >&2; \
   tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
 
+echo "== 3c. provision the model mount =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
+  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+  NEXUS_A2A_MODEL_URL="$NEXUS_A2A_MODEL_URL" \
+  NEXUS_A2A_MODEL_ZONE="model" \
+  NEXUS_A2A_MODEL_STORAGE="$(native_path "$WORK_DIR/model-cache")" \
+  "${CARGO_TEST[@]}" live_mount_cohost_model -- --ignored --nocapture
+
 # THE PAIR, before the agent starts. The conversation must exist before the
 # spawn (the co-host arms its tail on what its chat list names at startup), and
 # it must be the AGENT<->OPERATOR conversation (a conversation is addressed by
@@ -176,6 +200,21 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_A2A_TEST_INBOX="$AGENT" NEXUS_A2A_TEST_PEER="$OPERATOR" \
   "${CARGO_TEST[@]}" live_ensure_inbox -- --ignored >/dev/null
 echo "   both sides filed"
+
+if [ "${NEXUS_A2A_MODEL_LIVE:-0}" = 1 ]; then
+  echo "== 5. real-model child and two-turn VFS workflow =="
+  if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+    NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+    NEXUS_A2A_TEST_INBOX="$AGENT" NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
+    NEXUS_A2A_TEST_MODEL="$MODEL" \
+    "${CARGO_TEST[@]}" live_cohost_model_workflow -- --ignored --nocapture; then
+    echo "!! the live model workflow failed." >&2
+    tail -120 "$WORK_DIR/daemon.log" >&2 || true
+    exit 1
+  fi
+  echo "LIVE COHOST E2E OK"
+  exit 0
+fi
 
 echo "== 5. spawn the co-host agent =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \

@@ -82,14 +82,7 @@ enum VfsOp {
     /// directory differ only by the `entry_type` the kernel dispatches on, and a
     /// second arm would be the same request assembled a second way.
     EnsureEntry {
-        path: String,
-        entry_type: i32,
-        io_profile: String,
-        capacity: u64,
-        /// Where a DT_LINK points. `None` for every other type — the wire field is
-        /// optional, so an absent target is absent on the wire too.
-        link_target: Option<String>,
-        auth_token: String,
+        request: SetattrRequest,
         resp: mpsc::SyncSender<io::Result<bool>>,
     },
     /// `Stat` — the TYPED RPC, not the generic Call surface.
@@ -392,29 +385,8 @@ impl NexusVfsClient {
                                         }
                                     }));
                                 }
-                                VfsOp::EnsureEntry {
-                                    path,
-                                    entry_type,
-                                    io_profile,
-                                    capacity,
-                                    link_target,
-                                    auth_token,
-                                    resp,
-                                } => {
-                                    let r = client
-                                        .setattr(deadlined(
-                                            SetattrRequest {
-                                                path,
-                                                auth_token,
-                                                entry_type,
-                                                io_profile,
-                                                capacity,
-                                                link_target,
-                                                ..Default::default()
-                                            },
-                                            OP_DEADLINE,
-                                        ))
-                                        .await;
+                                VfsOp::EnsureEntry { request, resp } => {
+                                    let r = client.setattr(deadlined(request, OP_DEADLINE)).await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
@@ -600,19 +572,14 @@ impl NexusVfsClient {
         capacity: u64,
         auth_token: &str,
     ) -> io::Result<bool> {
-        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
-        self.tx
-            .send(VfsOp::EnsureEntry {
-                path: path.to_owned(),
-                entry_type: DT_STREAM,
-                io_profile: io_profile.to_owned(),
-                capacity,
-                link_target: None,
-                auth_token: auth_token.to_owned(),
-                resp: resp_tx,
-            })
-            .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+        self.setattr(SetattrRequest {
+            path: path.to_owned(),
+            auth_token: auth_token.to_owned(),
+            entry_type: DT_STREAM,
+            io_profile: io_profile.to_owned(),
+            capacity,
+            ..Default::default()
+        })
     }
 
     /// `sys_setattr(DT_LINK)` on `path` — a pointer to `target`, idempotently.
@@ -629,19 +596,13 @@ impl NexusVfsClient {
     /// conversation existed — which is why the index was a plain file for as long as it
     /// was.
     pub fn ensure_link(&self, path: &str, target: &str, auth_token: &str) -> io::Result<bool> {
-        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
-        self.tx
-            .send(VfsOp::EnsureEntry {
-                path: path.to_owned(),
-                entry_type: DT_LINK_SETATTR,
-                io_profile: String::new(),
-                capacity: 0,
-                link_target: Some(target.to_owned()),
-                auth_token: auth_token.to_owned(),
-                resp: resp_tx,
-            })
-            .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+        self.setattr(SetattrRequest {
+            path: path.to_owned(),
+            auth_token: auth_token.to_owned(),
+            entry_type: DT_LINK_SETATTR,
+            link_target: Some(target.to_owned()),
+            ..Default::default()
+        })
     }
 
     /// `sys_setattr(DT_DIR)` on `path` — create the directory entry, idempotently.
@@ -655,19 +616,22 @@ impl NexusVfsClient {
     /// success and created nothing, and an agent that had announced itself but not
     /// yet conversed was invisible to every `agent_list` in the cluster.
     pub fn ensure_dir(&self, path: &str, auth_token: &str) -> io::Result<bool> {
-        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.setattr(SetattrRequest {
+            path: path.to_owned(),
+            auth_token: auth_token.to_owned(),
+            entry_type: DT_DIR_SETATTR,
+            ..Default::default()
+        })
+    }
+
+    /// Apply a typed Setattr request, including operator-provisioned mounts.
+    /// Authorization and backend construction are enforced by the daemon.
+    pub fn setattr(&self, request: SetattrRequest) -> io::Result<bool> {
+        let (resp, rx) = mpsc::sync_channel(1);
         self.tx
-            .send(VfsOp::EnsureEntry {
-                path: path.to_owned(),
-                entry_type: DT_DIR_SETATTR,
-                io_profile: String::new(),
-                capacity: 0,
-                link_target: None,
-                auth_token: auth_token.to_owned(),
-                resp: resp_tx,
-            })
+            .send(VfsOp::EnsureEntry { request, resp })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+        await_reply(&rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
     /// Generic Call RPC — sends `method` + JSON `payload` through the

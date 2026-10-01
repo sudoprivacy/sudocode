@@ -22,6 +22,48 @@ pub enum ProviderClient {
 }
 
 impl ProviderClient {
+    /// Resolve a provider under this session's model egress policy.
+    pub fn from_resolved_with_access(
+        resolved: &ResolvedProvider,
+        mode: Option<AuthMode>,
+        access: &crate::ModelAccess,
+    ) -> Result<Self, ApiError> {
+        if !resolved.base_url.starts_with("nexus://") {
+            if access.require_mount {
+                return Err(ApiError::Configuration(
+                    "co-hosted model requests require a nexus:///mount baseUrl".into(),
+                ));
+            }
+            return Self::from_resolved(resolved, mode);
+        }
+        if resolved.kind == ProviderKind::Codex
+            || resolved.api_format == ApiFormat::GeminiGenerateContent
+        {
+            return Err(ApiError::Configuration(
+                "this provider has no Nexus model mount transport".into(),
+            ));
+        }
+        let transport = crate::nexus_transport::NexusTransport::new(
+            &resolved.base_url,
+            std::sync::Arc::clone(&access.fs),
+        )?;
+        let mut local = resolved.clone();
+        local.base_url = "http://nexus.invalid".into();
+        // The mount authenticates upstream; this client never loads credentials.
+        local.credential = Credential::ApiKey(String::new());
+        let mut client = Self::from_resolved(&local, mode)?;
+        match &mut client {
+            Self::Anthropic(client) => client.set_nexus_transport(transport),
+            Self::OpenAi(client) | Self::Xai(client) => client.set_nexus_transport(transport),
+            _ => {
+                return Err(ApiError::Configuration(
+                    "unsupported Nexus provider transport".into(),
+                ))
+            }
+        }
+        Ok(client)
+    }
+
     /// Build a `ProviderClient` from a fully resolved provider config.
     ///
     /// This is the primary entry point for config-driven provider construction.

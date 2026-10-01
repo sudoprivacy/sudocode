@@ -6143,6 +6143,10 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
         &job.sudocode_config,
         &job.fallback_config,
         job.auth_mode,
+        &api::ModelAccess {
+            fs: Arc::clone(&job.fs),
+            require_mount: job.execution.require_model_mount,
+        },
     )?
     .with_parent_execution(job.execution.clone());
     let permission_policy = agent_permission_policy(job.permission_mode);
@@ -6370,6 +6374,10 @@ fn build_agent_runtime(
         &job.sudocode_config,
         &job.fallback_config,
         job.auth_mode,
+        &api::ModelAccess {
+            fs: Arc::clone(&job.fs),
+            require_mount: job.execution.require_model_mount,
+        },
     )?
     .with_parent_execution(job.execution.clone());
     let permission_policy = agent_permission_policy(job.permission_mode);
@@ -7364,6 +7372,7 @@ struct ProviderEntry {
 /// send no `cache_control` at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParentExecution {
+    require_model_mount: bool,
     /// CC: `agentDefinition.effort ?? state.effortValue` — inherited.
     reasoning_effort: Option<String>,
     /// Extended thinking. True only for a fork child; see [`Self::for_child`].
@@ -7383,6 +7392,7 @@ impl ParentExecution {
             reasoning_effort: ctx.and_then(|c| c.parent_reasoning_effort.clone()),
             thinking_enabled: ctx.is_some_and(|c| c.parent_thinking_enabled),
             routing_session_id: ctx.and_then(|c| c.parent_routing_session_id.clone()),
+            require_model_mount: ctx.is_some_and(|c| c.parent_requires_model_mount),
         }
     }
 
@@ -7443,12 +7453,19 @@ impl ProviderRuntimeClient {
         sudocode_config: &SudoCodeConfig,
         fallback_config: &ProviderFallbackConfig,
         auth_mode: Option<api::AuthMode>,
+        access: &api::ModelAccess,
     ) -> Result<Self, String> {
         let primary_model = fallback_config.primary().map_or(model, str::to_string);
-        let primary = build_provider_entry_with_config(&primary_model, sudocode_config, auth_mode)?;
+        let primary =
+            build_provider_entry_with_config(&primary_model, sudocode_config, auth_mode, access)?;
         let mut chain = vec![primary];
         for fallback_model in fallback_config.fallbacks() {
-            match build_provider_entry_with_config(fallback_model, sudocode_config, auth_mode) {
+            match build_provider_entry_with_config(
+                fallback_model,
+                sudocode_config,
+                auth_mode,
+                access,
+            ) {
                 Ok(entry) => chain.push(entry),
                 Err(error) => {
                     eprintln!(
@@ -7469,12 +7486,13 @@ fn build_provider_entry_with_config(
     model: &str,
     sudocode_config: &SudoCodeConfig,
     auth_mode: Option<api::AuthMode>,
+    access: &api::ModelAccess,
 ) -> Result<ProviderEntry, String> {
     let resolved_provider = resolve_provider_from_config(model, auth_mode, sudocode_config)
         .map_err(|e| e.to_string())?;
     let wire_model = resolved_provider.model_id.clone();
-    let client =
-        ProviderClient::from_resolved(&resolved_provider, auth_mode).map_err(|e| e.to_string())?;
+    let client = ProviderClient::from_resolved_with_access(&resolved_provider, auth_mode, access)
+        .map_err(|e| e.to_string())?;
     Ok(ProviderEntry {
         model: wire_model,
         client,
@@ -7515,6 +7533,10 @@ fn runtime_error_from_api(error: &ApiError) -> RuntimeError {
 
 #[async_trait::async_trait]
 impl ApiClient for ProviderRuntimeClient {
+    fn requires_model_mount(&self) -> bool {
+        self.execution.require_model_mount
+    }
+
     fn wire_model_id(&self) -> Option<&str> {
         self.chain.first().map(|entry| entry.model.as_str())
     }
@@ -9450,6 +9472,7 @@ mod tests {
                 reasoning_effort: Some("high".to_string()),
                 thinking_enabled: parent_thinking,
                 routing_session_id: Some("sess-1".to_string()),
+                require_model_mount: true,
             }
             .for_child(is_fork)
             .thinking_enabled
@@ -9475,6 +9498,7 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             thinking_enabled: true,
             routing_session_id: Some("sess-1".to_string()),
+            require_model_mount: true,
         }
         .for_child(false);
         assert_eq!(ordinary.reasoning_effort.as_deref(), Some("high"));
@@ -9491,6 +9515,7 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             thinking_enabled: true,
             routing_session_id: Some("sess-1".to_string()),
+            require_model_mount: true,
         };
         let client = super::ProviderRuntimeClient {
             chain: Vec::new(),

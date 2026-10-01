@@ -112,6 +112,7 @@ pub use api::{
     // Auth / provider enums + sources.
     AuthMode,
     AuthSource,
+    ModelAccess,
     // Config SSOT (these are themselves re-exported by `api` from `runtime`).
     ModelConfigEntry,
     ModelProviderMapping,

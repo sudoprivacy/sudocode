@@ -594,6 +594,66 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
         "a write on {peer_endpoint} woke a tail parked on {endpoint} after {woke:?} \
          (idle timeout was {idle_elapsed:?})"
     );
+
+    // A parked reader alone misses the apply/read lock inversion: apply then
+    // races only a sleeping condvar, never the backend read under its lock.
+    // Keep four tails crossing their read/wait boundary while the other node
+    // commits fresh frames. Every reader must see every body in order.
+    const FRAMES: usize = 128;
+    const READERS: usize = 4;
+    let nonce = fresh();
+    let expected: Vec<_> = (0..FRAMES)
+        .map(|i| format!("replicated-{nonce}-{i}"))
+        .collect();
+    let ready = Arc::new(std::sync::Barrier::new(READERS + 1));
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let client = Arc::clone(&client);
+            let auth = auth.clone();
+            let ready = Arc::clone(&ready);
+            thread::spawn(move || {
+                let inbox = mailbox(&client, me, &auth);
+                let mut cursor = next;
+                let mut received = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(30);
+                ready.wait();
+                while received.len() < FRAMES {
+                    assert!(Instant::now() < deadline, "replication stopped at {cursor}");
+                    let (frames, at) = inbox
+                        .poll_conversation("peer-node", cursor, 1)
+                        .expect("concurrent replicated tail must not deadlock");
+                    received.extend(frames.into_iter().map(|frame| frame.body));
+                    cursor = at;
+                }
+                (received, cursor)
+            })
+        })
+        .collect();
+    ready.wait();
+    for body in &expected {
+        send_to(&peer, "peer-node", me, body, &auth).expect("append during concurrent tails");
+    }
+    let mut end = next;
+    for reader in readers {
+        let (received, cursor) = reader.join().expect("tail reader");
+        assert_eq!(
+            received, expected,
+            "every reader must see the complete ordered transcript"
+        );
+        assert_eq!(cursor, next + FRAMES as u64);
+        end = cursor;
+    }
+
+    // Write an acknowledgement from the receiving node and read it on the
+    // original sender: replication must still make progress in both directions.
+    let ack = format!("ack-{nonce}-{FRAMES}");
+    send_to(&client, me, "peer-node", &ack, &auth).expect("acknowledge replicated batch");
+    let (acknowledgements, _) = mailbox(&peer, "peer-node", &auth)
+        .poll_conversation(me, end, DELIVERY_WAIT_MS)
+        .expect("read acknowledgement on original sender");
+    assert_eq!(acknowledgements.len(), 1);
+    assert_eq!(acknowledgements[0].body, ack);
+    println!("{READERS} concurrent tails read all {FRAMES} ordered frames; reverse acknowledgement arrived");
 }
 
 /// Guard the concurrent-dispatch property that lets the receiver share the ONE
@@ -1013,5 +1073,227 @@ fn live_agent_list_sees_every_peer_from_either_node() {
                  not an agent; the full listing was {listed:?}"
             );
         }
+    }
+}
+
+/// Provision the operator's model route over the same authenticated gRPC bind.
+#[test]
+#[ignore = "requires the co-host daemon and model mount environment"]
+fn live_mount_cohost_model() {
+    let client = model_operator();
+    let params = [
+        (
+            "base_url".to_string(),
+            std::env::var("NEXUS_A2A_MODEL_URL").expect("model endpoint"),
+        ),
+        (
+            "api_key".to_string(),
+            std::env::var("NEXUS_A2A_MODEL_KEY").unwrap_or_else(|_| "mock-key-unused".to_string()),
+        ),
+        (
+            "blob_root".to_string(),
+            std::env::var("NEXUS_A2A_MODEL_STORAGE").expect("model storage"),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    client
+        .setattr(nexus_vfs_client::proto::SetattrRequest {
+            path: "/model".to_string(),
+            entry_type: 2,
+            backend_type: "anthropic".to_string(),
+            backend_name: "cohost-model".to_string(),
+            zone_id: std::env::var("NEXUS_A2A_MODEL_ZONE").expect("model zone"),
+            backend_params: params,
+            ..Default::default()
+        })
+        .expect("mount the model through authenticated Setattr");
+}
+
+fn model_operator() -> NexusVfsClient {
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("endpoint");
+    // Mount creation is an operator operation. The harness owns the founder's
+    // node credential; the agent bundle used by the other tests grants no admin.
+    let tls = std::path::PathBuf::from(
+        std::env::var("NEXUS_A2A_MODEL_TLS_DIR").expect("node TLS directory"),
+    );
+    NexusVfsClient::connect_tls(
+        &endpoint,
+        std::fs::read(tls.join("ca.pem")).unwrap(),
+        std::fs::read(tls.join("node.pem")).unwrap(),
+        std::fs::read(tls.join("node-key.pem")).unwrap(),
+        "nexus-node",
+    )
+    .expect("operator mTLS connection")
+}
+
+/// Real daemon + real model: a child reads fresh VFS data, the parent writes a
+/// result, then a second mailbox turn consumes it. Inspect native requests in
+/// /model as well as artifacts, so direct HTTP cannot satisfy the acceptance.
+#[test]
+#[ignore = "funded model and fresh daemon: NEXUS_A2A_MODEL_LIVE=1 e2e/nexus-a2a/run-cohost.sh"]
+fn live_cohost_model_workflow() {
+    use serde_json::{json, Value};
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").unwrap();
+    let agent = std::env::var("NEXUS_A2A_TEST_INBOX").unwrap();
+    let user = std::env::var("NEXUS_A2A_TEST_REPLY_TO").unwrap();
+    let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
+    println!("LIVE COHOST: connecting agent and operator");
+    let client = dial(&endpoint);
+    let operator = model_operator();
+    let mb = mailbox(&client, &user, "");
+    println!("LIVE COHOST: ensuring conversation");
+    mb.ensure_conversation(&agent).unwrap();
+    // /proc contains process metadata. Store task files under this agent's
+    // replicated content mount, and verify the fixture before asking for work.
+    let data = format!("/agents/{agent}/quote-review-{}", fresh());
+    let code = format!("BATCH-{}", fresh());
+    let units = fresh() % 17 + 9;
+    let total = units * 29 + 47;
+    let quote = format!("Code: {code}\nUnits: {units}\nUnit price: 29\nDelivery: 47\nSubtotal = units * unit price + delivery.\n");
+    operator
+        .write(&format!("{data}/quote.txt"), quote.as_bytes().to_vec(), "")
+        .unwrap();
+    assert_eq!(
+        operator.read(&format!("{data}/quote.txt"), "").unwrap(),
+        quote.as_bytes()
+    );
+    let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
+    println!("LIVE COHOST: starting managed session");
+    let started: Value = serde_json::from_slice(
+        &client
+            .call(
+                "managed_agent.start_session_v1",
+                payload.to_string().as_bytes(),
+                "",
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let workspace = &data;
+    println!("LIVE COHOST: fresh quote mounted at {workspace}");
+    let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
+    println!("LIVE COHOST: sending delegation turn");
+    send_to(&client, &user, &agent,
+        &format!("Please prepare our sample quote for review. Delegate this complete task to one Explore agent: read {workspace}/quote.txt, calculate units times unit price plus delivery, and report both the quote code and the calculated numeric subtotal. The calculation and its reported result are part of the child's task. After the child finishes, use its result to save {workspace}/result.json with exactly code and subtotal fields (subtotal a JSON number). Reply with the quote code and subtotal once the file is saved."), "").unwrap();
+    let first = wait_live_reply(&mb, &agent, &mut cursor, &code);
+    assert!(first.contains(&total.to_string()), "{first}");
+    let result: Value =
+        serde_json::from_slice(&operator.read(&format!("{data}/result.json"), "").unwrap())
+            .unwrap();
+    assert_eq!(result, json!({"code":code,"subtotal":total}));
+    send_to(&client, &user, &agent,
+        &format!("Read {workspace}/result.json with the file tool, add a fee of 13 to its subtotal, and write {workspace}/final.json with exactly code and total fields. Reply with the code, final total, and FINAL_COMPLETE after saving."), "").unwrap();
+    let final_reply = wait_live_reply(&mb, &agent, &mut cursor, "FINAL_COMPLETE");
+    assert!(
+        final_reply.contains(&code) && final_reply.contains(&(total + 13).to_string()),
+        "{final_reply}"
+    );
+    let result: Value =
+        serde_json::from_slice(&operator.read(&format!("{data}/final.json"), "").unwrap()).unwrap();
+    assert_eq!(result, json!({"code":code,"total":total + 13}));
+
+    verify_live_child(&operator, &agent, &model, &code, total);
+    verify_live_model_requests(&operator);
+    let cancel = json!({"session_id":started["session_id"],"mode":"session"});
+    client
+        .call("managed_agent.cancel_v1", cancel.to_string().as_bytes(), "")
+        .unwrap();
+}
+
+fn verify_live_child(operator: &NexusVfsClient, agent: &str, model: &str, code: &str, total: u64) {
+    let root = format!("/agents/{agent}/subagents");
+    let children: Vec<serde_json::Value> = operator
+        .readdir(&root, "")
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            std::path::Path::new(&e.name)
+                .extension()
+                .is_some_and(|x| x == "json")
+        })
+        .map(|e| {
+            serde_json::from_slice(&operator.read(&listed_path(&root, &e.name), "").unwrap())
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(children.len(), 1, "must actually delegate once");
+    let child = &children[0];
+    assert_eq!(child["model"], model);
+    assert_eq!(child["status"], "completed", "{child}");
+    let result = child["result"].as_str().expect("child result");
+    assert!(
+        result.contains(code) && result.contains(&total.to_string()),
+        "{result}"
+    );
+}
+
+fn verify_live_model_requests(operator: &NexusVfsClient) {
+    use serde_json::Value;
+    let requests: Vec<Value> = operator
+        .readdir("/model", "")
+        .unwrap()
+        .iter()
+        .filter(|e| e.name.ends_with(".prompt"))
+        .map(|e| {
+            serde_json::from_slice(&operator.read(&listed_path("/model", &e.name), "").unwrap())
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        requests.len() >= 5,
+        "parent, child and follow-up must cross the model mount"
+    );
+    assert!(requests
+        .iter()
+        .all(|r| r["nexus_http"]["path"] == "v1/messages"));
+    let delegated = requests.iter().any(|r| {
+        let text = r["body"]["messages"].to_string();
+        let tools = r["body"]["tools"].as_array().expect("native tools");
+        text.contains("quote.txt")
+            && tools.iter().any(|t| t["name"] == "read_file")
+            && tools
+                .iter()
+                .all(|t| t["name"] != "agent_spawn" && t["name"] != "bash")
+    });
+    assert!(
+        delegated,
+        "must capture the child's own native model request"
+    );
+    assert!(requests
+        .iter()
+        .any(|r| r["body"].to_string().contains("FINAL_COMPLETE")));
+    println!("LIVE COHOST: fresh child calculation, two persisted artifacts, second mailbox turn; {} Nexus model requests", requests.len());
+}
+
+fn listed_path(parent: &str, name: &str) -> String {
+    if name.starts_with('/') {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+fn wait_live_reply(mb: &Mailbox, agent: &str, cursor: &mut u64, marker: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let mut last_reply = None;
+    loop {
+        let (messages, next) = mb
+            .poll_conversation(agent, *cursor, DELIVERY_WAIT_MS)
+            .unwrap();
+        *cursor = next;
+        for message in messages {
+            if message.from == agent {
+                println!("LIVE COHOST reply: {}", message.body);
+                if message.body.contains(marker) {
+                    return message.body;
+                }
+                last_reply = Some(message.body);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "co-host did not finish the step containing {marker}; last reply: {last_reply:?}"
+        );
     }
 }

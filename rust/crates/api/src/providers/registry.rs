@@ -708,6 +708,9 @@ fn endpoint_type_to_api_format(endpoint_type: &str) -> ApiFormat {
 /// construct their own versioned path (e.g. `/v1/messages`,
 /// `/v1beta/models/...`) — strip the trailing `/v1` to avoid double-prefix.
 fn adjust_base_url_for_format(base_url: &str, api_format: ApiFormat) -> String {
+    if base_url.starts_with("nexus://") {
+        return base_url.to_string();
+    }
     match api_format {
         ApiFormat::OpenAiCompletions | ApiFormat::OpenAiResponses => base_url.to_string(),
         _ => base_url
@@ -794,6 +797,9 @@ fn resolve_credential(
     provider_name: &str,
     connection: &ProviderConnectionConfig,
 ) -> Result<Credential, ApiError> {
+    if connection.base_url.starts_with("nexus://") {
+        return Ok(Credential::None);
+    }
     match auth_mode {
         "api-key" | "proxy" => {
             // Inline API key takes priority.

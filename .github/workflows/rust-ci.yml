@@ -400,8 +400,6 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    env:
-      SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-process-tree-config
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -414,6 +412,7 @@ jobs:
       - name: Run live PTY process-tree cancellation and timeout tests
         shell: bash
         env:
+          SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-process-tree-config
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           SCODE_TEST_BACKEND: live
           SCODE_LIVE_MODEL: claude-sonnet-4-6
@@ -434,5 +433,7 @@ jobs:
           cargo test -p rusty-sudocode-cli --test pty_bash_process_tree -- --test-threads=1 --nocapture
       - name: Remove process-tree test credentials
         if: always()
+        env:
+          SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-process-tree-config
         run: |
           node -e "require('fs').rmSync(require('path').join(process.env.SUDO_CODE_CONFIG_HOME, 'sudocode.json'), { force: true })"

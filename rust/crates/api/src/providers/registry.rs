@@ -156,43 +156,6 @@ pub fn resolve_model_alias_from_config(config: &SudoCodeConfig, alias: &str) -> 
 
 /// Local preflight check: reject requests whose estimated token count
 /// exceeds the model's context window (looked up from hardcoded specs).
-/// Fraction of the context window below which the remote `count_tokens`
-/// refinement is not worth a network round trip.
-///
-/// The remote count exists to catch a request the local byte estimate calls
-/// safe but the tokenizer does not. That can only matter near the limit — and
-/// the call is not free: it uploads the entire request body a second time,
-/// every turn, to refine a number that was not in question.
-///
-/// It is worse than merely redundant behind a gateway. Measured against one
-/// (2026-09-29): `POST /v1/messages/count_tokens` returns `404 Invalid URL`
-/// because that gateway routes only `POST /v1/messages`, and
-/// `preflight_message_request` swallows the error by design — so every turn
-/// paid for a full body upload that could not have returned an answer, and
-/// nothing said so. A 36 KB request, once per turn, silently discarded.
-///
-/// 0.8 leaves a fifth of the window as margin for the estimate being wrong,
-/// which is far more than the heuristic's observed error.
-const REMOTE_COUNT_TOKENS_HEADROOM: f64 = 0.8;
-
-/// Whether the remote token count can still change the preflight verdict.
-///
-/// `false` when the local estimate is comfortably inside the window, which is
-/// the overwhelming majority of turns.
-#[must_use]
-pub fn remote_count_tokens_worthwhile(request: &MessageRequest) -> bool {
-    let Some(limit) = model_token_limit(&request.model) else {
-        return false;
-    };
-    let estimated =
-        estimate_message_request_input_tokens(request).saturating_add(request.max_tokens);
-    #[allow(clippy::cast_precision_loss)]
-    let threshold = f64::from(limit.context_window_tokens) * REMOTE_COUNT_TOKENS_HEADROOM;
-    #[allow(clippy::cast_precision_loss)]
-    let estimated = f64::from(estimated);
-    estimated >= threshold
-}
-
 pub fn preflight_message_request(request: &MessageRequest) -> Result<(), ApiError> {
     let Some(limit) = model_token_limit(&request.model) else {
         return Ok(());
@@ -1857,50 +1820,6 @@ mod tests {
                 .expect("gpt-5.4 should be registered")
                 .context_window_tokens,
             1_000_000
-        );
-    }
-
-    /// A small turn must not trigger the remote token count. That call uploads
-    /// the whole request body a second time, every turn — and behind a gateway
-    /// that routes only `POST /v1/messages` it 404s and the error is swallowed,
-    /// so the upload cannot even return an answer.
-    ///
-    /// The threshold is checked from both sides so the test pins a boundary
-    /// rather than the direction of one comparison: a request at a few percent
-    /// of the window must not pay for it, and one that has eaten most of the
-    /// window still must.
-    #[test]
-    fn remote_token_count_is_skipped_until_the_window_is_nearly_full() {
-        use crate::types::{InputContentBlock, InputMessage};
-
-        let request_of = |chars: usize| MessageRequest {
-            model: "gpt-5.4".to_string(),
-            max_tokens: 8_000,
-            messages: vec![InputMessage {
-                role: "user".to_string(),
-                content: vec![InputContentBlock::Text {
-                    text: "x".repeat(chars),
-                }],
-            }],
-            system: Some("short".to_string()),
-            tools: None,
-            tool_choice: None,
-            stream: true,
-            ..Default::default()
-        };
-
-        // gpt-5.4's window is 1M tokens; the estimate is bytes/4-ish, so 40k
-        // characters is a rounding error against it.
-        assert!(
-            !remote_count_tokens_worthwhile(&request_of(40_000)),
-            "a turn using a fraction of the window must not pay for a second \
-             full-body request to refine a number that is not in question"
-        );
-        // ~3.4M characters lands near the window, where the local estimate
-        // being wrong would actually change the verdict.
-        assert!(
-            remote_count_tokens_worthwhile(&request_of(3_400_000)),
-            "close to the limit the remote count is the whole point of the guard"
         );
     }
 

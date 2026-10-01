@@ -1015,3 +1015,47 @@ fn live_agent_list_sees_every_peer_from_either_node() {
         }
     }
 }
+
+/// Provision the operator's model route over the same authenticated gRPC bind.
+#[test]
+#[ignore = "requires the co-host daemon and model mount environment"]
+fn live_mount_cohost_model() {
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("endpoint");
+    // Mount creation is an operator operation. The harness owns the founder's
+    // node credential; the agent bundle used by the other tests grants no admin.
+    let tls = std::path::PathBuf::from(
+        std::env::var("NEXUS_A2A_MODEL_TLS_DIR").expect("node TLS directory"),
+    );
+    let client = NexusVfsClient::connect_tls(
+        &endpoint,
+        std::fs::read(tls.join("ca.pem")).unwrap(),
+        std::fs::read(tls.join("node.pem")).unwrap(),
+        std::fs::read(tls.join("node-key.pem")).unwrap(),
+        "nexus-node",
+    )
+    .expect("operator mTLS connection");
+    let params = [
+        (
+            "base_url".to_string(),
+            std::env::var("NEXUS_A2A_MODEL_URL").expect("model endpoint"),
+        ),
+        ("api_key".to_string(), "mock-key-unused".to_string()),
+        (
+            "blob_root".to_string(),
+            std::env::var("NEXUS_A2A_MODEL_STORAGE").expect("model storage"),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    client
+        .setattr(nexus_vfs_client::proto::SetattrRequest {
+            path: "/model".to_string(),
+            entry_type: 2,
+            backend_type: "anthropic".to_string(),
+            backend_name: "cohost-model".to_string(),
+            zone_id: std::env::var("NEXUS_A2A_MODEL_ZONE").expect("model zone"),
+            backend_params: params,
+            ..Default::default()
+        })
+        .expect("mount the model through authenticated Setattr");
+}

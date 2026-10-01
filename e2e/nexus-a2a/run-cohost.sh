@@ -47,10 +47,10 @@ CARGO_TEST=(cargo test "${MANIFEST[@]}" -q -p runtime --test mailbox_nexus_live)
 echo "== 0. the co-host daemon binary =="
 BIN="${NEXUSD_COHOST_BIN:-}"
 if [ -z "$BIN" ]; then
-  # `--features daemon`: the bin is behind it so the workspace's own test and
+  # `--features daemon,driver-ai`: the bin is behind it so the workspace's own test and
   # clippy jobs do not compile a raft + tonic tree on three platforms (and do not
   # need `protoc`, which the macOS runners have not got).
-  cargo build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon
+  cargo build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon,driver-ai
   BIN="$(cargo metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
          | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/nexusd-cohost"
   [ -x "$BIN" ] || BIN="$BIN.exe"
@@ -95,8 +95,12 @@ echo "== 1. mock model on 127.0.0.1:${MOCK_PORT} =="
 # Built first, then run: `cargo run` would otherwise compile INTO the log this
 # waits on, and a cold build outlasts any sane readiness window.
 cargo build "${MANIFEST[@]}" -q -p mock-anthropic-service
-cargo run "${MANIFEST[@]}" -q -p mock-anthropic-service -- \
-  --bind "127.0.0.1:${MOCK_PORT}" >"$WORK_DIR/mock.log" 2>&1 &
+# Start the executable itself so cleanup owns the server PID. Killing
+# `cargo run` leaves its child holding the port on Windows.
+MOCK_BIN="$(cargo metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
+  | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/mock-anthropic-service"
+[ -x "$MOCK_BIN" ] || MOCK_BIN="$MOCK_BIN.exe"
+"$MOCK_BIN" --bind "127.0.0.1:${MOCK_PORT}" >"$WORK_DIR/mock.log" 2>&1 &
 MOCK_PID=$!
 for _ in $(seq 1 20); do
   grep -q MOCK_ANTHROPIC_BASE_URL "$WORK_DIR/mock.log" 2>/dev/null && break
@@ -119,8 +123,7 @@ cat >"$CONFIG_HOME/sudocode.json" <<JSON
   "auth_modes": {
     "api-key": {
       "anthropic": {
-        "baseUrl": "http://127.0.0.1:${MOCK_PORT}",
-        "apiKey": "mock-key-unused"
+        "baseUrl": "nexus:///model"
       }
     }
   },
@@ -166,6 +169,14 @@ for i in $(seq 1 30); do
 done
 [ -n "$ready" ] || { echo "!! the co-host daemon never became writable" >&2; \
   tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+
+echo "== 3c. provision the model mount =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
+  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+  NEXUS_A2A_MODEL_URL="http://127.0.0.1:${MOCK_PORT}" \
+  NEXUS_A2A_MODEL_ZONE="model" \
+  NEXUS_A2A_MODEL_STORAGE="$(native_path "$WORK_DIR/model-cache")" \
+  "${CARGO_TEST[@]}" live_mount_cohost_model -- --ignored --nocapture
 
 # THE PAIR, before the agent starts. The conversation must exist before the
 # spawn (the co-host arms its tail on what its chat list names at startup), and

@@ -152,3 +152,66 @@ fn undersized_picker_cannot_confirm_an_unseen_selection() {
         assert_eq!(env.captured_message_count(), 0);
     }
 }
+
+#[test]
+fn too_narrow_input_preserves_draft_and_middle_cursor() {
+    let env = TestEnv::new("chrome-budget-narrow");
+    let mut sess = env.spawn_with_env(&[], &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")]);
+    common::expect_screen(&sess, |s| s.contains('❯'), common::DEFAULT_TIMEOUT, "input");
+    sess.send("DraftHeadTail").unwrap();
+    common::expect_input_line(&sess, "DraftHeadTail", common::DEFAULT_TIMEOUT, "draft");
+    sess.send("\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C").unwrap();
+    // Establish the cursor before testing resize. Mixed navigation + editing
+    // in one undrawn event batch is a separate TextInput regression.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    sess.send("X").unwrap();
+    common::expect_input_line(
+        &sess,
+        "DraftXHeadTail",
+        common::DEFAULT_TIMEOUT,
+        "middle cursor probe",
+    );
+    sess.send("\x7f").unwrap();
+    common::expect_input_line(
+        &sess,
+        "DraftHeadTail",
+        common::DEFAULT_TIMEOUT,
+        "remove probe",
+    );
+    sess.resize(8, 12).unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains("Enlarge") && s.contains("terminal"),
+        common::DEFAULT_TIMEOUT,
+        "narrow warning",
+    );
+    sess.send("MustNotAppear").unwrap();
+    // A visible size warning has focus, so hidden draft edits are rejected.
+    // Give the key burst time to reach the app before restoring the viewport.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    sess.resize(24, 80).unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| common::input_line_of(s) == "DraftHeadTail",
+        common::DEFAULT_TIMEOUT,
+        "unchanged draft",
+    );
+    sess.send("Kept").unwrap();
+    common::expect_input_line(
+        &sess,
+        "DraftKeptHeadTail",
+        common::DEFAULT_TIMEOUT,
+        "preserved cursor",
+    );
+    sess.send_ctrl('u').unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains('❯') && common::input_line_of(s).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "cleared draft",
+    );
+    exit(&mut sess);
+    if env.is_mock() {
+        assert_eq!(env.captured_message_count(), 0);
+    }
+}

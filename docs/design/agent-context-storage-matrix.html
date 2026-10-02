@@ -491,6 +491,65 @@ agent-memory/&lt;type&gt;/           per-agent-type memory
 <small><b>sudowork to build</b> (design-ready, no new nexus primitive): the zone layout · per-pid DT_LINK wiring · on_terminate GC · zone_perms adoption. <b>nexus committed</b> (non-blocking): Rust glob/grep search-plugin; path-aware gate fix. Open reconcile → Q1.</small>
 </div>
 
+<h2>A template is not an agent</h2>
+<div class="qbox">
+<p>This matrix is about agents, and until the sudowork frontend was looked at
+there seemed to be only agents. There is a second thing above them, and
+conflating the two is how one agent ended up owning several people&rsquo;s
+memory.</p>
+
+<p><b>A template</b> &mdash; &#x300C;&#x62DB;&#x8058;&#x4E13;&#x5BB6;&#x300D;,
+&#x79D1;&#x7814;&#x7533;&#x62A5;, the entries behind
+<code>/api/agents/hub/list</code> &mdash; is a <i>shared, organization-level
+definition</i>: prompts, bound skills, a display name. It is keyed by its
+catalog id and is the same object for everybody who picks it.</p>
+
+<p><b>An agent</b> is the <i>durable principal</i> this matrix describes: it
+owns a home at <span class="path">/agents/{name}/</span>, its memory, its
+conversations and its inbox, and it outlives any session or pid. It belongs to
+exactly one person.</p>
+
+<p><b>So a template cannot be an agent.</b> A shared definition cannot own one
+person&rsquo;s memory. Two users who both pick
+&#x300C;&#x62DB;&#x8058;&#x4E13;&#x5BB6;&#x300D; chose the same template and
+are <i>not</i> the same principal. Moss used to hand the template&rsquo;s name
+to <code>start_session</code> as the <code>agent_id</code>; because
+<span class="path">/agents/{name}/</span> is zone-wide and a zone is a tenant,
+every user in an organization who picked it landed in one agent home, sharing
+its state stream, conversation list and mailbox
+(<a href="https://github.com/sudoprivacy/moss/pull/314">moss #314</a>).</p>
+
+<p><b>The agent is therefore the pair</b> &mdash; this user, that template
+&mdash; and a session with no template at all belongs to the user&rsquo;s own
+agent rather than to nobody
+(<a href="https://github.com/sudoprivacy/moss/pull/308">moss #308</a>).</p>
+
+<p><b>Where the concept lives, by design:</b></p>
+<ul>
+<li><b>nexus-vfs</b> and <b>sudocode</b> have no notion of a template, and
+should not: they know agents (<code>agent_id</code>,
+<code>AgentDescriptor { name }</code>). Verified &mdash; zero occurrences in
+either <code>managed_agent</code>.</li>
+<li><b>moss</b> holds both and now keeps them apart: <code>assistantName</code>
+is the template reference (catalog lookup, shared-memory directory, display
+name, wiki/corp-app scopes), while what nexus is told is the per-user instance.</li>
+<li><b>sudowork&rsquo;s UI</b> does not yet make the distinction. The
+&#x300C;&#x667A;&#x80FD;&#x4F53;&#x5E93;&#x300D; lists templates and
+&#x300C;&#x6211;&#x7684;&#x667A;&#x80FD;&#x4F53;&#x300D; lists installed
+templates; there is no word for an instance, and no way to create one. That is
+the open end, not a storage question &mdash; see below.</li>
+</ul>
+
+<p><b>The consequence that is still open.</b> A user has exactly one agent of
+their own plus one per template they pick. There is no way to create a
+<i>second</i> agent of one&rsquo;s own, so every conversation a user starts
+without choosing a template accumulates into a single memory bucket that cannot
+be partitioned. The architecture already allows more
+(&#x300C;&#x4E00;&#x4E2A;&#x4EBA;&#x53EF;&#x4EE5;&#x6709;&#x591A;&#x4E2A;
+copilot&#x300D;); the creation path was never designed, because the discussion
+was about which button is primary rather than about which objects exist.</p>
+</div>
+
 <h2>Open questions (for consensus)</h2>
 <div class="qbox" id="q1"><span class="qn">Q1</span> <b>Session identity &amp; path — co-host recovery implemented; adoption and index work remain (2026-10-02).</b>
 <p><b>Agreed target:</b> <code>agent-name</code> identifies the durable principal; <code>session-id</code> identifies a durable transcript; <code>pid</code> identifies one live run. Shared session bytes live at <span class="path">/sessions/&lt;sid&gt;/</span>, with agent/repo/pid associations as links and ownership controlling visibility. <a href="https://github.com/nexi-lab/nexus/pull/4564">Nexus #4564</a> changed the architecture document: it proposed optional <code>session_id</code> on start, separate <code>session_id</code> and <code>pid</code> in the response, and live-run operations addressed by pid. That documentation merge did not implement the wire changes.</p>

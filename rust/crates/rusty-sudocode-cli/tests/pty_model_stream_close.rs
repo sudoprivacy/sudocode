@@ -26,6 +26,15 @@ enum ResponseKind {
     RefusedTail,
 }
 
+impl ResponseKind {
+    const fn is_refused(self) -> bool {
+        matches!(
+            self,
+            Self::RefusedStream | Self::RefusedJson | Self::RefusedAfterText | Self::RefusedTail
+        )
+    }
+}
+
 struct StreamProvider {
     url: String,
     stopped: Arc<AtomicBool>,
@@ -163,13 +172,7 @@ fn response_body(terminal: bool, empty: bool) -> String {
 }
 
 fn refusal_body(kind: ResponseKind) -> Option<String> {
-    if !matches!(
-        kind,
-        ResponseKind::RefusedStream
-            | ResponseKind::RefusedJson
-            | ResponseKind::RefusedAfterText
-            | ResponseKind::RefusedTail
-    ) {
+    if !kind.is_refused() {
         return None;
     }
     let details = json!({"type":"refusal","category":"cyber","explanation":"The provider declined this request."});
@@ -241,13 +244,7 @@ fn check_response(kind: ResponseKind) {
             "availability must follow the HTTP status, not digits in a diagnostic ID: {screen}"
         );
         assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
-    } else if matches!(
-        kind,
-        ResponseKind::RefusedStream
-            | ResponseKind::RefusedJson
-            | ResponseKind::RefusedAfterText
-            | ResponseKind::RefusedTail
-    ) {
+    } else if kind.is_refused() {
         assert_ne!(exit, 0, "a refused turn cannot succeed: {screen}");
         let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(squeezed.contains("providerrefusedtherequest"), "{screen}");

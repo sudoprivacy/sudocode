@@ -1124,10 +1124,8 @@ where
         self
     }
 
-    /// Model this session last announced to the assistant. Exposed so the CLI
-    /// can carry the state across runtime rebuilds (a `/model` switch rebuilds
-    /// the runtime); without it a rebuild would re-announce or, worse, announce
-    /// a stale model.
+    /// Configured model label for this runtime, which may be a provider alias.
+    /// The last announced wire model is read separately from the transcript.
     #[must_use]
     pub fn prompt_known_model(&self) -> Option<&str> {
         self.prompt_known_model.as_deref()
@@ -1330,50 +1328,45 @@ where
     /// blocks, leaving the system prompt byte-stable across a `/model` switch
     /// so its prompt-cache prefix stays warm.
     fn inject_model_context(&mut self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
-        let Some(known) = self.prompt_known_model.clone() else {
+        if self.prompt_known_model.is_none() {
             return blocks;
-        };
-        let active = self.active_model();
+        }
+        let active = self
+            .api_client
+            .wire_model_id()
+            .map_or_else(|| self.active_model(), str::to_string);
         if active.is_empty() {
             return blocks;
         }
-        if active != known {
-            let reminder = ContentBlock::Text {
-                text: format!(
-                    "<system-reminder>The active model has changed since this session started. \
+        // Rebuilding the runtime stamps the newly selected model into its
+        // config. Only the transcript records what the assistant was last
+        // told, including after resume or switching back to an earlier model.
+        let known = self.session_model_context().map(str::to_string);
+        if known.as_deref() == Some(active.as_str()) {
+            return blocks;
+        }
+        let text = match known {
+            Some(known) => format!(
+                "<system-reminder>The active model has changed since this session started. \
                      You were {known}; you are now running as {active}. \
                      Any earlier text in this conversation that named a different model is stale. \
                      When asked which model you are, answer {active}.</system-reminder>"
-                ),
-            };
-            self.prompt_known_model = Some(active);
-            let mut combined = Vec::with_capacity(blocks.len() + 1);
-            combined.push(reminder);
-            combined.extend(blocks);
-            return combined;
-        }
-        if self.session_has_model_context() {
-            return blocks;
-        }
-        let mut combined = Vec::with_capacity(blocks.len() + 1);
-        combined.push(ContentBlock::Text {
-            text: format!(
-                "{MODEL_CONTEXT_REMINDER_PREFIX}{active}. \
-                 Your built-in identity text may name a different model or vendor; \
-                 the model named here is the one actually serving this session, so \
-                 when asked which model you are, answer {active}.</system-reminder>"
             ),
-        });
+            None => format!(
+                "{MODEL_CONTEXT_REMINDER_PREFIX}{active}. \
+                 This is the model ID selected by the host for this request. \
+                 Earlier model labels in the conversation may be stale; \
+                 when asked which model is selected, report this ID.</system-reminder>"
+            ),
+        };
+        let mut combined = Vec::with_capacity(blocks.len() + 1);
+        combined.push(ContentBlock::Text { text });
         combined.extend(blocks);
         combined
     }
 
-    /// Model the session should treat as the one currently answering. Reads
-    /// the session's requested model (`session.model`) — the one the next
-    /// request will actually use, kept in sync by `/model` and runtime
-    /// rebuilds — and falls back to the announced model when the session
-    /// carries none. This is compared against `prompt_known_model` (what was
-    /// last announced) so a switch is detected exactly once.
+    /// Fallback model label for clients that do not expose a wire model ID.
+    /// Prefer the session's requested model, then the runtime configuration.
     fn active_model(&self) -> String {
         self.session
             .model
@@ -1397,20 +1390,29 @@ where
             .unwrap_or_default()
     }
 
-    /// `true` when some message already announced the active model to the
-    /// assistant, via either the first-turn announcement or a change reminder.
-    /// Scanning the session self-heals after compaction removes the carrier.
-    fn session_has_model_context(&self) -> bool {
-        self.session.messages.iter().any(|message| {
-            message.blocks.iter().any(|block| {
-                matches!(
-                    block,
-                    ContentBlock::Text { text }
-                        if text.contains(MODEL_CONTEXT_REMINDER_PREFIX)
-                            || text.contains(MODEL_CHANGE_REMINDER_MARKER)
-                )
+    /// Last model announced in retained user-side context. Search backwards so
+    /// an older announcement cannot hide a later switch or a switch back.
+    fn session_model_context(&self) -> Option<&str> {
+        self.session
+            .messages
+            .iter()
+            .rev()
+            .filter(|message| message.role == MessageRole::User)
+            .flat_map(|message| message.blocks.iter().rev())
+            .find_map(|block| {
+                let ContentBlock::Text { text } = block else {
+                    return None;
+                };
+                let announced = text
+                    .strip_prefix(MODEL_CONTEXT_REMINDER_PREFIX)
+                    .or_else(|| {
+                        text.strip_prefix("<system-reminder>")?
+                            .strip_prefix(MODEL_CHANGE_REMINDER_MARKER)?
+                            .split_once("; you are now running as ")
+                            .map(|(_, model)| model)
+                    })?;
+                announced.split_once(". ").map(|(model, _)| model)
             })
-        })
     }
 
     /// Drain any coordinator-mode `<task-notification>` XML blocks

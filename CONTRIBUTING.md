@@ -284,6 +284,9 @@ The daily `Model Compatibility` workflow discovers gateway models and runs
 live PTYs in batches of at most eight, with three batches running concurrently.
 Each process has one 90-second deadline. A pass requires exit 0 and the expected
 persisted assistant answer; model names and error text cannot satisfy it.
+If retry backoff outlasts the deadline, the report uses the last HTTP attempt's
+recorded error to identify unavailable providers. A later HTTP success clears
+that evidence; unexplained timeouts and empty or incorrect answers still fail.
 `SCODE_COMPAT_REPORT=/absolute/path/report.json` keeps a report outside the
 temporary test workspace and updates it after every model. CI retains partial
 reports and rejects incomplete sweeps or a sweep with no passing models.

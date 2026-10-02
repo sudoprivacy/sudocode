@@ -67,6 +67,29 @@ impl std::fmt::Display for ModelStatus {
 /// transient/group-membership errors that should be skipped, not failed.
 fn is_availability_error(screen: &str) -> bool {
     common::model_unavailable_in_screen(screen)
+        // Also reproduced with a minimal direct gateway request, independently
+        // of scode's prompt and tools: the dependent provider rejects the route.
+        || screen.contains("Bad request for dependent service.")
+}
+
+/// Read only the last completed HTTP attempt. A later successful HTTP response
+/// must invalidate an earlier outage, even if its stream then hangs or is empty.
+/// The full trace can contain request data; reports retain only the error.
+fn latest_request_failure(path: &Path) -> Option<String> {
+    let log = std::fs::read_to_string(path).ok()?;
+    for line in log.lines().rev() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match event["event"].as_str() {
+            Some("request_succeeded") => return None,
+            Some("request_failed") => {
+                return event["attributes"]["error"].as_str().map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Run a single model through a "What is 2+2?" smoke test.
@@ -77,6 +100,7 @@ fn is_availability_error(screen: &str) -> bool {
 #[allow(clippy::redundant_closure_for_method_calls)]
 fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
     let workspace = HarnessWorkspace::new(&format!("compat-{model}"));
+    let request_log = workspace.root.join("model-requests.jsonl");
     let spawn_result = spawn_scode_in_dir_with_env(
         &workspace.root,
         &[
@@ -90,7 +114,10 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
             "What is 2+2? Answer with just the number.",
         ],
         MODEL_TIMEOUT,
-        &[("SUDO_CODE_CONFIG_HOME", env.config_home())],
+        &[
+            ("SUDO_CODE_CONFIG_HOME", env.config_home()),
+            ("SCODE_LOG_PATH", &request_log),
+        ],
     );
 
     let mut sess = match spawn_result {
@@ -110,6 +137,7 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
     // "4" is not an answer, and a timeout after that match is not success.
     let exit = sess.expect_eof();
     let screen = sess.render(|s| s.contents());
+    let request_error = latest_request_failure(&request_log);
     let (status, detail) = match exit {
         Ok(0) => match assistant_answer(&workspace.root.join(".scode")) {
             Ok(answer) if answer.trim() == "4" => (
@@ -127,9 +155,20 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
             format!("upstream unavailable, exit {code}: {screen}"),
         ),
         Ok(code) => (ModelStatus::Fail, format!("exit {code}: {screen}")),
+        // Retry backoff can outlast the PTY deadline. A concrete provider error
+        // explains that timeout; a generic "still waiting" notice never does.
+        Err(_) if request_error.as_deref().is_some_and(is_availability_error) => (
+            ModelStatus::Skip,
+            format!(
+                "upstream unavailable while CLI retries: {}",
+                request_error.as_deref().unwrap_or_default()
+            ),
+        ),
         Err(error) => (
             ModelStatus::Fail,
-            format!("process did not finish: {error}\n{screen}"),
+            format!(
+                "process did not finish: {error}; last HTTP error: {request_error:?}\n{screen}"
+            ),
         ),
     };
     ModelResult {

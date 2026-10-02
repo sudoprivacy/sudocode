@@ -49,6 +49,7 @@ struct ModelResult {
 enum ModelStatus {
     Pass,
     Skip,
+    Refused,
     Fail,
 }
 
@@ -57,6 +58,7 @@ impl std::fmt::Display for ModelStatus {
         match self {
             Self::Pass => write!(f, "PASS"),
             Self::Skip => write!(f, "SKIP"),
+            Self::Refused => write!(f, "REFUSED"),
             Self::Fail => write!(f, "FAIL"),
         }
     }
@@ -92,6 +94,55 @@ fn latest_request_failure(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Only a protocol refusal from the current HTTP attempt can explain this exit.
+fn latest_provider_refusal(path: &Path) -> Option<serde_json::Value> {
+    let log = std::fs::read_to_string(path).ok()?;
+    for line in log.lines().rev() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match event["event"].as_str() {
+            Some("provider_refusal") => return Some(event["attributes"].clone()),
+            Some("request_succeeded" | "request_failed" | "request_debug") => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Keep request-shape diagnostics without prompts, tool definitions or headers.
+fn request_diagnostics(path: &Path) -> serde_json::Value {
+    let log = std::fs::read_to_string(path).unwrap_or_default();
+    let events: Vec<_> = log
+        .lines()
+        .filter_map(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).ok()?;
+            let attributes = &event["attributes"];
+            match event["event"].as_str()? {
+                "request_debug" => {
+                    let body = &attributes["body"];
+                    Some(serde_json::json!({"request": {
+                        "model": body["model"], "max_tokens": body["max_tokens"],
+                        "thinking": body["thinking"], "reasoning_effort": body["reasoning_effort"],
+                        "stream": body["stream"], "tool_choice": body["tool_choice"],
+                        "tool_count": body["tools"].as_array().map(Vec::len)
+                    }}))
+                }
+                "request_succeeded" | "request_failed" => Some(serde_json::json!({
+                    "event": event["event"], "path": attributes["path"],
+                    "status": attributes["status"], "error": attributes["error"]
+                })),
+                "provider_refusal" => Some(serde_json::json!({
+                    "event": event["event"], "model": attributes["model"],
+                    "category": attributes["category"], "explanation": attributes["explanation"]
+                })),
+                _ => None,
+            }
+        })
+        .collect();
+    serde_json::json!(events)
 }
 
 /// Run a single model through a "What is 2+2?" smoke test.
@@ -140,7 +191,8 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
     let exit = sess.expect_eof();
     let screen = sess.render(|s| s.contents());
     let request_error = latest_request_failure(&request_log);
-    let (status, detail) = match exit {
+    let refusal = latest_provider_refusal(&request_log);
+    let (status, mut detail) = match exit {
         Ok(0) => match assistant_answer(&workspace.root.join(".scode")) {
             Ok(answer) if answer.trim() == "4" => (
                 ModelStatus::Pass,
@@ -152,6 +204,13 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
             ),
             Err(error) => (ModelStatus::Fail, error),
         },
+        Ok(code) if refusal.is_some() => (
+            ModelStatus::Refused,
+            format!(
+                "provider explicitly refused the request, exit {code}: {}",
+                refusal.unwrap()
+            ),
+        ),
         Ok(code) if is_availability_error(&screen) => (
             ModelStatus::Skip,
             format!("upstream unavailable, exit {code}: {screen}"),
@@ -173,6 +232,14 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
             ),
         ),
     };
+    if status != ModelStatus::Skip {
+        use std::fmt::Write as _;
+        let _ = write!(
+            detail,
+            "\nHTTP trace: {}",
+            request_diagnostics(&request_log)
+        );
+    }
     ModelResult {
         model: model.to_string(),
         status,
@@ -255,7 +322,8 @@ fn compat_models() -> Vec<String> {
 /// Prints a summary table and writes a JSON report to the workspace.
 ///
 /// The test **passes** as long as there are no `Fail` results.
-/// `Skip` (upstream unavailable) does not count as failure.
+/// `Skip` (upstream unavailable) and `Refused` do not count as failure or as
+/// verified compatibility. CI's aggregate requires at least one actual pass.
 #[test]
 fn model_compat_sweep() {
     let env = TestEnv::new("model-compat");
@@ -317,8 +385,12 @@ fn model_compat_sweep() {
         .iter()
         .filter(|r| r.status == ModelStatus::Fail)
         .count();
+    let refused_count = results
+        .iter()
+        .filter(|r| r.status == ModelStatus::Refused)
+        .count();
 
-    eprintln!("\nSummary: {pass_count} pass, {skip_count} skip, {fail_count} fail");
+    eprintln!("\nSummary: {pass_count} pass, {skip_count} skip, {refused_count} refused, {fail_count} fail");
 
     assert_eq!(
         fail_count, 0,
@@ -332,6 +404,7 @@ fn write_report(path: &Path, expected: usize, results: &[ModelResult]) {
         "completed": results.len(),
         "pass": results.iter().filter(|r| r.status == ModelStatus::Pass).count(),
         "skip": results.iter().filter(|r| r.status == ModelStatus::Skip).count(),
+        "refused": results.iter().filter(|r| r.status == ModelStatus::Refused).count(),
         "fail": results.iter().filter(|r| r.status == ModelStatus::Fail).count(),
         "models": results.iter().map(|r| serde_json::json!({
             "model": r.model,

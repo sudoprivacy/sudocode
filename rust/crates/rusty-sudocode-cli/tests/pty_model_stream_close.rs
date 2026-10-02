@@ -1,4 +1,4 @@
-//! Reproduce gateway streams that close early or end without usable content.
+//! Exercise real CLI failures from interrupted, empty, refused or rejected requests.
 mod common;
 
 use std::fmt::Write as _;
@@ -18,6 +18,12 @@ enum ResponseKind {
     Complete,
     EmptyThenComplete,
     AlwaysEmpty,
+    InvalidRequestWithStatusDigits,
+    MissingModel,
+    RefusedStream,
+    RefusedJson,
+    RefusedAfterText,
+    RefusedTail,
 }
 
 struct StreamProvider {
@@ -75,9 +81,15 @@ impl StreamProvider {
                 let index = count.fetch_add(1, Ordering::SeqCst);
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(request["stream"], true);
+                if let Some(response) = error_response(kind) {
+                    let _ = socket.write_all(response.as_bytes());
+                    continue;
+                }
                 let empty = matches!(kind, ResponseKind::AlwaysEmpty)
                     || (matches!(kind, ResponseKind::EmptyThenComplete) && index == 0);
-                let body = response_body(!matches!(kind, ResponseKind::Interrupted), empty);
+                let body = refusal_body(kind).unwrap_or_else(|| {
+                    response_body(!matches!(kind, ResponseKind::Interrupted), empty)
+                });
                 // Promise bytes that never arrive: reqwest must raise a body
                 // read error, instead of accepting ordinary clean HTTP EOF.
                 let missing = if matches!(kind, ResponseKind::Interrupted | ResponseKind::Complete)
@@ -104,6 +116,19 @@ impl Drop for StreamProvider {
         self.stopped.store(true, Ordering::SeqCst);
         self.worker.take().unwrap().join().unwrap();
     }
+}
+
+fn error_response(kind: ResponseKind) -> Option<String> {
+    let (status, message) = match kind {
+        ResponseKind::MissingModel => ("404 Not Found", "selected deployment absent"),
+        ResponseKind::InvalidRequestWithStatusDigits => (
+            "400 Bad Request",
+            "invalid max_tokens; diagnostic id: 404-429-502-503",
+        ),
+        _ => return None,
+    };
+    let body = json!({"error":{"type":"invalid_request_error","message":message}}).to_string();
+    Some(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
 }
 
 fn response_body(terminal: bool, empty: bool) -> String {
@@ -137,24 +162,51 @@ fn response_body(terminal: bool, empty: bool) -> String {
     body
 }
 
+fn refusal_body(kind: ResponseKind) -> Option<String> {
+    if !matches!(
+        kind,
+        ResponseKind::RefusedStream
+            | ResponseKind::RefusedJson
+            | ResponseKind::RefusedAfterText
+            | ResponseKind::RefusedTail
+    ) {
+        return None;
+    }
+    let details = json!({"type":"refusal","category":"cyber","explanation":"The provider declined this request."});
+    if matches!(kind, ResponseKind::RefusedJson) {
+        return Some(json!({"type":"message","id":"refused-json","role":"assistant","model":"sonnet","content":[],"stop_reason":"refusal","stop_details":details,"usage":{"input_tokens":12,"output_tokens":0}}).to_string());
+    }
+    let mut body = response_body(false, !matches!(kind, ResponseKind::RefusedAfterText));
+    let event = json!({"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":details},"usage":{"input_tokens":12,"output_tokens":0}});
+    write!(&mut body, "event: message_delta\ndata: {event}").unwrap();
+    if !matches!(kind, ResponseKind::RefusedTail) {
+        body.push_str("\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+    }
+    Some(body)
+}
+
 // render takes a closure over screens with different lifetimes.
 #[allow(clippy::redundant_closure_for_method_calls)]
 fn check_response(kind: ResponseKind) {
     let env = TestEnv::new("stream-body-close");
     if env.is_live() {
         return;
-    } // the peer must truncate at a specified byte
+    } // the peer must produce the specified protocol fault
     let provider = StreamProvider::new(kind);
     let path = env.config_home().join("sudocode.json");
     let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
     std::fs::write(path, config.to_string()).unwrap();
-    let mut cli = env.spawn(&[
-        "--permission-mode",
-        "read-only",
-        "--print",
-        "Report the stream result",
-    ]);
+    let log_path = env.workspace_root().join("provider-events.jsonl");
+    let mut cli = env.spawn_with_env(
+        &[
+            "--permission-mode",
+            "read-only",
+            "--print",
+            "Report the stream result",
+        ],
+        &[("SCODE_LOG_PATH", log_path.to_str().unwrap())],
+    );
     cli.set_default_timeout(common::at_least(Duration::from_secs(45)));
     let exit = cli.expect_eof().unwrap();
     let screen = cli.render(|s| s.contents());
@@ -173,6 +225,51 @@ fn check_response(kind: ResponseKind) {
             },
             "only a response with no usable content should be regenerated, once"
         );
+    } else if matches!(
+        kind,
+        ResponseKind::InvalidRequestWithStatusDigits | ResponseKind::MissingModel
+    ) {
+        assert_ne!(exit, 0, "provider error must fail the turn: {screen}");
+        let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            squeezed.contains("apireturned"),
+            "the real provider error must reach the CLI: {screen}"
+        );
+        assert_eq!(
+            common::model_unavailable_in_screen(&screen),
+            matches!(kind, ResponseKind::MissingModel),
+            "availability must follow the HTTP status, not digits in a diagnostic ID: {screen}"
+        );
+        assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+    } else if matches!(
+        kind,
+        ResponseKind::RefusedStream
+            | ResponseKind::RefusedJson
+            | ResponseKind::RefusedAfterText
+            | ResponseKind::RefusedTail
+    ) {
+        assert_ne!(exit, 0, "a refused turn cannot succeed: {screen}");
+        let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(squeezed.contains("providerrefusedtherequest"), "{screen}");
+        assert!(squeezed.contains("cyber"), "{screen}");
+        assert!(
+            squeezed.contains("Theproviderdeclinedthisrequest."),
+            "{screen}"
+        );
+        assert!(
+            !screen.contains("assistant stream produced no content"),
+            "{screen}"
+        );
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            1,
+            "a refusal must never be retried"
+        );
+        assert!(
+            squeezed.contains("[error-kind:provider_refusal]"),
+            "{screen}"
+        );
+        assert_refusal_trace(&log_path);
     } else if matches!(kind, ResponseKind::AlwaysEmpty) {
         assert_ne!(
             exit, 0,
@@ -196,6 +293,27 @@ fn check_response(kind: ResponseKind) {
     }
 }
 
+fn assert_refusal_trace(log_path: &std::path::Path) {
+    let events: Vec<Value> = std::fs::read_to_string(log_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let refusals: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "provider_refusal")
+        .collect();
+    assert_eq!(refusals.len(), 1, "the report needs one structured refusal");
+    assert_eq!(refusals[0]["attributes"]["category"], "cyber");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "response_usage"
+                && event["attributes"]["input_tokens"] == 12),
+        "refusal usage must still be recorded"
+    );
+}
+
 #[test]
 fn terminal_response_survives_a_broken_http_body() {
     check_response(ResponseKind::Complete);
@@ -214,4 +332,34 @@ fn empty_terminal_response_retries_and_returns_the_answer() {
 #[test]
 fn repeated_empty_terminal_responses_fail_after_one_retry() {
     check_response(ResponseKind::AlwaysEmpty);
+}
+
+#[test]
+fn invalid_request_status_digits_do_not_make_a_live_test_skip() {
+    check_response(ResponseKind::InvalidRequestWithStatusDigits);
+}
+
+#[test]
+fn missing_model_http_status_is_recognized_as_unavailable() {
+    check_response(ResponseKind::MissingModel);
+}
+
+#[test]
+fn explicit_stream_refusal_is_reported_without_retry() {
+    check_response(ResponseKind::RefusedStream);
+}
+
+#[test]
+fn explicit_json_refusal_is_reported_without_retry() {
+    check_response(ResponseKind::RefusedJson);
+}
+
+#[test]
+fn explicit_refusal_after_partial_text_cannot_succeed() {
+    check_response(ResponseKind::RefusedAfterText);
+}
+
+#[test]
+fn explicit_refusal_in_unterminated_tail_is_not_retried_as_truncation() {
+    check_response(ResponseKind::RefusedTail);
 }

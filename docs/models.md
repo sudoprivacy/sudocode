@@ -64,6 +64,13 @@ including responses with a normal stop frame or cache metadata. The retry stays
 streaming and uses the same model and credentials. A second empty response fails
 the turn. A completed answer is not regenerated.
 
+An explicit Anthropic `stop_reason: "refusal"` ends the turn with a provider
+refusal error, even when HTTP returned 200 or partial text preceded the refusal.
+The CLI shows the provider's category and explanation when present, records
+reported usage, and never retries that refusal. The live compatibility report
+lists these outcomes as `REFUSED`, separately from successful answers and outages.
+See [Anthropic's refusal protocol](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback).
+
 ## Provider-specific handling
 
 Translating Claude-style messages to OpenAI-compatible chat completion

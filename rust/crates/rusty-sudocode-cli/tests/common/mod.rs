@@ -430,10 +430,11 @@ pub fn expect_turn_complete_after(
     }
 }
 
-/// Locate the compiled `scode` binary for the current test run.
+/// Locate the compiled CLI, or a release artifact selected for live acceptance.
 #[must_use]
 pub fn scode_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_scode"))
+    std::env::var_os("SCODE_TEST_BIN")
+        .map_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_scode")), PathBuf::from)
 }
 
 /// A throwaway config home under `parent`, seeded from the real one, for a
@@ -998,16 +999,18 @@ pub fn model_unavailable_in_screen(screen: &str) -> bool {
         "no access to model",
         "model_not_found",
         "not supported",
-        "404",
+        // Match the HTTP status label. Bare digits also occur in request IDs
+        // and invalid parameter values, and must not turn real failures into skips.
+        "api returned 404",
         // Transient capacity / connectivity.
-        "429",
+        "api returned 429",
         "rate limit",
         "Rate limit",
         "overloaded",
         "saturated",
         "upstream",
-        "503",
-        "502",
+        "api returned 503",
+        "api returned 502",
         "timed out",
         "timeout",
         "ETIMEDOUT",

@@ -86,7 +86,7 @@ impl SseParser {
             // re-upload the whole conversation eight times to be told the same
             // thing. Reachable for any JSON body now that `push` holds those
             // back for this method rather than frame-splitting them.
-            Err(error @ ApiError::Api { .. }) => Err(error),
+            Err(error @ (ApiError::Api { .. } | ApiError::ProviderRefusal { .. })) => Err(error),
             // The tail did not parse. If it is the *start* of a terminal frame
             // (a `message_stop` — the last event Anthropic emits), the stream
             // reached its logical end and only the closing `}\n\n` bytes were
@@ -263,6 +263,11 @@ pub(crate) fn parse_frame_with_provider(
         // dropping it — otherwise the user sees an empty response with no
         // hint of what went wrong.
         if event_name.is_none() {
+            if let Ok(raw) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if let Some(error) = refusal_from_response(&raw, provider, model) {
+                    return Err(error);
+                }
+            }
             if let Some(error) = detect_non_sse_error(trimmed) {
                 return Err(error);
             }
@@ -275,9 +280,42 @@ pub(crate) fn parse_frame_with_provider(
         return Ok(None);
     }
 
-    serde_json::from_str::<StreamEvent>(&payload)
+    let raw: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))?;
+    if let Some(error) = refusal_from_response(&raw, provider, model) {
+        return Err(error);
+    }
+    serde_json::from_value::<StreamEvent>(raw)
         .map(Some)
         .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))
+}
+
+/// Recognize the protocol's stop reason, never prose that merely mentions a refusal.
+/// Gate before converting to `StreamEvent`, which intentionally ignores `stop_details`.
+pub(crate) fn refusal_from_response(
+    raw: &serde_json::Value,
+    provider: &str,
+    model: &str,
+) -> Option<ApiError> {
+    let message = match raw["type"].as_str()? {
+        "message_delta" => &raw["delta"],
+        "message" => raw,
+        _ => return None,
+    };
+    if message["stop_reason"] != "refusal" {
+        return None;
+    }
+    let details = &message["stop_details"];
+    Some(ApiError::ProviderRefusal {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        category: details["category"].as_str().map(str::to_string),
+        explanation: details["explanation"].as_str().map(str::to_string),
+        usage: raw
+            .get("usage")
+            .and_then(|usage| serde_json::from_value(usage.clone()).ok())
+            .map(Box::new),
+    })
 }
 
 /// Detect a response body that is not an SSE stream at all: an HTML error

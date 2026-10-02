@@ -693,6 +693,8 @@ fn classify_error_kind(message: &str) -> &'static str {
         "unsupported_resumed_command"
     } else if message.contains("confirmation required") {
         "confirmation_required"
+    } else if message.contains("provider refused the request") {
+        "provider_refusal"
     } else if message.contains("api failed") || message.contains("api returned") {
         "api_http_error"
     } else {

@@ -433,6 +433,23 @@ impl AnthropicClient {
         }
         response.gateway_request_id = gateway_request_id;
 
+        if let Some(error) = crate::sse::refusal_from_response(
+            &serde_json::from_str::<Value>(&body).map_err(ApiError::from)?,
+            "Anthropic",
+            &request.model,
+        ) {
+            // Refused responses still incur usage, but cannot enter the completion cache.
+            if let Some(prompt_cache) = &self.prompt_cache {
+                let record = prompt_cache.record_usage(
+                    &request,
+                    &response.usage,
+                    response.gateway_request_id.as_deref(),
+                );
+                self.store_last_prompt_cache_record(record);
+            }
+            return Err(error);
+        }
+
         if let Some(prompt_cache) = &self.prompt_cache {
             let record = prompt_cache.record_response(&request, &response);
             self.store_last_prompt_cache_record(record);
@@ -1063,6 +1080,9 @@ impl MessageStream {
                 // error when the stream stopped WITHOUT a logical end.
                 let remaining = match self.parser.finish() {
                     Ok(remaining) => remaining,
+                    Err(error @ ApiError::ProviderRefusal { .. }) => {
+                        return Err(self.record_refusal(error))
+                    }
                     Err(_) if self.logically_complete => Vec::new(),
                     Err(error) => return Err(error),
                 };
@@ -1080,7 +1100,11 @@ impl MessageStream {
             match self.response.chunk().await {
                 Ok(Some(chunk)) => {
                     self.scan_chunk_for_cache_diagnosis(&chunk);
-                    self.pending.extend(self.parser.push(&chunk)?);
+                    let events = self
+                        .parser
+                        .push(&chunk)
+                        .map_err(|error| self.record_refusal(error))?;
+                    self.pending.extend(events);
                 }
                 Ok(None) => {
                     self.done = true;
@@ -1098,6 +1122,34 @@ impl MessageStream {
                 }
             }
         }
+    }
+
+    fn record_refusal(&mut self, error: ApiError) -> ApiError {
+        if let ApiError::ProviderRefusal {
+            model,
+            category,
+            explanation,
+            usage,
+            ..
+        } = &error
+        {
+            self.done = true;
+            self.pending.clear();
+            if let Some(usage) = usage {
+                self.latest_usage = Some((**usage).clone());
+            }
+            self.record_usage_once();
+            if let Some(tracer) = &self.session_tracer {
+                let attributes = serde_json::json!({
+                    "request_id": self.client_request_id,
+                    "model": model,
+                    "category": category,
+                    "explanation": explanation
+                });
+                tracer.record("provider_refusal", attributes.as_object().unwrap().clone());
+            }
+        }
+        error
     }
 
     /// Pull the message id (and any cache diagnosis) out of the raw

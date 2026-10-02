@@ -53,7 +53,7 @@ def collect(directory):
     if collections.Counter(row["model"] for row in rows) != collections.Counter(expected):
         errors.append("Reported models do not match the discovery plan")
     counts = collections.Counter(row["status"] for row in rows)
-    if set(counts) - {"PASS", "SKIP", "FAIL"}:
+    if set(counts) - {"PASS", "SKIP", "REFUSED", "FAIL"}:
         errors.append("Unknown result status")
     if counts["FAIL"]:
         errors.append(f"{counts['FAIL']} compatibility failures")
@@ -61,10 +61,12 @@ def collect(directory):
         errors.append("No model passed")
     report = {"total": len(expected), "completed": len(rows),
               "pass": counts["PASS"], "skip": counts["SKIP"], "fail": counts["FAIL"],
+              "refused": counts["REFUSED"],
               "errors": errors, "models": rows}
     output = Path(directory) / "model-compat-report.json"
     output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"{counts['PASS']} pass, {counts['SKIP']} skip, {counts['FAIL']} fail")
+    print(f"{counts['PASS']} pass, {counts['SKIP']} skip, "
+          f"{counts['REFUSED']} refused, {counts['FAIL']} fail")
     if errors:
         raise SystemExit("; ".join(errors))
 

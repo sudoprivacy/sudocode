@@ -70,6 +70,8 @@ fn is_availability_error(screen: &str) -> bool {
         // Also reproduced with a minimal direct gateway request, independently
         // of scode's prompt and tools: the dependent provider rejects the route.
         || screen.contains("Bad request for dependent service.")
+        // A connection failure before HTTP, also seen in a direct gateway probe.
+        || screen.contains("client error (Connect): tls handshake eof")
 }
 
 /// Read only the last completed HTTP attempt. A later successful HTTP response

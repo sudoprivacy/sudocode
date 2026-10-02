@@ -1,4 +1,4 @@
-//! PTY tests for the write_plan approval dialog.
+//! PTY tests for the `write_plan` approval dialog.
 //!
 //! When the model calls `write_plan` in REPL mode, the CLI writes the plan
 //! file and shows a 4-choice dialog. These tests verify:
@@ -19,20 +19,32 @@ mod common;
 use std::time::Duration;
 
 use common::{expect_turn_complete_after, turn_status_marker, TestEnv, LIVE_TURN_BUDGET};
+use runtime::{ContentBlock, Session};
 
 /// Budget for the process to exit after `/exit`. Generous on purpose: teardown
 /// (unwinding the render loop and persisting the session) is its own cost,
 /// unrelated to how long the asserted behaviour took.
 const EXIT_BUDGET: Duration = Duration::from_secs(30);
 
-/// When the model calls write_plan in REPL mode, the user should see a
+/// When the model calls `write_plan` in REPL mode, the user should see a
 /// confirmation dialog. Choosing "keep context & execute" completes the turn.
 //
 // Runs on Windows too: the confirmation crosses the engine↔renderer seam as a
 // QuestionRequest answered above the seam by CliQuestionPrompter (rustyline).
 #[test]
 fn write_plan_shows_confirm_dialog_and_accepts_keep_context() {
-    let env = TestEnv::new("plan-confirm");
+    choose_plan_action("plan-confirm", "2", "The user APPROVED the plan", false);
+}
+
+// render takes a closure over screens with different lifetimes.
+#[allow(clippy::redundant_closure_for_method_calls)]
+fn choose_plan_action(name: &str, choice: &str, expected: &str, is_error: bool) {
+    let env = TestEnv::new(name);
+    let budget = if env.is_live() {
+        LIVE_TURN_BUDGET
+    } else {
+        env.timeout()
+    };
 
     let mut sess = env.spawn(&[
         "--permission-mode",
@@ -40,50 +52,87 @@ fn write_plan_shows_confirm_dialog_and_accepts_keep_context() {
         "--allowedTools",
         "write_plan",
     ]);
-    sess.expect("❯").expect("should see REPL prompt");
+    common::expect_input_line_cleared(&sess, budget, "plan REPL ready");
 
     let prompt = env.prompt(
         "Call the write_plan tool right now with a short markdown plan as `content`. Do not explain anything.",
         "write_plan_roundtrip",
     );
-    sess.send(&format!("{prompt}\r")).expect("send prompt");
-
-    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
-    let dialog_appeared = sess.expect("Choose an action").is_ok();
-
-    if !dialog_appeared && env.is_live() {
-        eprintln!("SKIP: live model did not call write_plan");
-        return;
-    }
-    assert!(dialog_appeared, "should see confirmation dialog");
-
-    // Choose option 2: keep context & execute
-    let marker = turn_status_marker(&sess);
-    sess.send("2\r").expect("send choice 2");
-    expect_turn_complete_after(
+    sess.send(&prompt).expect("type prompt");
+    common::expect_input_line(
         &sess,
-        &marker,
-        if env.is_live() {
-            LIVE_TURN_BUDGET
-        } else {
-            env.timeout()
-        },
-        "keep-context plan turn should complete",
+        "Call the write_plan tool",
+        budget,
+        "plan prompt entered",
     );
+    sess.send("\r").expect("submit prompt");
 
-    // Let the REPL re-arm its input row before sending /exit. The status line
-    // can print a beat before rustyline re-enters readline; sending in that
-    // window drops the keystrokes (the whole suite settles here for the same
-    // reason). The shared-editor fix removes the throwaway-editor perturbation,
-    // this closes the remaining render-vs-input timing gap under parallel load.
-    std::thread::sleep(Duration::from_millis(500));
-    sess.send("/exit\r").expect("send /exit");
+    // The title prints before rustyline enters readline. Sending a choice at
+    // that point races terminal setup: CI echoed the digit above the options
+    // and left the dialog waiting at `Your choice: 2`, having lost Enter.
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("Choose an action") && screen.contains("Your choice:"),
+        budget,
+        "plan choice editor ready",
+    );
+    let marker = turn_status_marker(&sess);
+    sess.send(choice).expect("type choice");
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains(&format!("Your choice: {choice}")),
+        budget,
+        "plan choice entered",
+    );
+    // A user can pause before Enter. Span several spinner ticks: background
+    // progress must not erase the choice editor while it owns the terminal.
+    std::thread::sleep(Duration::from_millis(300));
+    let screen = sess.render(|s| s.contents());
+    assert!(
+        screen.contains(&format!("Your choice: {choice}")),
+        "the pending choice must remain visible: {screen}"
+    );
+    sess.send("\r").expect("submit choice");
+    expect_turn_complete_after(&sess, &marker, budget, "chosen plan action completes");
+
+    common::expect_input_line_cleared(&sess, budget, "plan REPL rearmed");
+    sess.send("/exit").expect("type /exit");
+    common::expect_input_line(&sess, "/exit", budget, "exit entered");
+    sess.send("\r").expect("submit /exit");
     sess.set_default_timeout(EXIT_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("clean exit after write_plan dialog: {e}\nPTY:\n{screen}");
     });
     assert_eq!(exit, 0, "scode should exit 0 after /exit; got {exit}");
+    assert!(
+        saved_plan_decision(&env.workspace_root().join(".scode"), expected, is_error),
+        "the chosen approval/rejection must reach the persisted tool result"
+    );
+}
+
+fn saved_plan_decision(dir: &std::path::Path, expected: &str, expected_error: bool) -> bool {
+    std::fs::read_dir(dir).unwrap().any(|entry| {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            saved_plan_decision(&path, expected, expected_error)
+        } else if path
+            .file_name()
+            .is_some_and(|name| name == "transcript.jsonl")
+        {
+            let session = Session::load_from_path(&path).unwrap();
+            session
+                .messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .any(|block| {
+                    matches!(block, ContentBlock::ToolResult { tool_name, output, is_error, .. }
+                    if tool_name == "write_plan" && output.contains(expected) && *is_error == expected_error)
+                })
+        } else {
+            false
+        }
+    })
 }
 
 /// Choice 1 (clear context & execute) is the default: it resets the session
@@ -146,10 +195,10 @@ fn write_plan_choice_clear_context_executes_plan() {
 }
 
 /// The `[+]` free-text row (comment / keep-planning) must be reachable by arrow
-/// keys and accept typed input — the DialPad bug where the cursor couldn't land
+/// keys and accept typed input — the `DialPad` bug where the cursor couldn't land
 /// on it and typing was swallowed. Down past the 4 options lands on `[+]`;
 /// Enter opens text entry; the typed comment feeds back and the model revises
-/// (calls write_plan again → the dialog reappears). Live-only: only a real model
+/// (calls `write_plan` again → the dialog reappears). Live-only: only a real model
 /// re-plans on the comment.
 #[test]
 fn write_plan_comment_row_is_reachable_and_revises() {
@@ -214,56 +263,10 @@ fn write_plan_comment_row_is_reachable_and_revises() {
 /// without implementing the plan.
 #[test]
 fn write_plan_choice_exit_rejects_execution() {
-    let env = TestEnv::new("plan-exit");
-
-    let mut sess = env.spawn(&[
-        "--permission-mode",
-        "workspace-write",
-        "--allowedTools",
-        "write_plan",
-    ]);
-    sess.expect("❯").expect("should see REPL prompt");
-
-    let prompt = env.prompt(
-        "Call the write_plan tool right now with a short markdown plan as `content`. Do not explain anything.",
-        "write_plan_roundtrip",
+    choose_plan_action(
+        "plan-exit",
+        "4",
+        "User chose to exit plan mode without executing",
+        true,
     );
-    sess.send(&format!("{prompt}\r")).expect("send prompt");
-
-    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
-    let dialog_appeared = sess.expect("Choose an action").is_ok();
-
-    if !dialog_appeared && env.is_live() {
-        eprintln!("SKIP: live model did not call write_plan");
-        return;
-    }
-    assert!(dialog_appeared, "should see confirmation dialog");
-
-    // Choose option 4: exit plan (don't execute)
-    let marker = turn_status_marker(&sess);
-    sess.send("4\r").expect("send choice 4");
-    expect_turn_complete_after(
-        &sess,
-        &marker,
-        if env.is_live() {
-            LIVE_TURN_BUDGET
-        } else {
-            env.timeout()
-        },
-        "exit-plan turn should complete",
-    );
-
-    // Let the REPL re-arm its input row before sending /exit. The status line
-    // can print a beat before rustyline re-enters readline; sending in that
-    // window drops the keystrokes (the whole suite settles here for the same
-    // reason). The shared-editor fix removes the throwaway-editor perturbation,
-    // this closes the remaining render-vs-input timing gap under parallel load.
-    std::thread::sleep(Duration::from_millis(500));
-    sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(EXIT_BUDGET);
-    let exit = sess.expect_eof().unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("clean exit after write_plan dialog: {e}\nPTY:\n{screen}");
-    });
-    assert_eq!(exit, 0, "scode should exit 0 after /exit; got {exit}");
 }

@@ -57,6 +57,20 @@ threshold. It must not size a request using a display name, a config alias, or
 an older model recorded in a resumed transcript. Configured token limits match
 full deployment IDs before trying the provider-prefix basename fallback.
 
+## Empty streamed responses
+
+The engine retries a response once when it ends without text or tool content,
+including responses with a normal stop frame or cache metadata. The retry stays
+streaming and uses the same model and credentials. A second empty response fails
+the turn. A completed answer is not regenerated.
+
+An explicit Anthropic `stop_reason: "refusal"` ends the turn with a provider
+refusal error, even when HTTP returned 200 or partial text preceded the refusal.
+The CLI shows the provider's category and explanation when present, records
+reported usage, and never retries that refusal. The live compatibility report
+lists these outcomes as `REFUSED`, separately from successful answers and outages.
+See [Anthropic's refusal protocol](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback).
+
 ## Provider-specific handling
 
 Translating Claude-style messages to OpenAI-compatible chat completion
@@ -162,6 +176,13 @@ ceiling is lower, every request fails:
 <400> InternalError.Algo.InvalidParameter: Range of max_tokens should be [1, 32768]
 ```
 
+The bundled GPT-4o and GPT-4o mini entries use the documented 128,000-token
+context window and 16,384-token output ceiling
+([GPT-4o](https://developers.openai.com/api/docs/models/gpt-4o),
+[GPT-4o mini](https://developers.openai.com/api/docs/models/gpt-4o-mini)).
+This prevents an undocumented gateway entry from receiving the 64,000-token
+fallback and rejecting even a short prompt.
+
 Two optional fields on the model entry override the table:
 
 ```jsonc
@@ -216,5 +237,5 @@ To add a new model that requires special handling:
 1. Identify which families above the model belongs to.
 2. Extend the matching detection function in
    `rust/crates/api/src/providers/openai_compat.rs`.
-3. Add a unit test for the detection alongside the existing tests.
+3. Add a PTY regression that checks the provider request and resulting answer.
 4. Add an entry to the relevant section above.

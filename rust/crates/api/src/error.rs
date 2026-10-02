@@ -59,6 +59,15 @@ pub enum ApiError {
         body_snippet: String,
         source: serde_json::Error,
     },
+    /// A provider explicitly declined the request, including HTTP 200 refusals.
+    /// Preserve usage for accounting, but never retry or accept partial output.
+    ProviderRefusal {
+        provider: String,
+        model: String,
+        category: Option<String>,
+        explanation: Option<String>,
+        usage: Option<Box<crate::types::Usage>>,
+    },
     Api {
         status: reqwest::StatusCode,
         error_type: Option<String>,
@@ -203,6 +212,7 @@ impl ApiError {
             | Self::Json { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. }
+            | Self::ProviderRefusal { .. }
             | Self::Api { .. } => ErrorAction::Fatal,
         }
     }
@@ -282,9 +292,10 @@ impl ApiError {
         match self {
             // These carry data needed by each predicate method; callers
             // short-circuit before reaching categorize().
-            Self::Http(_) | Self::Api { .. } | Self::RetriesExhausted { .. } => {
-                ErrorCategory::Structured
-            }
+            Self::Http(_)
+            | Self::Api { .. }
+            | Self::RetriesExhausted { .. }
+            | Self::ProviderRefusal { .. } => ErrorCategory::Structured,
             // Transport failures: retryable, safe_failure_class = "provider_transport".
             Self::IncompleteStream { .. }
             | Self::InvalidSseFrame(_)
@@ -337,6 +348,7 @@ impl ApiError {
     #[must_use]
     pub fn safe_failure_class(&self) -> &'static str {
         match self {
+            Self::ProviderRefusal { .. } => "provider_refusal",
             Self::RetriesExhausted { .. } if self.is_context_window_failure() => "context_window",
             Self::RetriesExhausted { .. } if self.is_generic_fatal_wrapper() => {
                 "provider_retry_exhausted"
@@ -491,6 +503,16 @@ impl Display for ApiError {
                 f,
                 "{provider} stream for model {model} ended mid-frame (truncated response, likely a dropped connection or a proxy cutting the stream); first 200 chars of the incomplete tail: {body_snippet}"
             ),
+            Self::ProviderRefusal { provider, model, category, explanation, .. } => {
+                write!(f, "{provider} provider refused the request for model {model}")?;
+                if let Some(category) = category {
+                    write!(f, " (category: {category})")?;
+                }
+                if let Some(explanation) = explanation {
+                    write!(f, ": {explanation}")?;
+                }
+                Ok(())
+            }
             Self::Api {
                 status,
                 error_type,

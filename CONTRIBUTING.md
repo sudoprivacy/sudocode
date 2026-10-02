@@ -129,6 +129,10 @@ Commit the live tests after actually running them, or add the end-to-end tests
 to CI. Record the command, result and any remaining coverage limits in the PR;
 mock passes or skipped live tests alone do not complete acceptance.
 
+Set `SCODE_TEST_BIN` to the absolute path of a downloaded release binary to run
+the same PTY workflows against that artifact. Without it, the harness uses the
+CLI built by Cargo. This also lets release acceptance leave build outputs intact.
+
 ```bash
 cd rust/
 cargo test --workspace                     # all tests (PTY tests included)
@@ -279,6 +283,22 @@ in `rust/Cargo.toml`). Relaxing this for a single crate goes through
 the PR description first.
 
 ## Required checks
+
+The daily `Model Compatibility` workflow discovers gateway models and runs
+live PTYs in batches of at most eight, with three batches running concurrently.
+Each process has one 90-second deadline. A pass requires exit 0 and the expected
+persisted assistant answer; model names and error text cannot satisfy it.
+If retry backoff outlasts the deadline, the report uses the last HTTP attempt's
+recorded error to identify unavailable providers. A later HTTP success clears
+that evidence; unexplained timeouts and empty or incorrect answers still fail.
+`SCODE_COMPAT_REPORT=/absolute/path/report.json` keeps a report outside the
+temporary test workspace and updates it after every model. CI retains partial
+reports and rejects incomplete sweeps or a sweep with no passing models.
+An explicit protocol refusal is reported separately as `REFUSED`, with the
+provider's category and explanation when supplied. It does not establish
+compatibility and is never retried. An all-refused sweep still fails the
+aggregate's requirement for a real pass. Reports include request parameters
+and HTTP results for diagnosis, without prompts, tool definitions or headers.
 
 CI gates these on every PR. Run them locally before pushing:
 

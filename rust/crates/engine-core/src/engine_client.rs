@@ -268,7 +268,10 @@ impl EngineApiClient {
                         if !state.saw_stop && state.has_content {
                             state.buffer.push_back(AssistantEvent::MessageStop);
                         }
-                        if state.buffer.is_empty() && !state.saw_stop {
+                        // A terminal frame and cache/usage metadata do not make
+                        // an empty response useful. Retry it once regardless of
+                        // how the gateway framed the end of the stream.
+                        if !state.has_content {
                             if let Some(retry_request) = state.retry_request.take() {
                                 let response = state
                                     .client

@@ -319,6 +319,7 @@ The Cargo workspace is described in
 - [`docs/container.md`](./docs/container.md) — building and running inside a container.
 - [`sudo-code-roadmap.html`](./sudo-code-roadmap.html) Goal 2 — what claude-code parity means and how it is tracked (reference sources, resolution taxonomy, sync markers).
 - [`docs/mock-parity-harness.md`](./docs/mock-parity-harness.md) — the deterministic mock backend and harness.
+- [Memory systems comparison](./docs/research/memory-systems-2026-10-01/memory-systems-comparison.html) — a dated source investigation of Codex CLI, Claude Code, and Sudocode; [read and discuss on ShareOne](https://s.shareone.vip/s/codex-claude-code-sudocode-memory-systems).
 - [`rust/README.md`](./rust/README.md) — Cargo workspace map.
 
 ## Contributing

@@ -1716,21 +1716,23 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   started by an external orchestrator through
   <code>ManagedAgentService.start_session_v1({agent_id, repos, model,
   owner_id, zone_id})</code>. The returned <code>session_id</code>
-  IS the AgentRegistry pid; sudocode does not invent its own. The
-  same binary stays runnable as a standalone CLI without nexus —
-  the <code>FsBackend</code> trait abstracts this.</li>
+  currently names the AgentRegistry pid. The engine creates a separate
+  durable session-id for its transcript. Those identities have different
+  lifetimes; the control API's field name does not make them the same.
+  Co-host recovery and the interface migration choice are tracked in
+  <a href="https://s.shareone.vip/s/agent-context-storage-matrix#q1">the storage matrix, Q1</a>.
+  The CLI also runs standalone without a shared Nexus daemon.</li>
 
-  <li><strong>FsBackend trait.</strong> All filesystem access in
-  the sudocode runtime routes through one
+  <li><strong>FsBackend trait.</strong> File tools and session persistence use the
   <code>FsBackend</code> trait with three impls:
   <code>KernelFsBackend&lt;Kernel&gt;</code> (in-process kernel
-  syscalls when the sudocode runtime is hosted in-process by the nexus
-  daemon <code>nexusd-cluster</code>),
-  <code>StdFsBackend</code> (host <code>std::fs</code> for the
-  standalone CLI), <code>NexusVfsFsBackend</code> (gRPC to a remote
-  kernel from an edge / dev CLI). No code path bypasses the trait —
-  not session jsonl, not config, not the workspace-bounded
-  <code>file_ops</code> helpers.</li>
+  syscalls, either the CLI's embedded kernel or the shared daemon's kernel),
+  <code>StdFsBackend</code> (host files, including standalone session storage),
+  and <code>NexusVfsFsBackend</code> (gRPC to a remote kernel).
+  <code>HostContext</code> supplies the filesystem and host-side configuration
+  and shell roots. Kernel backend type alone does not determine the session
+  storage root; <code>managed_root(ManagedRoot::Sessions)</code> can select
+  <code>/sessions</code> or defer to the local store's partition.</li>
 
   <li><strong>Mailbox read / write.</strong> A sudocode session
   watches its own <code>/proc/{self_pid}/chat-with-me</code> via
@@ -1756,12 +1758,14 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   path layout is the SSOT for permissions and the error message
   is the teaching channel.</li>
 
-  <li><strong>Session state placement.</strong> When hosted in-process by
-  <code>nexusd-cluster</code> (on <code>KernelFsBackend</code>), session jsonl transcripts live at
-  <code>/agents/{name}/sessions/&lt;workspace_hash&gt;/&lt;session-id&gt;.jsonl</code>
-  on the kernel VFS, not on the host filesystem. Booting a worker
-  reads its profile + the requested <code>--session-id</code>
-  transcript from that VFS path; the same path supports resume.</li>
+  <li><strong>Session state placement.</strong> The <code>nexusd-cohost</code>
+  composition installs sudocode's spawn adapter. Its session transcript lives
+  at <code>/sessions/&lt;session-id&gt;/transcript.jsonl</code> on the shared
+  kernel, indexed by <code>/agents/{name}/sessions/&lt;session-id&gt;</code>.
+  Standalone retains host session files under its workspace partition.
+  Co-host persistence is implemented; startup still creates a new session.
+  Loading an existing durable session on a new pid remains a target, including
+  backend-aware store reads and the control-interface choice in Q1.</li>
 
   <li><strong>Lifecycle.</strong> Out-of-band termination
   (SIGTERM / SIGKILL / orphan reap from <code>AgentRegistry</code>)

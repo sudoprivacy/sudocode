@@ -433,25 +433,22 @@ impl AnthropicClient {
         }
         response.gateway_request_id = gateway_request_id;
 
-        if let Some(error) = crate::sse::refusal_from_response(
+        let refusal = crate::sse::refusal_from_response(
             &serde_json::from_str::<Value>(&body).map_err(ApiError::from)?,
             "Anthropic",
             &request.model,
-        ) {
+        );
+        if let Some(prompt_cache) = &self.prompt_cache {
             // Refused responses still incur usage, but cannot enter the completion cache.
-            if let Some(prompt_cache) = &self.prompt_cache {
-                let record = prompt_cache.record_usage(
+            let record = if refusal.is_some() {
+                prompt_cache.record_usage(
                     &request,
                     &response.usage,
                     response.gateway_request_id.as_deref(),
-                );
-                self.store_last_prompt_cache_record(record);
-            }
-            return Err(error);
-        }
-
-        if let Some(prompt_cache) = &self.prompt_cache {
-            let record = prompt_cache.record_response(&request, &response);
+                )
+            } else {
+                prompt_cache.record_response(&request, &response)
+            };
             self.store_last_prompt_cache_record(record);
         }
         self.http.record_analytics(
@@ -474,7 +471,7 @@ impl AnthropicClient {
                     )),
                 ),
         );
-        Ok(response)
+        refusal.map_or(Ok(response), Err)
     }
 
     pub async fn stream_message(

@@ -135,6 +135,18 @@ impl EngineApiClient {
     /// One method rather than four call sites deciding for themselves — the
     /// duplication this whole area is being repaired for.
     fn runtime_error(&self, error: &api::ApiError) -> RuntimeError {
+        if let api::ApiError::ToolCallingUnsupported { model } = error {
+            if let Some(tracer) = self.session_tracer() {
+                tracer.record(
+                    "model_capability_rejected",
+                    serde_json::Map::from_iter([
+                        ("model".into(), serde_json::json!(model)),
+                        ("capability".into(), serde_json::json!("tool_calling")),
+                        ("source".into(), serde_json::json!("endpoint_catalog")),
+                    ]),
+                );
+            }
+        }
         runtime_error_from_api(
             &self.session_id,
             self.account.as_deref(),
@@ -414,6 +426,7 @@ impl ApiClient for EngineApiClient {
                 .await
         };
         if let Some(catalog) = catalog {
+            catalog.refresh_if_missing().await;
             catalog.scope(request).await
         } else {
             request.await
@@ -482,6 +495,7 @@ impl ApiClient for EngineApiClient {
             Err(RuntimeError::new("post-tool continuation nudge exhausted"))
         };
         if let Some(catalog) = catalog {
+            catalog.refresh_if_missing().await;
             catalog.scope(request).await
         } else {
             request.await

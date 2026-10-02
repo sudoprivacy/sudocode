@@ -157,6 +157,16 @@ pub fn resolve_model_alias_from_config(config: &SudoCodeConfig, alias: &str) -> 
 /// Local preflight check: reject requests whose estimated token count
 /// exceeds the model's context window (looked up from hardcoded specs).
 pub fn preflight_message_request(request: &MessageRequest) -> Result<(), ApiError> {
+    if request
+        .tools
+        .as_ref()
+        .is_some_and(|tools| !tools.is_empty())
+        && runtime::model_capabilities::tool_calling_supported(&request.model) == Some(false)
+    {
+        return Err(ApiError::ToolCallingUnsupported {
+            model: request.model.clone(),
+        });
+    }
     let Some(limit) = model_token_limit(&request.model) else {
         return Ok(());
     };

@@ -57,6 +57,13 @@ threshold. It must not size a request using a display name, a config alias, or
 an older model recorded in a resumed transcript. Configured token limits match
 full deployment IDs before trying the provider-prefix basename fallback.
 
+## Empty streamed responses
+
+The engine retries a response once when it ends without text or tool content,
+including responses with a normal stop frame or cache metadata. The retry stays
+streaming and uses the same model and credentials. A second empty response fails
+the turn. A completed answer is not regenerated.
+
 ## Provider-specific handling
 
 Translating Claude-style messages to OpenAI-compatible chat completion
@@ -223,5 +230,5 @@ To add a new model that requires special handling:
 1. Identify which families above the model belongs to.
 2. Extend the matching detection function in
    `rust/crates/api/src/providers/openai_compat.rs`.
-3. Add a unit test for the detection alongside the existing tests.
+3. Add a PTY regression that checks the provider request and resulting answer.
 4. Add an entry to the relevant section above.

@@ -160,11 +160,9 @@ fn too_narrow_input_preserves_draft_and_middle_cursor() {
     common::expect_screen(&sess, |s| s.contains('❯'), common::DEFAULT_TIMEOUT, "input");
     sess.send("DraftHeadTail").unwrap();
     common::expect_input_line(&sess, "DraftHeadTail", common::DEFAULT_TIMEOUT, "draft");
-    sess.send("\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[C").unwrap();
-    // Establish the cursor before testing resize. Mixed navigation + editing
-    // in one undrawn event batch is a separate TextInput regression.
-    std::thread::sleep(std::time::Duration::from_millis(150));
-    sess.send("X").unwrap();
+    // Navigation and editing in one burst must share the same cursor. No
+    // artificial pause/render is allowed between moving and inserting.
+    sess.send("\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[CX").unwrap();
     common::expect_input_line(
         &sess,
         "DraftXHeadTail",

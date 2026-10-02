@@ -342,7 +342,7 @@ impl PermissionPolicy {
                 }
                 if allow_rule.is_some()
                     || current_mode == PermissionMode::Allow
-                    || current_mode >= required_mode
+                    || (current_mode != PermissionMode::Prompt && current_mode >= required_mode)
                 {
                     return PermissionOutcome::Allow;
                 }
@@ -367,7 +367,7 @@ impl PermissionPolicy {
 
         if allow_rule.is_some()
             || current_mode == PermissionMode::Allow
-            || current_mode >= required_mode
+            || (current_mode != PermissionMode::Prompt && current_mode >= required_mode)
         {
             return PermissionOutcome::Allow;
         }
@@ -668,6 +668,51 @@ mod tests {
             policy.authorize("bash", "{}", None),
             PermissionOutcome::Deny { reason } if reason.contains("requires danger-full-access permission")
         ));
+    }
+
+    #[test]
+    fn prompt_mode_requires_a_decision_at_every_tool_level() {
+        for required in [
+            PermissionMode::ReadOnly,
+            PermissionMode::WorkspaceWrite,
+            PermissionMode::DangerFullAccess,
+        ] {
+            let policy = PermissionPolicy::new(PermissionMode::Prompt)
+                .with_tool_requirement("test_tool", required);
+            for hook in [None, Some(PermissionOverride::Allow)] {
+                let context = PermissionContext::new(hook, None);
+                for allow in [true, false] {
+                    let mut prompter = RecordingPrompter {
+                        seen: Vec::new(),
+                        allow,
+                    };
+                    let outcome = policy.authorize_with_context(
+                        "test_tool",
+                        "{}",
+                        &context,
+                        Some(&mut prompter),
+                    );
+                    assert_eq!(prompter.seen.len(), 1, "{required:?}, hook={hook:?}");
+                    assert_eq!(
+                        outcome,
+                        if allow {
+                            PermissionOutcome::Allow
+                        } else {
+                            PermissionOutcome::Deny {
+                                reason: "not now".into(),
+                            }
+                        }
+                    );
+                }
+                assert!(
+                    matches!(
+                        policy.authorize_with_context("test_tool", "{}", &context, None),
+                        PermissionOutcome::Deny { .. }
+                    ),
+                    "missing approver must fail closed"
+                );
+            }
+        }
     }
 
     #[test]

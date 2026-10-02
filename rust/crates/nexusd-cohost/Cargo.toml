@@ -27,7 +27,7 @@ daemon = [
   "dep:a2a",
   "dep:managed-agent",
   "dep:kernel",
-  "dep:engine-host",
+  "dep:engine-acp",
   "dep:anyhow",
 ]
 
@@ -57,7 +57,7 @@ nexus-cluster = { workspace = true, optional = true }
 # agent receives on; `managed-agent` is the control plane whose spawn provider
 # this binary supplies.
 a2a = { workspace = true, optional = true }
-managed-agent = { workspace = true, optional = true }
+managed-agent = { workspace = true, optional = true, features = ["subprocess-host"] }
 # `ServiceDecl` — the shape a service is handed to the kernel in. The co-host
 # builds one by hand because the provider is the assembly's choice, not the
 # service's.
@@ -66,15 +66,8 @@ kernel = { workspace = true, optional = true }
 # git one, which is the whole reason this crate lives here: the nexus-vfs rev is
 # named once for the workspace, and the runtime cannot be a rev older than the
 # kernel it is handed.
-engine-host = { path = "../engine-host", optional = true }
+engine-acp = { path = "../engine-acp", optional = true, default-features = false, features = ["mailbox"] }
 anyhow = { version = "1", optional = true }
-
-# The raw ACP-subprocess tunnel (sudowork / hydra `spawn_spec`) is unix-only at
-# the module gate, so the feature is too. Without this a co-host node would be a
-# DOWNGRADE from `nexusd-cluster`, which ships it: this binary has to be a
-# superset of the one it replaces, not a trade.
-[target.'cfg(unix)'.dependencies]
-managed-agent = { workspace = true, optional = true, features = ["subprocess-host"] }
 
 [lints]
 workspace = true

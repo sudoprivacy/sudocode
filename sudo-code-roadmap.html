@@ -1380,6 +1380,24 @@ sub-section and applies to every entry below.</p>
 
 <h4>Architecture context</h4>
 
+<h5>Active work: bounded inline chrome and region ownership</h5>
+<p>Slots own content, one layout policy allocates terminal rows, and the
+terminal backend owns the boundary between committed history and the live
+frame. Normal order remains PendingSlot → StatusSlot → TodoSlot → separator
+→ InputSlot → separator → FooterSlot; bottom docking is not required.</p>
+<p>The approved small-window policy prioritizes InputSlot. Other slots fold
+into explicit count summaries and automatically expand when space returns.
+Long drafts scroll inside the input viewport without changing their contents
+or cursor. A question that cannot be fully reviewed must show a size warning
+and must not accept an unseen confirmation. Layout measures wrapped terminal
+rows, including ANSI-styled content, rather than independently budgeting each
+slot from terminal height. No history replay, automatic scrollback purge, or
+content deduplication is a recovery strategy.</p>
+<p>This is in progress, not accepted as a resize fix. Acceptance requires real
+PTY checks of narrow/short windows, drafts and question state, restoration,
+and retained startup history. The iocraft region-ownership draft remains
+separate: green CI alone does not establish correct terminal reflow.</p>
+
 <table>
   <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
   <tbody>

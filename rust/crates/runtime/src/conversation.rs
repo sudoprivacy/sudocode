@@ -1124,10 +1124,8 @@ where
         self
     }
 
-    /// Model this session last announced to the assistant. Exposed so the CLI
-    /// can carry the state across runtime rebuilds (a `/model` switch rebuilds
-    /// the runtime); without it a rebuild would re-announce or, worse, announce
-    /// a stale model.
+    /// Configured model label for this runtime, which may be a provider alias.
+    /// The last announced wire model is read separately from the transcript.
     #[must_use]
     pub fn prompt_known_model(&self) -> Option<&str> {
         self.prompt_known_model.as_deref()
@@ -1361,7 +1359,6 @@ where
                  when asked which model is selected, report this ID.</system-reminder>"
             ),
         };
-        self.prompt_known_model = Some(active);
         let mut combined = Vec::with_capacity(blocks.len() + 1);
         combined.push(ContentBlock::Text { text });
         combined.extend(blocks);

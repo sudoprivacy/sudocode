@@ -211,10 +211,17 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
                 refusal.unwrap()
             ),
         ),
-        Ok(code) if is_availability_error(&screen) => (
-            ModelStatus::Skip,
-            format!("upstream unavailable, exit {code}: {screen}"),
-        ),
+        Ok(code)
+            if is_availability_error(&screen)
+                || request_error.as_deref().is_some_and(is_availability_error) =>
+        {
+            (
+                ModelStatus::Skip,
+                format!(
+                    "upstream unavailable, exit {code}: {screen}; HTTP error: {request_error:?}"
+                ),
+            )
+        }
         Ok(code) => (ModelStatus::Fail, format!("exit {code}: {screen}")),
         // Retry backoff can outlast the PTY deadline. A concrete provider error
         // explains that timeout; a generic "still waiting" notice never does.

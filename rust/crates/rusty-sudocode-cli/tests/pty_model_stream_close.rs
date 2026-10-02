@@ -212,7 +212,20 @@ fn check_response(kind: ResponseKind) {
     );
     cli.set_default_timeout(common::at_least(Duration::from_secs(45)));
     let exit = cli.expect_eof().unwrap();
-    let screen = cli.render(|s| s.contents());
+    // expect_eof waits for the child, not the PTY reader. ConPTY can deliver
+    // the final diagnostic after the process has already exited.
+    let screen = common::expect_screen(
+        &cli,
+        |screen| {
+            if exit == 0 {
+                screen.contains("STREAM_BODY_VERIFIED")
+            } else {
+                common::screen_contains(screen, "Run `scode --help` for usage.")
+            }
+        },
+        env.timeout(),
+        "complete process output",
+    );
     if matches!(
         kind,
         ResponseKind::Complete | ResponseKind::EmptyThenComplete
@@ -246,25 +259,11 @@ fn check_response(kind: ResponseKind) {
         assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
     } else if kind.is_refused() {
         assert_ne!(exit, 0, "a refused turn cannot succeed: {screen}");
-        let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(squeezed.contains("providerrefusedtherequest"), "{screen}");
-        assert!(squeezed.contains("cyber"), "{screen}");
-        assert!(
-            squeezed.contains("Theproviderdeclinedthisrequest."),
-            "{screen}"
-        );
-        assert!(
-            !screen.contains("assistant stream produced no content"),
-            "{screen}"
-        );
+        assert_refusal_screen(&screen);
         assert_eq!(
             provider.requests.load(Ordering::SeqCst),
             1,
             "a refusal must never be retried"
-        );
-        assert!(
-            squeezed.contains("[error-kind:provider_refusal]"),
-            "{screen}"
         );
         assert_refusal_trace(&log_path);
     } else if matches!(kind, ResponseKind::AlwaysEmpty) {
@@ -288,6 +287,24 @@ fn check_response(kind: ResponseKind) {
             "{screen}"
         );
     }
+}
+
+fn assert_refusal_screen(screen: &str) {
+    let squeezed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(squeezed.contains("providerrefusedtherequest"), "{screen}");
+    assert!(squeezed.contains("cyber"), "{screen}");
+    assert!(
+        squeezed.contains("Theproviderdeclinedthisrequest."),
+        "{screen}"
+    );
+    assert!(
+        !screen.contains("assistant stream produced no content"),
+        "{screen}"
+    );
+    assert!(
+        squeezed.contains("[error-kind:provider_refusal]"),
+        "{screen}"
+    );
 }
 
 fn assert_refusal_trace(log_path: &std::path::Path) {

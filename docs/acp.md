@@ -55,6 +55,29 @@ session and independent across sessions:
   waits for turns in another directory to finish or to pause on user input
   before it starts, and a paused turn gives the directory back while it waits.
 
+### Cancelling a foreground shell tool
+
+Cancelling a turn terminates the running Bash command's process group, including
+its descendants. A Bash tool timeout performs the same cleanup and returns a
+timeout result to the model. The model can then finish its reply. Unix uses a
+process group; Windows uses a Job Object. The session remains available for the
+next prompt after cancellation or timeout.
+
+The live PTY regression in
+[`pty_bash_process_tree.rs`](../rust/crates/rusty-sudocode-cli/tests/pty_bash_process_tree.rs)
+waits for a real grandchild's file marker, cancels or times out its shell, checks
+that the grandchild exits, and asks the next turn to copy the marker's token into
+a new file. With Node.js and [proxy credentials](authentication.md) configured:
+
+```bash
+cd rust
+SCODE_TEST_BACKEND=live SCODE_LIVE_MODEL=claude-sonnet-4-6 \
+  cargo test -p rusty-sudocode-cli --test pty_bash_process_tree -- --test-threads=1 --nocapture
+```
+
+The `Live Bash process tree` CI job runs this workflow on Linux and Windows for
+main pushes and manual workflow runs, using `SUDOROUTER_CI_API_KEY`.
+
 ### Per-session system prompt (`_meta.sudocode.*`)
 
 `session/new` and `session/load` accept two optional, orthogonal keys under

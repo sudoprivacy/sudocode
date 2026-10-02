@@ -388,3 +388,52 @@ jobs:
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           PROXY_BASE_URL: https://api.sudorouter.ai/v1
         run: cargo test -p rusty-sudocode-cli --test acp_live_smoke -- --test-threads=1
+
+  live-bash-process-tree:
+    name: Live Bash process tree (${{ matrix.os }})
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Run live PTY process-tree cancellation and timeout tests
+        shell: bash
+        env:
+          SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-process-tree-config
+          PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+          SCODE_TEST_BACKEND: live
+          SCODE_LIVE_MODEL: claude-sonnet-4-6
+          SCODE_LIVE_AUTH_PROFILE: sudorouter
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const key = process.env.PROXY_AUTH_TOKEN;
+          if (!key) throw new Error('SUDOROUTER_CI_API_KEY is required for live PTY tests');
+          const dir = process.env.SUDO_CODE_CONFIG_HOME;
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(path.join(dir, 'sudocode.json'), JSON.stringify({
+            auth_modes: { proxy: { sudorouter: { apiKey: key, baseUrl: 'https://api.sudorouter.ai/v1' } } },
+            models: {}
+          }), { mode: 0o600 });
+          NODE
+          cargo test -p rusty-sudocode-cli --test pty_bash_process_tree -- --test-threads=1 --nocapture
+      - name: Remove process-tree test credentials
+        if: always()
+        env:
+          SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-process-tree-config
+        run: |
+          node -e "require('fs').rmSync(require('path').join(process.env.SUDO_CODE_CONFIG_HOME, 'sudocode.json'), { force: true })"

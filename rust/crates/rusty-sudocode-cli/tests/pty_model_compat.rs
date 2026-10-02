@@ -50,6 +50,7 @@ enum ModelStatus {
     Pass,
     Skip,
     Refused,
+    Unsupported,
     Fail,
 }
 
@@ -59,6 +60,7 @@ impl std::fmt::Display for ModelStatus {
             Self::Pass => write!(f, "PASS"),
             Self::Skip => write!(f, "SKIP"),
             Self::Refused => write!(f, "REFUSED"),
+            Self::Unsupported => write!(f, "UNSUPPORTED"),
             Self::Fail => write!(f, "FAIL"),
         }
     }
@@ -112,6 +114,29 @@ fn latest_provider_refusal(path: &Path) -> Option<serde_json::Value> {
     None
 }
 
+/// Only an endpoint-catalog preflight rejection with no inference attempt can
+/// establish unsupported capability. Model output cannot opt out of this test.
+fn unsupported_tool_capability(path: &Path, model: &str) -> bool {
+    let log = std::fs::read_to_string(path).unwrap_or_default();
+    let mut rejected = false;
+    for line in log.lines() {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match event["event"].as_str() {
+            Some("request_debug" | "request_succeeded" | "request_failed") => return false,
+            Some("model_capability_rejected") => {
+                let attributes = &event["attributes"];
+                rejected |= attributes["model"] == model
+                    && attributes["capability"] == "tool_calling"
+                    && attributes["source"] == "endpoint_catalog";
+            }
+            _ => {}
+        }
+    }
+    rejected
+}
+
 /// Keep request-shape diagnostics without prompts, tool definitions or headers.
 fn request_diagnostics(path: &Path) -> serde_json::Value {
     let log = std::fs::read_to_string(path).unwrap_or_default();
@@ -137,6 +162,10 @@ fn request_diagnostics(path: &Path) -> serde_json::Value {
                 "provider_refusal" => Some(serde_json::json!({
                     "event": event["event"], "model": attributes["model"],
                     "category": attributes["category"], "explanation": attributes["explanation"]
+                })),
+                "model_capability_rejected" => Some(serde_json::json!({
+                    "event": event["event"], "model": attributes["model"],
+                    "capability": attributes["capability"], "source": attributes["source"]
                 })),
                 _ => None,
             }
@@ -192,6 +221,7 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
     let screen = sess.render(|s| s.contents());
     let request_error = latest_request_failure(&request_log);
     let refusal = latest_provider_refusal(&request_log);
+    let unsupported = unsupported_tool_capability(&request_log, model);
     let (status, mut detail) = match exit {
         Ok(0) => match assistant_answer(&workspace.root.join(".scode")) {
             Ok(answer) if answer.trim() == "4" => (
@@ -204,6 +234,12 @@ fn test_one_model(env: &TestEnv, model: &str) -> ModelResult {
             ),
             Err(error) => (ModelStatus::Fail, error),
         },
+        Ok(code) if unsupported => (
+            ModelStatus::Unsupported,
+            format!(
+                "endpoint declares tool calling unsupported; no inference attempted, exit {code}"
+            ),
+        ),
         Ok(code) if refusal.is_some() => (
             ModelStatus::Refused,
             format!(
@@ -329,7 +365,8 @@ fn compat_models() -> Vec<String> {
 /// Prints a summary table and writes a JSON report to the workspace.
 ///
 /// The test **passes** as long as there are no `Fail` results.
-/// `Skip` (upstream unavailable) and `Refused` do not count as failure or as
+/// `Skip` (upstream unavailable), `Refused`, and `Unsupported` (catalog-declared
+/// missing tool support) do not count as failure or as
 /// verified compatibility. CI's aggregate requires at least one actual pass.
 #[test]
 fn model_compat_sweep() {
@@ -396,8 +433,12 @@ fn model_compat_sweep() {
         .iter()
         .filter(|r| r.status == ModelStatus::Refused)
         .count();
+    let unsupported_count = results
+        .iter()
+        .filter(|r| r.status == ModelStatus::Unsupported)
+        .count();
 
-    eprintln!("\nSummary: {pass_count} pass, {skip_count} skip, {refused_count} refused, {fail_count} fail");
+    eprintln!("\nSummary: {pass_count} pass, {skip_count} skip, {refused_count} refused, {unsupported_count} unsupported, {fail_count} fail");
 
     assert_eq!(
         fail_count, 0,
@@ -412,6 +453,7 @@ fn write_report(path: &Path, expected: usize, results: &[ModelResult]) {
         "pass": results.iter().filter(|r| r.status == ModelStatus::Pass).count(),
         "skip": results.iter().filter(|r| r.status == ModelStatus::Skip).count(),
         "refused": results.iter().filter(|r| r.status == ModelStatus::Refused).count(),
+        "unsupported": results.iter().filter(|r| r.status == ModelStatus::Unsupported).count(),
         "fail": results.iter().filter(|r| r.status == ModelStatus::Fail).count(),
         "models": results.iter().map(|r| serde_json::json!({
             "model": r.model,

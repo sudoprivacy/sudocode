@@ -32,6 +32,9 @@ const CONTEXT_WINDOW_ERROR_MARKERS: &[&str] = &[
 
 #[derive(Debug)]
 pub enum ApiError {
+    ToolCallingUnsupported {
+        model: String,
+    },
     MissingCredentials {
         provider: &'static str,
         env_vars: &'static [&'static str],
@@ -200,6 +203,7 @@ impl ApiError {
             | Self::Auth(_)
             | Self::InvalidApiKeyEnv(_)
             | Self::Configuration(_)
+            | Self::ToolCallingUnsupported { .. }
             | Self::RequestBodySizeExceeded { .. } => ErrorAction::Human,
             Self::Api { status, .. } if matches!(status.as_u16(), 401 | 403 | 413) => {
                 ErrorAction::Human
@@ -311,7 +315,9 @@ impl ApiError {
             // Local I/O or JSON parse failures.
             Self::InvalidApiKeyEnv(_) | Self::Io(_) | Self::Json { .. } => ErrorCategory::RuntimeIo,
             // Config-driven resolution errors.
-            Self::Configuration(_) => ErrorCategory::Configuration,
+            Self::Configuration(_) | Self::ToolCallingUnsupported { .. } => {
+                ErrorCategory::Configuration
+            }
         }
     }
 
@@ -348,6 +354,7 @@ impl ApiError {
     #[must_use]
     pub fn safe_failure_class(&self) -> &'static str {
         match self {
+            Self::ToolCallingUnsupported { .. } => "unsupported_model_capability",
             Self::ProviderRefusal { .. } => "provider_refusal",
             Self::RetriesExhausted { .. } if self.is_context_window_failure() => "context_window",
             Self::RetriesExhausted { .. } if self.is_generic_fatal_wrapper() => {
@@ -556,6 +563,9 @@ impl Display for ApiError {
                 "request body size ({estimated_bytes} bytes) exceeds {provider} limit ({max_bytes} bytes); reduce prompt length or context before retrying"
             ),
             Self::Configuration(msg) => write!(f, "provider configuration error: {msg}"),
+            Self::ToolCallingUnsupported { model } => write!(f,
+                "model '{model}' does not support tool calling on the current endpoint; select a tool-capable model for agent work"
+            ),
         }
     }
 }

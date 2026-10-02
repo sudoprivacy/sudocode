@@ -73,6 +73,9 @@ pub struct ModelCapability {
     /// wire format. `None` when sudorouter hasn't populated this field yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_types: Option<Vec<String>>,
+    /// Deployment capability published by the current endpoint. None is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calling_supported: Option<bool>,
 }
 
 impl ModelCapability {
@@ -86,6 +89,7 @@ impl ModelCapability {
             image_max_bytes: None,
             image_max_dimension: None,
             endpoint_types: None,
+            tool_calling_supported: None,
         }
     }
 }
@@ -115,6 +119,7 @@ impl DefaultLimits {
             image_max_bytes: None,
             image_max_dimension: None,
             endpoint_types: None,
+            tool_calling_supported: None,
         }
     }
 }
@@ -345,6 +350,17 @@ pub fn lookup(model_id: &str) -> Option<ModelCapability> {
     Some(cap)
 }
 
+/// Read tool support only from this connection's catalog, for the exact wire ID.
+/// A bundled or legacy unscoped entry cannot describe another deployment.
+#[must_use]
+pub fn tool_calling_supported(model_id: &str) -> Option<bool> {
+    crate::model_discovery::active_snapshot()?
+        .models
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(model_id))
+        .and_then(|(_, cap)| cap.tool_calling_supported)
+}
+
 /// Returns `true` if the model is known to accept image input. Used by the
 /// push_images path to decide whether to send the image natively or route it
 /// through a VLM-describe side-call (substituting a text description into the
@@ -552,6 +568,8 @@ pub struct ApiModelEntry {
     pub image_max_dimension: Option<u32>,
     #[serde(default)]
     pub supported_endpoint_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub tool_calling_supported: Option<bool>,
 }
 
 /// Parse the `/v1/models` API response JSON into a vec of model entries.
@@ -609,6 +627,9 @@ pub fn parse_api_response(json: &serde_json::Value) -> Vec<ApiModelEntry> {
                 image_max_bytes,
                 image_max_dimension,
                 supported_endpoint_types,
+                tool_calling_supported: entry
+                    .get("tool_calling_supported")
+                    .and_then(|v| v.as_bool()),
             })
         })
         .collect()

@@ -42,6 +42,19 @@ have separate caches. Credentials are never written into these catalog files.
 Provider-managed credential-file connections and native Gemini/Codex discovery retain
 their existing behavior.
 
+### Tool support
+
+An endpoint can publish `tool_calling_supported: false` for a deployment that
+accepts plain chat but cannot run tools. Agent requests to that deployment stop
+before inference with an error asking you to select a tool-capable model. The
+first request waits for initial discovery when no catalog is cached.
+
+This field applies to the exact deployment ID on the current connection. An
+omitted field means unknown and preserves existing behavior; scode does not
+infer tool support from a model family name. The live compatibility report lists
+a catalog-based rejection as `UNSUPPORTED`, with no inference attempt. It does
+not count as a compatibility pass. Wrong answers remain failures.
+
 ## Config IDs, display names, and deployment IDs
 
 These fields have different jobs:

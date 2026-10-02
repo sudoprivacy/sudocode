@@ -157,6 +157,22 @@ impl ModelCatalog {
         });
     }
 
+    /// A first request must observe a successful initial capability refresh.
+    /// Discovery failure retains the existing unknown-capability behavior.
+    pub async fn refresh_if_missing(&self) {
+        let missing = self
+            .0
+            .snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none();
+        if missing {
+            if let Err(error) = self.refresh(false).await {
+                tracing::debug!(%error, "initial model discovery failed; capabilities remain unknown");
+            }
+        }
+    }
+
     fn stale(&self) -> bool {
         let file = self
             .0
@@ -254,6 +270,7 @@ impl ModelCatalog {
                         .image_max_dimension
                         .or_else(|| curated.and_then(|c| c.image_max_dimension)),
                     endpoint_types: entry.supported_endpoint_types,
+                    tool_calling_supported: entry.tool_calling_supported,
                 };
                 models.insert(entry.id, cap);
             }

@@ -221,6 +221,12 @@ Subagent result summaries use the subagent's resolved model. Manual and
 automatic compaction reuse the current agent's API client and model route;
 they do not select a separate summarization model.
 
+In a co-host deployment, subagents also use the parent's Nexus filesystem for
+workspace instructions and their own agent-type memory directory. Their prompt
+names the VFS workspace and separately identifies the host directory used by
+shell commands. The daemon's shell directory is not a source of workspace
+instructions. Standalone CLI subagents use their local project context.
+
 ### `reasoning_effort` values
 
 `--reasoning-effort` accepts `none`, `minimal`, `low`, `medium`, `high`.

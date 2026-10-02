@@ -5456,7 +5456,7 @@ fn prepare_agent_job(
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| slugify_agent_name(&input.description));
     let created_at = iso8601_now();
-    let system_prompt = build_agent_system_prompt(&normalized_subagent_type)?;
+    let system_prompt = build_agent_system_prompt(&normalized_subagent_type, fs.as_ref())?;
     let allowed_tools = allowed_tools_for_subagent(&normalized_subagent_type);
 
     // Fork subagent: wrap the caller's directive with the non-negotiable
@@ -6401,22 +6401,46 @@ fn build_agent_runtime(
     .with_hook_abort_signal(job.abort_signal.clone()))
 }
 
-fn build_agent_system_prompt(subagent_type: &str) -> Result<SystemPrompt, String> {
-    let cwd = current_workspace_root().map_err(|error| error.to_string())?;
+fn build_agent_system_prompt(
+    subagent_type: &str,
+    fs: &dyn FsBackend,
+) -> Result<SystemPrompt, String> {
+    let shell_root = current_workspace_root().map_err(|error| error.to_string())?;
+    let cohost = fs
+        .managed_root(runtime::fs_backend::ManagedRoot::Memory)
+        .is_some();
+    let cwd = if cohost {
+        PathBuf::from(fs.working_root().map_err(|error| error.to_string())?)
+    } else {
+        shell_root.clone()
+    };
     // Route sub-agents through the per-agent-type memory scope
     // (`<workspace>/agent-memory/<subagent_type>/`) so one agent's
     // remembered facts don't leak into another's memory index —
     // mirrors CC-fork's `agentMemory.ts` per-agent scoping. Fork is
     // intentionally scoped too so a fork child's memory is separate
     // from its parent's workspace memory.
-    let mut prompt = runtime::load_system_prompt_for_agent(
-        cwd,
+    let mut prompt = runtime::load_system_prompt_for_agent_with(
+        &cwd,
         runtime::today_local(),
         std::env::consts::OS,
         "unknown",
         subagent_type,
+        if cohost {
+            fs
+        } else {
+            runtime::fs_backend::host_fs()
+        },
     )
     .map_err(|error| error.to_string())?;
+    if cohost {
+        prompt
+            .dynamic_sections
+            .push(runtime::spawn_task::cohost_shell_prompt_section(
+                &cwd.to_string_lossy(),
+                &shell_root,
+            ));
+    }
     if subagent_type == "fork" {
         // Fork subagent gets the parent's default system prompt (via
         // load_system_prompt above) plus a fork-specific behavioral
@@ -12932,8 +12956,10 @@ mod tests {
         )
         .expect("write plan entry");
 
-        let explore_prompt = build_agent_system_prompt("Explore").expect("Explore prompt built");
-        let plan_prompt = build_agent_system_prompt("Plan").expect("Plan prompt built");
+        let explore_prompt = build_agent_system_prompt("Explore", runtime::fs_backend::host_fs())
+            .expect("Explore prompt built");
+        let plan_prompt = build_agent_system_prompt("Plan", runtime::fs_backend::host_fs())
+            .expect("Plan prompt built");
 
         std::env::remove_var("SUDOCODE_MEMORY_DIR");
 
@@ -12972,7 +12998,8 @@ mod tests {
         );
         let _home = HomeGuard::override_home(&home);
 
-        let prompt = build_agent_system_prompt("committee").expect("system prompt build");
+        let prompt = build_agent_system_prompt("committee", runtime::fs_backend::host_fs())
+            .expect("system prompt build");
         let joined = prompt.dynamic_sections.join("\n---section---\n");
         assert!(
             joined.contains("NAMING_COMMITTEE_SENTINEL"),

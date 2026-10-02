@@ -2332,29 +2332,32 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     } else {
         0
     };
+    let row_height = |rows: usize| {
+        u32::try_from(rows).expect("allocated chrome rows fit the terminal's u16 geometry")
+    };
 
     element! {
         View(width: u32::from(term_width), flex_direction: FlexDirection::Column, max_height: u32::from(term_height.saturating_sub(1)), overflow: Overflow::Hidden) {
-            View(height: layout.pending.rows as u32, flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(layout.pending.rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 AnsiText(content: layout.pending.text)
             }
-            View(height: layout.status.rows as u32, flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(layout.status.rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 AnsiText(content: layout.status.text, color: if matches!(status_slot, StatusSlot::Tips) { Some(Color::DarkGrey) } else { None })
             }
-            View(height: layout.todo.rows as u32, flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(layout.todo.rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 AnsiText(content: layout.todo.text, color: Color::DarkGrey)
             }
-            View(height: layout.separators as u32, flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(layout.separators), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 Text(content: sep.clone(), color: Color::DarkGrey)
             }
             // InputSlot
-            View(height: if reviewable { 0 } else { layout.input_rows as u32 }, flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: if reviewable { 0 } else { row_height(layout.input_rows) }, flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 Text(content: input_warning.unwrap_or_default(), color: Color::Yellow)
             }
-            View(height: visible_panel_rows as u32, flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(visible_panel_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 AnsiText(content: panel_text.unwrap_or_default(), color: Color::Cyan)
             }
-            View(height: visible_input_rows as u32, flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(visible_input_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
             #(if let InputSlot::Hint(ref hint_text) = current_input_slot {
                 element! {
                     View(flex_direction: FlexDirection::Row) {
@@ -2418,11 +2421,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             })
             }
             // Separator
-            View(height: layout.separators as u32, flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(layout.separators), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 Text(content: sep, color: Color::DarkGrey)
             }
             // FooterSlot
-            View(height: layout.footer.rows as u32, flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(layout.footer.rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 AnsiText(content: layout.footer.text, color: Color::DarkGrey)
             }
         }

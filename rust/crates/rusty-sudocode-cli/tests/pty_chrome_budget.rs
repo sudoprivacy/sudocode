@@ -1,5 +1,5 @@
 //! No-API acceptance of the shared chrome row budget using the actual REPL.
-//! Resize/history ownership is additionally checked by pty_chrome_resize and
+//! Resize/history ownership is additionally checked by `pty_chrome_resize` and
 //! the framework's ConPTY/xterm driver; these are not substitutes for it.
 mod common;
 

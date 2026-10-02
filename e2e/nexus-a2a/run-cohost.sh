@@ -167,6 +167,9 @@ AUTHON_DAEMON_PID=
 CLIENT_ID="live-probe"
 [ "${NEXUS_A2A_MODEL_LIVE:-0}" != 1 ] || CLIENT_ID="$OPERATOR"
 CLIENT_BUNDLE="$(authon_mint "$CLIENT_ID")" || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+# Recovery also exercises automatic replies, which address the authenticated
+# sender. Give that workflow the operator's own credential.
+RESUME_CLIENT_BUNDLE="$(authon_mint "$OPERATOR")"
 authon_boot
 authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
 
@@ -244,5 +247,11 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_A2A_TEST_INBOX="$AGENT" NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
   NEXUS_A2A_TEST_MODEL="$MODEL" \
   "${CARGO_TEST[@]}" live_cohost_subagent_context -- --ignored --nocapture
+
+echo "== 8. stop and restore a durable co-host session on a new pid =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$RESUME_CLIENT_BUNDLE" \
+  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+  NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" NEXUS_A2A_TEST_MODEL="$MODEL" \
+  "${CARGO_TEST[@]}" live_cohost_session_resume -- --ignored --nocapture
 
 echo "COHOST E2E OK"

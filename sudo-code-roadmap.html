@@ -1758,14 +1758,20 @@ the nexus team; SSOT at <code>nexus/docs/architecture/nexus-integration-architec
   path layout is the SSOT for permissions and the error message
   is the teaching channel.</li>
 
-  <li><strong>Session state placement.</strong> The <code>nexusd-cohost</code>
-  composition installs sudocode's spawn adapter. Its session transcript lives
-  at <code>/sessions/&lt;session-id&gt;/transcript.jsonl</code> on the shared
-  kernel, indexed by <code>/agents/{name}/sessions/&lt;session-id&gt;</code>.
-  Standalone retains host session files under its workspace partition.
-  Co-host persistence is implemented; startup still creates a new session.
-  Loading an existing durable session on a new pid remains a target, including
-  backend-aware store reads and the control-interface choice in Q1.</li>
+  <li><strong>Session state placement and recovery.</strong> The <code>nexusd-cohost</code>
+  composition installs sudocode's spawn adapter. Its transcript lives at <code>/sessions/&lt;sid&gt;/transcript.jsonl</code>, with
+  an agent index at <code>/agents/{name}/sessions/&lt;sid&gt;</code>. The
+  compatible control API keeps <code>session_id</code> as the process handle,
+  returns a separate <code>durable_session_id</code>, and accepts
+  <code>resume_session_id</code> to restore a stopped run on a new pid.
+  Recovery reads and continues writing through the session's VFS backend.
+  Persisted agent, owner, zone and repository bindings must match; old
+  transcripts without those bindings need a separate migration. A kernel
+  advisory lease excludes concurrent co-host writers during normal operation;
+  this does not provide storage fencing during network partitions.
+  Standalone retains its local workspace partition and resume behavior.
+  See <a href="docs/permissions-and-sandbox.md">hosted recovery operations</a>
+  and the storage matrix's Q1 for the identity contract.</li>
 
   <li><strong>Lifecycle.</strong> Out-of-band termination
   (SIGTERM / SIGKILL / orphan reap from <code>AgentRegistry</code>)

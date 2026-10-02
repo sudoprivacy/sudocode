@@ -16,14 +16,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 // `::` because this module shares its name with that crate.
-use ::managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnTask};
+use ::managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnOptions, SpawnTask};
 use runtime::mailbox::Mailbox;
-use runtime::session_control::SessionStore;
 use runtime::spawn_task::{
-    cohost_a2a_prompt_section, cohost_shell_prompt_section, spawn_task, AgentDescriptor,
+    cohost_a2a_prompt_section, cohost_shell_prompt_section, spawn_task_with_abort, AgentDescriptor,
     AgentState, KernelConvenience, SpawnHandle,
 };
-use runtime::{FsBackend, KernelFsBackend, PermissionMode, Session, SystemPrompt};
+use runtime::{FsBackend, KernelFsBackend, PermissionMode, SystemPrompt};
 
 use crate::config::{require_sudocode_config_for_cwd, resolve_auth_mode};
 use crate::runtime_build::{build_engine_runtime, HostContext, RuntimeConfig};
@@ -60,11 +59,29 @@ const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 /// place an operator can see it. These used to be `expect`s, so a daemon started
 /// without sudocode configuration died on its own thread and printed a backtrace
 /// about a missing file in place of a refusal naming it.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "preserve the public spawn API"
+)]
 pub fn spawn_managed_agent<K, F>(
     kernel: Arc<K>,
     desc: AgentDescriptor,
     state_callback: F,
 ) -> Result<SpawnHandle, String>
+where
+    K: KernelConvenience + Send + Sync + 'static,
+    F: Fn(AgentState, Option<String>) + Send + 'static,
+{
+    spawn_with_options(&kernel, &desc, &SpawnOptions::default(), state_callback)
+        .map(|(handle, _)| handle)
+}
+
+fn spawn_with_options<K, F>(
+    kernel: &Arc<K>,
+    desc: &AgentDescriptor,
+    options: &SpawnOptions,
+    state_callback: F,
+) -> Result<(SpawnHandle, String), String>
 where
     K: KernelConvenience + Send + Sync + 'static,
     F: Fn(AgentState, Option<String>) + Send + 'static,
@@ -93,7 +110,7 @@ where
     // permission checks that a `std::fs` write never sees.
     let workspace_root = format!("/proc/{}/workspace", desc.pid);
     let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
-        Arc::clone(&kernel),
+        Arc::clone(kernel),
         &desc.owner_id,
         &desc.zone_id,
         &desc.name,
@@ -162,25 +179,16 @@ where
         memory: runtime::memory::MemoryMode::default(),
     };
 
-    // The agent's session, rooted where its OWN filesystem says sessions live:
-    // `/sessions/<id>/transcript.jsonl` on a kernel, and `create_handle` plants
-    // the `/agents/{name}/sessions/<id>` index for it. Nothing here chooses a
-    // path — `FsBackend::managed_root` does, which is why pointing
-    // sessions at nexus is a backend swap rather than a second layout to keep in
-    // step.
-    //
-    // The session id is its own, NOT the pid: a pid names a running process and
-    // a session names a transcript, and one agent's pid is reused across the
-    // sessions it runs.
-    let session = Session::new();
-    let handle =
-        session_store_for(&workspace_root, &host.fs, &desc.name).create_handle(&session.session_id);
-    let session = session
-        .with_persistence_path(handle.path)
-        // The backend too, or persistence would default to `StdFsBackend` and
-        // write a VFS-looking path onto the daemon's local disk — the same
-        // mistake the mailbox made before #752.
-        .with_fs_backend(Arc::clone(&host.fs));
+    let abort = runtime::HookAbortSignal::default();
+    let (session, lease) = crate::managed_session::prepare_session(
+        kernel,
+        desc,
+        Arc::clone(&host.fs),
+        options.resume_session_id.as_deref(),
+        &config.model,
+        abort.clone(),
+    )?;
+    let durable_session_id = session.session_id.clone();
 
     let built = build_engine_runtime(
         &host,
@@ -199,30 +207,18 @@ where
 
     // `built` goes with it: its `Drop` shuts down the MCP servers and plugins
     // this engine is using, so it has to outlive the loop rather than the call.
-    Ok(spawn_task(
-        &desc,
-        mailbox,
-        engine,
-        built,
-        host.shell_root.clone(),
-        state_callback,
+    Ok((
+        spawn_task_with_abort(
+            desc,
+            mailbox,
+            engine,
+            (built, lease),
+            host.shell_root.clone(),
+            state_callback,
+            abort,
+        ),
+        durable_session_id,
     ))
-}
-
-/// The session store a co-hosted agent records into.
-///
-/// Fails loud rather than degrading to a session nobody can find: a store that
-/// cannot be built means `/sessions` is unroutable, and an agent that runs
-/// anyway would hold its whole transcript in memory and lose it on exit —
-/// exactly the state this replaces.
-fn session_store_for(
-    workspace_root: &str,
-    fs: &Arc<dyn FsBackend>,
-    agent_name: &str,
-) -> SessionStore {
-    SessionStore::from_cwd_with(workspace_root, Arc::clone(fs))
-        .expect("co-host: the agent's session store must be reachable")
-        .with_agent_name(agent_name)
 }
 
 /// The `SpawnTask` provider that hosts a `sudocode` agent as a nexus
@@ -246,10 +242,24 @@ where
         desc: AgentDescriptor,
         state_observer: Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>,
     ) -> Result<Box<dyn ManagedSpawnHandle>, String> {
-        let handle = spawn_managed_agent(kernel, desc, move |state, reason| {
-            state_observer(state, reason);
-        })?;
-        Ok(Box::new(SudoCodeSpawnHandle { inner: handle }))
+        self.spawn_with_options(kernel, desc, SpawnOptions::default(), state_observer)
+    }
+
+    fn spawn_with_options(
+        &self,
+        kernel: Arc<K>,
+        desc: AgentDescriptor,
+        options: SpawnOptions,
+        state_observer: Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>,
+    ) -> Result<Box<dyn ManagedSpawnHandle>, String> {
+        let (handle, durable_session_id) =
+            spawn_with_options(&kernel, &desc, &options, move |state, reason| {
+                state_observer(state, reason);
+            })?;
+        Ok(Box::new(SudoCodeSpawnHandle {
+            inner: handle,
+            durable_session_id,
+        }))
     }
 }
 
@@ -259,9 +269,14 @@ where
 /// (idempotent — the observer may fire concurrently with an in-flight cancel).
 struct SudoCodeSpawnHandle {
     inner: SpawnHandle,
+    durable_session_id: String,
 }
 
 impl ManagedSpawnHandle for SudoCodeSpawnHandle {
+    fn durable_session_id(&self) -> Option<&str> {
+        Some(&self.durable_session_id)
+    }
+
     fn abort(&self) {
         self.inner.abort_signal.abort();
     }

@@ -1412,3 +1412,201 @@ fn wait_live_reply(mb: &Mailbox, agent: &str, cursor: &mut u64, marker: &str) ->
         );
     }
 }
+
+/// Real daemon RPC, durable VFS bytes, and a new managed pid. Included by the
+/// co-host CI harness; the model can be scripted because this verifies recovery.
+#[test]
+#[ignore = "requires the isolated daemon from e2e/nexus-a2a/run-cohost.sh"]
+fn live_cohost_session_resume() {
+    use serde_json::{json, Value};
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").unwrap();
+    let agent = format!("resume-probe-{}", fresh());
+    let user = std::env::var("NEXUS_A2A_TEST_REPLY_TO").unwrap();
+    let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
+    let client = dial(&endpoint);
+    let operator = model_operator();
+    let read_transcript = |path: &str| {
+        let mut contents = Vec::new();
+        let mut offset = 0;
+        loop {
+            match operator.stream_read_at(path, offset, false, 0, "") {
+                Ok((bytes, next, _)) => {
+                    let is_empty = bytes.is_empty();
+                    contents.extend_from_slice(&bytes);
+                    if is_empty || next <= offset {
+                        break;
+                    }
+                    offset = next;
+                }
+                // A deployment without a WAL uses a regular file. Its normal
+                // read returns all bytes; a stream's normal read returns one frame.
+                Err(_) if offset == 0 => return operator.read(path, "").unwrap(),
+                Err(error) => panic!("read transcript stream: {error}"),
+            }
+        }
+        contents
+    };
+
+    let mb = mailbox(&client, &user, "");
+    mb.ensure_conversation(&agent).unwrap();
+    let mut request = json!({"agent_id":agent,"owner_id":"root","zone_id":"root","model":model});
+    let rpc = |method: &str, payload: &Value| -> Result<Value, String> {
+        let bytes = client
+            .call(method, payload.to_string().as_bytes(), "")
+            .map_err(|e| e.to_string())?;
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+    };
+    let wait_ready = |pid: &Value| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let state = rpc("managed_agent.get_session_v1", &json!({"session_id":pid})).unwrap();
+            if state["state"] == "ready" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "agent did not become ready: {state}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    let first = rpc("managed_agent.start_session_v1", &request).unwrap();
+    let sid = first["durable_session_id"]
+        .as_str()
+        .expect("co-host durable ID");
+    assert_ne!(first["session_id"], sid);
+    let path = format!("/sessions/{sid}/transcript.jsonl");
+    let marker = format!("RESUME_PROOF_{}", fresh());
+    let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
+    send_to(
+        &client,
+        &user,
+        &agent,
+        &format!("Remember {marker}. Reply PONG. PARITY_SCENARIO:cohost_reply"),
+        "",
+    )
+    .unwrap();
+    wait_live_reply(&mb, &agent, &mut cursor, "PONG");
+    wait_ready(&first["session_id"]);
+    let old_bytes = read_transcript(&path);
+    assert!(String::from_utf8_lossy(&old_bytes).contains(&marker));
+    // Parse the daemon's bytes with the production loader. A stream may contain
+    // superseded snapshots as well as incremental message records.
+    let messages = |bytes: &[u8]| {
+        let scratch = std::env::temp_dir().join(format!("cohost-transcript-{}.jsonl", fresh()));
+        std::fs::write(&scratch, bytes).unwrap();
+        let loaded = runtime::Session::load_from_path(&scratch);
+        std::fs::remove_file(&scratch).unwrap();
+        loaded.unwrap().messages
+    };
+    let old_messages = messages(&old_bytes);
+    assert_eq!(
+        old_messages
+            .iter()
+            .filter(|m| m.role == runtime::MessageRole::User)
+            .count(),
+        1
+    );
+    request["resume_session_id"] = json!(sid);
+    assert!(
+        rpc("managed_agent.start_session_v1", &request).is_err(),
+        "active transcript resumed twice"
+    );
+    rpc(
+        "managed_agent.cancel_v1",
+        &json!({"session_id":first["session_id"],"mode":"session"}),
+    )
+    .unwrap();
+    // Cancel signals the worker. Recovery must wait for its last write and lease
+    // release rather than stealing a still-running transcript.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let second = loop {
+        match rpc("managed_agent.start_session_v1", &request) {
+            Ok(started) => break started,
+            Err(error)
+                if error.contains("still running") && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100))
+            }
+            Err(error) => panic!("restore failed: {error}"),
+        }
+    };
+    assert_ne!(second["session_id"], first["session_id"]);
+    assert_eq!(second["durable_session_id"], sid);
+    let snapshot = rpc(
+        "managed_agent.get_session_v1",
+        &json!({"session_id":second["session_id"]}),
+    )
+    .unwrap();
+    assert_eq!(snapshot["durable_session_id"], sid);
+    send_to(
+        &client,
+        &user,
+        &agent,
+        "Continue after restart; reply PONG. PARITY_SCENARIO:cohost_reply",
+        "",
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (received, next) = mb
+            .poll_conversation(&agent, cursor, DELIVERY_WAIT_MS)
+            .unwrap();
+        cursor = next;
+        if received
+            .iter()
+            .any(|m| m.from == agent && m.body.contains("PONG"))
+        {
+            break;
+        }
+        for message in received {
+            println!("RESUME reply: {}", message.body);
+        }
+        if Instant::now() >= deadline {
+            let state = rpc(
+                "managed_agent.get_session_v1",
+                &json!({"session_id":second["session_id"]}),
+            );
+            panic!(
+                "resumed agent did not reply: {state:?}; transcript: {}",
+                String::from_utf8_lossy(&read_transcript(&path))
+            );
+        }
+    }
+    wait_ready(&second["session_id"]);
+    let new_messages = messages(&read_transcript(&path));
+    assert!(new_messages.len() > old_messages.len());
+    assert_eq!(
+        new_messages
+            .iter()
+            .filter(|m| m.role == runtime::MessageRole::User)
+            .count(),
+        2
+    );
+    assert_eq!(&new_messages[..old_messages.len()], old_messages.as_slice());
+    assert!(
+        operator
+            .readdir("/model", "")
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.name.ends_with(".prompt"))
+            .any(|entry| {
+                let bytes = operator
+                    .read(&listed_path("/model", &entry.name), "")
+                    .unwrap();
+                let request: Value = serde_json::from_slice(&bytes).unwrap();
+                let history = request["body"]["messages"].to_string();
+                history.contains(&marker) && history.contains("Continue after restart")
+            }),
+        "the restored model request must include the original turn"
+    );
+    rpc(
+        "managed_agent.cancel_v1",
+        &json!({"session_id":second["session_id"],"mode":"session"}),
+    )
+    .unwrap();
+    println!(
+        "COHOST RESUME OK: durable={sid}, old_pid={}, new_pid={}",
+        first["session_id"], second["session_id"]
+    );
+}

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use crate::fs_backend::{FsBackend, StdFsBackend};
-use crate::session::{ContentBlock, MessageRole, Session, SessionError};
+use crate::session::{ContentBlock, HostedSessionIdentity, MessageRole, Session, SessionError};
 use crate::workspace_root::current_workspace_root;
 
 /// Per-worktree session store that namespaces on-disk session files by
@@ -29,8 +29,9 @@ pub struct SessionStore {
     /// set, creating a session also plants the `/agents/{name}/sessions/<sid>`
     /// DT_LINK enum-index via [`FsBackend::link`]. `None` for standalone
     /// (single implicit profile, no agent namespace). Left unset, the link
-    /// step is skipped; on a host backend `link` is a no-op anyway.
+    /// step is skipped.
     agent_name: Option<String>,
+    identity: Option<HostedSessionIdentity>,
 }
 
 impl SessionStore {
@@ -73,6 +74,7 @@ impl SessionStore {
             workspace_root: canonical_cwd,
             fs,
             agent_name: None,
+            identity: None,
         })
     }
 
@@ -115,6 +117,7 @@ impl SessionStore {
             workspace_root: canonical_workspace,
             fs,
             agent_name: None,
+            identity: None,
         })
     }
 
@@ -126,6 +129,14 @@ impl SessionStore {
     #[must_use]
     pub fn with_agent_name(mut self, agent_name: impl Into<String>) -> Self {
         self.agent_name = Some(agent_name.into());
+        self
+    }
+
+    /// Bind hosted recovery to durable identity and repository mappings. This
+    /// permits a new procfs workspace only for the same persisted bindings.
+    #[must_use]
+    pub fn with_identity(mut self, identity: HostedSessionIdentity) -> Self {
+        self.identity = Some(identity);
         self
     }
 
@@ -243,7 +254,8 @@ impl SessionStore {
         reference: &str,
     ) -> Result<LoadedManagedSession, SessionControlError> {
         let handle = self.resolve_reference(reference)?;
-        let session = Session::load_from_path(&handle.path)?;
+        let session = Session::load_from_path_with(&*self.fs, &handle.path)?
+            .with_fs_backend(Arc::clone(&self.fs));
         self.validate_loaded_session(&handle.path, &session)?;
         Ok(LoadedManagedSession {
             handle: SessionHandle {
@@ -268,7 +280,9 @@ impl SessionStore {
             .fork
             .as_ref()
             .and_then(|fork| fork.branch_name.clone());
-        let forked = forked.with_persistence_path(handle.path.clone());
+        let forked = forked
+            .with_persistence_path(handle.path.clone())
+            .with_fs_backend(Arc::clone(&self.fs));
         forked.save_to_path(&handle.path)?;
         Ok(ForkedManagedSession {
             parent_session_id,
@@ -283,6 +297,15 @@ impl SessionStore {
         session_path: &Path,
         session: &Session,
     ) -> Result<(), SessionControlError> {
+        if let Some(expected) = &self.identity {
+            return if session.identity.as_ref() == Some(expected) {
+                Ok(())
+            } else {
+                Err(SessionControlError::Format(
+                    "session ownership or repository bindings do not match (legacy sessions without identity cannot be restored by this host)".into(),
+                ))
+            };
+        }
         let Some(actual) = session.workspace_root() else {
             if path_is_within_workspace(session_path, &self.workspace_root, &*self.fs) {
                 return Ok(());
@@ -339,7 +362,7 @@ impl SessionStore {
                 .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
                 .map(|duration| duration.as_millis())
                 .unwrap_or_default();
-            let summary = match Session::load_from_path(&path) {
+            let summary = match Session::load_from_path_with(&*self.fs, &path) {
                 Ok(session) => {
                     if self.validate_loaded_session(&path, &session).is_err() {
                         continue;

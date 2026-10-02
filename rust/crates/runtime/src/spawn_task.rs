@@ -223,11 +223,37 @@ where
     // passes `()`.
     R: Send + 'static,
 {
-    let abort_signal = HookAbortSignal::default();
+    spawn_task_with_abort(
+        desc,
+        mailbox,
+        runtime,
+        host_resources,
+        shell_root,
+        state_callback,
+        HookAbortSignal::default(),
+    )
+}
+
+/// Spawn with a host-owned abort signal, so losing a session lease also stops
+/// the loop. The returned handle exposes the same signal to normal cancellation.
+pub fn spawn_task_with_abort<C, T, F, R>(
+    desc: &AgentDescriptor,
+    mailbox: Arc<Mailbox>,
+    runtime: ConversationRuntime<C, T>,
+    host_resources: R,
+    shell_root: std::path::PathBuf,
+    state_callback: F,
+    abort_signal: HookAbortSignal,
+) -> SpawnHandle
+where
+    C: ApiClient + 'static,
+    T: ToolExecutor + 'static,
+    F: Fn(AgentState, Option<String>) + Send + 'static,
+    R: Send + 'static,
+{
     let abort_for_thread = abort_signal.clone();
 
-    // The abort signal is created here, so it is applied here: a caller
-    // cannot hold a signal that does not exist yet.
+    // The engine and receiver must observe the same host-owned signal.
     let runtime = runtime.with_hook_abort_signal(abort_for_thread.clone());
     let join = thread::Builder::new()
         .name(format!("managed-agent-{}", desc.pid))

@@ -1127,6 +1127,121 @@ fn model_operator() -> NexusVfsClient {
     .expect("operator mTLS connection")
 }
 
+/// Exercise sub-agent context through a real daemon and its model mount. The
+/// provider scripts delegation; the assertions inspect what the child actually
+/// sent, including fresh VFS memory and a conflicting host instruction file.
+#[test]
+#[ignore = "requires the mock co-host daemon: e2e/nexus-a2a/run-cohost.sh"]
+fn live_cohost_subagent_context() {
+    use serde_json::{json, Value};
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").unwrap();
+    let agent = format!("{}-context", std::env::var("NEXUS_A2A_TEST_INBOX").unwrap());
+    let user = std::env::var("NEXUS_A2A_TEST_REPLY_TO").unwrap();
+    let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
+    let client = dial(&endpoint);
+    let operator = model_operator();
+    let mb = mailbox(&client, &user, "");
+    mb.ensure_conversation(&agent).unwrap();
+
+    let memory_marker = format!("VFS-MEMORY-{}", fresh());
+    let memory_root = format!("/agents/{agent}/memory/agent-memory/general-purpose");
+    operator
+        .write(
+            &format!("{memory_root}/MEMORY.md"),
+            format!("# Project context\nFixture marker: {memory_marker}\n").into_bytes(),
+            "",
+        )
+        .unwrap();
+    let shell = std::path::PathBuf::from(std::env::var("SUDO_CODE_CONFIG_HOME").unwrap())
+        .join("agents")
+        .join(&agent)
+        .join("shell");
+    std::fs::create_dir_all(&shell).unwrap();
+    let host_marker = format!("HOST-INSTRUCTIONS-{}", fresh());
+    let host_instructions = shell.join("AGENTS.md");
+    assert!(
+        !host_instructions.exists(),
+        "fixture must use a fresh agent"
+    );
+    std::fs::write(&host_instructions, &host_marker).unwrap();
+
+    let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
+    let started: Value = serde_json::from_slice(
+        &client
+            .call(
+                "managed_agent.start_session_v1",
+                payload.to_string().as_bytes(),
+                "",
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
+    send_to(
+        &client,
+        &user,
+        &agent,
+        "Delegate the calculation and send its result. PARITY_SCENARIO:cohost_delegate",
+        "",
+    )
+    .unwrap();
+    let reply = wait_live_reply(&mb, &agent, &mut cursor, "\"status\"");
+    let result: Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(result["status"], "completed", "{reply}");
+    assert_eq!(result["result"], "203");
+
+    let requests: Vec<Value> = operator
+        .readdir("/model", "")
+        .unwrap()
+        .iter()
+        .filter(|e| e.name.ends_with(".prompt"))
+        .map(|e| {
+            serde_json::from_slice(&operator.read(&listed_path("/model", &e.name), "").unwrap())
+                .unwrap()
+        })
+        .collect();
+    let child = requests
+        .iter()
+        .find(|r| {
+            r["body"]["system"]
+                .to_string()
+                .contains("background sub-agent of type `general-purpose`")
+        })
+        .expect("capture the child's own request through Nexus");
+    let system = child["body"]["system"].to_string();
+    assert!(
+        system.contains(&memory_marker),
+        "child must receive its own VFS memory, not host memory"
+    );
+    assert!(
+        !system.contains(&host_marker),
+        "host shell instructions must not become VFS workspace instructions"
+    );
+    let workspace = started["workspace_path"]
+        .as_str()
+        .unwrap()
+        .trim_end_matches('/');
+    assert!(
+        system.contains(&format!("Working directory: {workspace}")),
+        "child must name the same VFS workspace as its file tools"
+    );
+    assert!(
+        system.contains("Your files and your shell are in different places"),
+        "child must know where its host-side shell runs"
+    );
+    // Windows joins in the memory loader may use backslashes in displayed
+    // paths; the marker above proves the lookup succeeded on the VFS anyway.
+    assert!(system.replace("\\\\", "/").contains(&memory_root));
+    assert_eq!(child["nexus_http"]["path"], "v1/messages");
+
+    let cancel = json!({"session_id":started["session_id"],"mode":"session"});
+    client
+        .call("managed_agent.cancel_v1", cancel.to_string().as_bytes(), "")
+        .unwrap();
+    println!("COHOST CONTEXT: delegated result, VFS memory, workspace and host isolation verified");
+}
+
 /// Real daemon + real model: a child reads fresh VFS data, the parent writes a
 /// result, then a second mailbox turn consumes it. Inspect native requests in
 /// /model as well as artifacts, so direct HTTP cannot satisfy the acceptance.

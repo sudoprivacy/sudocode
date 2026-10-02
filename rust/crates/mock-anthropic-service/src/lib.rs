@@ -879,7 +879,7 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
                 "toolu_delegate",
                 "Agent",
                 json!({
-                    "description": "cohost calculation", "model": "claude-sonnet", "auth_mode": "api-key", "run_in_background": false,
+                    "description": "cohost calculation", "model": "inherit", "run_in_background": false,
                     "prompt": "PARITY_SCENARIO:subagent_calc_child What is 101 + 102? Reply with ONLY the number."
                 }),
             )])

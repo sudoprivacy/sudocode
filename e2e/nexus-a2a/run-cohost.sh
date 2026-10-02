@@ -238,4 +238,11 @@ if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE
   exit 1
 fi
 
+echo "== 7. delegate with VFS context and conflicting host instructions =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+  NEXUS_A2A_TEST_INBOX="$AGENT" NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
+  NEXUS_A2A_TEST_MODEL="$MODEL" \
+  "${CARGO_TEST[@]}" live_cohost_subagent_context -- --ignored --nocapture
+
 echo "COHOST E2E OK"

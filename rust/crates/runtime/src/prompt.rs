@@ -628,12 +628,32 @@ pub fn load_system_prompt_for_agent(
     os_version: impl Into<String>,
     agent_type: &str,
 ) -> Result<SystemPrompt, PromptBuildError> {
+    load_system_prompt_for_agent_with(
+        cwd,
+        current_date,
+        os_name,
+        os_version,
+        agent_type,
+        &StdFsBackend,
+    )
+}
+
+/// Load a sub-agent's workspace instructions and memory through the filesystem
+/// that its file tools use. Co-hosts pass their VFS workspace as `cwd`.
+pub fn load_system_prompt_for_agent_with(
+    cwd: impl Into<PathBuf>,
+    current_date: impl Into<String>,
+    os_name: impl Into<String>,
+    os_version: impl Into<String>,
+    agent_type: &str,
+    fs: &dyn FsBackend,
+) -> Result<SystemPrompt, PromptBuildError> {
     load_system_prompt_impl(
         cwd,
         current_date,
         os_name,
         os_version,
-        &StdFsBackend,
+        fs,
         Some(agent_type),
         crate::memory::MemoryMode::Enabled,
     )
@@ -649,7 +669,16 @@ fn load_system_prompt_impl(
     memory: crate::memory::MemoryMode,
 ) -> Result<SystemPrompt, PromptBuildError> {
     let cwd = cwd.into();
-    let project_context = ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?;
+    let project_context = if fs
+        .managed_root(crate::fs_backend::ManagedRoot::Memory)
+        .is_some()
+    {
+        // A VFS path may also exist on the daemon's host. Running host git
+        // against it would import another workspace's state into this prompt.
+        ProjectContext::discover_with_fs(&cwd, current_date.into(), fs)?
+    } else {
+        ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?
+    };
     let config = ConfigLoader::default_for(&cwd).load()?;
     let builder_base = SystemPromptBuilder::new()
         .with_os(os_name, os_version)

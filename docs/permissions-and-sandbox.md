@@ -74,6 +74,36 @@ The supported formats are Anthropic Messages, OpenAI Chat Completions and
 OpenAI Responses. Gemini and Codex subscription routes are refused in a
 co-host. Standalone CLI sessions retain their configured HTTP connections.
 
+## Co-hosted session recovery
+
+The managed-agent RPC returns two identifiers for a co-hosted run:
+
+- `session_id`: the existing process handle for `get_session_v1`, `cancel_v1`
+  and `/proc/<pid>`.
+- `durable_session_id`: the transcript key at
+  `/sessions/<sid>/transcript.jsonl`.
+
+After stopping the old run with `cancel_v1` (`mode: "session"`), call
+`start_session_v1` with the same agent, owner, zone and repository mappings,
+plus `resume_session_id` set to the saved **durable** ID. Successful recovery
+returns a new process handle and the same durable ID. The original messages
+are loaded through the VFS and subsequent turns append to that transcript.
+Native stream snapshots replace the previously loaded view, so a turn-ending
+save or compaction does not duplicate older messages on recovery.
+Standalone CLI session paths and `--resume` keep their existing behavior.
+
+A still-running worker holds a kernel advisory lease on the session. Cancel
+signals that worker; retry recovery once it has finished its last write and
+released the lease. After a daemon crash, the lease expires within 60 seconds.
+This is explicit stop-and-resume, not automatic failover or storage fencing
+under network partitions.
+
+Ownership and repository bindings are recorded in transcript metadata and must
+match on recovery. Old transcripts without these bindings cannot be adopted by
+this RPC; they require a separate migration. Missing, malformed or mismatched
+sessions fail without falling back to a fresh session. Raw subprocesses keep
+using their existing ACP restoration path.
+
 ## Linux sandbox
 
 On Linux `scode` can run tools inside a user-namespace sandbox via

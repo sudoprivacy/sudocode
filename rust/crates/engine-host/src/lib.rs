@@ -64,6 +64,7 @@ pub mod nexus_a2a;
 /// `RuntimePluginState` inputs, and the `build_runtime*` chain (plugins, MCP,
 /// policy, system prompt, `EngineApiClient`) every engine-side (re)build shares.
 pub mod managed_agent;
+mod managed_session;
 pub mod runtime_build;
 
 /// The standalone host's in-process kernel: the VFS a CLI session's file tools

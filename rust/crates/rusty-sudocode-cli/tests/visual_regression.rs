@@ -18,6 +18,16 @@
 mod common;
 
 use common::TestEnv;
+use pty_expect::PtySession;
+
+/// Submit only after the prior frame has settled and the command is visible.
+/// A separator or prompt in the byte stream can belong to an earlier redraw.
+fn submit_command(sess: &mut PtySession, command: &str) {
+    common::expect_input_line_cleared(sess, common::DEFAULT_TIMEOUT, "command ready");
+    sess.send(command).expect("type command");
+    common::expect_input_line(sess, command, common::DEFAULT_TIMEOUT, "command draft");
+    sess.send("\r").expect("submit command");
+}
 
 /// After the startup banner, a `─` separator character appears in the REPL
 /// output before the prompt.
@@ -31,7 +41,7 @@ fn separator_line_appears_after_startup() {
 
     sess.expect("❯").expect("REPL prompt should appear");
 
-    sess.send("/exit\r").expect("send /exit");
+    submit_command(&mut sess, "/exit");
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0);
 }
@@ -46,28 +56,7 @@ fn footer_hint_appears_in_repl() {
     sess.expect("read only")
         .expect("footer should show permission mode");
 
-    // The sync REPL prints the footer before read_line enters raw mode.
-    // Wait for the actual prompt, then observe the draft before submitting;
-    // otherwise early input can be lost during terminal initialization.
-    // ConPTY may emit the prompt before the footer in the byte stream, so
-    // inspect the screen instead of requiring a second prompt emission.
-    let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-    while !sess.render(|screen| screen.contents().contains('❯')) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "REPL prompt should appear; screen:\n{}",
-            sess.render(|screen| screen.raw().contents())
-        );
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    sess.send("/exit").expect("type /exit");
-    common::expect_input_line(
-        &sess,
-        "/exit",
-        common::DEFAULT_TIMEOUT,
-        "exit draft after footer",
-    );
-    sess.send("\r").expect("submit /exit");
+    submit_command(&mut sess, "/exit");
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0);
 }
@@ -85,11 +74,13 @@ fn no_duplicate_echo_after_submit() {
     sess.expect("❯").expect("REPL prompt should appear");
 
     // Send /help — deterministic output, no LLM call needed.
-    sess.send("/help\r").expect("send /help");
+    submit_command(&mut sess, "/help");
 
-    // Wait for the separator that precedes the next prompt — this
-    // confirms print_before_prompt ran and the full output is captured.
-    let output = sess.expect("─").expect("next separator should appear");
+    // Observe this command's output. The separator also appears before the
+    // command runs, so matching it cannot establish that /help was submitted.
+    let output = sess
+        .expect("Navigate prompt history")
+        .expect("help output should appear");
 
     // The submitted text must NOT appear as a `›`-prefixed echo line.
     // If it does, the echo duplication bug has regressed.
@@ -98,7 +89,7 @@ fn no_duplicate_echo_after_submit() {
         "found echo line '› /help' — input was duplicated: {output:?}"
     );
 
-    sess.send("/exit\r").expect("send /exit");
+    submit_command(&mut sess, "/exit");
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0);
 }
@@ -116,7 +107,7 @@ fn bottom_chrome_cleared_after_submit() {
     sess.expect("❯").expect("REPL prompt should appear");
 
     // Send /version — produces "Sudo Code\n  Version ..." with no `─`.
-    sess.send("/version\r").expect("send /version");
+    submit_command(&mut sess, "/version");
 
     // Expect the version output.
     let output = sess
@@ -136,7 +127,7 @@ fn bottom_chrome_cleared_after_submit() {
 
     // Wait for next prompt before exiting.
     sess.expect("❯").expect("next prompt");
-    sess.send("/exit\r").expect("send /exit");
+    submit_command(&mut sess, "/exit");
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0);
 }
@@ -173,14 +164,16 @@ fn no_post_readline_cursor_up_in_repl() {
 
     sess.expect("❯").expect("REPL prompt should appear");
 
-    sess.send("/help\r").expect("send /help");
-    let help_output = sess.expect("❯").expect("next prompt after /help");
+    submit_command(&mut sess, "/help");
+    let help_output = sess
+        .expect("Navigate prompt history")
+        .expect("help output should appear");
     assert!(
         !help_output.contains("\x1b[1F"),
         "post-submit output contains ESC[1F: {help_output:?}"
     );
 
-    sess.send("/exit\r").expect("send /exit");
+    submit_command(&mut sess, "/exit");
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0);
 }

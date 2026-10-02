@@ -134,6 +134,65 @@ impl fmt::Debug for SessionPersistence {
     }
 }
 
+/// Durable ownership and repository bindings for a hosted transcript.
+/// Procfs paths change with each pid; these bindings must match before a host
+/// may relocate a session to its new process workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedSessionIdentity {
+    pub agent_name: String,
+    pub owner_id: String,
+    pub zone_id: String,
+    pub repos: BTreeMap<String, String>,
+}
+
+impl HostedSessionIdentity {
+    fn to_json(&self) -> JsonValue {
+        JsonValue::Object(BTreeMap::from([
+            (
+                "agent_name".into(),
+                JsonValue::String(self.agent_name.clone()),
+            ),
+            ("owner_id".into(), JsonValue::String(self.owner_id.clone())),
+            ("zone_id".into(), JsonValue::String(self.zone_id.clone())),
+            (
+                "repos".into(),
+                JsonValue::Object(
+                    self.repos
+                        .iter()
+                        .map(|(alias, path)| (alias.clone(), JsonValue::String(path.clone())))
+                        .collect(),
+                ),
+            ),
+        ]))
+    }
+
+    fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| SessionError::Format("session identity must be an object".into()))?;
+        let repos = object
+            .get("repos")
+            .and_then(JsonValue::as_object)
+            .ok_or_else(|| SessionError::Format("session identity is missing repos".into()))?
+            .iter()
+            .map(|(alias, value)| {
+                value
+                    .as_str()
+                    .map(|path| (alias.clone(), path.to_string()))
+                    .ok_or_else(|| {
+                        SessionError::Format("session repo must be a path string".into())
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            agent_name: required_string(object, "agent_name")?,
+            owner_id: required_string(object, "owner_id")?,
+            zone_id: required_string(object, "zone_id")?,
+            repos,
+        })
+    }
+}
+
 /// Persisted conversational state for the runtime and CLI session manager.
 ///
 /// `workspace_root` binds the session to the worktree it was created in. The
@@ -152,6 +211,7 @@ pub struct Session {
     pub compaction: Option<SessionCompaction>,
     pub fork: Option<SessionFork>,
     pub workspace_root: Option<PathBuf>,
+    pub identity: Option<HostedSessionIdentity>,
     pub prompt_history: Vec<SessionPromptEntry>,
     /// The model used in this session, persisted so resumed sessions can
     /// report which model was originally used.
@@ -170,6 +230,7 @@ impl PartialEq for Session {
             && self.messages == other.messages
             && self.compaction == other.compaction
             && self.fork == other.fork
+            && self.identity == other.identity
             && self.workspace_root == other.workspace_root
             && self.prompt_history == other.prompt_history
             && self.last_health_check_ms == other.last_health_check_ms
@@ -223,6 +284,7 @@ impl Session {
             compaction: None,
             fork: None,
             workspace_root: None,
+            identity: None,
             prompt_history: Vec::new(),
             last_health_check_ms: None,
             model: None,
@@ -391,6 +453,12 @@ impl Session {
         let snapshot = self.render_jsonl_snapshot()?;
         let path_str = path.to_string_lossy();
         let backend = self.backend();
+        if backend.is_append_stream(&path_str)? {
+            // One frame commits the complete replacement. Its session_meta
+            // starts a new snapshot when loading, rather than replaying history.
+            backend.append(&path_str, snapshot.as_bytes())?;
+            return Ok(());
+        }
         rotate_session_file_if_needed_with(backend, path)?;
         write_atomic_with(backend, &path_str, &snapshot)?;
         cleanup_rotated_logs_with(backend, path)?;
@@ -412,6 +480,9 @@ impl Session {
         );
         let snapshot = original.render_jsonl_snapshot()?;
         write_atomic_with(self.backend(), &archive, &snapshot)?;
+        if self.backend().is_append_stream(&path.to_string_lossy())? {
+            return self.save_to_path(path);
+        }
         // Avoid rotation before the atomic replacement: failure must leave the
         // live transcript at its original path, rather than only in a backup.
         write_atomic_with(
@@ -640,6 +711,7 @@ impl Session {
                 branch_name: normalize_optional_string(branch_name),
             }),
             workspace_root: self.workspace_root.clone(),
+            identity: self.identity.clone(),
             prompt_history: self.prompt_history.clone(),
             last_health_check_ms: self.last_health_check_ms,
             model: self.model.clone(),
@@ -679,6 +751,9 @@ impl Session {
         }
         if let Some(fork) = &self.fork {
             object.insert("fork".to_string(), fork.to_json());
+        }
+        if let Some(identity) = &self.identity {
+            object.insert("identity".to_string(), identity.to_json());
         }
         if let Some(workspace_root) = &self.workspace_root {
             object.insert(
@@ -737,6 +812,10 @@ impl Session {
             .map(SessionCompaction::from_json)
             .transpose()?;
         let fork = object.get("fork").map(SessionFork::from_json).transpose()?;
+        let identity = object
+            .get("identity")
+            .map(HostedSessionIdentity::from_json)
+            .transpose()?;
         let workspace_root = object
             .get("workspace_root")
             .and_then(JsonValue::as_str)
@@ -764,6 +843,7 @@ impl Session {
             compaction,
             fork,
             workspace_root,
+            identity,
             prompt_history,
             last_health_check_ms: None,
             model,
@@ -771,6 +851,10 @@ impl Session {
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keep ordered JSONL replay and its accumulated state together"
+    )]
     fn from_jsonl(contents: &str) -> Result<Self, SessionError> {
         let mut version = SESSION_VERSION;
         let mut session_id = None;
@@ -780,6 +864,7 @@ impl Session {
         let mut compaction = None;
         let mut fork = None;
         let mut workspace_root = None;
+        let mut identity = None;
         let mut model = None;
         let mut prompt_history = Vec::new();
 
@@ -811,11 +896,21 @@ impl Session {
                     ))
                 })? {
                 "session_meta" => {
+                    // Metadata only starts full snapshots, never incremental
+                    // updates. Native streams retain older snapshots in their
+                    // log, so the most recent one replaces the accumulated view.
+                    messages.clear();
+                    prompt_history.clear();
+                    compaction = None;
                     version = required_u32(object, "version")?;
                     session_id = Some(required_string(object, "session_id")?);
                     created_at_ms = Some(required_u64(object, "created_at_ms")?);
                     updated_at_ms = Some(required_u64(object, "updated_at_ms")?);
                     fork = object.get("fork").map(SessionFork::from_json).transpose()?;
+                    identity = object
+                        .get("identity")
+                        .map(HostedSessionIdentity::from_json)
+                        .transpose()?;
                     workspace_root = object
                         .get("workspace_root")
                         .and_then(JsonValue::as_str)
@@ -865,6 +960,7 @@ impl Session {
             compaction,
             fork,
             workspace_root,
+            identity,
             prompt_history,
             last_health_check_ms: None,
             model,
@@ -914,6 +1010,21 @@ impl Session {
         let mut rendered = self.snapshot_lines()?.join("\n");
         rendered.push('\n');
         Ok(rendered)
+    }
+
+    /// Persist a new session before its first turn using the backend's native
+    /// append-log format. Existing non-empty transcripts must be loaded instead.
+    pub fn initialize_persistence(&self) -> Result<(), SessionError> {
+        let Some(path) = self.persistence_path() else {
+            return Ok(());
+        };
+        let path_str = path.to_string_lossy();
+        if self.backend().exists(&path_str)? && self.backend().stat(&path_str)?.len > 0 {
+            return Err(SessionError::Format(
+                "session transcript already exists".into(),
+            ));
+        }
+        self.bootstrap_append_log(path)
     }
 
     /// Bootstrap an empty/missing transcript to the full in-memory snapshot.
@@ -1002,6 +1113,9 @@ impl Session {
         );
         if let Some(fork) = &self.fork {
             object.insert("fork".to_string(), fork.to_json());
+        }
+        if let Some(identity) = &self.identity {
+            object.insert("identity".to_string(), identity.to_json());
         }
         if let Some(workspace_root) = &self.workspace_root {
             object.insert(

@@ -4150,7 +4150,7 @@ impl LiveCli {
     fn drive_turn(
         &self,
         input: &str,
-        spinner_ref: Option<render::SpinnerRef>,
+        spinner_ref: Option<&render::SpinnerRef>,
         output: Option<&repl_ui::OutputSender>,
         ui: Option<&repl_ui::UiCommandSender>,
         render: bool,
@@ -4167,7 +4167,8 @@ impl LiveCli {
         // the iocraft staging overlay (a live, self-clearing region); it is
         // never committed to durable scrollback, so `Running` cannot outlive
         // the call regardless of whether a `ui` overlay is present.
-        let mut renderer = render.then(|| EngineEventRenderer::new(spinner_ref, output.cloned()));
+        let mut renderer =
+            render.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
         let mut blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
         blocks.append(&mut self.pending_images.borrow_mut());
         self.engine_handle
@@ -4280,7 +4281,13 @@ impl LiveCli {
                     if let Some(monitor) = cancel_monitor {
                         monitor.suspend();
                     }
-                    let decision = permission_prompter.decide(&request);
+                    // The line editor owns the current terminal row while it
+                    // asks. A ticking spinner would erase its prompt and input.
+                    let mut decide = || permission_prompter.decide(&request);
+                    let decision = match spinner_ref {
+                        Some(spinner) => spinner.suspend(decide),
+                        None => decide(),
+                    };
                     if let Some(monitor) = cancel_monitor {
                         monitor.resume();
                     }
@@ -4292,7 +4299,11 @@ impl LiveCli {
                     if let Some(monitor) = cancel_monitor {
                         monitor.suspend();
                     }
-                    let answers = question_prompter.ask(&request).unwrap_or_default();
+                    let mut ask = || question_prompter.ask(&request).unwrap_or_default();
+                    let answers = match spinner_ref {
+                        Some(spinner) => spinner.suspend(ask),
+                        None => ask(),
+                    };
                     if let Some(monitor) = cancel_monitor {
                         monitor.resume();
                     }
@@ -4360,7 +4371,7 @@ impl LiveCli {
             .then(|| ReplTurnCancelMonitor::install(self.engine_handle.commands.clone()));
         let outcome = self.drive_turn(
             input,
-            Some(spinner_ref),
+            Some(&spinner_ref),
             None,
             None,
             true,
@@ -4523,7 +4534,7 @@ impl LiveCli {
 
         let outcome = self.drive_turn(
             input,
-            Some(spinner_ref),
+            Some(&spinner_ref),
             Some(output),
             Some(&ui),
             true,

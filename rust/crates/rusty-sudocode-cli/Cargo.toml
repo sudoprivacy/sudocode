@@ -25,7 +25,8 @@ engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
-iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", branch = "main" }
+# Draft integration: blocked on iocraft PR #5's full resize acceptance.
+iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "e82609cc683e322d951d1ae869a2ca2240f41926" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"

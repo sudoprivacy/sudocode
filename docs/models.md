@@ -64,6 +64,12 @@ These fields have different jobs:
 - `providers.<auth-mode>.model` is the exact model/deployment ID sent to the
   selected provider. Internal deployment IDs can include `/`.
 
+The runtime announces the selected provider ID in conversation context on the
+first turn and after a model switch. When asked which model it is, the assistant
+uses the latest ID as the session's configured model. Earlier answers can be
+stale after switching. This reports the request's routing ID; it does not
+independently verify the provider's underlying model implementation.
+
 Compaction uses the active provider's wire model ID for both requests and
 capability lookups, including the output-token ceiling and automatic pressure
 threshold. It must not size a request using a display name, a config alias, or

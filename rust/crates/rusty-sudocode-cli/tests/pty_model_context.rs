@@ -77,12 +77,12 @@ fn model_context_follows_switches_and_switching_back() {
             common::expect_input_line_cleared(&cli, budget, "input after switch");
         }
         let prompt = env.prompt(
-            "Which model ID is selected for this turn? Reply only with that ID, without tools.",
+            "你知道你自己是什么模型吗？只输出当前模型名称。",
             "single_turn_text",
         );
         let marker = common::turn_status_marker(&cli);
         cli.send(&prompt).unwrap();
-        common::expect_input_line(&cli, "Which model ID", budget, "question entered");
+        common::expect_input_line(&cli, "你知道你自己", budget, "question entered");
         cli.send("\r").unwrap();
         common::expect_turn_complete_after(&cli, &marker, budget, "model answered");
         let saved = messages(&env);

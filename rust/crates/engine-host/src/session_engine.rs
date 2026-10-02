@@ -161,9 +161,73 @@ pub struct SessionEngine {
     /// Auth-mode override — the engine's SSOT. `None` = auto-resolve from the
     /// model + config; `/auth` pins a concrete mode. Every rebuild reads it.
     auth_mode: std::sync::Mutex<Option<AuthMode>>,
+    host_prompt_sections: Vec<String>,
+    // Last to drop: the writer lease outlives the runtime and transcript.
+    _host_resources: Option<std::sync::Mutex<Option<Box<dyn Send + Sync>>>>,
 }
 
 impl SessionEngine {
+    /// Adopt a session prepared by a host, retaining its filesystem and writer
+    /// lease. This is the same engine used by the CLI and every ACP transport.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_host(
+        host: crate::HostContext,
+        session: runtime::Session,
+        mut config: RuntimeConfig,
+        mcp_servers: std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
+        prompt_overrides: runtime::SystemPromptOverrides,
+        abort_signal: runtime::HookAbortSignal,
+        resources: Box<dyn Send + Sync>,
+    ) -> Result<Self, String> {
+        let handle = SessionHandle {
+            id: session.session_id.clone(),
+            path: session
+                .persistence_path()
+                .ok_or("hosted session has no persistence path")?
+                .to_path_buf(),
+        };
+        let host_prompt_sections = config.system_prompt.dynamic_sections().to_vec();
+        let mut prompt =
+            build_acp_system_prompt(&host.config_root, &prompt_overrides, config.memory)?;
+        prompt.extend_dynamic_sections(host_prompt_sections.clone());
+        config.system_prompt = prompt;
+        let permission_mode = config.permission_mode;
+        let allowed_tools = config.allowed_tools.clone();
+        let auth_mode = config.auth_mode;
+        let memory = config.memory;
+        let runtime = build_engine_runtime(
+            &host,
+            session,
+            &handle.id,
+            config,
+            &mcp_servers,
+            abort_signal.clone(),
+            None,
+        )
+        .map_err(|e| format!("build hosted session engine: {e}"))?;
+        let cwd = host.shell_root.clone();
+        Ok(Self {
+            session: std::sync::Mutex::new(AcpCliSession {
+                cwd,
+                host,
+                handle,
+                runtime,
+                abort_signal,
+                started_at: Instant::now(),
+                session_mcp_servers: mcp_servers,
+                prompt_overrides,
+                memory,
+            }),
+            tokio_runtime: Some(tokio::runtime::Runtime::new().map_err(|e| e.to_string())?),
+            allowed_tools,
+            permission_mode: std::sync::Mutex::new(permission_mode),
+            reasoning_effort: None,
+            auth_mode: std::sync::Mutex::new(Some(auth_mode)),
+            host_prompt_sections,
+            _host_resources: Some(std::sync::Mutex::new(Some(resources))),
+        })
+    }
+
     /// Build a single-session engine for `cwd`. Ports `AcpCliAgent::build_session`.
     ///
     /// `system_prompt` is supplied by the caller (the REPL passes its own
@@ -247,6 +311,8 @@ impl SessionEngine {
             permission_mode: std::sync::Mutex::new(permission_mode),
             reasoning_effort,
             auth_mode: std::sync::Mutex::new(auth_mode),
+            host_prompt_sections: Vec::new(),
+            _host_resources: None,
         })
     }
 
@@ -330,6 +396,8 @@ impl SessionEngine {
             permission_mode: std::sync::Mutex::new(permission_mode),
             reasoning_effort,
             auth_mode: std::sync::Mutex::new(auth_mode),
+            host_prompt_sections: Vec::new(),
+            _host_resources: None,
         })
     }
 
@@ -378,13 +446,17 @@ impl SessionEngine {
         let model = new_session.model.clone().unwrap_or_default();
         let permission_mode = self.locked_permission_mode();
         let auth_override = self.auth_override();
-        let sudocode_config = load_sudocode_config_for_cwd(&cwd);
+        let sudocode_config = load_sudocode_config_for_cwd(&session.host.config_root);
         let auth_mode = resolve_model_switch_auth_mode(&model, auth_override, &sudocode_config)
             .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
         // Pass the caller's base prompt, never the assembled snapshot. The
         // shared runtime builder checks explicit overrides before reusing it.
-        let system_prompt =
-            build_acp_system_prompt(&cwd, &session.prompt_overrides, session.memory)?;
+        let mut system_prompt = build_acp_system_prompt(
+            &session.host.config_root,
+            &session.prompt_overrides,
+            session.memory,
+        )?;
+        system_prompt.extend_dynamic_sections(self.host_prompt_sections.clone());
         let runtime = build_engine_runtime(
             &session.host,
             new_session,
@@ -869,6 +941,14 @@ impl engine_core::EngineDelegate for SessionEngine {
         let session = self.lock_session();
         let path = session.handle.path.clone();
         let _ = session.runtime.session().save_to_path(&path);
+        // Release the writer lease on explicit close, even if a renderer still
+        // retains an Arc to this closed engine for a queued notification.
+        if let Some(resources) = &self._host_resources {
+            resources
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
     }
 }
 
@@ -1215,6 +1295,9 @@ impl SessionLifecycle for SessionEngine {
     }
 
     fn reset_session(&self) -> Result<SessionHandle, String> {
+        if self._host_resources.is_some() {
+            return Err("managed session identity is fixed; use start_session to create or resume a session".into());
+        }
         let mut session = self.lock_session();
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         let current_model = session.runtime.session().model.clone();
@@ -1228,6 +1311,9 @@ impl SessionLifecycle for SessionEngine {
     }
 
     fn resume_session(&self, reference: &str) -> Result<(SessionHandle, usize), String> {
+        if self._host_resources.is_some() {
+            return Err("managed session identity is fixed; use start_session to create or resume a session".into());
+        }
         let mut session = self.lock_session();
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         let (handle, mut loaded) = load_session_reference(reference).map_err(|e| e.to_string())?;
@@ -1243,6 +1329,9 @@ impl SessionLifecycle for SessionEngine {
         &self,
         branch: Option<String>,
     ) -> Result<(SessionHandle, usize, Option<String>), String> {
+        if self._host_resources.is_some() {
+            return Err("fork requires a separate managed session and writer lease".into());
+        }
         let mut session = self.lock_session();
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         let forked = session.runtime.fork_session(branch);

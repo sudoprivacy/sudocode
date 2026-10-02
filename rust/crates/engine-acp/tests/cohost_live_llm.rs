@@ -1,6 +1,8 @@
+#![cfg(feature = "mailbox")]
+
 //! LIVE co-host proof — the same agent, answered by a real model.
 //!
-//! Drives `engine_host::managed_agent::spawn_managed_agent` (the EXACT factory
+//! Drives `managed_harness::spawn_managed_agent` (the EXACT factory
 //! the nexusd `SudoCodeSpawnAdapter` calls) on a real in-process `Kernel`:
 //! provisions the pair's conversation exactly as a sender would, spawns the
 //! managed-agent loop, writes a user prompt into the shared transcript, and
@@ -17,7 +19,9 @@
 //!   ANTHROPIC_BASE_URL=https://napi.sudorouter.ai \
 //!   cargo test -p engine-host --test cohost_live_llm -- --ignored --nocapture
 
+#[path = "../../engine-host/tests/common/mod.rs"]
 mod common;
+mod managed_harness;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,8 +30,8 @@ use common::{
     make_desc, mount_agent_world, provision_stream_transcript, send_prompt, user_ctx,
     wait_for_agent_reply,
 };
-use engine_host::managed_agent::spawn_managed_agent;
 use kernel::kernel::Kernel;
+use managed_harness::spawn_managed_agent;
 use runtime::mailbox::{InboxConvention, Mailbox};
 use runtime::{FsBackend, KernelFsBackend};
 

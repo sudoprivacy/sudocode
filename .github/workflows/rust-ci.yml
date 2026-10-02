@@ -213,7 +213,7 @@ jobs:
         # can print its captured failure output.
         env:
           RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
-        run: cargo test --workspace
+        run: cargo test --workspace --features engine-acp/mailbox
 
   terminal-resize:
     name: Real terminal resize (${{ matrix.os }})
@@ -370,7 +370,7 @@ jobs:
       # cheap enough to answer before anything compiles.
       #
       # A co-hosted agent takes the daemon's `Arc<Kernel>` and hands back a
-      # `SpawnTask<Kernel>`. Two nexus-vfs revs in one graph are two `Kernel`
+      # `SpawnTask<Kernel>` adapter. Two nexus-vfs revs in one graph are two `Kernel`
       # types, and the seam stops unifying — but NOT reliably at compile time: a
       # probe with `kernel` at one tag and the daemon crate at another compiled
       # fine, because the type system only objects where a type actually crosses

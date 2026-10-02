@@ -54,11 +54,17 @@ theme-selected muted foreground without an additional dim attribute; cache
 health indicators keep their semantic colors. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
 
-Resizing the terminal reflows the live UI in place: status, Todo, and queued
-message panels remain transient rather than leaving duplicate frames in the
-conversation. The current input draft is retained. For UI that fits within
-the viewport, resize clears only the live UI from its retained start position,
-without clearing the preceding conversation or purging terminal scrollback.
+The live slots share one row budget. In a short window, InputSlot takes
+priority: running tools, queued messages and Todos fold to count summaries;
+status details fold to a labeled summary. Growing the window restores the
+details automatically. Long drafts scroll inside the input viewport without
+discarding their hidden contents. A question that cannot be fully reviewed
+shows an enlarge-window warning and does not accept confirmation until it fits;
+Escape and Ctrl-C remain available. Normal slot order is unchanged.
+
+Terminal resize recovery is still being repaired. In particular, Windows
+terminal reflow can leave stale live frames in scrollback; the bounded layout
+does not by itself establish correct history/live-region recovery.
 
 While a turn is running, messages you submit wait in the staging area.
 Press ↑ on an empty input to recall the newest queued human message for

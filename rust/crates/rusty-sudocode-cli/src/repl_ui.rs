@@ -34,7 +34,7 @@ use iocraft::prelude::*;
 mod ansi_text;
 mod layout;
 use ansi_text::AnsiText;
-use layout::{ChromeLayout, Measurements, Slot};
+use layout::{ChromeLayout, InputLayout, Measurements, Slot};
 
 // ── stderr redirect ───────────────────────────────────────────────────
 
@@ -397,6 +397,29 @@ enum InputSlot {
     FuzzySelect(FuzzySelectState),
 }
 
+/// Content projections only: layout budgets the review body independently
+/// from the controls, which must never be hidden while confirming a choice.
+#[derive(Default)]
+struct QuestionPanel {
+    heading: String,
+    body: String,
+    controls: String,
+}
+
+impl QuestionPanel {
+    fn new(question: &QuestionPromptView, controls: String) -> Self {
+        Self {
+            heading: question
+                .title
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .map_or_else(String::new, |title| format!("[{title}]")),
+            body: question.description.clone().unwrap_or_default(),
+            controls,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FuzzySelectState {
     question: QuestionPromptView,
@@ -467,19 +490,8 @@ impl FuzzySelectState {
             .and_then(|&i| self.question.options.get(i))
     }
 
-    fn format_panel(&self) -> String {
+    fn format_panel(&self) -> QuestionPanel {
         let mut lines = Vec::new();
-        if let Some(title) = self.question.title.as_deref().filter(|t| !t.is_empty()) {
-            lines.push(format!("[{title}]"));
-        }
-        if let Some(desc) = self
-            .question
-            .description
-            .as_deref()
-            .filter(|d| !d.is_empty())
-        {
-            lines.push(desc.to_string());
-        }
         let total = self.filtered.len();
         if self.filter.is_empty() {
             lines.push(format!("{} items  {}", total, self.question.prompt));
@@ -521,7 +533,7 @@ impl FuzzySelectState {
                 crate::render::RESET
             ));
         }
-        lines.join("\n")
+        QuestionPanel::new(&self.question, lines.join("\n"))
     }
 }
 
@@ -826,18 +838,8 @@ fn format_question_panel(
     question: &QuestionPromptView,
     selected_index: usize,
     custom_input: &str,
-) -> String {
+) -> QuestionPanel {
     let mut lines = Vec::new();
-    if let Some(title) = question.title.as_deref().filter(|title| !title.is_empty()) {
-        lines.push(format!("[{title}]"));
-    }
-    if let Some(description) = question
-        .description
-        .as_deref()
-        .filter(|description| !description.is_empty())
-    {
-        lines.push(description.to_string());
-    }
     lines.push(format!(
         "{}/{}  {}",
         question.index + 1,
@@ -910,7 +912,7 @@ fn format_question_panel(
         crate::render::DIM,
         crate::render::RESET,
     ));
-    lines.join("\n")
+    QuestionPanel::new(question, lines.join("\n"))
 }
 
 /// Message type for the output channel: distinguishes complete lines
@@ -1453,6 +1455,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut text_input_was_mounted = hooks.use_state(|| false);
     let mut input_reviewable = hooks.use_state(|| true);
     let mut measurements = hooks.use_ref_default::<Measurements>();
+    // This ScrollView remains mounted even at zero height; the handle never
+    // points at a torn-down component when a new question resets its offset.
+    let mut review_handle = hooks.use_ref_default::<ScrollViewHandle>();
 
     // Clone handles for the future (StdoutHandle is Clone).
     let stdout_for_future = stdout.clone();
@@ -1499,6 +1504,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 loop {
                     match rx.try_recv() {
                         Ok(UiCommand::ShowQuestion(question)) => {
+                            review_handle.write().scroll_to_top();
                             let slot = if question.force_fuzzy_select
                                 || question.options.len() > DIALPAD_MAX_OPTIONS
                             {
@@ -1651,6 +1657,21 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     && !(code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
                     return;
+                }
+                if matches!(current_slot, InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)) {
+                    let mut review = review_handle.write();
+                    let page = i32::from(review.viewport_height()).saturating_sub(1).max(1);
+                    match code {
+                        KeyCode::PageUp => { review.scroll_by(-page); return; }
+                        KeyCode::PageDown => { review.scroll_by(page); return; }
+                        KeyCode::Home if modifiers.contains(KeyModifiers::CONTROL) => {
+                            review.scroll_to_top(); return;
+                        }
+                        KeyCode::End if modifiers.contains(KeyModifiers::CONTROL) => {
+                            review.scroll_to_bottom(); return;
+                        }
+                        _ => {}
+                    }
                 }
                 // Dismiss InputSlot::Hint on any keypress.
                 if matches!(current_slot, InputSlot::Hint(_)) {
@@ -2211,17 +2232,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     // InputSlot rendering
-    let (panel_text, prompt_label) = match &current_input_slot {
-        InputSlot::Hint(_) | InputSlot::TextInput => (None, crate::render::PROMPT_PREFIX),
+    let (panel, prompt_label) = match &current_input_slot {
+        InputSlot::Hint(_) | InputSlot::TextInput => {
+            (QuestionPanel::default(), crate::render::PROMPT_PREFIX)
+        }
         InputSlot::DialPad(q) => (
-            Some(format_question_panel(
-                q,
-                dialpad_cursor.get(),
-                &dialpad_input.read(),
-            )),
+            format_question_panel(q, dialpad_cursor.get(), &dialpad_input.read()),
             "\u{2753} ",
         ),
-        InputSlot::FuzzySelect(fs) => (Some(fs.format_panel()), "\u{1f50d} "),
+        InputSlot::FuzzySelect(fs) => (fs.format_panel(), "\u{1f50d} "),
     };
 
     let perm = permission_mode.clone();
@@ -2276,7 +2295,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     );
     let mut measured = measurements.write();
     measured.begin(w);
-    let panel_rows = panel_text.as_deref().map_or(0, |text| measured.rows(text));
+    let heading_rows = measured.rows(&panel.heading);
+    let body_rows = measured.rows(&panel.body);
+    let controls_rows = measured.rows(&panel.controls);
     let input_row_count = match &current_input_slot {
         InputSlot::TextInput => desired_text_rows,
         InputSlot::Hint(text) => measured.rows(text),
@@ -2286,7 +2307,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let layout = ChromeLayout::allocate(
         w,
         term_height as usize,
-        panel_rows + input_row_count,
+        heading_rows + body_rows + controls_rows + input_row_count,
         [
             Slot {
                 full: render_pending_overlay(&pending_items, 10),
@@ -2315,22 +2336,33 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ),
         &mut measured,
     );
+    let input_layout = InputLayout::allocate(
+        layout.input_rows,
+        [heading_rows, body_rows, controls_rows, input_row_count],
+        &mut measured,
+    );
     measured.end();
     drop(measured);
-    let panel_fits = panel_rows + input_row_count <= layout.input_rows;
     let input_warning = layout.warning.clone().or_else(|| {
-        (!matches!(current_input_slot, InputSlot::TextInput) && !panel_fits)
+        (!matches!(current_input_slot, InputSlot::TextInput) && !input_layout.fits_controls)
             .then(|| "Enlarge terminal to review; Esc cancels".to_string())
     });
     let reviewable = input_warning.is_none();
     if input_reviewable.get() != reviewable {
         input_reviewable.set(reviewable);
     }
-    let visible_panel_rows = if reviewable { panel_rows } else { 0 };
-    let visible_input_rows = if reviewable {
-        layout.input_rows - visible_panel_rows
+    let visible = if reviewable {
+        input_layout
     } else {
-        0
+        InputLayout::default()
+    };
+    let review_hint = if visible.hint > 0 {
+        let offset = usize::try_from(review_handle.read().scroll_offset())
+            .unwrap_or(0)
+            .min(body_rows.saturating_sub(visible.body));
+        layout::review_hint(offset, visible.body, body_rows)
+    } else {
+        String::new()
     };
     let row_height = |rows: usize| {
         u32::try_from(rows).expect("allocated chrome rows fit the terminal's u16 geometry")
@@ -2354,10 +2386,21 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             View(height: if reviewable { 0 } else { row_height(layout.input_rows) }, flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 Text(content: input_warning.unwrap_or_default(), color: Color::Yellow)
             }
-            View(height: row_height(visible_panel_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                AnsiText(content: panel_text.unwrap_or_default(), color: Color::Cyan)
+            View(height: row_height(visible.heading), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                AnsiText(content: panel.heading, color: Color::Cyan)
             }
-            View(height: row_height(visible_input_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+            View(height: row_height(visible.body), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                ScrollView(handle: Some(review_handle), auto_scroll: false, scrollbar: Some(false), keyboard_scroll: Some(false)) {
+                    AnsiText(content: panel.body, color: Color::Cyan)
+                }
+            }
+            View(height: row_height(visible.hint), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                AnsiText(content: review_hint, color: Color::DarkGrey)
+            }
+            View(height: row_height(visible.controls), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                AnsiText(content: panel.controls, color: Color::Cyan)
+            }
+            View(height: row_height(visible.editor), flex_shrink: 0.0, overflow: Overflow::Hidden) {
             #(if let InputSlot::Hint(ref hint_text) = current_input_slot {
                 element! {
                     View(flex_direction: FlexDirection::Row) {
@@ -2675,9 +2718,9 @@ mod tests {
     fn question_panel_marks_selected_option() {
         let panel = format_question_panel(&question_with_options(), 1, "");
 
-        assert!(panel.contains("[Setup]"));
-        assert!(panel.contains(" [1] Project (recommended)"));
-        assert!(panel.contains("> [2] User"));
+        assert_eq!(panel.heading, "[Setup]");
+        assert!(panel.controls.contains(" [1] Project (recommended)"));
+        assert!(panel.controls.contains("> [2] User"));
     }
 
     #[test]
@@ -2690,10 +2733,10 @@ mod tests {
         // shows a caret + the hint. This is the row Up/Down reach and typing
         // fills in-place.
         let panel = format_question_panel(&question, question.options.len(), "");
-        assert!(panel.contains("> [+]"));
-        assert!(panel.contains("type a comment"));
-        assert!(panel.contains("  [1] Project"));
-        assert!(panel.contains("  [2] User"));
+        assert!(panel.controls.contains("> [+]"));
+        assert!(panel.controls.contains("type a comment"));
+        assert!(panel.controls.contains("  [1] Project"));
+        assert!(panel.controls.contains("  [2] User"));
     }
 
     #[test]
@@ -2704,10 +2747,10 @@ mod tests {
         // With a non-empty buffer, the `[+]` row renders the typed text (with a
         // caret when selected) instead of the hint — no slot switch needed.
         let on_row = format_question_panel(&question, question.options.len(), "hi there");
-        assert!(on_row.contains("> [+] hi there"));
+        assert!(on_row.controls.contains("> [+] hi there"));
         let off_row = format_question_panel(&question, 0, "hi there");
-        assert!(off_row.contains("[+] hi there"));
-        assert!(!off_row.contains("type your own answer"));
+        assert!(off_row.controls.contains("[+] hi there"));
+        assert!(!off_row.controls.contains("type your own answer"));
     }
 
     #[test]

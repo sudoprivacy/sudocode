@@ -1397,12 +1397,16 @@ content deduplication is a recovery strategy.</p>
 PTY checks of narrow/short windows, drafts and question state, restoration,
 and retained startup history. The iocraft region-ownership draft remains
 separate: green CI alone does not establish correct terminal reflow.</p>
-<p>Open acceptance gaps: long question descriptions (including the full
-<code>write_plan</code> review) need a bounded review viewport; asking the
-user to enlarge indefinitely is not a finished solution. Input event batches
-also need a separate ownership audit: navigation followed by typing before a
-render currently uses a stale insertion cursor. Neither gap is waived by the
-small-window draft tests.</p>
+<p>Long question descriptions (including the full <code>write_plan</code>
+review) use a bounded review viewport inside InputSlot. The heading, choices,
+custom-answer row and confirmation hint stay visible; Page Up/Down and
+Ctrl+Home/End navigate the complete description. A range hint makes hidden
+content explicit. No truncation or permanent output is involved. If the
+controls plus a review row cannot fit, confirmation remains disabled until
+the window grows. Input event batches must share one current text/cursor
+state across editing and navigation, without requiring a render or a delay
+between keys. Both changes require end-to-end acceptance; neither waives
+the separate terminal-reflow failure.</p>
 
 <table>
   <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>

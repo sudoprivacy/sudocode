@@ -209,6 +209,7 @@ enum Scenario {
     EditFileRoundtrip,
     GlobSearchRoundtrip,
     WritePlanRoundtrip,
+    WritePlanReview,
     TodoWriteRoundtrip,
     TodoWriteEmptyRoundtrip,
     TodoWriteLifecycleRoundtrip,
@@ -339,6 +340,7 @@ impl Scenario {
             "edit_file_roundtrip" => Some(Self::EditFileRoundtrip),
             "glob_search_roundtrip" => Some(Self::GlobSearchRoundtrip),
             "write_plan_roundtrip" => Some(Self::WritePlanRoundtrip),
+            "write_plan_review" => Some(Self::WritePlanReview),
             "todo_write_roundtrip" => Some(Self::TodoWriteRoundtrip),
             "todo_write_empty_roundtrip" => Some(Self::TodoWriteEmptyRoundtrip),
             "todo_write_lifecycle_roundtrip" => Some(Self::TodoWriteLifecycleRoundtrip),
@@ -403,6 +405,7 @@ impl Scenario {
             Self::EditFileRoundtrip => "edit_file_roundtrip",
             Self::GlobSearchRoundtrip => "glob_search_roundtrip",
             Self::WritePlanRoundtrip => "write_plan_roundtrip",
+            Self::WritePlanReview => "write_plan_review",
             Self::TodoWriteRoundtrip => "todo_write_roundtrip",
             Self::TodoWriteEmptyRoundtrip => "todo_write_empty_roundtrip",
             Self::TodoWriteLifecycleRoundtrip => "todo_write_lifecycle_roundtrip",
@@ -1386,18 +1389,18 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"pattern":"*.txt"}"#],
             ),
         },
-        Scenario::WritePlanRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("write_plan roundtrip complete: {tool_output}"))
+        Scenario::WritePlanRoundtrip | Scenario::WritePlanReview => {
+            match latest_tool_result(request) {
+                Some((tool_output, _)) => {
+                    final_text_sse(&format!("write_plan roundtrip complete: {tool_output}"))
+                }
+                None => tool_use_sse(
+                    "toolu_write_plan",
+                    "write_plan",
+                    &[&write_plan_fixture(scenario).to_string()],
+                ),
             }
-            None => tool_use_sse(
-                "toolu_write_plan",
-                "write_plan",
-                &[
-                    r##"{"content":"# Plan\n1. First step\n2. Second step","context":"mock context","constraints":"mock constraints","acceptance":"mock acceptance"}"##,
-                ],
-            ),
-        },
+        }
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => {
                 final_text_sse(&format!("todo_write roundtrip complete: {tool_output}"))
@@ -1993,18 +1996,20 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"pattern": "*.txt"}),
             ),
         },
-        Scenario::WritePlanRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => text_message_response(
-                "msg_write_plan_final",
-                &format!("write_plan roundtrip complete: {tool_output}"),
-            ),
-            None => tool_message_response(
-                "msg_write_plan_tool",
-                "toolu_write_plan",
-                "write_plan",
-                json!({"content": "# Plan\n1. First step\n2. Second step", "context": "mock context", "constraints": "mock constraints", "acceptance": "mock acceptance"}),
-            ),
-        },
+        Scenario::WritePlanRoundtrip | Scenario::WritePlanReview => {
+            match latest_tool_result(request) {
+                Some((tool_output, _)) => text_message_response(
+                    "msg_write_plan_final",
+                    &format!("write_plan roundtrip complete: {tool_output}"),
+                ),
+                None => tool_message_response(
+                    "msg_write_plan_tool",
+                    "toolu_write_plan",
+                    "write_plan",
+                    write_plan_fixture(scenario),
+                ),
+            }
+        }
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_todo_write_final",
@@ -2313,6 +2318,18 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
     }
 }
 
+fn write_plan_fixture(scenario: Scenario) -> serde_json::Value {
+    let content = if matches!(scenario, Scenario::WritePlanReview) {
+        (0..64)
+            .map(|i| format!("ReviewStep{i:02}: inspect the complete plan."))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        "# Plan\n1. First step\n2. Second step".to_string()
+    };
+    json!({"content": content, "context": "mock context", "constraints": "mock constraints", "acceptance": "mock acceptance"})
+}
+
 fn request_id_for(scenario: Scenario) -> &'static str {
     match scenario {
         Scenario::StreamingText => "req_streaming_text",
@@ -2341,6 +2358,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::EditFileRoundtrip => "req_edit_file_roundtrip",
         Scenario::GlobSearchRoundtrip => "req_glob_search_roundtrip",
         Scenario::WritePlanRoundtrip => "req_write_plan_roundtrip",
+        Scenario::WritePlanReview => "req_write_plan_review",
         Scenario::TodoWriteRoundtrip => "req_todo_write_roundtrip",
         Scenario::TodoWriteEmptyRoundtrip => "req_todo_write_empty_roundtrip",
         Scenario::TodoWriteLifecycleRoundtrip => "req_todo_write_lifecycle_roundtrip",

@@ -58,9 +58,13 @@ The live slots share one row budget. In a short window, InputSlot takes
 priority: running tools, queued messages and Todos fold to count summaries;
 status details fold to a labeled summary. Growing the window restores the
 details automatically. Long drafts scroll inside the input viewport without
-discarding their hidden contents. A question that cannot be fully reviewed
-shows an enlarge-window warning and does not accept confirmation until it fits;
-Escape and Ctrl-C remain available. Normal slot order is unchanged.
+discarding their hidden contents. Long question descriptions (including plan
+review) scroll inside InputSlot with Page Up/Down; Ctrl+Home/End jump to the
+start/end. A range label shows which rows are visible, while choices and the
+custom-answer row remain on screen. Arrow keys still navigate the choices.
+If even the controls and a review row cannot fit, an enlarge-window warning
+disables confirmation; Escape and Ctrl-C remain available. Normal slot order
+is unchanged.
 
 Terminal resize recovery is still being repaired. In particular, Windows
 terminal reflow can leave stale live frames in scrollback; the bounded layout

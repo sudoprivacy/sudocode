@@ -74,6 +74,53 @@ pub(super) struct ChromeLayout {
     pub warning: Option<String>,
 }
 
+/// Allocate within InputSlot after the shared chrome budget. Interactive
+/// controls never scroll out of view; only the question body can scroll.
+#[derive(Default)]
+pub(super) struct InputLayout {
+    pub heading: usize,
+    pub body: usize,
+    pub hint: usize,
+    pub controls: usize,
+    pub editor: usize,
+    pub fits_controls: bool,
+}
+
+impl InputLayout {
+    pub fn allocate(
+        available: usize,
+        // Heading, complete body, controls, minimum editor rows.
+        [heading, body, controls, editor]: [usize; 4],
+        measurements: &mut Measurements,
+    ) -> Self {
+        let fixed = heading + controls + editor;
+        let capacity = available.saturating_sub(fixed);
+        // Reserve the largest range label so paging cannot change layout.
+        let hint = if body > capacity {
+            measurements.rows(&review_hint(body - 1, 1, body))
+        } else {
+            0
+        };
+        let visible_body = body.min(capacity.saturating_sub(hint));
+        Self {
+            heading,
+            body: visible_body,
+            hint,
+            controls,
+            editor: available.saturating_sub(heading + visible_body + hint + controls),
+            fits_controls: fixed <= available && (body == 0 || visible_body > 0),
+        }
+    }
+}
+
+pub(super) fn review_hint(offset: usize, visible: usize, total: usize) -> String {
+    format!(
+        "Review {}-{}/{total} · PgUp/PgDn · Ctrl+Home/End",
+        offset + 1,
+        offset + visible,
+    )
+}
+
 impl ChromeLayout {
     pub fn allocate(
         width: usize,

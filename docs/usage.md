@@ -150,7 +150,9 @@ to individual spans so they do not leak into following labels or input.
 Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
 themes, including inline code, language grammars, and added/removed diff fills.
 The default REPL queries the terminal palette once at startup, with a shared
-250 ms deadline and preservation of queued keys and pastes. If unsupported,
+250 ms deadline and preservation of queued keys and pastes. Native Windows
+console windows can also supply their color table; ConPTY does not use its
+backing console as the visible palette. If the query is unsupported,
 `COLORFGBG` selects the theme (dark otherwise). `NO_COLOR` skips the query and
 colors; noninteractive commands do not query the terminal. The legacy REPL
 uses `COLORFGBG`. Running tool previews cache syntax highlighting; repainting

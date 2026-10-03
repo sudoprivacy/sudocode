@@ -97,20 +97,25 @@ fn assert_reference(light: bool, no_color: bool) {
                 cursor = row + 1;
                 let mut col = rows[row].len() - expected.len();
                 for span in spans {
-                    for _ in span["text"].as_str().unwrap().chars() {
+                    for ch in span["text"].as_str().unwrap().chars() {
                         let cell = raw
                             .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
                             .unwrap();
-                        assert_eq!(
-                            format!("{:?}", cell.fgcolor()),
-                            if no_color {
-                                "Default"
-                            } else {
-                                span["foreground"].as_str().unwrap()
-                            },
-                            "{} row {row} col {col}: {expected}",
-                            reference["theme"]
-                        );
+                        // ConPTY may coalesce foreground-only changes on blank
+                        // cells. Compare every visible source character; spaces
+                        // still participate in text, width and background checks.
+                        if !ch.is_whitespace() {
+                            assert_eq!(
+                                format!("{:?}", cell.fgcolor()),
+                                if no_color {
+                                    "Default"
+                                } else {
+                                    span["foreground"].as_str().unwrap()
+                                },
+                                "{} row {row} col {col}: {expected}",
+                                reference["theme"]
+                            );
+                        }
                         assert_eq!(
                             format!("{:?}", cell.bgcolor()),
                             "Default",
@@ -173,6 +178,9 @@ fn colored_session(env: &TestEnv, light: bool) -> PtySession {
     )
 }
 
+// ConPTY consumes OSC queries instead of exposing them to the PTY peer.
+// Windows exercises unsupported-probe fallback and late input below.
+#[cfg(unix)]
 #[test]
 fn palette_probe_preserves_early_keys_paste_and_ignores_late_replies() {
     let env = TestEnv::new("palette-input");
@@ -214,6 +222,7 @@ fn palette_probe_preserves_early_keys_paste_and_ignores_late_replies() {
     finish(&mut sess);
 }
 
+#[cfg(unix)]
 #[test]
 fn detected_background_overrides_colorfgbg() {
     let env = TestEnv::new("palette-override");
@@ -245,6 +254,37 @@ fn detected_background_overrides_colorfgbg() {
         "reference rendered",
     );
     assert_cell(&sess, "source ~/.zshrc", "Rgb(64, 160, 43)", "Default");
+    finish(&mut sess);
+}
+
+#[test]
+fn unsupported_probe_keeps_typing_and_late_replies_separate() {
+    let env = TestEnv::new("palette-fallback-input");
+    let mut sess = colored_session(&env, false);
+    sess.resize(40, 100).unwrap();
+    sess.expect("❯")
+        .expect("unsupported query falls back to a usable prompt");
+    sess.send("\x1b]11;rgb:ffff/ffff/ffff\x07after").unwrap();
+    common::expect_input_line(
+        &sess,
+        "after",
+        common::DEFAULT_TIMEOUT,
+        "late response is not input",
+    );
+    sess.send("\x1b]").unwrap();
+    sess.send("typing").unwrap();
+    common::expect_input_line(
+        &sess,
+        "aftertyping",
+        common::DEFAULT_TIMEOUT,
+        "Alt bracket does not swallow keys",
+    );
+    assert_eq!(
+        common::input_line_of(&sess.render(|s| s.contents())).trim(),
+        "aftertyping"
+    );
+    sess.send("\x15").unwrap();
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "clear draft");
     finish(&mut sess);
 }
 

@@ -278,6 +278,21 @@ scode doctor
 
 For day-to-day workflows see [`docs/usage.md`](./docs/usage.md).
 
+The model can delegate through `agent_spawn`: `Explore` searches a codebase,
+`Plan` researches an implementation, and `Verification` runs checks or monitors
+CI. These are child tasks within the current scode process, with their own
+conversation and restricted tool sets. They inherit the parent's model and
+permissions. Nexus-managed agents have a separate independent-agent lifecycle.
+
+In the default interactive REPL, including `--resume`, background sub-agent
+completion automatically starts a follow-up turn. Results arriving during a
+parent turn wait until that turn finishes; the user can continue chatting while
+a worker runs. Synchronous results return directly, and a synchronous worker
+that exceeds the auto-background threshold follows the same completion path.
+`pid_output` remains available for explicit retrieval. The legacy synchronous
+REPL (`SUDOCODE_INTERRUPT_QUEUE_MODE=off`) requires retrieval; print mode
+requires `run_in_background: false`. Child tasks do not survive process exit.
+
 ## Architecture — current implementation
 
 ```mermaid

@@ -194,6 +194,10 @@ jobs:
         env:
           SCODE_TEST_BACKEND: mock
         run: cargo test --workspace --test pty_cache_prefix --test pty_compaction_safety -- --nocapture
+      - name: PTY sub-agent resume and completion workflow
+        env:
+          SCODE_TEST_BACKEND: mock
+        run: cargo test --workspace --test pty_subagent_workflow -- --nocapture
       - name: Run workspace tests
         # Keep panic diagnostics visible if a Windows PTY aborts before libtest
         # can print its captured failure output.

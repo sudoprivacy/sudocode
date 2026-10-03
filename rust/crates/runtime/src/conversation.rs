@@ -1436,6 +1436,11 @@ where
         let workspace_root = crate::workspace_root::current_workspace_root_or_default();
         let notifications =
             crate::coordinator_notification::drain(&workspace_root).unwrap_or_default();
+        // The interactive event bridge can already carry the same completion.
+        // Consume the legacy coordinator queue without injecting it twice.
+        let notifications: Vec<_> = notifications.into_iter().filter(|notification| {
+            !blocks.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains(notification.as_str())))
+        }).collect();
         if notifications.is_empty() {
             return blocks;
         }

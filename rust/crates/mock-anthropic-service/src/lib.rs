@@ -270,6 +270,10 @@ enum Scenario {
     /// `Agent` whose child ([`Scenario::SubagentToolChild`]) makes a tool call,
     /// so the forwarded stream has text, a tool call and its result.
     SubagentEventsSync,
+    /// Interactive preset workflow with file-derived evidence and completion push.
+    SubagentWorkflow,
+    /// Worker for the interactive workflow.
+    SubagentWorkflowChild,
     /// Synchronous delegation that exceeds a one-second auto-background threshold.
     SubagentEventsSyncSlow,
     /// Two `Agent` calls in one message, both `run_in_background: true`: the
@@ -372,6 +376,8 @@ impl Scenario {
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
+            "subagent_workflow" => Some(Self::SubagentWorkflow),
+            "subagent_workflow_child" => Some(Self::SubagentWorkflowChild),
             "subagent_events_sync" => Some(Self::SubagentEventsSync),
             "subagent_events_sync_slow" => Some(Self::SubagentEventsSyncSlow),
             "subagent_events_background" => Some(Self::SubagentEventsBackground),
@@ -438,6 +444,8 @@ impl Scenario {
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
+            Self::SubagentWorkflow => "subagent_workflow",
+            Self::SubagentWorkflowChild => "subagent_workflow_child",
             Self::SubagentEventsSync => "subagent_events_sync",
             Self::SubagentEventsSyncSlow => "subagent_events_sync_slow",
             Self::SubagentEventsBackground => "subagent_events_background",
@@ -882,7 +890,110 @@ fn agent_call_input(
     })
 }
 
+/// Return actual tool evidence; a canned success marker cannot pass this workflow.
+fn subagent_workflow_step(request: &MessageRequest, scenario: Scenario) -> SubagentStep {
+    let last_text = request
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            if message.role != "user" {
+                return None;
+            }
+            let text = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    InputContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then_some(text)
+        })
+        .unwrap_or_default();
+    if last_text.contains("<task-notification>") {
+        return SubagentStep::Answer(format!("Background result received: {last_text}"));
+    }
+    if last_text.contains("17 + 25") {
+        return SubagentStep::Answer("42".into());
+    }
+    if last_text.contains("HOLD_PARENT") {
+        if tool_results_by_name(request).contains_key("bash") {
+            return SubagentStep::Answer("PARENT_WORK_FINISHED".into());
+        }
+        return SubagentStep::Tools(vec![(
+            "workflow_parent_hold",
+            "bash",
+            json!({
+                "command": "touch parent-ready; while [ ! -f parent-release ]; do sleep 0.2; done; echo PARENT_WORK_FINISHED"
+            }),
+        )]);
+    }
+    if scenario == Scenario::SubagentWorkflowChild {
+        if let Some((result, _)) = latest_tool_result(request) {
+            return SubagentStep::Answer(result);
+        }
+        return if last_text.contains("ci-ready") {
+            SubagentStep::Tools(vec![(
+                "workflow_child_tool",
+                "bash",
+                json!({
+                    "command": "while [ ! -f ci-ready ]; do sleep 0.2; done; cat ci-result.txt"
+                }),
+            )])
+        } else {
+            SubagentStep::Tools(vec![(
+                "workflow_child_tool",
+                "read_file",
+                json!({"path":"evidence.txt"}),
+            )])
+        };
+    }
+    if let Some((result, _)) = latest_tool_result(request) {
+        if last_text.contains("COLLECT_RESULT")
+            && !tool_results_by_name(request).contains_key("pid_output")
+        {
+            let manifest: Value = serde_json::from_str(&result).expect("spawn manifest");
+            return SubagentStep::Tools(vec![(
+                "workflow_collect",
+                "pid_output",
+                json!({"pid":manifest["agentId"], "block":true}),
+            )]);
+        }
+        return SubagentStep::Answer(result);
+    }
+    let background = last_text.contains("run_in_background true");
+    let verification = last_text.contains("ci-ready");
+    let preset = if verification {
+        "Verification"
+    } else {
+        "Explore"
+    };
+    let task = if verification {
+        "wait for ci-ready and read ci-result.txt"
+    } else {
+        "read evidence.txt"
+    };
+    SubagentStep::Tools(vec![(
+        "workflow_spawn",
+        "agent_spawn",
+        agent_call_input(
+            "inspect fixture evidence",
+            &format!("{SCENARIO_PREFIX}subagent_workflow_child {task}"),
+            preset,
+            background,
+        ),
+    )])
+}
+
 fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> SubagentStep {
+    if matches!(
+        scenario,
+        Scenario::SubagentWorkflow | Scenario::SubagentWorkflowChild
+    ) {
+        return subagent_workflow_step(request, scenario);
+    }
     if matches!(scenario, Scenario::CohostDelegate) {
         let results = tool_results_by_name(request);
         return if results.contains_key("send") {
@@ -1688,6 +1799,8 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             final_text_sse(&sum.to_string())
         }
         Scenario::CohostDelegate
+        | Scenario::SubagentWorkflow
+        | Scenario::SubagentWorkflowChild
         | Scenario::SubagentEventsSync
         | Scenario::SubagentEventsSyncSlow
         | Scenario::SubagentEventsBackground
@@ -2351,6 +2464,8 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             text_message_response("msg_subagent_calc_child", &sum.to_string())
         }
         Scenario::CohostDelegate
+        | Scenario::SubagentWorkflow
+        | Scenario::SubagentWorkflowChild
         | Scenario::SubagentEventsSync
         | Scenario::SubagentEventsSyncSlow
         | Scenario::SubagentEventsBackground
@@ -2418,6 +2533,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",
+        Scenario::SubagentWorkflow => "req_subagent_workflow",
+        Scenario::SubagentWorkflowChild => "req_subagent_workflow_child",
         Scenario::SubagentEventsSync => "req_subagent_events_sync",
         Scenario::SubagentEventsSyncSlow => "req_subagent_events_sync_slow",
         Scenario::SubagentEventsBackground => "req_subagent_events_background",

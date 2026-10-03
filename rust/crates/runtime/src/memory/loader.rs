@@ -1,8 +1,8 @@
 //! Filesystem discovery for memory entries.
 //!
-//! The default location is `~/.scode/projects/<slug>/memory/`, where
-//! `<slug>` is derived from the git root (or cwd). `SUDOCODE_MEMORY_DIR`
-//! takes precedence when set.
+//! Native memory shares the global/project configuration roots. The former
+//! `~/.scode/projects/<slug>/` store is read as a compatibility layer.
+//! `SUDOCODE_MEMORY_DIR` remains an isolated explicit override.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,31 +14,24 @@ use crate::fs_backend::FsBackend;
 pub const MEMORY_DIR_ENV: &str = "SUDOCODE_MEMORY_DIR";
 pub const MEMORY_INDEX_FILE: &str = "MEMORY.md";
 
-/// Resolve the default memory directory for a given working directory.
-///
-/// Lookup order:
-/// 1. `SUDOCODE_MEMORY_DIR` environment variable (primary override).
-/// 2. `~/.scode/projects/<slug>/memory/` where slug is derived from
-///    the git root (or `cwd` if not in a git repo).
-/// 3. Relative `.scode/projects/<slug>/memory/` if `$HOME` is unavailable.
+/// Project memory, or the isolated `SUDOCODE_MEMORY_DIR` override.
 #[must_use]
 pub fn default_memory_dir_for(cwd: &Path) -> PathBuf {
-    if let Some(dir) = std::env::var_os(MEMORY_DIR_ENV) {
-        return PathBuf::from(dir);
+    std::env::var_os(MEMORY_DIR_ENV).map_or_else(
+        || crate::config::project_config_dir(cwd).join("memory"),
+        PathBuf::from,
+    )
+}
+
+/// Read-only compatibility root. Avoid a git subprocess for new installations.
+pub(super) fn legacy_memory_base_dir(cwd: &Path) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let projects = PathBuf::from(home).join(".scode").join("projects");
+    if !projects.is_dir() {
+        return None;
     }
     let base = find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let slug = sanitize_path(&base.to_string_lossy());
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".scode")
-            .join("projects")
-            .join(&slug)
-            .join("memory");
-    }
-    PathBuf::from(".scode")
-        .join("projects")
-        .join(&slug)
-        .join("memory")
+    Some(projects.join(sanitize_path(&base.to_string_lossy())))
 }
 
 /// Resolve the default memory directory using the current workspace root
@@ -88,20 +81,8 @@ pub fn agent_memory_dir_under(base: &Path, agent_type: &str) -> PathBuf {
 /// exists so [`agent_memory_dir_for`] and [`default_memory_dir_for`]
 /// stay consistent when the override or fallback path shifts.
 fn agent_memory_base_dir(cwd: &Path) -> PathBuf {
-    if let Some(dir) = std::env::var_os(MEMORY_DIR_ENV) {
-        // The env override targets the workspace memory dir; the
-        // agent-memory subdirs live alongside it.
-        return PathBuf::from(dir);
-    }
-    let base = find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let slug = sanitize_path(&base.to_string_lossy());
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".scode")
-            .join("projects")
-            .join(&slug);
-    }
-    PathBuf::from(".scode").join("projects").join(&slug)
+    std::env::var_os(MEMORY_DIR_ENV)
+        .map_or_else(|| crate::config::project_config_dir(cwd), PathBuf::from)
 }
 
 /// Ensure the memory directory exists, creating it (and parents) if needed.
@@ -284,14 +265,7 @@ mod tests {
         } else {
             std::env::remove_var("HOME");
         }
-        // The path should be under projects/<slug>/memory/
-        let slug = sanitize_path(&cwd.to_string_lossy());
-        assert_eq!(
-            resolved,
-            PathBuf::from("/tmp/sudocode-test-home/.scode/projects")
-                .join(&slug)
-                .join("memory")
-        );
+        assert_eq!(resolved, cwd.join(".nexus/sudocode/memory"));
         fs::remove_dir_all(cwd).ok();
     }
 
@@ -344,8 +318,7 @@ mod tests {
             std::env::remove_var("HOME");
         }
 
-        let slug = sanitize_path(&cwd.to_string_lossy());
-        let base = PathBuf::from("/tmp/sudocode-test-home-agent/.scode/projects").join(&slug);
+        let base = cwd.join(".nexus/sudocode");
         assert_eq!(a, base.join("agent-memory").join("Explore"));
         assert_eq!(b, base.join("agent-memory").join("general-purpose"));
         // Agent-scoped path must NEVER equal the workspace-scoped path.

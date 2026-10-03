@@ -147,12 +147,12 @@ fn estimate_serialized_tokens<T: serde::Serialize>(value: &T) -> usize {
 /// Split the system prompt into the attributed category totals.
 fn prompt_section_totals(prompt: &SystemPrompt) -> (usize, usize, usize, usize) {
     let mut system = prompt
-        .static_sections
+        .static_sections()
         .iter()
         .map(|s| estimate_text_tokens(s))
         .sum::<usize>();
     let (mut memory, mut skills, mut agents) = (0, 0, 0);
-    for section in &prompt.dynamic_sections {
+    for section in prompt.dynamic_sections() {
         let tokens = estimate_text_tokens(section);
         match classify_section(section) {
             SectionCategory::SystemPrompt => system += tokens,

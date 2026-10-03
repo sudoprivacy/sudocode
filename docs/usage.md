@@ -2,6 +2,85 @@
 
 Day-to-day `scode` workflows.
 
+## Global and project directories
+
+All native config paths resolve through `runtime::config`. The same roots own
+settings, model configuration, memory, and explicitly installed CLI packages:
+
+| Scope | Directory override | Default |
+| --- | --- | --- |
+| Global | `SCODE_GLOBAL_CONFIG_DIR` | `~/.nexus/sudocode` |
+| Project | `SCODE_PROJECT_CONFIG_DIR` | `<cwd>/.nexus/sudocode` |
+
+`SCODE_GLOBAL_CONFIG_DIR` takes priority over the legacy `SUDO_CODE_CONFIG_HOME`
+spelling, which remains supported. Empty config-directory overrides are ignored.
+A relative project override resolves against the session working directory.
+A relative global override retains the existing process-cwd-relative behavior;
+use an absolute path for a global root shared across projects.
+
+Within each root, `settings.json` contains runtime settings and `sudocode.json`
+contains model/provider configuration. The global `sudocode.json` supplies the
+base; the project file deep-merges on top. Project `settings.local.json` adds
+machine-local overrides. Legacy global `scode.json` and project `.scode.json`
+remain readable. Existing files keep their names; no duplicate config file or
+automatic migration is introduced. The account selection (`auth_profile`)
+remains owned by global `settings.json` and project `settings.local.json`.
+
+### CLI packages
+
+Install a package directory, or symlink its **whole package root**, under
+`<global config directory>/cli-tools/` or
+`<project config directory>/cli-tools/`. Each package must contain `tools/`:
+
+```text
+~/.nexus/sudocode/cli-tools/
+  feishu-automation -> /path/to/feishu-automation
+                       ├── README.md
+                       └── tools/
+                           └── send_message.py
+```
+
+For example, using the default global root:
+
+```bash
+mkdir -p ~/.nexus/sudocode/cli-tools
+ln -s /absolute/path/to/feishu-automation ~/.nexus/sudocode/cli-tools/feishu-automation
+```
+
+At session creation, scode advertises the installed package names and canonical
+`tools/` paths in stable name order, plus a fixed instruction to inspect relevant
+entrypoints and help. Project installations override global ones with the same
+name. Broken links, unreadable entries, names beginning with `.` or `_`, and
+packages without a `tools/` directory are skipped. A plain `tools/` elsewhere in
+the workspace or an `additionalDirectories` entry is not an installation.
+
+Discovery neither executes package code nor adds model tool schemas. The model
+uses its shell tool, retaining each package's launcher, filenames, help, and
+working-directory conventions. The catalog is frozen in the session snapshot;
+new installations appear in a new session or an explicit feature reload.
+
+### Memory scopes
+
+Native sessions read `<project config directory>/memory/` and
+`<global config directory>/memory/`. Put cross-project preferences in global
+memory and project-specific facts in project memory. Both use the existing
+`MEMORY.md` index and typed Markdown entries. Same-filename precedence is
+project, legacy project, then global; every rendered entry includes its source
+path so updates and deletions target the right file. All layers share one prompt
+budget. Per-agent-type stores use `agent-memory/<type>/` under the same roots.
+
+Existing `~/.scode/projects/<git-root-or-cwd-slug>/memory/` and `agent-memory/`
+files remain compatibility sources without being moved or rewritten. New project
+facts go in the project config directory. When forgetting a fact, remove its
+shadowed copies too so they cannot reappear later.
+
+`SUDOCODE_MEMORY_DIR` remains an explicit, isolated memory root; it does not merge
+global or legacy memory. Backend-owned memory roots are isolated the same way.
+Disabled memory neither reads nor creates memory directories. Automatic memory-write
+permissions respect read-only mode and explicit deny/ask rules, including live
+permission-mode switches. Changes to memory files become prompt context in a new
+session; compact and resume keep the snapshot.
+
 ## Web search with Bocha
 
 Set `web_search` in `~/.nexus/sudocode/sudocode.json`:
@@ -149,6 +228,31 @@ scode doctor
 `scode doctor` reports auth mode resolution, provider reachability, MCP
 server status, config resolution, the permission policy, the sandbox
 mode, and the tool / skill inventory.
+
+## Prompt cache stability
+
+A session saves its assembled system prompt alongside its transcript. Normal
+turns, compaction, process restart, and session forks reuse that snapshot. Editing
+`AGENTS.md`, memory files, CLI package installations, skills, or agent definitions on disk does not silently
+change an existing session's system prompt. A new session reads the current files.
+Plugin/feature reloads explicitly rebuild the snapshot. An explicit new static
+prompt override, memory-mode change, workspace/agent change, or changed deferred
+tool catalog also builds a replacement. Resuming without repeating a custom
+prompt flag keeps the saved prompt.
+
+Snapshots are optional: older transcripts acquire one on their next normal turn
+or successful compaction. A failed compaction does not modify the transcript.
+The snapshot freezes advertised context, not runtime permission enforcement.
+Tool schemas and the deferred catalog use name order. Upgrading from an older
+version with a different order can cause one prefix rebuild; subsequent requests
+keep that order, with the existing one-time reveal on first tool discovery.
+
+Main-agent turns, subagent turns, and summary requests use the same request
+builder. Mock PTY tests capture the HTTP payload after provider conversion and
+check system blocks, tool definitions, reasoning settings, routing identity, and
+message prefixes. These tests protect the requests scode controls; they do not
+simulate actual provider cache hits. Cache usage reported by the real provider
+remains the evidence for actual reuse.
 
 ## Custom system prompt
 

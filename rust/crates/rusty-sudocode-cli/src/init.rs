@@ -126,7 +126,7 @@ struct RepoDetection {
 pub(crate) fn initialize_repo(cwd: &Path) -> Result<InitReport, Box<dyn std::error::Error>> {
     let mut artifacts = Vec::new();
 
-    let config_dir = cwd.join(".nexus").join("sudocode");
+    let config_dir = runtime::config::project_config_dir(cwd);
     artifacts.push(InitArtifact {
         name: ".nexus/sudocode/",
         status: ensure_dir(&config_dir)?,

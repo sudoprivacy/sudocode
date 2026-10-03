@@ -742,7 +742,17 @@ pub fn permission_policy(
 ) -> Result<PermissionPolicy, String> {
     let base = PermissionPolicy::new(mode).with_permission_rules(feature_config.permission_rules());
     let base = if memory.is_enabled() {
-        base.with_memory_allow_rules(&runtime::memory::default_memory_dir_for(cwd))
+        let context = runtime::memory::MemoryContext::resolve(
+            None,
+            Some(cwd),
+            None,
+            runtime::memory::MemoryPromptVariant::Compact,
+        );
+        let base = base.with_memory_allow_rules(context.memory_dir());
+        match context.global_memory_dir.as_deref() {
+            Some(global) => base.with_memory_allow_rules(global),
+            None => base,
+        }
     } else {
         base
     };

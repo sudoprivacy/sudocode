@@ -264,7 +264,7 @@ pub fn loopback_redirect_uri(port: u16) -> String {
 }
 
 pub fn credentials_path() -> io::Result<PathBuf> {
-    Ok(credentials_home_dir()?.join("credentials.json"))
+    Ok(crate::config::default_config_home().join("credentials.json"))
 }
 
 pub fn load_oauth_credentials() -> io::Result<Option<OAuthTokenSet>> {
@@ -390,22 +390,6 @@ fn generate_random_token(bytes: usize) -> io::Result<String> {
     getrandom::getrandom(&mut buffer)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     Ok(base64url_encode(&buffer))
-}
-
-fn credentials_home_dir() -> io::Result<PathBuf> {
-    if let Some(path) = std::env::var_os("SUDO_CODE_CONFIG_HOME") {
-        return Ok(PathBuf::from(path));
-    }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "HOME is not set (on Windows, set USERPROFILE or HOME, \
-                 or use SUDO_CODE_CONFIG_HOME to point directly at the config directory)",
-            )
-        })?;
-    Ok(PathBuf::from(home).join(".nexus").join("sudocode"))
 }
 
 fn read_credentials_root_with(

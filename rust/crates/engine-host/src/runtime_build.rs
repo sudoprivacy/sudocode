@@ -660,57 +660,81 @@ pub(crate) fn build_runtime_with_plugin_state(
             return Err(Box::new(std::io::Error::other(error)));
         }
     };
-    let mut system_prompt = config.system_prompt.clone();
-    // The cwd-derived sections — the skills listing (so the model can name and
-    // load a skill without the user knowing it exists, plugin-provided roots
-    // included via `plugin_load_outcome`) and the `<available-agent-types>`
-    // catalog (so it knows what to pass as `agent_spawn`'s `agent`). Shared
-    // with the `scode system-prompt` preview via `commands::cwd_prompt_sections`
-    // so the two cannot drift.
-    //
-    // The catalog lives here and NOT in `agent_spawn`'s description because
-    // that description sits in the cached tools block while this list changes
-    // whenever a `.md` agent is added — see `runtime::agent_types` for the
-    // cache measurement behind the split.
-    //
-    // This runs for the REPL, `--print`, and ACP sessions alike: they all land
-    // in this function via `build_runtime_for_host`.
-    //
-    // Read from the host's own root, not through `fs`: a skill and an agent
-    // type are host installations (they live beside the configuration that
-    // declares them), so a co-hosted agent gets the daemon's, exactly as it
-    // gets the daemon's auth mode.
-    system_prompt.dynamic_sections.extend(cwd_prompt_sections(
-        &host.config_root,
-        Some(&plugin_load_outcome),
-    ));
-    // Deferred tools listing: inject `<available-deferred-tools>` so the
-    // model knows which tools exist beyond the core set visible in the API
-    // `tools` array. Discovery via ToolSearch, direct execution by name.
+    let workspace_root = host.fs.working_root()?;
+    let agent_name = host.resolved_agent_name();
     let deferred_section = tool_registry.deferred_tools_prompt_section();
-    if !deferred_section.is_empty() {
-        system_prompt.dynamic_sections.push(deferred_section);
-    }
-    // A2A: teach the model its identity + how to reply, so a receiving loop
-    // knows it can `send` back to a named peer and doesn't echo the message
-    // framing. Every receive path renders the shared REPL section; nexus adds
-    // its network note (via `peer_system_prompt`), standalone uses the same
-    // local identity the `send` routing below resolves.
-    if host.mailbox.is_some() {
-        // A host that supplied its own mailbox also drives delivery, and the
-        // prose describing that framing travels with the driver rather than
-        // being guessed here — the co-host's messages arrive wrapped in
-        // `[message from <sender>]`, which only its loop knows to emit.
-    } else if let Some(session) = a2a {
-        system_prompt
-            .dynamic_sections
-            .push(session.peer_system_prompt());
+    let system_prompt = if let Some(snapshot) = session.prompt_snapshot().filter(|snapshot| {
+        snapshot.compatible_with(
+            &config.system_prompt,
+            config.memory.is_enabled(),
+            &workspace_root,
+            &agent_name,
+        ) && snapshot
+            .prompt
+            .dynamic_sections()
+            .iter()
+            .find(|section| section.starts_with("<available-deferred-tools>"))
+            .map(String::as_str)
+            == (!deferred_section.is_empty()).then_some(deferred_section.as_str())
+    }) {
+        snapshot.prompt.clone()
     } else {
-        let self_name = host.resolved_agent_name();
+        let mut system_prompt = config.system_prompt.clone();
+        // The cwd-derived sections — the skills listing (so the model can name and
+        // load a skill without the user knowing it exists, plugin-provided roots
+        // included via `plugin_load_outcome`) and the `<available-agent-types>`
+        // catalog (so it knows what to pass as `agent_spawn`'s `agent`). Shared
+        // with the `scode system-prompt` preview via `commands::cwd_prompt_sections`
+        // so the two cannot drift.
+        //
+        // The catalog lives here and NOT in `agent_spawn`'s description because
+        // that description sits in the cached tools block while this list changes
+        // whenever a `.md` agent is added — see `runtime::agent_types` for the
+        // cache measurement behind the split.
+        //
+        // This runs for the REPL, `--print`, and ACP sessions alike: they all land
+        // in this function via `build_runtime_for_host`.
+        //
+        // Read from the host's own root, not through `fs`: a skill and an agent
+        // type are host installations (they live beside the configuration that
+        // declares them), so a co-hosted agent gets the daemon's, exactly as it
+        // gets the daemon's auth mode.
+        system_prompt.extend_dynamic_sections(cwd_prompt_sections(
+            &host.config_root,
+            Some(&plugin_load_outcome),
+        ));
+        // Deferred tools listing: inject `<available-deferred-tools>` so the
+        // model knows which tools exist beyond the core set visible in the API
+        // `tools` array. Discovery via ToolSearch, direct execution by name.
+        if !deferred_section.is_empty() {
+            system_prompt.append_dynamic_section(deferred_section);
+        }
+        // A2A: teach the model its identity + how to reply, so a receiving loop
+        // knows it can `send` back to a named peer and doesn't echo the message
+        // framing. Every receive path renders the shared REPL section; nexus adds
+        // its network note (via `peer_system_prompt`), standalone uses the same
+        // local identity the `send` routing below resolves.
+        if host.mailbox.is_some() {
+            // A host that supplied its own mailbox also drives delivery, and the
+            // prose describing that framing travels with the driver rather than
+            // being guessed here — the co-host's messages arrive wrapped in
+            // `[message from <sender>]`, which only its loop knows to emit.
+        } else if let Some(session) = a2a {
+            system_prompt.append_dynamic_section(session.peer_system_prompt());
+        } else {
+            let self_name = host.resolved_agent_name();
+            system_prompt.append_dynamic_section(runtime::agent_mailbox::repl_a2a_prompt_section(
+                &self_name,
+            ));
+        }
         system_prompt
-            .dynamic_sections
-            .push(runtime::agent_mailbox::repl_a2a_prompt_section(&self_name));
-    }
+    };
+    session.set_prompt_snapshot(runtime::SessionPromptSnapshot {
+        prompt: system_prompt.clone(),
+        memory_enabled: config.memory.is_enabled(),
+        workspace_root,
+        agent_name,
+    });
     let client = match EngineApiClient::new(
         session_id,
         &config.sudocode_config,

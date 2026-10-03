@@ -1149,6 +1149,20 @@ fn subagent_compaction_uses_shared_text_transport() {
     assert_eq!(manifests[0]["model"], "claude-sonnet");
     assert_eq!(manifests[0]["status"], "completed");
     let checkpoint = checkpoints[0];
+    let child_turns = requests.iter().filter(|request| {
+        !is_compaction_request(request) && request["system"] == checkpoint["system"]
+    });
+    let mut child_count = 0;
+    for request in child_turns {
+        child_count += 1;
+        for key in ["tools", "thinking", "metadata", "output_config"] {
+            assert_eq!(request[key], checkpoint[key], "child prefix changed: {key}");
+        }
+    }
+    assert!(
+        child_count >= 2,
+        "must compare child turns around compaction"
+    );
     assert!(checkpoint["messages"]
         .to_string()
         .contains("CHILD_COMPACTION"));

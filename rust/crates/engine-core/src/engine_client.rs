@@ -14,13 +14,13 @@
 //! behavior), not how they look.
 
 use std::collections::{BTreeSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use api::{
-    AuthMode, CacheHints, ContentBlockDelta, InputMessage, MessageRequest, MessageResponse,
-    MessageStream, OutputContentBlock, PromptCache, PromptCacheRecord, ProviderClient,
-    ResolvedProvider, StreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
+    AuthMode, ContentBlockDelta, InputMessage, MessageRequest, MessageResponse, MessageStream,
+    OutputContentBlock, PromptCache, PromptCacheRecord, ProviderClient, ResolvedProvider,
+    StreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
 };
 use async_trait::async_trait;
 use runtime::{
@@ -47,6 +47,8 @@ pub struct EngineApiClient {
     enable_tools: bool,
     allowed_tools: Option<BTreeSet<String>>,
     tool_registry: GlobalToolRegistry,
+    cold_tools: OnceLock<Vec<api::ToolDefinition>>,
+    revealed_tools: OnceLock<Vec<api::ToolDefinition>>,
     reasoning_effort: Option<String>,
     thinking_enabled: bool,
     /// The account this client bills to, for error messages. The gateway rejects
@@ -64,6 +66,50 @@ impl EngineApiClient {
     #[inline]
     fn request_metadata(&self) -> api::RequestMetadata {
         api::RequestMetadata::for_session(&self.session_id)
+    }
+
+    /// Build each schema set once, with deterministic order across rebuilds.
+    #[inline]
+    fn tool_definitions(&self, revealed: bool) -> Option<&[api::ToolDefinition]> {
+        if !self.enable_tools {
+            return None;
+        }
+        let cold = self.cold_tools.get_or_init(|| {
+            let mut definitions = self
+                .tool_registry
+                .core_definitions(self.allowed_tools.as_ref(), None);
+            definitions.sort_by(|a, b| a.name.cmp(&b.name));
+            definitions
+        });
+        Some(if revealed {
+            self.revealed_tools.get_or_init(|| {
+                let mut definitions = cold.clone();
+                for definition in &mut definitions {
+                    definition.defer_loading = false;
+                }
+                definitions
+            })
+        } else {
+            cold
+        })
+    }
+
+    #[inline]
+    fn request_tools(&self, request: &ApiRequest) -> Option<Vec<api::ToolDefinition>> {
+        if !self.enable_tools {
+            return None;
+        }
+        Some(
+            self.request_tool_definitions(&request.messages, &request.pre_compact_discovered_tools),
+        )
+    }
+
+    #[inline]
+    fn session_request_fields(&self) -> api::SessionRequestFields {
+        api::SessionRequestFields {
+            metadata: Some(self.request_metadata()),
+            reasoning_effort: self.reasoning_effort.clone(),
+        }
     }
 
     /// Build a client for `model`, resolving the provider from config + auth
@@ -122,6 +168,8 @@ impl EngineApiClient {
             enable_tools,
             allowed_tools,
             tool_registry,
+            cold_tools: OnceLock::new(),
+            revealed_tools: OnceLock::new(),
             reasoning_effort: None,
             thinking_enabled: true,
             account,
@@ -183,11 +231,8 @@ impl EngineApiClient {
     #[must_use]
     pub fn fixed_request_overhead_tokens(&self, system_prompt: &runtime::SystemPrompt) -> usize {
         let system = (!system_prompt.is_empty()).then(|| system_prompt.render());
-        let tools = self.enable_tools.then(|| {
-            self.tool_registry
-                .core_definitions(self.allowed_tools.as_ref(), None)
-        });
-        api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize
+        api::estimate_request_overhead_tokens(system.as_deref(), self.tool_definitions(false))
+            as usize
     }
 
     /// The `tools` array a request over `messages` carries — the same
@@ -195,6 +240,7 @@ impl EngineApiClient {
     /// discovered-tool reveal — so `/context` counts what is actually on the
     /// wire rather than a second guess at it. Empty when tools are disabled.
     #[must_use]
+    #[inline]
     pub fn request_tool_definitions(
         &self,
         messages: &[ConversationMessage],
@@ -203,10 +249,11 @@ impl EngineApiClient {
         if !self.enable_tools {
             return Vec::new();
         }
-        let mut discovered = tools::extract_discovered_tool_names(messages);
-        discovered.extend(pre_compact_discovered_tools.iter().cloned());
-        self.tool_registry
-            .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
+        let revealed = self.revealed_tools.get().is_some()
+            || !pre_compact_discovered_tools.is_empty()
+            || !tools::extract_discovered_tool_names(messages).is_empty();
+        self.tool_definitions(revealed)
+            .map_or_else(Vec::new, <[_]>::to_vec)
     }
 
     /// Start a streaming response, optionally applying a stall timeout on the
@@ -422,25 +469,18 @@ impl ApiClient for EngineApiClient {
     ) -> Result<runtime::TextCompletion, RuntimeError> {
         let catalog = self.catalog.clone();
         let request = async {
-            let tools = (options.include_tools && self.enable_tools).then(|| {
-                self.request_tool_definitions(
-                    &request.messages,
-                    &request.pre_compact_discovered_tools,
-                )
-            });
+            let tools = if options.include_tools {
+                self.request_tools(&request)
+            } else {
+                None
+            };
             self.client
                 .complete_text(
                     &self.model,
                     request,
                     options,
                     tools,
-                    api::SessionRequestFields {
-                        metadata: Some(self.request_metadata()),
-                        // Mirrors the turn stream below. A completion that
-                        // exists to reuse a turn's prefix has to declare the
-                        // same session-level parameters the turn declared.
-                        reasoning_effort: self.reasoning_effort.clone(),
-                    },
+                    self.session_request_fields(),
                 )
                 .await
         };
@@ -468,30 +508,20 @@ impl ApiClient for EngineApiClient {
         let catalog = self.catalog.clone();
         let request = async {
             let is_post_tool = request_ends_with_tool_result(&request);
-            let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
-                system_static: Some(request.system_prompt.static_text()),
-                system_dynamic: Some(request.system_prompt.dynamic_text()),
-                breakpoint_last_message: true,
-            });
-            let message_request = MessageRequest {
-                model: self.model.clone(),
-                max_tokens: api::max_tokens_for_model(&self.model),
-                messages: tools::convert_messages(&request.messages),
-                system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
-                tools: self.enable_tools.then(|| {
-                    self.request_tool_definitions(
-                        &request.messages,
-                        &request.pre_compact_discovered_tools,
-                    )
-                }),
-                tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
-                stream: true,
-                reasoning_effort: self.reasoning_effort.clone(),
-                cache_hints,
-                thinking_enabled: self.thinking_enabled,
-                metadata: Some(self.request_metadata()),
-                ..Default::default()
-            };
+            let tools = self.request_tools(&request);
+            let mut message_request = api::session_message_request(
+                &self.model,
+                &request,
+                runtime::TextCompletionOptions {
+                    max_tokens: api::max_tokens_for_model(&self.model),
+                    include_tools: self.enable_tools,
+                    cache_prefix: true,
+                    thinking_enabled: self.thinking_enabled,
+                },
+                tools,
+                self.session_request_fields(),
+            );
+            message_request.tool_choice = self.enable_tools.then_some(ToolChoice::Auto);
 
             // Post-tool continuations get one stall-timeout retry (a nudge); other
             // turns run a single attempt.

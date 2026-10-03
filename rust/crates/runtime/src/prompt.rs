@@ -1,6 +1,9 @@
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, OnceLock};
+
+use crate::json::{JsonError, JsonValue};
 
 use crate::config::{ConfigError, ConfigLoader, RuntimeConfig};
 use crate::fs_backend::{FsBackend, StdFsBackend};
@@ -42,83 +45,280 @@ pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDA
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
 
-/// Structured system prompt with an explicit static/dynamic split.
-///
-/// Static sections are stable across requests and suitable for aggressive
-/// caching (e.g. Anthropic prompt caching with `scope: "global"`).
-/// Dynamic sections change per session or per turn and receive a plain
-/// `ephemeral` cache hint.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Copy-on-write prompt sections. Cloning a session or an API request shares
+/// the compiled text; editing a builder cannot mutate an existing snapshot.
+#[derive(Debug, Clone, Default)]
 pub struct SystemPrompt {
-    pub static_sections: Vec<String>,
-    pub dynamic_sections: Vec<String>,
-    /// How many leading `static_sections` came from the built-in blocks.
-    ///
-    /// [`Self::override_static_sections`] replaces exactly those, so text a
-    /// caller appended survives an override applied afterwards. ACP needs this:
-    /// the process-wide `--append-system-prompt` and a session's `_meta`
-    /// overrides are two separate applications, and the session one must not
-    /// silently drop what the process appended.
-    builtin_static_sections: usize,
+    sections: Arc<PromptSections>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PromptSections {
+    static_sections: Vec<String>,
+    dynamic_sections: Vec<String>,
+    builtin_static_sections: usize,
+    explicit_override: bool,
+    rendered: OnceLock<RenderedPrompt>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedPrompt {
+    static_block: String,
+    dynamic_block: String,
+    full: String,
+}
+
+impl PartialEq for SystemPrompt {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.sections, &other.sections)
+            || (self.sections.static_sections == other.sections.static_sections
+                && self.sections.dynamic_sections == other.sections.dynamic_sections
+                && self.sections.builtin_static_sections == other.sections.builtin_static_sections
+                && self.sections.explicit_override == other.sections.explicit_override)
+    }
+}
+
+impl Eq for SystemPrompt {}
+
 impl SystemPrompt {
-    /// Concatenate all sections (static then dynamic) into a single prompt string.
+    #[inline]
+    fn rendered(&self) -> &RenderedPrompt {
+        self.sections.rendered.get_or_init(|| {
+            let static_text = self.static_sections().join("\n\n");
+            let dynamic_text = self.dynamic_sections().join("\n\n");
+            let full_text = self
+                .static_sections()
+                .iter()
+                .chain(self.dynamic_sections())
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            RenderedPrompt {
+                static_block: static_text,
+                dynamic_block: dynamic_text,
+                full: full_text,
+            }
+        })
+    }
+
+    #[inline]
+    fn edit(&mut self) -> &mut PromptSections {
+        let sections = Arc::make_mut(&mut self.sections);
+        sections.rendered.take();
+        sections
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn static_sections(&self) -> &[String] {
+        &self.sections.static_sections
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn dynamic_sections(&self) -> &[String] {
+        &self.sections.dynamic_sections
+    }
+
+    #[inline]
     #[must_use]
     pub fn render(&self) -> String {
-        let mut all = self.static_sections.clone();
-        all.extend(self.dynamic_sections.iter().cloned());
-        all.join("\n\n")
+        self.rendered().full.clone()
     }
 
-    /// Concatenated static text suitable for a cacheable system block.
+    #[inline]
     #[must_use]
     pub fn static_text(&self) -> String {
-        self.static_sections.join("\n\n")
+        self.rendered().static_block.clone()
     }
 
-    /// Concatenated dynamic text for the per-session system block.
+    #[inline]
     #[must_use]
     pub fn dynamic_text(&self) -> String {
-        self.dynamic_sections.join("\n\n")
+        self.rendered().dynamic_block.clone()
     }
 
+    #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.static_sections.is_empty() && self.dynamic_sections.is_empty()
+        self.static_sections().is_empty() && self.dynamic_sections().is_empty()
     }
 
-    /// Replace every static section — the built-in identity and behaviour
-    /// blocks (`You are Sudo Code…`, `# System`, `# Working`,
-    /// `# Risky actions`, `# Tools` / `# Git`) — with `text` as the
-    /// single static block.
-    ///
-    /// Dynamic sections (environment context, project context,
-    /// `AGENTS.md` instructions, runtime config, auto-memory, plugin
-    /// capabilities) are left untouched, so the caller-supplied prompt
-    /// still sees the workspace it is operating in. Callers that want a
-    /// blank-slate prompt can clear `dynamic_sections` themselves.
+    /// Replace builtin instructions while keeping explicit appended instructions.
     pub fn override_static_sections(&mut self, text: impl Into<String>) {
-        let split = self.builtin_static_sections.min(self.static_sections.len());
-        let appended = self.static_sections.split_off(split);
-        self.static_sections = std::iter::once(text.into()).chain(appended).collect();
-        self.builtin_static_sections = 1;
+        let sections = self.edit();
+        let split = sections
+            .builtin_static_sections
+            .min(sections.static_sections.len());
+        let appended = sections.static_sections.split_off(split);
+        sections.static_sections = std::iter::once(text.into()).chain(appended).collect();
+        sections.builtin_static_sections = 1;
+        sections.explicit_override = true;
     }
 
-    /// Append `text` as the last static section.
-    ///
-    /// Caller-supplied instructions are stable for as long as the caller is
-    /// — a per-tenant preamble does not change between turns — so they belong
-    /// in the aggressively cached static block rather than the per-turn
-    /// dynamic one. Orthogonal to [`Self::override_static_sections`]: the two
-    /// compose, and appending after an override puts the appended text last
-    /// within the replacement block.
-    ///
-    /// The trade-off is ordering: the workspace-discovered `AGENTS.md`
-    /// instructions, the auto-memory block and the skill listing are all
-    /// dynamic, so they now follow this text rather than precede it.
     pub fn append_static_section(&mut self, text: impl Into<String>) {
-        self.static_sections.push(text.into());
+        let sections = self.edit();
+        sections.static_sections.push(text.into());
+        sections.explicit_override = true;
+    }
+
+    pub fn append_dynamic_section(&mut self, text: impl Into<String>) {
+        self.edit().dynamic_sections.push(text.into());
+    }
+
+    pub fn extend_dynamic_sections(&mut self, sections: impl IntoIterator<Item = String>) {
+        self.edit().dynamic_sections.extend(sections);
+    }
+
+    pub fn prepend_dynamic_section(&mut self, text: impl Into<String>) {
+        self.edit().dynamic_sections.insert(0, text.into());
+    }
+
+    pub(crate) fn to_json(&self) -> JsonValue {
+        JsonValue::Object(std::collections::BTreeMap::from([
+            (
+                "explicit_override".into(),
+                JsonValue::Bool(self.sections.explicit_override),
+            ),
+            (
+                "static".into(),
+                JsonValue::Array(
+                    self.static_sections()
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            ),
+            (
+                "dynamic".into(),
+                JsonValue::Array(
+                    self.dynamic_sections()
+                        .iter()
+                        .cloned()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            ),
+            (
+                "builtin_count".into(),
+                JsonValue::Number(
+                    i64::try_from(self.sections.builtin_static_sections).unwrap_or(i64::MAX),
+                ),
+            ),
+        ]))
+    }
+
+    pub(crate) fn from_json(value: &JsonValue) -> Result<Self, JsonError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| JsonError::new("system prompt must be an object"))?;
+        let strings = |key: &str| -> Result<Vec<String>, JsonError> {
+            object
+                .get(key)
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| JsonError::new(format!("system prompt missing {key}")))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| JsonError::new("system prompt section must be text"))
+                })
+                .collect()
+        };
+        let static_sections = strings("static")?;
+        let dynamic_sections = strings("dynamic")?;
+        let builtin_static_sections = object
+            .get("builtin_count")
+            .and_then(JsonValue::as_i64)
+            .and_then(|count| usize::try_from(count).ok())
+            .filter(|count| *count <= static_sections.len())
+            .ok_or_else(|| JsonError::new("invalid system prompt builtin_count"))?;
+        Ok(Self {
+            sections: Arc::new(PromptSections {
+                static_sections,
+                dynamic_sections,
+                builtin_static_sections,
+                explicit_override: object
+                    .get("explicit_override")
+                    .and_then(JsonValue::as_bool)
+                    .unwrap_or(false),
+                rendered: OnceLock::new(),
+            }),
+        })
+    }
+}
+
+/// Persisted prompt for one session. Runtime rebuilds reuse it until an
+/// explicit reload or a change to caller-supplied instructions/memory mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPromptSnapshot {
+    pub prompt: SystemPrompt,
+    pub memory_enabled: bool,
+    pub workspace_root: String,
+    pub agent_name: String,
+}
+
+impl SessionPromptSnapshot {
+    #[inline]
+    #[must_use]
+    pub fn compatible_with(
+        &self,
+        base: &SystemPrompt,
+        memory_enabled: bool,
+        workspace_root: &str,
+        agent_name: &str,
+    ) -> bool {
+        self.workspace_root == workspace_root
+            && self.agent_name == agent_name
+            && self.memory_enabled == memory_enabled
+            && (!base.sections.explicit_override
+                || self.prompt.static_sections() == base.static_sections())
+    }
+
+    pub(crate) fn to_json(&self) -> JsonValue {
+        JsonValue::Object(std::collections::BTreeMap::from([
+            ("prompt".into(), self.prompt.to_json()),
+            (
+                "workspace_root".into(),
+                JsonValue::String(self.workspace_root.clone()),
+            ),
+            (
+                "agent_name".into(),
+                JsonValue::String(self.agent_name.clone()),
+            ),
+            (
+                "memory_enabled".into(),
+                JsonValue::Bool(self.memory_enabled),
+            ),
+        ]))
+    }
+
+    pub(crate) fn from_json(value: &JsonValue) -> Result<Self, JsonError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| JsonError::new("prompt snapshot must be an object"))?;
+        let prompt = object
+            .get("prompt")
+            .ok_or_else(|| JsonError::new("prompt snapshot missing prompt"))?;
+        let memory_enabled = object
+            .get("memory_enabled")
+            .and_then(JsonValue::as_bool)
+            .ok_or_else(|| JsonError::new("prompt snapshot missing memory mode"))?;
+        let text = |key: &str| {
+            object
+                .get(key)
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| JsonError::new(format!("prompt snapshot missing {key}")))
+        };
+        Ok(Self {
+            prompt: SystemPrompt::from_json(prompt)?,
+            memory_enabled,
+            workspace_root: text("workspace_root")?,
+            agent_name: text("agent_name")?,
+        })
     }
 }
 
@@ -301,9 +501,13 @@ impl SystemPromptBuilder {
         dynamic_sections.extend(self.append_sections.iter().cloned());
 
         SystemPrompt {
-            builtin_static_sections: static_sections.len(),
-            static_sections,
-            dynamic_sections,
+            sections: Arc::new(PromptSections {
+                builtin_static_sections: static_sections.len(),
+                explicit_override: false,
+                static_sections,
+                dynamic_sections,
+                rendered: OnceLock::new(),
+            }),
         }
     }
 
@@ -383,7 +587,12 @@ fn discover_instruction_files(cwd: &Path, fs: &dyn FsBackend) -> std::io::Result
     for dir in directories {
         for candidate in [
             dir.join("AGENTS.md"),
-            dir.join(".nexus").join("sudocode").join("AGENTS.md"),
+            (if dir == cwd {
+                crate::config::project_config_dir(cwd)
+            } else {
+                dir.join(".nexus").join("sudocode")
+            })
+            .join("AGENTS.md"),
         ] {
             push_context_file(&mut files, candidate, fs)?;
         }

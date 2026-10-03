@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fs_backend::{FsBackend, StdFsBackend};
 use crate::json::{JsonError, JsonValue};
+use crate::prompt::SessionPromptSnapshot;
 use crate::usage::{parse_usage_cost_currency, TokenUsage};
 
 const SESSION_VERSION: u32 = 1;
@@ -218,6 +219,8 @@ pub struct Session {
     /// Timestamp of last successful health check (ROADMAP #38)
     pub last_health_check_ms: Option<u64>,
     pub model: Option<String>,
+    prompt_snapshot: Option<SessionPromptSnapshot>,
+    prompt_snapshot_dirty: bool,
     persistence: Option<SessionPersistence>,
 }
 
@@ -227,6 +230,7 @@ impl PartialEq for Session {
             && self.session_id == other.session_id
             && self.created_at_ms == other.created_at_ms
             && self.updated_at_ms == other.updated_at_ms
+            && self.prompt_snapshot == other.prompt_snapshot
             && self.messages == other.messages
             && self.compaction == other.compaction
             && self.fork == other.fork
@@ -288,8 +292,31 @@ impl Session {
             prompt_history: Vec::new(),
             last_health_check_ms: None,
             model: None,
+            prompt_snapshot: None,
+            prompt_snapshot_dirty: false,
             persistence: None,
         }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn prompt_snapshot(&self) -> Option<&SessionPromptSnapshot> {
+        self.prompt_snapshot.as_ref()
+    }
+
+    /// Stage a new snapshot; persist it with the next message or full save.
+    /// A failed/cancelled compaction of a legacy transcript stays untouched.
+    pub fn set_prompt_snapshot(&mut self, snapshot: SessionPromptSnapshot) {
+        if self.prompt_snapshot.as_ref() != Some(&snapshot) {
+            self.prompt_snapshot = Some(snapshot);
+            self.prompt_snapshot_dirty = true;
+        }
+    }
+
+    /// Explicit feature reload discovers a replacement on the next build.
+    pub fn clear_prompt_snapshot(&mut self) {
+        self.prompt_snapshot = None;
+        self.prompt_snapshot_dirty = false;
     }
 
     #[must_use]
@@ -478,7 +505,15 @@ impl Session {
             path.display(),
             current_time_millis()
         );
-        let snapshot = original.render_jsonl_snapshot()?;
+        // Preserve the durable source byte-for-byte. In-memory metadata can
+        // already contain a staged prompt snapshot for a legacy transcript.
+        let snapshot = match self.backend().read_to_string(&path.to_string_lossy()) {
+            Ok(snapshot) => snapshot,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                original.render_jsonl_snapshot()?
+            }
+            Err(error) => return Err(error.into()),
+        };
         write_atomic_with(self.backend(), &archive, &snapshot)?;
         if self.backend().is_append_stream(&path.to_string_lossy())? {
             return self.save_to_path(path);
@@ -656,6 +691,7 @@ impl Session {
             self.messages.pop();
             return Err(error);
         }
+        self.prompt_snapshot_dirty = false;
         Ok(())
     }
 
@@ -715,6 +751,8 @@ impl Session {
             prompt_history: self.prompt_history.clone(),
             last_health_check_ms: self.last_health_check_ms,
             model: self.model.clone(),
+            prompt_snapshot: self.prompt_snapshot.clone(),
+            prompt_snapshot_dirty: false,
             persistence: None,
         }
     }
@@ -751,6 +789,9 @@ impl Session {
         }
         if let Some(fork) = &self.fork {
             object.insert("fork".to_string(), fork.to_json());
+        }
+        if let Some(snapshot) = &self.prompt_snapshot {
+            object.insert("prompt_snapshot".into(), snapshot.to_json());
         }
         if let Some(identity) = &self.identity {
             object.insert("identity".to_string(), identity.to_json());
@@ -830,6 +871,10 @@ impl Session {
                     .collect()
             })
             .unwrap_or_default();
+        let prompt_snapshot = object
+            .get("prompt_snapshot")
+            .map(SessionPromptSnapshot::from_json)
+            .transpose()?;
         let model = object
             .get("model")
             .and_then(JsonValue::as_str)
@@ -847,6 +892,8 @@ impl Session {
             prompt_history,
             last_health_check_ms: None,
             model,
+            prompt_snapshot,
+            prompt_snapshot_dirty: false,
             persistence: None,
         })
     }
@@ -866,6 +913,7 @@ impl Session {
         let mut workspace_root = None;
         let mut identity = None;
         let mut model = None;
+        let mut prompt_snapshot = None;
         let mut prompt_history = Vec::new();
 
         for (line_number, raw_line) in contents.lines().enumerate() {
@@ -915,12 +963,19 @@ impl Session {
                         .get("workspace_root")
                         .and_then(JsonValue::as_str)
                         .map(PathBuf::from);
+                    prompt_snapshot = object
+                        .get("prompt_snapshot")
+                        .map(SessionPromptSnapshot::from_json)
+                        .transpose()?;
                     model = object
                         .get("model")
                         .and_then(JsonValue::as_str)
                         .map(String::from);
                 }
                 "message" => {
+                    if let Some(snapshot) = object.get("prompt_snapshot") {
+                        prompt_snapshot = Some(SessionPromptSnapshot::from_json(snapshot)?);
+                    }
                     let message_value = object.get("message").ok_or_else(|| {
                         SessionError::Format(format!(
                             "JSONL record at line {} missing message",
@@ -964,6 +1019,8 @@ impl Session {
             prompt_history,
             last_health_check_ms: None,
             model,
+            prompt_snapshot,
+            prompt_snapshot_dirty: false,
             persistence: None,
         })
     }
@@ -1062,7 +1119,15 @@ impl Session {
             return Ok(());
         }
 
-        let line = format!("{}\n", message_record(message).render());
+        let mut record = message_record(message);
+        if self.prompt_snapshot_dirty {
+            if let (JsonValue::Object(object), Some(snapshot)) =
+                (&mut record, &self.prompt_snapshot)
+            {
+                object.insert("prompt_snapshot".into(), snapshot.to_json());
+            }
+        }
+        let line = format!("{}\n", record.render());
         backend.append(&path_str, line.as_bytes())?;
         Ok(())
     }
@@ -1113,6 +1178,9 @@ impl Session {
         );
         if let Some(fork) = &self.fork {
             object.insert("fork".to_string(), fork.to_json());
+        }
+        if let Some(snapshot) = &self.prompt_snapshot {
+            object.insert("prompt_snapshot".into(), snapshot.to_json());
         }
         if let Some(identity) = &self.identity {
             object.insert("identity".to_string(), identity.to_json());

@@ -1,7 +1,7 @@
 mod client;
 mod completion;
 pub mod model_discovery;
-pub use completion::convert_messages;
+pub use completion::{convert_messages, session_message_request};
 mod error;
 mod http_client;
 mod http_transport;

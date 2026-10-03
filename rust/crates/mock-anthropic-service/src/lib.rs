@@ -268,6 +268,8 @@ enum Scenario {
     /// `Agent` whose child ([`Scenario::SubagentToolChild`]) makes a tool call,
     /// so the forwarded stream has text, a tool call and its result.
     SubagentEventsSync,
+    /// Synchronous delegation that exceeds a one-second auto-background threshold.
+    SubagentEventsSyncSlow,
     /// Two `Agent` calls in one message, both `run_in_background: true`: the
     /// children run in parallel and finish after the parent's turn ended.
     SubagentEventsBackground,
@@ -367,6 +369,7 @@ impl Scenario {
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
             "subagent_events_sync" => Some(Self::SubagentEventsSync),
+            "subagent_events_sync_slow" => Some(Self::SubagentEventsSyncSlow),
             "subagent_events_background" => Some(Self::SubagentEventsBackground),
             "subagent_events_nested" => Some(Self::SubagentEventsNested),
             "subagent_events_cancel" => Some(Self::SubagentEventsCancel),
@@ -430,6 +433,7 @@ impl Scenario {
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
             Self::SubagentEventsSync => "subagent_events_sync",
+            Self::SubagentEventsSyncSlow => "subagent_events_sync_slow",
             Self::SubagentEventsBackground => "subagent_events_background",
             Self::SubagentEventsNested => "subagent_events_nested",
             Self::SubagentEventsCancel => "subagent_events_cancel",
@@ -897,16 +901,25 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
     let done = latest_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
     match (scenario, done) {
-        (Scenario::SubagentEventsSync, None) => SubagentStep::Tools(vec![(
-            "toolu_events_sync",
-            "Agent",
-            agent_call_input(
-                "sync child",
-                &child("subagent_tool_child", "list the workspace"),
-                "general-purpose",
-                false,
-            ),
-        )]),
+        (Scenario::SubagentEventsSync | Scenario::SubagentEventsSyncSlow, None) => {
+            SubagentStep::Tools(vec![(
+                "toolu_events_sync",
+                "Agent",
+                agent_call_input(
+                    "sync child",
+                    &child(
+                        if scenario == Scenario::SubagentEventsSyncSlow {
+                            "subagent_slow_child"
+                        } else {
+                            "subagent_tool_child"
+                        },
+                        "list the workspace",
+                    ),
+                    "general-purpose",
+                    false,
+                ),
+            )])
+        }
         (Scenario::SubagentEventsBackground, None) => SubagentStep::Tools(vec![
             (
                 "toolu_events_bg_1",
@@ -1668,6 +1681,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         }
         Scenario::CohostDelegate
         | Scenario::SubagentEventsSync
+        | Scenario::SubagentEventsSyncSlow
         | Scenario::SubagentEventsBackground
         | Scenario::SubagentEventsNested
         | Scenario::SubagentEventsCancel
@@ -2324,6 +2338,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         }
         Scenario::CohostDelegate
         | Scenario::SubagentEventsSync
+        | Scenario::SubagentEventsSyncSlow
         | Scenario::SubagentEventsBackground
         | Scenario::SubagentEventsNested
         | Scenario::SubagentEventsCancel
@@ -2388,6 +2403,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",
         Scenario::SubagentEventsSync => "req_subagent_events_sync",
+        Scenario::SubagentEventsSyncSlow => "req_subagent_events_sync_slow",
         Scenario::SubagentEventsBackground => "req_subagent_events_background",
         Scenario::SubagentEventsNested => "req_subagent_events_nested",
         Scenario::SubagentEventsCancel => "req_subagent_events_cancel",

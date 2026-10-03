@@ -563,6 +563,7 @@ fn provider_errors_return_one_failed_result() {
     let value = json_output(&out);
     assert_eq!(value["type"], "result");
     assert_eq!(value["subtype"], "runtime_error");
+    assert_eq!(value["kind"], "api_http_error");
     assert_eq!(value["is_error"], true);
 }
 

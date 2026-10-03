@@ -5674,6 +5674,10 @@ const DEFAULT_AGENT_AUTO_BG_SECS: u64 = 120;
 /// `Some(Duration)` otherwise. Unparseable values fall back to the
 /// 120 s default rather than disable the safety net.
 fn auto_background_threshold() -> Option<Duration> {
+    // A finite CLI invocation must finish synchronous children before exiting.
+    if FINITE_TASK_MODE.load(std::sync::atomic::Ordering::SeqCst) {
+        return None;
+    }
     match std::env::var("SUDOCODE_AGENT_AUTO_BG_SECS") {
         Ok(raw) => match raw.trim().parse::<u64>() {
             Ok(0) => None,

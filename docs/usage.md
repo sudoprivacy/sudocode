@@ -295,13 +295,15 @@ confirmation. Use `--allow-broad-cwd` explicitly when appropriate.
 
 Output contracts (schema version 1):
 
-- `text`: only the last complete assistant answer on stdout; errors on stderr.
+- `text`: only the last complete assistant answer on stdout; errors on stderr
+  retain the CLI's `[error-kind: ...]` classification.
 - `json`: one final `type: result` object, including `subtype`, `is_error`,
   `result`, `session_id`, `duration_ms`, `num_turns`, `model_round_trips`,
   `permission_denials`, and observed current-run `usage`. `num_turns` counts
   user turns (one for a started invocation), whereas `model_round_trips` counts
   provider calls, including those following tool results. Unknown usage/cost
   is omitted; usage never includes earlier resumed turns.
+  Execution errors include the CLI's machine-readable `kind` alongside `error`.
 - `stream-json`: flushed JSON lines: `system` initialization, complete
   `assistant.message.content` (text and tool_use blocks), `user` tool_result
   messages, and one final `result`. Tool inputs are objects; tool results
@@ -318,6 +320,8 @@ are denied immediately and recorded, allowing the agent to recover with an
 allowed tool. Questions end the task with `needs_input`, without inventing an
 answer. Detached Bash/PowerShell jobs and background agents are refused; agents
 must use `run_in_background: false` so their work finishes within the invocation.
+Synchronous agents stay synchronous even past the ordinary auto-background
+threshold.
 On failure or cancellation the engine is closed, with a 10-second cleanup
 budget. A stalled stdout consumer has a 30-second write deadline; a broken pipe
 cancels the engine. An unwritable pipe cannot receive a final result.

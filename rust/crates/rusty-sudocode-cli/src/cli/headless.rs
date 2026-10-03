@@ -455,6 +455,7 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
         exit_code = if stage == "invalid_input" { 2 } else { 1 };
         result["is_error"] = json!(true);
         result["subtype"] = json!(stage);
+        result["kind"] = json!(crate::classify_error_kind(&error.to_string()));
         result["error"] = json!(error.to_string());
     }
     let signal = signal_code.load(Ordering::SeqCst);
@@ -470,7 +471,8 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                 .and_then(|()| out.flush())
         } else {
             eprintln!(
-                "{}: {}",
+                "[error-kind: {}]\n{}: {}",
+                result["kind"].as_str().unwrap_or("unknown"),
                 result["subtype"].as_str().unwrap_or("error"),
                 result["error"].as_str().unwrap_or("cancelled")
             );

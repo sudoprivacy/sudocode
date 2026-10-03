@@ -19,6 +19,7 @@ mod conversation;
 pub mod coordinator_mode;
 pub mod coordinator_notification;
 pub mod custom_agents;
+pub mod directory;
 pub mod experiments;
 mod file_intent;
 mod file_ops;

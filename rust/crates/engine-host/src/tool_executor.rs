@@ -94,13 +94,13 @@ pub struct CliToolExecutor {
     // blocking pool, so the prompter must be protected across threads.
     question_prompter: Mutex<Option<Box<dyn QuestionPrompter>>>,
     abort_signal: Option<runtime::HookAbortSignal>,
-    /// This session's mailbox — the one `send` delivers through, whatever the
+    /// This session's directory — the namespace set `send` delivers through and
     /// recipient. `None` for a session that never built one, which resolves to
     /// the workspace inbox inside [`runtime::mailbox::sending_mailbox`].
     ///
     /// Held here, per dispatcher, rather than in a process global: a daemon
     /// co-hosts several agents at once and each owns its identity and inbox.
-    mailbox: Option<Arc<runtime::mailbox::Mailbox>>,
+    directory: Option<Arc<runtime::directory::Directory>>,
 }
 
 impl CliToolExecutor {
@@ -115,15 +115,15 @@ impl CliToolExecutor {
             mcp_state,
             question_prompter: Mutex::new(None),
             abort_signal: None,
-            mailbox: None,
+            directory: None,
         }
     }
 
-    /// Deliver `send` through `mailbox` — the session's own, with its identity
+    /// Deliver `send` through `directory` — the session's own namespace set,
     /// and its convention. Set at startup by whatever built the session's
     /// transport; a session that sets none delivers to the workspace inbox.
-    pub fn set_mailbox(&mut self, mailbox: Arc<runtime::mailbox::Mailbox>) {
-        self.mailbox = Some(mailbox);
+    pub fn set_directory(&mut self, directory: Arc<runtime::directory::Directory>) {
+        self.directory = Some(directory);
     }
 
     pub fn set_question_prompter(&mut self, prompter: Box<dyn QuestionPrompter>) {
@@ -306,7 +306,7 @@ impl ToolExecutor for CliToolExecutor {
             // cancellation select while a slow search or remote server is active.
             let registry = self.tool_registry.clone();
             let mcp_state = self.mcp_state.clone();
-            let mailbox = self.mailbox.clone();
+            let directory = self.directory.clone();
             let abort_signal = self.abort_signal.clone();
             let ctx = ctx.clone();
             let workspace = WorkspaceRootHandoff::capture();
@@ -317,7 +317,7 @@ impl ToolExecutor for CliToolExecutor {
                 // captured on the turn's thread would not have: this closure
                 // runs somewhere else, and `send` would quietly resolve to the
                 // workspace inbox while the session was on nexus.
-                let _mailbox = mailbox.map(runtime::mailbox::MailboxScope::enter);
+                let _directory = directory.map(runtime::mailbox::MailboxScope::enter);
                 if tool_name == "bash" {
                     if let Some(sink) = ctx.progress_sink.clone() {
                         runtime::set_bash_progress_callback(bash_progress_forward(sink));

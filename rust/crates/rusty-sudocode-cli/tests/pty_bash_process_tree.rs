@@ -81,6 +81,11 @@ fn write_fixture(root: &Path) -> (String, String) {
         "require('child_process').spawn(process.execPath,['descendant.cjs'],{stdio:'inherit'});",
     )
     .expect("write parent");
+    fs::write(
+        root.join("recover.cjs"),
+        "const fs=require('fs'); const marker=JSON.parse(fs.readFileSync('started.json','utf8')); fs.writeFileSync('recovered.txt',marker.token);",
+    )
+    .expect("write recovery");
     (node, token)
 }
 
@@ -154,7 +159,12 @@ fn run_bash_tree_workflow(is_cancel: bool) {
         "ready after cancellation",
     );
     let marker = common::turn_status_marker(&session);
-    let follow_up = "Use bash to read started.json, then write its token to recovered.txt. Do the actual file operations.";
+    // Keep shell syntax out of the model's recovery choice: this acceptance
+    // checks that a new real tool call works after cancellation or timeout.
+    // The script still reads the fresh grandchild token and writes the result.
+    let follow_up = format!(
+        "Use the bash tool to run exactly: \"{node}\" recover.cjs. Run once in the foreground. This reads started.json and writes its token to recovered.txt. Execute it; do not just describe it."
+    );
     session
         .send(&format!("{follow_up}\r"))
         .expect("follow-up turn");

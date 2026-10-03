@@ -169,6 +169,7 @@ else:
     prepare("v1.0.0")
     # Before migration there is no pointer: use the same GitHub version for both files.
     install("v1.0.0")
+    install("v1.0.0", "--version", "v1.0.0")
     publish("stage", "v1.0.0")
     assert not pointer.exists()
     publish("promote", "v1.0.0")

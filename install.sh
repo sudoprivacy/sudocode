@@ -261,6 +261,10 @@ case "$MIRROR_BASE" in
     */latest)
         # Resolve a single commit point. During publication/recovery this can
         # remain at the previous complete release while GitHub has a newer one.
+        if [ -n "$VERSION" ] && ! http_get "${MIRROR_BASE%/latest}/$VERSION/$CHECKSUM_FILE" >/dev/null 2>&1; then
+            warn "version $VERSION is not ready on the versioned mirror; using GitHub"
+            MIRROR_BASE=""
+        fi
         if [ -z "$VERSION" ]; then
             mirror_version=$(http_get "$MIRROR_BASE/version.txt" 2>/dev/null || true)
             if printf '%s\n' "$mirror_version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then

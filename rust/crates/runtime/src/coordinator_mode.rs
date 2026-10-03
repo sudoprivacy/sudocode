@@ -323,7 +323,7 @@ Additional tips:
 "#
 }
 
-/// Prepend the coordinator system prompt to `prompt.dynamic_sections`
+/// Prepend the coordinator system prompt to the prompt's dynamic sections
 /// when coordinator mode is enabled. Otherwise leaves `prompt`
 /// untouched. Callers should invoke this after `load_system_prompt()`
 /// so the coordinator instructions take primacy over the default
@@ -332,9 +332,7 @@ pub fn apply_coordinator_prompt_if_enabled(prompt: &mut SystemPrompt) {
     if !is_coordinator_mode() {
         return;
     }
-    prompt
-        .dynamic_sections
-        .insert(0, coordinator_system_prompt().to_string());
+    prompt.prepend_dynamic_section(coordinator_system_prompt().to_string());
 }
 
 /// Fields required to render a [`task-notification`][render_task_notification]

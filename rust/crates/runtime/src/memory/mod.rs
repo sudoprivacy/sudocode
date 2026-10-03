@@ -1,16 +1,15 @@
 //! File-based persistent memory.
 //!
-//! Layout under the memory directory (default `~/.scode/memory/`,
-//! overridable via the `SUDOCODE_MEMORY_DIR` env var):
+//! Layout under each global/project configuration root's `memory/` directory
+//! (or the isolated `SUDOCODE_MEMORY_DIR` override):
 //!
 //! - `MEMORY.md` — flat markdown index of pointers to entries.
 //! - `<slug>.md` — one file per remembered fact, with YAML-ish frontmatter
 //!   (`name`, `description`, `metadata.type`) plus a body.
 //!
 //! The runtime reads memory at prompt-build time and appends a rendered
-//! section to the [`SystemPromptBuilder`]. Writing is out of scope here —
-//! the model is instructed to *propose* additions in its output, and a
-//! follow-up PR will persist them.
+//! section to the [`SystemPromptBuilder`]. The model maintains the files through
+//! its existing file tools, using the source paths and scope instructions.
 
 pub mod entry;
 pub mod index;
@@ -129,57 +128,71 @@ impl MemoryIndex {
         memory_dir: &Path,
         variant: MemoryPromptVariant,
     ) -> String {
-        let mut out = String::new();
-        match variant {
-            MemoryPromptVariant::Compact => {
-                out.push_str(&build_compact_memory_instructions(memory_dir));
-            }
-            MemoryPromptVariant::Full => {
-                out.push_str(&build_full_memory_instructions(memory_dir));
-            }
-        }
+        self.render_scoped_for_prompt_with(memory_dir, variant, &[], None)
+    }
+
+    /// Render all scopes under one budget. Earlier scopes own duplicate filenames.
+    pub(super) fn render_scoped_for_prompt_with(
+        &self,
+        memory_dir: &Path,
+        variant: MemoryPromptVariant,
+        fallbacks: &[Self],
+        global_dir: Option<&Path>,
+    ) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = match variant {
+            MemoryPromptVariant::Compact => build_compact_memory_instructions(memory_dir),
+            MemoryPromptVariant::Full => build_full_memory_instructions(memory_dir),
+        };
         out.push_str("\n\n");
-
-        if let Some(index) = self.index.as_ref() {
-            let trimmed = index.raw.trim_end();
-            if !trimmed.is_empty() {
-                out.push_str(trimmed);
-                out.push_str("\n\n");
+        if let Some(global_dir) = global_dir {
+            let _ = writeln!(out,
+                "Project memory: `{}`. Global memory: `{}` (create it when needed). Save project-specific facts to project memory; save cross-project preferences to global memory. Same-filename precedence: project, legacy project, global. Update or forget a fact at its source path, including any shadowed copy when forgetting it. Legacy directories are compatibility sources; save new project facts in project memory.\n",
+                memory_dir.display(), global_dir.display());
+        }
+        out = truncate_bytes(&out, RENDERED_CHAR_CAP - 160);
+        let stores = || std::iter::once(self).chain(fallbacks.iter());
+        for store in stores() {
+            if let Some(index) = store
+                .index
+                .as_ref()
+                .filter(|index| !index.raw.trim().is_empty())
+            {
+                let heading = format!("### Memory index: {}\n", store.directory.display());
+                let remaining = RENDERED_CHAR_CAP.saturating_sub(out.len() + heading.len() + 160);
+                if remaining > 0 {
+                    out.push_str(&heading);
+                    out.push_str(&truncate_bytes(index.raw.trim_end(), remaining));
+                    out.push_str("\n\n");
+                }
             }
         }
-
         out.push_str("## Loaded memory files\n");
-        if self.entries.is_empty() {
-            out.push_str("\n(no memory entries loaded)\n");
-            return out;
-        }
-
-        let mut dropped = 0usize;
-        let mut rendered_any = false;
-        for entry in &self.entries {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut dropped = 0;
+        let mut loaded = 0;
+        for entry in stores().flat_map(|store| &store.entries) {
+            if !seen.insert(entry.path.file_name()) {
+                continue;
+            }
             let block = render_entry_block(entry);
-            // Reserve a little headroom for the trailing "dropped N" line.
-            if out.len() + block.len() + 80 > RENDERED_CHAR_CAP {
+            // Reserve room for the final budget notice.
+            if out.len() + block.len() + 100 > RENDERED_CHAR_CAP {
                 dropped += 1;
                 continue;
             }
             out.push('\n');
             out.push_str(&block);
-            rendered_any = true;
+            loaded += 1;
         }
-
-        if !rendered_any && !self.entries.is_empty() {
-            // We had entries but every one of them blew the budget. Note it.
-            dropped = self.entries.len();
+        if loaded == 0 && dropped == 0 {
+            out.push_str("\n(no memory entries loaded)\n");
         }
-
         if dropped > 0 {
-            use std::fmt::Write as _;
             let plural = if dropped == 1 { "y" } else { "ies" };
-            let _ = write!(
-                out,
-                "\n[memory] {dropped} additional entr{plural} dropped to fit the 16000-char budget.\n"
-            );
+            let _ = write!(out,
+                "\n[memory] {dropped} additional entr{plural} dropped to fit the 16000-char budget.\n");
         }
 
         out
@@ -387,11 +400,28 @@ Memory is one of several persistence mechanisms available to you as you assist t
     )
 }
 
+/// Bound index bytes as well as entries, preserving UTF-8 boundaries.
+fn truncate_bytes(text: &str, cap: usize) -> String {
+    const SUFFIX: &str = " [truncated]";
+    if text.len() <= cap {
+        return text.to_string();
+    }
+    if cap < SUFFIX.len() {
+        return SUFFIX[..cap].to_string();
+    }
+    let mut end = cap - SUFFIX.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} [truncated]", &text[..end])
+}
+
 fn render_entry_block(entry: &MemoryEntry) -> String {
     let body = truncate_body(&entry.body, ENTRY_BODY_CHAR_CAP);
     format!(
-        "- name: {name}  type: {ty}  description: {desc}\n  body: {body}\n",
+        "- name: {name}  type: {ty}  description: {desc}\n  source: {path}\n  body: {body}\n",
         name = entry.name,
+        path = entry.path.display(),
         ty = entry.memory_type,
         desc = entry.description,
         body = body.replace('\n', "\n        "),

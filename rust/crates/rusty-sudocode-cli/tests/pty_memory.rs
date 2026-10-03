@@ -9,8 +9,8 @@
 //! 3. Budget enforcement: when total rendered memory exceeds the
 //!    16 000-char cap, excess entries are dropped with a notice.
 //!
-//! All tests set `SUDOCODE_MEMORY_DIR` to a temp directory, avoiding
-//! any interaction with the user's real `~/.scode/memory/`.
+//! Tests isolate HOME and both config roots. Explicit memory fixtures use
+//! `SUDOCODE_MEMORY_DIR`; the default-path case verifies the project contract.
 
 mod common;
 
@@ -49,6 +49,10 @@ fn run_system_prompt(cwd: &Path, envs: &[(&str, &str)]) -> std::process::Output 
     // tests run in parallel and `scode` writes into its config home, so one
     // directory across all of them means they trip over each other's files.
     cmd.current_dir(cwd)
+        .env_remove("SCODE_GLOBAL_CONFIG_DIR")
+        .env_remove("SCODE_PROJECT_CONFIG_DIR")
+        .env_remove("SUDOCODE_MEMORY_DIR")
+        .env("HOME", cwd.join("home"))
         .env("SUDO_CODE_CONFIG_HOME", common::throwaway_config_home(cwd));
     for (k, v) in envs {
         cmd.env(k, v);
@@ -303,29 +307,18 @@ fn memory_budget_truncates_large_entries() {
 // ──────────────────────────────────────────────────────────────────────
 
 /// When run inside a git repo without `SUDOCODE_MEMORY_DIR`, the
-/// resolved memory path should be project-scoped under
-/// `~/.scode/projects/<slug>/memory/`.
+/// resolved memory path should live under the project's config directory.
 #[test]
 fn memory_project_scoped_path() {
-    // HOME is not set on Windows; the loader falls back to a relative
-    // path in that case so we can only verify this on Unix-like systems.
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => {
-            eprintln!("skipping memory_project_scoped_path: HOME not set (Windows)");
-            return;
-        }
-    };
-
     let root = unique_temp_dir("proj-scope");
     fs::create_dir_all(&root).expect("create root");
 
-    // Init a git repo so `find_git_root` succeeds.
-    std::process::Command::new("git")
+    let init = Command::new("git")
         .args(["init", "--quiet"])
         .current_dir(&root)
         .status()
         .expect("git init");
+    assert!(init.success(), "git init failed");
 
     // Run without SUDOCODE_MEMORY_DIR so it falls through to the
     // project-scoped default.
@@ -336,21 +329,25 @@ fn memory_project_scoped_path() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // The memory directory auto-created should be under projects/<slug>/memory.
-    let projects_dir = PathBuf::from(&home).join(".scode").join("projects");
+    let memory_dir = root.join(".nexus/sudocode/memory");
     assert!(
-        projects_dir.exists(),
-        "~/.scode/projects/ should exist after system-prompt runs"
+        memory_dir.is_dir(),
+        "project config memory should exist after system-prompt runs"
     );
-
-    // There should be at least one slug directory under projects/.
-    let entries: Vec<_> = fs::read_dir(&projects_dir)
-        .expect("read projects dir")
-        .filter_map(|e| e.ok())
-        .collect();
+    let text = String::from_utf8(output.stdout).expect("stdout utf8");
+    let advertised = text
+        .split("Project memory: `")
+        .nth(1)
+        .and_then(|section| section.split('`').next())
+        .expect("prompt advertises project memory");
+    assert_eq!(
+        Path::new(advertised).canonicalize().unwrap(),
+        memory_dir.canonicalize().unwrap(),
+        "prompt and created directory must agree"
+    );
     assert!(
-        !entries.is_empty(),
-        "~/.scode/projects/ should have at least one slug directory"
+        !root.join("home/.scode/projects").exists(),
+        "a fresh project must not create legacy memory directories"
     );
 
     fs::remove_dir_all(root).ok();

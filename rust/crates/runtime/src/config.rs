@@ -523,27 +523,36 @@ impl From<std::io::Error> for ConfigError {
 pub struct ConfigLoader {
     cwd: PathBuf,
     config_home: PathBuf,
+    project_config_dir: PathBuf,
 }
 
 impl ConfigLoader {
     #[must_use]
     pub fn new(cwd: impl Into<PathBuf>, config_home: impl Into<PathBuf>) -> Self {
+        let cwd = cwd.into();
+        let project_config_dir = project_config_dir(&cwd);
         Self {
-            cwd: cwd.into(),
+            cwd,
             config_home: config_home.into(),
+            project_config_dir,
         }
     }
 
     #[must_use]
     pub fn default_for(cwd: impl Into<PathBuf>) -> Self {
-        let cwd = cwd.into();
-        let config_home = default_config_home();
-        Self { cwd, config_home }
+        Self::new(cwd, default_config_home())
     }
 
     #[must_use]
     pub fn config_home(&self) -> &Path {
         &self.config_home
+    }
+
+    /// Project root shared by settings, memory, and installed CLI packages.
+    #[inline]
+    #[must_use]
+    pub fn project_config_dir(&self) -> &Path {
+        &self.project_config_dir
     }
 
     /// Remove the account and wire-format copies from `sudocode.json`'s model
@@ -743,11 +752,7 @@ impl ConfigLoader {
                 "agent name must not be empty".to_string(),
             ));
         }
-        let path = self
-            .cwd
-            .join(".nexus")
-            .join("sudocode")
-            .join("settings.json");
+        let path = self.project_config_dir.join("settings.json");
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(ConfigError::Io)?;
         }
@@ -891,10 +896,7 @@ impl ConfigLoader {
     pub fn auth_profile_paths(&self) -> (PathBuf, PathBuf) {
         (
             self.config_home.join("settings.json"),
-            self.cwd
-                .join(".nexus")
-                .join("sudocode")
-                .join("settings.local.json"),
+            self.project_config_dir.join("settings.local.json"),
         )
     }
 
@@ -915,19 +917,11 @@ impl ConfigLoader {
             },
             ConfigEntry {
                 source: ConfigSource::Project,
-                path: self
-                    .cwd
-                    .join(".nexus")
-                    .join("sudocode")
-                    .join("settings.json"),
+                path: self.project_config_dir.join("settings.json"),
             },
             ConfigEntry {
                 source: ConfigSource::Local,
-                path: self
-                    .cwd
-                    .join(".nexus")
-                    .join("sudocode")
-                    .join("settings.local.json"),
+                path: self.project_config_dir.join("settings.local.json"),
             },
         ]
     }
@@ -1044,11 +1038,7 @@ impl ConfigLoader {
         // the object merge below, so the resolved model view stays a single SSOT.
         let mut extra_bodies = parse_extra_bodies(&base.source);
         let mut merged = base.object;
-        let project_path = self
-            .cwd
-            .join(".nexus")
-            .join("sudocode")
-            .join("sudocode.json");
+        let project_path = self.project_config_dir.join("sudocode.json");
         if let Some(project) = read_optional_json_object_with(backend, &project_path)? {
             deep_merge_objects(&mut merged, &project.object);
             for (alias, body) in parse_extra_bodies(&project.source) {
@@ -1376,18 +1366,41 @@ fn resolve_plugin_path(cwd: &Path, config_home: &Path, value: &str) -> PathBuf {
     }
 }
 
+/// Environment contract for the two scode configuration roots.
+pub const GLOBAL_CONFIG_DIR_ENV: &str = "SCODE_GLOBAL_CONFIG_DIR";
+pub const PROJECT_CONFIG_DIR_ENV: &str = "SCODE_PROJECT_CONFIG_DIR";
+
+/// Explicit global root. The old spelling remains a fallback for existing setups.
 #[must_use]
-/// Returns the default per-user config directory used by the runtime.
-pub fn default_config_home() -> PathBuf {
-    std::env::var_os("SUDO_CODE_CONFIG_HOME")
+pub fn global_config_dir_override() -> Option<PathBuf> {
+    nonempty_env_path(GLOBAL_CONFIG_DIR_ENV).or_else(|| nonempty_env_path("SUDO_CODE_CONFIG_HOME"))
+}
+
+fn nonempty_env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+/// Global configuration root shared by all runtime consumers.
+#[must_use]
+pub fn default_config_home() -> PathBuf {
+    global_config_dir_override()
         .or_else(|| {
-            // Windows sets USERPROFILE rather than HOME.
             std::env::var_os("HOME")
                 .or_else(|| std::env::var_os("USERPROFILE"))
                 .map(|home| PathBuf::from(home).join(".nexus").join("sudocode"))
         })
         .unwrap_or_else(|| PathBuf::from(".nexus/sudocode"))
+}
+
+/// Project configuration root; a relative override is resolved against `cwd`.
+#[must_use]
+pub fn project_config_dir(cwd: &Path) -> PathBuf {
+    match nonempty_env_path(PROJECT_CONFIG_DIR_ENV) {
+        Some(path) => cwd.join(path),
+        None => cwd.join(".nexus").join("sudocode"),
+    }
 }
 
 impl RuntimeHookConfig {

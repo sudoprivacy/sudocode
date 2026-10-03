@@ -6,7 +6,7 @@
 //! `expect` — so `start_session_v1` killed a daemon thread and printed a backtrace
 //! about a missing file, where an RPC error naming it belongs.
 //!
-//! Its own test binary on purpose: `SUDO_CODE_CONFIG_HOME` is process-global, so a
+//! Its own test binary on purpose: `SCODE_GLOBAL_CONFIG_DIR` is process-global, so a
 //! test that needs it EMPTY cannot share a process with the ones that need it
 //! populated.
 
@@ -26,7 +26,7 @@ fn a_cohost_without_sudocode_configuration_refuses_and_names_what_is_missing() {
         .expect("config home");
     // SAFETY-ish: this binary runs exactly one test, so nothing else observes the
     // process environment while it is set.
-    std::env::set_var("SUDO_CODE_CONFIG_HOME", empty_home.path());
+    std::env::set_var("SCODE_GLOBAL_CONFIG_DIR", empty_home.path());
 
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
@@ -48,7 +48,7 @@ fn a_cohost_without_sudocode_configuration_refuses_and_names_what_is_missing() {
         "the refusal must say which side could not start: {refusal}"
     );
     assert!(
-        refusal.contains("SUDO_CODE_CONFIG_HOME"),
+        refusal.contains("SCODE_GLOBAL_CONFIG_DIR"),
         "the refusal must name where configuration is read from: {refusal}"
     );
     assert!(

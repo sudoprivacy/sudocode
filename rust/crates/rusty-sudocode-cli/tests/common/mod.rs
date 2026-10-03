@@ -842,7 +842,7 @@ fn spawn_with_workspace(
     // found` masquerades as a 127 exit. `/usr/bin/env` resolves the
     // same way on Linux, macOS, and Git Bash on Windows.
     let mut cmd = format!(
-        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env",
+        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR",
         shell_quote(&workspace_root)
     );
     cmd.push_str(&format!(
@@ -1095,7 +1095,7 @@ pub fn spawn_scode_in_dir_with_env(
     // reliably and resolves the scode path identically on Linux, macOS, and
     // Git Bash (see the note in `spawn_with_workspace`).
     let mut cmd = format!(
-        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env",
+        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR",
         shell_quote(&dir_str)
     );
     for (key, value) in env {

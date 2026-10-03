@@ -806,9 +806,7 @@ struct StateSnapshot<'a> {
 }
 
 fn emit_state_file(worker: &Worker) {
-    let state_dir = std::path::Path::new(&worker.cwd)
-        .join(".nexus")
-        .join("sudocode");
+    let state_dir = crate::config::project_config_dir(std::path::Path::new(&worker.cwd));
     if std::fs::create_dir_all(&state_dir).is_err() {
         return;
     }

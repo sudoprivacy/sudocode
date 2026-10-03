@@ -25,16 +25,16 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 
 use super::loader::{
-    agent_memory_dir_for, default_memory_dir, default_memory_dir_for, ensure_memory_dir_exists,
+    agent_memory_dir_for, agent_memory_dir_under, default_memory_dir_for, ensure_memory_dir_exists,
+    legacy_memory_base_dir, MEMORY_DIR_ENV,
 };
 use super::{MemoryIndex, MemoryPromptVariant};
 use crate::fs_backend::FsBackend;
 
 /// Where a memory lookup is happening, resolved once at the call site.
 ///
-/// Directory resolution reproduces, in order, what callers used to do by
-/// hand: an explicit directory wins, then per-agent scoping, then the
-/// project-scoped default, then the process-wide default.
+/// Explicit and backend-owned roots are isolated. Native defaults layer project,
+/// legacy project, and global memory, resolving directories once per prompt build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryContext {
     /// Working directory the session was started in, when known.
@@ -47,6 +47,10 @@ pub struct MemoryContext {
     pub variant: MemoryPromptVariant,
     /// Directory the fields above resolved to.
     pub memory_dir: PathBuf,
+    /// Shared memory for native sessions; absent with an explicit/backend root.
+    pub global_memory_dir: Option<PathBuf>,
+    /// Resolve legacy disk state only inside the enabled provider.
+    legacy_workspace: Option<PathBuf>,
 }
 
 impl MemoryContext {
@@ -58,17 +62,33 @@ impl MemoryContext {
         agent_type: Option<&str>,
         variant: MemoryPromptVariant,
     ) -> Self {
-        let dir = match (memory_dir, cwd, agent_type) {
-            (Some(dir), _, _) => dir.to_path_buf(),
-            (None, Some(cwd), Some(agent)) => agent_memory_dir_for(cwd, agent),
-            (None, Some(cwd), None) => default_memory_dir_for(cwd),
-            (None, None, _) => default_memory_dir(),
+        let workspace = cwd.map_or_else(
+            crate::workspace_root::current_workspace_root_or_default,
+            Path::to_path_buf,
+        );
+        let dir = memory_dir.map_or_else(
+            || {
+                agent_type.map_or_else(
+                    || default_memory_dir_for(&workspace),
+                    |agent| agent_memory_dir_for(&workspace, agent),
+                )
+            },
+            Path::to_path_buf,
+        );
+        let layered = memory_dir.is_none() && std::env::var_os(MEMORY_DIR_ENV).is_none();
+        let scoped = |base: PathBuf| {
+            agent_type.map_or_else(
+                || base.join("memory"),
+                |agent| agent_memory_dir_under(&base, agent),
+            )
         };
         Self {
             cwd: cwd.map(Path::to_path_buf),
             agent_type: agent_type.map(str::to_string),
             variant,
             memory_dir: dir,
+            global_memory_dir: layered.then(|| scoped(crate::config::default_config_home())),
+            legacy_workspace: layered.then_some(workspace),
         }
     }
 
@@ -176,7 +196,37 @@ impl MemoryProvider for FileMemoryProvider<'_> {
             directory: dir.to_path_buf(),
             ..Default::default()
         });
-        Some(index.render_for_prompt_with(dir, ctx.variant))
+        let legacy = ctx
+            .legacy_workspace
+            .as_deref()
+            .and_then(legacy_memory_base_dir)
+            .map(|base| {
+                ctx.agent_type.as_deref().map_or_else(
+                    || base.join("memory"),
+                    |agent| agent_memory_dir_under(&base, agent),
+                )
+            });
+        let mut fallbacks = Vec::new();
+        for extra in [legacy.as_deref(), ctx.global_memory_dir.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if extra != dir
+                && !fallbacks
+                    .iter()
+                    .any(|index: &MemoryIndex| index.directory == extra)
+            {
+                if let Ok(index) = MemoryIndex::load(extra, self.fs) {
+                    fallbacks.push(index);
+                }
+            }
+        }
+        Some(index.render_scoped_for_prompt_with(
+            dir,
+            ctx.variant,
+            &fallbacks,
+            ctx.global_memory_dir.as_deref(),
+        ))
     }
 }
 

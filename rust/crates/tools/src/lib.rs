@@ -256,7 +256,7 @@ use std::time::{Duration, Instant};
 use command_group::CommandGroup;
 
 use api::{
-    max_tokens_for_model, resolve_provider_from_config, ApiError, CacheHints, ContentBlockDelta,
+    max_tokens_for_model, resolve_provider_from_config, ApiError, ContentBlockDelta,
     MessageRequest, MessageResponse, OutputContentBlock, ProviderClient,
     StreamEvent as ApiStreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
 };
@@ -891,7 +891,8 @@ impl GlobalToolRegistry {
     /// injection. Name-only lines (CC parity — saves tokens).
     #[must_use]
     pub fn deferred_tools_prompt_section(&self) -> String {
-        let listing = self.deferred_tool_listing();
+        let mut listing = self.deferred_tool_listing();
+        listing.sort_by(|a, b| a.0.cmp(&b.0));
         if listing.is_empty() {
             return String::new();
         }
@@ -6182,7 +6183,7 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
     let permission_policy = agent_permission_policy(job.permission_mode);
     let tool_executor = SubagentToolExecutor::new(empty_tools);
     let mut system_prompt = SystemPrompt::default();
-    system_prompt.dynamic_sections.push(String::from(
+    system_prompt.append_dynamic_section(String::from(
         "You are a summarizer. You will be given the full output of a background sub-agent. \
          Summarize it for the parent coordinator in 500 words or fewer. Preserve every concrete \
          file path, line number, error message, PR number, commit hash, and command that appears \
@@ -6463,13 +6464,14 @@ fn build_agent_system_prompt(
         },
     )
     .map_err(|error| error.to_string())?;
+    if let Some(section) = commands::render_cli_packages_prompt_section(&shell_root) {
+        prompt.append_dynamic_section(section);
+    }
     if cohost {
-        prompt
-            .dynamic_sections
-            .push(runtime::spawn_task::cohost_shell_prompt_section(
-                &cwd.to_string_lossy(),
-                &shell_root,
-            ));
+        prompt.append_dynamic_section(runtime::spawn_task::cohost_shell_prompt_section(
+            &cwd.to_string_lossy(),
+            &shell_root,
+        ));
     }
     if subagent_type == "fork" {
         // Fork subagent gets the parent's default system prompt (via
@@ -6478,7 +6480,7 @@ fn build_agent_system_prompt(
         // body (build_fork_child_message) so the child sees them as
         // its FIRST user message rather than buried in the system
         // prompt.
-        prompt.dynamic_sections.push(String::from(
+        prompt.append_dynamic_section(String::from(
             "You are a fork subagent — a background worker inheriting the parent agent's context. Follow the fork rules in the first user message verbatim: execute directly with your tools, do not spawn further sub-agents, report structured facts and stop."
         ));
     } else if let Some(custom) = lookup_custom_agent(subagent_type) {
@@ -6487,14 +6489,14 @@ fn build_agent_system_prompt(
         // its own type even if the body is terse. Mirrors CC-fork's
         // `parseAgentFromMarkdown` → `getSystemPrompt` closure that
         // returns the raw markdown body as the agent's system prompt.
-        prompt.dynamic_sections.push(format!(
+        prompt.append_dynamic_section(format!(
             "You are the custom sub-agent `{}` defined at {}.",
             custom.name,
             custom.source_path.display()
         ));
-        prompt.dynamic_sections.push(custom.system_prompt);
+        prompt.append_dynamic_section(custom.system_prompt);
     } else {
-        prompt.dynamic_sections.push(format!(
+        prompt.append_dynamic_section(format!(
             "You are a background sub-agent of type `{subagent_type}`. Work only on the delegated task, use only the tools available to you, do not ask the user questions, and finish with a concise result."
         ));
     }
@@ -7482,11 +7484,24 @@ impl ParentExecution {
 pub(crate) struct ProviderRuntimeClient {
     chain: Vec<ProviderEntry>,
     allowed_tools: BTreeSet<String>,
+    tool_definitions: std::sync::OnceLock<Vec<ToolDefinition>>,
     /// Resolved by [`ParentExecution::for_child`] at spawn time.
     execution: ParentExecution,
 }
 
 impl ProviderRuntimeClient {
+    #[inline]
+    fn definitions(&self) -> &[ToolDefinition] {
+        self.tool_definitions.get_or_init(|| {
+            let mut definitions = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
+                .into_iter()
+                .map(ToolDefinition::from)
+                .collect::<Vec<_>>();
+            definitions.sort_by(|a, b| a.name.cmp(&b.name));
+            definitions
+        })
+    }
+
     /// Carry the parent's inherited settings onto a subagent's client — the
     /// single seam between a spawn and the requests it will send.
     ///
@@ -7531,6 +7546,7 @@ impl ProviderRuntimeClient {
         Ok(Self {
             chain,
             allowed_tools,
+            tool_definitions: std::sync::OnceLock::new(),
             execution: ParentExecution::default(),
         })
     }
@@ -7627,10 +7643,7 @@ impl ApiClient for ProviderRuntimeClient {
             .chain
             .first()
             .map_or(model, |entry| entry.model.as_str());
-        let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
-            .into_iter()
-            .map(ToolDefinition::from)
-            .collect::<Vec<_>>();
+        let tools = self.definitions();
         let system = (!system_prompt.is_empty()).then(|| system_prompt.render());
         runtime::ContextBudget {
             context_limit: runtime::model_capabilities::context_window_or_default(request_model)
@@ -7638,7 +7651,7 @@ impl ApiClient for ProviderRuntimeClient {
             max_output_tokens: max_tokens_for_model(request_model) as usize,
             overhead_tokens: api::estimate_request_overhead_tokens(
                 system.as_deref(),
-                (!tools.is_empty()).then_some(tools.as_slice()),
+                (!tools.is_empty()).then_some(tools),
             ) as usize,
             buffer_tokens: runtime::autocompact_buffer_tokens(request_model) as usize,
         }
@@ -7653,12 +7666,7 @@ impl ApiClient for ProviderRuntimeClient {
             .chain
             .first()
             .ok_or_else(|| RuntimeError::new("no completion provider"))?;
-        let tools = options.include_tools.then(|| {
-            tool_specs_for_allowed_tools(Some(&self.allowed_tools))
-                .into_iter()
-                .map(ToolDefinition::from)
-                .collect()
-        });
+        let tools = options.include_tools.then(|| self.definitions().to_vec());
         entry
             .client
             .complete_text(
@@ -7678,43 +7686,34 @@ impl ApiClient for ProviderRuntimeClient {
     }
 
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
-        let tools = tool_specs_for_allowed_tools(Some(&self.allowed_tools))
-            .into_iter()
-            .map(ToolDefinition::from)
-            .collect::<Vec<_>>();
-        let messages = convert_messages(&request.messages);
-        let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
-        let tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
-        // Subagents cache like the main loop does. Without this the request
-        // carries no `cache_control` at all, so every turn re-sends the whole
-        // prompt uncached at full input price — measured in production as 64
-        // consecutive subagent requests with zero cache reads AND zero cache
-        // writes, prompts ranging 5k-129k tokens. The main loop builds exactly
-        // these hints (`engine-core/src/engine_client.rs`); this path was
-        // simply never given them.
-        let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
-            system_static: Some(request.system_prompt.static_text()),
-            system_dynamic: Some(request.system_prompt.dynamic_text()),
-            breakpoint_last_message: true,
-        });
+        let tools = self.definitions().to_vec();
+        let first = self
+            .chain
+            .first()
+            .ok_or_else(|| RuntimeError::new("no completion provider"))?;
+        let mut message_request = api::session_message_request(
+            &first.model,
+            &request,
+            runtime::TextCompletionOptions {
+                max_tokens: max_tokens_for_model(&first.model),
+                include_tools: !tools.is_empty(),
+                cache_prefix: true,
+                thinking_enabled: self.execution.thinking_enabled,
+            },
+            Some(tools),
+            api::SessionRequestFields {
+                reasoning_effort: self.execution.reasoning_effort.clone(),
+                metadata: self.execution.request_metadata(),
+            },
+        );
+        message_request.tool_choice = (!self.allowed_tools.is_empty()).then_some(ToolChoice::Auto);
 
         let chain = &self.chain;
         let mut last_error: Option<ApiError> = None;
         for (index, entry) in chain.iter().enumerate() {
-            let message_request = MessageRequest {
-                model: entry.model.clone(),
-                max_tokens: max_tokens_for_model(&entry.model),
-                messages: messages.clone(),
-                system: system.clone(),
-                tools: (!tools.is_empty()).then(|| tools.clone()),
-                tool_choice: tool_choice.clone(),
-                stream: true,
-                cache_hints: cache_hints.clone(),
-                reasoning_effort: self.execution.reasoning_effort.clone(),
-                thinking_enabled: self.execution.thinking_enabled,
-                metadata: self.execution.request_metadata(),
-                ..Default::default()
-            };
+            // The converted history and session fields survive provider retries.
+            message_request.model.clone_from(&entry.model);
+            message_request.max_tokens = max_tokens_for_model(&entry.model);
 
             let attempt = stream_with_provider(&entry.client, &message_request).await;
             match attempt {
@@ -8951,27 +8950,11 @@ fn normalize_config_value(spec: ConfigSettingSpec, value: ConfigValue) -> Result
 fn config_file_for_scope(scope: ConfigScope) -> Result<PathBuf, String> {
     let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     Ok(match scope {
-        ConfigScope::Global => config_home_dir()?.join("settings.json"),
-        ConfigScope::Settings => cwd
-            .join(".nexus")
-            .join("sudocode")
-            .join("settings.local.json"),
+        ConfigScope::Global => runtime::config::default_config_home().join("settings.json"),
+        ConfigScope::Settings => {
+            runtime::config::project_config_dir(&cwd).join("settings.local.json")
+        }
     })
-}
-
-fn config_home_dir() -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var("SUDO_CODE_CONFIG_HOME") {
-        return Ok(PathBuf::from(path));
-    }
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| {
-            String::from(
-                "HOME is not set (on Windows, set USERPROFILE or HOME, \
-                 or use SUDO_CODE_CONFIG_HOME to point directly at the config directory)",
-            )
-        })?;
-    Ok(PathBuf::from(home).join(".nexus").join("sudocode"))
 }
 
 fn read_json_object(path: &Path) -> Result<serde_json::Map<String, Value>, String> {
@@ -9574,6 +9557,7 @@ mod tests {
         let client = super::ProviderRuntimeClient {
             chain: Vec::new(),
             allowed_tools: BTreeSet::new(),
+            tool_definitions: std::sync::OnceLock::new(),
             execution: super::ParentExecution::default(),
         }
         .with_parent_execution(inherited.clone());
@@ -12993,8 +12977,8 @@ mod tests {
 
         std::env::remove_var("SUDOCODE_MEMORY_DIR");
 
-        let explore_joined = explore_prompt.dynamic_sections.join("\n||\n");
-        let plan_joined = plan_prompt.dynamic_sections.join("\n||\n");
+        let explore_joined = explore_prompt.dynamic_sections().join("\n||\n");
+        let plan_joined = plan_prompt.dynamic_sections().join("\n||\n");
 
         assert!(
             explore_joined.contains("EXPLORE_ONLY_MARKER"),
@@ -13030,7 +13014,7 @@ mod tests {
 
         let prompt = build_agent_system_prompt("committee", runtime::fs_backend::host_fs())
             .expect("system prompt build");
-        let joined = prompt.dynamic_sections.join("\n---section---\n");
+        let joined = prompt.dynamic_sections().join("\n---section---\n");
         assert!(
             joined.contains("NAMING_COMMITTEE_SENTINEL"),
             "custom-agent body must be embedded in system prompt; got: {joined}"

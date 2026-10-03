@@ -139,7 +139,7 @@ where
     // answer to a question `resolve_auth_mode` already owns.
     let sudocode_config = require_sudocode_config_for_cwd(&host.config_root).map_err(|e| {
         format!(
-            "co-host: no usable sudocode configuration for {}: {e} — a co-hosted agent              resolves its model and credentials the way the CLI does, from              SUDO_CODE_CONFIG_HOME (or ~/.nexus/sudocode) plus this daemon's working              directory",
+            "co-host: no usable sudocode configuration for {}: {e} — a co-hosted agent              resolves its model and credentials the way the CLI does, from              SCODE_GLOBAL_CONFIG_DIR (or ~/.nexus/sudocode) plus this daemon's working              directory",
             host.config_root.display(),
         )
     })?;
@@ -152,18 +152,14 @@ where
     // and a model shown that framing without being told what it means answers
     // the wrapper instead of the sender.
     let mut system_prompt = SystemPrompt::default();
-    system_prompt
-        .dynamic_sections
-        .push(cohost_a2a_prompt_section(&desc.name));
+    system_prompt.append_dynamic_section(cohost_a2a_prompt_section(&desc.name));
     // The second: a co-hosted agent's files and its shell are in different
     // places, and a model not told that reads an unrelated directory and
     // concludes its workspace is empty.
-    system_prompt
-        .dynamic_sections
-        .push(cohost_shell_prompt_section(
-            &workspace_root,
-            &host.shell_root,
-        ));
+    system_prompt.append_dynamic_section(cohost_shell_prompt_section(
+        &workspace_root,
+        &host.shell_root,
+    ));
 
     let config = RuntimeConfig {
         model,

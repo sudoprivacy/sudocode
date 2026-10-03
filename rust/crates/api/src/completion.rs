@@ -20,13 +20,13 @@ use runtime::{
     TextCompletionOptions,
 };
 
-/// Build the request `complete_text` sends.
+/// Build the shared request prefix for turns, subagents, and compaction.
 ///
-/// Split out from the send so the parity test below can inspect it without a
-/// live provider: the whole bug class this path keeps hitting is a field the
-/// turn stream sets and this builder forgets, which no amount of testing the
-/// *response* can catch.
-fn cache_safe_request(
+/// Operation-specific changes (tool choice or fallback model) are applied by
+/// the caller after this builder has copied the session fields.
+#[inline]
+#[must_use]
+pub fn session_message_request(
     model: &str,
     request: &ApiRequest,
     options: TextCompletionOptions,
@@ -79,7 +79,7 @@ impl ProviderClient {
         tools: Option<Vec<ToolDefinition>>,
         session: SessionRequestFields,
     ) -> Result<TextCompletion, RuntimeError> {
-        let message_request = cache_safe_request(model, &request, options, tools, session);
+        let message_request = session_message_request(model, &request, options, tools, session);
         let response = self
             .send_message_streamed(&message_request, None)
             .await
@@ -266,7 +266,7 @@ pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_safe_request, convert_messages};
+    use super::{convert_messages, session_message_request};
     use crate::{
         InputContentBlock, MessageRequest, RequestMetadata, SessionRequestFields, ToolDefinition,
     };
@@ -304,7 +304,7 @@ mod tests {
     }
 
     /// Every field the turn stream fills from session state has to be restated
-    /// by [`cache_safe_request`] or it silently falls back to the type's
+    /// by [`session_message_request`] or it silently falls back to the type's
     /// default — and on Anthropic a request parameter that differs from the one
     /// the prefix was cached under rewrites the whole prefix and still returns
     /// 200. Three measured regressions came from that gap, so this test exists
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn cache_safe_request_mirrors_the_stream() {
         let mut system_prompt = SystemPrompt::default();
-        system_prompt.static_sections.push("be terse".to_string());
+        system_prompt.append_static_section("be terse".to_string());
         let request = ApiRequest {
             system_prompt,
             messages: vec![assistant(vec![ContentBlock::Text {
@@ -332,7 +332,7 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
         };
 
-        let built = cache_safe_request(
+        let built = session_message_request(
             "claude-sonnet-4-6",
             &request,
             options,

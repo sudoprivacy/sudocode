@@ -1275,10 +1275,7 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
 
 fn run_worker_state(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
-    let state_path = cwd
-        .join(".nexus")
-        .join("sudocode")
-        .join("worker-state.json");
+    let state_path = runtime::config::project_config_dir(&cwd).join("worker-state.json");
     if !state_path.exists() {
         // #139: this error used to say "run a worker first" without telling
         // callers how to run one. "worker" is an internal concept (there is
@@ -1471,15 +1468,13 @@ fn print_system_prompt(
     // Result errors propagate, so a broken plugin install fails this preview
     // exactly as it fails a live session.
     let outcome = plugin_load_outcome_for_cwd(&cwd)?;
-    prompt
-        .dynamic_sections
-        .extend(cwd_prompt_sections(&cwd, Some(&outcome)));
+    prompt.extend_dynamic_sections(cwd_prompt_sections(&cwd, Some(&outcome)));
     let message = prompt.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
         CliOutputFormat::Json => {
-            let mut all_sections = prompt.static_sections.clone();
-            all_sections.extend(prompt.dynamic_sections.iter().cloned());
+            let mut all_sections = prompt.static_sections().to_vec();
+            all_sections.extend(prompt.dynamic_sections().iter().cloned());
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({

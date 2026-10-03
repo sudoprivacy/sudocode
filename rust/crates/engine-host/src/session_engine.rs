@@ -346,7 +346,7 @@ impl SessionEngine {
 
     /// THE one runtime-rebuild primitive behind every session swap (model / auth
     /// / permission switch, `/clear`, `/resume`, `/session switch|fork`,
-    /// compaction, plugin reload). Rebuilds the locked session's runtime for
+    /// plugin reload). Compaction only replaces history. Rebuilds the locked runtime for
     /// `new_session` under `handle`, reading the effective config straight from
     /// the engine's SSOT (`self.permission_mode` / `self.auth_mode` /
     /// `self.reasoning_effort`) and the model from `new_session.model` — the
@@ -378,6 +378,8 @@ impl SessionEngine {
         let sudocode_config = load_sudocode_config_for_cwd(&cwd);
         let auth_mode = resolve_model_switch_auth_mode(&model, auth_override, &sudocode_config)
             .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
+        // Pass the caller's base prompt, never the assembled snapshot. The
+        // shared runtime builder checks explicit overrides before reusing it.
         let system_prompt =
             build_acp_system_prompt(&cwd, &session.prompt_overrides, session.memory)?;
         let runtime = build_engine_runtime(
@@ -1252,7 +1254,8 @@ impl SessionLifecycle for SessionEngine {
 
     fn reload_features(&self) -> Result<(), String> {
         let mut session = self.lock_session();
-        let new_session = session.runtime.session().clone();
+        let mut new_session = session.runtime.session().clone();
+        new_session.clear_prompt_snapshot();
         let handle = session.handle.clone();
         self.rebuild_locked(&mut session, new_session, handle)?;
         let path = session.handle.path.clone();

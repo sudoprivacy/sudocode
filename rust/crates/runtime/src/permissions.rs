@@ -167,6 +167,7 @@ pub struct PermissionPolicy {
     active_mode: PermissionMode,
     tool_requirements: BTreeMap<String, PermissionMode>,
     allow_rules: Vec<PermissionRule>,
+    memory_allow_rules: Vec<PermissionRule>,
     deny_rules: Vec<PermissionRule>,
     ask_rules: Vec<PermissionRule>,
 }
@@ -178,6 +179,7 @@ impl PermissionPolicy {
             active_mode,
             tool_requirements: BTreeMap::new(),
             allow_rules: Vec::new(),
+            memory_allow_rules: Vec::new(),
             deny_rules: Vec::new(),
             ask_rules: Vec::new(),
         }
@@ -215,22 +217,23 @@ impl PermissionPolicy {
     }
 
     /// Inject synthetic allow rules for the auto-memory directory.
-    /// CC carve-out: writes to `~/.scode/projects/<slug>/memory/` are auto-allowed
-    /// regardless of permission mode (except ReadOnly and deny rules).
+    /// Writes to configured memory roots are auto-allowed regardless of
+    /// permission mode (except `ReadOnly` and deny rules).
     #[must_use]
     pub fn with_memory_allow_rules(mut self, memory_dir: &std::path::Path) -> Self {
-        let prefix = memory_dir.to_string_lossy();
-        let dir_prefix = if prefix.ends_with('/') {
-            prefix.to_string()
-        } else {
-            format!("{}/", prefix)
-        };
-        for tool in &["write_file", "edit_file"] {
-            self.allow_rules.push(PermissionRule {
-                raw: format!("{tool}({dir_prefix}:*)"),
-                tool_name: tool.to_string(),
-                matcher: PermissionRuleMatcher::Prefix(dir_prefix.clone()),
-            });
+        let mut native = memory_dir.join("").to_string_lossy().into_owned();
+        let portable = format!("{}/", memory_dir.to_string_lossy().trim_end_matches('/'));
+        if native.is_empty() {
+            native.clone_from(&portable);
+        }
+        for prefix in std::iter::once(&native).chain((native != portable).then_some(&portable)) {
+            for tool in ["write_file", "edit_file"] {
+                self.memory_allow_rules.push(PermissionRule {
+                    raw: format!("{tool}({prefix}:*)"),
+                    tool_name: tool.to_string(),
+                    matcher: PermissionRuleMatcher::Prefix(prefix.clone()),
+                });
+            }
         }
         self
     }
@@ -300,7 +303,16 @@ impl PermissionPolicy {
         let current_mode = self.active_mode();
         let required_mode = self.required_mode_for(tool_name);
         let ask_rule = Self::find_matching_rule(&self.ask_rules, tool_name, input);
-        let allow_rule = Self::find_matching_rule(&self.allow_rules, tool_name, input);
+        let allow_rule =
+            Self::find_matching_rule(&self.allow_rules, tool_name, input).or_else(|| {
+                // Synthetic memory access must follow live mode switches; user rules
+                // retain their explicit semantics and deny/ask still take precedence.
+                if current_mode == PermissionMode::ReadOnly {
+                    None
+                } else {
+                    Self::find_matching_rule(&self.memory_allow_rules, tool_name, input)
+                }
+            });
 
         match context.override_decision() {
             Some(PermissionOverride::Deny) => {

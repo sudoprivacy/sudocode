@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 /// the in-process REPL renderer and the ACP renderer so they render the same
 /// reports from one definition.
 pub mod bash_mode;
+mod cli_packages;
 pub mod reports;
+
+pub use cli_packages::render_cli_packages_prompt_section;
 
 use plugins::{
     discover_marketplace_manifest, MarketplaceDiscoveryError, MarketplaceManifest, PluginError,
@@ -2957,7 +2960,7 @@ fn add_mcp_server(cwd: &Path, name: &str, config_json: &str) -> Result<String, S
     let config_value: serde_json::Value =
         serde_json::from_str(config_json).map_err(|e| format!("invalid JSON: {e}"))?;
 
-    let settings_dir = cwd.join(".nexus").join("sudocode");
+    let settings_dir = runtime::config::project_config_dir(cwd);
     let settings_path = settings_dir.join("settings.json");
 
     let mut settings: serde_json::Value = if settings_path.exists() {
@@ -2997,7 +3000,7 @@ fn add_mcp_server(cwd: &Path, name: &str, config_json: &str) -> Result<String, S
 
 /// Remove an MCP server from the project-level settings file.
 fn remove_mcp_server(cwd: &Path, name: &str) -> Result<String, String> {
-    let settings_path = cwd.join(".nexus").join("sudocode").join("settings.json");
+    let settings_path = runtime::config::project_config_dir(cwd).join("settings.json");
 
     if !settings_path.exists() {
         return Err(format!(
@@ -3246,7 +3249,7 @@ fn render_mcp_report_json_for(
                 "action": "add-json",
                 "server": name.trim(),
                 "result": result,
-                "config_file": cwd.join(".nexus").join("sudocode").join("settings.json").display().to_string(),
+                "config_file": runtime::config::project_config_dir(cwd).join("settings.json").display().to_string(),
             }))
         }
         Some(args) if args.split_whitespace().next() == Some("remove") => {
@@ -3261,7 +3264,7 @@ fn render_mcp_report_json_for(
                 "action": "remove",
                 "server": name,
                 "result": result,
-                "config_file": cwd.join(".nexus").join("sudocode").join("settings.json").display().to_string(),
+                "config_file": runtime::config::project_config_dir(cwd).join("settings.json").display().to_string(),
             }))
         }
         Some(args) => Ok(render_mcp_usage_json(Some(args))),
@@ -3382,7 +3385,12 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
         push_unique_root(
             &mut roots,
             DefinitionSource::ProjectClaw,
-            ancestor.join(".nexus").join("sudocode").join(leaf),
+            (if ancestor == cwd {
+                runtime::config::project_config_dir(cwd)
+            } else {
+                ancestor.join(".nexus").join("sudocode")
+            })
+            .join(leaf),
         );
         push_unique_root(
             &mut roots,
@@ -3391,11 +3399,11 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
         );
     }
 
-    if let Ok(sudocode_config_home) = env::var("SUDO_CODE_CONFIG_HOME") {
+    if let Some(sudocode_config_home) = runtime::config::global_config_dir_override() {
         push_unique_root(
             &mut roots,
             DefinitionSource::UserClawConfigHome,
-            PathBuf::from(sudocode_config_home).join(leaf),
+            sudocode_config_home.join(leaf),
         );
     }
 
@@ -3407,13 +3415,15 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
         );
     }
 
-    if let Some(home) = env::var_os("HOME") {
+    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
         let home = PathBuf::from(home);
-        push_unique_root(
-            &mut roots,
-            DefinitionSource::UserClaw,
-            home.join(".nexus").join("sudocode").join(leaf),
-        );
+        if runtime::config::global_config_dir_override().is_none() {
+            push_unique_root(
+                &mut roots,
+                DefinitionSource::UserClaw,
+                runtime::config::default_config_home().join(leaf),
+            );
+        }
         push_unique_root(
             &mut roots,
             DefinitionSource::UserCodex,
@@ -3436,7 +3446,12 @@ fn discover_skill_roots_with_plugins(
             &mut roots,
             DefinitionSource::ProjectClaw,
             cwd,
-            ancestor.join(".nexus").join("sudocode").join("skills"),
+            (if ancestor == cwd {
+                runtime::config::project_config_dir(cwd)
+            } else {
+                ancestor.join(".nexus").join("sudocode")
+            })
+            .join("skills"),
         );
         push_unique_skill_root(
             &mut roots,
@@ -3458,8 +3473,7 @@ fn discover_skill_roots_with_plugins(
         );
     }
 
-    if let Ok(sudocode_config_home) = env::var("SUDO_CODE_CONFIG_HOME") {
-        let sudocode_config_home = PathBuf::from(sudocode_config_home);
+    if let Some(sudocode_config_home) = runtime::config::global_config_dir_override() {
         push_unique_skill_root(
             &mut roots,
             DefinitionSource::UserClawConfigHome,
@@ -3480,12 +3494,14 @@ fn discover_skill_roots_with_plugins(
 
     if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
         let home = PathBuf::from(home);
-        push_unique_skill_root(
-            &mut roots,
-            DefinitionSource::UserClaw,
-            cwd,
-            home.join(".nexus").join("sudocode").join("skills"),
-        );
+        if runtime::config::global_config_dir_override().is_none() {
+            push_unique_skill_root(
+                &mut roots,
+                DefinitionSource::UserClaw,
+                cwd,
+                runtime::config::default_config_home().join("skills"),
+            );
+        }
         push_unique_skill_root(
             &mut roots,
             DefinitionSource::UserClaw,
@@ -3582,21 +3598,21 @@ fn install_skill_into(
 }
 
 fn default_skill_install_root() -> std::io::Result<PathBuf> {
-    if let Ok(sudocode_config_home) = env::var("SUDO_CODE_CONFIG_HOME") {
-        return Ok(PathBuf::from(sudocode_config_home).join("skills"));
+    if let Some(sudocode_config_home) = runtime::config::global_config_dir_override() {
+        return Ok(sudocode_config_home.join("skills"));
     }
     if let Ok(codex_home) = env::var("CODEX_HOME") {
         return Ok(PathBuf::from(codex_home).join("skills"));
     }
-    if let Some(home) = env::var_os("HOME") {
-        return Ok(PathBuf::from(home)
-            .join(".nexus")
-            .join("sudocode")
-            .join("skills"));
+    if env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .is_some()
+    {
+        return Ok(runtime::config::default_config_home().join("skills"));
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::NotFound,
-        "unable to resolve a skills install root; set SUDO_CODE_CONFIG_HOME or HOME",
+        "unable to resolve a skills install root; set SCODE_GLOBAL_CONFIG_DIR or HOME",
     ))
 }
 
@@ -3745,7 +3761,7 @@ fn push_unique_root(
 
 /// Resolves a skill root to an absolute, lexically normalized path.
 ///
-/// Roots are not absolute by construction: `SUDO_CODE_CONFIG_HOME`,
+/// Roots are not absolute by construction: `SCODE_GLOBAL_CONFIG_DIR`,
 /// `plugins.installRoot` and a plugin manifest's `skills` field all accept
 /// relative values, and `default_config_home` falls back to a bare
 /// `.nexus/sudocode` when neither the override nor `HOME` is set. A relative
@@ -4416,6 +4432,9 @@ pub fn cwd_prompt_sections(
         sections.push(section);
     }
     sections.push(runtime::agent_types::render_agent_types_prompt_section(cwd));
+    if let Some(section) = render_cli_packages_prompt_section(cwd) {
+        sections.push(section);
+    }
     sections
 }
 
@@ -4650,7 +4669,7 @@ fn render_agents_usage(unexpected: Option<&str>) -> String {
         "Agents".to_string(),
         "  Usage            /agents [list|help]".to_string(),
         "  Direct CLI       scode agents".to_string(),
-        "  Sources          .nexus/sudocode/agents, ~/.nexus/sudocode/agents, $SUDO_CODE_CONFIG_HOME/agents".to_string(),
+        "  Sources          .nexus/sudocode/agents, ~/.nexus/sudocode/agents, $SCODE_GLOBAL_CONFIG_DIR/agents".to_string(),
     ];
     if let Some(args) = unexpected {
         lines.push(format!("  Unexpected       {args}"));
@@ -4665,7 +4684,7 @@ fn render_agents_usage_json(unexpected: Option<&str>) -> Value {
         "usage": {
             "slash_command": "/agents [list|help]",
             "direct_cli": "scode agents [list|help]",
-            "sources": [".nexus/sudocode/agents", "~/.nexus/sudocode/agents", "$SUDO_CODE_CONFIG_HOME/agents"],
+            "sources": [".nexus/sudocode/agents", "~/.nexus/sudocode/agents", "$SCODE_GLOBAL_CONFIG_DIR/agents"],
         },
         "unexpected": unexpected,
     })
@@ -4678,7 +4697,7 @@ fn render_skills_usage(unexpected: Option<&str>) -> String {
         "  Alias            /skill".to_string(),
         "  Direct CLI       scode skills [list|install <path>|help|<skill> [args]]".to_string(),
         "  Invoke           /skills help overview -> $help overview".to_string(),
-        "  Install root     $SUDO_CODE_CONFIG_HOME/skills or ~/.nexus/sudocode/skills".to_string(),
+        "  Install root     $SCODE_GLOBAL_CONFIG_DIR/skills or ~/.nexus/sudocode/skills".to_string(),
         "  Sources          .nexus/sudocode/skills, .omc/skills, .agents/skills, .codex/skills, ~/.nexus/sudocode/skills, ~/.omc/skills, ~/.agents/skills, ~/.config/opencode/skills, ~/.codex/skills".to_string(),
     ];
     if let Some(args) = unexpected {
@@ -4696,7 +4715,7 @@ fn render_skills_usage_json(unexpected: Option<&str>) -> Value {
             "aliases": ["/skill"],
             "direct_cli": "scode skills [list|install <path>|help|<skill> [args]]",
             "invoke": "/skills help overview -> $help overview",
-            "install_root": "$SUDO_CODE_CONFIG_HOME/skills or ~/.nexus/sudocode/skills",
+            "install_root": "$SCODE_GLOBAL_CONFIG_DIR/skills or ~/.nexus/sudocode/skills",
             "sources": [
                 ".nexus/sudocode/skills",
                 ".omc/skills",
@@ -6195,7 +6214,7 @@ mod tests {
         assert!(agents_help.contains("Usage            /agents [list|help]"));
         assert!(agents_help.contains("Direct CLI       scode agents"));
         assert!(agents_help
-            .contains("Sources          .nexus/sudocode/agents, ~/.nexus/sudocode/agents, $SUDO_CODE_CONFIG_HOME/agents"));
+            .contains("Sources          .nexus/sudocode/agents, ~/.nexus/sudocode/agents, $SCODE_GLOBAL_CONFIG_DIR/agents"));
 
         let agents_unexpected =
             super::handle_agents_slash_command(Some("show planner"), &cwd).expect("agents usage");
@@ -6208,7 +6227,7 @@ mod tests {
         assert!(skills_help.contains("Alias            /skill"));
         assert!(skills_help.contains("Invoke           /skills help overview -> $help overview"));
         assert!(skills_help.contains(
-            "Install root     $SUDO_CODE_CONFIG_HOME/skills or ~/.nexus/sudocode/skills"
+            "Install root     $SCODE_GLOBAL_CONFIG_DIR/skills or ~/.nexus/sudocode/skills"
         ));
         assert!(skills_help.contains(".omc/skills"));
         assert!(skills_help.contains(".agents/skills"));

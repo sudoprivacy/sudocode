@@ -33,13 +33,11 @@
 //! ## Search paths
 //!
 //! `standard_custom_agent_dirs(cwd)` returns, in priority order:
-//! 1. `~/.nexus/sudocode/agents/`
-//! 2. `<cwd>/.sudocode/agents/`
+//! 1. `<project config directory>/agents/`
+//! 2. `<global config directory>/agents/`
+//! 3. `<cwd>/.sudocode/agents/` (legacy)
 //!
-//! First hit wins per-name — mirrors CC-fork's user/project/managed
-//! precedence.  The order is intentionally user-scope before
-//! project-scope so a user override for a shared team name takes
-//! effect.
+//! First hit wins per-name, using the native project-over-global contract.
 //!
 //! ## Scope vs. sudocode's TOML-agents inventory
 //!
@@ -110,18 +108,17 @@ pub struct CustomAgentDefinition {
 /// order.  See module docs for the semantics.
 #[must_use]
 pub fn standard_custom_agent_dirs(cwd: &Path) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(home) = home_dir() {
-        dirs.push(home.join(".nexus").join("sudocode").join("agents"));
-    }
-    dirs.push(cwd.join(".sudocode").join("agents"));
-    dirs
+    vec![
+        crate::config::project_config_dir(cwd).join("agents"),
+        crate::config::default_config_home().join("agents"),
+        cwd.join(".sudocode").join("agents"),
+    ]
 }
 
 /// Look up a custom agent by name across the standard search paths.
 /// Returns `None` when no `.md` file matches.  Multiple `.md` files
 /// with the same frontmatter `name` in different search paths → the
-/// first-hit wins (user scope before project scope).
+/// first-hit wins (project scope before global scope).
 #[must_use]
 pub fn find_custom_agent(name: &str, cwd: &Path) -> Option<CustomAgentDefinition> {
     for dir in standard_custom_agent_dirs(cwd) {
@@ -317,22 +314,6 @@ fn parse_tools_list(raw: &str) -> Vec<String> {
         }
     }
     names.into_iter().collect()
-}
-
-/// Return the current user's home dir. Delegated so tests can shim it
-/// via env var without touching every call site.
-fn home_dir() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.trim().is_empty() {
-            return Some(PathBuf::from(home));
-        }
-    }
-    if let Ok(user_profile) = std::env::var("USERPROFILE") {
-        if !user_profile.trim().is_empty() {
-            return Some(PathBuf::from(user_profile));
-        }
-    }
-    None
 }
 
 #[cfg(test)]

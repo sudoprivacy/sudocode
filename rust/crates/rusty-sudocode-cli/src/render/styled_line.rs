@@ -2,8 +2,7 @@
 //!
 //! A child RESET cannot restore an enclosing style. Keep styles as data until
 //! the final ANSI boundary instead; each span specifies its complete style.
-//! Both direct terminal output and the REPL's ANSI-to-iocraft bridge consume
-//! this same serialization. No renderer-side color/intensity override is needed.
+//! Direct terminal output serializes ANSI; the REPL consumes structured spans.
 
 use std::fmt;
 
@@ -11,12 +10,21 @@ use crossterm::style::{Color, ContentStyle, Stylize};
 
 use super::{theme, RESET};
 
+#[derive(Clone, Debug)]
 pub(crate) struct StyledLine {
     base: ContentStyle,
     spans: Vec<(ContentStyle, String)>,
 }
 
 impl StyledLine {
+    pub(crate) fn structured(&self) -> super::styled_text::StyledText {
+        let mut text = super::styled_text::StyledText::default();
+        for (style, content) in &self.spans {
+            text.push(*style, content);
+        }
+        text
+    }
+
     /// Low-emphasis chrome uses the theme's muted foreground, not faint on
     /// top of an already muted color. This is shared by summaries and status.
     pub(crate) fn muted() -> Self {

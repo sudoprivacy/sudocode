@@ -13,7 +13,10 @@ use syntect::parsing::SyntaxSet;
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
 mod styled_line;
+pub(crate) mod styled_text;
+pub(crate) mod text_layout;
 pub(crate) use styled_line::StyledLine;
+use text_layout::display_width as visible_width;
 
 /// Terminal color capability tier, detected from environment variables.
 ///
@@ -169,7 +172,7 @@ impl ColorTheme {
     //   success = green, error = red, diff = green/red
     //
     // Derived:
-    //   warning  = teal-bright #2DD4BF → ANSI 79  (avoids amber clash with primary)
+    //   warning = yellow/ochre; links = blue; inline code = violet
     //   muted    = VI grey #6b7280     → ANSI 243
     //   border   = VI border #E5E7EB   → ANSI 248
 
@@ -180,13 +183,13 @@ impl ColorTheme {
             primary: Color::AnsiValue(214),       // amber #F59E0B
             success: Color::Green,                // semantic
             error: Color::Red,                    // semantic
-            warning: Color::AnsiValue(79),        // teal-bright #2DD4BF
+            warning: Color::AnsiValue(220),       // yellow, distinct from info/success
             info: Color::AnsiValue(36),           // teal #0D9488
             muted: Color::AnsiValue(243),         // grey #767676
             emphasis: Color::AnsiValue(214),      // amber (italic text)
             strong: Color::White,                 // bold text
-            link: Color::AnsiValue(36),           // teal
-            code: Color::AnsiValue(79),           // teal-bright
+            link: Color::AnsiValue(75),           // blue
+            code: Color::AnsiValue(177),          // violet
             code_bg: 236,                         // dark grey bg
             border: Color::AnsiValue(248),        // light grey
             diff_added: Color::AnsiValue(70),     // semantic green
@@ -208,13 +211,13 @@ impl ColorTheme {
             primary: Color::AnsiValue(172),       // darker amber #D97706
             success: Color::DarkGreen,            // semantic
             error: Color::DarkRed,                // semantic
-            warning: Color::AnsiValue(30),        // dark teal #008787
+            warning: Color::AnsiValue(130),       // ochre on a light background
             info: Color::AnsiValue(30),           // dark teal
             muted: Color::AnsiValue(245),         // medium grey
             emphasis: Color::AnsiValue(172),      // darker amber
             strong: Color::Black,                 // bold text
-            link: Color::AnsiValue(30),           // dark teal
-            code: Color::AnsiValue(30),           // dark teal
+            link: Color::AnsiValue(25),           // dark blue
+            code: Color::AnsiValue(90),           // dark violet
             code_bg: 253,                         // light grey bg
             border: Color::AnsiValue(250),        // light grey
             diff_added: Color::AnsiValue(22),     // semantic dark green
@@ -821,24 +824,33 @@ impl RenderState {
     }
 }
 
+/// Syntect grammars are immutable and expensive to inflate. Load them only
+/// when highlighting is needed, then share them across turns and file cards.
+struct SyntaxResources {
+    syntax_set: SyntaxSet,
+    theme: Theme,
+}
+
+fn syntax_resources() -> &'static SyntaxResources {
+    static RESOURCES: std::sync::OnceLock<SyntaxResources> = std::sync::OnceLock::new();
+    RESOURCES.get_or_init(|| SyntaxResources {
+        syntax_set: SyntaxSet::load_defaults_newlines(),
+        theme: ThemeSet::load_defaults()
+            .themes
+            .remove("base16-ocean.dark")
+            .unwrap_or_default(),
+    })
+}
+
 #[derive(Debug)]
 pub struct TerminalRenderer {
-    syntax_set: SyntaxSet,
-    syntax_theme: Theme,
     color_theme: ColorTheme,
     color_support: ColorSupport,
 }
 
 impl Default for TerminalRenderer {
     fn default() -> Self {
-        let syntax_set = SyntaxSet::load_defaults_newlines();
-        let syntax_theme = ThemeSet::load_defaults()
-            .themes
-            .remove("base16-ocean.dark")
-            .unwrap_or_default();
         Self {
-            syntax_set,
-            syntax_theme,
             color_theme: ColorTheme::default(),
             color_support: ColorSupport::detect(),
         }
@@ -1293,15 +1305,16 @@ impl TerminalRenderer {
             return code.to_string();
         }
 
-        let syntax = self
+        let resources = syntax_resources();
+        let syntax = resources
             .syntax_set
             .find_syntax_by_token(language)
-            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
-        let mut syntax_highlighter = HighlightLines::new(syntax, &self.syntax_theme);
+            .unwrap_or_else(|| resources.syntax_set.find_syntax_plain_text());
+        let mut syntax_highlighter = HighlightLines::new(syntax, &resources.theme);
         let mut colored_output = String::new();
 
         for line in LinesWithEndings::from(code) {
-            match syntax_highlighter.highlight_line(line, &self.syntax_set) {
+            match syntax_highlighter.highlight_line(line, &resources.syntax_set) {
                 Ok(ranges) => {
                     let escaped = match self.color_support {
                         ColorSupport::TrueColor => as_24_bit_terminal_escaped(&ranges[..], false),
@@ -1630,32 +1643,6 @@ fn line_closes_fence(line: &str, opener: FenceMarker) -> bool {
     rest[length..].chars().all(|c| c == ' ' || c == '\t')
 }
 
-fn visible_width(input: &str) -> usize {
-    strip_ansi(input).chars().count()
-}
-
-fn strip_ansi(input: &str) -> String {
-    let mut output = String::new();
-    let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-
-    output
-}
-
 /// Stateful processor that prefixes the first line with • (bold) and indents
 /// all continuation lines by two spaces so that column 0 is reserved
 /// exclusively for status glyphs. Hard-wraps text at the terminal width so the
@@ -1665,7 +1652,8 @@ pub(crate) struct ResponseGlyphState {
     started: bool,
     pub(crate) visible_col: usize,
     max_col: usize,
-    in_escape: bool,
+    decoder: styled_text::AnsiDecoder,
+    parser: vte::Parser,
 }
 
 impl ResponseGlyphState {
@@ -1675,7 +1663,8 @@ impl ResponseGlyphState {
             visible_col: 0,
             // Ensure at least 4 columns to avoid degenerate wrapping.
             max_col: terminal_width.max(4),
-            in_escape: false,
+            decoder: styled_text::AnsiDecoder::new(),
+            parser: vte::Parser::new(),
         }
     }
 
@@ -1687,56 +1676,40 @@ impl ResponseGlyphState {
 
         let mut out = String::with_capacity(rendered.len() + 64);
 
-        for ch in rendered.chars() {
-            if ch == '\r' {
-                out.push(ch);
-                self.visible_col = 0;
-                continue;
-            }
-            if ch == '\n' {
-                out.push(ch);
-                self.visible_col = 0;
-                continue;
-            }
-
-            // At line start, emit glyph or margin.
-            if self.visible_col == 0 {
-                if self.started {
-                    out.push_str("  ");
-                } else {
-                    self.started = true;
-                    // Use the text bullet, not the emoji-capable U+23FA record
-                    // symbol: terminal font fallback can distort the latter.
-                    out.push_str(&format!("\r\x1b[2K{BOLD}\u{2022}{RESET} "));
+        self.parser.advance(&mut self.decoder, rendered.as_bytes());
+        let text = std::mem::take(&mut self.decoder.output);
+        let mut offset = 0;
+        for line in text.text.split_inclusive(['\n', '\r']) {
+            let body = line.trim_end_matches(['\n', '\r']);
+            if !body.is_empty() {
+                let rows = text_layout::wrap_line(
+                    &text,
+                    offset..offset + body.len(),
+                    self.max_col - 2,
+                    self.visible_col.saturating_sub(2),
+                );
+                for (index, (row, col)) in rows.into_iter().enumerate() {
+                    if index > 0 {
+                        out.push('\n');
+                        self.visible_col = 0;
+                    }
+                    if self.visible_col == 0 {
+                        if self.started {
+                            out.push_str("  ");
+                        } else {
+                            self.started = true;
+                            out.push_str(&format!("\r\x1b[2K{BOLD}•{RESET} "));
+                        }
+                    }
+                    row.write_ansi(0..row.text.len(), &mut out);
+                    self.visible_col = col + 2;
                 }
-                self.visible_col = 2;
             }
-
-            // ANSI escape start.
-            if ch == '\x1b' {
-                self.in_escape = true;
-                out.push(ch);
-                continue;
+            if body.len() < line.len() {
+                out.push_str(&line[body.len()..]);
+                self.visible_col = 0;
             }
-
-            // Inside an ANSI CSI sequence — push until ASCII letter terminates.
-            if self.in_escape {
-                out.push(ch);
-                if ch.is_ascii_alphabetic() {
-                    self.in_escape = false;
-                }
-                continue;
-            }
-
-            // Hard wrap: line has reached the terminal edge.
-            if self.visible_col >= self.max_col {
-                out.push('\n');
-                out.push_str("  ");
-                self.visible_col = 2;
-            }
-
-            out.push(ch);
-            self.visible_col += 1;
+            offset += line.len();
         }
 
         out

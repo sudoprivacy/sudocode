@@ -32,7 +32,8 @@ use commands::suggest_slash_commands;
 use iocraft::prelude::*;
 
 mod ansi_text;
-use ansi_text::AnsiText;
+use crate::render::styled_text::StyledText;
+use ansi_text::{AnsiText, RichText};
 
 // ── stderr redirect ───────────────────────────────────────────────────
 
@@ -305,7 +306,7 @@ enum StatusSlot {
     /// Animated progress during a turn.
     Spinner(String),
     /// Turn result (tokens/cost/ctx). Cleared when the next turn starts.
-    TurnResult(String),
+    TurnResult(Arc<StyledText>),
     /// First-run tips. Dismissed on first submit.
     Tips,
     /// Nothing — slot not rendered, saves vertical space.
@@ -541,7 +542,7 @@ pub struct ToolCard {
 pub enum UiCommand {
     ShowQuestion(QuestionPromptView),
     ClearQuestion,
-    SetTurnResult(String),
+    SetTurnResult(Arc<StyledText>),
     ShowInputHint(String),
     /// Update the `TodoSlot` panel with the current todo list.
     UpdateTodos(Vec<runtime::Todo>),
@@ -586,8 +587,10 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ClearQuestion);
     }
 
-    pub fn set_turn_result(&self, text: &str) {
-        let _ = self.tx.send(UiCommand::SetTurnResult(text.to_string()));
+    pub(crate) fn set_turn_result(&self, text: &crate::render::StyledLine) {
+        let _ = self
+            .tx
+            .send(UiCommand::SetTurnResult(Arc::new(text.structured())));
     }
 
     pub fn show_input_hint(&self, text: &str) {
@@ -1416,7 +1419,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut input_value = hooks.use_state(String::new);
     let mut frame = hooks.use_state(|| 0usize);
     let mut spinner_text = hooks.use_state(String::new);
-    let mut turn_result = hooks.use_state(|| None::<String>);
+    let mut turn_result = hooks.use_state(|| None::<Arc<StyledText>>);
     let mut has_submitted = hooks.use_state(|| false);
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
     let mut should_exit = hooks.use_state(|| false);
@@ -2266,9 +2269,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             })
             // StatusSlot
             #(match &status_slot {
-                StatusSlot::Spinner(s) => Some(element! { AnsiText(content: s.clone()) }),
-                StatusSlot::TurnResult(s) => Some(element! { AnsiText(content: s.clone()) }),
-                StatusSlot::Tips => Some(element! { AnsiText(content: tips_text.clone(), color: Color::DarkGrey) }),
+                StatusSlot::Spinner(s) => Some(AnyElement::from(element! { AnsiText(content: s.clone()) })),
+                StatusSlot::TurnResult(s) => Some(AnyElement::from(element! { RichText(content: s.clone()) })),
+                StatusSlot::Tips => Some(AnyElement::from(element! { AnsiText(content: tips_text.clone(), color: Color::DarkGrey) })),
                 StatusSlot::Empty => None,
             })
             // Upper chrome: TodoSlot (when non-empty), then separator

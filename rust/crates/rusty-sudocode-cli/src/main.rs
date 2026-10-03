@@ -72,8 +72,8 @@ use cli::format::{
     format_issue_report, format_model_report, format_model_switch_report,
     format_permission_prompt_box, format_permissions_report, format_permissions_switch_report,
     format_pr_report, format_resume_report, format_sandbox_report, format_tool_call_start,
-    format_tool_result, format_turn_status_line, format_ultraplan_report, render_messages,
-    render_resume_usage, render_version_report, truncate_for_summary, TurnStatus,
+    format_tool_result, format_ultraplan_report, render_messages, render_resume_usage,
+    render_version_report, truncate_for_summary, turn_status_line, TurnStatus,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
@@ -4138,7 +4138,7 @@ impl LiveCli {
     /// the running totals (cost, tokens, wall time) continue seamlessly. Returns
     /// `None` for a session with no recorded turns (nothing to summarize —
     /// StatusSlot falls back to Tips, as for a brand-new session).
-    fn resume_status_line(&self) -> Option<String> {
+    fn resume_status_line(&self) -> Option<render::StyledLine> {
         let catalog = self.lifecycle.model_catalog();
         let _scope = catalog
             .as_ref()
@@ -4159,7 +4159,7 @@ impl LiveCli {
             .ok()
             .and_then(|cwd| resolve_git_branch_for(&cwd));
         let account = self.lifecycle.current_billing_account();
-        Some(format_turn_status_line(&TurnStatus {
+        Some(turn_status_line(&TurnStatus {
             model: &model,
             turn: tracker.turns(),
             usage: &latest,
@@ -4530,7 +4530,7 @@ impl LiveCli {
         // second copy of the precedence rules. A turn takes seconds; the config
         // read behind this does not register next to it.
         let account = self.lifecycle.current_billing_account();
-        let line = format_turn_status_line(&TurnStatus {
+        let line = turn_status_line(&TurnStatus {
             model,
             turn: turns,
             usage: &usage,
@@ -4551,8 +4551,8 @@ impl LiveCli {
                 ui.set_turn_result(&line);
             }
             (Some(ui), None) => ui.set_turn_result(&line),
-            (None, Some(out)) => out.println(&line),
-            (None, None) => self.out_println(line),
+            (None, Some(out)) => out.println(&line.to_string()),
+            (None, None) => self.out_println(line.to_string()),
         }
     }
 

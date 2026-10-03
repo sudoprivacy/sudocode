@@ -215,6 +215,8 @@ enum Scenario {
     TodoWriteLifecycleRoundtrip,
     SleepShortRoundtrip,
     MarkdownRenderingShowcase,
+    UnicodeRenderingShowcase,
+    SyntaxHighlightShowcase,
     SleepOverMaxRoundtrip,
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
@@ -348,6 +350,8 @@ impl Scenario {
             "todo_write_lifecycle_roundtrip" => Some(Self::TodoWriteLifecycleRoundtrip),
             "sleep_short_roundtrip" => Some(Self::SleepShortRoundtrip),
             "markdown_rendering_showcase" => Some(Self::MarkdownRenderingShowcase),
+            "unicode_rendering_showcase" => Some(Self::UnicodeRenderingShowcase),
+            "syntax_highlight_showcase" => Some(Self::SyntaxHighlightShowcase),
             "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
             "fork_subagent_recursion_guard_roundtrip" => {
                 Some(Self::ForkSubagentRecursionGuardRoundtrip)
@@ -414,6 +418,8 @@ impl Scenario {
             Self::TodoWriteLifecycleRoundtrip => "todo_write_lifecycle_roundtrip",
             Self::SleepShortRoundtrip => "sleep_short_roundtrip",
             Self::MarkdownRenderingShowcase => "markdown_rendering_showcase",
+            Self::UnicodeRenderingShowcase => "unicode_rendering_showcase",
+            Self::SyntaxHighlightShowcase => "syntax_highlight_showcase",
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
             Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
@@ -1167,7 +1173,9 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
             streaming_text_sse()
         }
-        Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(),
+        Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(MARKDOWN_SHOWCASE_DOC),
+        Scenario::UnicodeRenderingShowcase => markdown_showcase_sse(UNICODE_SHOWCASE_DOC),
+        Scenario::SyntaxHighlightShowcase => markdown_showcase_sse(SYNTAX_SHOWCASE_DOC),
         Scenario::ThinkingThenText => thinking_then_text_sse(),
         Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
             Some((output, is_error)) => {
@@ -1715,6 +1723,12 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         }
         Scenario::MarkdownRenderingShowcase => {
             text_message_response("msg_markdown_showcase", MARKDOWN_SHOWCASE_DOC)
+        }
+        Scenario::UnicodeRenderingShowcase => {
+            text_message_response("msg_unicode_showcase", UNICODE_SHOWCASE_DOC)
+        }
+        Scenario::SyntaxHighlightShowcase => {
+            text_message_response("msg_syntax_showcase", SYNTAX_SHOWCASE_DOC)
         }
         Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
             text_message_response(
@@ -2356,6 +2370,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ThinkingThenText => "req_thinking_then_text",
         Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
+        Scenario::UnicodeRenderingShowcase => "req_unicode_showcase",
+        Scenario::SyntaxHighlightShowcase => "req_syntax_showcase",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
         Scenario::SkillReadRoundtrip => "req_skill_read_roundtrip",
         Scenario::ImageReadRoundtrip => "req_image_read_roundtrip",
@@ -2537,10 +2553,16 @@ fn tool_message_response_many(id: &str, tool_uses: &[ToolUseMessage<'_>]) -> Mes
 /// hole). Consumed by `pty_raw_mode_line_endings.rs`.
 pub const MARKDOWN_SHOWCASE_DOC: &str = "Intro:\n- alpha\n- beta\n\n## Section\n\nAfter blank:\n\n- gamma\n\n1. parent\n   - child\n\n- outer\n  - inner\n- second\n\nDone.";
 
+/// Deterministic terminal-column and semantic-style fixture for PTY acceptance.
+pub const UNICODE_SHOWCASE_DOC: &str = "CJK:界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\n\nEmoji:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa👩🏽‍💻END\n\nCombining:aaaaaaaaaaaaaaaaaaaaaaaaaaaae\u{301}END\n\n| Key | Value |\n| --- | --- |\n| 中文 | 通过 |\n| ASCII | ok |\n\n[LINK](https://example.com) and `CODE`\n\nUnicode done.";
+
+/// Repeated highlighted turns for release process measurements.
+const SYNTAX_SHOWCASE_DOC: &str = "```rust\nfn main() {\n    let values = [1, 2, 3];\n    for value in values {\n        println!(\"value: {value}\");\n    }\n}\n```\n\nHighlight done.";
+
 /// Stream `MARKDOWN_SHOWCASE_DOC` as several text deltas with boundaries that
 /// deliberately fall mid-line, so the CLI's blank-line chunker — not the
 /// delta framing — decides how the renderer sees the text.
-fn markdown_showcase_sse() -> String {
+fn markdown_showcase_sse(document: &str) -> String {
     let mut body = String::new();
     append_sse(
         &mut body,
@@ -2569,7 +2591,7 @@ fn markdown_showcase_sse() -> String {
         }),
     );
     // Cut roughly every 25 bytes at char boundaries — mid-word, mid-line.
-    let mut rest = MARKDOWN_SHOWCASE_DOC;
+    let mut rest = document;
     while !rest.is_empty() {
         let mut cut = rest.len().min(25);
         while !rest.is_char_boundary(cut) {

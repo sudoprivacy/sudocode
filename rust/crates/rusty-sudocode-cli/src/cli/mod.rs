@@ -12,3 +12,6 @@ pub(crate) mod session;
 pub(crate) mod status;
 pub(crate) mod undo;
 pub(crate) mod update;
+
+pub(crate) mod headless;
+pub(crate) mod headless_output;

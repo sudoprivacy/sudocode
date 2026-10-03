@@ -269,3 +269,63 @@ cargo test -p rusty-sudocode-cli --test pty_image_handling -- --include-ignored
 This last test scripts only model replies: scode executes Bash, suh captures
 real Chrome pixels, and the test verifies those exact bytes in the next model
 request. A live model's visual accuracy is a separate check.
+
+## Non-interactive agent tasks (`-p`, `--print`)
+
+Print mode executes one complete agent turn using the normal project context,
+model configuration, skills, MCP servers and permission policy, then exits.
+Flags may follow the task; use `--` before task text that begins with `-`.
+
+```sh
+scode -p "Inspect this project" --model sonnet
+cat task.txt | scode -p --output-format json
+cat input.csv | scode -p "Summarize these quotes"
+scode -p "Continue the review" --resume SESSION_ID
+scode -p "Read the configuration" --output-format stream-json --verbose
+scode -p -- "--this is task text"
+```
+
+Stdin must contain finite UTF-8 input and reach EOF: the first-byte deadline is
+3 seconds, the total input deadline is 30 seconds, and the limit is 16 MiB.
+A task argument and stdin are combined with an explicit `<stdin>` section.
+With no task and no stdin, print mode reports an error; it never starts a REPL.
+For inherited pipes with no producer, redirect stdin from `/dev/null` (Windows:
+`NUL`). TTY stdin is never read, including for permission or broad-directory
+confirmation. Use `--allow-broad-cwd` explicitly when appropriate.
+
+Output contracts (schema version 1):
+
+- `text`: only the last complete assistant answer on stdout; errors on stderr
+  retain the CLI's `[error-kind: ...]` classification.
+- `json`: one final `type: result` object, including `subtype`, `is_error`,
+  `result`, `session_id`, `duration_ms`, `num_turns`, `model_round_trips`,
+  `permission_denials`, and observed current-run `usage`. `num_turns` counts
+  user turns (one for a started invocation), whereas `model_round_trips` counts
+  provider calls, including those following tool results. Unknown usage/cost
+  is omitted; usage never includes earlier resumed turns.
+  Execution errors include the CLI's machine-readable `kind` alongside `error`.
+- `stream-json`: flushed JSON lines: `system` initialization, complete
+  `assistant.message.content` (text and tool_use blocks), `user` tool_result
+  messages, and one final `result`. Tool inputs are objects; tool results
+  reference their call IDs. Assistant IDs are unique across resumed runs.
+  This is a documented subset, not the full Claude Agent SDK protocol.
+
+`--verbose` permits diagnostics on stderr. `--include-partial-messages` is
+reserved and currently rejected: full tool arguments are not represented as
+provider input deltas. Stream output requires `-p`; subcommands and `--compact`
+cannot be combined with print mode. Legacy prompt and REPL output is unchanged.
+
+Print mode never grants extra permissions. Requests requiring human approval
+are denied immediately and recorded, allowing the agent to recover with an
+allowed tool. Questions end the task with `needs_input`, without inventing an
+answer. Detached Bash/PowerShell jobs and background agents are refused; agents
+must use `run_in_background: false` so their work finishes within the invocation.
+Synchronous agents stay synchronous even past the ordinary auto-background
+threshold.
+On failure or cancellation the engine is closed, with a 10-second cleanup
+budget. A stalled stdout consumer has a 30-second write deadline; a broken pipe
+cancels the engine. An unwritable pipe cannot receive a final result.
+
+Exit codes: success `0`, execution/startup/output failure `1`, invalid arguments
+or input `2`, SIGINT `130`, SIGTERM `143` (Unix). Structured errors use the same
+result envelope as success, with `is_error: true` and an error subtype.

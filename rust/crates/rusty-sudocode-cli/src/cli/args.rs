@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use commands::{
     classify_skills_slash_command, resolve_skill_invocation, resolve_skill_invocation_with_plugins,
     slash_command_specs, SkillSlashDispatch, SlashCommand,
@@ -100,8 +100,16 @@ struct Cli {
     allow_broad_cwd: bool,
 
     /// Non-interactive print mode
-    #[arg(long, global = true)]
+    #[arg(short = 'p', long, global = true)]
     print: bool,
+
+    /// Additional headless diagnostics (stderr only)
+    #[arg(long, global = true)]
+    verbose: bool,
+
+    /// Reserved: partial streaming is not supported yet
+    #[arg(long, global = true)]
+    include_partial_messages: bool,
 
     /// Resume a saved session (optionally specify session path)
     #[arg(long, global = true, num_args = 0..=1, default_missing_value = "")]
@@ -129,6 +137,7 @@ struct Cli {
 enum OutputFormat {
     Text,
     Json,
+    StreamJson,
 }
 
 impl From<OutputFormat> for CliOutputFormat {
@@ -136,6 +145,7 @@ impl From<OutputFormat> for CliOutputFormat {
         match f {
             OutputFormat::Text => Self::Text,
             OutputFormat::Json => Self::Json,
+            OutputFormat::StreamJson => unreachable!("stream-json is headless-only"),
         }
     }
 }
@@ -293,6 +303,7 @@ enum AcpSub {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CliAction {
+    Headless(super::headless::HeadlessOptions),
     DumpManifests {
         output_format: CliOutputFormat,
         manifests_dir: Option<PathBuf>,
@@ -519,7 +530,15 @@ pub(crate) fn parse_args_with_prompt_overrides(
         return action.map(|action| (action, runtime::SystemPromptOverrides::default()));
     }
 
-    let cli = Cli::try_parse_from(std::iter::once("scode".to_string()).chain(args.iter().cloned()));
+    // Preserve legacy trailing prompt semantics, but let print-mode flags occur
+    // after the positional task. `--` escapes task text beginning with a dash.
+    let mut command = Cli::command();
+    if super::headless::requested(args) {
+        command = command.mut_arg("prompt_words", |arg| arg.trailing_var_arg(false));
+    }
+    let cli = command
+        .try_get_matches_from(std::iter::once("scode".to_string()).chain(args.iter().cloned()))
+        .and_then(|matches| Cli::from_arg_matches(&matches));
 
     match cli {
         Ok(mut cli) => {
@@ -559,7 +578,19 @@ fn non_empty(value: Option<String>, flag: &str) -> Result<Option<String>, String
 /// Convert the parsed `Cli` struct into the application's `CliAction`.
 #[allow(clippy::too_many_lines)]
 fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
-    let output_format: CliOutputFormat = cli.output_format.into();
+    if cli.include_partial_messages {
+        return Err(
+            "--include-partial-messages is not supported; use complete stream-json messages".into(),
+        );
+    }
+    if !cli.print && (cli.output_format == OutputFormat::StreamJson || cli.verbose) {
+        return Err("stream-json and --verbose require -p/--print".into());
+    }
+    let output_format = if cli.output_format == OutputFormat::StreamJson {
+        CliOutputFormat::Json
+    } else {
+        cli.output_format.into()
+    };
     let model_flag_raw = cli.model.clone();
     let model = match &cli.model {
         Some(m) => {
@@ -581,6 +612,35 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
     };
     let allowed_tools = normalize_allowed_tools(&cli.allowed_tools)?;
     let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
+
+    if cli.print {
+        if cli.command.is_some() || cli.compact {
+            return Err("-p cannot be combined with a subcommand or --compact".into());
+        }
+        return Ok(CliAction::Headless(super::headless::HeadlessOptions {
+            prompt: cli.prompt_words.join(" "),
+            model,
+            allowed_tools,
+            permission_mode,
+            reasoning_effort: cli.reasoning_effort,
+            auth_mode,
+            allow_broad_cwd: cli.allow_broad_cwd,
+            base_commit: cli.base_commit,
+            resume: cli.resume.map(|value| {
+                if value.is_empty() {
+                    LATEST_SESSION_REFERENCE.into()
+                } else {
+                    value
+                }
+            }),
+            format: match cli.output_format {
+                OutputFormat::Text => super::headless::OutputFormat::Text,
+                OutputFormat::Json => super::headless::OutputFormat::Json,
+                OutputFormat::StreamJson => super::headless::OutputFormat::StreamJson,
+            },
+            verbose: cli.verbose,
+        }));
+    }
 
     // --resume takes priority over subcommands
     if let Some(resume_value) = cli.resume {

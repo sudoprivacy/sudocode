@@ -705,6 +705,18 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "Flags:")?;
     writeln!(
         out,
+        "  -p, --print                Run one non-interactive agent task; never prompt"
+    )?;
+    writeln!(
+        out,
+        "  --verbose                  Print-mode diagnostics on stderr"
+    )?;
+    writeln!(
+        out,
+        "  Use -- before print-mode task text beginning with a dash"
+    )?;
+    writeln!(
+        out,
         "  --model MODEL              Override the active model"
     )?;
     writeln!(
@@ -713,7 +725,7 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
     )?;
     writeln!(
         out,
-        "  --output-format FORMAT     Non-interactive output format: text or json"
+        "  --output-format FORMAT     Output format: text, json, or stream-json (-p only)"
     )?;
     writeln!(
         out,

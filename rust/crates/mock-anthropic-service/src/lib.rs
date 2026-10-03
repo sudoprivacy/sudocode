@@ -188,6 +188,7 @@ enum Scenario {
     /// with line boundaries.
     ThinkingThenText,
     ReadFileRoundtrip,
+    SkillReadRoundtrip,
     ImageReadRoundtrip,
     BrowserImageRoundtrip,
     WebSearchRoundtrip,
@@ -267,6 +268,8 @@ enum Scenario {
     /// `Agent` whose child ([`Scenario::SubagentToolChild`]) makes a tool call,
     /// so the forwarded stream has text, a tool call and its result.
     SubagentEventsSync,
+    /// Synchronous delegation that exceeds a one-second auto-background threshold.
+    SubagentEventsSyncSlow,
     /// Two `Agent` calls in one message, both `run_in_background: true`: the
     /// children run in parallel and finish after the parent's turn ended.
     SubagentEventsBackground,
@@ -318,6 +321,7 @@ impl Scenario {
             "streaming_text" => Some(Self::StreamingText),
             "thinking_then_text" => Some(Self::ThinkingThenText),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
+            "skill_read_roundtrip" => Some(Self::SkillReadRoundtrip),
             "image_read_roundtrip" => Some(Self::ImageReadRoundtrip),
             "browser_image_roundtrip" => Some(Self::BrowserImageRoundtrip),
             "web_search_roundtrip" => Some(Self::WebSearchRoundtrip),
@@ -365,6 +369,7 @@ impl Scenario {
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
             "subagent_events_sync" => Some(Self::SubagentEventsSync),
+            "subagent_events_sync_slow" => Some(Self::SubagentEventsSyncSlow),
             "subagent_events_background" => Some(Self::SubagentEventsBackground),
             "subagent_events_nested" => Some(Self::SubagentEventsNested),
             "subagent_events_cancel" => Some(Self::SubagentEventsCancel),
@@ -382,6 +387,7 @@ impl Scenario {
             Self::StreamingText => "streaming_text",
             Self::ThinkingThenText => "thinking_then_text",
             Self::ReadFileRoundtrip => "read_file_roundtrip",
+            Self::SkillReadRoundtrip => "skill_read_roundtrip",
             Self::ImageReadRoundtrip => "image_read_roundtrip",
             Self::BrowserImageRoundtrip => "browser_image_roundtrip",
             Self::WebSearchRoundtrip => "web_search_roundtrip",
@@ -427,6 +433,7 @@ impl Scenario {
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
             Self::SubagentEventsSync => "subagent_events_sync",
+            Self::SubagentEventsSyncSlow => "subagent_events_sync_slow",
             Self::SubagentEventsBackground => "subagent_events_background",
             Self::SubagentEventsNested => "subagent_events_nested",
             Self::SubagentEventsCancel => "subagent_events_cancel",
@@ -487,8 +494,14 @@ async fn handle_connection(
         socket.write_all(response.as_bytes()).await?;
         return Ok(());
     }
-    let scenario = detect_scenario(&request)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parity scenario"))?;
+    let Some(scenario) = detect_scenario(&request) else {
+        // A malformed fixture is a non-retryable request error, not a dropped
+        // connection that makes clients spend minutes retrying transport I/O.
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"missing parity scenario"}}"#;
+        let response = http_response("400 Bad Request", "application/json", body, &[]);
+        socket.write_all(response.as_bytes()).await?;
+        return Ok(());
+    };
 
     let path_for_count = path.clone();
     requests.lock().await.push(CapturedRequest {
@@ -888,16 +901,25 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
     let done = latest_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
     match (scenario, done) {
-        (Scenario::SubagentEventsSync, None) => SubagentStep::Tools(vec![(
-            "toolu_events_sync",
-            "Agent",
-            agent_call_input(
-                "sync child",
-                &child("subagent_tool_child", "list the workspace"),
-                "general-purpose",
-                false,
-            ),
-        )]),
+        (Scenario::SubagentEventsSync | Scenario::SubagentEventsSyncSlow, None) => {
+            SubagentStep::Tools(vec![(
+                "toolu_events_sync",
+                "Agent",
+                agent_call_input(
+                    "sync child",
+                    &child(
+                        if scenario == Scenario::SubagentEventsSyncSlow {
+                            "subagent_slow_child"
+                        } else {
+                            "subagent_tool_child"
+                        },
+                        "list the workspace",
+                    ),
+                    "general-purpose",
+                    false,
+                ),
+            )])
+        }
         (Scenario::SubagentEventsBackground, None) => SubagentStep::Tools(vec![
             (
                 "toolu_events_bg_1",
@@ -1131,6 +1153,15 @@ fn build_http_response(request: &MessageRequest, scenario: Scenario, attempt: us
 }
 
 #[allow(clippy::too_many_lines)]
+fn read_roundtrip_input(scenario: Scenario) -> Value {
+    let path = if scenario == Scenario::SkillReadRoundtrip {
+        ".agents/skills/headless-probe/SKILL.md"
+    } else {
+        "fixture.txt"
+    };
+    json!({"path": path})
+}
+
 fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
     match scenario {
         Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
@@ -1185,17 +1216,19 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 },
             ]),
         },
-        Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => final_text_sse(&format!(
-                "read_file roundtrip complete: {}",
-                extract_read_content(&tool_output)
-            )),
-            None => tool_use_sse(
-                "toolu_read_fixture",
-                "read_file",
-                &[r#"{"path":"fixture.txt"}"#],
-            ),
-        },
+        Scenario::ReadFileRoundtrip | Scenario::SkillReadRoundtrip => {
+            match latest_tool_result(request) {
+                Some((tool_output, _)) => final_text_sse(&format!(
+                    "read_file roundtrip complete: {}",
+                    extract_read_content(&tool_output)
+                )),
+                None => tool_use_sse(
+                    "toolu_read_fixture",
+                    "read_file",
+                    &[&read_roundtrip_input(scenario).to_string()],
+                ),
+            }
+        }
         Scenario::GrepChunkAssembly => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "grep_search matched {} occurrences",
@@ -1648,6 +1681,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         }
         Scenario::CohostDelegate
         | Scenario::SubagentEventsSync
+        | Scenario::SubagentEventsSyncSlow
         | Scenario::SubagentEventsBackground
         | Scenario::SubagentEventsNested
         | Scenario::SubagentEventsCancel
@@ -1738,21 +1772,23 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 ],
             ),
         },
-        Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => text_message_response(
-                "msg_read_file_final",
-                &format!(
-                    "read_file roundtrip complete: {}",
-                    extract_read_content(&tool_output)
+        Scenario::ReadFileRoundtrip | Scenario::SkillReadRoundtrip => {
+            match latest_tool_result(request) {
+                Some((tool_output, _)) => text_message_response(
+                    "msg_read_file_final",
+                    &format!(
+                        "read_file roundtrip complete: {}",
+                        extract_read_content(&tool_output)
+                    ),
                 ),
-            ),
-            None => tool_message_response(
-                "msg_read_file_tool",
-                "toolu_read_fixture",
-                "read_file",
-                json!({"path": "fixture.txt"}),
-            ),
-        },
+                None => tool_message_response(
+                    "msg_read_file_tool",
+                    "toolu_read_fixture",
+                    "read_file",
+                    read_roundtrip_input(scenario),
+                ),
+            }
+        }
         Scenario::GrepChunkAssembly => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_grep_final",
@@ -2302,6 +2338,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         }
         Scenario::CohostDelegate
         | Scenario::SubagentEventsSync
+        | Scenario::SubagentEventsSyncSlow
         | Scenario::SubagentEventsBackground
         | Scenario::SubagentEventsNested
         | Scenario::SubagentEventsCancel
@@ -2320,6 +2357,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
+        Scenario::SkillReadRoundtrip => "req_skill_read_roundtrip",
         Scenario::ImageReadRoundtrip => "req_image_read_roundtrip",
         Scenario::BrowserImageRoundtrip => "req_browser_image_roundtrip",
         Scenario::WebSearchRoundtrip => "req_web_search_roundtrip",
@@ -2365,6 +2403,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",
         Scenario::SubagentEventsSync => "req_subagent_events_sync",
+        Scenario::SubagentEventsSyncSlow => "req_subagent_events_sync_slow",
         Scenario::SubagentEventsBackground => "req_subagent_events_background",
         Scenario::SubagentEventsNested => "req_subagent_events_nested",
         Scenario::SubagentEventsCancel => "req_subagent_events_cancel",

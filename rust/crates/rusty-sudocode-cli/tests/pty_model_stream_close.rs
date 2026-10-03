@@ -220,7 +220,7 @@ fn check_response(kind: ResponseKind) {
             if exit == 0 {
                 screen.contains("STREAM_BODY_VERIFIED")
             } else {
-                common::screen_contains(screen, "Run `scode --help` for usage.")
+                common::screen_contains(screen, "runtime_error:")
             }
         },
         env.timeout(),

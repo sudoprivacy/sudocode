@@ -53,7 +53,7 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
     );
     sess.send("\r").expect("submit");
     sess.set_default_timeout(if env.is_live() {
-        Duration::from_secs(120)
+        common::LIVE_TURN_BUDGET
     } else {
         common::DEFAULT_TIMEOUT
     });

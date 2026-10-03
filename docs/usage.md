@@ -210,6 +210,19 @@ discovered through ToolSearch is listed but costs no tokens.
 The window and auto-compaction reserve use the current session's endpoint
 catalog, including discovered limits that override the built-in model table.
 
+## Managing saved sessions
+
+In the iocraft REPL, `/session`, `/session list` or `/resume` opens the same input
+component used by `/model`. Type to filter, use arrow keys to select, press
+Enter to switch, or Esc to return to the prompt. The current session is marked
+in the list. The one-shot `/session list` command still prints a text report.
+
+`/session delete <id>` asks for confirmation in that input component, with
+Cancel selected by default. Esc also cancels. `/session delete <id> --force`
+skips confirmation; both paths reject deleting the active session. Session
+selection and confirmation are available after the current model turn finishes
+or is cancelled.
+
 ## Compacting a long conversation
 
 `/compact` in the REPL, ACP, or `scode --resume <id> /compact` uses the same

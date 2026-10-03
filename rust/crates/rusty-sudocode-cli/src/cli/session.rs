@@ -108,8 +108,8 @@ pub(crate) fn render_session_list(
 
 /// Compact one-line description of a session for the interactive picker.
 ///
-/// Excludes ANSI styling because `dialoguer::FuzzySelect` matches against the
-/// raw string, and escape characters would be visible in the fuzzy filter.
+/// Excludes ANSI styling so both inline and synchronous fuzzy pickers can
+/// match the raw string without displaying escape characters.
 pub(crate) fn format_session_picker_entry(
     session: &ManagedSessionSummary,
     active_session_id: &str,

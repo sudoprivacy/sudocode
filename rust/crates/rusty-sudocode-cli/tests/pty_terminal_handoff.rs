@@ -187,13 +187,21 @@ print('PAGER_DONE', flush=True)
             ("PAGER", &command),
         ],
     );
-    common::expect_input_line_cleared(&child, env.timeout(), "initial prompt");
+    // Start with a small viewport so pagination is required without racing a
+    // live resize against command input. Resize has its own acceptance suite.
     child.resize(12, 80).unwrap();
-    child.send("/status\r").unwrap();
-    child.expect("PAGER_READY").unwrap();
+    common::expect_input_line_cleared(&child, env.timeout(), "initial prompt");
+    child.send("/status").unwrap();
+    common::expect_input_line(&child, "/status", env.timeout(), "pager command");
+    child.send("\r").unwrap();
+    child.expect("PAGER_READY").unwrap_or_else(|error| {
+        panic!(
+            "pager did not take terminal ownership: {error}\n{}",
+            common::screen_tail(&child, 5000)
+        );
+    });
     child.send("q").unwrap();
     child.expect("PAGER_DONE").unwrap();
-    child.resize(30, 100).unwrap();
     assert!(
         std::fs::read_to_string(env.workspace_root().join("pager-report.txt"))
             .unwrap()

@@ -1,3 +1,5 @@
+#![cfg(feature = "mailbox")]
+
 //! The co-host, proven on a scripted model — no secrets, no network.
 //!
 //! `cohost_live_llm` is the real thing and is `#[ignore]`d for it, so until now
@@ -16,7 +18,9 @@
 //! kernel of its own and one on the daemon's — so a behaviour proven on either
 //! side is a statement about the engine rather than about a host.
 
+#[path = "../../engine-host/tests/common/mod.rs"]
 mod common;
+mod managed_harness;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,8 +30,8 @@ use common::{
     agent_workspace, make_desc, mount_agent_world, provision_stream_transcript, send_prompt,
     user_ctx, wait_for_agent_reply,
 };
-use engine_host::managed_agent::spawn_managed_agent;
 use kernel::kernel::Kernel;
+use managed_harness::spawn_managed_agent;
 use runtime::mailbox::{InboxConvention, Mailbox};
 use runtime::{FsBackend, KernelFsBackend};
 
@@ -256,6 +260,23 @@ fn run_cohost_turn(
         agent_id,
         Duration::from_secs(60),
     );
+    // A send tool can deliver the reply before its turn finishes. Wait for the
+    // durable receive acknowledgement before terminating the host.
+    if reply.is_some() {
+        let receiver = Mailbox::daemon_absolute(Arc::clone(&user_fs), agent_id.into());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !receiver
+            .read_position(USER)
+            .unwrap()
+            .is_some_and(|offset| offset > 0)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "turn did not acknowledge peer input"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     handle.abort_signal.abort();
     let _ = handle.join.join();
 
@@ -575,7 +596,7 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     );
     managed_agent::install_managed_agent_with_spawn(
         &kernel,
-        Arc::new(engine_host::managed_agent::SudoCodeSpawnAdapter),
+        Arc::new(engine_acp::managed_agent::SudoCodeSpawnAdapter),
     )
     .unwrap();
     let agent = "resume-agent";
@@ -592,7 +613,13 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     mb.ensure_conversation(agent).unwrap();
     let mut request =
         json!({"agent_id":agent,"owner_id":"test-owner","zone_id":"root","model":MODEL});
+    provision_stream_transcript(
+        &kernel,
+        &a2a::conversation_transcript_path(&a2a::conversation_id(agent, "test-owner")),
+    );
     let first = managed_call(&kernel, "start_session_v1", request.clone()).unwrap();
+    let first_controller =
+        managed_harness::attach_controller(Arc::clone(&kernel), &first, false).unwrap();
     let sid = first["durable_session_id"].as_str().unwrap();
     assert_ne!(first["session_id"], sid);
     let path = format!("/sessions/{sid}/transcript.jsonl");
@@ -612,6 +639,7 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     await_new_reply(&mb, agent, &mut cursor);
     wait_idle(&kernel, &first["session_id"]);
     stop_session(&kernel, &first["session_id"], sid);
+    drop(first_controller);
     let before = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
     assert!(!before.messages.is_empty());
     let before_bytes = fs.read_to_string(&path).unwrap();
@@ -644,6 +672,8 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     }
     let captured_before = harness.requests_seen();
     let second = managed_call(&kernel, "start_session_v1", request.clone()).unwrap();
+    let second_controller =
+        managed_harness::attach_controller(Arc::clone(&kernel), &second, true).unwrap();
     assert_ne!(second["session_id"], first["session_id"]);
     assert_eq!(second["durable_session_id"], sid);
     (mb.sender())(
@@ -654,6 +684,7 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     await_new_reply(&mb, agent, &mut cursor);
     wait_idle(&kernel, &second["session_id"]);
     stop_session(&kernel, &second["session_id"], sid);
+    drop(second_controller);
     let after = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
     assert_eq!(after.session_id, before.session_id);
     assert!(after.messages.len() > before.messages.len());

@@ -1,5 +1,9 @@
+#![cfg(feature = "mailbox")]
+
 //! A co-host cannot silently retain an HTTP model route.
+#[path = "../../engine-host/tests/common/mod.rs"]
 mod common;
+mod managed_harness;
 
 use std::sync::Arc;
 
@@ -20,7 +24,7 @@ fn direct_model_configuration_is_refused_before_an_agent_starts() {
     std::env::set_var("SUDO_CODE_CONFIG_HOME", home.path());
     let kernel = Arc::new(kernel::kernel::Kernel::new());
     common::mount_agent_world(&kernel);
-    let result = engine_host::managed_agent::spawn_managed_agent(
+    let result = managed_harness::spawn_managed_agent(
         kernel,
         common::make_desc("direct-model", "direct-model", "test"),
         |_, _| {},

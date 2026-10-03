@@ -704,6 +704,26 @@ fn compact_bash_step(request: &MessageRequest) -> Option<(String, &'static str, 
         .map(|input| (format!("compact_bash_{completed}"), "bash", input))
 }
 
+// Only a tool result produced after the latest user scenario belongs to this turn.
+fn current_turn_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
+    for message in request.messages.iter().rev() {
+        for block in message.content.iter().rev() {
+            match block {
+                InputContentBlock::ToolResult {
+                    content, is_error, ..
+                } => return Some((flatten_tool_result_content(content), *is_error)),
+                InputContentBlock::Text { text, .. }
+                    if message.role == "user" && text.contains("PARITY_SCENARIO:") =>
+                {
+                    return None
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
     request.messages.iter().rev().find_map(|message| {
         message.content.iter().rev().find_map(|block| match block {
@@ -1211,7 +1231,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 ],
             ),
         },
-        Scenario::WriteFileAllowed => match latest_tool_result(request) {
+        Scenario::WriteFileAllowed => match current_turn_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "write_file succeeded: {}",
                 extract_file_path(&tool_output)
@@ -1222,7 +1242,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"path":"generated/output.txt","content":"created by mock service\n"}"#],
             ),
         },
-        Scenario::WriteFileDenied => match latest_tool_result(request) {
+        Scenario::WriteFileDenied => match current_turn_tool_result(request) {
             Some((tool_output, _)) => {
                 final_text_sse(&format!("write_file denied as expected: {tool_output}"))
             }
@@ -1449,7 +1469,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             }
             None => tool_use_sse("toolu_sleep_short", "Sleep", &[r#"{"duration_ms":600}"#]),
         },
-        Scenario::AskUserQuestionRoundtrip => match latest_tool_result(request) {
+        Scenario::AskUserQuestionRoundtrip => match current_turn_tool_result(request) {
             Some((tool_output, _)) => {
                 final_text_sse(&format!("ask_user_question answered: {tool_output}"))
             }
@@ -1768,7 +1788,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"pattern": "parity", "path": "fixture.txt", "output_mode": "count"}),
             ),
         },
-        Scenario::WriteFileAllowed => match latest_tool_result(request) {
+        Scenario::WriteFileAllowed => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_write_allowed_final",
                 &format!("write_file succeeded: {}", extract_file_path(&tool_output)),
@@ -1780,7 +1800,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"path": "generated/output.txt", "content": "created by mock service\n"}),
             ),
         },
-        Scenario::WriteFileDenied => match latest_tool_result(request) {
+        Scenario::WriteFileDenied => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_write_denied_final",
                 &format!("write_file denied as expected: {tool_output}"),
@@ -2081,7 +2101,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"duration_ms": 600}),
             ),
         },
-        Scenario::AskUserQuestionRoundtrip => match latest_tool_result(request) {
+        Scenario::AskUserQuestionRoundtrip => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_ask_user_question_final",
                 &format!("ask_user_question answered: {tool_output}"),

@@ -36,6 +36,10 @@
 //! * **Never read a just-sent frame without blocking.** See
 //!   [`DELIVERY_WAIT_MS`].
 
+#[path = "common/session_controller.rs"]
+mod session_controller;
+use session_controller::Controller;
+
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -287,19 +291,6 @@ fn live_blocking_read_wakes_on_write() {
 /// is scripted rather than a live model's choice. The body carries the scenario
 /// marker that selects it.
 ///
-/// ## Not yet observed passing
-///
-/// Everything up to the reply is verified: the co-host boots against the mock,
-/// an agent spawns, and the message lands in the inbox that agent's loop reads
-/// (`Mailbox::a2a_inbox`, so `/agents/<name>/chat-with-me`). The reply has not
-/// been seen, and the reason is not this test: the only co-host image available
-/// carries the sudocode rev the NEXUS `Cargo.lock` pins, which is hundreds of
-/// commits behind — the agent inside it predates the send path this is meant to
-/// exercise. Proving it needs that pin bumped and the image rebuilt, which is a
-/// nexus-repo integration rather than a test fix.
-///
-/// Left `#[ignore]` and driven only by the harness, so it cannot be mistaken
-/// for a passing guard in the meantime.
 #[test]
 #[ignore = "requires a co-host daemon; e2e/nexus-a2a/run-cohost.sh sets this up"]
 fn live_cohost_reads_its_inbox_and_replies() {
@@ -312,6 +303,19 @@ fn live_cohost_reads_its_inbox_and_replies() {
         .expect("set NEXUS_A2A_TEST_REPLY_BODY to what the scenario answers");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
     let client = dial(&endpoint);
+
+    let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
+    let started = client
+        .call(
+            "managed_agent.start_session_v1",
+            serde_json::json!({"agent_id":agent,"model":model})
+                .to_string()
+                .as_bytes(),
+            &auth,
+        )
+        .unwrap();
+    let started = serde_json::from_slice(&started).unwrap();
+    let _controller = Controller::attach(&client, &started, &auth);
 
     // From where the operator's inbox is NOW, so the reply found below is this
     // run's rather than a previous one's.
@@ -332,7 +336,7 @@ fn live_cohost_reads_its_inbox_and_replies() {
         let (msgs, _next) = mailbox(&client, &reply_to, &auth)
             .poll_conversation(&agent, before, 0)
             .expect("read the operator's inbox");
-        if let Some(reply) = msgs.iter().find(|m| m.from == agent) {
+        if let Some(reply) = msgs.iter().find(|m| m.from == agent && m.kind != "session") {
             assert!(
                 reply.body.contains(&expected),
                 "the co-host replied, but not with what its turn was scripted to say: {reply:?}"
@@ -767,6 +771,8 @@ fn live_spawn_cohost() {
         .expect("start_session_v1 call");
     let body = String::from_utf8_lossy(&resp);
     println!("start_session_v1 -> {body}");
+    let started = serde_json::from_slice(&resp).unwrap();
+    let _controller = Controller::attach(&client, &started, &auth);
     assert!(
         body.contains("session_id"),
         "expected a session_id in the spawn response, got {body}"
@@ -1177,6 +1183,7 @@ fn live_cohost_subagent_context() {
             .unwrap(),
     )
     .unwrap();
+    let _controller = Controller::attach(&client, &started, "");
     let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
     send_to(
         &client,
@@ -1285,6 +1292,7 @@ fn live_cohost_model_workflow() {
             .unwrap(),
     )
     .unwrap();
+    let _controller = Controller::attach(&client, &started, "");
     let workspace = &data;
     println!("LIVE COHOST: fresh quote mounted at {workspace}");
     let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
@@ -1398,7 +1406,7 @@ fn wait_live_reply(mb: &Mailbox, agent: &str, cursor: &mut u64, marker: &str) ->
             .unwrap();
         *cursor = next;
         for message in messages {
-            if message.from == agent {
+            if message.from == agent && message.kind != "session" {
                 println!("LIVE COHOST reply: {}", message.body);
                 if message.body.contains(marker) {
                     return message.body;
@@ -1471,6 +1479,7 @@ fn live_cohost_session_resume() {
         }
     };
     let first = rpc("managed_agent.start_session_v1", &request).unwrap();
+    let controller = Controller::attach(&client, &first, "");
     let sid = first["durable_session_id"]
         .as_str()
         .expect("co-host durable ID");
@@ -1517,6 +1526,7 @@ fn live_cohost_session_resume() {
         &json!({"session_id":first["session_id"],"mode":"session"}),
     )
     .unwrap();
+    drop(controller);
     // Cancel signals the worker. Recovery must wait for its last write and lease
     // release rather than stealing a still-running transcript.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -1531,6 +1541,7 @@ fn live_cohost_session_resume() {
             Err(error) => panic!("restore failed: {error}"),
         }
     };
+    let _controller = Controller::attach(&client, &second, "");
     assert_ne!(second["session_id"], first["session_id"]);
     assert_eq!(second["durable_session_id"], sid);
     let snapshot = rpc(
@@ -1555,7 +1566,7 @@ fn live_cohost_session_resume() {
         cursor = next;
         if received
             .iter()
-            .any(|m| m.from == agent && m.body.contains("PONG"))
+            .any(|m| m.from == agent && m.kind != "session" && m.body.contains("PONG"))
         {
             break;
         }

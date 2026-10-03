@@ -30,10 +30,10 @@ futures = "0.3"
 getrandom = "0.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Nexus kernel rlib — provides the `kernel::kernel::syscall::KernelSyscall`
-# trait that `runtime::spawn_task::<K>` is generic over.
+# trait used by KernelFsBackend and the direct in-process mailbox.
 kernel = { workspace = true }
 # The A2A messaging substrate: SSOT for the mailbox message schema
-# (`MailboxEnvelope`) + the `/chat-with-me` path suffix. Re-exported from
+# (`MailboxEnvelope`) and conversation paths. Re-exported from
 # `spawn_task` so downstream crates use it without a direct a2a dependency.
 a2a = { workspace = true }
 # VFS namespace constants (SESSIONS_BASE): the layout is nexus-vfs contract, so

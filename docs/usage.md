@@ -40,6 +40,11 @@ scode
 The REPL accepts prose and slash commands. Tab completion expands slash
 command names, model aliases, permission modes, and recent session IDs.
 
+Ctrl+U clears the current draft; typing immediately afterward starts the new
+draft. Pasting inserts text at the cursor and preserves any text after it.
+Long or multiline pastes appear as `[Pasted text #N +M lines]`; submission
+expands the placeholder into the original text, including any edits around it.
+
 Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.

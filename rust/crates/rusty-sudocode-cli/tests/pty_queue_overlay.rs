@@ -48,6 +48,26 @@ fn input_submitted_during_a_turn_shows_in_the_queue_overlay() {
     sess.expect(&format!("↳ queued: {MARKER}"))
         .expect("queued input should render in the queue overlay, not scrollback");
 
+    // Both kinds of pending work share the layout budget, without deleting
+    // either entry from the coordinator when details no longer fit.
+    sess.resize(8, 100).expect("short window");
+    common::expect_screen_settled(
+        &sess,
+        |screen| screen.contains("1 running · 1 queued") && screen.contains('❯'),
+        common::DEFAULT_TIMEOUT,
+        "pending counts in compact layout",
+    );
+    sess.resize(50, 100).expect("restore window");
+    common::expect_screen(
+        &sess,
+        |screen| {
+            screen.contains(&format!("↳ queued: {MARKER}"))
+                && !screen.contains("1 running · 1 queued")
+        },
+        common::DEFAULT_TIMEOUT,
+        "queued message restored from unchanged state",
+    );
+
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();

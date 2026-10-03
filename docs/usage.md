@@ -40,6 +40,11 @@ scode
 The REPL accepts prose and slash commands. Tab completion expands slash
 command names, model aliases, permission modes, and recent session IDs.
 
+Ctrl+U clears the current draft; typing immediately afterward starts the new
+draft. Pasting inserts text at the cursor and preserves any text after it.
+Long or multiline pastes appear as `[Pasted text #N +M lines]`; submission
+expands the placeholder into the original text, including any edits around it.
+
 Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
@@ -54,11 +59,21 @@ theme-selected muted foreground without an additional dim attribute; cache
 health indicators keep their semantic colors. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
 
-Resizing the terminal reflows the live UI in place: status, Todo, and queued
-message panels remain transient rather than leaving duplicate frames in the
-conversation. The current input draft is retained. For UI that fits within
-the viewport, resize clears only the live UI from its retained start position,
-without clearing the preceding conversation or purging terminal scrollback.
+The live slots share one row budget. In a short window, InputSlot takes
+priority: running tools, queued messages and Todos fold to count summaries;
+status details fold to a labeled summary. Growing the window restores the
+details automatically. Long drafts scroll inside the input viewport without
+discarding their hidden contents. Long question descriptions (including plan
+review) scroll inside InputSlot with Page Up/Down; Ctrl+Home/End jump to the
+start/end. A range label shows which rows are visible, while choices and the
+custom-answer row remain on screen. Arrow keys still navigate the choices.
+If even the controls and a review row cannot fit, an enlarge-window warning
+disables confirmation; Escape and Ctrl-C remain available. Normal slot order
+is unchanged.
+
+Terminal resize recovery is still being repaired. In particular, Windows
+terminal reflow can leave stale live frames in scrollback; the bounded layout
+does not by itself establish correct history/live-region recovery.
 
 While a turn is running, messages you submit wait in the staging area.
 Press ↑ on an empty input to recall the newest queued human message for

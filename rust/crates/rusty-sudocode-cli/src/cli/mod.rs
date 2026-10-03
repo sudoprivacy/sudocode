@@ -7,6 +7,7 @@ pub(crate) mod format;
 pub(crate) mod git;
 pub(crate) mod help;
 pub(crate) mod lifecycle;
+pub(crate) mod memory_ui;
 pub(crate) mod pager;
 pub(crate) mod session;
 pub(crate) mod session_ui;

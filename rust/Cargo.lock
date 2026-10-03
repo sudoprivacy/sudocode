@@ -1126,7 +1126,7 @@ dependencies = [
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/sudoprivacy/crossterm.git?branch=feat%2Fwindows-vt-bracketed-paste#236374f0f95d201e70402d704731b8b69cacbd56"
+source = "git+https://github.com/sudoprivacy/crossterm.git?rev=35f34a117d6d0d441d0256d39626697ce7604052#35f34a117d6d0d441d0256d39626697ce7604052"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm_winapi",
@@ -2423,7 +2423,7 @@ dependencies = [
 [[package]]
 name = "iocraft"
 version = "0.8.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?branch=main#7cc7f986fdb3c7cc30762c3fd8f6c17b9cdc9e30"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=60bb2014696471e1febe505784b3a23e7c601b05#60bb2014696471e1febe505784b3a23e7c601b05"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm 0.29.0",
@@ -2438,7 +2438,7 @@ dependencies = [
 [[package]]
 name = "iocraft-macros"
 version = "0.2.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?branch=main#7cc7f986fdb3c7cc30762c3fd8f6c17b9cdc9e30"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=60bb2014696471e1febe505784b3a23e7c601b05#60bb2014696471e1febe505784b3a23e7c601b05"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4530,6 +4530,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "shell-words",
  "smol",
  "stdin-peek",
  "syntect",

@@ -25,7 +25,7 @@ engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
-iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", branch = "main" }
+iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "60bb2014696471e1febe505784b3a23e7c601b05" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"
@@ -38,6 +38,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 telemetry = { path = "../telemetry" }
 serde = { version = "1", features = ["derive"] }
 smol = "2"
+shell-words = "1"
 serde_json.workspace = true
 sha2 = "0.10"
 flate2 = "1"
@@ -69,4 +70,3 @@ stdin-peek = { path = "../stdin-peek" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["term", "poll", "signal", "fs"] }
-

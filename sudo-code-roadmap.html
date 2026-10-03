@@ -1586,6 +1586,17 @@ impact, lowest implementation cost first:</p>
 
 <h4>Inline rendering design principles</h4>
 
+<p><strong>External terminal ownership (#584).</strong> CCB validation:
+<code>src/commands/memory/memory.tsx</code> and
+<code>src/utils/promptEditor.ts</code> (CCB <code>236d99ed</code>) confirm a
+file picker, exclusive stdin while the editor runs, and restoration after
+errors. Scode uses its existing InputSlot for memory and session selection.
+Editor and pager handoff flushes pending output, stops and joins the event
+reader, restores cooked input and stderr, and resumes the same component
+tree afterward. Its own display remains inline. PTY coverage exercises
+repeated editing, selection/cancellation, failure recovery, and pager EOF
+and keyboard input.</p>
+
 <ol>
   <li>Inline REPL only. <strong>No alternate-screen mode</strong> — see the bright-line rule above. Scrollback in the host terminal (VS Code, tmux, SSH) stays load-bearing.</li>
   <li>Every formatting function takes <code>&amp;mut impl Write</code> so it stays testable without a terminal, and so the same code path serves <code>--output-format json</code>, ACP, and pipe consumers.</li>
@@ -1987,4 +1998,3 @@ PR — the roadmap tracks the live state, not history.</p>
 <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v833ccba57c9e4d2798f2e76cebdd09a11778172276447" integrity="sha512-57MDmcccJXYtNnH+ZiBwzC4jb2rvgVCEokYN+L/nLlmO8rfYT/gIpW2A569iJ/3b+0UEasghjuZH/ma3wIs/EQ==" data-cf-beacon='{"version":"2024.11.0","token":"01647f0bf2284c1cab76d276d454730c","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
 </body>
 </html>
-

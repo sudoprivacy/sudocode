@@ -81,8 +81,10 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
             rows[first] == format!("{prefix}CJK:{}", "界".repeat(17))
                 || (env.is_live() && rows[first] == format!("• CJK:{}", "界".repeat(17)))
         );
+        // ConPTY may fill unused columns with spaces. Keep the leading
+        // margin and visible continuation text exact.
         assert_eq!(
-            rows[first + 1],
+            rows[first + 1].trim_end_matches(' '),
             format!("  {}", "界".repeat(13)),
             "wide continuation must retain its margin: {contents}"
         );

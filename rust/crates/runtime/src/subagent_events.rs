@@ -77,6 +77,10 @@ pub struct SubagentLifecycle {
     pub completed_at: Option<String>,
     /// The final `AgentOutput` manifest (with the result text) on `Finished`.
     pub raw_output: Option<serde_json::Value>,
+    /// Model-facing completion, rendered by the producer using the shared
+    /// task-notification format. Renderers enqueue it without interpreting
+    /// the tool's private manifest schema.
+    pub completion_notification: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

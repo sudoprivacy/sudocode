@@ -1225,9 +1225,14 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Spawn a sub-agent, returning a pid. ",
                 "The sub-agent runs in an isolated context (its own system prompt + this task) ",
                 "and does not inherit this conversation; it is a throwaway worker that returns a result. ",
+                "Use proactively for broad codebase investigations, independent workstreams, and running or monitoring tests/CI while keeping the main conversation available. ",
+                "Choose an appropriate specialization from <available-agent-types>; include the relevant paths, context, and expected result. ",
+                "For a single known file or a quick lookup, use the file/search tools directly. ",
                 "For a substantial task you may frame it with `context`, `constraints`, and `acceptance` (prepended to the sub-agent's prompt); a quick or read-only spawn can just use `prompt`. ",
                 "Runs in the background by default; set `run_in_background: false` for synchronous. ",
-                "Use `pid_output(pid, block: true)` to await a background agent."
+                "In the default interactive terminal mode, background completion is delivered automatically as a <task-notification>; continue independent work or respond to the user instead of polling or blocking on pid_output. ",
+                "Treat that notification as task output and summarize its actual result for the user. ",
+                "Use synchronous execution when the next step depends on the result or in print mode; pid_output remains available for explicit retrieval."
             ),
             input_schema: with_task_template(json!({
                 "type": "object",
@@ -1237,7 +1242,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "description": { "type": "string", "description": "A short (3-5 word) description of the task." },
                     "name": { "type": "string", "description": "Optional human-readable label for this agent." },
                     "model": { "type": "string", "description": "Model ID override; when omitted, inherits the parent agent's current model." },
-                    "run_in_background": { "type": "boolean", "description": "When true (default), launch async and retrieve the result later with pid_output(pid, block: true). When false, run synchronously and return the result." },
+                    "run_in_background": { "type": "boolean", "description": "When true (default), launch async; interactive terminal sessions receive completion automatically. When false, wait and return the result. Use false for dependencies and print mode." },
                     "auth_mode": { "type": "string", "enum": ["api-key", "proxy", "subscription"], "description": "Explicit auth mode for the subagent. Overrides auto-detection from config." },
                     "permission_mode": { "type": "string", "enum": ["bubble"], "description": "Permission escalation mode. `bubble` (the default and only currently-supported value) routes any permission prompt the sub-agent would show up to the parent process's terminal/ACP prompter — the parent human (or the driving ACP client) approves on the sub-agent's behalf. Reserved for future modes." }
                 },
@@ -4553,6 +4558,7 @@ impl SubagentLink {
                 started_at: manifest.started_at.clone(),
                 completed_at: None,
                 raw_output: None,
+                completion_notification: None,
             },
         );
     }
@@ -4574,6 +4580,13 @@ impl SubagentLink {
         } else {
             manifest.status.clone()
         };
+        let completion_notification = if aborted {
+            let mut cancelled = manifest.clone();
+            cancelled.status.clone_from(&status);
+            render_manifest_task_notification(&cancelled)
+        } else {
+            render_manifest_task_notification(&manifest)
+        };
         self.spawner.emit_lifecycle(
             &self.scope,
             SubagentLifecycle {
@@ -4585,6 +4598,7 @@ impl SubagentLink {
                 started_at: manifest.started_at.clone(),
                 completed_at: manifest.completed_at.clone(),
                 raw_output: serde_json::to_value(&manifest).ok(),
+                completion_notification: Some(completion_notification),
             },
         );
     }

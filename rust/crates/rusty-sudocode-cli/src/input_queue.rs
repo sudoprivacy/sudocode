@@ -112,6 +112,7 @@ pub struct QueuedInput {
 pub enum QueuedKind {
     Human,
     Peer,
+    Subagent,
 }
 
 impl QueuedInput {

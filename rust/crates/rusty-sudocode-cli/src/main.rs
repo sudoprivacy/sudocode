@@ -23,6 +23,7 @@ mod render;
 mod render_engine;
 mod repl_ui;
 mod startup;
+mod subagent_completion;
 
 use engine_acp::AcpError;
 use engine_core::{
@@ -2573,8 +2574,8 @@ struct SlashSelectionHandler(
 /// Events from all sources into the coordinator REPL loop.
 ///
 /// Multi-producer single-consumer: iocraft UI produces `Human`, the
-/// A2A poller produces `PeerMessage`, and the turn runner produces
-/// `TurnComplete`.
+/// A2A poller produces `PeerMessage`, the engine event bridge produces
+/// `SubagentCompleted`, and the turn runner produces `TurnComplete`.
 enum CoordinatorEvent {
     Human(repl_ui::InputEvent),
     /// A peer's message, plus the acknowledgement its receiver waits on.
@@ -2586,6 +2587,10 @@ enum CoordinatorEvent {
     /// back-pressured rather than a place messages accumulate behind the
     /// cursor. Dropping the sender is a refusal and re-delivers.
     PeerMessage(runtime::agent_mailbox::MailboxEnvelope, mpsc::Sender<()>),
+    SubagentCompleted {
+        prompt: String,
+        display: String,
+    },
     TurnComplete,
 }
 
@@ -3166,13 +3171,45 @@ fn run_repl_iocraft_dispatch(
     // mailbox poller below: reading it back through the lock would have the
     // coordinator thread contend with every turn for a value that cannot change.
     let session_agent_name = cli.lifecycle.agent_name();
+    // UI input, peer messages, sub-agent results and turn completion converge
+    // on this channel so idle delivery needs no polling.
+    let (coord_tx, coord_rx) = mpsc::channel::<CoordinatorEvent>();
+    // Consume the engine's one event stream even while the parent is idle.
+    // Completion notifications re-enter through the ordinary input queue;
+    // turn events still go to the existing renderer in their original order.
+    let (turn_tx, turn_rx) = mpsc::channel();
+    let engine_events = std::mem::replace(&mut cli.engine_handle.events, turn_rx);
+    let completion_tx = coord_tx.clone();
+    thread::Builder::new()
+        .name("repl-engine-events".into())
+        .spawn(move || {
+            let mut completions = subagent_completion::Completions::default();
+            while let Ok(event) = engine_events.recv() {
+                for finished in completions.observe(&event) {
+                    if let Some(prompt) = finished.completion_notification {
+                        let display = format!(
+                            "Sub-agent {}: {}",
+                            finished.agent.description,
+                            finished.status.as_deref().unwrap_or("finished")
+                        );
+                        if completion_tx
+                            .send(CoordinatorEvent::SubagentCompleted { prompt, display })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                // Child streams belong to their own context. Completion above is
+                // what the parent needs; do not accumulate child deltas while idle.
+                if !matches!(event, EngineEvent::Subagent(_)) && turn_tx.send(event).is_err() {
+                    return;
+                }
+            }
+        })
+        .expect("spawn REPL engine event bridge");
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
-
-    // Unified coordinator event channel. All event sources (UI input,
-    // A2A peer messages, turn completion) converge here so the loop
-    // blocks on a single recv() with no timeout-based polling.
-    let (coord_tx, coord_rx) = mpsc::channel::<CoordinatorEvent>();
 
     // Bridge: forward iocraft InputEvents as CoordinatorEvent::Human.
     let coord_tx_input = coord_tx.clone();
@@ -3269,6 +3306,7 @@ fn run_repl_iocraft_dispatch(
                             input_queue::QueuedKind::Peer => {
                                 echo_peer_to_scrollback(&repl_output, &echo.display)
                             }
+                            input_queue::QueuedKind::Subagent => repl_output.println(&echo.display),
                         }
                     }
                     repl_ui_cmd.queued_messages_clear();
@@ -3285,16 +3323,31 @@ fn run_repl_iocraft_dispatch(
                 }
                 continue;
             }
-            CoordinatorEvent::PeerMessage(msg, ack) => {
-                // A2A is DRY with human input: idle → echo to scrollback now and
-                // start a turn; during a turn → hold in the pending overlay and
-                // echo at the flush boundary. The only difference from human is
-                // the marker (`QueuedKind::Peer` → `📨 A2A from X: …` vs `❯`).
-                let peer_from = msg.from.clone();
-                let display = format!("\u{1f4e8} A2A from {}: {}", msg.from, msg.body);
-                let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
+            event @ (CoordinatorEvent::PeerMessage(..)
+            | CoordinatorEvent::SubagentCompleted { .. }) => {
+                // Peer messages and sub-agent results share human input's
+                // scheduling: run while idle, otherwise queue until the turn
+                // boundary. Keep their origin distinct in the UI and history.
+                let (prompt, display, kind, ack) = match event {
+                    CoordinatorEvent::PeerMessage(msg, ack) => {
+                        let display = format!("\u{1f4e8} A2A from {}: {}", msg.from, msg.body);
+                        (
+                            tools::compose_next_turn_from_envelopes(&[msg]),
+                            display,
+                            input_queue::QueuedKind::Peer,
+                            Some(ack),
+                        )
+                    }
+                    CoordinatorEvent::SubagentCompleted { prompt, display } => {
+                        (prompt, display, input_queue::QueuedKind::Subagent, None)
+                    }
+                    _ => unreachable!(),
+                };
                 if !turn_active {
-                    echo_peer_to_scrollback(&repl_output, &display);
+                    match kind {
+                        input_queue::QueuedKind::Subagent => repl_output.println(&display),
+                        _ => echo_peer_to_scrollback(&repl_output, &display),
+                    }
                     let _ = coord.lock().unwrap().submit_when_idle(prompt.clone());
                     turn_active = true;
                     runner_handle = Some(spawn_iocraft_turn(
@@ -3309,17 +3362,22 @@ fn run_repl_iocraft_dispatch(
                 } else {
                     let mut coord_lock = coord.lock().unwrap();
                     coord_lock.submit_during_turn(
-                        input_queue::QueuedInput::peer(prompt, display.clone()),
+                        input_queue::QueuedInput {
+                            text: prompt,
+                            display: display.clone(),
+                            kind,
+                        },
                         input_queue::QueueMode::Queue,
                     );
                     repl_ui_cmd.queued_message_push(&display, false);
-                    let _ = peer_from;
                 }
                 // Taken: the message is this process's responsibility now, so
                 // the receiver may advance its cursor. What remains — the
                 // turn-input queue, an in-flight turn — are the same windows
                 // human input has, and a human can retype.
-                let _ = ack.send(());
+                if let Some(ack) = ack {
+                    let _ = ack.send(());
+                }
                 continue;
             }
             CoordinatorEvent::Human(input_event) => match input_event {

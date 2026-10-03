@@ -1,6 +1,6 @@
 name: Sub-agent Parity Live E2E
 
-# Runs the 7 PTY live e2e files covering the sub-agent CC-fork parity
+# Runs the 8 PTY live e2e files covering the sub-agent CC-fork parity
 # scope (PR #282). These tests skip cleanly under
 # `SCODE_TEST_BACKEND=mock` because the mock harness has a known
 # scenario-inheritance gap on subagent-owned `/v1/messages` requests
@@ -21,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       tests:
-        description: 'Comma-separated PTY test names to run (empty = all 7)'
+        description: 'Comma-separated PTY test names to run (empty = all 8)'
         default: ''
         required: false
 
@@ -78,7 +78,7 @@ jobs:
           ENDJSON
           echo "Proxy config written to $CONFIG_DIR/sudocode.json"
 
-      # The full 7-test set that covers the sub-agent parity surface.
+      # The full 8-test set that covers the sub-agent parity surface.
       # Kept as a single explicit list so it's easy to see what's
       # covered + trim by name from the workflow_dispatch input.
       - name: Determine tests to run
@@ -90,7 +90,7 @@ jobs:
             echo "list=$MANUAL" >> "$GITHUB_OUTPUT"
             echo "Using manually provided test list: $MANUAL"
           else
-            echo "list=pty_presets_e2e,pty_custom_agents,pty_agent_memory_scoping,pty_send_message_multi_turn,pty_verification_streak,pty_agent_summary,pty_agent_permission_bubble" >> "$GITHUB_OUTPUT"
+            echo "list=pty_subagent_workflow,pty_presets_e2e,pty_custom_agents,pty_agent_memory_scoping,pty_send_message_multi_turn,pty_verification_streak,pty_agent_summary,pty_agent_permission_bubble" >> "$GITHUB_OUTPUT"
           fi
 
       # Run each PTY test with SCODE_TEST_BACKEND=live. `--test-threads=1`

@@ -238,6 +238,7 @@ async fn drive(
     cmd_rx: std_mpsc::Receiver<EngineCommand>,
     evt_tx: std_mpsc::Sender<EngineEvent>,
 ) {
+    let subagents = SubagentRelay::to_session(evt_tx.clone());
     // Bridge the std command receiver into a Tokio channel so the per-turn pump
     // can `select!` on it. A tiny forwarder thread does the blocking `recv`.
     let (tcmd_tx, mut tcmd_rx) = tokio_mpsc::unbounded_channel::<EngineCommand>();
@@ -257,7 +258,7 @@ async fn drive(
     while let Some(cmd) = tcmd_rx.recv().await {
         match cmd {
             EngineCommand::Prompt { blocks } => {
-                if run_one_turn(&delegate, blocks, &evt_tx, &mut tcmd_rx).await {
+                if run_one_turn(&delegate, blocks, &evt_tx, &mut tcmd_rx, &subagents).await {
                     delegate.close();
                     break;
                 }
@@ -310,6 +311,7 @@ async fn run_one_turn(
     blocks: Vec<ContentBlock>,
     evt_tx: &std_mpsc::Sender<EngineEvent>,
     tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    subagents: &SubagentRelay,
 ) -> bool {
     let table = RequestTable::default();
     let label = turn_label(&blocks);
@@ -329,8 +331,9 @@ async fn run_one_turn(
     let delegate = delegate.clone();
     let turn_tx = evt_tx.clone();
     let turn_table = table.clone();
+    let subagents = subagents.clone();
     let mut handle = tokio::task::spawn_blocking(move || {
-        let mut observer = ObserverAdapter::new(turn_tx.clone());
+        let mut observer = ObserverAdapter::new(turn_tx.clone()).with_subagent_relay(subagents);
         let mut prompter = PrompterAdapter {
             tx: turn_tx,
             table: turn_table,
@@ -469,15 +472,16 @@ impl SubagentRelay {
     #[must_use]
     pub fn new() -> (Self, std_mpsc::Receiver<EngineEvent>) {
         let (session, rx) = std_mpsc::channel();
-        (
-            Self {
-                route: Arc::new(Mutex::new(SubagentRoute {
-                    turn: None,
-                    session,
-                })),
-            },
-            rx,
-        )
+        (Self::to_session(session), rx)
+    }
+
+    fn to_session(session: std_mpsc::Sender<EngineEvent>) -> Self {
+        Self {
+            route: Arc::new(Mutex::new(SubagentRoute {
+                turn: None,
+                session,
+            })),
+        }
     }
 
     /// Route events into `turn` until the returned guard drops. Drop the guard

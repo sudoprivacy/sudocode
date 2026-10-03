@@ -357,7 +357,7 @@ impl EngineEventRenderer {
             | EngineEvent::Compaction(_)
             | EngineEvent::ModelChanged { .. }
             | EngineEvent::PermissionModeChanged { .. }
-            // The REPL attaches no sub-agent relay, so these never arrive.
+            // Background completions are scheduled by the REPL event bridge.
             | EngineEvent::Subagent(_) => RenderOutcome::Continue,
         }
     }

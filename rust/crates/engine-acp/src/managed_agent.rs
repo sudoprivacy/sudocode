@@ -134,6 +134,9 @@ impl<K: KernelConvenience + Send + Sync + 'static> SpawnTask<K> for SudoCodeSpaw
         let thread_stop = stopped.clone();
         let thread_registry = Arc::clone(&registry);
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            // Each managed session owns an I/O driver. Kernel calls and turns
+            // use blocking workers; do not allocate a CPU-sized pool per agent.
+            .worker_threads(2)
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?;

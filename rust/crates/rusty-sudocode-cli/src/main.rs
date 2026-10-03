@@ -3342,6 +3342,7 @@ fn run_repl_iocraft_dispatch(
                     break;
                 }
                 repl_ui::InputEvent::Abort => {
+                    pending_slash_selection = None;
                     cancel_pending_question_answer(&pending_question_answer);
                     repl_ui_cmd.clear_question();
                     if runner_handle.is_some() {
@@ -3456,6 +3457,40 @@ fn run_repl_iocraft_dispatch(
                                     None
                                 },
                             ));
+                            true
+                        }
+                        Ok(Some(SlashCommand::Resume { session_path: None })) => {
+                            if turn_active {
+                                repl_output.println("A turn is running; wait for it to finish before selecting a session.");
+                            } else {
+                                pending_slash_selection = cli::session_ui::select_session(
+                                    &repl_ui_cmd,
+                                    &cli_shared,
+                                    &repl_output,
+                                );
+                            }
+                            true
+                        }
+                        Ok(Some(SlashCommand::Session { action, target }))
+                            if matches!(action.as_deref(), None | Some("list"))
+                                || (action.as_deref() == Some("delete") && target.is_some()) =>
+                        {
+                            if turn_active {
+                                repl_output.println("A turn is running; wait for it to finish before selecting or deleting a session.");
+                            } else if action.as_deref() == Some("delete") {
+                                pending_slash_selection = cli::session_ui::confirm_delete(
+                                    &repl_ui_cmd,
+                                    &cli_shared,
+                                    &repl_output,
+                                    target.as_deref().unwrap(),
+                                );
+                            } else {
+                                pending_slash_selection = cli::session_ui::select_session(
+                                    &repl_ui_cmd,
+                                    &cli_shared,
+                                    &repl_output,
+                                );
+                            }
                             true
                         }
                         Ok(Some(command)) => {

@@ -219,6 +219,7 @@ enum Scenario {
     SyntaxHighlightShowcase,
     CodexColorsShowcase,
     CodexDiffShowcase,
+    SyntaxHighlightLimits,
     SleepOverMaxRoundtrip,
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
@@ -360,6 +361,7 @@ impl Scenario {
             "syntax_highlight_showcase" => Some(Self::SyntaxHighlightShowcase),
             "codex_colors_showcase" => Some(Self::CodexColorsShowcase),
             "codex_diff_showcase" => Some(Self::CodexDiffShowcase),
+            "syntax_highlight_limits" => Some(Self::SyntaxHighlightLimits),
             "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
             "fork_subagent_recursion_guard_roundtrip" => {
                 Some(Self::ForkSubagentRecursionGuardRoundtrip)
@@ -432,6 +434,7 @@ impl Scenario {
             Self::SyntaxHighlightShowcase => "syntax_highlight_showcase",
             Self::CodexColorsShowcase => "codex_colors_showcase",
             Self::CodexDiffShowcase => "codex_diff_showcase",
+            Self::SyntaxHighlightLimits => "syntax_highlight_limits",
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
             Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
@@ -1305,6 +1308,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 .to_string()],
             ),
         },
+        Scenario::SyntaxHighlightLimits => markdown_showcase_sse(&syntax_limits_doc()),
         Scenario::ThinkingThenText => thinking_then_text_sse(),
         Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
             Some((output, is_error)) => {
@@ -1875,6 +1879,9 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 }),
             ),
         },
+        Scenario::SyntaxHighlightLimits => {
+            text_message_response("msg_syntax_limits", &syntax_limits_doc())
+        }
         Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
             text_message_response(
                 "msg_streaming_text",
@@ -2521,6 +2528,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::SyntaxHighlightShowcase => "req_syntax_showcase",
         Scenario::CodexColorsShowcase => "req_codex_colors",
         Scenario::CodexDiffShowcase => "req_codex_diff",
+        Scenario::SyntaxHighlightLimits => "req_syntax_limits",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
         Scenario::SkillReadRoundtrip => "req_skill_read_roundtrip",
         Scenario::ImageReadRoundtrip => "req_image_read_roundtrip",
@@ -2711,7 +2719,31 @@ pub const UNICODE_SHOWCASE_DOC: &str = "CJK:界界界界界界界界界界界界
 pub const CODEX_COLORS_SHOWCASE_DOC: &str = include_str!("fixtures/codex-colors.md");
 
 /// Repeated highlighted turns for release process measurements.
-pub const SYNTAX_SHOWCASE_DOC: &str = r#"```rust
+pub const SYNTAX_SHOWCASE_DOC: &str = r#"Theme prose.
+
+# ThemeHeadingOne
+## ThemeHeadingTwo
+### ThemeHeadingThree
+#### ThemeHeadingFour
+##### ThemeHeadingFive
+###### ThemeHeadingSix
+
+**ThemeStrong** *ThemeEmphasis* ~~ThemeStrike~~
+
+- `~/.zshrc.bak-20261001`
+- `~/.config/scode/credentials.bak`
+
+Inline `ThemeInline` and **`ThemeBoldCode`**.
+
+[ThemeWeb](https://example.com/reference)
+
+[ThemePath](./src/main.rs:42) and [src/lib.rs](./src/lib.rs)
+
+1. ThemeOrdered
+
+> ThemeQuote
+
+```rust,no_run
 // ThemeComment
 struct ThemeType;
 fn palette_probe(count: usize) -> bool {
@@ -2720,7 +2752,7 @@ fn palette_probe(count: usize) -> bool {
 }
 ```
 
-```python
+```python3
 # PythonComment
 def python_probe(count):
     return "PythonString" if count > 7 else None
@@ -2728,6 +2760,10 @@ def python_probe(count):
 
 ```json
 {"theme_key": "JsonString", "count": 42, "ready": true}
+```
+
+```typescript
+const typed_probe: string = "TypedString";
 ```
 
 ```unknown-language
@@ -2741,6 +2777,13 @@ plain_identifier <opaque> 42
 ```
 
 Highlight done."#;
+
+fn syntax_limits_doc() -> String {
+    format!(
+        "Limit probe.\n\n```rust\n{}\nfn limit_probe() {{}}\n```\n\nLimit done.",
+        "x".repeat(4097)
+    )
+}
 
 /// Stream `MARKDOWN_SHOWCASE_DOC` as several text deltas with boundaries that
 /// deliberately fall mid-line, so the CLI's blank-line chunker — not the

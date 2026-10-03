@@ -1,0 +1,3087 @@
+{
+  "reference": {
+    "repository": "https://github.com/openai/codex",
+    "commit": "b741e480e203f037ca726bc2a76d99a8e8668e66",
+    "versions": {
+      "ratatui": "0.30.2",
+      "syntect": "5.3.0",
+      "two-face": "0.5.1"
+    },
+    "helper_source_sha256": "749fdb46718ecf7c1f108afe45782a3f9e51902bb0db1811b0ba4482da647206",
+    "method": "Unmodified upstream MarkdownStyles and highlighting helpers; terminal cell styles use the upstream CIE76 palette-distance helper."
+  },
+  "variants": {
+    "dark-indexed": {
+      "documents": [
+        {
+          "language": "rust,no_run",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "//"
+                },
+                {
+                  "style": 11,
+                  "text": " ThemeComment"
+                }
+              ],
+              "text": "// ThemeComment"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "struct"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 14,
+                  "text": "ThemeType"
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "struct ThemeType;"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "fn"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 15,
+                  "text": "palette_probe"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 16,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 16,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "usize"
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "->"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "bool"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "{"
+                }
+              ],
+              "text": "fn palette_probe(count: usize) -> bool {"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    "
+                },
+                {
+                  "style": 12,
+                  "text": "let"
+                },
+                {
+                  "style": 13,
+                  "text": " message "
+                },
+                {
+                  "style": 17,
+                  "text": "="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "ThemeString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "    let message = \"ThemeString\";"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    count "
+                },
+                {
+                  "style": 17,
+                  "text": ">="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "42"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "&&"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "!"
+                },
+                {
+                  "style": 13,
+                  "text": "message"
+                },
+                {
+                  "style": 17,
+                  "text": "."
+                },
+                {
+                  "style": 15,
+                  "text": "is_empty"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                }
+              ],
+              "text": "    count >= 42 && !message.is_empty()"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "}"
+                }
+              ],
+              "text": "}"
+            }
+          ]
+        },
+        {
+          "language": "python3",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "#"
+                },
+                {
+                  "style": 11,
+                  "text": " PythonComment"
+                }
+              ],
+              "text": "# PythonComment"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "def"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 15,
+                  "text": "python_probe"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 16,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                }
+              ],
+              "text": "def python_probe(count):"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    "
+                },
+                {
+                  "style": 12,
+                  "text": "return"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "PythonString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "if"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "count"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": ">"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "7"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "else"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "None"
+                }
+              ],
+              "text": "    return \"PythonString\" if count > 7 else None"
+            }
+          ]
+        },
+        {
+          "language": "json",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "{"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "theme_key"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "JsonString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ","
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "42"
+                },
+                {
+                  "style": 11,
+                  "text": ","
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "ready"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "true"
+                },
+                {
+                  "style": 11,
+                  "text": "}"
+                }
+              ],
+              "text": "{\"theme_key\": \"JsonString\", \"count\": 42, \"ready\": true}"
+            }
+          ]
+        },
+        {
+          "language": "typescript",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "const"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "typed_probe"
+                },
+                {
+                  "style": 17,
+                  "text": ":"
+                },
+                {
+                  "style": 14,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "string"
+                },
+                {
+                  "style": 14,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "TypedString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "const typed_probe: string = \"TypedString\";"
+            }
+          ]
+        },
+        {
+          "language": "unknown-language",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 8,
+                  "text": "plain_identifier <opaque> 42"
+                }
+              ],
+              "text": "plain_identifier <opaque> 42"
+            }
+          ]
+        },
+        {
+          "language": "diff",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "@@"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "-1 +1"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "@@"
+                }
+              ],
+              "text": "@@ -1 +1 @@"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "-"
+                },
+                {
+                  "style": 19,
+                  "text": "removed_value"
+                }
+              ],
+              "text": "-removed_value"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "+"
+                },
+                {
+                  "style": 5,
+                  "text": "added_value"
+                }
+              ],
+              "text": "+added_value"
+            }
+          ]
+        }
+      ],
+      "roles": {
+        "bold_code": 0,
+        "emphasis": 1,
+        "h1": 2,
+        "h2": 3,
+        "h3": 4,
+        "h4": 1,
+        "h5": 1,
+        "h6": 1,
+        "inline": 5,
+        "link": 6,
+        "ordered": 7,
+        "prose": 8,
+        "quote": 9,
+        "strike": 10,
+        "strong": 3
+      },
+      "styles": [
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Idx(150)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(150)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(75)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(12)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(2)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": false,
+          "strike": true,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(103)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(183)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(189)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(223)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(111)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(217)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(116)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(216)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(211)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        }
+      ]
+    },
+    "dark-truecolor": {
+      "documents": [
+        {
+          "language": "rust,no_run",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "//"
+                },
+                {
+                  "style": 11,
+                  "text": " ThemeComment"
+                }
+              ],
+              "text": "// ThemeComment"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "struct"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 14,
+                  "text": "ThemeType"
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "struct ThemeType;"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "fn"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 15,
+                  "text": "palette_probe"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 16,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 16,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "usize"
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "->"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "bool"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "{"
+                }
+              ],
+              "text": "fn palette_probe(count: usize) -> bool {"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    "
+                },
+                {
+                  "style": 12,
+                  "text": "let"
+                },
+                {
+                  "style": 13,
+                  "text": " message "
+                },
+                {
+                  "style": 17,
+                  "text": "="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "ThemeString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "    let message = \"ThemeString\";"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    count "
+                },
+                {
+                  "style": 17,
+                  "text": ">="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "42"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "&&"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "!"
+                },
+                {
+                  "style": 13,
+                  "text": "message"
+                },
+                {
+                  "style": 17,
+                  "text": "."
+                },
+                {
+                  "style": 15,
+                  "text": "is_empty"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                }
+              ],
+              "text": "    count >= 42 && !message.is_empty()"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "}"
+                }
+              ],
+              "text": "}"
+            }
+          ]
+        },
+        {
+          "language": "python3",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "#"
+                },
+                {
+                  "style": 11,
+                  "text": " PythonComment"
+                }
+              ],
+              "text": "# PythonComment"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "def"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 15,
+                  "text": "python_probe"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 16,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                }
+              ],
+              "text": "def python_probe(count):"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    "
+                },
+                {
+                  "style": 12,
+                  "text": "return"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "PythonString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "if"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "count"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": ">"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "7"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "else"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "None"
+                }
+              ],
+              "text": "    return \"PythonString\" if count > 7 else None"
+            }
+          ]
+        },
+        {
+          "language": "json",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "{"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "theme_key"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "JsonString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ","
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "42"
+                },
+                {
+                  "style": 11,
+                  "text": ","
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "ready"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "true"
+                },
+                {
+                  "style": 11,
+                  "text": "}"
+                }
+              ],
+              "text": "{\"theme_key\": \"JsonString\", \"count\": 42, \"ready\": true}"
+            }
+          ]
+        },
+        {
+          "language": "typescript",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "const"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "typed_probe"
+                },
+                {
+                  "style": 17,
+                  "text": ":"
+                },
+                {
+                  "style": 14,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "string"
+                },
+                {
+                  "style": 14,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "TypedString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "const typed_probe: string = \"TypedString\";"
+            }
+          ]
+        },
+        {
+          "language": "unknown-language",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 8,
+                  "text": "plain_identifier <opaque> 42"
+                }
+              ],
+              "text": "plain_identifier <opaque> 42"
+            }
+          ]
+        },
+        {
+          "language": "diff",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "@@"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "-1 +1"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "@@"
+                }
+              ],
+              "text": "@@ -1 +1 @@"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "-"
+                },
+                {
+                  "style": 19,
+                  "text": "removed_value"
+                }
+              ],
+              "text": "-removed_value"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "+"
+                },
+                {
+                  "style": 5,
+                  "text": "added_value"
+                }
+              ],
+              "text": "+added_value"
+            }
+          ]
+        }
+      ],
+      "roles": {
+        "bold_code": 0,
+        "emphasis": 1,
+        "h1": 2,
+        "h2": 3,
+        "h3": 4,
+        "h4": 1,
+        "h5": 1,
+        "h6": 1,
+        "inline": 5,
+        "link": 6,
+        "ordered": 7,
+        "prose": 8,
+        "quote": 9,
+        "strike": 10,
+        "strong": 3
+      },
+      "styles": [
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(166, 227, 161)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(166, 227, 161)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(99, 168, 248)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(12)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(2)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": false,
+          "strike": true,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(147, 153, 178)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(203, 166, 247)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(205, 214, 244)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(249, 226, 175)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(137, 180, 250)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(235, 160, 172)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(148, 226, 213)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(250, 179, 135)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(243, 139, 168)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        }
+      ]
+    },
+    "light-indexed": {
+      "documents": [
+        {
+          "language": "rust,no_run",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "//"
+                },
+                {
+                  "style": 11,
+                  "text": " ThemeComment"
+                }
+              ],
+              "text": "// ThemeComment"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "struct"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 14,
+                  "text": "ThemeType"
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "struct ThemeType;"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "fn"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 15,
+                  "text": "palette_probe"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 16,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 16,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "usize"
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "->"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "bool"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "{"
+                }
+              ],
+              "text": "fn palette_probe(count: usize) -> bool {"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    "
+                },
+                {
+                  "style": 12,
+                  "text": "let"
+                },
+                {
+                  "style": 13,
+                  "text": " message "
+                },
+                {
+                  "style": 17,
+                  "text": "="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "ThemeString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "    let message = \"ThemeString\";"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    count "
+                },
+                {
+                  "style": 17,
+                  "text": ">="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "42"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "&&"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "!"
+                },
+                {
+                  "style": 13,
+                  "text": "message"
+                },
+                {
+                  "style": 17,
+                  "text": "."
+                },
+                {
+                  "style": 15,
+                  "text": "is_empty"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                }
+              ],
+              "text": "    count >= 42 && !message.is_empty()"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "}"
+                }
+              ],
+              "text": "}"
+            }
+          ]
+        },
+        {
+          "language": "python3",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "#"
+                },
+                {
+                  "style": 11,
+                  "text": " PythonComment"
+                }
+              ],
+              "text": "# PythonComment"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "def"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 15,
+                  "text": "python_probe"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 16,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                }
+              ],
+              "text": "def python_probe(count):"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    "
+                },
+                {
+                  "style": 12,
+                  "text": "return"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "PythonString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "if"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "count"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": ">"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "7"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "else"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "None"
+                }
+              ],
+              "text": "    return \"PythonString\" if count > 7 else None"
+            }
+          ]
+        },
+        {
+          "language": "json",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "{"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "theme_key"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "JsonString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ","
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "42"
+                },
+                {
+                  "style": 11,
+                  "text": ","
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "ready"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "true"
+                },
+                {
+                  "style": 11,
+                  "text": "}"
+                }
+              ],
+              "text": "{\"theme_key\": \"JsonString\", \"count\": 42, \"ready\": true}"
+            }
+          ]
+        },
+        {
+          "language": "typescript",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "const"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "typed_probe"
+                },
+                {
+                  "style": 17,
+                  "text": ":"
+                },
+                {
+                  "style": 14,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "string"
+                },
+                {
+                  "style": 14,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "TypedString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "const typed_probe: string = \"TypedString\";"
+            }
+          ]
+        },
+        {
+          "language": "unknown-language",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 8,
+                  "text": "plain_identifier <opaque> 42"
+                }
+              ],
+              "text": "plain_identifier <opaque> 42"
+            }
+          ]
+        },
+        {
+          "language": "diff",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "@@"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "-1 +1"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "@@"
+                }
+              ],
+              "text": "@@ -1 +1 @@"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "-"
+                },
+                {
+                  "style": 19,
+                  "text": "removed_value"
+                }
+              ],
+              "text": "-removed_value"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "+"
+                },
+                {
+                  "style": 5,
+                  "text": "added_value"
+                }
+              ],
+              "text": "+added_value"
+            }
+          ]
+        }
+      ],
+      "roles": {
+        "bold_code": 0,
+        "emphasis": 1,
+        "h1": 2,
+        "h2": 3,
+        "h3": 4,
+        "h4": 1,
+        "h5": 1,
+        "h6": 1,
+        "inline": 5,
+        "link": 6,
+        "ordered": 7,
+        "prose": 8,
+        "quote": 9,
+        "strike": 10,
+        "strong": 3
+      },
+      "styles": [
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Idx(28)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(28)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(26)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(12)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(2)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": false,
+          "strike": true,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(244)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(92)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(60)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(172)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(27)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(203)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(30)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(202)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(197)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        }
+      ]
+    },
+    "light-truecolor": {
+      "documents": [
+        {
+          "language": "rust,no_run",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "//"
+                },
+                {
+                  "style": 11,
+                  "text": " ThemeComment"
+                }
+              ],
+              "text": "// ThemeComment"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "struct"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 14,
+                  "text": "ThemeType"
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "struct ThemeType;"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "fn"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 15,
+                  "text": "palette_probe"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 16,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 16,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "usize"
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "->"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "bool"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "{"
+                }
+              ],
+              "text": "fn palette_probe(count: usize) -> bool {"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    "
+                },
+                {
+                  "style": 12,
+                  "text": "let"
+                },
+                {
+                  "style": 13,
+                  "text": " message "
+                },
+                {
+                  "style": 17,
+                  "text": "="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "ThemeString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "    let message = \"ThemeString\";"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    count "
+                },
+                {
+                  "style": 17,
+                  "text": ">="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "42"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "&&"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "!"
+                },
+                {
+                  "style": 13,
+                  "text": "message"
+                },
+                {
+                  "style": 17,
+                  "text": "."
+                },
+                {
+                  "style": 15,
+                  "text": "is_empty"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                }
+              ],
+              "text": "    count >= 42 && !message.is_empty()"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "}"
+                }
+              ],
+              "text": "}"
+            }
+          ]
+        },
+        {
+          "language": "python3",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "#"
+                },
+                {
+                  "style": 11,
+                  "text": " PythonComment"
+                }
+              ],
+              "text": "# PythonComment"
+            },
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "def"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 15,
+                  "text": "python_probe"
+                },
+                {
+                  "style": 11,
+                  "text": "("
+                },
+                {
+                  "style": 16,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": ")"
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                }
+              ],
+              "text": "def python_probe(count):"
+            },
+            {
+              "spans": [
+                {
+                  "style": 13,
+                  "text": "    "
+                },
+                {
+                  "style": 12,
+                  "text": "return"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "PythonString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "if"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "count"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": ">"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "7"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "else"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "None"
+                }
+              ],
+              "text": "    return \"PythonString\" if count > 7 else None"
+            }
+          ]
+        },
+        {
+          "language": "json",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "{"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "theme_key"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "JsonString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ","
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "count"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "42"
+                },
+                {
+                  "style": 11,
+                  "text": ","
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 15,
+                  "text": "ready"
+                },
+                {
+                  "style": 11,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ":"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 18,
+                  "text": "true"
+                },
+                {
+                  "style": 11,
+                  "text": "}"
+                }
+              ],
+              "text": "{\"theme_key\": \"JsonString\", \"count\": 42, \"ready\": true}"
+            }
+          ]
+        },
+        {
+          "language": "typescript",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 12,
+                  "text": "const"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "typed_probe"
+                },
+                {
+                  "style": 17,
+                  "text": ":"
+                },
+                {
+                  "style": 14,
+                  "text": " "
+                },
+                {
+                  "style": 12,
+                  "text": "string"
+                },
+                {
+                  "style": 14,
+                  "text": " "
+                },
+                {
+                  "style": 17,
+                  "text": "="
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 5,
+                  "text": "TypedString"
+                },
+                {
+                  "style": 5,
+                  "text": "\""
+                },
+                {
+                  "style": 11,
+                  "text": ";"
+                }
+              ],
+              "text": "const typed_probe: string = \"TypedString\";"
+            }
+          ]
+        },
+        {
+          "language": "unknown-language",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 8,
+                  "text": "plain_identifier <opaque> 42"
+                }
+              ],
+              "text": "plain_identifier <opaque> 42"
+            }
+          ]
+        },
+        {
+          "language": "diff",
+          "lines": [
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "@@"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 13,
+                  "text": "-1 +1"
+                },
+                {
+                  "style": 13,
+                  "text": " "
+                },
+                {
+                  "style": 11,
+                  "text": "@@"
+                }
+              ],
+              "text": "@@ -1 +1 @@"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "-"
+                },
+                {
+                  "style": 19,
+                  "text": "removed_value"
+                }
+              ],
+              "text": "-removed_value"
+            },
+            {
+              "spans": [
+                {
+                  "style": 11,
+                  "text": "+"
+                },
+                {
+                  "style": 5,
+                  "text": "added_value"
+                }
+              ],
+              "text": "+added_value"
+            }
+          ]
+        }
+      ],
+      "roles": {
+        "bold_code": 0,
+        "emphasis": 1,
+        "h1": 2,
+        "h2": 3,
+        "h3": 4,
+        "h4": 1,
+        "h5": 1,
+        "h6": 1,
+        "inline": 5,
+        "link": 6,
+        "ordered": 7,
+        "prose": 8,
+        "quote": 9,
+        "strike": 10,
+        "strong": 3
+      },
+      "styles": [
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Rgb(64, 160, 43)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": true,
+          "fg": "Default",
+          "italic": true,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(64, 160, 43)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(28, 100, 200)",
+          "italic": false,
+          "strike": false,
+          "underline": true
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(12)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Idx(2)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Default",
+          "italic": false,
+          "strike": true,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(124, 127, 147)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(136, 57, 239)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(76, 79, 105)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(223, 142, 29)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(30, 102, 245)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(230, 69, 83)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(23, 146, 153)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(254, 100, 11)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        },
+        {
+          "bg": "Default",
+          "bold": false,
+          "fg": "Rgb(210, 15, 57)",
+          "italic": false,
+          "strike": false,
+          "underline": false
+        }
+      ]
+    }
+  }
+}

@@ -133,12 +133,12 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
 
 #[test]
 fn unicode_columns_and_semantic_colors_dark() {
-    showcase("15;0", "Idx(75)", "Rgb(166, 227, 161)");
+    showcase("15;0", "Rgb(99, 168, 248)", "Rgb(166, 227, 161)");
 }
 
 #[test]
 fn unicode_columns_and_semantic_colors_light() {
-    showcase("0;15", "Idx(25)", "Rgb(64, 160, 43)");
+    showcase("0;15", "Rgb(28, 100, 200)", "Rgb(64, 160, 43)");
 }
 
 #[test]

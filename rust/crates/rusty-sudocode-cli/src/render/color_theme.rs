@@ -1,8 +1,11 @@
-//! UI palette and terminal background selection. Code colors use Codex's
-//! bundled Catppuccin themes through the sibling code_theme module.
+//! Shared UI colors and the Codex-compatible Markdown syntax theme.
+//!
+//! Brand accents remain amber. Transcript syntax and inline-code colors come
+//! from the same bundled Catppuccin assets as Codex, without local overrides.
+
+use crossterm::style::Color;
 
 use super::{ansi_fg, terminal_palette};
-use crossterm::style::Color;
 
 /// Semantic color theme — coder picks a scenario token, never a raw color.
 ///
@@ -11,8 +14,10 @@ use crossterm::style::Color;
 /// switching palette changes every color at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTheme {
+    /// Selects the adaptive default syntax theme in code_theme.
+    pub light_background: bool,
     // ── Semantic tokens ──────────────────────────────────────────────
-    /// Primary emphasis — prompt glyph, H1 heading, box title.
+    /// Brand emphasis — prompt glyph, logo and box title.
     pub primary: Color,
     /// Success — tool done, write result, spinner complete.
     pub success: Color,
@@ -24,17 +29,11 @@ pub struct ColorTheme {
     pub info: Color,
     /// Muted — footer hints, dim text, labels, separators.
     pub muted: Color,
-    /// Emphasis — italic text in markdown.
-    pub emphasis: Color,
-    /// Strong — bold text in markdown.
-    pub strong: Color,
     /// Link — hyperlinks.
     pub link: Color,
-    /// Selects the adaptive default syntax theme.
-    pub light_background: bool,
-    /// Code block background (256-color index).
+    /// Shell-mode background (256-color index); Markdown code stays transparent.
     pub code_bg: u8,
-    /// Border — box/table/code fence chrome.
+    /// Border — box/table chrome.
     pub border: Color,
     /// Diff added line.
     pub diff_added: Color,
@@ -46,14 +45,10 @@ pub struct ColorTheme {
     pub logo: Color,
     /// Logo accent ("Code" wordmark).
     pub logo_accent: Color,
-    /// Blockquote prefix.
+    /// Ordered Markdown list markers use terminal ANSI bright blue.
+    pub ordered_list_marker: Color,
+    /// Markdown blockquote text and prefix (ANSI green, as in Codex).
     pub quote: Color,
-    /// H2 heading.
-    pub heading_h2: Color,
-    /// H3 heading.
-    pub heading_h3: Color,
-    /// H4+ heading.
-    pub heading_h4: Color,
 }
 
 impl ColorTheme {
@@ -66,9 +61,8 @@ impl ColorTheme {
     // Semantic colors (industry standard, not brand-specific):
     //   success = green, error = red, diff = green/red
     //
-    // Derived:
-    //   warning = yellow/ochre; links = blue; code uses Catppuccin
-    //   muted = readable grey; decorative borders stay subordinate to text
+    // Transcript links use the Codex blue accent; inline code follows its syntax theme.
+    // Muted chrome remains readable without applying the terminal dim attribute.
     // Light mode deepens amber/teal instead of reusing low-contrast brand swatches.
 
     /// Dark terminal background (default).
@@ -76,29 +70,28 @@ impl ColorTheme {
     pub fn dark() -> Self {
         let primary = 214;
         let muted = 247;
-        let link = 75;
         Self {
-            primary: Color::AnsiValue(primary),  // amber #F59E0B
-            success: Color::Green,               // semantic
-            error: Color::Red,                   // semantic
-            warning: Color::AnsiValue(220),      // yellow, distinct from info/success
-            info: Color::AnsiValue(36),          // teal #0D9488
-            muted: Color::AnsiValue(muted),      // readable muted grey
-            emphasis: Color::AnsiValue(primary), // amber (italic text)
-            strong: Color::White,                // bold text
-            link: Color::AnsiValue(link),        // blue
             light_background: false,
-            code_bg: 236,                             // dark grey bg
-            border: Color::AnsiValue(248),            // light grey
-            diff_added: Color::AnsiValue(70),         // semantic green
-            diff_removed: Color::AnsiValue(203),      // semantic red
+            primary: Color::AnsiValue(primary), // amber #F59E0B
+            success: Color::Green,              // semantic
+            error: Color::Red,                  // semantic
+            warning: Color::AnsiValue(220),     // yellow, distinct from info/success
+            info: Color::AnsiValue(36),         // teal #0D9488
+            muted: Color::AnsiValue(muted),     // readable muted grey
+            link: Color::Rgb {
+                r: 99,
+                g: 168,
+                b: 248,
+            }, // blue
+            code_bg: 236,                       // dark grey bg
+            border: Color::AnsiValue(248),      // light grey
+            diff_added: Color::AnsiValue(70),   // semantic green
+            diff_removed: Color::AnsiValue(203), // semantic red
             hook_feedback: Color::AnsiValue(primary), // amber
-            logo: Color::AnsiValue(primary),          // amber
-            logo_accent: Color::AnsiValue(36),        // teal
-            quote: Color::AnsiValue(muted),           // grey
-            heading_h2: Color::White,
-            heading_h3: Color::AnsiValue(36),    // teal
-            heading_h4: Color::AnsiValue(muted), // grey
+            logo: Color::AnsiValue(primary),    // amber
+            logo_accent: Color::AnsiValue(36),  // teal
+            ordered_list_marker: Color::Blue,
+            quote: Color::DarkGreen, // terminal green
         }
     }
 
@@ -107,29 +100,28 @@ impl ColorTheme {
     pub fn light() -> Self {
         let primary = 94;
         let muted = 241;
-        let link = 25;
         Self {
+            light_background: true,
             primary: Color::AnsiValue(primary), // deep amber, readable on light backgrounds
             success: Color::DarkGreen,          // semantic
             error: Color::DarkRed,              // semantic
             warning: Color::AnsiValue(130),     // ochre on a light background
             info: Color::AnsiValue(23),         // deep teal
             muted: Color::AnsiValue(muted),     // readable muted grey
-            emphasis: Color::AnsiValue(primary), // darker amber
-            strong: Color::Black,               // bold text
-            link: Color::AnsiValue(link),       // dark blue
-            light_background: true,
-            code_bg: 255,                             // light grey bg
-            border: Color::AnsiValue(muted),          // light grey
-            diff_added: Color::AnsiValue(22),         // semantic dark green
-            diff_removed: Color::AnsiValue(124),      // semantic dark red
+            link: Color::Rgb {
+                r: 28,
+                g: 100,
+                b: 200,
+            }, // dark blue
+            code_bg: 255,                       // light grey bg
+            border: Color::AnsiValue(muted),    // light grey
+            diff_added: Color::AnsiValue(22),   // semantic dark green
+            diff_removed: Color::AnsiValue(124), // semantic dark red
             hook_feedback: Color::AnsiValue(primary), // darker amber
-            logo: Color::AnsiValue(primary),          // darker amber
-            logo_accent: Color::AnsiValue(23),        // deep teal
-            quote: Color::AnsiValue(muted),           // grey
-            heading_h2: Color::Black,
-            heading_h3: Color::AnsiValue(23),    // deep teal
-            heading_h4: Color::AnsiValue(muted), // grey
+            logo: Color::AnsiValue(primary),    // darker amber
+            logo_accent: Color::AnsiValue(23),  // deep teal
+            ordered_list_marker: Color::Blue,
+            quote: Color::DarkGreen, // terminal green
         }
     }
 
@@ -155,7 +147,7 @@ impl ColorTheme {
         ansi_fg(self.muted)
     }
 
-    /// ANSI escape for the code block background.
+    /// ANSI escape for the shell-mode background.
     #[inline]
     pub fn code_bg_seq(&self) -> String {
         format!("\x1b[48;5;{}m", self.code_bg)
@@ -181,7 +173,7 @@ impl Default for ColorTheme {
     }
 }
 
-/// Process-wide UI theme, detected once after the startup palette probe.
+/// Process-wide theme, detected once for both chrome and syntax highlighting.
 static THEME: std::sync::OnceLock<ColorTheme> = std::sync::OnceLock::new();
 
 #[inline]

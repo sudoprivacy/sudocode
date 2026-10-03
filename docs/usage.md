@@ -160,6 +160,11 @@ or editing input does not reparse their code. Output stays in native terminal
 scrollback, with no alternate screen. Terminal theme changes take effect on
 the next launch.
 
+Markdown uses Codex's typographic hierarchy: headings and emphasis keep the
+terminal foreground, inline code and file links use the syntax theme's green,
+and web links are blue and underlined. Inline code omits literal backticks;
+fenced code has no extra frame or background. Amber remains the UI brand accent.
+
 Resizing the terminal reflows the live UI in place: status, Todo, and queued
 message panels remain transient rather than leaving duplicate frames in the
 conversation. The current input draft is retained. For UI that fits within

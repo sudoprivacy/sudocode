@@ -518,9 +518,9 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "context",
         aliases: &[],
-        summary: "Inspect or manage the conversation context",
-        argument_hint: Some("[show|clear]"),
-        resume_supported: true,
+        summary: "Visualize current context usage as a colored grid",
+        argument_hint: Some("[all]"),
+        resume_supported: false,
     },
     SlashCommandSpec {
         name: "color",
@@ -4350,6 +4350,46 @@ pub fn render_skills_prompt_section(
     let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
     let skills = load_skills_from_roots(&roots).ok()?;
     render_skills_section(&skills)
+}
+
+/// One skill's share of the `# Available skills` section, for `/context`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillPromptEntry {
+    pub name: String,
+    /// Where the skill was discovered: `Project`, `User`, or `Plugin`.
+    pub source: &'static str,
+    /// Estimated tokens of this skill's listing line (same chars/4 heuristic
+    /// as the request preflight).
+    pub tokens: usize,
+}
+
+/// The skills [`render_skills_prompt_section`] lists for `cwd`, one entry per
+/// active (unshadowed) skill, in listing order. Sized from the full entry
+/// form; when the section falls back to name-only lines the per-skill figures
+/// overstate slightly, but the category total `/context` shows comes from the
+/// rendered section itself, so the headline number stays exact.
+#[must_use]
+pub fn skill_prompt_entries(
+    cwd: &Path,
+    plugin_load_outcome: Option<&PluginLoadOutcome>,
+) -> Vec<SkillPromptEntry> {
+    let roots = discover_skill_roots_with_plugins(cwd, plugin_load_outcome);
+    let Ok(skills) = load_skills_from_roots(&roots) else {
+        return Vec::new();
+    };
+    skills
+        .iter()
+        .filter(|skill| skill.shadowed_by.is_none())
+        .map(|skill| SkillPromptEntry {
+            name: skill.name.clone(),
+            source: match skill.source.report_scope() {
+                DefinitionScope::Project => "Project",
+                DefinitionScope::UserConfigHome | DefinitionScope::UserHome => "User",
+                DefinitionScope::Plugin => "Plugin",
+            },
+            tokens: skill_entry_full(skill).len() / 4 + 1,
+        })
+        .collect()
 }
 
 /// Every dynamic system-prompt section derivable from the working directory

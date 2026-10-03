@@ -20,12 +20,12 @@ use std::time::Duration;
 use api::{
     AuthMode, CacheHints, ContentBlockDelta, InputMessage, MessageRequest, MessageResponse,
     MessageStream, OutputContentBlock, PromptCache, PromptCacheRecord, ProviderClient,
-    ResolvedProvider, StreamEvent, SudoCodeConfig, ToolChoice,
+    ResolvedProvider, StreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
 };
 use async_trait::async_trait;
 use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, MessageRole, PromptCacheEvent,
-    RuntimeError,
+    ApiClient, ApiRequest, AssistantEvent, AssistantEventStream, ConversationMessage, MessageRole,
+    PromptCacheEvent, RuntimeError,
 };
 use telemetry::{SessionTracer, SudoclawLogSink};
 use tools::GlobalToolRegistry;
@@ -188,6 +188,25 @@ impl EngineApiClient {
                 .core_definitions(self.allowed_tools.as_ref(), None)
         });
         api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize
+    }
+
+    /// The `tools` array a request over `messages` carries — the same
+    /// `core_definitions` call [`ApiClient::stream`] makes, with the same
+    /// discovered-tool reveal — so `/context` counts what is actually on the
+    /// wire rather than a second guess at it. Empty when tools are disabled.
+    #[must_use]
+    pub fn request_tool_definitions(
+        &self,
+        messages: &[ConversationMessage],
+        pre_compact_discovered_tools: &BTreeSet<String>,
+    ) -> Vec<ToolDefinition> {
+        if !self.enable_tools {
+            return Vec::new();
+        }
+        let mut discovered = tools::extract_discovered_tool_names(messages);
+        discovered.extend(pre_compact_discovered_tools.iter().cloned());
+        self.tool_registry
+            .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
     }
 
     /// Start a streaming response, optionally applying a stall timeout on the
@@ -404,10 +423,10 @@ impl ApiClient for EngineApiClient {
         let catalog = self.catalog.clone();
         let request = async {
             let tools = (options.include_tools && self.enable_tools).then(|| {
-                let mut discovered = tools::extract_discovered_tool_names(&request.messages);
-                discovered.extend(request.pre_compact_discovered_tools.iter().cloned());
-                self.tool_registry
-                    .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
+                self.request_tool_definitions(
+                    &request.messages,
+                    &request.pre_compact_discovered_tools,
+                )
             });
             self.client
                 .complete_text(
@@ -449,11 +468,6 @@ impl ApiClient for EngineApiClient {
         let catalog = self.catalog.clone();
         let request = async {
             let is_post_tool = request_ends_with_tool_result(&request);
-            let discovered = self.enable_tools.then(|| {
-                let mut d = tools::extract_discovered_tool_names(&request.messages);
-                d.extend(request.pre_compact_discovered_tools.iter().cloned());
-                d
-            });
             let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
                 system_static: Some(request.system_prompt.static_text()),
                 system_dynamic: Some(request.system_prompt.dynamic_text()),
@@ -465,8 +479,10 @@ impl ApiClient for EngineApiClient {
                 messages: tools::convert_messages(&request.messages),
                 system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
                 tools: self.enable_tools.then(|| {
-                    self.tool_registry
-                        .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
+                    self.request_tool_definitions(
+                        &request.messages,
+                        &request.pre_compact_discovered_tools,
+                    )
                 }),
                 tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
                 stream: true,

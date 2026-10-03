@@ -530,15 +530,17 @@ pub(crate) fn parse_args_with_prompt_overrides(
         return action.map(|action| (action, runtime::SystemPromptOverrides::default()));
     }
 
-    // Preserve legacy trailing prompt semantics, but let print-mode flags occur
-    // after the positional task. `--` escapes task text beginning with a dash.
-    let mut command = Cli::command();
-    if super::headless::requested(args) {
-        command = command.mut_arg("prompt_words", |arg| arg.trailing_var_arg(false));
-    }
-    let cli = command
-        .try_get_matches_from(std::iter::once("scode".to_string()).chain(args.iter().cloned()))
-        .and_then(|matches| Cli::from_arg_matches(&matches));
+    let cli = crate::startup::measure("clap", || {
+        // Preserve legacy trailing prompt semantics, but let print-mode flags occur
+        // after the positional task. `--` escapes task text beginning with a dash.
+        let mut command = Cli::command();
+        if super::headless::requested(args) {
+            command = command.mut_arg("prompt_words", |arg| arg.trailing_var_arg(false));
+        }
+        command
+            .try_get_matches_from(std::iter::once("scode".to_string()).chain(args.iter().cloned()))
+            .and_then(|matches| Cli::from_arg_matches(&matches))
+    });
 
     match cli {
         Ok(mut cli) => {
@@ -611,7 +613,8 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
         cli.permission_mode
     };
     let allowed_tools = normalize_allowed_tools(&cli.allowed_tools)?;
-    let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
+    let permission_mode = permission_mode_override
+        .unwrap_or_else(|| crate::startup::measure("permission_config", default_permission_mode));
 
     if cli.print {
         if cli.command.is_some() || cli.compact {

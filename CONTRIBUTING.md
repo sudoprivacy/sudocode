@@ -299,6 +299,31 @@ the PR description first.
 
 ## Required checks
 
+### Startup latency
+
+`SCODE_TRACE_STARTUP=1 scode version` prints local phase durations to stderr.
+`--version` reports console setup and clap parsing; `version` also reports
+permission defaults, argument conversion, legacy config migration and output.
+Agent startup additionally reports prompt construction, auth configuration,
+model capabilities and engine construction (including plugin/MCP discovery).
+The `arguments` phase includes its nested `clap` and `permission_config` phases;
+do not add their durations together. Tracing is disabled by default and sends
+no telemetry. Cumulative time begins at `main`, excluding OS process creation
+and executable loading.
+
+Measure that complete process cost with
+`python3 e2e/startup/run.py --bin rust/target/release/scode`. It warms the page
+cache, samples each version command 40 times with an isolated config/home,
+checks that tracing preserves JSON stdout, and enforces a 100 ms median budget.
+The release-benchmark CI jobs run it on Linux, macOS and Windows. The initial
+100 ms budget is a coarse regression guard, not a claim of equivalent hardware
+performance: local Intel macOS medians were 22.6 ms (`--version`) and 23.1 ms
+(`version --output-format json`), with about 1.3 ms measured inside `main`.
+Windows' previously reported 27–29 ms needs its own phase measurements before
+selecting an optimization; the macOS measurements do not establish that cause.
+
+### Other acceptance checks
+
 The daily `Model Compatibility` workflow discovers gateway models and runs
 live PTYs in batches of at most eight, with three batches running concurrently.
 Each process has one 90-second deadline. A pass requires exit 0 and the expected

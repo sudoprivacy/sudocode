@@ -352,7 +352,7 @@ fn diff_roundtrip(light: bool) {
     let mut sess = colored_session(&env, light);
     sess.resize(60, 100).unwrap();
     sess.expect("❯").unwrap();
-    let prompt = env.prompt(&format!("Use edit_file to replace this exact line in colors.rs:\n{CODEX_DIFF_OLD}\nwith:\n{CODEX_DIFF_NEW}\nThen say Color diff done."), "codex_diff_showcase");
+    let prompt = env.prompt(&format!("First read colors.rs, then use edit_file to replace this exact line:\n{CODEX_DIFF_OLD}\nwith:\n{CODEX_DIFF_NEW}\nThen say Color diff done."), "codex_diff_showcase");
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
@@ -363,7 +363,7 @@ fn diff_roundtrip(light: bool) {
     sess.send("\r").unwrap();
     common::expect_screen(
         &sess,
-        |s| s.contains("Editing colors.rs") && s.contains("NEW_MARKER"),
+        |s| s.contains("Editing ") && s.contains("colors.rs") && s.contains("NEW_MARKER"),
         common::LIVE_TURN_BUDGET,
         "running diff",
     );

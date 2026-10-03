@@ -48,6 +48,12 @@ mod stderr_redirect {
         pub fn drain(&self) -> Option<String> {
             None
         }
+        pub fn suspend(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+        pub fn resume(&self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }
 
@@ -60,10 +66,12 @@ mod stderr_redirect {
 #[cfg(unix)]
 mod stderr_redirect {
     use std::io::Read;
-    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 
     pub struct StderrRedirect {
         read_file: std::fs::File,
+        write_fd: OwnedFd,
+        original_stderr: OwnedFd,
     }
 
     impl StderrRedirect {
@@ -71,10 +79,7 @@ mod stderr_redirect {
         /// success.  The read end is kept for `drain()`.
         pub fn activate() -> Option<Self> {
             let (read_fd, write_fd): (OwnedFd, OwnedFd) = nix::unistd::pipe().ok()?;
-
-            // Point fd 2 at the write end of the pipe.
-            nix::unistd::dup2(write_fd.as_raw_fd(), 2).ok()?;
-            // `write_fd` is dropped here — fd 2 keeps the write end alive.
+            let original_stderr = std::io::stderr().as_fd().try_clone_to_owned().ok()?;
 
             // Make the read end non-blocking so drain() never stalls.
             let flags =
@@ -84,7 +89,23 @@ mod stderr_redirect {
             nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(oflags)).ok()?;
 
             let read_file = std::fs::File::from(read_fd);
-            Some(Self { read_file })
+            nix::unistd::dup2(write_fd.as_raw_fd(), 2).ok()?;
+            Some(Self {
+                read_file,
+                write_fd,
+                original_stderr,
+            })
+        }
+
+        /// External programs inherit the real terminal, not the capture pipe.
+        pub fn suspend(&self) -> std::io::Result<()> {
+            nix::unistd::dup2(self.original_stderr.as_raw_fd(), 2)?;
+            Ok(())
+        }
+
+        pub fn resume(&self) -> std::io::Result<()> {
+            nix::unistd::dup2(self.write_fd.as_raw_fd(), 2)?;
+            Ok(())
         }
 
         /// Non-blocking drain: returns captured text or `None`.
@@ -105,6 +126,12 @@ mod stderr_redirect {
             } else {
                 Some(collected)
             }
+        }
+    }
+
+    impl Drop for StderrRedirect {
+        fn drop(&mut self) {
+            let _ = self.suspend();
         }
     }
 }
@@ -922,6 +949,39 @@ enum OutputMsg {
     Line(String),
     /// Raw chunk — `StdoutHandle::print`, no extra newline.
     Raw(String),
+    /// A barrier: flush preceding output before releasing terminal ownership.
+    Suspend(TerminalHandoff),
+}
+
+struct TerminalHandoff {
+    ready: SyncSender<io::Result<()>>,
+    resume: Receiver<()>,
+    done: SyncSender<io::Result<()>>,
+}
+
+/// Restores the render loop even when the external operation errors or unwinds.
+pub struct TerminalSuspension {
+    resume: Option<SyncSender<()>>,
+    done: Receiver<io::Result<()>>,
+}
+
+impl TerminalSuspension {
+    pub fn finish(&mut self) -> io::Result<()> {
+        if let Some(resume) = self.resume.take() {
+            let _ = resume.send(());
+            return self
+                .done
+                .recv()
+                .map_err(|_| io::Error::other("terminal render loop stopped"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TerminalSuspension {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
 }
 
 /// A single call to iocraft's stdout handle. Borrows from the message being
@@ -1020,6 +1080,26 @@ pub struct OutputSender {
 impl OutputSender {
     pub fn println(&self, text: &str) {
         let _ = self.tx.send(OutputMsg::Line(text.to_string()));
+    }
+
+    pub fn suspend(&self) -> io::Result<TerminalSuspension> {
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(OutputMsg::Suspend(TerminalHandoff {
+                ready: ready_tx,
+                resume: resume_rx,
+                done: done_tx,
+            }))
+            .map_err(|_| io::Error::other("terminal render loop stopped"))?;
+        ready_rx
+            .recv()
+            .map_err(|_| io::Error::other("terminal handoff failed"))??;
+        Ok(TerminalSuspension {
+            resume: Some(resume_tx),
+            done: done_rx,
+        })
     }
 }
 
@@ -1363,6 +1443,7 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
     output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
+    terminal_handoff: Arc<Mutex<Option<TerminalHandoff>>>,
     ui_rx: Arc<Mutex<Receiver<UiCommand>>>,
     input_tx: SyncSender<InputEvent>,
     spinner: SpinnerState,
@@ -1396,6 +1477,8 @@ pub type UpArrowDequeueHook = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let ctx = hooks.use_context::<ReplContext>();
     let output_rx = Arc::clone(&ctx.output_rx);
+    let terminal_handoff = Arc::clone(&ctx.terminal_handoff);
+    let terminal_handoff_for_future = Arc::clone(&ctx.terminal_handoff);
     let ui_rx = Arc::clone(&ctx.ui_rx);
     let input_tx = ctx.input_tx.clone();
     let spinner = ctx.spinner.clone();
@@ -1496,6 +1579,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let (text, terminated) = match rx.try_recv() {
                         Ok(OutputMsg::Line(text)) => (text, true),
                         Ok(OutputMsg::Raw(text)) => (text, false),
+                        Ok(OutputMsg::Suspend(request)) => {
+                            *terminal_handoff_for_future
+                                .lock()
+                                .expect("terminal handoff mutex poisoned") = Some(request);
+                            frame.set(frame.get().wrapping_add(1));
+                            break;
+                        }
                         Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                     };
                     split_for_iocraft(&text, terminated, |op| match op {
@@ -2177,6 +2267,27 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Exit check: `system` was obtained before the event handler and is
     // NOT captured by the Send closure. The exit flag is set inside the
     // closure; we check it here outside the closure.
+    if let Some(request) = terminal_handoff
+        .lock()
+        .expect("terminal handoff mutex poisoned")
+        .take()
+    {
+        system.suspend(move || {
+            let redir = stderr_redir.lock().expect("stderr redirect mutex poisoned");
+            let released = redir
+                .as_ref()
+                .map_or(Ok(()), stderr_redirect::StderrRedirect::suspend);
+            let is_released = released.is_ok();
+            if request.ready.send(released).is_ok() && is_released {
+                // Channel closure also releases us if the caller unwinds.
+                let _ = request.resume.recv();
+            }
+            let restored = redir
+                .as_ref()
+                .map_or(Ok(()), stderr_redirect::StderrRedirect::resume);
+            let _ = request.done.send(restored);
+        });
+    }
     if *should_exit.read() {
         system.exit();
     }
@@ -2371,6 +2482,7 @@ pub fn spawn_repl_ui(
 
     let ctx = ReplContext {
         output_rx: Arc::new(Mutex::new(output_rx)),
+        terminal_handoff: Arc::new(Mutex::new(None)),
         ui_rx: Arc::new(Mutex::new(ui_rx)),
         input_tx: input_tx.clone(),
         spinner: spinner.clone(),

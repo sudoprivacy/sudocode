@@ -54,7 +54,7 @@ pub(crate) fn print_with_pager_threshold(text: &str, extra_trailing_rows: usize)
         return;
     };
 
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(text.as_bytes());
         if !text.ends_with('\n') {
             let _ = stdin.write_all(b"\n");
@@ -91,10 +91,12 @@ fn select_pager(get_env: impl Fn(&str) -> Option<String>) -> Option<(String, Vec
     if trimmed.is_empty() {
         return None;
     }
-    let mut parts = trimmed.split_whitespace();
-    let program = parts.next()?.to_string();
-    let args: Vec<String> = parts.map(str::to_string).collect();
-    Some((program, args))
+    if std::path::Path::new(trimmed).is_file() {
+        return Some((trimmed.to_string(), Vec::new()));
+    }
+    let parts = shell_words::split(trimmed).ok()?;
+    let (program, args) = parts.split_first()?;
+    Some((program.clone(), args.to_vec()))
 }
 
 #[cfg(test)]

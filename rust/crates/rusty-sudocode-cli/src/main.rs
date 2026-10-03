@@ -3384,6 +3384,18 @@ fn run_repl_iocraft_dispatch(
                     // Try slash command dispatch.
                     let trimmed = text.trim();
                     let is_slash = match SlashCommand::parse(trimmed) {
+                        Ok(Some(SlashCommand::Memory)) => {
+                            if turn_active {
+                                repl_output.println("A turn is running; wait for it to finish before editing memory.");
+                            } else {
+                                pending_slash_selection = cli::memory_ui::select_memory(
+                                    &repl_ui_cmd,
+                                    &cli_shared,
+                                    &repl_output,
+                                );
+                            }
+                            true
+                        }
                         Ok(Some(SlashCommand::Config { section: None })) => {
                             // Interactive config tree browser via FieldSchema SSOT.
                             let cwd = env::current_dir().unwrap_or_default();
@@ -3897,7 +3909,7 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
 
 impl LiveCli {
     /// True when the async REPL (queue mode) is active. In this mode the
-    /// input thread owns stdin via rustyline, so interactive widgets
+    /// render thread owns stdin via iocraft, so interactive widgets
     /// (FuzzySelect, Select) cannot be used on the runner thread.
     fn is_async_mode(&self) -> bool {
         self.shared_queue_mode.is_some()
@@ -3911,8 +3923,17 @@ impl LiveCli {
         }
     }
 
-    fn out_suspend<F: FnOnce() -> R, R>(&self, f: F) -> R {
-        f()
+    fn out_suspend<F: FnOnce() -> R, R>(&self, f: F) -> io::Result<R> {
+        let mut suspension = self
+            .iocraft_output
+            .as_ref()
+            .map(repl_ui::OutputSender::suspend)
+            .transpose()?;
+        let result = f();
+        if let Some(ref mut suspension) = suspension {
+            suspension.finish()?;
+        }
+        Ok(result)
     }
 
     fn new(
@@ -4761,7 +4782,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Status => {
-                self.print_status();
+                self.print_status()?;
                 false
             }
             SlashCommand::Bughunter { scope } => {
@@ -4858,7 +4879,7 @@ impl LiveCli {
                         };
                         self.out_suspend(|| {
                             Self::print_mcp(args.as_deref(), CliOutputFormat::Text)
-                        })?;
+                        })??;
                     }
                 }
                 false
@@ -4868,11 +4889,11 @@ impl LiveCli {
                 false
             }
             SlashCommand::Init => {
-                self.out_suspend(|| run_init(CliOutputFormat::Text))?;
+                self.out_suspend(|| run_init(CliOutputFormat::Text))??;
                 false
             }
             SlashCommand::Diff => {
-                self.out_suspend(|| Self::print_diff())?;
+                self.out_suspend(Self::print_diff)??;
                 false
             }
             SlashCommand::Undo => {
@@ -4880,7 +4901,7 @@ impl LiveCli {
                 false
             }
             SlashCommand::Version => {
-                self.out_suspend(|| Self::print_version(CliOutputFormat::Text));
+                self.out_suspend(|| Self::print_version(CliOutputFormat::Text))?;
                 false
             }
             SlashCommand::Export { path } => {
@@ -4894,7 +4915,7 @@ impl LiveCli {
                 self.handle_plugins_command(action.as_deref(), target.as_deref())?
             }
             SlashCommand::Agents { args } => {
-                self.out_suspend(|| Self::print_agents(args.as_deref(), CliOutputFormat::Text))?;
+                self.out_suspend(|| Self::print_agents(args.as_deref(), CliOutputFormat::Text))??;
                 false
             }
             SlashCommand::Cron { args } => {
@@ -4917,7 +4938,7 @@ impl LiveCli {
                     SkillSlashDispatch::Local => {
                         self.out_suspend(|| {
                             self.print_skills_with_plugins(args.as_deref(), CliOutputFormat::Text)
-                        })?;
+                        })??;
                     }
                 }
                 false
@@ -5039,7 +5060,7 @@ impl LiveCli {
         }
     }
 
-    fn print_status(&self) {
+    fn print_status(&self) -> io::Result<()> {
         let usage = self.lifecycle.usage_snapshot();
         let cumulative = usage.cumulative_usage();
         let latest = usage.current_turn_usage();
@@ -5059,7 +5080,7 @@ impl LiveCli {
             None, // #148: REPL /status doesn't carry flag provenance
             &self.lifecycle.current_billing_account().describe(),
         );
-        self.out_suspend(|| print_with_pager(&report));
+        self.out_suspend(|| print_with_pager(&report))
     }
 
     fn record_prompt_history(&mut self, prompt: &str) {
@@ -5143,7 +5164,7 @@ impl LiveCli {
                     .items(&models)
                     .default(default_idx)
                     .interact_opt()
-            })?;
+            })??;
             return match selection {
                 Some(idx) => self.set_model(Some(models[idx].clone())),
                 None => Ok(false),
@@ -5331,7 +5352,7 @@ impl LiveCli {
                     .items(&labels)
                     .default(0)
                     .interact_opt()
-            })?;
+            })??;
             return match selection {
                 Some(idx) => self.load_session(Some(sessions[idx].id.clone())),
                 None => Ok(false),
@@ -5412,17 +5433,42 @@ impl LiveCli {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        if !path.exists() {
-            fs::write(path, "")?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
         }
-        let (editor, source) = if let Ok(v) = env::var("VISUAL") {
-            (v, "$VISUAL")
-        } else if let Ok(e) = env::var("EDITOR") {
-            (e, "$EDITOR")
+        let (editor, source) = ["VISUAL", "EDITOR"]
+            .into_iter()
+            .find_map(|key| {
+                env::var(key)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| (value, format!("${key}")))
+            })
+            .unwrap_or_else(|| ("vi".to_string(), "default".to_string()));
+        // A literal executable path may contain spaces or Windows backslashes.
+        // Otherwise accept quoted argv, without evaluating shell expressions.
+        let parts = if Path::new(&editor).is_file() {
+            vec![editor.clone()]
         } else {
-            ("vi".to_string(), "default")
+            shell_words::split(&editor)?
         };
-        let status = std::process::Command::new(&editor).arg(path).status()?;
+        let (program, args) = parts.split_first().ok_or("Editor command is empty")?;
+        let status = std::process::Command::new(program)
+            .args(args)
+            .arg(path)
+            .status()
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("Failed to launch editor '{editor}': {error}"),
+                )
+            })?;
         if !status.success() {
             return Err(format!("Editor '{}' exited with {}", editor, status).into());
         }
@@ -5459,13 +5505,13 @@ impl LiveCli {
                     .items(&labels)
                     .default(0)
                     .interact_opt()
-            })?;
+            })??;
             match selection {
                 Some(idx) => files[idx].path.clone(),
                 None => return Ok(()),
             }
         };
-        let msg = self.out_suspend(|| Self::open_in_editor(&target))?;
+        let msg = self.out_suspend(|| Self::open_in_editor(&target))??;
         self.out_println(msg);
         Ok(())
     }
@@ -5713,7 +5759,7 @@ impl LiveCli {
                             .items(&items)
                             .default(default_idx)
                             .interact_opt()
-                    })?;
+                    })??;
                     let Some(idx) = selection else {
                         return Ok(false);
                     };
@@ -5783,7 +5829,7 @@ impl LiveCli {
                     ));
                     return Ok(false);
                 }
-                if !self.out_suspend(|| confirm_session_deletion(&handle.id)) {
+                if !self.out_suspend(|| confirm_session_deletion(&handle.id))? {
                     self.out_println("delete: cancelled.");
                     return Ok(false);
                 }

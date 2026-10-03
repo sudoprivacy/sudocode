@@ -119,6 +119,20 @@ scode
 The REPL accepts prose and slash commands. Tab completion expands slash
 command names, model aliases, permission modes, and recent session IDs.
 
+`/memory` opens the discovered instruction file in `$VISUAL`, then `$EDITOR`,
+or `vi` when neither is set. With several instruction files, type to filter
+the file picker, press Enter to edit, or Esc to cancel. With none, it creates
+`AGENTS.md` in the current directory. Finish the current turn before editing.
+Editor commands accept quoted arguments, for example `EDITOR='code --wait'`;
+shell expansions are not evaluated. An existing executable path can be used
+directly, including paths containing spaces.
+
+External editors and the `$PAGER` used by long `/status` and `/diff` reports
+temporarily receive terminal input and output. Closing them restores the
+same REPL and its input state; an editor launch error or unsuccessful exit
+also returns to the prompt. A blank `PAGER` disables paging. Scode keeps its
+inline display; external programs control their own terminal presentation.
+
 Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.

@@ -372,7 +372,13 @@ jobs:
         run: cargo build --release -p rusty-sudocode-cli --bin scode
       - name: Check complete process startup budget
         shell: bash
-        run: python ../e2e/startup/run.py --bin target/release/scode${{ runner.os == 'Windows' && '.exe' || '' }} --budget-ms 100
+        run: python ../e2e/startup/run.py --bin target/release/scode${{ runner.os == 'Windows' && '.exe' || '' }} --budget-ms 100 --report target/startup.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: startup-${{ matrix.os }}
+          path: rust/target/startup.json
+          if-no-files-found: warn
 
   clippy-workspace:
     name: cargo clippy --workspace (${{ matrix.os }})

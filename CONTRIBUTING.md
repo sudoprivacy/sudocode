@@ -315,6 +315,17 @@ Measure that complete process cost with
 `python3 e2e/startup/run.py --bin rust/target/release/scode`. It warms the page
 cache, samples each version command 40 times with an isolated config/home,
 checks that tracing preserves JSON stdout, and enforces a 100 ms median budget.
+The harness requires `rustc` and builds a minimal Rust reference outside the
+timed region. It alternates paired invocations with identical arguments,
+environment, output bytes and pipe capture. `reference_median_ms` measures
+that process-launch floor; `paired_difference_median_ms` is scode's added cost
+on the same host. This difference includes executable loading and application
+work, so it is not a measurement of config parsing alone. `traced_main_ms`
+covers only the instrumented portion inside `main`; `traced_wall_ms` also
+includes process creation, loading, tracing output and shutdown. The single
+traced sample is diagnostic, not the untraced median used for the budget.
+Pass `--report path.json` to retain all paired samples and phase timings; CI
+uploads one `startup-<os>` artifact per release benchmark job.
 The release-benchmark CI jobs run it on Linux, macOS and Windows. The initial
 100 ms budget is a coarse regression guard, not a claim of equivalent hardware
 performance: local Intel macOS medians were 22.6 ms (`--version`) and 23.1 ms

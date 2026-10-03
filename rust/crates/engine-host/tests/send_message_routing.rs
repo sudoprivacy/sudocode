@@ -169,13 +169,16 @@ fn nexus_executor() -> (CliToolExecutor, Appends, Provisions) {
     let appends: Appends = Arc::new(Mutex::new(Vec::new()));
     let provisions: Provisions = Arc::new(Mutex::new(Vec::new()));
     let mut executor = executor();
-    executor.set_mailbox(Arc::new(Mailbox::new(
+    let mailbox = Arc::new(Mailbox::new(
         Arc::new(RecordingBackend {
             appends: Arc::clone(&appends),
             provisions: Arc::clone(&provisions),
         }),
         SESSION_AGENT.to_string(),
         InboxConvention::new(String::new()),
+    ));
+    executor.set_directory(Arc::new(runtime::directory::Directory::single(
+        "nexus", mailbox,
     )));
     (executor, appends, provisions)
 }

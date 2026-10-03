@@ -1295,7 +1295,7 @@ pub fn spawn_local_poller(
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    static SCOPED_MAILBOX: std::cell::RefCell<Option<Arc<Mailbox>>> =
+    static SCOPED_DIRECTORY: std::cell::RefCell<Option<Arc<crate::directory::Directory>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1324,14 +1324,17 @@ thread_local! {
 /// changed, so two tests in one binary needing different conventions would be in
 /// each other's way. A test gives its executor a mailbox like the host does.
 pub struct MailboxScope {
-    previous: Option<Arc<Mailbox>>,
+    previous: Option<Arc<crate::directory::Directory>>,
 }
 
 impl MailboxScope {
-    /// Enter `mailbox` as this thread's mailbox until the guard drops.
+    /// Enter `directory` as this thread's addressing set until the guard drops.
+    ///
+    /// One member is the standalone / nexus-only case; several is a session
+    /// attached to more than one namespace at once.
     #[must_use]
-    pub fn enter(mailbox: Arc<Mailbox>) -> Self {
-        let previous = SCOPED_MAILBOX.with(|cell| cell.borrow_mut().replace(mailbox));
+    pub fn enter(directory: Arc<crate::directory::Directory>) -> Self {
+        let previous = SCOPED_DIRECTORY.with(|cell| cell.borrow_mut().replace(directory));
         Self { previous }
     }
 }
@@ -1339,7 +1342,7 @@ impl MailboxScope {
 impl Drop for MailboxScope {
     fn drop(&mut self) {
         let previous = self.previous.take();
-        SCOPED_MAILBOX.with(|cell| {
+        SCOPED_DIRECTORY.with(|cell| {
             *cell.borrow_mut() = previous;
         });
     }
@@ -1360,8 +1363,23 @@ impl Drop for MailboxScope {
 /// this handle is never polled. A receiver builds its own with its real identity.
 #[must_use]
 pub fn sending_mailbox() -> Arc<Mailbox> {
-    if let Some(mailbox) = SCOPED_MAILBOX.with(|cell| cell.borrow().clone()) {
-        return mailbox;
+    // The primary member of the thread's directory, or the ambient fallback.
+    // `send`'s unqualified / local-pid paths and every caller that needs one
+    // mailbox (its `self_id`, its convention) use this; cross-namespace
+    // discovery and routing use `scoped_directory()` instead.
+    scoped_directory().primary_mailbox()
+}
+
+/// The thread's addressing set: every namespace this session is attached to.
+///
+/// One member in the standalone / nexus-only case, several when a session is
+/// attached to more than one at once. The ambient fallback (no scope installed)
+/// is a single workspace-local member, so a caller that never set a directory —
+/// a sub-agent, a test — still gets a valid one-namespace answer.
+#[must_use]
+pub fn scoped_directory() -> Arc<crate::directory::Directory> {
+    if let Some(directory) = SCOPED_DIRECTORY.with(|cell| cell.borrow().clone()) {
+        return directory;
     }
     // Ambient fallback with no scoped mailbox: workspace-rooted, so a
     // coordinator/sub-agent send stays per-workspace (a sub-agent belongs to its
@@ -1378,7 +1396,8 @@ pub fn sending_mailbox() -> Arc<Mailbox> {
     // the scoped mailbox, so the two agree instead of nearly agreeing.
     let root = crate::current_workspace_root_or_default();
     let self_id = local_agent_name(None, &root);
-    Arc::new(Mailbox::workspace_local(&root, self_id))
+    let mailbox = Arc::new(Mailbox::workspace_local(&root, self_id));
+    Arc::new(crate::directory::Directory::single("local", mailbox))
 }
 
 #[cfg(test)]

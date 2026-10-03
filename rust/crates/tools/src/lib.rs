@@ -2202,6 +2202,11 @@ pub struct AgentListRow {
     pub pid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// The namespace(s) this agent is addressable in (e.g. `["local"]`,
+    /// `["nexus"]`, or both). A name in more than one is addressed with a
+    /// `label:name` qualifier; a sub-agent row carries none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
 }
 
 /// Collect the addressable agents this session can reach, plus the workers it
@@ -2219,13 +2224,13 @@ pub fn collect_agent_list(
     active_only: bool,
     fs: &dyn FsBackend,
 ) -> Result<Vec<AgentListRow>, String> {
-    let mailbox = runtime::mailbox::sending_mailbox();
-    let self_name = mailbox.self_id().to_string();
+    let directory = runtime::mailbox::scoped_directory();
+    let self_name = directory.self_id().to_string();
     // Surface an enumeration failure instead of swallowing it: `list_recipients`
-    // returns `Err` precisely so "I could not read the namespace" stays distinct
-    // from "no one is there". `unwrap_or_default()` collapsed the two, telling the
-    // model nobody exists when the truth is the read failed.
-    let peers = mailbox.list_recipients()?;
+    // returns `Err` precisely so "I could not read a namespace" stays distinct
+    // from "no one is there". Across every namespace the session is attached to,
+    // merged and tagged with where each was found.
+    let peers = directory.list_recipients()?;
     // The sub-agent store is a local dir; a read failure there is soft — an empty
     // worker list is a reasonable degrade, and the peers above are the tool's point.
     let subagents = list_agent_snapshots_from_store_with(true, fs).unwrap_or_default();
@@ -2233,11 +2238,12 @@ pub fn collect_agent_list(
 }
 
 /// Pure core of [`collect_agent_list`], sources injected so it is testable
-/// without a real backend. `peers` are addressable names from the mailbox
-/// namespace; `self_name` is filtered out (an agent is not its own peer);
-/// `subagents` are already-filtered running snapshots.
+/// without a real backend. `peers` are addressable recipients from the
+/// directory (each tagged with the namespaces it was found in); `self_name` is
+/// filtered out (an agent is not its own peer); `subagents` are already-filtered
+/// running snapshots.
 pub fn merge_agent_list(
-    peers: &[String],
+    peers: &[runtime::directory::Recipient],
     self_name: &str,
     subagents: Vec<AgentSnapshot>,
     active_only: bool,
@@ -2248,17 +2254,20 @@ pub fn merge_agent_list(
     // Source 1: addressable peers in the mailbox namespace. Liveness is not
     // knowable from the namespace alone (a remote backend does not report it),
     // so `active` is left `None` — the row is addressable, not "running".
-    for name in peers {
-        if name == self_name || name.is_empty() {
+    for recipient in peers {
+        if recipient.name == self_name || recipient.name.is_empty() {
             continue; // an agent is not its own peer
         }
-        rows.entry(name.clone()).or_insert_with(|| AgentListRow {
-            name: name.clone(),
-            active: None,
-            kind: "peer".to_string(),
-            pid: None,
-            role: None,
-        });
+        let sources: Vec<String> = recipient.sources.iter().map(|s| (*s).to_string()).collect();
+        rows.entry(recipient.name.clone())
+            .or_insert_with(|| AgentListRow {
+                name: recipient.name.clone(),
+                active: None,
+                kind: "peer".to_string(),
+                pid: None,
+                role: None,
+                sources,
+            });
     }
 
     // Source 2: sub-agents this process spawned (running/backgrounded).
@@ -2277,6 +2286,7 @@ pub fn merge_agent_list(
                 kind: "subagent".to_string(),
                 pid: Some(snap.agent_id.clone()),
                 role: role.clone(),
+                sources: Vec::new(),
             });
         // A pid-bearing (active) worker wins a name collision with a peer row.
         if active {
@@ -2986,13 +2996,42 @@ fn run_send_message(mut input: SendMessageInput) -> Result<String, String> {
             .lock()
             .map(|agents| agents.contains_key(&input.to))
             .unwrap_or(false);
+    let directory = runtime::mailbox::scoped_directory();
     let mailbox = if local_pid {
+        // A running in-process sub-agent reads the workspace-local mailbox, not
+        // any addressable namespace — its pid is a process handle, not a peer.
         std::sync::Arc::new(runtime::mailbox::Mailbox::workspace_local(
             &current_workspace_root().map_err(|e| e.to_string())?,
-            runtime::mailbox::sending_mailbox().self_id().to_string(),
+            directory.self_id().to_string(),
         ))
+    } else if input.to == "*" {
+        // Broadcast enumerates below through the primary's namespace; keep the
+        // primary mailbox as the handle its loop uses.
+        directory.primary_mailbox()
     } else {
-        runtime::mailbox::sending_mailbox()
+        // Route to the namespace that can address the recipient. A name in one
+        // namespace resolves there; a name in several must be qualified
+        // (`local:x` / `nexus:x`) so delivery is never silently to the wrong
+        // one; a name found nowhere falls to the primary, whose durable inbox
+        // holds the message until that peer first runs.
+        use runtime::directory::Routed;
+        match directory.route(&input.to) {
+            Routed::One(member) => {
+                input.to = runtime::directory::Directory::bare_name(&input.to).to_string();
+                std::sync::Arc::clone(&member.mailbox)
+            }
+            Routed::Ambiguous(labels) => {
+                return Err(format!(
+                    "'{}' is addressable in more than one namespace ({}). \
+                     Re-send with a qualifier, e.g. `{}:{}`.",
+                    input.to,
+                    labels.join(", "),
+                    labels[0],
+                    input.to
+                ));
+            }
+            Routed::NotFound => directory.primary_mailbox(),
+        }
     };
     let sender = resolve_sender(&input, &mailbox);
 
@@ -9946,11 +9985,22 @@ mod tests {
 
     #[test]
     fn merge_agent_list_lists_peers_and_running_subagents() {
-        // Peers come from the mailbox namespace (names), not a probed filename.
+        // Peers come from the directory (recipients tagged with their namespace),
+        // not a probed filename.
+        use runtime::directory::Recipient;
         let peers = vec![
-            "alice".to_string(),
-            "bob".to_string(),
-            "me".to_string(), // self — must be filtered out
+            Recipient {
+                name: "alice".to_string(),
+                sources: vec!["local"],
+            },
+            Recipient {
+                name: "bob".to_string(),
+                sources: vec!["nexus"],
+            },
+            Recipient {
+                name: "me".to_string(),
+                sources: vec!["local"],
+            }, // self — filtered out
         ];
 
         // one running sub-agent (own name, distinct from peers)
@@ -9972,6 +10022,12 @@ mod tests {
         // A peer is addressable; liveness is unknown from the namespace → None.
         assert_eq!(by["alice"].active, None, "peer liveness unknown");
         assert_eq!(by["alice"].kind, "peer");
+        assert_eq!(
+            by["alice"].sources,
+            vec!["local".to_string()],
+            "peer carries its namespace"
+        );
+        assert_eq!(by["bob"].sources, vec!["nexus".to_string()]);
         assert!(by["alice"].pid.is_none());
         assert_eq!(by["bob"].active, None);
         // A running sub-agent is positively active, with its pid + role.

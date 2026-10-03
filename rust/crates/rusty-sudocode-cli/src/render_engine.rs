@@ -1,6 +1,6 @@
 //! The terminal renderer for the engine↔renderer seam: it consumes
 //! [`engine_events::EngineEvent`]s from an `EngineHandle` and draws them (the
-//! markdown/ANSI stream, the ⏺ glyph margin, the spinner's byte counter +
+//! markdown/ANSI stream, the • glyph margin, the spinner's byte counter +
 //! "Reasoning…" cue, and tool call/result lines). This is the render *half* of
 //! the old `CliStreamState`, now cleanly separated: the engine produces events,
 //! this draws them, and nothing engine-side renders.
@@ -16,7 +16,7 @@ use engine_events::{
     RetryEvent, ToolProgressEvent,
 };
 
-use crate::cli::format::{format_tool_call_start, format_tool_result};
+use crate::cli::format::format_tool_result;
 use crate::render::{
     query_terminal_width, MarkdownStreamState, ResponseGlyphState, SpinnerRef, TerminalRenderer,
     DIM, RESET,
@@ -46,6 +46,13 @@ pub(crate) enum RenderOutcome {
 /// Stateful terminal renderer for one turn's event stream.
 pub(crate) struct EngineEventRenderer {
     markdown: MarkdownStreamState,
+    /// Buffers thinking deltas until a line is complete so reasoning is emitted
+    /// one dim line at a time, not one `\x1b[2m…\x1b[0m` pair per streamed delta
+    /// (the fragmentation bug). Kept separate from `markdown` because thinking is
+    /// shown as raw dim prose, deliberately not run through the answer's markdown
+    /// renderer (its ANSI resets would cancel the dim, and its parser state must
+    /// not interleave with the answer across the block boundary).
+    thinking_pending: String,
     renderer: TerminalRenderer,
     glyph: ResponseGlyphState,
     spinner: Option<SpinnerRef>,
@@ -53,12 +60,10 @@ pub(crate) struct EngineEventRenderer {
     /// `true` while inside a thinking block, so the "Reasoning…" spinner cue is
     /// raised once and lowered when real content resumes.
     thinking_active: bool,
-    /// `true` when a staging overlay (the iocraft REPL) shows in-flight tool
-    /// calls as running cards. In that mode the command header is NOT appended
-    /// to scrollback here — the overlay renders it — while the finished result
-    /// card still appends normally (the ordered scrollback sink). Off for
-    /// one-shot / `--print`, where there is no overlay and the header appends.
-    staging_overlay: bool,
+    /// `true` once this thinking block has written text to the terminal, so
+    /// leaving the block can close it off. Distinct from `thinking_active`:
+    /// a block that produced only empty deltas needs no separator.
+    thinking_printed: bool,
     /// Tool-call arguments remembered from `ToolCall` and paired with the
     /// matching `ToolResult`, so the completed card can show what was requested
     /// — the result payload does not echo command/path/strings. Shared type
@@ -70,21 +75,15 @@ impl EngineEventRenderer {
     pub(crate) fn new(spinner: Option<SpinnerRef>, output_writer: Option<OutputSender>) -> Self {
         Self {
             markdown: MarkdownStreamState::default(),
+            thinking_pending: String::new(),
             renderer: TerminalRenderer::new(),
             glyph: ResponseGlyphState::new(query_terminal_width()),
             spinner,
             output_writer,
             thinking_active: false,
-            staging_overlay: false,
+            thinking_printed: false,
             tool_inputs: crate::cli::format::ToolInputRegistry::default(),
         }
-    }
-
-    /// Enable staging-overlay mode: suppress the command-header append (the
-    /// overlay shows in-flight calls); the finished result card still appends.
-    pub(crate) fn with_staging_overlay(mut self) -> Self {
-        self.staging_overlay = true;
-        self
     }
 
     fn write_out(&mut self, text: &str) {
@@ -141,6 +140,20 @@ impl EngineEventRenderer {
         }
     }
 
+    /// Emit buffered thinking text up to the last complete line, one dim line
+    /// at a time, leaving any trailing partial line in `thinking_pending` for
+    /// the next delta (or the `end_thinking` flush). Dimming per line — rather
+    /// than per delta — is what collapses the stream of `\x1b[2m…\x1b[0m`
+    /// fragments into clean, copy-safe reasoning lines while staying live.
+    fn flush_thinking_lines(&mut self) {
+        while let Some(newline) = self.thinking_pending.find('\n') {
+            let line: String = self.thinking_pending.drain(..=newline).collect();
+            let rendered = render_thinking_line(&line);
+            let prefixed = self.glyph.apply(&rendered);
+            self.write_out(&prefixed);
+        }
+    }
+
     /// Leave the thinking state (lower the "Reasoning…" cue) when real content
     /// resumes after a thinking block.
     fn end_thinking(&mut self) {
@@ -149,6 +162,30 @@ impl EngineEventRenderer {
             if let Some(s) = &self.spinner {
                 s.set_thinking(false);
             }
+        }
+        if self.thinking_printed {
+            self.thinking_printed = false;
+            // Emit any trailing partial line (a block that ended without a final
+            // newline) before closing, so the last reasoning sentence is not
+            // dropped. `flush_thinking_lines` only emits up to the last newline;
+            // the remainder lives in `thinking_pending` until here.
+            if !self.thinking_pending.is_empty() {
+                let rendered = render_thinking_line(&self.thinking_pending);
+                self.thinking_pending.clear();
+                let prefixed = self.glyph.apply(&rendered);
+                self.write_out(&prefixed);
+            }
+            // Close the dim block with a blank line so the answer does not
+            // continue the last reasoning line. `visible_col` says whether that
+            // line was left open: mid-line needs one newline to end it and a
+            // second to make the gap, at column 0 the first is already spent.
+            let separator = if self.glyph.visible_col > 0 {
+                "\n\n"
+            } else {
+                "\n"
+            };
+            let closed = self.glyph.apply(separator);
+            self.write_out(&closed);
         }
     }
 
@@ -172,13 +209,42 @@ impl EngineEventRenderer {
                 if let Some(s) = &self.spinner {
                     s.add_response_bytes(text.len() as u32);
                 }
-                // Thinking is not surfaced in the transcript; the spinner's
-                // "Reasoning…" mode is the only cue.
                 if !self.thinking_active {
                     self.thinking_active = true;
                     if let Some(s) = &self.spinner {
                         s.set_thinking(true);
                     }
+                }
+                // Surface the reasoning instead of dropping it. Extended
+                // thinking is billed either way, and these deltas only arrive
+                // when the `thinking` setting is on (with it off the request
+                // carries no thinking parameter at all), so the single setting
+                // means both "spend the tokens" and "show what they bought" —
+                // paying for reasoning and then hiding it is the one
+                // combination with no argument for it.
+                //
+                // Not fed through `self.markdown`: thinking is prose the model
+                // wrote for itself, and interleaving it with the answer's
+                // markdown stream would corrupt that parser's state across the
+                // block boundary.
+                if !text.is_empty() {
+                    if !self.thinking_printed {
+                        // Pause (and write the header) exactly once per block,
+                        // not once per delta. `SpinnerRef::pause` emits a
+                        // carriage return + erase-line to clear its own row;
+                        // per-delta that lands mid-line and wipes the thinking
+                        // text already drawn on it. `TextDelta` can afford to
+                        // pause every delta only because it writes at markdown
+                        // block boundaries, so its erase always lands at column
+                        // 0. Reasoning is written at line boundaries and has the
+                        // same protection.
+                        self.pause_spinner();
+                        let header = self.glyph.apply(&crate::cli::format::thinking_header());
+                        self.write_out(&header);
+                        self.thinking_printed = true;
+                    }
+                    self.thinking_pending.push_str(&text);
+                    self.flush_thinking_lines();
                 }
                 RenderOutcome::Continue
             }
@@ -194,18 +260,16 @@ impl EngineEventRenderer {
                 // the call's input.
                 self.tool_inputs.remember(&id, &input);
                 self.pause_spinner();
-                // Staging overlay owns the command header (as a running card),
-                // so suppress the scrollback append here to avoid showing it
-                // twice. The glyph reset and spinner pause/resume still run —
-                // they are streaming-cursor bookkeeping, independent of who
-                // renders the header. Without an overlay (one-shot / --print)
-                // the header appends as before.
-                if !self.staging_overlay {
-                    let line = format!("\n{}\n", format_tool_call_start(&name, &input));
-                    self.write_out(&line);
-                }
-                // The tool line reset column 0; the next assistant text starts a
-                // fresh ⏺-margined block.
+                // No card is committed here. `Running` (amber) is a live,
+                // self-clearing status that belongs only to the iocraft staging
+                // overlay; scrollback is durable and must carry exactly one card
+                // per call — the terminal-status (green/red) card committed on
+                // `ToolResult` below. Committing a `Running` header here froze an
+                // amber "in-flight" card permanently above the real result. The
+                // in-flight cue is the spinner + the tool's own streamed stdout.
+                //
+                // The glyph reset still runs: the tool line reset column 0, so
+                // the next assistant text starts a fresh •-margined block.
                 self.glyph.visible_col = 0;
                 self.resume_spinner();
                 RenderOutcome::Continue
@@ -251,6 +315,10 @@ impl EngineEventRenderer {
             }
             EngineEvent::Error { message } => {
                 // Flush any partial assistant text first, then surface the error.
+                // `end_thinking` first so a turn that failed while still
+                // reasoning closes its dim block rather than letting the error
+                // line inherit the dim attribute.
+                self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
                     let prefixed = self.glyph.apply(&rendered);
                     self.write_out(&prefixed);
@@ -260,6 +328,10 @@ impl EngineEventRenderer {
                 RenderOutcome::Done
             }
             EngineEvent::TurnComplete(_) => {
+                // A turn can end on a thinking block (the model reasoned and
+                // then produced no text, e.g. it was interrupted): close it so
+                // the next prompt is not written into an open dim run.
+                self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
                     let prefixed = self.glyph.apply(&rendered);
                     self.write_out(&prefixed);
@@ -398,9 +470,23 @@ fn format_hook_progress(event: &HookProgressEvent) -> String {
     )
 }
 
+/// Render one complete thinking line for the transcript: dim prose, but a
+/// blank line emitted raw. Dimming is applied once per line here — the single
+/// place that decides it — instead of once per streamed delta, which is what
+/// turned reasoning into a stream of `\x1b[2m…\x1b[0m` fragments. A whitespace-
+/// only line has no text to tint, so wrapping it would only add escape noise.
+fn render_thinking_line(line: &str) -> String {
+    if line.trim().is_empty() {
+        line.to_string()
+    } else {
+        crate::cli::format::dim_thinking(line)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_hook_progress;
+    use super::{format_hook_progress, render_thinking_line};
+    use crate::render::{DIM, RESET};
     use engine_events::HookProgressEvent;
     use runtime::HookEvent;
 
@@ -491,5 +577,26 @@ mod tests {
         };
         let line = format_hook_progress(&event);
         assert!(!line.ends_with('\n'), "unexpected newline in {line:?}");
+    }
+
+    /// A non-empty reasoning line is dimmed exactly once — one `DIM…RESET` pair
+    /// for the whole line, which is the fix for the per-delta fragmentation that
+    /// wrapped every streamed chunk in its own escape pair.
+    #[test]
+    fn a_reasoning_line_is_dimmed_once_as_a_whole() {
+        let rendered = render_thinking_line("checking 17 is prime\n");
+        assert_eq!(rendered, format!("{DIM}checking 17 is prime\n{RESET}"));
+        assert_eq!(rendered.matches(DIM).count(), 1, "one dim open per line");
+        assert_eq!(rendered.matches(RESET).count(), 1, "one reset per line");
+    }
+
+    /// A blank separator line between reasoning paragraphs is emitted raw: it
+    /// has no text to tint, so wrapping it would only add escape noise to the
+    /// scrollback the user copies out.
+    #[test]
+    fn a_blank_reasoning_line_is_emitted_without_escapes() {
+        let rendered = render_thinking_line("  \n");
+        assert_eq!(rendered, "  \n");
+        assert!(!rendered.contains(DIM), "blank line carries no dim escape");
     }
 }

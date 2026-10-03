@@ -70,7 +70,7 @@ fn async_repl_processes_single_turn_and_exits() {
     // child processes than the local dev box. 30 s comfortably covers the
     // runner-thread join + persist_session + telemetry flush + process
     // teardown even on a congested runner.
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!(

@@ -19,7 +19,7 @@ fn esc_cancels_turn_in_async_repl() {
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     let prompt = env.prompt(
-        "Run this exact bash command: printf 'esc-start'; sleep 30; printf 'esc-done'",
+        "Run this exact bash command: printf 'ready' > cancel-ready; printf 'esc-start'; sleep 30; printf 'esc-done'",
         "bash_interrupt_long_running",
     );
     let mut sess = env.spawn_with_env(
@@ -42,47 +42,35 @@ fn esc_cancels_turn_in_async_repl() {
 
     sess.send(&format!("{prompt}\r")).expect("send prompt");
 
-    // Wait for an indicator that the turn is in progress.
-    sess.expect("(?i)(bash|thinking|sonnet|auto|claude|❯)")
-        .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
-            panic!("should see turn activity: {e}\nPTY screen:\n{screen}");
-        });
-
-    // Short delay — just enough for the API stream to start. The prompt
-    // asks for `sleep 30` so the turn should still be running when ESC
-    // arrives, even in live mode.
-    std::thread::sleep(Duration::from_millis(500));
+    // Only the running Bash command can create this marker. The banner and
+    // echoed prompt can match before the abort monitor is armed, and stdout
+    // may remain buffered until the command finishes.
+    common::expect_screen(
+        &sess,
+        |_| fs::read_to_string(root.join("cancel-ready")).is_ok_and(|s| s == "ready"),
+        if env.is_live() {
+            common::LIVE_TURN_BUDGET
+        } else {
+            env.timeout()
+        },
+        "Bash must start before cancellation",
+    );
 
     // Press ESC to cancel the turn.
     sess.send("\x1b").expect("send ESC");
 
-    // Wait for cancel + prompt return.
-    let cancel_timeout = if env.is_live() {
-        Duration::from_secs(30)
-    } else {
-        Duration::from_secs(15)
-    };
-    sess.set_default_timeout(cancel_timeout);
-    // In live mode the turn may complete before ESC arrives (fast model).
-    // Accept either "Cancelled" (ESC worked) or "❯" (turn completed
-    // before ESC). Either outcome proves the REPL doesn't hang.
-    sess.expect("(?i)(cancelled|interrupted|❯)")
-        .unwrap_or_else(|e| {
-            let screen = sess.render(|s| s.contents());
-            panic!(
-                "ESC should cancel the turn or turn should complete: {e}\nPTY screen:\n{screen}"
-            );
-        });
-
-    // In async REPL mode the ❯ prompt is persistent from the input thread
-    // and doesn't get re-printed after a cancel — "Cancelled" is the
-    // sufficient confirmation. Give the input thread a moment to settle
-    // back into readline before sending /exit.
-    std::thread::sleep(Duration::from_millis(500));
-
-    sess.send("/exit\r").expect("send exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    // A persistent or replayed prompt is not evidence that ESC cancelled.
+    common::expect_screen(
+        &sess,
+        |screen| screen.to_lowercase().contains("cancelled"),
+        env.timeout(),
+        "ESC must cancel the running turn",
+    );
+    common::expect_input_line_cleared(&sess, env.timeout(), "input ready after cancellation");
+    sess.send("/exit").expect("type exit");
+    common::expect_input_line(&sess, "/exit", env.timeout(), "exit entered");
+    sess.send("\r").expect("submit exit");
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY screen:\n{screen}");

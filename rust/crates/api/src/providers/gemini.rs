@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use crate::error::ApiError;
 use crate::http_transport::{parse_retry_after, HttpTransport, RetryPolicy};
 use crate::providers::registry::Credential;
+use crate::stream_collect::ResponseAccumulator;
 use crate::types::{
     ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
     InputContentBlock, InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest,
@@ -405,7 +406,7 @@ async fn check_gemini_response(response: reqwest::Response) -> Result<reqwest::R
         message,
         request_id: None,
         body,
-        retryable: matches!(status.as_u16(), 429 | 500 | 502 | 503),
+        retryable: crate::error::is_retryable_http_status(status.as_u16()),
         suggested_action: None,
         retry_after,
     })
@@ -544,7 +545,9 @@ fn translate_input_message(
                     }
                 }));
             }
-            InputContentBlock::Thinking { .. } => {}
+            // Gemini carries reasoning as `thoughtSignature` on the call itself,
+            // and `redacted_thinking` is an Anthropic block it never issued.
+            InputContentBlock::Thinking { .. } | InputContentBlock::RedactedThinking { .. } => {}
         }
     }
 
@@ -663,6 +666,15 @@ impl SseParser {
 
     fn push(&mut self, chunk: &[u8]) -> Vec<SseFrame> {
         self.buffer.extend_from_slice(chunk);
+        if crate::sse::body_opens_as_json(&self.buffer) {
+            // Not an SSE stream at all — a gateway that ignored `alt=sse` and is
+            // answering with JSON. Frame splitting must not run over it: a blank
+            // line anywhere inside a pretty-printed body reads as a frame
+            // terminator, and `next_frame` drains what it split off even when it
+            // yields nothing, so the bytes before that line would be gone. Hold
+            // everything for `finish`, which knows how to read a whole body.
+            return Vec::new();
+        }
         let mut frames = Vec::new();
 
         while let Some(frame) = self.next_frame() {
@@ -670,6 +682,59 @@ impl SseParser {
         }
 
         frames
+    }
+
+    /// Read whatever is left once the HTTP stream ends.
+    ///
+    /// A well-formed SSE stream ends on a frame separator, so leftovers mean the
+    /// gateway answered a streaming request without streaming: either the whole
+    /// `GenerateContentResponse` as one object, or the JSON *array* of chunks
+    /// that `:streamGenerateContent` returns when `alt=sse` is ignored. That
+    /// answer is complete and already billed — dropping it, which is what this
+    /// parser did before (it had no `finish` at all), reported an empty response
+    /// and left the caller re-sending the whole conversation to be told the same
+    /// thing, paying a cold cache write each time.
+    fn finish(&mut self, model: &str) -> Result<Vec<SseFrame>, ApiError> {
+        if self.buffer.is_empty() {
+            return Ok(Vec::new());
+        }
+        let trailing = std::mem::take(&mut self.buffer);
+        let tail = String::from_utf8_lossy(&trailing);
+        let tail = tail.trim();
+        // A final SSE frame that only lost its terminator still has `data:`
+        // lines. Unwrap those first so it is read as the frame it is.
+        let payload = if tail.starts_with("data:") || tail.contains("\ndata:") {
+            tail.lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            tail.to_string()
+        };
+        if payload.is_empty() || payload == "[DONE]" {
+            return Ok(Vec::new());
+        }
+        // An error envelope is a real answer about a real problem: surface it so
+        // a `400` is reported instead of retried.
+        if let Some(error) = crate::sse::detect_non_sse_error(&payload) {
+            return Err(error);
+        }
+        match serde_json::from_str::<Value>(&payload) {
+            Ok(Value::Array(chunks)) => Ok(chunks
+                .iter()
+                .map(|chunk| SseFrame {
+                    data: chunk.to_string(),
+                })
+                .collect()),
+            Ok(chunk @ Value::Object(_)) => Ok(vec![SseFrame {
+                data: chunk.to_string(),
+            }]),
+            // Neither an error nor a complete body: the response was cut off.
+            // Say so — a retryable truncation — rather than reporting a
+            // successful empty turn.
+            _ => Err(ApiError::incomplete_stream("gemini", model, &payload)),
+        }
     }
 
     fn next_frame(&mut self) -> Option<SseFrame> {
@@ -742,15 +807,18 @@ impl MessageStream {
                 return Ok(None);
             }
 
-            match self.response.chunk().await? {
-                Some(chunk) => {
-                    for frame in self.parser.push(&chunk) {
-                        self.pending.extend(self.state.ingest_frame(&frame)?);
-                    }
+            if let Some(chunk) = self.response.chunk().await? {
+                for frame in self.parser.push(&chunk) {
+                    self.pending.extend(self.state.ingest_frame(&frame)?);
                 }
-                None => {
-                    self.done = true;
+            } else {
+                // Read a body the gateway sent instead of a stream before
+                // declaring the stream over with nothing in it.
+                let frames = self.parser.finish(&self.state.model)?;
+                for frame in frames {
+                    self.pending.extend(self.state.ingest_frame(&frame)?);
                 }
+                self.done = true;
             }
         }
     }
@@ -819,6 +887,7 @@ impl StreamState {
                     stop_sequence: None,
                     usage: Usage::default(),
                     request_id: None,
+                    gateway_request_id: None,
                 },
             }));
         }
@@ -985,76 +1054,11 @@ async fn collect_stream(
     stream: &mut MessageStream,
     request: &MessageRequest,
 ) -> Result<MessageResponse, ApiError> {
-    let mut content: Vec<OutputContentBlock> = Vec::new();
-    let mut model = request.model.clone();
-    let mut id = String::new();
-    let mut usage = Usage::default();
-    let mut stop_reason = None;
-
+    let mut accumulator = ResponseAccumulator::new("gemini", &request.model);
     while let Some(event) = stream.next_event().await? {
-        match event {
-            StreamEvent::MessageStart(start) => {
-                id = start.message.id;
-                model.clone_from(&start.message.model);
-            }
-            StreamEvent::ContentBlockStart(start) => {
-                content.push(start.content_block);
-            }
-            StreamEvent::ContentBlockDelta(delta) => {
-                apply_delta(&mut content, &delta);
-            }
-            StreamEvent::ContentBlockStop(_) | StreamEvent::MessageStop(_) => {}
-            StreamEvent::MessageDelta(d) => {
-                stop_reason = d.delta.stop_reason;
-                usage = d.usage;
-            }
-        }
+        accumulator.push(event);
     }
-
-    // Parse accumulated JSON strings in tool-use blocks.
-    for block in &mut content {
-        if let OutputContentBlock::ToolUse { input, .. } = block {
-            if let Some(s) = input.as_str() {
-                if let Ok(parsed) = serde_json::from_str(s) {
-                    *input = parsed;
-                }
-            }
-        }
-    }
-
-    Ok(MessageResponse {
-        id,
-        kind: "message".to_string(),
-        role: "assistant".to_string(),
-        content,
-        model,
-        stop_reason,
-        stop_sequence: None,
-        usage,
-        request_id: None,
-    })
-}
-
-fn apply_delta(content: &mut [OutputContentBlock], delta: &ContentBlockDeltaEvent) {
-    let Some(block) = content.last_mut() else {
-        return;
-    };
-    match (&mut *block, &delta.delta) {
-        (OutputContentBlock::Text { text }, ContentBlockDelta::TextDelta { text: new_text }) => {
-            text.push_str(new_text);
-        }
-        (
-            OutputContentBlock::ToolUse { input, .. },
-            ContentBlockDelta::InputJsonDelta { partial_json },
-        ) => {
-            if let Some(existing) = input.as_str() {
-                *input = Value::String(format!("{existing}{partial_json}"));
-            } else {
-                *input = Value::String(partial_json.clone());
-            }
-        }
-        _ => {}
-    }
+    accumulator.finish(stream.request_id().map(ToString::to_string))
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,6 +1165,73 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert!(frames[0].data.contains("hi"));
         assert!(frames[1].data.contains("there"));
+    }
+
+    /// A gateway that ignores `alt=sse` and answers `:streamGenerateContent`
+    /// with the JSON array of chunks. The answer is complete and already billed;
+    /// this parser used to have no `finish` at all, so every byte of it was
+    /// dropped and the caller re-sent the whole conversation to get a reply it
+    /// had already received.
+    #[test]
+    fn a_whole_json_body_sent_instead_of_a_stream_becomes_frames() {
+        let mut parser = SseParser::new();
+        let raw = b"[\n  {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]},\n\n\
+                     {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" there\"}]},\
+                     \"finishReason\":\"STOP\"}]}\n]";
+
+        assert!(
+            parser.push(raw).is_empty(),
+            "an unframed body cannot be read until the stream ends"
+        );
+        let frames = parser.finish("gemini-3.1-pro-preview").expect("whole body");
+
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert!(frames[0].data.contains("hi"));
+        assert!(frames[1].data.contains("there"));
+    }
+
+    /// The other thing a gateway answers a streaming request with. Reporting it
+    /// as an empty stream — or as a retryable truncation — would re-upload the
+    /// conversation to be told the same thing.
+    #[test]
+    fn an_unframed_error_body_surfaces_the_error() {
+        let mut parser = SseParser::new();
+        let raw =
+            br#"{"error":{"code":400,"message":"request too large","status":"INVALID_ARGUMENT"}}"#;
+
+        assert!(parser.push(raw).is_empty());
+        let error = parser
+            .finish("gemini-3.1-pro-preview")
+            .expect_err("an error body is an error");
+
+        match error {
+            ApiError::Api {
+                status, message, ..
+            } => {
+                assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+                assert_eq!(message.as_deref(), Some("request too large"));
+            }
+            other => panic!("expected the gateway's error, got {other:?}"),
+        }
+    }
+
+    /// A body that stops mid-object is a truncation. Before, the leftover was
+    /// dropped and the turn looked like a successful empty answer.
+    #[test]
+    fn a_truncated_body_is_reported_as_an_incomplete_stream() {
+        let mut parser = SseParser::new();
+        assert!(parser
+            .push(br#"{"candidates":[{"content":{"parts":[{"text":"hal"#)
+            .is_empty());
+
+        let error = parser
+            .finish("gemini-3.1-pro-preview")
+            .expect_err("a cut-off body is not a complete answer");
+
+        assert!(
+            matches!(error, ApiError::IncompleteStream { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]

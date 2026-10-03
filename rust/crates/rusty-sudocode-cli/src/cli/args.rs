@@ -157,6 +157,11 @@ enum Cmd {
         #[arg(long)]
         fix: bool,
     },
+    /// Inspect how the provider's prompt cache has been behaving
+    Cache {
+        #[command(subcommand)]
+        action: CacheSub,
+    },
     /// Show session state
     State,
     /// Initialize workspace
@@ -267,6 +272,12 @@ enum Cmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum CacheSub {
+    /// Summarise cache reads, writes and breaks across recorded sessions
+    Stats,
+}
+
+#[derive(Debug, Subcommand)]
 enum AcpSub {
     /// Start ACP in WebSocket server mode
     Serve {
@@ -362,6 +373,9 @@ pub(crate) enum CliAction {
         reasoning_effort: Option<String>,
         auth_mode: Option<AuthMode>,
         ws_port: Option<u16>,
+    },
+    CacheStats {
+        output_format: CliOutputFormat,
     },
     State {
         output_format: CliOutputFormat,
@@ -593,6 +607,9 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             }),
             Cmd::Sandbox => Ok(CliAction::Sandbox { output_format }),
             Cmd::Doctor { fix } => Ok(CliAction::Doctor { fix, output_format }),
+            Cmd::Cache { action } => match action {
+                CacheSub::Stats => Ok(CliAction::CacheStats { output_format }),
+            },
             Cmd::State => Ok(CliAction::State { output_format }),
             Cmd::Init => Ok(CliAction::Init { output_format }),
             Cmd::Config {
@@ -1308,6 +1325,7 @@ mod tests {
         );
 
         let config = engine_core::SudoCodeConfig {
+            cache_ttl_1h: None,
             auth_modes: BTreeMap::new(),
             models,
             web_search: Default::default(),

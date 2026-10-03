@@ -3,10 +3,10 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use command_group::AsyncCommandGroup;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
-use tokio::runtime::Builder;
 
 use crate::hooks::HookAbortSignal;
 use crate::lane_events::{LaneEvent, ShipMergeMethod, ShipProvenance};
@@ -83,9 +83,16 @@ pub struct BashCommandInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BashCommandOutput {
     pub stdout: String,
+    /// Actual process exit code; absent for background, interrupted or signaled runs.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// Compact model results omit empty stderr.
+    #[serde(default)]
     pub stderr: String,
     #[serde(rename = "rawOutputPath")]
     pub raw_output_path: Option<String>,
+    /// Compact model results only emit this flag when true.
+    #[serde(default)]
     pub interrupted: bool,
     #[serde(rename = "isImage")]
     pub is_image: Option<bool>,
@@ -105,6 +112,67 @@ pub struct BashCommandOutput {
     pub structured_content: Option<Vec<serde_json::Value>>,
     #[serde(rename = "sandboxStatus")]
     pub sandbox_status: Option<SandboxStatus>,
+}
+
+impl BashCommandOutput {
+    /// Model-facing projection, applied before transcript persistence and output offload.
+    /// The full execution result remains available to internal callers via `Serialize`.
+    #[must_use]
+    pub fn model_output(&self) -> serde_json::Value {
+        let mut value = serde_json::json!({ "stdout": self.stdout });
+        let object = value.as_object_mut().expect("object literal");
+        if let Some(code) = self.exit_code {
+            object.insert("exit_code".into(), code.into());
+        }
+        if !self.stderr.is_empty() {
+            object.insert("stderr".into(), self.stderr.clone().into());
+        }
+        if self.interrupted {
+            object.insert("interrupted".into(), true.into());
+        }
+        // Preserve names consumed by renderers and task/output readers.
+        for (key, text) in [
+            ("returnCodeInterpretation", &self.return_code_interpretation),
+            ("backgroundTaskId", &self.background_task_id),
+            ("rawOutputPath", &self.raw_output_path),
+        ] {
+            if let Some(text) = text.as_ref().filter(|text| !text.is_empty()) {
+                object.insert(key.into(), text.clone().into());
+            }
+        }
+        if self.background_task_id.is_some() && self.no_output_expected == Some(true) {
+            object.insert("noOutputExpected".into(), true.into());
+        }
+        if let Some(content) = self.structured_content.as_ref().filter(|v| !v.is_empty()) {
+            object.insert("structuredContent".into(), content.clone().into());
+        }
+        if self.is_image == Some(true) {
+            object.insert("isImage".into(), true.into());
+        }
+        // On failure, explain unavailable isolation without routine capability flags.
+        if self.return_code_interpretation.is_some() {
+            if let Some(reason) = self
+                .sandbox_status
+                .as_ref()
+                .and_then(|status| status.fallback_reason.as_ref())
+                .filter(|reason| !reason.is_empty())
+            {
+                object.insert("sandboxWarning".into(), reason.clone().into());
+            }
+        }
+        value
+    }
+}
+
+fn describe_exit_status(status: std::process::ExitStatus) -> Option<String> {
+    if status.success() {
+        None
+    } else if let Some(code) = status.code() {
+        Some(format!("exit_code:{code}"))
+    } else {
+        // `code() == None` means signal termination on Unix, not success.
+        Some(status.to_string())
+    }
 }
 
 /// Executes a shell command with the requested sandbox settings.
@@ -150,6 +218,7 @@ pub fn execute_bash_with_progress(
             .spawn()?;
 
         return Ok(BashCommandOutput {
+            exit_code: None,
             stdout: String::new(),
             stderr: String::new(),
             raw_output_path: None,
@@ -265,12 +334,16 @@ async fn execute_bash_async(
     detect_and_emit_ship_prepared(&input.command, &cwd);
 
     let mut command = prepare_tokio_command(&input.command, &cwd, &sandbox_status, true);
-    command.stdin(Stdio::null());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     command.kill_on_drop(true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let output = command.output();
-    tokio::pin!(output);
+    let mut child = command.group().kill_on_drop(true).spawn()?;
+    let mut stdout_pipe = child.inner().stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.inner().stderr.take().expect("stderr piped");
     let timeout_sleep = tokio::time::sleep(Duration::from_millis(timeout_ms));
     tokio::pin!(timeout_sleep);
     let abort_wait = async {
@@ -282,25 +355,47 @@ async fn execute_bash_async(
     };
     tokio::pin!(abort_wait);
 
-    let output = tokio::select! {
-        biased;
-        () = &mut abort_wait => {
+    // Keep the group handle outside the output future so cancellation can kill
+    // descendants as well as the shell, including on Windows (Job Object).
+    let result = {
+        let output = async {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let (_, _, status) = tokio::try_join!(
+                stdout_pipe.read_to_end(&mut stdout),
+                stderr_pipe.read_to_end(&mut stderr),
+                child.wait(),
+            )?;
+            Ok::<_, io::Error>(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        };
+        tokio::pin!(output);
+        tokio::select! {
+            biased;
+            () = &mut abort_wait => Err(false),
+            () = &mut timeout_sleep => Err(true),
+            result = &mut output => Ok(result?),
+        }
+    };
+    let output = match result {
+        Ok(output) => output,
+        Err(is_timeout) => {
+            child.kill().await?;
+            let message = if is_timeout {
+                format!("Command exceeded timeout of {timeout_ms} ms")
+            } else {
+                String::from("Command interrupted by user")
+            };
             return Ok(interrupted_bash_output(
-                "Command interrupted by user",
-                "interrupted",
+                &message,
+                if is_timeout { "timeout" } else { "interrupted" },
                 input.dangerously_disable_sandbox,
-                sandbox_status,
+                Some(sandbox_status),
             ));
         }
-        () = &mut timeout_sleep => {
-            return Ok(interrupted_bash_output(
-                &format!("Command exceeded timeout of {timeout_ms} ms"),
-                "timeout",
-                input.dangerously_disable_sandbox,
-                sandbox_status,
-            ));
-        }
-        result = &mut output => result?,
     };
 
     let stdout = truncate_output(
@@ -312,15 +407,10 @@ async fn execute_bash_async(
         MAX_OUTPUT_BYTES_SAFETY,
     );
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = output.status.code().and_then(|code| {
-        if code == 0 {
-            None
-        } else {
-            Some(format!("exit_code:{code}"))
-        }
-    });
+    let return_code_interpretation = describe_exit_status(output.status);
 
     Ok(BashCommandOutput {
+        exit_code: output.status.code(),
         stdout,
         stderr,
         raw_output_path: None,
@@ -410,10 +500,10 @@ async fn execute_bash_streaming(
     command.kill_on_drop(true);
 
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = command.spawn()?;
+    let mut child = command.group().kill_on_drop(true).spawn()?;
 
-    let stdout = child.stdout.take().expect("stdout piped");
-    let stderr = child.stderr.take().expect("stderr piped");
+    let stdout = child.inner().stdout.take().expect("stdout piped");
+    let stderr = child.inner().stderr.take().expect("stderr piped");
 
     let mut stdout_reader = tokio::io::BufReader::new(stdout);
     let mut stderr_reader = tokio::io::BufReader::new(stderr);
@@ -481,21 +571,21 @@ async fn execute_bash_streaming(
         tokio::select! {
             biased;
             () = &mut abort_wait => {
-                let _ = child.kill().await;
+                child.kill().await?;
                 return Ok(interrupted_bash_output(
                     "Command interrupted by user",
                     "interrupted",
                     input.dangerously_disable_sandbox,
-                    sandbox_status,
+                    Some(sandbox_status),
                 ));
             }
             _ = tokio::time::sleep_until(timeout_deadline) => {
-                let _ = child.kill().await;
+                child.kill().await?;
                 return Ok(interrupted_bash_output(
                     &format!("Command exceeded timeout of {timeout_ms} ms"),
                     "timeout",
                     input.dangerously_disable_sandbox,
-                    sandbox_status,
+                    Some(sandbox_status),
                 ));
             }
             () = &mut readers => {
@@ -543,15 +633,10 @@ async fn execute_bash_streaming(
     let stdout = truncate_output(&stdout_buf, MAX_OUTPUT_BYTES_SAFETY);
     let stderr = truncate_output(&stderr_buf, MAX_OUTPUT_BYTES_SAFETY);
     let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = status.code().and_then(|code| {
-        if code == 0 {
-            None
-        } else {
-            Some(format!("exit_code:{code}"))
-        }
-    });
+    let return_code_interpretation = describe_exit_status(status);
 
     Ok(BashCommandOutput {
+        exit_code: status.code(),
         stdout,
         stderr,
         raw_output_path: None,
@@ -568,13 +653,14 @@ async fn execute_bash_streaming(
     })
 }
 
-fn interrupted_bash_output(
+pub(crate) fn interrupted_bash_output(
     stderr: &str,
     return_code_interpretation: &str,
     dangerously_disable_sandbox: Option<bool>,
-    sandbox_status: SandboxStatus,
+    sandbox_status: Option<SandboxStatus>,
 ) -> BashCommandOutput {
     BashCommandOutput {
+        exit_code: None,
         stdout: String::new(),
         stderr: stderr.to_string(),
         raw_output_path: None,
@@ -587,7 +673,7 @@ fn interrupted_bash_output(
         return_code_interpretation: Some(return_code_interpretation.to_string()),
         no_output_expected: Some(true),
         structured_content: None,
-        sandbox_status: Some(sandbox_status),
+        sandbox_status,
     }
 }
 
@@ -667,49 +753,6 @@ fn prepare_tokio_command(
 fn prepare_sandbox_dirs(cwd: &std::path::Path) {
     let _ = std::fs::create_dir_all(cwd.join(".sandbox-home"));
     let _ = std::fs::create_dir_all(cwd.join(".sandbox-tmp"));
-}
-
-// ---------------------------------------------------------------------------
-// Bash with file change tracking
-// ---------------------------------------------------------------------------
-
-use crate::file_snapshot::FileChangeSnapshotWithMtime;
-
-/// Result of bash execution with file change tracking.
-#[derive(Debug)]
-pub struct BashWithTrackingResult {
-    /// The original bash output.
-    pub output: BashCommandOutput,
-
-    /// File changes detected during execution.
-    pub file_changes: FileChangeSnapshotWithMtime,
-}
-
-/// Execute a bash command with file change tracking.
-///
-/// Captures a snapshot before and after execution to detect
-/// files created or modified by the command.
-pub fn execute_bash_with_tracking(
-    input: BashCommandInput,
-    workspace_root: Option<&std::path::Path>,
-) -> io::Result<BashWithTrackingResult> {
-    let cwd = workspace_root
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| current_workspace_root().unwrap_or_default());
-
-    // Capture before snapshot
-    let mut snapshot = FileChangeSnapshotWithMtime::capture_before(&cwd);
-
-    // Execute the command
-    let output = execute_bash(input)?;
-
-    // Capture after snapshot
-    snapshot.capture_after(&cwd);
-
-    Ok(BashWithTrackingResult {
-        output,
-        file_changes: snapshot,
-    })
 }
 
 // `#[cfg(unix)]` because every test in this module exercises

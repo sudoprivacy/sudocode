@@ -1,6 +1,9 @@
 use runtime::{parse_usage_cost_currency, pricing_for_model, TokenUsage, UsageCostEstimate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::env;
+use std::sync::OnceLock;
+use uuid::Uuid;
 
 /// Top-level request-body fields that sudocode computes itself.
 ///
@@ -130,11 +133,77 @@ impl RequestMetadata {
         // Serialised through serde so field order and escaping are fixed; a
         // hand-built string would be a second source of truth for the shape.
         serde_json::json!({
+            "device_id": device_id(),
             "session_id": self.session_id,
             "account_uuid": self.account_uuid.clone().unwrap_or_default(),
         })
         .to_string()
     }
+}
+
+/// Session-level request fields a borrowed transport cannot derive for itself.
+///
+/// [`ProviderClient::complete_text`](crate::ProviderClient::complete_text)
+/// builds its own [`MessageRequest`] rather than borrowing the turn stream's,
+/// so every field the stream fills from session state has to be restated there
+/// or it silently falls back to the type's default. Three measured cache
+/// regressions came from exactly that gap, all on the compaction request whose
+/// only purpose is to reuse the prefix a turn just wrote: `thinking` omitted,
+/// `thinking.budget_tokens` derived from the request's own `max_tokens`
+/// instead of the model's, and `reasoning_effort` omitted. Anthropic's cache
+/// key covers the request parameters and not just the messages, so each of
+/// those rewrote the entire prefix — and returned 200 while doing it, which is
+/// why none of them surfaced as an error.
+///
+/// Grouping them gives a session-level field one obvious home, and
+/// `cache_safe_request_mirrors_the_stream` in `completion.rs` fails to compile
+/// when a new field on `MessageRequest` has not been classified.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionRequestFields {
+    /// Routing key — see [`RequestMetadata`].
+    pub metadata: Option<RequestMetadata>,
+    /// Reasoning effort for OpenAI-compatible reasoning models. Session-level
+    /// state (`--reasoning-effort`, or an agent definition), so a completion
+    /// that replays a turn's prefix has to declare the same value the turns
+    /// declare, and a summary generated at a different effort than the user
+    /// asked for is wrong on its own terms.
+    pub reasoning_effort: Option<String>,
+}
+
+/// Stable, opaque identifier for this machine and user.
+///
+/// It is not optional padding. A pooling upstream that takes the JSON branch
+/// on the leading `{` requires **both** `device_id` and `session_id` to be
+/// non-empty before it will use the object at all — sub2api rejects it with
+/// `if j.DeviceID == "" || j.SessionID == "" { return nil }` — and then falls
+/// back to hashing the request's *cacheable content*. That content includes
+/// the breakpoint on the last message, so it changes every turn: the session
+/// re-picks an upstream account on every request, which is precisely what
+/// this metadata exists to prevent. Sending `session_id` without a
+/// `device_id` therefore buys nothing at all.
+///
+/// Verified against a live pool on 2026-09-27: every turn logged
+/// `sticky.hash_metadata_parse_failed` with `parsed_nil: true`, and
+/// `sticky.hash_source` was `cacheable_content` rather than the session id.
+///
+/// Derived rather than persisted, so this adds no on-disk state; hashed
+/// through UUIDv5 so the hostname and username never leave the machine.
+fn device_id() -> &'static str {
+    static DEVICE_ID: OnceLock<String> = OnceLock::new();
+    DEVICE_ID.get_or_init(|| {
+        let host = env::var("COMPUTERNAME")
+            .or_else(|_| env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "unknown-host".to_owned());
+        let user = env::var("USERNAME")
+            .or_else(|_| env::var("USER"))
+            .unwrap_or_else(|_| "unknown-user".to_owned());
+        // U+0001 cannot occur in either value, so two different (host, user)
+        // pairs cannot collapse into the same seed.
+        let seed = format!("{host}\u{1}{user}");
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, seed.as_bytes())
+            .simple()
+            .to_string()
+    })
 }
 
 /// Provider-agnostic description of what to cache in a request.
@@ -211,6 +280,10 @@ pub enum InputContentBlock {
         thinking: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
+    },
+    /// Encrypted thinking, replayed exactly as the server issued it.
+    RedactedThinking {
+        data: Value,
     },
     ToolUse {
         id: String,
@@ -298,6 +371,15 @@ pub struct MessageResponse {
     pub usage: Usage,
     #[serde(default)]
     pub request_id: Option<String>,
+    /// The gateway's correlation id for this call, taken from the response
+    /// headers rather than the body — hence `#[serde(default)]`, and never sent.
+    ///
+    /// Named for the gateway rather than the client on purpose: the streaming
+    /// path already has a `client_request_id`, which is an id *we* generate for
+    /// our own tracing. Confusing the two would silently break the join this
+    /// field exists for.
+    #[serde(default, skip_serializing)]
+    pub gateway_request_id: Option<String>,
 }
 
 impl MessageResponse {
@@ -511,6 +593,7 @@ mod tests {
                 ..Usage::default()
             },
             request_id: None,
+            gateway_request_id: None,
         };
 
         let cost = response.usage.estimated_cost_usd(&response.model);
@@ -565,5 +648,26 @@ mod tests {
         assert_eq!(usage.cost_currency.as_deref(), Some("usd"));
         assert_eq!(usage.token_usage().cost_units, Some(43_700));
         assert_eq!(usage.token_usage().cost_currency, None);
+    }
+
+    /// The routing key is useless to a pooling upstream unless every field it
+    /// gates on is present. sub2api rejects the whole JSON object when either
+    /// `device_id` or `session_id` is empty and silently falls back to a hash
+    /// that changes every turn — so a missing field does not degrade routing,
+    /// it removes it. Hence asserting the fields, not just that it parses.
+    #[test]
+    fn user_id_carries_device_session_and_account() {
+        use super::RequestMetadata;
+
+        let meta = RequestMetadata::for_session("session-abc");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&meta.user_id()).expect("user_id should be JSON");
+
+        assert_eq!(parsed["session_id"], "session-abc");
+        assert_eq!(parsed["account_uuid"], "");
+        assert!(
+            !parsed["device_id"].as_str().unwrap_or_default().is_empty(),
+            "device_id must be non-empty or the upstream discards the object"
+        );
     }
 }

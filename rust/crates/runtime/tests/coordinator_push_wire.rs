@@ -117,11 +117,17 @@ async fn run_turn_prepends_drained_task_notification_to_first_user_message() {
         </task-notification>";
     coordinator_notification::emit(&ws, "agent-abc", xml).expect("emit ok");
 
-    // Drop a stray sanity file so the mailbox path is verifiable.
-    let mailbox = runtime::agent_mailbox::inbox_path_under(&ws, COORDINATOR_INBOX_RECIPIENT);
+    // The envelope must be on disk before run_turn, in the conversation the
+    // sub-agent shares with the coordinator — derived the way both sides
+    // derive it rather than spelled, so this cannot drift from the writer.
+    let transcript = std::path::PathBuf::from(
+        runtime::mailbox::InboxConvention::new(ws.to_string_lossy().into_owned())
+            .transcript_path("agent-abc", COORDINATOR_INBOX_RECIPIENT),
+    );
     assert!(
-        mailbox.exists(),
-        "envelope should be on disk before run_turn"
+        transcript.exists(),
+        "envelope should be on disk before run_turn, expected {}",
+        transcript.display()
     );
 
     let captured = Arc::new(Mutex::new(Vec::new()));

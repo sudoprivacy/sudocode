@@ -23,12 +23,12 @@ pub mod experiments;
 mod file_intent;
 mod file_ops;
 mod file_redirect;
-mod file_snapshot;
 mod file_tracker;
 pub mod fs_backend;
 mod git_context;
 pub mod green_contract;
 mod hooks;
+pub mod image_input;
 pub mod image_registry;
 mod json;
 mod lane_events;
@@ -49,6 +49,7 @@ pub mod mcp_tool_bridge;
 mod mcp_ws;
 pub mod memory;
 pub mod model_capabilities;
+pub mod model_discovery;
 pub mod nexus_mailbox;
 mod oauth;
 pub mod permission_enforcer;
@@ -61,6 +62,7 @@ mod remote;
 pub mod sandbox;
 mod session;
 pub mod session_control;
+pub mod test_support;
 pub mod verification_watcher;
 pub use session_control::SessionStore;
 pub mod cron_registry;
@@ -85,18 +87,17 @@ pub mod zone_context;
 
 pub use bash::{
     clear_bash_progress_callback, execute_bash, execute_bash_with_abort,
-    execute_bash_with_progress, execute_bash_with_tracking, set_bash_progress_callback,
-    BashCommandInput, BashCommandOutput, BashProgress, BashProgressCallback,
-    BashWithTrackingResult, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
+    execute_bash_with_progress, set_bash_progress_callback, BashCommandInput, BashCommandOutput,
+    BashProgress, BashProgressCallback, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
 pub use compact::{
     autocompact_buffer_tokens, compact_session, compact_session_sync,
     compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
-    format_compact_summary, get_compact_continuation_message, should_compact, CompactionConfig,
-    CompactionError, CompactionResult, CompactionSummarySource, ContextBudget,
-    AUTOCOMPACT_BUFFER_TOKENS, COMPACTION_FAILED, COMPACT_MAX_OUTPUT_TOKENS,
+    format_compact_summary, get_compact_continuation_message, render_todo_continuity_block,
+    should_compact, CompactionConfig, CompactionError, CompactionResult, CompactionSummarySource,
+    ContextBudget, AUTOCOMPACT_BUFFER_TOKENS, COMPACTION_FAILED, COMPACT_MAX_OUTPUT_TOKENS,
 };
 pub use config::{
     default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,
@@ -106,7 +107,8 @@ pub use config::{
     ModelProviderMapping, OAuthConfig, ProviderConnectionConfig, ProviderFallbackConfig,
     ResolvedPermissionMode, RuntimeConfig, RuntimeFeatureConfig, RuntimeHookConfig,
     RuntimePermissionRuleConfig, RuntimePluginConfig, ScopedMcpServerConfig, SudoCodeConfig,
-    WebSearchConfig, SAMPLE_SUDOCODE_JSON, SUDOCODE_SETTINGS_SCHEMA_NAME,
+    WebSearchConfig, PERMISSION_MODE_ACCEPTED, PERMISSION_MODE_OPTIONS, SAMPLE_SUDOCODE_JSON,
+    SUDOCODE_SETTINGS_SCHEMA_NAME,
 };
 pub use config_schema::{
     resolve_input_kind, ConfigInputKind, FieldSchema, FieldType, SETTINGS_SCHEMA, SUDOCODE_SCHEMA,
@@ -131,10 +133,11 @@ pub use file_ops::{
     WriteFileOutput,
 };
 pub use file_redirect::{get_drafts_dir, is_in_drafts, redirect_to_drafts, DRAFTS_DIR_NAME};
-pub use file_snapshot::{FileChangeSnapshot, FileChangeSnapshotWithMtime};
 pub use file_tracker::{CleanupResult, CleanupStrategy, FileOp, TurnFileTracker};
+pub use fs_backend::ManagedRoot;
 pub use fs_backend::{
-    FsBackend, FsDirEntry, FsMetadata, KernelFsBackend, NexusVfsFsBackend, StdFsBackend,
+    host_fs, host_fs_arc, vfs_path_for_host_path, FsBackend, FsDirEntry, FsMetadata,
+    KernelFsBackend, NexusVfsFsBackend, StdFsBackend,
 };
 pub use git_context::{GitCommitEntry, GitContext};
 pub use hooks::{
@@ -197,9 +200,10 @@ pub use policy_engine::{
     PolicyEngine, PolicyRule, ReconcileReason, ReviewStatus,
 };
 pub use prompt::{
-    load_system_prompt, load_system_prompt_for_agent, load_system_prompt_with,
-    load_system_prompt_with_memory, prepend_bullets, ContextFile, ProjectContext, PromptBuildError,
-    SystemPrompt, SystemPromptBuilder, SystemPromptOverrides, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    load_system_prompt, load_system_prompt_for_agent, load_system_prompt_for_agent_with,
+    load_system_prompt_with, load_system_prompt_with_memory, prepend_bullets, ContextFile,
+    ProjectContext, PromptBuildError, SystemPrompt, SystemPromptBuilder, SystemPromptOverrides,
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{
     attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryContext,

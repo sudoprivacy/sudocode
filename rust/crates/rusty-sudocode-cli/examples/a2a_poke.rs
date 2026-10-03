@@ -59,20 +59,19 @@ fn main() {
 
     // The same dial a running `scode` performs: one constructor, which names
     // the bundle layout and the server SAN once and reports which PEM failed.
+    let credential = runtime::nexus_mailbox::AgentCredential::load(cert_dir)
+        .unwrap_or_else(|e| panic!("load credential {cert_dir}: {e}"));
     let client = runtime::nexus_mailbox::Config {
         endpoint: endpoint.clone(),
-        agent: from.clone(),
-        peers: Vec::new(),
-        api_key: String::new(),
-        tls: Some(runtime::nexus_mailbox::TlsPaths::from_bundle_dir(cert_dir)),
+        agent: credential.agent.clone(),
+        tls: credential.tls,
     }
     .connect()
     .unwrap_or_else(|e| panic!("{e}"));
 
-    // Idempotent, and the sender's own inbox has to exist for a reply to land.
-    mailbox(&client, from, "")
-        .ensure_inbox()
-        .unwrap_or_else(|e| panic!("ensure {from} inbox: {e}"));
+    // No provisioning step. The send creates the conversation when it is the
+    // first one and indexes it under BOTH names, so a reply has somewhere to
+    // land without the sender preparing an inbox of its own.
     send_to(&client, from, to, body, "").unwrap_or_else(|e| panic!("send to {to}: {e}"));
     println!("sent as {from} -> {to}: {body}");
 }

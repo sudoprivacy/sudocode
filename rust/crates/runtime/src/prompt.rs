@@ -628,12 +628,32 @@ pub fn load_system_prompt_for_agent(
     os_version: impl Into<String>,
     agent_type: &str,
 ) -> Result<SystemPrompt, PromptBuildError> {
+    load_system_prompt_for_agent_with(
+        cwd,
+        current_date,
+        os_name,
+        os_version,
+        agent_type,
+        &StdFsBackend,
+    )
+}
+
+/// Load a sub-agent's workspace instructions and memory through the filesystem
+/// that its file tools use. Co-hosts pass their VFS workspace as `cwd`.
+pub fn load_system_prompt_for_agent_with(
+    cwd: impl Into<PathBuf>,
+    current_date: impl Into<String>,
+    os_name: impl Into<String>,
+    os_version: impl Into<String>,
+    agent_type: &str,
+    fs: &dyn FsBackend,
+) -> Result<SystemPrompt, PromptBuildError> {
     load_system_prompt_impl(
         cwd,
         current_date,
         os_name,
         os_version,
-        &StdFsBackend,
+        fs,
         Some(agent_type),
         crate::memory::MemoryMode::Enabled,
     )
@@ -649,7 +669,16 @@ fn load_system_prompt_impl(
     memory: crate::memory::MemoryMode,
 ) -> Result<SystemPrompt, PromptBuildError> {
     let cwd = cwd.into();
-    let project_context = ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?;
+    let project_context = if fs
+        .managed_root(crate::fs_backend::ManagedRoot::Memory)
+        .is_some()
+    {
+        // A VFS path may also exist on the daemon's host. Running host git
+        // against it would import another workspace's state into this prompt.
+        ProjectContext::discover_with_fs(&cwd, current_date.into(), fs)?
+    } else {
+        ProjectContext::discover_with_git_fs(&cwd, current_date.into(), fs)?
+    };
     let config = ConfigLoader::default_for(&cwd).load()?;
     let builder_base = SystemPromptBuilder::new()
         .with_os(os_name, os_version)
@@ -661,9 +690,41 @@ fn load_system_prompt_impl(
         Some(agent) => memory_prompt_variant_for_agent(agent, &cwd),
         None => crate::memory::MemoryPromptVariant::Compact,
     };
-    let memory_ctx = crate::memory::MemoryContext::resolve(None, Some(&cwd), agent_type, variant);
-    let builder =
-        crate::memory::append_from_provider(builder_base, memory.provider().as_ref(), &memory_ctx);
+    // The backend roots memory when it imposes a namespace, exactly as it roots
+    // sessions and sub-agents. Without asking, a co-hosted agent's memory
+    // resolved from the DAEMON's working directory — off the VFS entirely, and
+    // the same directory for every agent on that daemon, since they all share
+    // it. `None` from a host backend keeps a CLI's per-project memory unchanged.
+    // `resolve` takes a FINAL directory when given one, so the sub-agent
+    // partition is composed here — through `agent_memory_dir_under`, the same
+    // rule the workspace path uses, so which host supplied the root changes
+    // where memory lives and not how it is laid out.
+    // And the filesystem to read it on: the one that rooted it. `None` leaves
+    // the per-project host layout, which lives outside any workspace mount — so
+    // reading it through a CLI session's kernel would refuse every path and
+    // report a session with no memory at all.
+    let (memory_dir, memory_fs): (Option<PathBuf>, &dyn FsBackend) =
+        match fs.managed_root(crate::fs_backend::ManagedRoot::Memory) {
+            Some(root) => {
+                let dir = match agent_type {
+                    Some(agent) => crate::memory::agent_memory_dir_under(Path::new(&root), agent),
+                    None => PathBuf::from(root),
+                };
+                (Some(dir), fs)
+            }
+            None => (None, crate::fs_backend::host_fs()),
+        };
+    let memory_ctx = crate::memory::MemoryContext::resolve(
+        memory_dir.as_deref(),
+        Some(&cwd),
+        agent_type,
+        variant,
+    );
+    let builder = crate::memory::append_from_provider(
+        builder_base,
+        memory.provider(memory_fs).as_ref(),
+        &memory_ctx,
+    );
     Ok(builder.build())
 }
 

@@ -8,6 +8,7 @@ use crate::providers::gemini::{self, GeminiClient};
 use crate::providers::openai_compat::{self, OpenAiCompatClient, OpenAiCompatConfig};
 use crate::providers::registry::{ApiFormat, Credential, ResolvedProvider};
 use crate::providers::{AuthMode, ProviderKind};
+use crate::stream_collect::ResponseAccumulator;
 use crate::types::{MessageRequest, MessageResponse, StreamEvent};
 
 #[allow(clippy::large_enum_variant)]
@@ -21,6 +22,48 @@ pub enum ProviderClient {
 }
 
 impl ProviderClient {
+    /// Resolve a provider under this session's model egress policy.
+    pub fn from_resolved_with_access(
+        resolved: &ResolvedProvider,
+        mode: Option<AuthMode>,
+        access: &crate::ModelAccess,
+    ) -> Result<Self, ApiError> {
+        if !resolved.base_url.starts_with("nexus://") {
+            if access.require_mount {
+                return Err(ApiError::Configuration(
+                    "co-hosted model requests require a nexus:///mount baseUrl".into(),
+                ));
+            }
+            return Self::from_resolved(resolved, mode);
+        }
+        if resolved.kind == ProviderKind::Codex
+            || resolved.api_format == ApiFormat::GeminiGenerateContent
+        {
+            return Err(ApiError::Configuration(
+                "this provider has no Nexus model mount transport".into(),
+            ));
+        }
+        let transport = crate::nexus_transport::NexusTransport::new(
+            &resolved.base_url,
+            std::sync::Arc::clone(&access.fs),
+        )?;
+        let mut local = resolved.clone();
+        local.base_url = "http://nexus.invalid".into();
+        // The mount authenticates upstream; this client never loads credentials.
+        local.credential = Credential::ApiKey(String::new());
+        let mut client = Self::from_resolved(&local, mode)?;
+        match &mut client {
+            Self::Anthropic(client) => client.set_nexus_transport(transport),
+            Self::OpenAi(client) | Self::Xai(client) => client.set_nexus_transport(transport),
+            _ => {
+                return Err(ApiError::Configuration(
+                    "unsupported Nexus provider transport".into(),
+                ))
+            }
+        }
+        Ok(client)
+    }
+
     /// Build a `ProviderClient` from a fully resolved provider config.
     ///
     /// This is the primary entry point for config-driven provider construction.
@@ -61,6 +104,13 @@ impl ProviderClient {
                 };
                 let mut client = AnthropicClient::from_auth_with_mode(auth, mode)
                     .with_base_url(resolved.base_url.clone());
+                // `sudocode.json: cache_ttl_1h` overrides the default the auth
+                // mode picked. Applied here, once, before any request: the TTL
+                // is part of every `cache_control` block, so a value that moved
+                // between turns would rewrite the prefix it was holding.
+                if let Some(ttl_1h) = resolved.cache_ttl_1h {
+                    client = client.with_cache_ttl_1h(ttl_1h);
+                }
                 // Per-model `extraBody` (sudocode.json) — same additive rule
                 // as the OpenAI-compatible path: sudocode's own fields win.
                 // `render_json_body` skips keys the serialized request already
@@ -264,6 +314,34 @@ impl ProviderClient {
                 .map(MessageStream::Gemini),
         }
     }
+
+    /// Get one whole response, transported as a stream.
+    ///
+    /// Prefer this over [`ProviderClient::send_message`] for any request whose
+    /// duration is not bounded — which in practice means any request carrying a
+    /// whole conversation. A non-streaming request puts no bytes on the socket
+    /// until generation has finished, and on our path a connection that stays
+    /// byte-quiet for ~50s is closed with no HTTP response at all: measured with
+    /// the same prompt, model and route and only `stream` changed, `stream:
+    /// false` died at 50.3s while `stream: true` had its first byte at 1.7s and
+    /// ran to completion in 201.8s. The failure therefore scales with how slow
+    /// the answer is, and the requests most likely to be slow are the big ones
+    /// we least want to lose.
+    ///
+    /// Callers keep their shape: this returns the same `MessageResponse` the
+    /// non-streaming call did, and goes through the same retrying transport.
+    pub async fn send_message_streamed(
+        &self,
+        request: &MessageRequest,
+        trace_id: Option<&str>,
+    ) -> Result<MessageResponse, ApiError> {
+        let streaming = MessageRequest {
+            stream: true,
+            ..request.clone()
+        };
+        let mut stream = self.stream_message(&streaming, trace_id).await?;
+        stream.collect_response(&request.model).await
+    }
 }
 
 #[derive(Debug)]
@@ -293,6 +371,34 @@ impl MessageStream {
             Self::Codex(stream) => stream.next_event().await,
             Self::Gemini(stream) => stream.next_event().await,
         }
+    }
+
+    /// Which provider this stream came from, for error messages only.
+    #[must_use]
+    pub const fn provider_label(&self) -> &'static str {
+        match self {
+            Self::Anthropic(_) => "anthropic",
+            Self::OpenAiCompat(_) => "openai-compatible",
+            Self::Codex(_) => "codex",
+            Self::Gemini(_) => "gemini",
+        }
+    }
+
+    /// Drain this stream and assemble the single `MessageResponse` an
+    /// equivalent non-streaming request would have returned.
+    ///
+    /// `request_model` is only a fallback for providers whose `message_start`
+    /// does not name the model; the stream's own answer wins when it has one.
+    pub async fn collect_response(
+        &mut self,
+        request_model: &str,
+    ) -> Result<MessageResponse, ApiError> {
+        let request_id = self.request_id().map(ToString::to_string);
+        let mut accumulator = ResponseAccumulator::new(self.provider_label(), request_model);
+        while let Some(event) = self.next_event().await? {
+            accumulator.push(event);
+        }
+        accumulator.finish(request_id)
     }
 }
 
@@ -359,6 +465,7 @@ mod tests {
         );
 
         SudoCodeConfig {
+            cache_ttl_1h: None,
             auth_modes,
             models,
             web_search: Default::default(),

@@ -77,7 +77,7 @@ fn model_switch_in_repl() {
     // Clean exit.
     sess.expect("❯").expect("prompt after switch");
     sess.send("/exit\r").expect("exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().expect("should exit");
     assert_eq!(exit, 0);
 }
@@ -105,7 +105,7 @@ fn model_without_args_opens_picker() {
     // Clean exit.
     sess.expect("❯").expect("prompt after picker");
     sess.send("/exit\r").expect("exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let exit = sess.expect_eof().expect("should exit");
     assert_eq!(exit, 0);
 }
@@ -134,7 +134,7 @@ fn permissions_switch_in_repl() {
     // Clean exit.
     sess.expect("❯").expect("prompt after switch");
     sess.send("/exit\r").expect("exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
 }
 
@@ -241,6 +241,6 @@ fn slash_command_fuzzy_suggest_on_typo() {
     // Clean exit.
     sess.expect("❯").expect("prompt after error");
     sess.send("/exit\r").expect("exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
 }

@@ -26,6 +26,7 @@ your first contribution.
 - [Prerequisites](#prerequisites)
 - [Building](#building)
 - [Required checks](#required-checks)
+- [Measuring prompt-cache behaviour](#measuring-prompt-cache-behaviour)
 - [Running the CLI locally](#running-the-cli-locally)
 - [Working on a single crate](#working-on-a-single-crate)
 - [Commit style](#commit-style)
@@ -90,7 +91,7 @@ the code first.
   and [`.../src/session.rs`](./rust/crates/engine-core/src/session.rs).
   A CI `boundary-gate` job enforces it. (See ROADMAP → ACP-cut / #100.)
 
-The full 11 Always / 10 Never list lives in [`README.md` § Design
+The full Always / Never list lives in [`README.md` § Design
 principles](./README.md#design-principles). When in doubt, read
 that section before opening the PR.
 
@@ -119,6 +120,18 @@ to change the rule before the unit test lands.
 (See `sudo-code-roadmap.html` § Goal 1 → "Test layer policy" for the long form.)
 
 ### Running tests
+
+Acceptance for new or changed behavior starts with the most realistic end-to-end
+run available. Prefer live PTY tests with a real API key for scode, and a real
+daemon or local Docker deployment for infrastructure. Exercise connected user
+steps with fresh data and assert the resulting content, not only success text.
+Commit the live tests after actually running them, or add the end-to-end tests
+to CI. Record the command, result and any remaining coverage limits in the PR;
+mock passes or skipped live tests alone do not complete acceptance.
+
+Set `SCODE_TEST_BIN` to the absolute path of a downloaded release binary to run
+the same PTY workflows against that artifact. Without it, the harness uses the
+CLI built by Cargo. This also lets release acceptance leave build outputs intact.
 
 ```bash
 cd rust/
@@ -271,6 +284,22 @@ the PR description first.
 
 ## Required checks
 
+The daily `Model Compatibility` workflow discovers gateway models and runs
+live PTYs in batches of at most eight, with three batches running concurrently.
+Each process has one 90-second deadline. A pass requires exit 0 and the expected
+persisted assistant answer; model names and error text cannot satisfy it.
+If retry backoff outlasts the deadline, the report uses the last HTTP attempt's
+recorded error to identify unavailable providers. A later HTTP success clears
+that evidence; unexplained timeouts and empty or incorrect answers still fail.
+`SCODE_COMPAT_REPORT=/absolute/path/report.json` keeps a report outside the
+temporary test workspace and updates it after every model. CI retains partial
+reports and rejects incomplete sweeps or a sweep with no passing models.
+An explicit protocol refusal is reported separately as `REFUSED`, with the
+provider's category and explanation when supplied. It does not establish
+compatibility and is never retried. An all-refused sweep still fails the
+aggregate's requirement for a real pass. Reports include request parameters
+and HTTP results for diagnosis, without prompts, tool definitions or headers.
+
 CI gates these on every PR. Run them locally before pushing:
 
 ```bash
@@ -319,6 +348,43 @@ cargo build -p mock-anthropic-service
 # Documentation build (catches broken intra-doc links)
 cargo doc --workspace --no-deps
 ```
+
+## Measuring prompt-cache behaviour
+
+Anthropic's prompt cache matches a **byte-exact prefix**, so anything that
+rewrites an earlier part of a request throws away everything cached after it.
+That failure is invisible in normal output — the run still succeeds, it just
+costs several times more input. Two places report it:
+
+- **Live, per turn** — the status line's `⚡NN%` (hit rate, higher is better)
+  and `✎NN%` (write rate, lower is steadier; red on a spike ≥25%).
+- **After the fact, across sessions** — `scode cache stats`
+  (`--output-format json` for a machine-readable version):
+
+```bash
+scode cache stats
+```
+
+It reads per-session records under
+`~/.nexus/sudocode/cache/prompt-cache/<session-id>/stats.json` and reports
+reads, writes, hit rate and cache breaks. A break is classified: `system
+prompt changed` / `tool definitions changed` / `model changed` / `message
+history rewritten at index N`, or **`unexpected`** when reads dropped while
+the request fingerprint held steady — that last one means the prefix went
+cold for a reason the request does not explain, and is worth chasing.
+
+Two limits worth knowing before reading the numbers:
+
+- **Only the Anthropic provider records.** A session on an OpenAI-compatible,
+  Gemini or Codex model leaves nothing here, so empty stats mean "not
+  measured", not "no problems".
+- **Appending is not rewriting.** Every turn appends messages, so a reason
+  naming a *rewritten* index is the one that matters; it is the signature of
+  code mutating history that the provider has already cached.
+
+If you change anything that touches the system prompt, the tool list, or the
+message history, take a reading before and after — the cost of getting this
+wrong does not show up as a failure.
 
 ## Running the CLI locally
 

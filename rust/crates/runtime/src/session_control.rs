@@ -60,7 +60,7 @@ impl SessionStore {
         // workspace-fingerprinted local partition. Asking the backend (rather
         // than hardcoding) means pointing sessions at nexus is a backend swap,
         // not a code change to remember here.
-        let sessions_root = match fs.managed_sessions_root() {
+        let sessions_root = match fs.managed_root(crate::fs_backend::ManagedRoot::Sessions) {
             Some(root) => PathBuf::from(root),
             None => canonical_cwd
                 .join(".scode")
@@ -102,7 +102,7 @@ impl SessionStore {
             .unwrap_or_else(|_| workspace_root.to_path_buf());
         // Backend-imposed session namespace (nexus /sessions/) wins; else the
         // data-dir's workspace-fingerprinted partition.
-        let sessions_root = match fs.managed_sessions_root() {
+        let sessions_root = match fs.managed_root(crate::fs_backend::ManagedRoot::Sessions) {
             Some(root) => PathBuf::from(root),
             None => data_dir
                 .as_ref()

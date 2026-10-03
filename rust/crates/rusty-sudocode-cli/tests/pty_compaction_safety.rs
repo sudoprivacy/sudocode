@@ -24,6 +24,23 @@ struct Provider {
     worker: Option<thread::JoinHandle<()>>,
 }
 
+/// The opening words of the checkpoint instructions in
+/// `runtime::compact::BASE_COMPACT_PROMPT`.
+const COMPACTION_PROMPT: &str = "Create a concise checkpoint";
+
+/// Is this captured request a compaction call rather than a task turn?
+///
+/// It used to be enough to ask whether the request was non-streaming, because
+/// compaction was the only non-streaming request the CLI made. Compaction is
+/// streamed now — it is the largest and slowest request in a session, and a
+/// non-streaming one has its connection closed with no HTTP response at all
+/// after ~50s — so the transport no longer separates the two. Key on the
+/// checkpoint instructions, which is what actually makes a request a
+/// compaction, and which no task turn carries.
+fn is_compaction_request(request: &Value) -> bool {
+    request.to_string().contains(COMPACTION_PROMPT)
+}
+
 /// Fail loudly when a `0o500` directory does not actually refuse writes.
 ///
 /// Probes the behaviour rather than asking `geteuid() == 0`. The question that
@@ -153,6 +170,7 @@ fn serve(
     let counting = first.contains("/count_tokens");
     let is_post = first.starts_with("POST ") && !counting;
     let streaming = request["stream"] == true;
+    let compaction = is_compaction_request(&request);
     let number = if is_post {
         let mut requests = captured.lock().unwrap();
         requests.push(request.clone());
@@ -160,11 +178,17 @@ fn serve(
     } else {
         0
     };
-    if streaming && mode == "delegate" {
+    // A task turn gets the generic reply; the canned checkpoint bodies below are
+    // for compaction. Both arrive streamed now, so the checkpoint instructions
+    // are what tells them apart.
+    if !compaction && streaming && mode == "delegate" {
         serve_delegation(&mut socket, &request);
         return;
     }
-    if streaming && (matches!(mode, "success" | "post-error") || mode.starts_with("long-summary")) {
+    if !compaction
+        && streaming
+        && (matches!(mode, "success" | "post-error") || mode.starts_with("long-summary"))
+    {
         serve_success_stream(&mut socket);
         return;
     }
@@ -224,9 +248,95 @@ fn serve(
     }
     #[cfg(not(unix))]
     let _ = read_only_dir;
-    let body = response.to_string();
-    let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    // A 200 answering a streamed request has to be a stream. Reaching the
+    // client through the "gateway ignored `stream: true`" fallback instead would
+    // make every assertion here depend on that fallback staying in place.
+    // Error statuses stay JSON: that is what a real gateway sends for them,
+    // streamed request or not.
+    let (content_type, body) = if is_post && streaming && status == "200 OK" {
+        let stream = if mode.starts_with("openai-") {
+            openai_sse_body(&response)
+        } else {
+            anthropic_sse_body(&response)
+        };
+        ("text/event-stream", stream)
+    } else {
+        ("application/json", response.to_string())
+    };
+    let response = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     let _ = socket.write_all(response.as_bytes());
+}
+
+/// Re-shape a canned `/v1/messages` body into the SSE stream a gateway would
+/// have sent for it: no content on `message_start`, one block per text block,
+/// and `stop_reason`/`usage` on `message_delta`.
+fn anthropic_sse_body(message: &Value) -> String {
+    let blocks = message["content"].as_array().cloned().unwrap_or_default();
+    let mut start = message.clone();
+    start["content"] = json!([]);
+    start["stop_reason"] = Value::Null;
+    let mut events = vec![(
+        "message_start",
+        json!({"type":"message_start","message":start}),
+    )];
+    for (index, block) in blocks.iter().enumerate() {
+        events.push((
+            "content_block_start",
+            json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}}),
+        ));
+        events.push((
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":block["text"]}}),
+        ));
+        events.push((
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":index}),
+        ));
+    }
+    events.push((
+        "message_delta",
+        json!({"type":"message_delta","delta":{"stop_reason":message["stop_reason"],"stop_sequence":null},"usage":message["usage"]}),
+    ));
+    events.push(("message_stop", json!({"type":"message_stop"})));
+    let mut body = String::new();
+    for (event, data) in &events {
+        write!(&mut body, "event: {event}\ndata: {data}\n\n").unwrap();
+    }
+    body
+}
+
+/// Re-shape a canned chat completion into the `chat.completion.chunk` stream a
+/// gateway would have sent for it: the whole message as one delta, then the
+/// finish reason and usage, then `[DONE]`.
+fn openai_sse_body(completion: &Value) -> String {
+    let choice = &completion["choices"][0];
+    let mut delta = json!({"role":"assistant","content":choice["message"]["content"]});
+    if let Some(calls) = choice["message"]["tool_calls"].as_array() {
+        delta["tool_calls"] = Value::Array(
+            calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| {
+                    let mut call = call.clone();
+                    call["index"] = json!(index);
+                    call
+                })
+                .collect(),
+        );
+    }
+    let chunk = |choices: Value, usage: &Value| {
+        json!({"id":completion["id"],"object":"chat.completion.chunk","created":0,
+               "model":completion["model"],"choices":choices,"usage":usage})
+    };
+    let content = chunk(
+        json!([{"index":0,"delta":delta,"finish_reason":Value::Null}]),
+        &Value::Null,
+    );
+    let end = chunk(
+        json!([{"index":0,"delta":{},"finish_reason":choice["finish_reason"]}]),
+        &completion["usage"],
+    );
+    format!("data: {content}\n\ndata: {end}\n\ndata: [DONE]\n\n")
 }
 
 fn serve_success_stream(socket: &mut TcpStream) {
@@ -384,7 +494,7 @@ fn failed_empty_truncated_and_growing_summaries_preserve_durable_history() {
         let requests = provider.requests.lock().unwrap();
         assert!(!requests.is_empty(), "must exercise the real model path");
         assert!(
-            requests.iter().all(|r| r["stream"] != true),
+            requests.iter().all(is_compaction_request),
             "failure must not execute the task"
         );
         assert!(
@@ -398,11 +508,21 @@ fn failed_empty_truncated_and_growing_summaries_preserve_durable_history() {
 
 #[test]
 fn compaction_uses_fixed_output_ceiling_and_summary_length_guidance() {
+    // `expected_limit` is the summary's own allowance (`COMPACT_MAX_OUTPUT_TOKENS`
+    // capped by the model) plus the thinking budget the request has to declare to
+    // match the turn whose cached prefix it replays. Anthropic requires
+    // `budget_tokens < max_tokens`, so a request that must declare the turn's
+    // budget cannot also cap its output at 12K: with a 12K cap the provider
+    // clamped the budget to 6000 against the turn's 32000, and the one request
+    // built to reuse the cache read none of it — at HTTP 200, so the only
+    // symptom was the bill. What stays fixed is the *summary* allowance: it
+    // still does not scale with the model's output ceiling, and the prompt still
+    // carries the 8,000-token guidance that actually governs summary length.
     for (mode, configured_limit, expected_limit) in [
-        ("long-summary", None, 12_000),
-        ("long-summary", Some(16_384), 12_000),
+        ("long-summary", None, 12_000 + 32_000),
+        ("long-summary", Some(16_384), 16_384),
         ("long-summary", Some(10_000), 10_000),
-        ("long-summary-fallback", Some(16_384), 12_000),
+        ("long-summary-fallback", Some(16_384), 16_384),
     ] {
         let provider = Provider::new(mode);
         let workspace = HarnessWorkspace::new(mode);
@@ -425,15 +545,20 @@ fn compaction_uses_fixed_output_ceiling_and_summary_length_guidance() {
             requests.len(),
             if mode.ends_with("fallback") { 2 } else { 1 }
         );
-        assert!(requests.iter().all(|r| r["max_tokens"] == expected_limit));
         assert!(requests.iter().all(|r| {
             r["messages"].as_array().unwrap().last().unwrap()["content"]
                 .to_string()
                 .contains("Aim to keep the entire summary within 8,000 tokens")
         }));
+        assert_eq!(requests[0]["max_tokens"], json!(expected_limit));
         assert!(requests[0]["tools"].is_array());
         if mode.ends_with("fallback") {
+            // The standard-compaction fallback builds a prefix of its own — its
+            // own system prompt, no tools, thinking off — so it has nothing to
+            // match and keeps the summary's own ceiling.
             assert!(requests[1]["tools"].is_null());
+            assert_eq!(requests[1]["max_tokens"], json!(12_000));
+            assert!(requests[1]["thinking"].is_null());
         }
     }
 }
@@ -467,7 +592,7 @@ fn recompaction_rewrites_checkpoint_and_archives_original_history() {
             .unwrap()
             .iter()
             .map(|r| (
-                r["stream"].clone(),
+                is_compaction_request(r),
                 r["messages"].as_array().map(Vec::len),
                 r["tools"].as_array().map(Vec::len)
             ))
@@ -636,13 +761,48 @@ fn automatic_compaction_continues_after_a_long_summary() {
         .summary
         .ends_with("CHECKPOINT_COMPLETE</summary>"));
     let requests = provider.requests.lock().unwrap();
-    assert_eq!(requests.iter().filter(|r| r["stream"] != true).count(), 1);
+    assert_eq!(
+        requests.iter().filter(|r| is_compaction_request(r)).count(),
+        1
+    );
+    // The cache-safe compaction request borrows the turn's cached prefix, and
+    // the value of `thinking` is part of Anthropic's cache key — so it has to
+    // declare the turn's budget, not one derived from its own smaller output
+    // cap. That derivation made this request declare 8192 against the turn's
+    // 8192 only by accident of arithmetic on other models; on a 64K model it
+    // declared 6000 against 32000 and read none of the history it had just
+    // sent byte-for-byte, at HTTP 200. Pin the budget rather than the cap: the
+    // budget is what the cache keys on, and the API only requires the cap to
+    // be large enough to hold it (`budget_tokens < max_tokens`).
+    let budget = |r: &Value| r["thinking"]["budget_tokens"].clone();
+    let turn = requests
+        .iter()
+        .find(|r| !is_compaction_request(r))
+        .expect("a turn request");
+    let compaction = requests
+        .iter()
+        .find(|r| is_compaction_request(r))
+        .expect("a compaction request");
+    assert_eq!(budget(turn), json!(8_192));
+    assert_eq!(
+        budget(compaction),
+        budget(turn),
+        "compaction must declare the turn's thinking budget or it cannot read \
+         the turn's prefix"
+    );
+    assert!(
+        compaction["max_tokens"].as_u64().unwrap() > 8_192,
+        "the cap has to be able to hold the budget: {}",
+        compaction["max_tokens"]
+    );
+    assert!(
+        requests.iter().all(|r| r["max_tokens"] == 16_384),
+        "every request caps output at the model's configured maxOutputTokens"
+    );
     assert!(requests
         .iter()
-        .all(|r| { r["max_tokens"] == if r["stream"] == true { 16_384 } else { 12_000 } }));
-    assert!(requests
-        .iter()
-        .any(|r| r["stream"] == true && r["messages"].to_string().contains("CHECKPOINT_COMPLETE")));
+        .any(|r| !is_compaction_request(r)
+            && r["messages"].to_string().contains("CHECKPOINT_COMPLETE")));
 }
 
 #[test]
@@ -703,7 +863,7 @@ fn automatic_compaction_failure_never_sends_a_historyless_task_request() {
     let requests = provider.requests.lock().unwrap();
     assert!(!requests.is_empty());
     assert!(
-        requests.iter().all(|r| r["stream"] != true),
+        requests.iter().all(is_compaction_request),
         "failed compaction must not dispatch a task request"
     );
 }
@@ -755,7 +915,10 @@ fn pressure_prunes_large_tool_output_without_a_summary_call() {
     cli.expect_eof().unwrap();
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1, "pruning should avoid a summary request");
-    assert_eq!(requests[0]["stream"], true);
+    assert!(
+        !is_compaction_request(&requests[0]),
+        "the one request must be the task, not a checkpoint call"
+    );
     let input = requests[0]["messages"].to_string();
     for marker in [
         "PROJECT_ALPHA",
@@ -951,7 +1114,7 @@ fn subagent_compaction_uses_shared_text_transport() {
     let requests = provider.requests.lock().unwrap();
     let checkpoints = requests
         .iter()
-        .filter(|r| r["stream"] != true)
+        .filter(|r| is_compaction_request(r))
         .collect::<Vec<_>>();
     assert_eq!(
         checkpoints.len(),
@@ -960,7 +1123,7 @@ fn subagent_compaction_uses_shared_text_transport() {
         requests
             .iter()
             .map(|r| (
-                r["stream"].clone(),
+                is_compaction_request(r),
                 r["model"].clone(),
                 r["messages"].as_array().map(Vec::len),
                 r["messages"].as_array().and_then(|m| m.last()).map(|m| m
@@ -1001,7 +1164,7 @@ fn subagent_compaction_uses_shared_text_transport() {
     assert!(
         requests
             .iter()
-            .filter(|r| r["stream"] == true)
+            .filter(|r| !is_compaction_request(r))
             .any(|r| r["messages"].to_string().contains("CHILD_DONE")),
         "parent must receive the child result"
     );
@@ -1110,7 +1273,10 @@ fn openai_compaction_validates_responses_and_preserves_history_on_failure() {
         for request in requests.iter() {
             assert_eq!(request["model"], "intranet/apeiron-openai");
             assert_eq!(request["max_tokens"], 1024);
-            assert_ne!(request["stream"], true);
+            assert!(
+                is_compaction_request(request),
+                "a failed checkpoint must not dispatch a task request"
+            );
             assert!(request["messages"].to_string().contains("PROJECT_ALPHA"));
         }
         if mode == "openai-fallback" {
@@ -1167,7 +1333,7 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|request| request["stream"].clone())
+                    .map(|request| is_compaction_request(request))
                     .collect::<Vec<_>>()
             );
         });
@@ -1177,9 +1343,12 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
     assert_eq!(&after.messages[..before.messages.len()], &before.messages);
     let requests = provider.requests.lock().unwrap();
     assert_eq!(
-        requests.iter().filter(|r| r["stream"] == true).count(),
+        requests
+            .iter()
+            .filter(|r| !is_compaction_request(r))
+            .count(),
         1,
         "no further task request after compaction fails"
     );
-    assert!(requests.iter().any(|r| r["stream"] != true));
+    assert!(requests.iter().any(is_compaction_request));
 }

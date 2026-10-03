@@ -436,6 +436,78 @@ async fn stream_message_parses_sse_events_with_tool_use() {
     std::env::remove_var("SUDO_CODE_CONFIG_HOME");
 }
 
+/// Usage must be recorded even when `message_stop` lands in a later TCP frame.
+///
+/// A `message_delta` carrying a `stop_reason` ends the message logically, and
+/// the stream stops reading the socket at that point — so a `message_stop` that
+/// upstream sent in a separate frame is never parsed. Recording only on
+/// `message_stop` therefore made accounting depend on where the gateway's frame
+/// boundaries happened to fall. A live three-turn session against the pool
+/// recorded exactly one of its three requests this way: turn 1 arrived
+/// coalesced, turns 2 and 3 did not, and both the usage telemetry and the
+/// prompt-cache ledger — the instrument cache breaks are diagnosed from — lost
+/// two thirds of their rows without any error anywhere.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn usage_is_recorded_when_message_stop_arrives_in_a_later_frame() {
+    let _guard = env_lock();
+    let temp_root = std::env::temp_dir().join(format!(
+        "api-stream-split-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
+    ));
+    std::env::set_var("SUDO_CODE_CONFIG_HOME", &temp_root);
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let head = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_split\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":13,\"cache_read_input_tokens\":21,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":34,\"cache_read_input_tokens\":55,\"output_tokens\":1}}\n\n",
+    );
+    let tail = concat!(
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server =
+        spawn_split_body_server(state.clone(), "200 OK", "text/event-stream", head, tail).await;
+
+    let client = ApiClient::new("test-key")
+        .with_auth_token(Some("proxy-token".to_string()))
+        .with_base_url(server.base_url())
+        .with_prompt_cache(PromptCache::new("split-frame-session"));
+    let mut stream = client
+        .stream_message(&sample_request(true), None)
+        .await
+        .expect("stream should start");
+
+    while let Some(_event) = stream
+        .next_event()
+        .await
+        .expect("stream event should parse")
+    {}
+
+    let cache_stats = client
+        .prompt_cache_stats()
+        .expect("prompt cache stats should exist");
+    assert_eq!(
+        cache_stats.tracked_requests, 1,
+        "the request went unrecorded because message_stop was in a second frame"
+    );
+    assert_eq!(cache_stats.last_cache_creation_input_tokens, Some(34));
+    assert_eq!(cache_stats.last_cache_read_input_tokens, Some(55));
+
+    let _ = std::fs::remove_dir_all(temp_root);
+    std::env::remove_var("SUDO_CODE_CONFIG_HOME");
+}
+
 #[tokio::test]
 async fn retries_retryable_failures_before_succeeding() {
     let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
@@ -531,6 +603,7 @@ async fn provider_client_dispatches_anthropic_requests() {
         credential: Credential::ApiKey("test-key".to_string()),
         model_id: "claude-sonnet-4-6".to_string(),
         extra_body: serde_json::Map::new(),
+        cache_ttl_1h: None,
     };
     let client = ProviderClient::from_resolved(&resolved, None)
         .expect("anthropic provider client should be constructed");
@@ -779,6 +852,246 @@ async fn send_message_tracks_unexpected_prompt_cache_breaks() {
     std::env::remove_var("SUDO_CODE_CONFIG_HOME");
 }
 
+/// One whole response, transported as a stream. Every caller that used to send
+/// a conversation-sized request non-streaming now goes through this, so the
+/// wire shape is the thing worth pinning: `stream: true` regardless of what the
+/// caller's request said, and the same `MessageResponse` back.
+#[tokio::test]
+async fn send_message_streamed_streams_the_request_and_returns_one_response() {
+    let sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_collected\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":8,\"cache_creation_input_tokens\":13,\"cache_read_input_tokens\":21,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Summary.\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":4}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "text/event-stream", sse)],
+    )
+    .await;
+
+    let client =
+        ProviderClient::Anthropic(ApiClient::new("test-key").with_base_url(server.base_url()));
+    // The caller's request says `stream: false` — the transport decision is
+    // not the caller's to make.
+    let response = client
+        .send_message_streamed(&sample_request(false), None)
+        .await
+        .expect("a streamed request should collect into one response");
+
+    assert_eq!(
+        response.content,
+        vec![OutputContentBlock::Text {
+            text: "Summary.".to_string(),
+        }]
+    );
+    assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
+    // The prompt-cache numbers only ever arrive on `message_start`; losing
+    // them would make every collected turn look like a cache miss.
+    assert_eq!(response.usage.cache_read_input_tokens, 21);
+    assert_eq!(response.usage.cache_creation_input_tokens, 13);
+    assert_eq!(response.usage.output_tokens, 4);
+
+    let requests = state.lock().await;
+    assert_eq!(requests.len(), 1);
+    let body: serde_json::Value =
+        serde_json::from_str(&requests[0].body).expect("body should be json");
+    assert_eq!(body["stream"], json!(true));
+}
+
+/// An upstream that ignores `stream: true` and answers with the whole message
+/// body. The answer is complete and paid for: read it. Re-sending the
+/// conversation to get a reply we already have is what this used to do.
+#[tokio::test]
+async fn a_json_body_answered_to_a_streaming_request_is_read_not_re_sent() {
+    let body = concat!(
+        "{\"id\":\"msg_unframed\",\"type\":\"message\",\"role\":\"assistant\",",
+        "\"content\":[{\"type\":\"text\",\"text\":\"Unframed but complete.\"}],",
+        "\"model\":\"claude-3-7-sonnet-latest\",\"stop_reason\":\"end_turn\",",
+        "\"usage\":{\"input_tokens\":30,\"cache_read_input_tokens\":4000,\"output_tokens\":6}}"
+    );
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    // One queued response: a second request would find the server gone, which
+    // is the assertion — the body we already have is enough.
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "application/json", body)],
+    )
+    .await;
+
+    let client =
+        ProviderClient::Anthropic(ApiClient::new("test-key").with_base_url(server.base_url()));
+    let response = client
+        .send_message_streamed(&sample_request(false), None)
+        .await
+        .expect("a complete body is a complete answer, whatever framing it used");
+
+    assert_eq!(
+        response.content,
+        vec![OutputContentBlock::Text {
+            text: "Unframed but complete.".to_string(),
+        }]
+    );
+    assert_eq!(response.stop_reason.as_deref(), Some("end_turn"));
+    assert_eq!(response.usage.cache_read_input_tokens, 4000);
+    assert_eq!(captured_paths(&state).await, vec!["/v1/messages"]);
+}
+
+/// The exact-count preflight uploads the whole conversation a second time —
+/// the `count_tokens` body *is* the message body. A turn using a fraction of
+/// its window cannot be pushed over the line by estimator error, so buying the
+/// exact number there is a round trip that cannot change the outcome. It used
+/// to happen on every single turn.
+#[tokio::test]
+async fn preflight_does_not_count_tokens_when_the_request_is_far_from_the_window() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response(
+            "200 OK",
+            "application/json",
+            &ok_message_body(),
+        )],
+    )
+    .await;
+
+    let client = ApiClient::new("test-key").with_base_url(server.base_url());
+    client
+        .send_message(&small_known_model_request(), None)
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(captured_paths(&state).await, vec!["/v1/messages"]);
+}
+
+/// Near the line the exact number does change the verdict, so it is still
+/// worth the upload — and it still rejects the request before it is sent.
+#[tokio::test]
+async fn preflight_counts_tokens_when_an_exact_answer_could_change_the_verdict() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response(
+            "200 OK",
+            "application/json",
+            "{\"input_tokens\":190000}",
+        )],
+    )
+    .await;
+
+    let client = ApiClient::new("test-key").with_base_url(server.base_url());
+    let error = client
+        .send_message(&near_window_request(), None)
+        .await
+        .expect_err("190K counted plus a 32K reservation is over the 200K window");
+
+    assert!(
+        matches!(
+            error,
+            ApiError::ContextWindowExceeded {
+                estimated_input_tokens: 190_000,
+                requested_output_tokens: 32_000,
+                context_window_tokens: 200_000,
+                ..
+            }
+        ),
+        "expected the exact count to drive the rejection, got {error:?}"
+    );
+    assert_eq!(
+        captured_paths(&state).await,
+        vec!["/v1/messages/count_tokens"],
+        "the message itself must never be sent once the count rules it out"
+    );
+}
+
+/// `api.sudorouter.ai` answers `/v1/messages/count_tokens` with 404. A gateway
+/// that does not implement the endpoint will not start mid-session, so asking
+/// again every turn is the same wasted upload with an answer we already have.
+#[tokio::test]
+async fn a_gateway_without_count_tokens_is_asked_once_and_then_left_alone() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![
+            http_response(
+                "404 Not Found",
+                "application/json",
+                "{\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"not_found\"}}",
+            ),
+            http_response("200 OK", "application/json", &ok_message_body()),
+            http_response("200 OK", "application/json", &ok_message_body()),
+        ],
+    )
+    .await;
+
+    let client = ApiClient::new("test-key").with_base_url(server.base_url());
+    let request = near_window_request();
+    client
+        .send_message(&request, None)
+        .await
+        .expect("a missing count endpoint must fall back to the local estimate, not fail the turn");
+    client
+        .send_message(&request, None)
+        .await
+        .expect("second turn should succeed");
+
+    assert_eq!(
+        captured_paths(&state).await,
+        vec!["/v1/messages/count_tokens", "/v1/messages", "/v1/messages"],
+    );
+}
+
+/// The latch has to stay narrow: a rate limit or a 5xx says this attempt
+/// failed, not that the endpoint is absent. Disabling the check on those would
+/// silently drop the context-window guard for the rest of the session.
+#[tokio::test]
+async fn a_transient_count_tokens_failure_does_not_disable_the_check() {
+    let rate_limited = http_response(
+        "429 Too Many Requests",
+        "application/json",
+        "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}",
+    );
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let server = spawn_server(
+        state.clone(),
+        vec![
+            rate_limited.clone(),
+            http_response("200 OK", "application/json", &ok_message_body()),
+            rate_limited,
+            http_response("200 OK", "application/json", &ok_message_body()),
+        ],
+    )
+    .await;
+
+    let client = ApiClient::new("test-key").with_base_url(server.base_url());
+    let request = near_window_request();
+    for turn in 0..2 {
+        client
+            .send_message(&request, None)
+            .await
+            .unwrap_or_else(|error| panic!("turn {turn} should fall back and succeed: {error:?}"));
+    }
+
+    assert_eq!(
+        captured_paths(&state).await,
+        vec![
+            "/v1/messages/count_tokens",
+            "/v1/messages",
+            "/v1/messages/count_tokens",
+            "/v1/messages",
+        ],
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires ANTHROPIC_API_KEY and network access"]
 async fn live_stream_smoke_test() {
@@ -848,67 +1161,8 @@ async fn spawn_server(
     let join_handle = tokio::spawn(async move {
         for response in responses {
             let (mut socket, _) = listener.accept().await.expect("server should accept");
-            let mut buffer = Vec::new();
-            let mut header_end = None;
-
-            loop {
-                let mut chunk = [0_u8; 1024];
-                let read = socket
-                    .read(&mut chunk)
-                    .await
-                    .expect("request read should succeed");
-                if read == 0 {
-                    break;
-                }
-                buffer.extend_from_slice(&chunk[..read]);
-                if let Some(position) = find_header_end(&buffer) {
-                    header_end = Some(position);
-                    break;
-                }
-            }
-
-            let header_end = header_end.expect("request should include headers");
-            let (header_bytes, remaining) = buffer.split_at(header_end);
-            let header_text =
-                String::from_utf8(header_bytes.to_vec()).expect("headers should be utf8");
-            let mut lines = header_text.split("\r\n");
-            let request_line = lines.next().expect("request line should exist");
-            let mut parts = request_line.split_whitespace();
-            let method = parts.next().expect("method should exist").to_string();
-            let path = parts.next().expect("path should exist").to_string();
-            let mut headers = HashMap::new();
-            let mut content_length = 0_usize;
-            for line in lines {
-                if line.is_empty() {
-                    continue;
-                }
-                let (name, value) = line.split_once(':').expect("header should have colon");
-                let value = value.trim().to_string();
-                if name.eq_ignore_ascii_case("content-length") {
-                    content_length = value.parse().expect("content length should parse");
-                }
-                headers.insert(name.to_ascii_lowercase(), value);
-            }
-
-            let mut body = remaining[4..].to_vec();
-            while body.len() < content_length {
-                let mut chunk = vec![0_u8; content_length - body.len()];
-                let read = socket
-                    .read(&mut chunk)
-                    .await
-                    .expect("body read should succeed");
-                if read == 0 {
-                    break;
-                }
-                body.extend_from_slice(&chunk[..read]);
-            }
-
-            state.lock().await.push(CapturedRequest {
-                method,
-                path,
-                headers,
-                body: String::from_utf8(body).expect("body should be utf8"),
-            });
+            let captured = capture_request(&mut socket).await;
+            state.lock().await.push(captured);
 
             socket
                 .write_all(response.as_bytes())
@@ -920,6 +1174,120 @@ async fn spawn_server(
     TestServer {
         base_url: format!("http://{address}"),
         join_handle,
+    }
+}
+
+/// Serves one response whose body is written in two pieces, with a gap between
+/// them, so the client reads `head` and `tail` as separate chunks.
+///
+/// A single `write_all` of a small body arrives coalesced, which is the one
+/// framing under which nothing goes wrong — so no single-write server can catch
+/// a defect that only appears when a frame boundary falls in the wrong place.
+async fn spawn_split_body_server(
+    state: Arc<Mutex<Vec<CapturedRequest>>>,
+    status: &'static str,
+    content_type: &'static str,
+    head: &'static str,
+    tail: &'static str,
+) -> TestServer {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should have local addr");
+    let join_handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("server should accept");
+        let captured = capture_request(&mut socket).await;
+        state.lock().await.push(captured);
+
+        let headers = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            head.len() + tail.len()
+        );
+        socket
+            .write_all(headers.as_bytes())
+            .await
+            .expect("header write should succeed");
+        socket
+            .write_all(head.as_bytes())
+            .await
+            .expect("head write should succeed");
+        socket.flush().await.expect("head flush should succeed");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        socket
+            .write_all(tail.as_bytes())
+            .await
+            .expect("tail write should succeed");
+        socket.flush().await.expect("tail flush should succeed");
+    });
+
+    TestServer {
+        base_url: format!("http://{address}"),
+        join_handle,
+    }
+}
+
+async fn capture_request(socket: &mut tokio::net::TcpStream) -> CapturedRequest {
+    let mut buffer = Vec::new();
+    let mut header_end = None;
+
+    loop {
+        let mut chunk = [0_u8; 1024];
+        let read = socket
+            .read(&mut chunk)
+            .await
+            .expect("request read should succeed");
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if let Some(position) = find_header_end(&buffer) {
+            header_end = Some(position);
+            break;
+        }
+    }
+
+    let header_end = header_end.expect("request should include headers");
+    let (header_bytes, remaining) = buffer.split_at(header_end);
+    let header_text = String::from_utf8(header_bytes.to_vec()).expect("headers should be utf8");
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().expect("request line should exist");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().expect("method should exist").to_string();
+    let path = parts.next().expect("path should exist").to_string();
+    let mut headers = HashMap::new();
+    let mut content_length = 0_usize;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line.split_once(':').expect("header should have colon");
+        let value = value.trim().to_string();
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value.parse().expect("content length should parse");
+        }
+        headers.insert(name.to_ascii_lowercase(), value);
+    }
+
+    let mut body = remaining[4..].to_vec();
+    while body.len() < content_length {
+        let mut chunk = vec![0_u8; content_length - body.len()];
+        let read = socket
+            .read(&mut chunk)
+            .await
+            .expect("body read should succeed");
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+
+    CapturedRequest {
+        method,
+        path,
+        headers,
+        body: String::from_utf8(body).expect("body should be utf8"),
     }
 }
 
@@ -1043,4 +1411,63 @@ fn sample_request(stream: bool) -> MessageRequest {
         stream,
         ..Default::default()
     }
+}
+
+/// A model the bundled capabilities table knows: 200K context window, 64K max
+/// output. The preflight returns immediately for a model with no registered
+/// limits, so an unknown model would let these tests pass without ever
+/// reaching the decision they are about.
+const KNOWN_WINDOW_MODEL: &str = "claude-sonnet-4-6";
+
+/// Same conversation as [`sample_request`], pointed at a model whose window is
+/// known — and using a negligible slice of it.
+fn small_known_model_request() -> MessageRequest {
+    MessageRequest {
+        model: KNOWN_WINDOW_MODEL.to_string(),
+        ..sample_request(false)
+    }
+}
+
+/// A request whose local byte estimate lands past 80% of the 200K window:
+/// ~150K tokens of message text (the estimate is serialized-bytes / 4) plus a
+/// 32K output reservation, so ~182K of 200K. The local guard still passes it,
+/// but it is close enough that estimator error could flip the verdict — which
+/// is exactly when an exact remote count earns its round trip.
+fn near_window_request() -> MessageRequest {
+    MessageRequest {
+        model: KNOWN_WINDOW_MODEL.to_string(),
+        max_tokens: 32_000,
+        messages: vec![InputMessage {
+            role: "user".to_string(),
+            content: vec![InputContentBlock::Text {
+                text: "x".repeat(600_000),
+            }],
+        }],
+        ..sample_request(false)
+    }
+}
+
+fn ok_message_body() -> String {
+    json!({
+        "id": "msg_preflight",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "ok"}],
+        "model": KNOWN_WINDOW_MODEL,
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 5, "output_tokens": 2},
+    })
+    .to_string()
+}
+
+/// Request paths in arrival order — what the client actually spent round trips
+/// on, which is the whole subject of the preflight tests.
+async fn captured_paths(state: &Arc<Mutex<Vec<CapturedRequest>>>) -> Vec<String> {
+    state
+        .lock()
+        .await
+        .iter()
+        .map(|request| request.path.clone())
+        .collect()
 }

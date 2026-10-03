@@ -1,12 +1,16 @@
 mod client;
 mod completion;
+pub mod model_discovery;
 pub use completion::convert_messages;
 mod error;
 mod http_client;
 mod http_transport;
+mod nexus_transport;
+pub use nexus_transport::ModelAccess;
 mod prompt_cache;
 mod providers;
 mod sse;
+mod stream_collect;
 mod types;
 
 pub use client::{
@@ -14,7 +18,9 @@ pub use client::{
     resolve_saved_oauth_token, resolve_startup_auth_source, MessageStream, OAuthTokenSet,
     ProviderClient,
 };
-pub use error::{format_context_window_blocked_error, format_user_visible_api_error, ApiError};
+pub use error::{
+    format_context_window_blocked_error, format_user_visible_api_error, ApiError, ErrorAction,
+};
 pub use http_client::{
     build_http_client, build_http_client_or_default, build_http_client_with,
     build_http_client_with_opts, ProxyConfig, TimeoutConfig,
@@ -24,8 +30,8 @@ pub use http_transport::{
     RetryPolicy,
 };
 pub use prompt_cache::{
-    CacheBreakEvent, PromptCache, PromptCacheConfig, PromptCachePaths, PromptCacheRecord,
-    PromptCacheStats,
+    cache_break_cause, cache_root, CacheBreakEvent, PromptCache, PromptCacheConfig,
+    PromptCachePaths, PromptCacheRecord, PromptCacheRequestRow, PromptCacheStats,
 };
 pub use providers::anthropic::{
     is_anthropic_api_key, is_claude_code_oauth_token, is_proxy_auth_token, AnthropicClient,
@@ -49,12 +55,13 @@ pub use providers::registry::{
 };
 pub use providers::{detect_provider_kind, AuthMode, ProviderKind};
 pub use sse::{parse_frame, SseParser};
+pub use stream_collect::ResponseAccumulator;
 pub use types::{
     CacheHints, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
     ContentBlockStopEvent, ImageSource, InputContentBlock, InputMessage, MessageDelta,
     MessageDeltaEvent, MessageRequest, MessageResponse, MessageStartEvent, MessageStopEvent,
-    OutputContentBlock, RequestMetadata, StreamEvent, ToolChoice, ToolDefinition,
-    ToolResultContentBlock, Usage,
+    OutputContentBlock, RequestMetadata, SessionRequestFields, StreamEvent, ToolChoice,
+    ToolDefinition, ToolResultContentBlock, Usage,
 };
 
 pub use telemetry::{

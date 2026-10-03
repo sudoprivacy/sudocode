@@ -108,33 +108,26 @@ impl TestWorkspace {
             .expect("test sudocode.json should be written");
     }
 
-    /// Seed `<config_home>/cache/model-capabilities.json` with a text-only
-    /// fixture model so push_images' `vision_capable(...)` returns false and
-    /// the VLM-route branch fires. Regression guard for the class of bug
-    /// where `run_acp_server` forgets to call `model_capabilities::load` —
-    /// without the load call, this fixture never reaches the OnceLock and
-    /// vision_capable falls back to the optimistic default (true), so the
-    /// wrong-model VLM route never fires. Real-e2e caught this bug on
-    /// 2026-07-01; this fixture keeps it from recurring silently.
-    fn seed_text_only_test_fixture(&self, model_id: &str) {
-        let cache_dir = self.config_home.join("cache");
-        fs::create_dir_all(&cache_dir).expect("cache dir");
-        // Minimal ModelCapabilitiesFile shape — one text-only test model plus
-        // a sane default so the file passes model_capabilities::load's
-        // parse_capabilities_json ("must contain a 'default' entry" invariant).
-        let json = serde_json::json!({
-            "updated_at": 0,
-            "default": {"context_window": 200000, "max_output_tokens": 64000},
-            "models": {
-                model_id: {
-                    "context_window": 131072,
-                    "max_output_tokens": 64000,
-                    "vision_supported": false,
-                },
+    /// Fetch the fixture through discovery so the child loads its own endpoint's
+    /// persisted catalog. A global capability cache must not override this route.
+    async fn seed_model_catalog(&self, endpoint: &str) {
+        use runtime::model_discovery::{DiscoverySource, ModelCatalog};
+        let catalog = ModelCatalog::open(
+            &self.config_home,
+            DiscoverySource {
+                models_url: format!("{endpoint}/v1/models"),
+                headers: [
+                    ("x-api-key".into(), "test-acp-key".into()),
+                    ("anthropic-version".into(), "2023-06-01".into()),
+                ]
+                .into_iter()
+                .collect(),
             },
-        });
-        fs::write(cache_dir.join("model-capabilities.json"), json.to_string())
-            .expect("write model-capabilities.json");
+        );
+        catalog
+            .refresh(true)
+            .await
+            .expect("fetch test model catalog");
     }
 
     fn cleanup(&self) {
@@ -2816,9 +2809,8 @@ async fn acp_stdio_same_session_prompts_stay_serial() {
 ///  - stderr shows `[push_images] VLM-route start` + `VLM done` eprintlns.
 ///
 /// This catches ALL three regression classes in one test:
-///  a) `model_capabilities::load` missing in run_acp_server (SSOT cache
-///     never populated → vision_capable falls back to optimistic default
-///     → push_images takes native branch → mock gets 0 requests → fail).
+///  a) endpoint catalog not loaded/scoped in ACP (vision defaults to true,
+///     push_images takes the native branch, and the VLM mock gets no request).
 ///  b) VLM-route wire-format regressions (wrong endpoint path, wrong content
 ///     shape, missing Authorization header, wrong model name).
 ///  c) block_in_place / runtime nesting regressions (would hang the call
@@ -2851,7 +2843,20 @@ async fn acp_wrong_model_vlm_full_roundtrip() {
         &anthropic_mock.base_url(),
         sudorouter_mock.base_url(),
     );
-    workspace.seed_text_only_test_fixture(WIRE_MODEL);
+    anthropic_mock
+        .set_model_catalog(json!({
+            "data": [{
+                "id": WIRE_MODEL,
+                "context_window": 131072,
+                "max_output_tokens": 64000,
+                "vision_supported": false,
+            }],
+            "has_more": false,
+        }))
+        .await;
+    workspace
+        .seed_model_catalog(&anthropic_mock.base_url())
+        .await;
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
     cmd.current_dir(&workspace.root);
@@ -3875,6 +3880,36 @@ async fn acp_subagent_events_nested() {
     let session_id = scenario_session_new(&mut client, &workspace.root).await;
     let (notifs, _) = prompt_scenario(&mut client, &session_id, "subagent_events_nested").await;
     dump_subagent_events("nested", &notifs);
+
+    let requests = server.captured_requests().await;
+    let parent = requests
+        .iter()
+        .find(|request| request.scenario == "subagent_events_nested")
+        .expect("the parent calls the provider");
+    let parent_body: Value = serde_json::from_str(&parent.raw_body).unwrap();
+    let routing_key = parent_body["metadata"]["user_id"]
+        .as_str()
+        .filter(|key| !key.is_empty())
+        .expect("the parent carries a routing identity");
+    for scenario in [
+        "subagent_events_nested",
+        "subagent_nest_child",
+        "subagent_tool_child",
+    ] {
+        let turns: Vec<_> = requests
+            .iter()
+            .filter(|request| request.scenario == scenario)
+            .collect();
+        assert!(!turns.is_empty(), "{scenario} must call the provider");
+        for turn in turns {
+            let body: Value = serde_json::from_str(&turn.raw_body).unwrap();
+            assert_eq!(
+                body["metadata"]["user_id"].as_str(),
+                Some(routing_key),
+                "{scenario} must retain the parent's routing identity",
+            );
+        }
+    }
 
     let traces = assert_subagent_invariants(&notifs);
     assert_eq!(traces.len(), 2, "child + grandchild: {traces:#?}");

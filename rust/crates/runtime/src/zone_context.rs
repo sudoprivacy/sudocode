@@ -53,7 +53,12 @@ pub struct HostZoneContext {
 
 impl HostZoneContext {
     /// Cohost path (R6.2): the descriptor is planted by the trusted
-    /// [`ManagedAgentService`]; its `zone_id` is authority by construction.
+    /// [`ManagedAgentService`]; its `zone_id` is authority by construction,
+    /// so the context is [`ContextSource::TrustedLocal`] — an in-process
+    /// planted descriptor is not an unverified credential. A descriptor
+    /// carrying `ENV_NEXUS_RESOURCE_SCOPE` is enforced to that scope
+    /// (host-injected runtime resource scope); one without labels runs
+    /// unscoped, exactly as the trusted host that planted it.
     #[must_use]
     pub fn from_planted_descriptor(desc: &AgentDescriptor) -> Self {
         let zone_id = validate_existing_zone_id_ref(&desc.zone_id).then(|| desc.zone_id.clone());
@@ -65,7 +70,7 @@ impl HostZoneContext {
             delegation_ref: desc.labels.get(ENV_NEXUS_DELEGATION_REF).cloned(),
             resource_scope,
             resource_scope_present: scope_raw.is_some(),
-            source: ContextSource::UnverifiedDelegationRef,
+            source: ContextSource::TrustedLocal,
         }
     }
 

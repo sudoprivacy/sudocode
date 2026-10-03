@@ -493,6 +493,7 @@ async fn provider_client_dispatches_xai_requests() {
         credential: Credential::ApiKey("xai-test-key".to_string()),
         model_id: "grok-3".to_string(),
         extra_body: serde_json::Map::new(),
+        cache_ttl_1h: None,
     };
     let client = ProviderClient::from_resolved(&resolved, None)
         .expect("xAI provider client should be constructed");
@@ -714,6 +715,7 @@ async fn capture_chat_completion_body(
         credential: Credential::ApiKey("xai-test-key".to_string()),
         model_id: "grok-3".to_string(),
         extra_body,
+        cache_ttl_1h: None,
     };
     let client = ProviderClient::from_resolved(&resolved, None).expect("client should build");
     client
@@ -881,5 +883,94 @@ fn sample_request(stream: bool) -> MessageRequest {
         tool_choice: Some(ToolChoice::Auto),
         stream,
         ..Default::default()
+    }
+}
+
+/// Exercise the real serializers and HTTP boundary after a mixed tool batch.
+/// Images must not interleave the tool replies or turn into base64 tool text.
+#[tokio::test]
+async fn image_feedback_follows_all_tool_results_on_chat_and_responses_wire() {
+    use runtime::{ContentBlock, ConversationMessage};
+    for responses in [false, true] {
+        let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let response = if responses {
+            http_response("200 OK", "text/event-stream", concat!(
+                "event: response.created\ndata: {\"id\":\"resp_image\",\"model\":\"gpt-5.5\"}\n\n",
+                "event: response.output_text.delta\ndata: {\"delta\":\"seen\"}\n\n",
+                "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+            ))
+        } else {
+            http_response(
+                "200 OK",
+                "application/json",
+                r#"{"id":"image","model":"gpt-5.5","choices":[{"message":{"role":"assistant","content":"seen"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+            )
+        };
+        let server = spawn_server(state.clone(), vec![response]).await;
+        let mut first = ConversationMessage::tool_result("one", "Read", "image attached", false);
+        first.blocks.push(ContentBlock::Image {
+            data: "cGl4ZWxz".into(),
+            mime_type: "image/png".into(),
+        });
+        let history = vec![
+            ConversationMessage::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: "one".into(),
+                    name: "Read".into(),
+                    input: r#"{"path":"screen.png"}"#.into(),
+                    thought_signature: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "two".into(),
+                    name: "Read".into(),
+                    input: r#"{"path":"fixture.txt"}"#.into(),
+                    thought_signature: None,
+                },
+            ]),
+            first,
+            ConversationMessage::tool_result("two", "Read", "ordinary text", false),
+        ];
+        let request = MessageRequest {
+            model: "gpt-5.5".into(),
+            max_tokens: 64,
+            messages: api::convert_messages(&history),
+            ..Default::default()
+        };
+        let client = OpenAiCompatClient::new("test", OpenAiCompatConfig::openai())
+            .with_base_url(server.base_url());
+        let client = if responses {
+            client.with_api_format(ApiFormat::OpenAiResponses)
+        } else {
+            client
+        };
+        client
+            .send_message(&request, None)
+            .await
+            .expect("image follow-up request should succeed");
+        let captures = state.lock().await;
+        let body: serde_json::Value = serde_json::from_str(&captures[0].body).unwrap();
+        if responses {
+            let input = body["input"].as_array().unwrap();
+            let outputs: Vec<_> = input
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| v["type"] == "function_call_output")
+                .collect();
+            assert_eq!(outputs.len(), 2);
+            let image_index = input
+                .iter()
+                .position(|v| v.to_string().contains("data:image/png;base64,cGl4ZWxz"))
+                .unwrap();
+            assert!(outputs.iter().all(|(i, _)| *i < image_index));
+        } else {
+            let messages = body["messages"].as_array().unwrap();
+            assert_eq!(messages[1]["role"], "tool");
+            assert_eq!(messages[2]["role"], "tool");
+            assert_eq!(messages[3]["role"], "user");
+            assert_eq!(
+                messages[3]["content"][0]["image_url"]["url"],
+                "data:image/png;base64,cGl4ZWxz"
+            );
+        }
     }
 }

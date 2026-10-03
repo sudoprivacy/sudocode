@@ -42,6 +42,7 @@ fn strip_ansi_codes(input: &str) -> String {
     output
 }
 
+use crate::render::StyledLine;
 use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, PROMPT_PREFIX, RESET};
 use crate::{
     load_sudocode_config_for_current_dir, GitWorkspaceSummary, InternalPromptProgressEvent,
@@ -127,17 +128,33 @@ pub(crate) fn render_message(
                         }
                         out.push_str(&rendered);
                     }
-                    runtime::ContentBlock::ToolUse {
-                        id, name, input, ..
-                    } => {
+                    runtime::ContentBlock::Thinking { thinking, .. }
+                        if !thinking.trim().is_empty() =>
+                    {
+                        // Replay has to show reasoning for the same reason live
+                        // does: it was paid for. Rendered as plain dim text, not
+                        // through `render_markdown` — reasoning is prose the
+                        // model wrote for itself, and letting a stray `#` or
+                        // `*` in it become a heading or emphasis would make it
+                        // louder than the answer it belongs under.
                         if !out.is_empty() {
                             out.push('\n');
                         }
-                        // Remember the call's input so the matching ToolResult
-                        // below can show the identity fields (command, path,
-                        // pattern) that the result payload never echoes.
+                        out.push_str(&thinking_header());
+                        out.push_str(&dim_thinking(thinking.trim_end()));
+                        out.push('\n');
+                    }
+                    runtime::ContentBlock::ToolUse { id, input, .. } => {
+                        // Mirror the live render engine exactly: a ToolUse only
+                        // *remembers* its input so the matching ToolResult can
+                        // show the identity fields (command, path, pattern) the
+                        // result payload never echoes. It renders NO card here —
+                        // the single durable card per call is the completed
+                        // (green/red) one drawn by the ToolResult below. (A
+                        // running/amber card is a live overlay-only status and
+                        // must never be committed to scrollback; on replay a
+                        // resultless call is simply not shown, same as live.)
                         tool_inputs.remember(id, input);
-                        out.push_str(&format_tool_call_start(name, input));
                     }
                     _ => {}
                 }
@@ -216,6 +233,34 @@ fn text_from_blocks(blocks: &[runtime::ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Wrap one chunk of extended-thinking text in the dim attribute.
+///
+/// Deliberately one self-contained `DIM`…`RESET` pair per call rather than a
+/// single run held open across a whole reasoning block. The live path receives
+/// thinking as deltas that split mid-word, and [`ResponseGlyphState::apply`]
+/// injects its margin at every line start — so a run left open across a delta
+/// boundary would be closed by whichever writer comes next. Per-chunk pairs are
+/// idempotent under both, at the cost of one escape pair per delta.
+///
+/// [`ResponseGlyphState::apply`]: crate::render::ResponseGlyphState::apply
+#[inline]
+pub(crate) fn dim_thinking(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    format!("{DIM}{text}{RESET}")
+}
+
+/// Header that opens a reasoning block.
+///
+/// Without it dim text is ambiguous — it reads as a faded *answer* rather than
+/// as reasoning, and a turn that opens on thinking would look like the model
+/// started replying in the wrong style.
+#[inline]
+pub(crate) fn thinking_header() -> String {
+    format!("{DIM}✻ Thinking…{RESET}\n")
 }
 
 // NOTE: DISPLAY_TRUNCATION_NOTICE uses DIM + RESET which are theme-invariant
@@ -791,6 +836,13 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
 /// frame. A thin shell over [`tool_card_content`] — the SSOT that guarantees a
 /// tool looks identical running and done, differing only in frame color and
 /// whether the result body is present.
+///
+/// **Invariant: overlay-only.** `Running` (amber) is a live status; the sole
+/// caller is the iocraft staging overlay ([`crate::repl_ui`]), a self-clearing
+/// region that removes the card on completion. It must NEVER be committed to
+/// durable scrollback — that would freeze an amber "in-flight" card above the
+/// real result forever. Scrollback carries exactly one card per call: the
+/// completed (green/red) [`format_tool_result`].
 pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
     let in_val: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
@@ -907,7 +959,7 @@ impl ToolCardContent {
 /// and CJK width, so a closed box's right edge is unreliable — a left frame
 /// keeps output copy-pasteable and pipe-safe, matching Sudo Code's scrollback
 /// ethos. The frame carries the status color; the tool name inside `header`
-/// keeps its own identity color. There is no `⏺` glyph — the frame is the cue.
+/// keeps its own identity color. There is no response bullet — the frame is the cue.
 pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
     use std::fmt::Write as _;
     let t = theme();
@@ -2142,7 +2194,7 @@ pub(crate) struct TurnStatus<'a> {
 /// The values are fixed for the whole turn (the provider reports cache counts
 /// at message_start; only output tokens grow while streaming), so this renders
 /// once at turn end and never needs in-turn refresh.
-fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<String> {
+fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<StyledLine> {
     let read = u64::from(usage.cache_read_input_tokens);
     let creation = u64::from(usage.cache_creation_input_tokens);
     let fresh = u64::from(usage.input_tokens);
@@ -2164,32 +2216,27 @@ fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<String> {
     } else {
         theme.error
     };
-    let hit = format!(
-        "{}\u{26a1}{hit_pct}%{}{DIM}",
-        crate::render::ansi_fg(hit_color),
-        RESET,
-    );
-
-    // Write rate: dim normally, red on a spike (a cache break).
-    let write = if write_pct >= 25 {
-        format!(
-            "{}\u{270e}{write_pct}%{}{DIM}",
-            crate::render::ansi_fg(theme.error),
-            RESET,
-        )
+    let mut segment = StyledLine::muted();
+    segment.push_colored(format!("\u{26a1}{hit_pct}%"), hit_color);
+    segment.push(" ");
+    // Write rate: muted normally, red on a spike (a cache break).
+    let write = format!("\u{270e}{write_pct}%");
+    if write_pct >= 25 {
+        segment.push_colored(write, theme.error);
     } else {
-        format!("\u{270e}{write_pct}%")
-    };
+        segment.push(write);
+    }
 
-    Some(format!("{hit} {write}"))
+    Some(segment)
 }
 
-/// Render the dim per-turn status line shown after each interactive turn.
+/// Render the muted per-turn status line shown after each interactive turn.
 ///
 /// Contains, in order: model name, billing account, turn number, cumulative
 /// token count, estimated cost (when pricing for the model is known), elapsed
 /// wall-clock time for the turn, context-window occupancy, and the current git
-/// branch (when one is available). All fields are dimmed; turn and tokens are
+/// branch (when one is available). Labels use the theme's muted foreground;
+/// cache indicators retain their semantic colors without added dim. Turn and tokens are
 /// kept compact (`turn 3`, `3.2k tokens`) so the line stays single-row even at
 /// narrow widths.
 pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
@@ -2244,15 +2291,19 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
             segments.push(segment);
         }
     }
+    let mut line = StyledLine::muted();
+    line.push(segments.join(" · "));
     // KV-cache efficiency: hit rate + write rate over the most recent turn's
     // prompt total.
     if let Some(segment) = format_cache_efficiency_segment(usage) {
-        segments.push(segment);
+        line.push(" · ");
+        line.append(segment);
     }
     if let Some(branch) = branch.filter(|b| !b.is_empty()) {
-        segments.push(branch.to_string());
+        line.push(" · ");
+        line.push(branch);
     }
-    format!("{DIM}{}{RESET}", segments.join(" · "))
+    line.to_string()
 }
 
 /// The cost of one `usage`, as a display string without any prefix: the real
@@ -2806,6 +2857,39 @@ mod tests {
             plain.contains("Bash(cargo test --workspace)"),
             "replay must show the command from the call input: {plain}"
         );
+        // Structural invariant: exactly ONE card per call — the completed one.
+        // The ToolUse must NOT also render a running/amber start card (that
+        // used to persist an "in-flight" card above the result on resume).
+        assert_eq!(
+            plain.matches('\u{256d}').count(),
+            1,
+            "replay must render exactly one card per call (no persisted running card): {plain}"
+        );
+    }
+
+    #[test]
+    fn replay_lone_tool_call_without_result_renders_no_card() {
+        // A ToolUse with no following ToolResult (interrupted turn, truncated
+        // session) must render NOTHING on replay — not a stranded amber running
+        // card. A resumed session is not "in flight"; only completed calls show.
+        let renderer = crate::render::TerminalRenderer::new();
+        let messages = vec![runtime::ConversationMessage {
+            role: runtime::MessageRole::Assistant,
+            blocks: vec![runtime::ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                input: r#"{"command":"sleep 30"}"#.to_string(),
+                thought_signature: None,
+            }],
+            usage: None,
+            model: None,
+            duration_ms: None,
+        }];
+        let plain = strip_ansi(&render_messages(&messages, 80, &renderer));
+        assert!(
+            !plain.contains('\u{256d}'),
+            "a resultless call must render no card on replay: {plain:?}"
+        );
     }
 
     #[test]
@@ -3047,7 +3131,11 @@ mod tests {
             cache_read_input_tokens: 8000,
             ..TokenUsage::default()
         };
-        let seg = strip_ansi(&format_cache_efficiency_segment(&usage).expect("segment present"));
+        let seg = strip_ansi(
+            &format_cache_efficiency_segment(&usage)
+                .expect("segment present")
+                .to_string(),
+        );
         assert_eq!(seg, "\u{26a1}80% \u{270e}10%", "{seg}");
     }
 
@@ -3061,7 +3149,11 @@ mod tests {
             output_tokens: 50_000,
             ..TokenUsage::default()
         };
-        let seg = strip_ansi(&format_cache_efficiency_segment(&usage).expect("segment present"));
+        let seg = strip_ansi(
+            &format_cache_efficiency_segment(&usage)
+                .expect("segment present")
+                .to_string(),
+        );
         assert_eq!(seg, "\u{26a1}90% \u{270e}0%", "{seg}");
     }
 

@@ -121,11 +121,11 @@ pub struct ModelConfigEntry {
 /// Web search configuration from `sudocode.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebSearchConfig {
-    /// Search provider: `"tavily"` or `"duckduckgo"`.
+    /// Search provider: `"tavily"`, `"bocha"`, or `"duckduckgo"`.
     pub provider: String,
     /// API endpoint URL.
     pub api_url: String,
-    /// API key (empty string = fallback to `proxy.sudorouter.apiKey`).
+    /// API key (Tavily alone falls back to `proxy.sudorouter.apiKey`).
     pub api_key: String,
 }
 
@@ -161,6 +161,16 @@ pub struct SudoCodeConfig {
     /// commands someone needs to fix this. Diagnostics report these and offer to
     /// move the key; the spending path refuses (see `select_proxy_account`).
     pub auth_profile_conflicts: Vec<PathBuf>,
+    /// `cache_ttl_1h` — hold Anthropic prompt caches for an hour rather than
+    /// the five-minute default.
+    ///
+    /// `None` means "follow Claude Code", which turns it on for subscription
+    /// auth and leaves a metered API key on 5m; the two pay for a cache write
+    /// differently (window versus 2x base against 1.25x). Set it only to
+    /// override that, and set it once: the TTL travels inside every
+    /// `cache_control` block, so changing it mid-session rewrites the prefix
+    /// it was holding.
+    pub cache_ttl_1h: Option<bool>,
 }
 
 impl SudoCodeConfig {
@@ -187,7 +197,6 @@ pub struct RuntimeFeatureConfig {
     permission_rules: RuntimePermissionRuleConfig,
     sandbox: SandboxConfig,
     provider_fallbacks: ProviderFallbackConfig,
-    trusted_roots: Vec<String>,
     /// Enable extended thinking for models that support it (default: true).
     thinking: bool,
     /// `experimental` section: feature-flag key -> enabled. Keys are
@@ -718,6 +727,64 @@ impl ConfigLoader {
         Ok(path)
     }
 
+    /// Persist `agentName` to the project settings, minting the durable identity
+    /// once so it is stable across restarts. Mirrors [`Self::set_auth_profile`]:
+    /// a locked read-modify-write that rewrites only this one key.
+    ///
+    /// Written to `<cwd>/.nexus/sudocode/settings.json` — a folder is one agent,
+    /// so the name belongs with the project, not the machine-wide config. This
+    /// is the native analog of nexus minting the name at auth: derive it once,
+    /// write it down, and every later boot reads the same name instead of
+    /// re-deriving one that can drift with the path spelling.
+    pub fn set_agent_name(&self, name: &str) -> Result<PathBuf, ConfigError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ConfigError::Parse(
+                "agent name must not be empty".to_string(),
+            ));
+        }
+        let path = self
+            .cwd
+            .join(".nexus")
+            .join("sudocode")
+            .join("settings.json");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(ConfigError::Io)?;
+        }
+
+        use crate::fs_backend::FsBackend as _;
+
+        let _guard = ConfigFileLock::acquire(&path)?;
+        let mut object = match std::fs::read_to_string(&path) {
+            Ok(text) if text.trim().is_empty() => serde_json::Map::new(),
+            Ok(text) => serde_json::from_str::<SerdeValue>(&text)
+                .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?
+                .as_object()
+                .cloned()
+                .ok_or_else(|| {
+                    ConfigError::Parse(format!(
+                        "{}: top-level settings value must be a JSON object",
+                        path.display()
+                    ))
+                })?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+            Err(error) => return Err(ConfigError::Io(error)),
+        };
+        object.insert(
+            "agentName".to_string(),
+            SerdeValue::String(name.to_string()),
+        );
+        let serialized = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&SerdeValue::Object(object))
+                .map_err(|error| ConfigError::Parse(error.to_string()))?
+        );
+        crate::fs_backend::StdFsBackend
+            .write_atomic(&path.to_string_lossy(), serialized.as_bytes())
+            .map_err(ConfigError::Io)?;
+        Ok(path)
+    }
+
     /// Read `sudocode.json` and report the legacy copies it still carries, or
     /// `None` when it carries none.
     ///
@@ -926,7 +993,6 @@ impl ConfigLoader {
             permission_rules: parse_optional_permission_rules(&merged_value)?,
             sandbox: parse_optional_sandbox_config(&merged_value)?,
             provider_fallbacks: parse_optional_provider_fallbacks(&merged_value)?,
-            trusted_roots: parse_optional_trusted_roots(&merged_value)?,
             thinking: parse_optional_thinking(&merged_value),
             experiments: parse_optional_experiments(&merged_value)?,
         };
@@ -1125,11 +1191,6 @@ impl RuntimeConfig {
     pub fn provider_fallbacks(&self) -> &ProviderFallbackConfig {
         &self.feature_config.provider_fallbacks
     }
-
-    #[must_use]
-    pub fn trusted_roots(&self) -> &[String] {
-        &self.feature_config.trusted_roots
-    }
 }
 
 impl RuntimeFeatureConfig {
@@ -1198,11 +1259,6 @@ impl RuntimeFeatureConfig {
     #[must_use]
     pub fn provider_fallbacks(&self) -> &ProviderFallbackConfig {
         &self.provider_fallbacks
-    }
-
-    #[must_use]
-    pub fn trusted_roots(&self) -> &[String] {
-        &self.trusted_roots
     }
 }
 
@@ -1764,18 +1820,133 @@ fn parse_optional_permission_mode(
     parse_permission_mode_label(mode, "merged settings.permissions.defaultMode").map(Some)
 }
 
+/// Every spelling `permissions.defaultMode` accepts, and what each resolves to.
+///
+/// Two vocabularies on purpose: `default` / `acceptEdits` / `auto` / `dontAsk`
+/// are Claude Code's, so a settings file written for it keeps working, and
+/// `read-only` / `workspace-write` / `danger-full-access` are this runtime's own
+/// (`PermissionMode::as_str`).
+///
+/// What a MENU offers is a different question — see [`PERMISSION_MODE_OPTIONS`].
+const PERMISSION_MODE_LABELS: &[(&str, ResolvedPermissionMode)] = &[
+    ("default", ResolvedPermissionMode::ReadOnly),
+    ("read-only", ResolvedPermissionMode::ReadOnly),
+    ("acceptEdits", ResolvedPermissionMode::WorkspaceWrite),
+    ("auto", ResolvedPermissionMode::WorkspaceWrite),
+    ("workspace-write", ResolvedPermissionMode::WorkspaceWrite),
+    ("dontAsk", ResolvedPermissionMode::DangerFullAccess),
+    (
+        "danger-full-access",
+        ResolvedPermissionMode::DangerFullAccess,
+    ),
+];
+
+/// The permission modes a MENU offers: three modes, this product's own names.
+///
+/// Not the same list as [`PERMISSION_MODE_LABELS`] and deliberately shorter. A
+/// menu offering `acceptEdits` beside `workspace-write` would be asking the user
+/// to choose between two spellings of one mode; the aliases exist so a file
+/// written elsewhere loads, not so anyone picks them.
+///
+/// It IS the same list for the two places that offer it — the config UI (via
+/// `config_schema`) and `scode config set`, which enforces its options. They had
+/// drifted to three canonical names and four aliases respectively, so
+/// `config set permissions.defaultMode read-only` was refused for a value the
+/// config UI writes and the parser accepts.
+pub const PERMISSION_MODE_OPTIONS: &[&str] =
+    &["read-only", "workspace-write", "danger-full-access"];
+
+/// Every spelling a SETTER accepts — the menu plus the compatibility aliases.
+///
+/// Offering and accepting are different jobs, and one list doing both is what
+/// made every choice wrong somewhere: validate against the three and
+/// `config set permissions.defaultMode acceptEdits` breaks for a value the
+/// parser reads fine; offer all seven and an index-driven picker lists one mode
+/// three times. So the menu is short and this is what a value is checked against.
+pub const PERMISSION_MODE_ACCEPTED: &[&str] = &[
+    "default",
+    "read-only",
+    "acceptEdits",
+    "auto",
+    "workspace-write",
+    "dontAsk",
+    "danger-full-access",
+];
+
+/// Byte equality for `const` context, where `==` on `&str` is not available.
+const fn same_label(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const fn is_parsable(label: &str) -> bool {
+    let mut i = 0;
+    while i < PERMISSION_MODE_LABELS.len() {
+        if same_label(PERMISSION_MODE_LABELS[i].0, label) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+// The three lists are one truth, checked by the compiler rather than by intent —
+// which is how they drifted in the first place. Every spelling a setter accepts
+// must parse, the accepted set must be the parser's whole vocabulary (equal
+// length, each parsable), and every mode the menu offers must be settable.
+const _: () = {
+    assert!(
+        PERMISSION_MODE_ACCEPTED.len() == PERMISSION_MODE_LABELS.len(),
+        "the accepted spellings must be exactly the ones the parser knows"
+    );
+    let mut i = 0;
+    while i < PERMISSION_MODE_ACCEPTED.len() {
+        assert!(
+            is_parsable(PERMISSION_MODE_ACCEPTED[i]),
+            "every accepted permission mode must be one the parser accepts"
+        );
+        i += 1;
+    }
+    let mut j = 0;
+    while j < PERMISSION_MODE_OPTIONS.len() {
+        assert!(
+            is_accepted(PERMISSION_MODE_OPTIONS[j]),
+            "every permission mode the menu offers must be one a setter accepts"
+        );
+        j += 1;
+    }
+};
+
+const fn is_accepted(label: &str) -> bool {
+    let mut i = 0;
+    while i < PERMISSION_MODE_ACCEPTED.len() {
+        if same_label(PERMISSION_MODE_ACCEPTED[i], label) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 fn parse_permission_mode_label(
     mode: &str,
     context: &str,
 ) -> Result<ResolvedPermissionMode, ConfigError> {
-    match mode {
-        "default" | "read-only" => Ok(ResolvedPermissionMode::ReadOnly),
-        "acceptEdits" | "auto" | "workspace-write" => Ok(ResolvedPermissionMode::WorkspaceWrite),
-        "dontAsk" | "danger-full-access" => Ok(ResolvedPermissionMode::DangerFullAccess),
-        other => Err(ConfigError::Parse(format!(
-            "{context}: unsupported permission mode {other}"
-        ))),
-    }
+    PERMISSION_MODE_LABELS
+        .iter()
+        .find(|(label, _)| *label == mode)
+        .map(|(_, resolved)| *resolved)
+        .ok_or_else(|| ConfigError::Parse(format!("{context}: unsupported permission mode {mode}")))
 }
 
 fn parse_optional_sandbox_config(root: &JsonValue) -> Result<SandboxConfig, ConfigError> {
@@ -1818,16 +1989,6 @@ fn parse_optional_provider_fallbacks(
     let fallbacks = optional_string_array(entry, "fallbacks", "merged settings.providerFallbacks")?
         .unwrap_or_default();
     Ok(ProviderFallbackConfig { primary, fallbacks })
-}
-
-fn parse_optional_trusted_roots(root: &JsonValue) -> Result<Vec<String>, ConfigError> {
-    let Some(object) = root.as_object() else {
-        return Ok(Vec::new());
-    };
-    Ok(
-        optional_string_array(object, "trustedRoots", "merged settings.trustedRoots")?
-            .unwrap_or_default(),
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1881,6 +2042,7 @@ fn parse_sudocode_from_object(
     let auth_modes = parse_auth_modes_section(root_obj, sentinel)?;
     let models = parse_sudocode_models_section(root_obj, sentinel, extra_bodies)?;
     let web_search = parse_web_search_section(root_obj);
+    let cache_ttl_1h = root_obj.get("cache_ttl_1h").and_then(JsonValue::as_bool);
 
     Ok(SudoCodeConfig {
         auth_modes,
@@ -1890,6 +2052,7 @@ fn parse_sudocode_from_object(
         // `sudocode.json` alone cannot see them.
         selected_account: None,
         auth_profile_conflicts: Vec::new(),
+        cache_ttl_1h,
     })
 }
 
@@ -1948,11 +2111,16 @@ fn parse_web_search_section(root: &BTreeMap<String, JsonValue>) -> WebSearchConf
         .and_then(JsonValue::as_str)
         .filter(|s| !s.is_empty())
         .map_or(defaults.provider, str::to_string);
+    let default_url = if provider == "bocha" {
+        "https://api.bocha.cn/v1/web-search".to_string()
+    } else {
+        defaults.api_url
+    };
     let api_url = obj
         .get("apiUrl")
         .and_then(JsonValue::as_str)
         .filter(|s| !s.is_empty())
-        .map_or(defaults.api_url, str::to_string);
+        .map_or(default_url, str::to_string);
     let api_key = obj
         .get("apiKey")
         .and_then(JsonValue::as_str)
@@ -2736,6 +2904,40 @@ mod tests {
     }
 
     #[test]
+    fn set_agent_name_persists_to_project_settings_and_reloads() {
+        let root = temp_dir();
+        let cwd = root.join("project");
+        let home = root.join("home").join(".nexus").join("sudocode");
+        fs::create_dir_all(&home).expect("home config dir");
+
+        let loader = ConfigLoader::new(&cwd, &home);
+        // Unset before minting.
+        assert!(loader.load().expect("load").get("agentName").is_none());
+
+        let written = loader.set_agent_name("scode-abc123").expect("mint name");
+        assert_eq!(
+            written,
+            cwd.join(".nexus").join("sudocode").join("settings.json")
+        );
+
+        // A fresh loader (a "restart") reads the SAME name, not a re-derived one.
+        let reloaded = ConfigLoader::new(&cwd, &home);
+        assert_eq!(
+            reloaded
+                .load()
+                .expect("reload")
+                .get("agentName")
+                .and_then(|v| v.as_str()),
+            Some("scode-abc123")
+        );
+
+        // An empty name is refused.
+        assert!(loader.set_agent_name("   ").is_err());
+
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
     fn loads_and_merges_claude_code_config_files_by_precedence() {
         let root = temp_dir();
         let cwd = root.join("project");
@@ -2919,53 +3121,6 @@ mod tests {
         assert_eq!(chain.primary(), None);
         assert!(chain.fallbacks().is_empty());
         assert!(chain.is_empty());
-
-        fs::remove_dir_all(root).expect("cleanup temp dir");
-    }
-
-    #[test]
-    fn parses_trusted_roots_from_settings() {
-        // given
-        let root = temp_dir();
-        let cwd = root.join("project");
-        let home = root.join("home").join(".nexus").join("sudocode");
-        fs::create_dir_all(&home).expect("home config dir");
-        fs::create_dir_all(&cwd).expect("project dir");
-        fs::write(
-            home.join("settings.json"),
-            r#"{"trustedRoots": ["/tmp/worktrees", "/home/user/projects"]}"#,
-        )
-        .expect("write settings");
-
-        // when
-        let loaded = ConfigLoader::new(&cwd, &home)
-            .load()
-            .expect("config should load");
-
-        // then
-        let roots = loaded.trusted_roots();
-        assert_eq!(roots, ["/tmp/worktrees", "/home/user/projects"]);
-
-        fs::remove_dir_all(root).expect("cleanup temp dir");
-    }
-
-    #[test]
-    fn trusted_roots_default_is_empty_when_unset() {
-        // given
-        let root = temp_dir();
-        let cwd = root.join("project");
-        let home = root.join("home").join(".nexus").join("sudocode");
-        fs::create_dir_all(&home).expect("home config dir");
-        fs::create_dir_all(&cwd).expect("project dir");
-        fs::write(home.join("settings.json"), "{}").expect("write empty settings");
-
-        // when
-        let loaded = ConfigLoader::new(&cwd, &home)
-            .load()
-            .expect("config should load");
-
-        // then
-        assert!(loaded.trusted_roots().is_empty());
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
     }

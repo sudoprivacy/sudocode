@@ -411,3 +411,11 @@ fn context_window_resolves_from_ssot_with_default_fallback() {
     assert_eq!(sonnet, 200_000);
     assert_ne!(sonnet, file_default);
 }
+
+// The two capabilities-cache tests that used to live here drove
+// `model_capabilities::merge_and_write`, which had no caller outside tests --
+// so they certified a fix that could not fire. Both rules moved to the paths
+// that run: "the bundled table outranks a stale file entry" is
+// `model_capabilities::tests::bundled_table_outranks_a_stale_file_entry`, and
+// "a model listed without token metadata gets no invented window" is
+// `model_discovery_http::discovery_refreshes_live_limits_and_isolates_endpoint_and_key`.

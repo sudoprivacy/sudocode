@@ -1,8 +1,9 @@
 //! Live API smoke tests that verify real backends accept our ACP payloads.
 //!
-//! These tests are gated on the `CLAUDE_CODE_OAUTH_TOKEN` environment variable.
-//! When the token is absent or empty the tests silently pass (return early).
-//! On CI they run only on main merges where the GitHub secret is available.
+//! These tests are gated on the `PROXY_AUTH_TOKEN` environment variable (a
+//! sudorouter API key; `PROXY_BASE_URL` selects the endpoint). When the token
+//! is absent or empty the tests silently pass (return early). On CI they run
+//! only on main merges / workflow_dispatch where the GitHub secret is available.
 //! Set `SCODE_LIVE_MODEL` to run them against a different available model; it
 //! defaults to `sonnet` for compatibility with existing live runs.
 //!
@@ -34,12 +35,46 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const RECV_TIMEOUT: Duration = Duration::from_secs(120);
 const SERVER_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Fail with the real cause when the provider answered with a credential rejection
+/// instead of a model reply.
+///
+/// These assertions are about model BEHAVIOUR, and a rejected credential arrives in
+/// the same place a reply would: the provider returns its refusal as the assistant's
+/// text, so `expected 'pong' … but got: "认证失败…"` reads as "the model gave a wrong
+/// answer". On main that misfiled the same failure for days while the actual fix was
+/// to rotate a secret.
+///
+/// Prose matching is the weak part and it is deliberate: the refusal comes back as
+/// the answer, so there is no status code or error object to read. The markers stay
+/// narrow, and a miss only means the old, vaguer message — this can mislabel nothing
+/// that was not already unlabelled.
+fn fail_clearly_if_the_credential_was_rejected(text: &str) {
+    const MARKERS: [&str; 5] = [
+        "认证失败",
+        "authentication failed",
+        "invalid api key",
+        "invalid_api_key",
+        "unauthorized",
+    ];
+    let lowered = text.to_lowercase();
+    if MARKERS.iter().any(|m| lowered.contains(m)) {
+        panic!(
+            "the provider rejected this run's credential — it answered with an \
+             authentication failure instead of a model reply, so this is NOT a \
+             model-behaviour failure. Rotate the live API credential this job uses. \
+             The provider said: {text:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Token guard
 // ---------------------------------------------------------------------------
 
-fn oauth_token() -> Option<String> {
-    std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+/// The proxy-mode credential (a sudorouter API key). `PROXY_BASE_URL` picks
+/// the endpoint; see the module gating note. Absent/empty -> tests early-pass.
+fn proxy_token() -> Option<String> {
+    std::env::var("PROXY_AUTH_TOKEN")
         .ok()
         .filter(|k| !k.is_empty())
 }
@@ -78,13 +113,22 @@ impl TestWorkspace {
         fs::create_dir_all(&self.home).expect("home should exist");
     }
 
-    /// Write sudocode.json with the real Anthropic base URL (no mock replacement).
+    /// Write sudocode.json for proxy auth against sudorouter: the sample
+    /// config carries placeholder proxy credentials, so substitute the real
+    /// key from `PROXY_AUTH_TOKEN` and the live New-API endpoint. Proxy-mode
+    /// auth reads the profile from config (not env), so the key has to land
+    /// in the file, not just the process environment.
     fn write_sudocode_json(&self) {
-        fs::write(
-            self.config_home.join("sudocode.json"),
-            runtime::SAMPLE_SUDOCODE_JSON,
-        )
-        .expect("test sudocode.json should be written");
+        let token = proxy_token().expect("PROXY_AUTH_TOKEN gates these tests");
+        let config = runtime::SAMPLE_SUDOCODE_JSON
+            .replace("<YOUR_SUDOROUTER_API_KEY>", &token)
+            .replace(
+                "https://hk.sudorouter.ai/v1",
+                &std::env::var("PROXY_BASE_URL")
+                    .unwrap_or_else(|_| "https://api.sudorouter.ai/v1".to_string()),
+            );
+        fs::write(self.config_home.join("sudocode.json"), config)
+            .expect("test sudocode.json should be written");
     }
 
     fn cleanup(&self) {
@@ -236,14 +280,17 @@ fn base_command_with_mode(
         .env_clear()
         .env("SUDO_CODE_CONFIG_HOME", &workspace.config_home)
         .env("HOME", &workspace.home)
-        .env("CLAUDE_CODE_OAUTH_TOKEN", token)
         .env("NO_COLOR", "1");
+    // Proxy-mode credentials live in the session's sudocode.json (written by
+    // TestWorkspace::write_sudocode_json), not the environment; `token` is
+    // still threaded so the guard's early-return covers every spawn.
+    let _ = token;
     for (key, value) in isolated_env::inherited_env() {
         cmd.env(key, value);
     }
     cmd.args([
         "--auth",
-        "subscription",
+        "proxy",
         "--model",
         &common::live_model(),
         "--permission-mode",
@@ -399,7 +446,7 @@ async fn scenario_session_prompt(client: &mut AcpTestClient, session_id: &str) {
     assert!(
         !notifs.is_empty(),
         "prompt produced no notifications — auth/API failure. \
-         Check CLAUDE_CODE_OAUTH_TOKEN is valid."
+         Check PROXY_AUTH_TOKEN is valid."
     );
 
     // Every notification should be a session/update.
@@ -423,6 +470,7 @@ async fn scenario_session_prompt(client: &mut AcpTestClient, session_id: &str) {
             }
         })
         .collect();
+    fail_clearly_if_the_credential_was_rejected(&response_text);
     assert!(
         response_text.to_lowercase().contains("pong"),
         "expected 'pong' in model response but got: {response_text:?}"
@@ -506,7 +554,7 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
     assert!(
         !notifs.is_empty(),
         "subagent prompt produced no notifications — auth/API failure. \
-         Check CLAUDE_CODE_OAUTH_TOKEN is valid."
+         Check PROXY_AUTH_TOKEN is valid."
     );
 
     // Count Agent/agent_spawn tool_call starts (status == "in_progress").
@@ -596,6 +644,15 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         .collect();
 
     if agent_starts.is_empty() {
+        // A rejected credential lands HERE, not in the assertion below: no Agent tool
+        // call was made because no turn happened, so the "model bypassed Agent" branch
+        // is exactly the path a dead credential takes — and then reports its refusal
+        // text as a wrong answer. This is the sibling of the guard at the `pong`
+        // assertion; missing it left the same failure misfiled on `main`, which is how
+        // it was found (the run said "text output is also wrong (expected 203, 403,
+        // 603)" and quoted an authentication failure).
+        fail_clearly_if_the_credential_was_rejected(&text_output);
+
         // Model bypassed Agent and answered directly.  Verify it at least
         // produced the correct numbers so we know the prompt/session works —
         // but warn that the subagent pipeline was not exercised.
@@ -745,7 +802,7 @@ async fn run_subagent_scenarios(client: &mut AcpTestClient, workspace: &TestWork
 
 #[tokio::test]
 async fn live_anthropic_smoke_stdio() {
-    let Some(token) = oauth_token() else {
+    let Some(token) = proxy_token() else {
         return;
     };
 
@@ -761,7 +818,7 @@ async fn live_anthropic_smoke_stdio() {
 
 #[tokio::test]
 async fn live_subagent_smoke_stdio() {
-    let Some(token) = oauth_token() else {
+    let Some(token) = proxy_token() else {
         return;
     };
 
@@ -777,7 +834,7 @@ async fn live_subagent_smoke_stdio() {
 
 #[tokio::test]
 async fn live_anthropic_smoke_ws() {
-    let Some(token) = oauth_token() else {
+    let Some(token) = proxy_token() else {
         return;
     };
 

@@ -587,6 +587,10 @@ pub(crate) fn prepare_and_push_images(
     images: &[(String, String)],
     cwd: &Path,
 ) -> Result<(), crate::AcpError> {
+    let catalog = engine.model_catalog();
+    let _scope = catalog
+        .as_ref()
+        .map(runtime::model_discovery::ModelCatalog::enter);
     let active_model = engine.current_model();
     let vision_capable = runtime::model_capabilities::vision_capable(&active_model);
     let sudocode_config = load_sudocode_config_for_cwd(cwd);
@@ -805,6 +809,13 @@ pub(crate) fn handle_slash_command(
     let mut stop = AcpStopReason::EndTurn;
     let response = match &command {
         SlashCommand::Model { model } => {
+            let catalog = engine.model_catalog();
+            if let Some(catalog) = &catalog {
+                catalog.refresh_in_background();
+            }
+            let _catalog_scope = catalog
+                .as_ref()
+                .map(runtime::model_discovery::ModelCatalog::enter);
             let _scope = WorkspaceRootScope::enter(cwd);
             match model {
                 None => {
@@ -954,6 +965,10 @@ pub(crate) fn build_prompt_usage(
     complete: &TurnComplete,
     auto_compacted: bool,
 ) -> Option<PromptUsage> {
+    let catalog = engine.model_catalog();
+    let _scope = catalog
+        .as_ref()
+        .map(runtime::model_discovery::ModelCatalog::enter);
     let per_turn = complete.turn_usage;
     if per_turn.total_tokens() == 0 {
         return None;

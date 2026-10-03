@@ -162,7 +162,7 @@ fn glob_then_grep_discovery() {
     ]);
 
     // Agent trigger: at minimum grep must be called.
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     sess.expect("(?i)grep")
         .expect("should see grep tool call (agent trigger)");
 
@@ -170,7 +170,7 @@ fn glob_then_grep_discovery() {
     sess.expect("(?i)(parity|2|two|match|found|notes|data|complete)")
         .expect("response should reference discovery results");
 
-    sess.set_default_timeout(Duration::from_secs(120));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(120)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("glob-grep scode should exit: {e}\nPTY screen:\n{screen}");

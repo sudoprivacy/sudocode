@@ -1,25 +1,33 @@
 #!/usr/bin/env bash
 # Auth ON: mTLS, a minted agent cert, and a `from` the sender cannot choose.
 #
-# `run.sh` and `run-cross-node.sh` both boot `--insecure-no-auth`, where the
-# daemon's stamp hook is fail-open and the authored `from` is preserved by
-# design. That is fine for proving delivery, and useless for proving identity:
-# `from` is an address — the convention turns it straight back into a path — so
-# a forgeable one is a way to make a peer's reply go somewhere the sender chose.
+# `run.sh` and its siblings prove DELIVERY: an envelope moves, a blocking tail
+# wakes, two nodes agree. None of them asserts identity, and `from` is an
+# address — the convention turns it straight back into a path — so a forgeable
+# one is a way to make a peer's reply go somewhere the sender chose. That is the
+# one property asserted here.
 #
-# Only an auth-on node decides who a message is from, so only an auth-on run can
-# show that it does. The bring-up is the one `nexus-vfs`'s own
-# `agent_signed_authorship` uses, so a failure here is about scode rather than
-# about a posture this repo invented:
+# What auth-on changes is NOT whether the node stamps `from`. Measured against
+# v0.7.20, a node stamps it with the dialling cert's agent id in both postures:
+# `--insecure-no-auth` makes authentication optional, not the stamp absent. What
+# it changes is whether that stamp is worth anything — under the flag an identity
+# is recorded but not required, and an identity a node applies without requiring
+# guarantees nothing. Auth-on is the posture with the credential store bound,
+# which is the only posture the property can be CLAIMED in; the reason to run it
+# is not that auth-off would show the forgery succeeding.
+#
+# The bring-up is the one `nexus-vfs`'s own `agent_signed_authorship` uses, so a
+# failure here is about scode rather than about a posture this repo invented:
 #
 #   1. boot TLS-on — the CA and node cert bootstrap themselves into <data>/tls
 #   2. STOP, because the mint is offline: it opens the data dir the daemon locks
 #   3. mint a CA-signed agent bundle (agent.pem / agent-key.pem / ca.pem)
 #   4. restart, and dial the mTLS plane with that bundle
 #
-# Auth-ON is also why this cannot reuse the other scripts' daemon: a plaintext
-# client is rejected outright, which the run below relies on rather than works
-# around.
+# Its own daemon, port and data dir, because the mint is offline against that
+# dir and the test pins `NEXUS_A2A_TEST_IDENTITY` to the id this script minted:
+# the pair has to come from one mint. Sharing another script's daemon would mean
+# sharing its bundle name too.
 #
 # Usage:
 #   e2e/nexus-a2a/run-auth-on.sh
@@ -69,7 +77,22 @@ daemon_env=(
   "RUST_LOG=${RUST_LOG:-info}"
 )
 
+# Where this boot's output starts. The log is opened in append mode so that a
+# failure can be read across both boots, which also means every line the first
+# boot wrote is still in the file when the second one starts — and
+# `wait_for_log` below used to grep the whole file. Step 4 therefore matched
+# boot 1's "Zone ... registered" and returned two milliseconds after asking,
+# having waited for nothing:
+#
+#   == 4. restart TLS-on ==
+#      Zone 'sharedzone' registered (after ~1s)     <- 2ms after the line above
+#
+# The test then dialled a listener that had not bound yet and failed with
+# `tcp connect error`, about one CI run in three.
+LOG_FROM=1
+
 boot() {
+  LOG_FROM=$(( $(wc -c <"$DATA_DIR/daemon.log" 2>/dev/null || echo 0) + 1 ))
   env $NO_CONV "${daemon_env[@]}" \
     "$NEXUSD_BIN" --bind-addr "0.0.0.0:${PORT}" >>"$DATA_DIR/daemon.log" 2>&1 &
   DAEMON_PID=$!
@@ -78,13 +101,35 @@ boot() {
 wait_for_log() {
   local needle="$1" budget="$2" i
   for i in $(seq 1 "$budget"); do
-    if grep -q "$needle" "$DATA_DIR/daemon.log" 2>/dev/null; then
+    # Only what this boot wrote — see LOG_FROM.
+    if tail -c "+$LOG_FROM" "$DATA_DIR/daemon.log" 2>/dev/null | grep -q "$needle"; then
       echo "   $needle (after ~${i}s)"
       return 0
     fi
     sleep 1
   done
   echo "!! daemon never logged '$needle'" >&2
+  tail -40 "$DATA_DIR/daemon.log" >&2
+  return 1
+}
+
+# A log line says the daemon reached some internal state; it does not say the
+# socket is accepting, and "accepting" is exactly what the next step needs —
+# `tcp connect error` is the failure it reports when it dials too early. So
+# dial it here first. Bash's own /dev/tcp is used rather than nc or a TLS
+# client because it needs no extra tool on any runner, and a bare TCP connect
+# is the whole question: an mTLS listener refuses the handshake, which is a
+# different error and means the socket was up.
+wait_for_port() {
+  local budget="$1" i
+  for i in $(seq 1 "$budget"); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/${PORT}") 2>/dev/null; then
+      echo "   :${PORT} accepting (after ~${i}s)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "!! :${PORT} never accepted a connection" >&2
   tail -40 "$DATA_DIR/daemon.log" >&2
   return 1
 }
@@ -118,6 +163,7 @@ done
 echo "== 4. restart TLS-on =="
 boot
 wait_for_log "Zone '$ZONE' registered" 45
+wait_for_port 45
 
 echo "== [auth-on] the node decides who a message is from =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \

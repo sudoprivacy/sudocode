@@ -35,6 +35,9 @@ impl RetryNotifier for StderrRetryNotifier {
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const ONEAPI_REQUEST_ID_HEADER: &str = "x-oneapi-request-id";
+/// A gateway's per-client correlation id. Separate from the ids above because
+/// it indexes a *different* ledger — see [`client_trace_from_headers`].
+const CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 
 /// Result of a successful HTTP request with tracking information.
 pub struct HttpRequestResult {
@@ -110,6 +113,7 @@ impl RetryPolicy {
 #[derive(Clone)]
 pub struct HttpTransport {
     inner: reqwest::Client,
+    nexus: Option<crate::nexus_transport::NexusTransport>,
     session_tracer: Option<SessionTracer>,
     retry_notifier: Option<std::sync::Arc<dyn RetryNotifier>>,
 }
@@ -135,9 +139,17 @@ impl HttpTransport {
     pub fn new() -> Self {
         Self {
             inner: build_http_client_or_default(),
+            nexus: None,
             session_tracer: None,
             retry_notifier: None,
         }
+    }
+
+    pub(crate) fn set_nexus_transport(
+        &mut self,
+        transport: crate::nexus_transport::NexusTransport,
+    ) {
+        self.nexus = Some(transport);
     }
 
     pub fn set_retry_notifier(&mut self, notifier: Option<std::sync::Arc<dyn RetryNotifier>>) {
@@ -237,7 +249,9 @@ impl HttpTransport {
             }
 
             // Build and send request.
-            let send_result = {
+            let send_result = if let Some(nexus) = &self.nexus {
+                nexus.send(url, headers, body, &request_id).await
+            } else {
                 let mut builder = self.inner.post(url);
                 for (name, value) in headers {
                     builder = builder.header(name.as_str(), value.as_str());
@@ -466,6 +480,30 @@ pub fn request_id_from_headers(headers: &reqwest::header::HeaderMap) -> Option<S
         .get(REQUEST_ID_HEADER)
         .or_else(|| headers.get(ALT_REQUEST_ID_HEADER))
         .or_else(|| headers.get(ONEAPI_REQUEST_ID_HEADER))
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
+}
+
+/// The correlation id a gateway hands its client, if there is one.
+///
+/// Deliberately not folded into [`request_id_from_headers`], which returns the
+/// first id that identifies the request *to the provider*. These two answer
+/// different questions and land in different ledgers:
+///
+/// - `x-oneapi-request-id` keys the gateway's own request log — which upstream
+///   channel served the call, and what it cost.
+/// - `x-client-request-id` is what a pooling gateway *behind* that one records
+///   against the account it selected. It is therefore the only value that can
+///   answer "which upstream account served this session's turn", which is the
+///   question behind every cache-break investigation: a cold prefix and an
+///   account change are indistinguishable from the client side without it.
+///
+/// Returns `None` when talking straight to a provider, which is correct — there
+/// is no gateway to correlate with.
+#[must_use]
+pub fn gateway_trace_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    headers
+        .get(CLIENT_REQUEST_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(ToOwned::to_owned)
 }

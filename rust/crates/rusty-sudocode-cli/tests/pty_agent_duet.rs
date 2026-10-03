@@ -61,14 +61,11 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
 use mock_anthropic_service::{UNIFIED_SEND_BODY, UNIFIED_SEND_RECIPIENT};
-use nexus_vfs_client::NexusVfsClient;
 use runtime::mailbox::Mailbox;
 
 /// The receiver's mailbox identity, for every transport.
@@ -134,52 +131,28 @@ impl Transport {
     }
 }
 
-/// An agent name no other run can be using.
-///
-/// The nexus cases match the envelope on it, and it reaches the binary only as
-/// `NEXUS_A2A_AGENT` — so an envelope carrying it can only have been written by
-/// that process, through the tool, over that transport.
-fn unique_sender_name() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    format!(
-        "scode-sender-{}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
 /// The receiver's mailbox, as the test reads it.
 fn receiver_mailbox(transport: &Transport, _config_home: &Path) -> Mailbox {
     match transport {
         Transport::OneNode { endpoint }
         | Transport::TwoNodes {
             receiver: endpoint, ..
-        } => Mailbox::over_nexus(
-            Arc::new(NexusVfsClient::connect(endpoint).expect("dial the receiver's node")),
-            RECEIVER,
-            String::new(),
-        ),
-    }
-}
-
-/// Where the receiver records its read position, which is how the test knows it
-/// is listening rather than still seeking. Config home: an A2A identity outlives
-/// any one directory.
-fn receiver_cursor(_transport: &Transport, config_home: &Path) -> PathBuf {
-    config_home.join(format!("a2a-cursor-{RECEIVER}"))
-}
-
-/// Block until `path` exists.
-fn wait_for_file(path: &Path, what: &str) {
-    let deadline = Instant::now() + BUDGET;
-    while !path.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "{what} never appeared at {} — the receiver is not listening, so anything \
-             sent now would be missed rather than delivered",
-            path.display()
-        );
-        std::thread::sleep(Duration::from_millis(100));
+        } => {
+            // Cert-only, like production: dial the receiver's node with its
+            // minted credential; the node stamps identity from the cert.
+            let credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
+                .expect("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<minted bundle dir>");
+            let credential = runtime::nexus_mailbox::AgentCredential::load(&credential)
+                .expect("load the receiver credential bundle");
+            let client = runtime::nexus_mailbox::Config {
+                endpoint: endpoint.to_string(),
+                agent: credential.agent.clone(),
+                tls: credential.tls,
+            }
+            .connect()
+            .expect("dial the receiver's node");
+            Mailbox::over_nexus(client, RECEIVER, String::new())
+        }
     }
 }
 
@@ -211,7 +184,14 @@ fn one_scode_sends_and_another_surfaces_it_on_every_transport() {
 }
 
 fn run_duet(transport: &Transport) {
-    let sender_name = unique_sender_name();
+    // Cert-only: the sender dials with its minted credential, so its A2A name -
+    // the `from` the node stamps - is the credential's agent, not a name the
+    // test invents. Reading it here keeps the assertion pinned to what shipped.
+    let sender_credential = std::env::var("NEXUS_A2A_TEST_SENDER_CREDENTIAL")
+        .expect("set NEXUS_A2A_TEST_SENDER_CREDENTIAL=<minted bundle dir>");
+    let sender_name = runtime::nexus_mailbox::AgentCredential::load(&sender_credential)
+        .expect("load the sender credential bundle")
+        .agent;
     let expected_from = sender_name.clone();
 
     // ── 2. The RECEIVER: a real scode REPL ─────────────────────────────────
@@ -222,34 +202,45 @@ fn run_duet(transport: &Transport) {
     let workspace = env.workspace_root().to_path_buf();
     std::fs::write(workspace.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
-    // ── 1. Provision the receiver's inbox ──────────────────────────────────
+    // ── 1. Provision the conversation ──────────────────────────────────
     // A send to a path that is not an append stream fails loudly rather than
-    // writing where nothing tails, so provision the receiver's stream first.
+    // writing where nothing tails, so provision the pair's transcript first.
+    // Either side may do it; here the test does, so the tail below has
+    // something to seek in even when the sender has not started.
     let inbox = receiver_mailbox(transport, env.config_home());
     inbox
-        .ensure_inbox()
-        .expect("provision the receiver's inbox");
-    let (_history, tail) = inbox.poll(0, 0).expect("seek the inbox to its tail");
+        .ensure_conversation(&sender_name)
+        .expect("provision the conversation");
+    let (_history, tail) = inbox
+        .poll_conversation(&sender_name, 0, 0)
+        .expect("seek the transcript to its tail");
 
-    let mut receiver_env_vars = vec![("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")];
-    if let Transport::OneNode { endpoint }
-    | Transport::TwoNodes {
-        receiver: endpoint, ..
-    } = transport
-    {
-        receiver_env_vars.push(("NEXUS_A2A_ENDPOINT", endpoint.as_str()));
-        receiver_env_vars.push(("NEXUS_A2A_AGENT", RECEIVER));
-        receiver_env_vars.push(("NEXUS_A2A_PEER", sender_name.as_str()));
-    }
+    // Cert-only: the receiver dials with its minted credential; its A2A name
+    // comes from the cert, so RECEIVER is the name that bundle must carry.
+    let receiver_credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
+        .expect("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<minted bundle dir>");
+    let receiver_endpoint = match transport {
+        Transport::OneNode { endpoint }
+        | Transport::TwoNodes {
+            receiver: endpoint, ..
+        } => endpoint,
+    };
+    let receiver_env_vars = vec![
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+        ("NEXUS_A2A_ENDPOINT", receiver_endpoint.as_str()),
+        ("NEXUS_A2A_CREDENTIAL", receiver_credential.as_str()),
+    ];
     let mut receiver = env.spawn_with_env(&["--permission-mode", "read-only"], &receiver_env_vars);
     receiver.set_default_timeout(BUDGET);
     receiver
         .expect("❯")
         .expect("the receiver's REPL should start");
-    wait_for_file(
-        &receiver_cursor(transport, env.config_home()),
-        "the receiver's read position",
-    );
+    // No wait for a read position here. It used to block until the receiver
+    // had written its cursor file, because a first-ever read seeked to the
+    // tail and anything sent before that was skipped. A first read now starts
+    // at the beginning of the conversation, so a message sent before the
+    // receiver has discovered it is still delivered - and the file that wait
+    // watched for is gone, the position having moved into the conversation.
 
     // ── 3. The SENDER: another real scode, whose model calls `send` ────────
     // Locally it must share the receiver's workspace, because that is what the
@@ -261,6 +252,8 @@ fn run_duet(transport: &Transport) {
         ),
         transport.scenario(),
     );
+    let sender_credential = std::env::var("NEXUS_A2A_TEST_SENDER_CREDENTIAL")
+        .expect("set NEXUS_A2A_TEST_SENDER_CREDENTIAL=<minted bundle dir>");
     let mut sender_env_vars = Vec::new();
     match transport {
         Transport::OneNode { endpoint }
@@ -268,8 +261,7 @@ fn run_duet(transport: &Transport) {
             sender: endpoint, ..
         } => {
             sender_env_vars.push(("NEXUS_A2A_ENDPOINT", endpoint.as_str()));
-            sender_env_vars.push(("NEXUS_A2A_AGENT", sender_name.as_str()));
-            sender_env_vars.push(("NEXUS_A2A_PEER", RECEIVER));
+            sender_env_vars.push(("NEXUS_A2A_CREDENTIAL", sender_credential.as_str()));
         }
     }
     // No `--allowedTools send`. Narrowing the tool set changes which channel the
@@ -334,12 +326,11 @@ fn run_duet(transport: &Transport) {
     // cursor, this one is the receiver's, and a receiver that surfaces a message
     // without recording it re-delivers the same message forever — which is how
     // a re-reply storm starts.
-    let cursor_file = receiver_cursor(transport, env.config_home());
     let deadline = Instant::now() + BUDGET;
     loop {
-        let recorded = std::fs::read_to_string(&cursor_file)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
+        let recorded = inbox
+            .read_position(&expected_from)
+            .expect("read the receiver's position")
             .unwrap_or(0);
         if recorded > tail {
             break;
@@ -348,7 +339,7 @@ fn run_duet(transport: &Transport) {
             Instant::now() < deadline,
             "[{}] the receiver surfaced the message but never advanced its own read              position past {tail} in {}",
             transport.label(),
-            cursor_file.display()
+            inbox.transcript_path(&expected_from)
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -356,7 +347,9 @@ fn run_duet(transport: &Transport) {
     // ── 5. Check what crossed ──────────────────────────────────────────────
     // The screen proves delivery; the mailbox proves the contents. Read from
     // the tail snapshot so this is about this run.
-    let (envelopes, next) = inbox.poll(tail, 0).expect("read the receiver's inbox");
+    let (envelopes, next) = inbox
+        .poll_conversation(&expected_from, tail, 0)
+        .expect("read the conversation");
     let delivered = envelopes
         .iter()
         .find(|e| e.from == expected_from)

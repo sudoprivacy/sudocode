@@ -73,9 +73,131 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Live-mode timeout — real API calls can take a few seconds.
 pub const LIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A wait, never shorter than this platform's floor.
+///
+/// [`DEFAULT_TIMEOUT`] exists because Windows runners are slow to spawn a PTY,
+/// and a test that hardcodes fewer seconds silently opts out of it — the
+/// calibration is there precisely for the runner it then fails on. Of the four
+/// `pty_resume` tests, the two asking for 10s and 5s were the two that failed on
+/// a Windows runner while their 15s siblings passed in the same run, same load.
+///
+/// Asking for MORE is a real statement (a live API turn, a long build) and is
+/// kept. Asking for less is not an assertion about the product — nothing checks
+/// that a prompt appears within five seconds — so it is raised to the floor.
+#[must_use]
+pub const fn at_least(wait: Duration) -> Duration {
+    if wait.as_secs() < DEFAULT_TIMEOUT.as_secs() {
+        DEFAULT_TIMEOUT
+    } else {
+        wait
+    }
+}
+
 /// The REPL's input-line marker. The footer and banner never carry it, so a
 /// line containing it is the line the user types on.
 const PROMPT_MARKER: &str = "\u{276f}";
+
+/// How often a screen wait re-reads the rendered screen.
+///
+/// One constant because every screen wait below is the same loop; three
+/// hand-rolled copies meant three different definitions of "promptly".
+const SCREEN_POLL: Duration = Duration::from_millis(25);
+
+/// Consecutive identical renders that count as "the screen stopped changing".
+const SETTLE_POLLS: u32 = 4;
+
+/// Block until the RENDERED SCREEN satisfies `pred`, and return that screen.
+///
+/// **This, not `expect()`, is how you wait for anything the CHROME draws** — the
+/// status line, a separator, the footer, a todo panel, the input line.
+///
+/// `expect()` matches the unconsumed PTY BYTE STREAM and advances a forward-only
+/// cursor past each match. That is exactly right for append-only output (model
+/// text, tool results) and quietly wrong for chrome. iocraft redraws on every
+/// change, so whether a chrome pattern sits in the stream AFTER your cursor is a
+/// fact about redraw timing, not about the product: match the status line first
+/// and the separator you then wait for may never be re-emitted, because nothing
+/// happened to trigger another redraw. A bigger budget cannot rescue that wait —
+/// it is waiting for bytes that are not coming — which is why
+/// `bash_turn_uses_crlf_and_does_not_staircase` timed out at 30s on CI while
+/// every assertion before it in the same test passed.
+///
+/// The screen has no such ordering: it is the current state, so "does it show X"
+/// is the question the test actually means.
+///
+/// # Panics
+/// When `pred` is not satisfied within `budget`; the message carries `context`
+/// and the rendered screen — which `expect()`'s `Error::Timeout` cannot, so a
+/// timeout here says what the terminal was actually showing.
+pub fn expect_screen<F>(sess: &PtySession, pred: F, budget: Duration, context: &str) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    let deadline = Instant::now() + at_least(budget);
+    loop {
+        let screen = sess.render(|s| s.contents());
+        if pred(&screen) {
+            return screen;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "{context}: the screen never satisfied the wait within {budget:?}\nPTY:\n{screen}"
+            );
+        }
+        std::thread::sleep(SCREEN_POLL);
+    }
+}
+
+/// Block until the screen satisfies `pred` AND has stopped changing.
+///
+/// For assertions that COUNT things ("exactly one status line after a resize"):
+/// mid-repaint the old and new rows can both be on screen, so a count taken
+/// between frames is a race. `pred` first, stillness second — stillness alone is
+/// not enough, because a screen that has not started drawing yet is also still.
+///
+/// # Panics
+/// When the screen never satisfied `pred`, or never settled, within `budget`;
+/// the message says which, and carries the rendered screen.
+pub fn expect_screen_settled<F>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    let deadline = Instant::now() + at_least(budget);
+    let mut previous: Option<String> = None;
+    let mut stable = 0u32;
+    let mut satisfied = false;
+    loop {
+        let screen = sess.render(|s| s.contents());
+        if pred(&screen) {
+            satisfied = true;
+            if previous.as_deref() == Some(screen.as_str()) {
+                stable += 1;
+                if stable >= SETTLE_POLLS {
+                    return screen;
+                }
+            } else {
+                stable = 0;
+            }
+        } else {
+            stable = 0;
+        }
+        if Instant::now() >= deadline {
+            let unmet = if satisfied {
+                "the wait was satisfied but the screen kept changing"
+            } else {
+                "the screen never satisfied the wait"
+            };
+            panic!("{context}: {unmet} after {budget:?}\nPTY:\n{screen}");
+        }
+        previous = Some(screen);
+        std::thread::sleep(SCREEN_POLL);
+    }
+}
 
 /// Block until the REPL's input line shows `text`, then return.
 ///
@@ -98,24 +220,17 @@ const PROMPT_MARKER: &str = "\u{276f}";
 /// When the input line has not shown `text` within `budget`; the message
 /// carries `context` and the rendered screen.
 pub fn expect_input_line(sess: &PtySession, text: &str, budget: Duration, context: &str) {
-    let deadline = Instant::now() + budget;
-    loop {
-        // The LIVE input row only — `input_line_of` takes the lowest row that
-        // carries the marker. Scanning every marker-bearing row would also match
-        // a replayed history line, and on `--resume` it matched typed characters
-        // that had landed IN the transcript rather than on the input line, which
-        // is the bug this narrowing exists to catch rather than confirm.
-        if sess.render(|s| input_line_of(&s.contents()).contains(text)) {
-            return;
-        }
-        if Instant::now() >= deadline {
-            let screen = sess.render(|s| s.contents());
-            panic!(
-                "{context}: the input line never showed {text:?} within {budget:?}\nPTY:\n{screen}"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    // The LIVE input row only — `input_line_of` takes the lowest row that carries
+    // the marker. Scanning every marker-bearing row would also match a replayed
+    // history line, and on `--resume` it matched typed characters that had landed
+    // IN the transcript rather than on the input line, which is the bug this
+    // narrowing exists to catch rather than confirm.
+    expect_screen(
+        sess,
+        |screen| input_line_of(screen).contains(text),
+        budget,
+        &format!("{context}: the input line never showed {text:?}"),
+    );
 }
 
 /// What the REPL's input buffer holds: the text after the last prompt marker on
@@ -201,33 +316,14 @@ pub fn screen_tail(sess: &PtySession, chars: usize) -> String {
 /// When the input line never emptied, or never settled, within `budget`; the
 /// message says which and carries the rendered screen.
 pub fn expect_input_line_cleared(sess: &PtySession, budget: Duration, context: &str) {
-    /// Identical consecutive renders required before calling the screen settled.
-    const SETTLE_POLLS: u32 = 4;
-    let deadline = Instant::now() + budget;
-    let mut previous: Option<String> = None;
-    let mut stable = 0u32;
-    loop {
-        let screen = sess.render(|s| s.contents());
-        let line = input_line_of(&screen);
-        if line.is_empty() && previous.as_deref() == Some(screen.as_str()) {
-            stable += 1;
-            if stable >= SETTLE_POLLS {
-                return;
-            }
-        } else {
-            stable = 0;
-        }
-        if Instant::now() >= deadline {
-            let unmet = if line.is_empty() {
-                "the input line emptied but the screen kept changing"
-            } else {
-                "the input line still held content"
-            };
-            panic!("{context}: {unmet} after {budget:?}\nPTY:\n{screen}");
-        }
-        previous = Some(screen);
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    expect_screen_settled(
+        sess,
+        // A process that has not painted its prompt yet also has an empty
+        // screen. It must not accept keystrokes as a ready REPL.
+        |screen| screen.contains(PROMPT_MARKER) && input_line_of(screen).is_empty(),
+        budget,
+        &format!("{context}: the input line never cleared"),
+    );
 }
 
 /// `true` if the rendered screen contains `text`, ignoring terminal line wraps
@@ -311,7 +407,7 @@ pub fn expect_turn_complete_after(
         let screen = sess.render(|screen| screen.contents());
         let status = turn_status_line(&screen);
         let fresh = !status.is_empty() && status != marker;
-        if fresh && input_line_of(&screen).is_empty() {
+        if fresh && screen.contains(PROMPT_MARKER) && input_line_of(&screen).is_empty() {
             return;
         }
         if Instant::now() >= deadline {
@@ -334,10 +430,11 @@ pub fn expect_turn_complete_after(
     }
 }
 
-/// Locate the compiled `scode` binary for the current test run.
+/// Locate the compiled CLI, or a release artifact selected for live acceptance.
 #[must_use]
 pub fn scode_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_scode"))
+    std::env::var_os("SCODE_TEST_BIN")
+        .map_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_scode")), PathBuf::from)
 }
 
 /// A throwaway config home under `parent`, seeded from the real one, for a
@@ -378,7 +475,7 @@ pub fn spawn_scode_with_timeout(args: &[&str], timeout: Duration) -> Result<PtyS
     let bin = scode_bin();
     let bin_str = bin.to_string_lossy();
     let mut sess = PtySession::spawn(&bin_str, args)?;
-    sess.set_default_timeout(timeout);
+    sess.set_default_timeout(at_least(timeout));
     Ok(sess)
 }
 
@@ -566,6 +663,43 @@ impl TestEnv {
         }
     }
 
+    /// Configure discovery for mock mode; live mode reads the real endpoint.
+    pub fn set_model_catalog(&self, catalog: serde_json::Value) {
+        if let Backend::Mock {
+            _runtime, server, ..
+        } = &self.backend
+        {
+            _runtime.block_on(server.set_model_catalog(catalog));
+        }
+    }
+
+    /// Fetch mock discovery before a one-shot command can consume capabilities.
+    pub fn prime_model_catalog(&self) {
+        if let Backend::Mock {
+            _runtime,
+            server,
+            workspace,
+        } = &self.backend
+        {
+            use runtime::model_discovery::{DiscoverySource, ModelCatalog};
+            let catalog = ModelCatalog::open(
+                &workspace.config_home,
+                DiscoverySource {
+                    models_url: format!("{}/v1/models", server.base_url()),
+                    headers: [
+                        ("x-api-key".into(), "test-pty-key".into()),
+                        ("anthropic-version".into(), "2023-06-01".into()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                },
+            );
+            _runtime
+                .block_on(catalog.refresh(true))
+                .expect("prime mock catalog");
+        }
+    }
+
     /// How many `/v1/messages` requests the mock server captured.
     /// Panics in live mode — request counting is mock-only.
     pub fn captured_message_count(&self) -> usize {
@@ -686,6 +820,7 @@ fn spawn_with_workspace(
 ) -> PtySession {
     let bin = scode_bin();
     let bin_str = bin.to_string_lossy().to_string();
+    #[cfg(not(windows))]
     let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
     let home_str = workspace.home.display().to_string();
 
@@ -716,7 +851,16 @@ fn spawn_with_workspace(
     ));
     cmd.push_str(&format!(" HOME={}", shell_quote(&home_str)));
     cmd.push_str(" NO_COLOR=1");
+    // Git Bash already translated its inherited PATH for MSYS. Replacing it
+    // with the native Windows string here makes MSYS parse drive-letter colons
+    // as separators when launching scode, corrupting paths and hiding sh.exe.
+    #[cfg(not(windows))]
     cmd.push_str(&format!(" PATH={}", shell_quote(&path)));
+    // ConPTY starts with the Windows system environment, which may contain
+    // Git's cmd/ but not its POSIX tools. Supply the shell's own tool directory
+    // in MSYS spelling; MSYS converts it once when launching the native scode.
+    #[cfg(windows)]
+    cmd.push_str(" PATH=\"/usr/bin:$PATH\"");
     cmd.push_str(" TERM=xterm");
     // Provide a git identity via the environment (which git honors directly,
     // regardless of HOME/.gitconfig resolution). Without it, tests that drive
@@ -756,7 +900,7 @@ fn spawn_with_workspace(
 
     let sh = resolve_sh();
     let mut sess = PtySession::spawn(&sh, &["-c", &cmd]).expect("spawn scode");
-    sess.set_default_timeout(timeout);
+    sess.set_default_timeout(at_least(timeout));
     sess
 }
 
@@ -855,16 +999,18 @@ pub fn model_unavailable_in_screen(screen: &str) -> bool {
         "no access to model",
         "model_not_found",
         "not supported",
-        "404",
+        // Match the HTTP status label. Bare digits also occur in request IDs
+        // and invalid parameter values, and must not turn real failures into skips.
+        "api returned 404",
         // Transient capacity / connectivity.
-        "429",
+        "api returned 429",
         "rate limit",
         "Rate limit",
         "overloaded",
         "saturated",
         "upstream",
-        "503",
-        "502",
+        "api returned 503",
+        "api returned 502",
         "timed out",
         "timeout",
         "ETIMEDOUT",
@@ -965,7 +1111,7 @@ pub fn spawn_scode_in_dir_with_env(
     }
     let sh = resolve_sh();
     let mut sess = PtySession::spawn(&sh, &["-c", &cmd])?;
-    sess.set_default_timeout(timeout);
+    sess.set_default_timeout(at_least(timeout));
     Ok(sess)
 }
 

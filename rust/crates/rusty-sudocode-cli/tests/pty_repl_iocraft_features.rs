@@ -90,7 +90,7 @@ fn iocraft_repl_keyboard_input_not_frozen() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -137,7 +137,7 @@ fn iocraft_repl_auto_grow_exit_no_hang() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -177,7 +177,7 @@ fn iocraft_repl_ctrlc_hint_renders_in_the_footer() {
             ("SUDOCODE_CTRLC_HINT_TTL_MS", "600000"),
         ],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("\u{276f}").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -244,7 +244,7 @@ fn iocraft_repl_ctrlc_hint_auto_dismisses() {
             ("SUDOCODE_CTRLC_HINT_TTL_MS", "300"),
         ],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("\u{276f}").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -299,7 +299,7 @@ fn iocraft_repl_turn_phase_thinking_renders() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -356,7 +356,7 @@ fn iocraft_repl_anthropic_format_thinking_visible() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -404,7 +404,7 @@ fn iocraft_repl_anthropic_format_thinking_visible() {
     // so `/exit` only runs once the model has finished — and "think step by
     // step" invites a long answer. Give that more room than the default.
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(180));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(180)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY:\n{screen}");
@@ -435,7 +435,7 @@ fn iocraft_repl_openai_format_gpt_works() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -492,7 +492,7 @@ fn iocraft_repl_gemini_format_works() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -564,7 +564,7 @@ fn iocraft_repl_streaming_code_block_not_corrupted() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -659,7 +659,7 @@ fn config_tree_navigate_back_and_toggle() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     // Wait for REPL prompt.
     sess.expect("❯").unwrap_or_else(|e| {
@@ -811,7 +811,7 @@ fn config_tree_navigate_back_and_toggle() {
     // input-slot pause the steps above use — so `/exit` reaches the command
     // parser, and give teardown extra headroom for a loaded runner.
     std::thread::sleep(Duration::from_millis(400));
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -835,7 +835,7 @@ fn model_picker_accepts_custom_typed_name() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
@@ -865,7 +865,7 @@ fn model_picker_accepts_custom_typed_name() {
     });
 
     std::thread::sleep(Duration::from_millis(400));
-    sess.set_default_timeout(Duration::from_secs(20));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(20)));
     sess.send("/exit\r").expect("send /exit");
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 pub use entry::{MemoryEntry, MemoryParseError, MemoryType};
 pub use index::{IndexPointer, ParsedIndex};
 pub use loader::{
-    agent_memory_dir_for, default_memory_dir, default_memory_dir_for, MEMORY_DIR_ENV,
-    MEMORY_INDEX_FILE,
+    agent_memory_dir_for, agent_memory_dir_under, default_memory_dir, default_memory_dir_for,
+    MEMORY_DIR_ENV, MEMORY_INDEX_FILE,
 };
 pub use provider::{
     DisabledMemoryProvider, FileMemoryProvider, MemoryContext, MemoryMode, MemoryProvider,
@@ -78,9 +78,9 @@ pub struct MemoryIndex {
 impl MemoryIndex {
     /// Load memory from the given directory. Missing directory is treated
     /// as "no memory" rather than an error.
-    pub fn load(memory_dir: &Path) -> std::io::Result<Self> {
-        let index = loader::load_index(memory_dir)?;
-        let entries = loader::load_entries(memory_dir)?;
+    pub fn load(memory_dir: &Path, fs: &dyn crate::fs_backend::FsBackend) -> std::io::Result<Self> {
+        let index = loader::load_index(memory_dir, fs)?;
+        let entries = loader::load_entries(memory_dir, fs)?;
         Ok(Self {
             directory: memory_dir.to_path_buf(),
             index,
@@ -89,8 +89,8 @@ impl MemoryIndex {
     }
 
     /// Load memory from [`default_memory_dir`], honoring `SUDOCODE_MEMORY_DIR`.
-    pub fn load_default() -> std::io::Result<Self> {
-        Self::load(&default_memory_dir())
+    pub fn load_default(fs: &dyn crate::fs_backend::FsBackend) -> std::io::Result<Self> {
+        Self::load(&default_memory_dir(), fs)
     }
 
     #[must_use]
@@ -410,6 +410,7 @@ fn truncate_body(body: &str, cap: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs_backend::StdFsBackend;
     use crate::prompt::SystemPromptBuilder;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -434,7 +435,7 @@ mod tests {
     #[test]
     fn empty_directory_is_empty() {
         let dir = temp_dir("empty");
-        let idx = MemoryIndex::load(&dir).expect("load");
+        let idx = MemoryIndex::load(&dir, &StdFsBackend).expect("load");
         assert!(idx.is_empty());
         fs::remove_dir_all(dir).ok();
     }
@@ -443,7 +444,7 @@ mod tests {
     fn missing_directory_is_empty() {
         let dir = std::env::temp_dir().join("runtime-mem-mod-missing-xyz");
         fs::remove_dir_all(&dir).ok();
-        let idx = MemoryIndex::load(&dir).expect("missing dir is empty");
+        let idx = MemoryIndex::load(&dir, &StdFsBackend).expect("missing dir is empty");
         assert!(idx.is_empty());
     }
 
@@ -458,7 +459,7 @@ mod tests {
         write_entry(&dir, "greet", "feedback", "Always greet warmly.");
         write_entry(&dir, "role", "user", "Senior Rust engineer.");
 
-        let idx = MemoryIndex::load(&dir).expect("load");
+        let idx = MemoryIndex::load(&dir, &StdFsBackend).expect("load");
         let rendered = idx.render_for_prompt(&dir);
         assert!(rendered.starts_with("# auto memory"));
         assert!(rendered.contains("Key Learnings"));
@@ -475,7 +476,7 @@ mod tests {
         let dir = temp_dir("truncate");
         let big_body = "x".repeat(ENTRY_BODY_CHAR_CAP * 2);
         write_entry(&dir, "big", "project", &big_body);
-        let idx = MemoryIndex::load(&dir).expect("load");
+        let idx = MemoryIndex::load(&dir, &StdFsBackend).expect("load");
         let rendered = idx.render_for_prompt(&dir);
         assert!(rendered.contains("[truncated]"));
         fs::remove_dir_all(dir).ok();
@@ -490,7 +491,7 @@ mod tests {
         for i in 0..12 {
             write_entry(&dir, &format!("e{i:02}"), "project", &body);
         }
-        let idx = MemoryIndex::load(&dir).expect("load");
+        let idx = MemoryIndex::load(&dir, &StdFsBackend).expect("load");
         let rendered = idx.render_for_prompt(&dir);
         assert!(rendered.len() <= RENDERED_CHAR_CAP);
         assert!(rendered.contains("dropped"));
@@ -503,7 +504,7 @@ mod tests {
         let ctx = MemoryContext::resolve(Some(&dir), None, None, MemoryPromptVariant::Compact);
         let appended = append_from_provider(
             SystemPromptBuilder::new().with_os("linux", "test"),
-            &FileMemoryProvider::new(),
+            &FileMemoryProvider::new(&StdFsBackend),
             &ctx,
         )
         .render();
@@ -524,13 +525,13 @@ mod tests {
         write_entry(&dir, "role", "user", "Senior Rust engineer.");
         write_entry(&dir, "habit", "feedback", "Prefer terse responses.");
 
-        let idx = MemoryIndex::load(&dir).expect("load");
+        let idx = MemoryIndex::load(&dir, &StdFsBackend).expect("load");
         assert!(!idx.is_empty());
 
         let ctx = MemoryContext::resolve(Some(&dir), None, None, MemoryPromptVariant::Compact);
         let prompt = append_from_provider(
             SystemPromptBuilder::new().with_os("linux", "test"),
-            &FileMemoryProvider::new(),
+            &FileMemoryProvider::new(&StdFsBackend),
             &ctx,
         )
         .render();
@@ -636,7 +637,7 @@ mod tests {
     #[test]
     fn full_instructions_render_only_for_full_variant() {
         let dir = temp_dir("variant");
-        let idx = MemoryIndex::load(&dir).expect("load");
+        let idx = MemoryIndex::load(&dir, &StdFsBackend).expect("load");
         let compact = idx.render_for_prompt_with(&dir, MemoryPromptVariant::Compact);
         let full = idx.render_for_prompt_with(&dir, MemoryPromptVariant::Full);
         assert!(compact.starts_with("# auto memory"));
@@ -661,7 +662,7 @@ mod tests {
         write_entry(&dir, "via-env", "reference", "Look here for X.");
         let prior = std::env::var_os(MEMORY_DIR_ENV);
         std::env::set_var(MEMORY_DIR_ENV, &dir);
-        let result = MemoryIndex::load_default();
+        let result = MemoryIndex::load_default(&StdFsBackend);
         if let Some(value) = prior {
             std::env::set_var(MEMORY_DIR_ENV, value);
         } else {

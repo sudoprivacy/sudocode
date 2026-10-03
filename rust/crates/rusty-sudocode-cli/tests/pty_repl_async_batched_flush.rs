@@ -107,7 +107,7 @@ fn three_queued_inputs_flush_as_one_combined_downstream_request() {
     // Step 6: let A finish naturally. The mock's bash sleep is 30 s; add
     // headroom for the turn's post-tool trip through the model + the
     // coordinator's TurnDone → drain path.
-    sess.set_default_timeout(Duration::from_secs(50));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(50)));
     // A finishes when the model emits its final text after the tool
     // result. The mock's bash_interrupt_long_running scenario emits
     // "bash interrupt unexpectedly continued: {tool_output}" as its final
@@ -138,6 +138,6 @@ fn three_queued_inputs_flush_as_one_combined_downstream_request() {
 
     // Clean shutdown so the child + bash subprocess don't linger.
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
 }

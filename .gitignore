@@ -25,3 +25,6 @@ sudocode.json
 # `cargo test` leaves the tree dirty.
 .sudocode-tasks.json
 .sudocode/
+# Agent-to-agent mailbox: per-workspace runtime state (JSONL inboxes + `.cursor-*`
+# presence markers written by the local poller). Runtime, never source.
+.sudocode-inbox/

@@ -54,11 +54,11 @@ jobs:
       # there's no cross-contamination if secrets rotate.
       - name: Write proxy config
         env:
-          SUDOROUTER_API_KEY: ${{ secrets.SUDOROUTER_API_KEY }}
+          SUDOROUTER_API_KEY: ${{ secrets.SUDOROUTER_CI_API_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SUDOROUTER_API_KEY:-}" ]; then
-            echo "::error::SUDOROUTER_API_KEY secret is not set — cannot run live e2e"
+            echo "::error::SUDOROUTER_CI_API_KEY secret is not set — cannot run live e2e"
             exit 1
           fi
           CONFIG_DIR="$HOME/.nexus/sudocode"

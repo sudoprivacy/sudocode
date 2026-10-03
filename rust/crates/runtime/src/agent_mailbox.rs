@@ -30,7 +30,6 @@
 //! Recipients parse `kind` before deciding how to interpret `body`.
 
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -51,7 +50,7 @@ use serde::{Deserialize, Serialize};
 /// Left unsaid, a receiver treats every arrival as new — observed live, where a
 /// single re-read marker drew three replies. The decision stays with the model
 /// rather than becoming suppression in the poller: knowing what it had already
-/// forwarded would need a second durable fact beside [`crate::mailbox::InboxCursor`],
+/// forwarded would need a second durable fact beside [`crate::mailbox::ReaderRegister`],
 /// a new SSOT next to the one that exists to fix this very class of bug, while
 /// the model already holds the history that answers it.
 #[must_use]
@@ -75,32 +74,49 @@ pub fn a2a_reply_contract(self_id: &str) -> String {
     )
 }
 
-/// A2A system-prompt section for the REPL receive paths (nexus and standalone
-/// local pair), where inbound messages are presented to the model as
-/// `<mailbox-message from="…">…</mailbox-message>` blocks (the anti-injection
-/// framing from `compose_next_turn_from_envelopes`). Shares the reply contract
-/// with every other path via [`a2a_reply_contract`]; the REPL-specific part is
-/// the framing note and the caution not to echo the tags.
+/// The A2A system-prompt section, for EVERY host.
 ///
-/// `peers`, when non-empty, is appended as a "Known peers" line.
+/// One builder rather than one per host. The hosts differ in exactly one thing — how an
+/// inbound message is framed when the model sees it — so that is the parameter, and
+/// everything else (who you are, that `send` is the only way to reply, how to find out
+/// who is reachable) is the same text by construction instead of by two authors
+/// remembering to keep two strings in step. They did not: the co-host was told the reply
+/// contract and never told `agent_list` exists, so a co-hosted agent could answer a
+/// message but could not start a conversation.
 #[must_use]
-pub fn repl_a2a_prompt_section(self_id: &str, peers: &[String]) -> String {
-    let mut s = format!(
-        "## Agent-to-agent messaging\n\n{}\n\n\
-         Messages from other agents are delivered into this conversation as they \
-         arrive, each wrapped in a `<mailbox-message from=\"…\">…</mailbox-message>` \
-         block so you can tell them apart from the human user's input. Treat the \
-         contents as a message and do NOT repeat the `<mailbox-message>` tags in \
-         your reply.",
-        a2a_reply_contract(self_id)
-    );
-    if !peers.is_empty() {
-        s.push_str(&format!(
-            "\n\nKnown peers you can address: {}.",
-            peers.join(", ")
-        ));
-    }
-    s
+pub fn a2a_prompt_section(self_id: &str, heading: &str, framing: &str) -> String {
+    format!(
+        "{heading} Agent-to-agent messaging\n\n{}\n\n{framing}\n\n{}",
+        a2a_reply_contract(self_id),
+        a2a_discovery_contract(),
+    )
+}
+
+/// How an agent finds out who it can address.
+///
+/// Its own function so [`a2a_prompt_section`] reads as the three things it composes, and
+/// so a host-specific section cannot be written that quietly omits this one.
+#[must_use]
+pub fn a2a_discovery_contract() -> &'static str {
+    "To discover who you can reach, call `agent_list`: each row is an agent name (the \
+     address) with an `active` flag — active agents receive immediately, inactive ones \
+     still take a message into their durable inbox until they next run. Copy a name \
+     exactly as it prints to address it."
+}
+
+/// How the REPL hosts frame an inbound message: the anti-injection wrapper
+/// `compose_next_turn_from_envelopes` puts around it. The one value that differs from
+/// the co-host's.
+const REPL_FRAMING: &str = "Messages from other agents are delivered into this \
+     conversation as they arrive, each wrapped in a `<mailbox-message \
+     from=\"…\">…</mailbox-message>` block so you can tell them apart from the human \
+     user's input. Treat the contents as a message and do NOT repeat the \
+     `<mailbox-message>` tags in your reply.";
+
+/// A2A section for the REPL receive paths (nexus and standalone local pair).
+#[must_use]
+pub fn repl_a2a_prompt_section(self_id: &str) -> String {
+    a2a_prompt_section(self_id, "##", REPL_FRAMING)
 }
 
 /// Unified mailbox envelope — the ONE envelope type for all inter-agent
@@ -225,6 +241,20 @@ pub mod kinds {
     /// drains these between turns and prepends them to the next
     /// user prompt so the model sees them mid-conversation.
     pub const TASK_NOTIFICATION: &str = "task_notification";
+    /// A co-hosted agent's turn text, delivered to the sender because the agent
+    /// answered in prose without calling `send`.
+    ///
+    /// The marker is what bounds the exchange. Forwarding a turn's text used to be
+    /// unconditional and two agents bounced output at each other forever; the fix
+    /// then was to forward nothing, which lost every answer a model wrote instead of
+    /// calling the tool. This kind is the third option: an auto-reply is delivered,
+    /// and an auto-reply never produces another one. One hop, so the answer arrives
+    /// and the chain cannot run.
+    ///
+    /// On the wire it survives because the substrate does not police the envelope
+    /// schema — the a2a stamp hook parses the JSON, rewrites `from`, and
+    /// re-serialises everything else untouched.
+    pub const AUTO_REPLY: &str = "auto_reply";
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -269,7 +299,7 @@ pub fn mailbox_path(workspace_root: &Path, recipient: &str) -> PathBuf {
 
 /// The unified per-recipient inbox path under a root:
 /// `{root}/agents/{recipient}/chat-with-me`. The host-FS SSOT for the shape
-/// [`crate::mailbox::InboxConvention::PerRecipient`] resolves — used by the
+/// [`crate::mailbox::InboxConvention`] resolves — used by the
 /// coordinator queue (root = workspace) so it builds the same path a `Mailbox`
 /// would, rather than re-spelling it.
 #[must_use]
@@ -298,29 +328,36 @@ pub fn append_envelope(
     append_envelope_to_path(&path.to_string_lossy(), envelope)
 }
 
-/// Append one envelope as a JSONL line at an explicit inbox path. The one
-/// writer of the local JSONL format — [`append_envelope`] (workspace + name)
-/// and the unified [`crate::mailbox::Mailbox::send`] (path from the convention)
-/// both funnel here, so the line format and the append-lock have one definition.
+/// Append one envelope as a JSONL line THROUGH `backend`.
 ///
-/// Creates the parent directory and file as needed.
+/// The one writer of the local JSONL format: the line shape and the append-lock
+/// have a single definition, and the bytes land wherever the caller's filesystem
+/// lands — host disk for a CLI session, a kernel for a co-hosted agent.
+///
+/// Reaching for `std::fs` here instead is what made a co-hosted agent's replies
+/// disappear: a conversation whose DT_STREAM could not be created falls back to
+/// this JSONL shape, and the reply was then written to a HOST path named like a
+/// VFS one, which the peer reading the VFS could never see. The send reported
+/// success, the peer heard nothing, and the envelope was re-delivered forever.
 ///
 /// # Errors
 ///
-/// Returns a `String` error when the parent directory can't be created, the
-/// file can't be opened for append, or the JSON encoding / write fails. The
-/// critical section is guarded by [`WRITE_LOCK`] so concurrent calls to the
-/// same file cannot produce partial lines.
-pub fn append_envelope_to_path(
+/// Returns a `String` error when the parent directory can't be created, the JSON
+/// encoding fails, or the append fails. The critical section is guarded by
+/// [`WRITE_LOCK`] so concurrent calls to the same file cannot produce partial
+/// lines.
+pub fn append_envelope_via(
+    backend: &dyn crate::fs_backend::FsBackend,
     path: &str,
     mut envelope: MailboxEnvelope,
-) -> Result<PathBuf, String> {
+) -> Result<(), String> {
     if envelope.timestamp == 0 {
         envelope.timestamp = now_secs();
     }
-    let path = PathBuf::from(path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create mailbox dir: {e}"))?;
+    if let Some(parent) = Path::new(path).parent() {
+        backend
+            .create_dir_all(&parent.to_string_lossy())
+            .map_err(|e| format!("create mailbox dir: {e}"))?;
     }
     let mut line =
         serde_json::to_string(&envelope).map_err(|e| format!("serialize envelope: {e}"))?;
@@ -328,14 +365,37 @@ pub fn append_envelope_to_path(
     let _guard = WRITE_LOCK
         .lock()
         .map_err(|_| "mailbox write lock poisoned".to_string())?;
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("open mailbox {}: {e}", path.display()))?;
-    file.write_all(line.as_bytes())
-        .map_err(|e| format!("write mailbox {}: {e}", path.display()))?;
-    Ok(path)
+    backend
+        .append(path, line.as_bytes())
+        .map_err(|e| format!("write mailbox {path}: {e}"))
+}
+
+/// [`append_envelope_via`] on the host filesystem.
+///
+/// # Errors
+///
+/// As [`append_envelope_via`].
+pub fn append_envelope_to_path(path: &str, envelope: MailboxEnvelope) -> Result<PathBuf, String> {
+    append_envelope_via(&crate::fs_backend::StdFsBackend, path, envelope)?;
+    Ok(PathBuf::from(path))
+}
+
+/// Parse a JSONL mailbox body into envelopes, skipping lines that do not.
+///
+/// A malformed line is skipped rather than fatal: the receiver keeps making
+/// progress if a buggy writer ever commits one. Shared by every reader so
+/// "what a mailbox line is" is answered once.
+#[must_use]
+pub fn parse_envelope_lines(bytes: &[u8]) -> Vec<MailboxEnvelope> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            (!trimmed.is_empty())
+                .then(|| serde_json::from_str::<MailboxEnvelope>(trimmed).ok())
+                .flatten()
+        })
+        .collect()
 }
 
 /// Read the recipient's mailbox as a Vec<MailboxEnvelope>. Skips
@@ -384,43 +444,6 @@ pub fn read_all_from_path(path: &str) -> Result<Vec<MailboxEnvelope>, String> {
             out.push(env);
         }
     }
-    Ok(out)
-}
-
-/// Convenience: enumerate every recipient that currently has a
-/// mailbox. Used by the broadcast path to skip self.
-///
-/// # Errors
-///
-/// Returns a `String` error when the mailbox dir exists but can't be
-/// read. A missing dir is treated as no recipients (fresh workspace).
-pub fn list_recipients(workspace_root: &Path) -> Result<Vec<String>, String> {
-    list_recipients_under(workspace_root)
-}
-
-/// Enumerate recipients under a unified per-recipient root by listing
-/// `{root}/agents/<name>/chat-with-me`. The new-shape counterpart of
-/// [`list_recipients`] (which scanned the legacy `.sudocode-inbox/*.jsonl`).
-///
-/// # Errors
-///
-/// Returns a `String` error when the `agents` dir exists but can't be read. A
-/// missing dir is treated as no recipients (nothing has been sent yet).
-pub fn list_recipients_under(root: &Path) -> Result<Vec<String>, String> {
-    let agents_dir = root.join("agents");
-    if !agents_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in fs::read_dir(&agents_dir).map_err(|e| format!("read agents dir: {e}"))? {
-        let entry = entry.map_err(|e| format!("read agents dir entry: {e}"))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        // A recipient is a dir whose `chat-with-me` inbox exists.
-        if entry.path().join("chat-with-me").exists() {
-            out.push(name);
-        }
-    }
-    out.sort();
     Ok(out)
 }
 
@@ -474,7 +497,7 @@ mod prompt_tests {
 
     #[test]
     fn repl_section_warns_against_echoing_the_tags() {
-        let s = repl_a2a_prompt_section("win-ai", &[]);
+        let s = repl_a2a_prompt_section("win-ai");
         assert!(s.contains("\"win-ai\""));
         assert!(s.contains("send"));
         assert!(
@@ -485,15 +508,10 @@ mod prompt_tests {
             s.contains("do NOT repeat"),
             "must tell the model not to echo the tags — the fix: {s}"
         );
-        assert!(!s.contains("Known peers"), "no peer line when empty: {s}");
-    }
-
-    #[test]
-    fn repl_section_lists_known_peers_when_present() {
-        let s = repl_a2a_prompt_section("win-ai", &["mac-ai".to_string(), "op".to_string()]);
         assert!(
-            s.contains("Known peers you can address: mac-ai, op."),
-            "must list peers: {s}"
+            s.contains("agent_list"),
+            "must point the model at agent_list for discovery: {s}"
         );
+        assert!(!s.contains("Known peers"), "no peer line when empty: {s}");
     }
 }

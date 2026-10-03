@@ -154,7 +154,10 @@ const HOOKS_CHILDREN: &[FieldSchema] = &[
     ),
 ];
 
-const PERMISSION_MODE_OPTIONS: &[&str] = &["read-only", "workspace-write", "danger-full-access"];
+// The option list comes from the parser's own table (`crate::config`), not a
+// copy: this one offered three of the seven spellings `permissions.defaultMode`
+// accepts, so the config UI hid four of them.
+use crate::config::PERMISSION_MODE_OPTIONS;
 
 const PERMISSIONS_CHILDREN: &[FieldSchema] = &[
     FieldSchema::enumerated(
@@ -261,10 +264,22 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
         FieldType::Object,
         "Provider fallback chain",
     ),
-    FieldSchema::leaf(
+    FieldSchema::deprecated(
         "trustedRoots",
         FieldType::StringArray,
-        "Trusted project root paths",
+        "additionalDirectories",
+    ),
+    // Directories a session may reach beyond its own workspace. A session's
+    // filesystem is a VFS with one mount per root (see
+    // `engine_host::local_kernel`), so this is literally the mount list: a path
+    // under none of these roots belongs to no mount and is refused.
+    //
+    // Deliberately NOT in the `config` tool's settable registry — a session that
+    // can widen its own reach is not contained by it.
+    FieldSchema::leaf(
+        "additionalDirectories",
+        FieldType::StringArray,
+        "Directories a session may reach beyond its workspace",
     ),
     FieldSchema::leaf(
         "auth_profile",
@@ -276,7 +291,66 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
         EXPERIMENTAL_CHILDREN,
         "Experimental feature flags (off by default)",
     ),
+    // Everything `scode config set` can write MUST be listed here. An unknown
+    // key is a validation ERROR, and one error fails the whole file: a single
+    // key the schema does not know takes permissions, hooks and plugin
+    // configuration down with it, silently, back to defaults. These thirteen
+    // were settable and unlisted, so setting any of them disabled the file that
+    // was just written.
+    FieldSchema::leaf("theme", FieldType::String, "Colour theme"),
+    FieldSchema::enumerated("editorMode", EDITOR_MODE_OPTIONS, "Line-editing mode"),
+    FieldSchema::leaf("language", FieldType::String, "Preferred response language"),
+    FieldSchema::leaf("verbose", FieldType::Bool, "Verbose output"),
+    FieldSchema::leaf(
+        "preferredNotifChannel",
+        FieldType::String,
+        "Where turn-completion notifications go",
+    ),
+    FieldSchema::leaf(
+        "autoCompactEnabled",
+        FieldType::Bool,
+        "Compact the session automatically as it approaches the context limit",
+    ),
+    FieldSchema::leaf("autoDreamEnabled", FieldType::Bool, "Enable auto-dream"),
+    FieldSchema::leaf(
+        "fileCheckpointingEnabled",
+        FieldType::Bool,
+        "Checkpoint files before a tool edits them",
+    ),
+    FieldSchema::leaf(
+        "showTurnDuration",
+        FieldType::Bool,
+        "Show each turn's duration",
+    ),
+    FieldSchema::leaf(
+        "terminalProgressBarEnabled",
+        FieldType::Bool,
+        "Show the terminal progress bar",
+    ),
+    FieldSchema::leaf(
+        "todoFeatureEnabled",
+        FieldType::Bool,
+        "Enable the todo list",
+    ),
+    FieldSchema::leaf(
+        "alwaysThinkingEnabled",
+        FieldType::Bool,
+        "Always request extended thinking",
+    ),
+    FieldSchema::enumerated(
+        "teammateMode",
+        TEAMMATE_MODE_OPTIONS,
+        "How a teammate agent is run",
+    ),
+    // This session's mailbox identity — the name peers address and the receiver
+    // polls. Unset, `runtime::mailbox::local_agent_name` derives one from the
+    // workspace path.
+    FieldSchema::leaf("agentName", FieldType::String, "This session's A2A name"),
 ];
+
+const EDITOR_MODE_OPTIONS: &[&str] = &["default", "vim", "emacs"];
+
+const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
 
 /// Children of `experimental`. MUST mirror
 /// `runtime::experiments::Experiment::ALL` — `parse_optional_experiments`
@@ -305,6 +379,11 @@ pub const SUDOCODE_SCHEMA: &[FieldSchema] = &[
         "Authentication mode configurations",
     ),
     FieldSchema::leaf("models", FieldType::Object, "Model alias definitions"),
+    FieldSchema::leaf(
+        "cache_ttl_1h",
+        FieldType::Bool,
+        "Hold Anthropic prompt caches for 1h instead of the 5m default (subscription auth only; a metered API key ignores this and stays on 5m). Unset follows Claude Code: on for subscriptions, off for API keys",
+    ),
     FieldSchema::object(
         "web_search",
         &[
@@ -507,7 +586,7 @@ mod tests {
 
     #[test]
     fn sudocode_schema_covers_known_keys() {
-        let expected = ["auth_modes", "models", "web_search"];
+        let expected = ["auth_modes", "models", "web_search", "cache_ttl_1h"];
         let keys: Vec<&str> = SUDOCODE_SCHEMA.iter().map(|f| f.key).collect();
         for key in &expected {
             assert!(keys.contains(key), "SUDOCODE_SCHEMA missing key: {key}");

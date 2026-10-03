@@ -1,144 +1,148 @@
 #!/usr/bin/env bash
-# Deterministic E2E for the standalone nexus-A2A client (X).
+# Deterministic E2E for the standalone nexus-A2A client (X), auth-on.
 #
-# Brings up a real `nexusd-cluster` founder in a container and drives the
-# ignored `runtime` integration tests (`mailbox_nexus_live`) against it — the
+# Brings up a real `nexusd-cluster` founder with TLS + auth and drives the
+# ignored `runtime` integration tests (`mailbox_nexus_live`) against it - the
 # one thing unit tests can't cover: that `ensure_stream` + `stream_write` +
 # `stream_read_at` actually move an envelope through a real gRPC server and a
-# real DT_STREAM. No LLM, no secrets — always safe to run.
+# real DT_STREAM. No LLM, no secrets - always safe to run.
+#
+# scode is cert-only: it dials mTLS with a minted credential and never
+# plaintext, so this harness dials exactly what production does. The bring-up
+# (boot TLS -> stop -> offline mint -> restart) is factored into lib.sh and
+# shared with run-auth-on.sh / run-cross-node.sh.
 #
 # The optional 2-LLM co-host duet (a real `scode` sending to a daemon-hosted
 # co-host agent that LLM-replies) runs only when SUDOROUTER_API_KEY (funded) and
-# SCODE_BIN are both set — mirroring `subagent-parity-live.yml`'s gating.
+# SCODE_BIN are both set - mirroring `subagent-parity-live.yml`'s gating.
 #
 # Usage:
 #   e2e/nexus-a2a/run.sh
-#   NEXUS_DAEMON_IMAGE=nexusd-cluster:latest e2e/nexus-a2a/run.sh   # force Docker
 #   NEXUSD_BIN=/path/to/nexusd-cluster e2e/nexus-a2a/run.sh          # force a binary
 #   SUDOROUTER_API_KEY=sk-... SCODE_BIN=/path/to/scode e2e/nexus-a2a/run.sh   # + duet
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# `run-cross-node.sh` and `run-auth-on.sh` already translate the paths they hand
-# the daemon; this one did not, and the divergence is invisible until it bites:
-# every assertion here goes over gRPC, so a daemon writing its data somewhere
-# else entirely still passes, and only the leftover directories show it.
 # shellcheck source=lib.sh
 . ./lib.sh
 
 # NOT 2126. That is the port `serve-local` defaults to and therefore the one a
-# developer's own daemon is already on — the harness would then either fail to
+# developer's own daemon is already on - the harness would then either fail to
 # bind or, worse, run its assertions against that daemon instead of the throwaway
 # it thinks it started. Any override still works; only the default moved.
-PORT="${NEXUS_A2A_HOST_PORT:-2143}"
-ENDPOINT="127.0.0.1:${PORT}"
+AUTHON_PORT="${NEXUS_A2A_HOST_PORT:-2143}"
+AUTHON_ZONE="${NEXUS_A2A_ZONE:-sharedzone}"
+ENDPOINT="https://127.0.0.1:${AUTHON_PORT}"
 RUST_DIR="${RUST_DIR:-$(cd ../../rust && pwd)}"
 CARGO_TEST=(cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test mailbox_nexus_live)
 
-# Two ways to get a daemon, and the default is the one CI can do.
-#
 # A downloaded binary needs no image built by hand, which is what kept this
 # harness off CI: building `nexusd-cluster` is a nexus-repo job and wants a
 # GitHub token. `fetch-daemon.sh` resolves the version from this checkout's
 # nexus-vfs pin, so the daemon MATCHES the client library rather than being
-# whatever `latest` is.
-#
-# Docker stays the path for the co-host duet: the LLM-replying agent runs
-# INSIDE the daemon, and that runtime ships in the co-host image rather than in
-# the released cluster binary. `NEXUS_DAEMON_IMAGE` selects it explicitly.
-MODE=binary
-if [ -n "${NEXUS_DAEMON_IMAGE:-}" ]; then
-  MODE=docker
-elif [ -z "${NEXUSD_BIN:-}" ]; then
-  # Through `bash`, not `./`: a repo cloned from a Windows checkout can
-  # arrive without the exec bit, and the failure then reads as a missing
-  # file rather than a permissions one.
+# whatever `latest` is. Through `bash`, not `./`: a repo cloned from a Windows
+# checkout can arrive without the exec bit.
+if [ -z "${NEXUSD_BIN:-}" ]; then
   NEXUSD_BIN="$(bash ./fetch-daemon.sh)" || exit 1
 fi
+AUTHON_NEXUSD_BIN="$NEXUSD_BIN"
 
-DAEMON_PID=
-DATA_DIR=
+AUTHON_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scode-a2a-nexusd.XXXXXX")"
+AUTHON_DAEMON_PID=
 cleanup() {
-  if [ "$MODE" = docker ]; then
-    docker compose down -v >/dev/null 2>&1 || true
-  else
-    [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null || true
-    [ -n "$DATA_DIR" ] && rm -rf "$DATA_DIR" 2>/dev/null || true
-  fi
+  [ -n "$AUTHON_DAEMON_PID" ] && kill "$AUTHON_DAEMON_PID" 2>/dev/null || true
+  rm -rf "$AUTHON_DATA_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
+mkdir -p "$AUTHON_DATA_DIR"/{data,id}
 
-if [ "$MODE" = docker ]; then
-  echo "== starting nexusd-cluster (${NEXUS_DAEMON_IMAGE}) on :${PORT} =="
-  docker compose up -d
-else
-  # Fresh data AND identity dir per run. A data-only wipe is not a fresh node:
-  # `identity.json` carries the peer address book and per-zone membership by
-  # design, so reusing it leaves the daemon rejoining an old cluster with a
-  # stale identity and no quorum.
-  DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scode-a2a-nexusd.XXXXXX")"
-  echo "== starting nexusd-cluster (binary) on :${PORT} =="
-  "$NEXUSD_BIN"     --bind-addr "0.0.0.0:${PORT}"     --data-dir "$(native_path "$DATA_DIR/data")"     --identity-dir "$(native_path "$DATA_DIR/identity")"     --no-tls     --insecure-no-auth     >"$DATA_DIR/daemon.log" 2>&1 &
-  DAEMON_PID=$!
-fi
+daemon_logs() { tail -40 "$AUTHON_DATA_DIR/daemon.log" 2>/dev/null || true; }
 
-daemon_logs() {
-  if [ "$MODE" = docker ]; then
-    docker compose logs --tail 40 || true
-  else
-    tail -40 "$DATA_DIR/daemon.log" 2>/dev/null || true
-  fi
-}
+echo "== 1. founder on :${AUTHON_PORT}, TLS on (CA bootstraps itself) =="
+authon_boot
+authon_wait_log "Static topology applied" 45
+
+# The mint opens the same data dir the daemon holds an exclusive lock on, so the
+# daemon has to be down for it. This is the documented posture, not a
+# workaround: a credential is not a network resource. One bundle serves the
+# identity-agnostic transport tests; the duet mints its own participants below.
+echo "== 2. stop, for the offline mint =="
+kill "$AUTHON_DAEMON_PID" 2>/dev/null || true
+wait "$AUTHON_DAEMON_PID" 2>/dev/null || true
+AUTHON_DAEMON_PID=
+
+echo "== 3. mint a CA-signed agent bundle for the client =="
+CLIENT_BUNDLE="$(authon_mint "live-probe")" || { daemon_logs; exit 1; }
+echo "   $CLIENT_BUNDLE"
+
+echo "== 4. restart TLS-on =="
+authon_boot
+authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
 
 echo "== waiting for a writable single-voter leader =="
+# The probe's output is KEPT, not discarded. This loop retries because a fresh
+# founder needs a moment to become writable, so every early failure is expected
+# and printing each one is noise - but the LAST one is the diagnosis, and
+# `2>/dev/null` threw it away. Everything that can go wrong before the daemon is
+# reachable lands in this loop and used to read as "daemon never became
+# writable": a panic on a missing `NEXUS_A2A_TEST_CERT_DIR`, and a build that
+# never produced the test binary at all (`failed to find tool "cl.exe"`).
 ready=
+probe=
 for i in $(seq 1 30); do
-  if NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored 2>/dev/null | grep -q "1 passed"; then
-    echo "   writable after ~$((i * 4))s"
+  if probe=$(NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+      "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored 2>&1) \
+      && printf '%s' "$probe" | grep -q "1 passed"; then
+    echo "   writable on attempt $i"
     ready=1
     break
   fi
   sleep 4
 done
 if [ -z "$ready" ]; then
-  echo "!! daemon never became writable" >&2
+  echo "!! daemon never became writable - the last probe said:" >&2
+  printf '%s\n' "$probe" >&2
   daemon_logs
   exit 1
 fi
 
 echo "== [deterministic] standalone A2A client round-trip =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored --nocapture
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored --nocapture
 
 # The seam the round-trip above leaves out. That one drives `Mailbox` directly,
 # so it proves the transport while saying nothing about whether the tool reaches
-# it, nor whether a receiver surfaces what arrives — and a `send` that wrote a
+# it, nor whether a receiver surfaces what arrives - and a `send` that wrote a
 # local file while reporting success is the failure this whole path exists
 # because of. This runs two real binaries: one calls the tool, the other's REPL
-# is parked on its inbox. It also covers the workspace-file transport, which
-# needs no daemon at all. Mock model, so no key is needed; set
+# is parked on its inbox. Mock model, so no key is needed; set
 # SCODE_TEST_BACKEND=live to have a real model choose the call instead.
 echo "== [deterministic] two scode processes, one daemon =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
+  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$(authon_mint "team-lead")" \
+  NEXUS_A2A_TEST_SENDER_CREDENTIAL="$(authon_mint "duet-sender")" \
   cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
   --test pty_agent_duet -- --nocapture
 
-# A daemon that is alive and SILENT — the failure a unit test cannot construct.
+# A daemon that is alive and SILENT - the failure a unit test cannot construct.
 #
 # A dropped connection reports itself; a stopped process holds the socket open
 # and answers nothing, which is how a standing receiver went deaf for four hours
 # while looking idle (#696). `SIGSTOP` reproduces exactly that, and only the
 # harness can do it, because only the harness knows the pid of the daemon it
-# started.
+# started - which is all the gate below checks.
 #
-# Binary mode only: in Docker the daemon is not our child, and Windows has no
-# SIGSTOP that leaves the socket open. Skipped loudly rather than silently, so a
-# run that did not exercise this says so.
-if [ "$MODE" = binary ] && [ -n "$DAEMON_PID" ]; then
+# The PLATFORM skip lives in the test, not here. Windows has no SIGSTOP that
+# leaves the socket open, and this script cannot tell: `AUTHON_DAEMON_PID` is set
+# there like anywhere else, so a gate on it skips nothing. The test prints its
+# own SKIP line and returns.
+if [ -n "$AUTHON_DAEMON_PID" ]; then
   echo "== [deterministic] a silent server errors, then recovers =="
-  NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_DAEMON_PID="$DAEMON_PID" \
+  NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+    NEXUS_A2A_TEST_DAEMON_PID="$AUTHON_DAEMON_PID" \
     "${CARGO_TEST[@]}" live_a_silent_server_errors_and_then_recovers -- --ignored --nocapture
 else
-  echo "== [skip] silent-server fault injection — needs a daemon this script started (MODE=$MODE) =="
+  echo "== [skip] silent-server fault injection - needs the daemon's pid =="
 fi
 
 # ---- Optional: real 2-LLM co-host duet (gated) --------------------------------
@@ -146,20 +150,28 @@ if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
   echo "== [live] scode -> co-host duet =="
   R="${DUET_RESPONDER:-duet-bot}"
   MODEL="${DUET_MODEL:-claude-sonnet-4-6}"
+  SELF="${DUET_SELF:-operator}"
+  # Mint the two participants the duet needs: the operator scode dials with its
+  # own bundle, and the responder inbox is provisioned + spawned by the co-host.
+  SELF_BUNDLE="$(authon_mint "$SELF")"
+  R_BUNDLE="$(authon_mint "$R")"
   # Provision the responder's inbox BEFORE spawning it, so the co-host arms its
   # watch at an empty tail and sees scode's message as new (not skipped).
-  NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_INBOX="$R" "${CARGO_TEST[@]}" live_ensure_inbox -- --ignored >/dev/null
-  NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_SPAWN="$R" NEXUS_A2A_TEST_MODEL="$MODEL" \
+  NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$R_BUNDLE" \
+    NEXUS_A2A_TEST_INBOX="$R" "${CARGO_TEST[@]}" live_ensure_inbox -- --ignored >/dev/null
+  NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$R_BUNDLE" \
+    NEXUS_A2A_TEST_SPAWN="$R" NEXUS_A2A_TEST_MODEL="$MODEL" \
     "${CARGO_TEST[@]}" live_spawn_cohost -- --ignored --nocapture
   sleep 8
-  NEXUS_A2A_ENDPOINT="$ENDPOINT" NEXUS_A2A_AGENT="${DUET_SELF:-operator}" NEXUS_A2A_PEER="$R" \
+  NEXUS_A2A_ENDPOINT="$ENDPOINT" NEXUS_A2A_CREDENTIAL="$SELF_BUNDLE" \
     "$SCODE_BIN" --auth proxy --model "$MODEL" --permission-mode danger-full-access \
     --print "Call send once: to=$R message='reply with exactly one word: PONG' summary='ping'. Then stop."
-  echo "   polling ${DUET_SELF:-operator}'s inbox for the co-host reply..."
+  echo "   polling ${SELF}'s inbox for the co-host reply..."
   got=
   for i in $(seq 1 30); do
-    out=$(NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_INBOX="${DUET_SELF:-operator}" \
-      "${CARGO_TEST[@]}" live_collect_inbox -- --ignored --nocapture 2>&1 || true)
+    out=$(NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SELF_BUNDLE" \
+      NEXUS_A2A_TEST_INBOX="$SELF" \
+      "${CARGO_TEST[@]}" live_collect_conversations -- --ignored --nocapture 2>&1 || true)
     if echo "$out" | grep -q "from=\"$R\""; then
       echo "   >>> DUET REPLY:"; echo "$out" | grep "from="; got=1; break
     fi
@@ -167,7 +179,7 @@ if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
   done
   [ -n "$got" ] || { echo "!! co-host never replied (see daemon logs)" >&2; daemon_logs; exit 1; }
 else
-  echo "== [skip] LLM duet — set SUDOROUTER_API_KEY + SCODE_BIN to enable =="
+  echo "== [skip] LLM duet - set SUDOROUTER_API_KEY + SCODE_BIN to enable =="
 fi
 
 echo "E2E OK"

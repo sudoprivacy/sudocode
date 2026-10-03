@@ -1,0 +1,81 @@
+Quote review brief
+
+Purpose
+This exercise prepares a small quote for review and then records its approved
+amount. The quote is synthetic test data. It is not a purchase order, a payment
+instruction, or authorization to contact a supplier. The reviewer should explain
+the calculation, preserve the task facts, and leave implementation pending until
+the next instruction. The eventual output is a local JSON artifact that another
+step can inspect without interpreting prose.
+
+Source of the figures
+The delegated reader has already read the source quote and reported its code,
+number of units, price per unit, delivery charge, and calculated subtotal. Use
+those reported facts. The code identifies this particular quote and must be
+copied exactly, including its prefix and digits. Do not replace it with a generic
+example, shorten it for presentation, infer it from a filename, or invent a new
+identifier. The original quote file may be removed before the task continues, so
+retain the actual reported code and amounts in the conversation.
+
+Arithmetic
+The subtotal means the number of units multiplied by the unit price, followed by
+one addition of the delivery charge. Delivery is charged once for the whole
+quote. It is not charged once for each unit. There is no tax, currency conversion,
+interest, service charge, or percentage discount in this exercise. Avoid adding
+those common commercial assumptions. Explain the multiplication and the delivery
+addition separately so a reviewer can distinguish a wrong quantity from a
+duplicated charge. State the resulting subtotal in ordinary decimal notation.
+
+Pending adjustment
+After review, apply a fixed discount of 11 to the subtotal. This is an absolute
+amount in the same units as the quote, not eleven percent and not eleven per
+item. Apply it once, after delivery has been included. The final total is the
+subtotal minus this discount. The review itself must leave the adjustment
+pending. Do not write the approval artifact or claim that implementation is
+finished merely because the arithmetic is straightforward. A later instruction
+will explicitly ask for that artifact after the session has been resumed.
+
+Required artifact
+When implementation is requested, write approved.json in the current workspace.
+It must be a JSON object with exactly four fields: code, subtotal, discount, and
+total. The code is a string. All three monetary values are JSON numbers. Do not
+put currency symbols, commas, explanatory labels, or units inside those numbers.
+Do not wrap the object in a Markdown fence or serialize it as a JSON string.
+Avoid additional fields such as status, notes, supplier, timestamp, or confidence;
+the consumer checks the complete object and does not accept unexpected fields.
+
+Review boundaries
+The child has already done the source-file reading. Do not ask it to repeat the
+same work or create a second agent merely to confirm its identity. The parent
+should now use the reported result and this checklist. If a required fact is
+missing, name the missing fact explicitly instead of silently substituting a
+default. A remembered task code is useful only if it is the actual code for this
+run. A plausible subtotal is not sufficient: it must match the arithmetic from
+the supplied quantity, unit price, and delivery charge.
+
+State to preserve
+The next session needs to know which source facts were obtained, what subtotal
+was calculated, what the user approved, and which work remains pending. Preserve
+the exact code and subtotal together with the fixed discount and the name of the
+output file. Keep completed delegation separate from pending implementation.
+There is no need to preserve every sentence of this checklist. Its rules can be
+condensed once their effect on the output is clear. Do not lose the distinction
+between a review response in the conversation and a file actually written to the
+workspace.
+
+Resuming the work
+The user will first accept the review, then compact the conversation, and finally
+ask the resumed session to finish. Treat that last request as continuation of
+this quote, not as a new quotation with newly chosen figures. The source files
+will no longer be available. Use retained context to produce the artifact and
+do not search the filesystem for a replacement source or infer values from
+unrelated files. A checkpoint that cannot retain the required facts should be
+reported as incomplete rather than concealed by fabricated data.
+
+Completion criteria
+The final artifact should allow a reader to check the code, the original
+subtotal, the single fixed adjustment, and the adjusted total directly. The
+review response can be concise, but it should identify the calculation and
+acknowledge that implementation is still pending. Once the file has actually
+been written, report its name and the resulting total. Keep this exercise local;
+no messages, orders, payments, or changes to external systems are required.

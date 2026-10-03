@@ -1,0 +1,285 @@
+name: Release nexusd-cohost
+
+# The daemon that hosts sudocode agents in-process — the artifact sudocloud
+# deploys. A SECOND product out of this repo, and deliberately on its own tag
+# namespace rather than riding `v*`:
+#
+#   * `v*` (and `nightly`) release `scode`, a CLI, on every patch. Republishing a
+#     ~40 MiB daemon for a CLI-only change is waste, and a nightly cadence for a
+#     production daemon is not a cadence anyone wants to deploy from.
+#   * a co-host build is a PAIRING — this sudocode and one nexus-vfs tag — and the
+#     pairing is what bit us: a daemon whose kernel rev differs from the agent
+#     runtime's is two `Kernel` types in one process. So the release names the
+#     nexus-vfs tag it was built against, read out of the workspace manifest at
+#     build time rather than typed into a release note.
+#
+# `nexusd-cluster` (nexus-vfs) is untouched by all of this and keeps its own slim
+# size budget; this is the bigger binary for nodes that host agents, not a
+# heavier version of that one.
+
+on:
+  push:
+    tags:
+      - 'nexusd-cohost-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-cohost-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The pod target. ubuntu-22.04 (glibc 2.35) to match the base
+          # `nexusd-cluster` releases from: the daemon loads plugin dylibs whose
+          # glibc floor is set by the runner that built THEM, and a co-host built
+          # on a newer glibc than the cluster it replaces would refuse them.
+          - name: linux-x64
+            os: ubuntu-22.04
+            bin: nexusd-cohost
+            package_dir: nexusd-cohost-linux-x64
+            archive_name: nexusd-cohost-linux-x64.tar.gz
+            max_size_bytes: 57671680  # 55 MiB — with model drivers: 54,701,888 bytes, 5.4% headroom
+          - name: linux-arm64
+            os: ubuntu-22.04-arm
+            bin: nexusd-cohost
+            package_dir: nexusd-cohost-linux-arm64
+            archive_name: nexusd-cohost-linux-arm64.tar.gz
+            max_size_bytes: 53477376  # 51 MiB — with model drivers: 51,190,552 bytes, 4.5% headroom
+          # Not for deployment — for the cross-machine duet, which runs a real
+          # co-host on a developer Mac and a developer Windows box. A daemon you
+          # cannot run on the machines you debug from is a daemon you debug by
+          # reading logs from somewhere else.
+          - name: macos-arm64
+            os: macos-15
+            bin: nexusd-cohost
+            package_dir: nexusd-cohost-macos-arm64
+            archive_name: nexusd-cohost-macos-arm64.tar.gz
+            max_size_bytes: 47185920  # 45 MiB — with model drivers: 44,696,464 bytes, 5.6% headroom
+          # Intel, because the Mac this project actually debugs from is Intel. The
+          # first cut of this matrix left it out reasoning "nothing runs a co-host
+          # there", and the cross-machine bring-up falsified that within the hour:
+          # `bad CPU type in executable`. A platform list is a claim about who runs
+          # this, and that claim is worth checking against the machines in the room
+          # rather than the ones in the design.
+          - name: macos-x64
+            os: macos-15-intel
+            bin: nexusd-cohost
+            package_dir: nexusd-cohost-macos-x64
+            archive_name: nexusd-cohost-macos-x64.tar.gz
+            max_size_bytes: 48234496  # 46 MiB — with model drivers: 46,141,528 bytes, 4.5% headroom
+          - name: windows-x64
+            os: windows-2022
+            bin: nexusd-cohost.exe
+            package_dir: nexusd-cohost-windows-x64
+            archive_name: nexusd-cohost-windows-x64.zip
+            max_size_bytes: 44040192  # 42 MiB — with model drivers: 42,127,872 bytes, 4.5% headroom
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      # raft-proto 0.7.0 / protobuf-build 0.14.1 rejects protoc >= 4.x with a
+      # faulty version check, so the pinned 3.20.2 is deliberate. Linux runners
+      # ship an accepted protoc in the base image; macOS and Windows have either
+      # none or one too new. (This is also why the `nexusd-cohost` bin sits behind
+      # `--features daemon`: without the gate every `--workspace` job on every PR
+      # would need this step.)
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        working-directory: .
+        run: |
+          set -euo pipefail
+          PROTOC_VERSION=3.20.2
+          case "$(uname -m)" in
+            arm64) ARCH=aarch_64 ;;
+            x86_64) ARCH=x86_64 ;;
+            *) echo "Unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          mkdir -p "$HOME/protoc"
+          curl -fsSL -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-osx-${ARCH}.zip"
+          unzip -o /tmp/protoc.zip -d "$HOME/protoc"
+          echo "$HOME/protoc/bin" >> "$GITHUB_PATH"
+          "$HOME/protoc/bin/protoc" --version
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: .
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $protocVersion = '3.20.2'
+          $protocDir = Join-Path $env:USERPROFILE 'protoc'
+          New-Item -ItemType Directory -Force -Path $protocDir | Out-Null
+          $zipPath = Join-Path $env:RUNNER_TEMP 'protoc.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri `
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${protocVersion}/protoc-${protocVersion}-win64.zip" `
+            -OutFile $zipPath
+          Expand-Archive -Force -Path $zipPath -DestinationPath $protocDir
+          $protocBinDir = Join-Path $protocDir 'bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $protocBinDir
+          Add-Content -Path $env:GITHUB_ENV -Value "PROTOC=$(Join-Path $protocBinDir 'protoc.exe')"
+          & "$(Join-Path $protocBinDir 'protoc.exe')" --version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      # `NEXUSD_BUILD_VERSION` is what `--version` prints after the binary's own
+      # name, so it is where this build states which revs it carries. Without it the
+      # daemon reports the version of the crate that owns the clap derive — the same
+      # number for every build of it, which reads as an answer while telling an
+      # operator nothing about the artifact in front of them.
+      #
+      # The artifact states these revs here and nowhere else, so there is no second
+      # copy to disagree with the binary.
+      - name: Stamp the build identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEXUS_VFS_TAG="$(grep -m1 -oE 'nexus-vfs", tag = "[^"]+"' Cargo.toml | sed 's/.*tag = "//; s/"//')"
+          # Strip the binary name the tag carries: clap prefixes the name itself, so
+          # `nexusd-cohost-v0.2.21` would print as `nexusd-cohost nexusd-cohost-v0.2.21`.
+          BUILD="${GITHUB_REF_NAME#nexusd-cohost-}"
+          echo "NEXUSD_BUILD_VERSION=${BUILD} (sudocode $(git rev-parse --short HEAD), nexus-vfs ${NEXUS_VFS_TAG})" >> "$GITHUB_ENV"
+
+      # `--locked`: a release artifact resolves to the revs the lockfile records and
+      # nothing else. That is the same discipline the pin serves — the daemon and the
+      # agent runtime inside it have to agree on one nexus-vfs.
+      - name: Build release binary
+        run: cargo build --locked --release -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost
+
+      # Asserted here because this is the only job where the stamp exists at all. The
+      # co-host gate already checks the NAME (`e2e/nexus-a2a/run-cohost.sh`), which
+      # lives in the code and cannot differ per platform; what only a release build
+      # can get wrong is the stamp. `NEXUSD_BUILD_VERSION` is read at COMPILE time, so
+      # a stamping step that lands after the build, an env var that fails to reach
+      # rustc, or a cache serving a binary compiled without it all produce a daemon
+      # that boots perfectly and names the wrong revs — the failure this whole stamp
+      # exists to prevent, arriving as a confident answer.
+      #
+      # Compared against the value this job computed rather than a re-derived one: a
+      # second spelling of the expected string is a second thing that can be wrong.
+      - name: The stamp reached the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$("target/release/${{ matrix.bin }}" --version)"
+          echo "$out"
+          case "$out" in
+            *"$NEXUSD_BUILD_VERSION"*) ;;
+            *) echo "::error::--version must carry the stamp '$NEXUSD_BUILD_VERSION', got: $out"; exit 1 ;;
+          esac
+
+      - name: Stage release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.package_dir }}"
+          cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+          # The archive carries the executable and nothing else. Provenance belongs in
+          # the binary, where `--version` keeps it: a text file answers "which revs is
+          # this?" only while it stays beside what it describes, and what gets copied
+          # to a pod, a laptop or /usr/local/bin is the executable. The pairing
+          # invariant — exactly one nexus-vfs rev in the graph — is the
+          # `one nexus-vfs pin` job, which is where an invariant belongs.
+          if [[ "${{ runner.os }}" != "Windows" ]]; then
+            chmod +x "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+            tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.package_dir }}"
+          else
+            (cd dist && 7z a -tzip "${{ matrix.archive_name }}" "${{ matrix.package_dir }}" >/dev/null)
+          fi
+          ls -la "dist/${{ matrix.archive_name }}"
+
+      # This binary gets its OWN budget, several times the slim `nexusd-cluster` one
+      # — it links an LLM agent runtime, so a cluster-sized cap here would fail on the
+      # first honest build and teach everyone to raise it. Separate numbers in separate
+      # repositories, because the two artifacts answer to different constraints:
+      # `nexusd-cluster` is the production daemon that must stay small (its budget lives
+      # in nexus-vfs, where it is built), and this is the node that hosts agents.
+      #
+      # A printed number was the previous state, and printing is not a gate — nobody
+      # diffs `du` output across releases, so the first build to double would have
+      # shipped. What a cap at ~4% headroom catches is the step change (a dependency
+      # arriving with a second TLS stack, an accidental `debug = true`) while leaving
+      # the ordinary drift of a moving runtime alone.
+      #
+      # Exact bytes, not `du`, which rounds to a block and cannot see a 200 KB move.
+      # Every cap in the matrix is measured on these same runners. The model-mount
+      # release enables driver-ai. Builds with model-mount routing measure roughly
+      # 2.4–2.7 MB above the previous daemon-only release baselines. The caps
+      # retain approximately 4–6% headroom above the measured feature-complete build.
+      - name: Check binary size
+        shell: bash
+        env:
+          MAX_SIZE_BYTES: ${{ matrix.max_size_bytes }}
+        run: |
+          set -euo pipefail
+          path="dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            actual=$(stat -f '%z' "$path")
+          else
+            actual=$(stat -c '%s' "$path")
+          fi
+          archive=$(wc -c < "dist/${{ matrix.archive_name }}" | tr -d ' ')
+          echo "binary: $actual bytes (max $MAX_SIZE_BYTES) · archive: $archive bytes"
+          if [[ "$actual" -gt "$MAX_SIZE_BYTES" ]]; then
+            echo "::error::${{ matrix.package_dir }} exceeds its size budget ($actual > $MAX_SIZE_BYTES bytes)"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package_dir }}
+          path: rust/dist/${{ matrix.archive_name }}
+
+  publish:
+    name: publish
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum nexusd-cohost-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/nexusd-cohost-*
+            dist/SHA256SUMS.txt
+          body: |
+            `nexusd-cohost` — the nexus cluster daemon with an in-process sudocode
+            agent runtime linked in. Every flag and boot path of `nexusd-cluster`;
+            the difference is one service declaration.
+
+            Ask the binary what it is — `nexusd-cohost --version` names this build,
+            the sudocode commit and the nexus-vfs tag it was linked against. That is
+            the provenance for reading a log or a bug report, and it travels with the
+            executable rather than beside it. The runtime and the kernel are linked
+            into the one binary, and that it holds exactly one nexus-vfs rev is
+            enforced by CI's `one nexus-vfs pin` job rather than by an operator.

@@ -172,7 +172,7 @@ fn git_init_write_commit_verify() {
     // case-insensitively: a live model names the tool `Bash`, and the tool
     // name's capitalisation is a presentation detail, not the behaviour under
     // test.
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     sess.expect("(?i)bash")
         .expect("should see bash tool call (agent trigger)");
 
@@ -180,7 +180,7 @@ fn git_init_write_commit_verify() {
     sess.expect("(?i)(commit|initial|committed|successfully|done|completed|alpha)")
         .expect("response should confirm completion");
 
-    sess.set_default_timeout(Duration::from_secs(120));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(120)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("git workflow should exit: {e}\nPTY screen:\n{screen}");

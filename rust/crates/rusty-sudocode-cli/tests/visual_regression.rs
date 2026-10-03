@@ -46,7 +46,28 @@ fn footer_hint_appears_in_repl() {
     sess.expect("read only")
         .expect("footer should show permission mode");
 
-    sess.send("/exit\r").expect("send /exit");
+    // The sync REPL prints the footer before read_line enters raw mode.
+    // Wait for the actual prompt, then observe the draft before submitting;
+    // otherwise early input can be lost during terminal initialization.
+    // ConPTY may emit the prompt before the footer in the byte stream, so
+    // inspect the screen instead of requiring a second prompt emission.
+    let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+    while !sess.render(|screen| screen.contents().contains('❯')) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "REPL prompt should appear; screen:\n{}",
+            sess.render(|screen| screen.raw().contents())
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    sess.send("/exit").expect("type /exit");
+    common::expect_input_line(
+        &sess,
+        "/exit",
+        common::DEFAULT_TIMEOUT,
+        "exit draft after footer",
+    );
+    sess.send("\r").expect("submit /exit");
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0);
 }

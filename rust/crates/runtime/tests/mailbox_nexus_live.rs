@@ -3,25 +3,36 @@
 //! thing they can't: that `ensure_stream` + `stream_write` + `stream_read_at`
 //! actually move an envelope through a real gRPC server and a real DT_STREAM.
 //!
-//! Run it with a daemon up (e.g. `nexusd-cluster serve-local --port 12022`):
+//! Run them through `e2e/nexus-a2a/run.sh`, which boots the daemon TLS-on and
+//! mints the bundle every test here needs. Driving one by hand takes both:
 //!
 //! ```text
-//! NEXUS_A2A_TEST_ENDPOINT=127.0.0.1:12022 \
-//!   cargo test -p runtime --test nexus_mailbox_live -- --ignored --nocapture
+//! NEXUS_A2A_TEST_ENDPOINT=https://127.0.0.1:2143 \
+//! NEXUS_A2A_TEST_CERT_DIR=<minted bundle> \
+//!   cargo test -p runtime --test mailbox_nexus_live -- --ignored --nocapture
 //! ```
 //!
-//! ## Both auth postures, one suite
+//! ## One dial, and the node decides who you are
 //!
-//! `dial` picks mTLS or plaintext from `NEXUS_A2A_TEST_CERT_DIR`, so every test
-//! here runs against an auth-off `serve-local` daemon AND against an auth-on
-//! federated one. Two rules follow, and breaking either produces a test that
-//! passes on one daemon and fails on the other for reasons that look like
-//! product bugs:
+//! `dial` is cert-only — `NEXUS_A2A_TEST_CERT_DIR` is mandatory, because the
+//! client has no plaintext dial left — so every harness here boots the daemon
+//! TLS-on and mints a bundle before running a line of this file. Three rules
+//! follow, and breaking any of them produces a test that fails for reasons that
+//! look like product bugs:
 //!
-//! * **Never assert the authored `from`.** Auth-on stamps it with the
-//!   authenticated identity; auth-off preserves what the sender wrote. Only
-//!   `live_authenticated_from_cannot_be_forged` may speak about `from`, and it
-//!   demands a bundle so it cannot run auth-off by accident.
+//! * **Never assert the authored `from`.** The node stamps it with the dialling
+//!   cert's agent id, and it does so in BOTH postures: `--insecure-no-auth`
+//!   makes authentication optional, not the stamp absent. (Measured against
+//!   v0.7.20. This doc used to say auth-off "preserves what the sender wrote",
+//!   which is what a bundle minted as `peer-x` disproves — the envelope arrives
+//!   authored by the cert.) Only `live_authenticated_from_cannot_be_forged` may
+//!   speak about `from`.
+//! * **Never mint a bundle named after an inbox a test READS.** Same stamp, read
+//!   side: a read skips `from == self_id` so a shared read/write stream never
+//!   echoes to its owner, so a probe dialling as the name it reads hides its own
+//!   write from itself. Nothing about that failure mentions certs — the dial
+//!   succeeds, the write is accepted, the stream's offset advances, and the
+//!   assertion reports `got []` with a cursor that moved.
 //! * **Never read a just-sent frame without blocking.** See
 //!   [`DELIVERY_WAIT_MS`].
 
@@ -54,17 +65,17 @@ fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
 /// the posture from the environment lets the SAME body assert the SAME property
 /// against both daemons.
 fn dial(endpoint: &str) -> Arc<NexusVfsClient> {
+    // Cert-only, like production: the test dials with a minted credential.
+    // `connect` does not read the agent name (the node reads identity off the
+    // cert handshake), but a credential is mandatory - there is no plaintext dial.
+    let dir = std::env::var("NEXUS_A2A_TEST_CERT_DIR")
+        .expect("set NEXUS_A2A_TEST_CERT_DIR=<minted bundle dir>");
+    let credential = runtime::nexus_mailbox::AgentCredential::load(&dir)
+        .unwrap_or_else(|e| panic!("load test credential: {e}"));
     runtime::nexus_mailbox::Config {
         endpoint: endpoint.to_string(),
-        // Dial-only: `connect` does not read the agent name. The identity that
-        // matters here is the CERT's, which the node reads off the handshake.
-        agent: String::new(),
-        peers: Vec::new(),
-        api_key: String::new(),
-        tls: std::env::var("NEXUS_A2A_TEST_CERT_DIR")
-            .ok()
-            .filter(|d| !d.is_empty())
-            .map(|dir| runtime::nexus_mailbox::TlsPaths::from_bundle_dir(&dir)),
+        agent: credential.agent,
+        tls: credential.tls,
     }
     .connect()
     .unwrap_or_else(|e| panic!("{e}"))
@@ -91,11 +102,6 @@ fn send_to(
 
 use runtime::mailbox::Mailbox;
 
-/// A counter, for names no other run and no sibling test can be using.
-///
-/// Not a clock: these tests are about the FIRST write to a path, and a
-/// timestamp coarse enough to repeat hands two runs the same name — after
-/// which the second proves nothing, because the path already exists.
 /// How long a test waits for a frame it has just sent to become readable.
 ///
 /// `send` returns once the write is accepted; the frame becomes readable when
@@ -113,6 +119,17 @@ use runtime::mailbox::Mailbox;
 /// only ever paid when something is genuinely wrong.
 const DELIVERY_WAIT_MS: u64 = 5_000;
 
+/// The counterpart name for probes that exercise the transport rather than a
+/// real exchange. A conversation needs two names even when only one side is
+/// under test, and a fixed one keeps those probes off any real agent's chat
+/// list.
+const PROBE_PEER: &str = "live-probe-peer";
+
+/// A counter, for names no other run and no sibling test can be using.
+///
+/// Not a clock: these tests are about the FIRST write to a path, and a
+/// timestamp coarse enough to repeat hands two runs the same name — after
+/// which the second proves nothing, because the path already exists.
 fn fresh() -> u64 {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nanos = std::time::SystemTime::now()
@@ -133,13 +150,13 @@ fn live_inbox_roundtrip() {
     let me = "scode-probe";
     // Provision our own inbox (idempotent) — the standalone self-provision path.
     mailbox(&client, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation("peer-x")
         .expect("ensure inbox");
 
     // Snapshot the tail so the assertion sees only the message we send below,
     // not any residue from a previous run of this probe.
     let (_history, start) = mailbox(&client, me, &auth)
-        .poll(0, 0)
+        .poll_conversation("peer-x", 0, 0)
         .expect("seek to tail");
 
     // A "peer" writes into our inbox (simulates the receive direction), then we
@@ -148,13 +165,16 @@ fn live_inbox_roundtrip() {
     send_to(&client, "peer-x", me, body, &auth).expect("send to inbox");
 
     let (msgs, next) = mailbox(&client, me, &auth)
-        .poll(start, DELIVERY_WAIT_MS)
+        .poll_conversation("peer-x", start, DELIVERY_WAIT_MS)
         .expect("poll new");
     assert!(next >= start, "cursor must not regress");
     assert!(
         // Body, not `from`: auth-on stamps the sender. See the module rule.
         msgs.iter().any(|m| m.body == body),
-        "expected the sent envelope back, got {msgs:?}"
+        "expected the sent envelope back reading from {start}, got {msgs:?} \
+         (next={next}). A transcript this probe has written to before starts at \
+         a non-zero offset, so this also fails when the read position and the \
+         append disagree about what an offset counts."
     );
 }
 
@@ -182,19 +202,19 @@ fn live_blocking_read_wakes_on_write() {
 
     let me = "scode-blocking-read-probe";
     mailbox(&client, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation("peer-block")
         .expect("ensure inbox");
     // Fix the cursor at the current tail so the assertions see only what we
     // write below, not residue from a previous run.
     let (_history, tail) = mailbox(&client, me, &auth)
-        .poll(0, 0)
+        .poll_conversation("peer-block", 0, 0)
         .expect("seek to tail");
 
     // Negative path: an idle inbox with no writer must block for the whole
     // timeout and return EMPTY at the deadline — never hang, never early-return.
     let t0 = Instant::now();
     let (idle_msgs, idle_next) = mailbox(&client, me, &auth)
-        .poll(tail, 800)
+        .poll_conversation("peer-block", tail, 800)
         .expect("idle blocking read");
     let idle_elapsed = t0.elapsed();
     assert!(
@@ -226,7 +246,7 @@ fn live_blocking_read_wakes_on_write() {
 
     let t1 = Instant::now();
     let (msgs, next) = mailbox(&client, me, &auth)
-        .poll(tail, 5_000)
+        .poll_conversation("peer-block", tail, 5_000)
         .expect("armed blocking read");
     let woke = t1.elapsed();
     writer.join().expect("writer thread");
@@ -296,7 +316,7 @@ fn live_cohost_reads_its_inbox_and_replies() {
     // From where the operator's inbox is NOW, so the reply found below is this
     // run's rather than a previous one's.
     let (_history, before) = mailbox(&client, &reply_to, &auth)
-        .poll(0, 0)
+        .poll_conversation(&agent, 0, 0)
         .expect("seek the operator's inbox to its tail");
 
     // The marker is what makes the agent's turn scripted. Without it the mock
@@ -310,7 +330,7 @@ fn live_cohost_reads_its_inbox_and_replies() {
     let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let (msgs, _next) = mailbox(&client, &reply_to, &auth)
-            .poll(before, 0)
+            .poll_conversation(&agent, before, 0)
             .expect("read the operator's inbox");
         if let Some(reply) = msgs.iter().find(|m| m.from == agent) {
             assert!(
@@ -361,15 +381,15 @@ fn live_send_provisions_an_inbox_that_never_existed() {
     // Blocking, not a bare read: see `DELIVERY_WAIT_MS`. Provisioning plus the
     // first append is the most apply-latency-sensitive path in this file.
     let (msgs, _next) = mailbox(&client, &never_ran, &auth)
-        .poll(0, DELIVERY_WAIT_MS)
+        .poll_conversation("offline-probe", 0, DELIVERY_WAIT_MS)
         .expect("the recipient must be able to read its own inbox");
-    // Delivery is the claim; the SENDER's name deliberately is not. Under
-    // auth-on the node overwrites the authored `from` with the authenticated
-    // identity, so pinning "offline-probe" here asserted the auth-OFF posture as
-    // a side effect and failed against every mTLS daemon — with the envelope
-    // sitting right there in the failure message. What `from` must contain has
-    // its own test (`live_authenticated_from_cannot_be_forged`); this one is
-    // about a message waiting for a reader who has never run.
+    // Delivery is the claim; the SENDER's name deliberately is not. The node
+    // overwrites the authored `from` with the dialling cert's identity, so
+    // pinning "offline-probe" here asserted a posture no daemon serves and
+    // failed against every one of them — with the envelope sitting right there
+    // in the failure message. What `from` must contain has its own test
+    // (`live_authenticated_from_cannot_be_forged`); this one is about a message
+    // waiting for a reader who has never run.
     assert!(
         msgs.iter().any(|m| m.body == body),
         "the envelope must be readable by the recipient, got {msgs:?}"
@@ -379,17 +399,25 @@ fn live_send_provisions_an_inbox_that_never_existed() {
     // write: provisioning it again is what failed with `entry_type immutable`
     // once a plain entry had been created at the path.
     mailbox(&client, &never_ran, &auth)
-        .ensure_inbox()
+        .ensure_conversation("offline-probe")
         .expect("the inbox must be a stream the recipient can still provision");
 }
 
 /// Under auth-on the daemon decides who a message is FROM.
 ///
 /// `from` is an address — the convention turns it straight back into a path —
-/// so a forgeable one is a way to make replies go somewhere else. Auth-off
-/// cannot show this: the stamp hook is fail-open there, and the authored value
-/// is preserved by design, which is why the other tests in this file assert the
-/// value they wrote.
+/// so a forgeable one is a way to make replies go somewhere else.
+///
+/// What auth-off cannot show is not the stamp. The stamp is there too: measured
+/// against v0.7.20, a client dialling an `--insecure-no-auth` node still has its
+/// frames stamped with its cert's agent id, because the flag makes
+/// authentication optional rather than the stamp absent. (This doc used to say
+/// the hook was "fail-open there, and the authored value preserved by design",
+/// and that the other tests therefore "assert the value they wrote" — they do
+/// not, and cannot: they read back a `from` they never authored.) What auth-on
+/// adds is the posture the stamp is CONTRACTUAL in: an identity recorded under
+/// `--insecure-no-auth` is not an identity required, and one a node applies
+/// without requiring guarantees nothing.
 ///
 /// Here the client holds a minted agent cert and authors a DIFFERENT name. The
 /// envelope that lands must carry the cert's identity, because the node
@@ -406,9 +434,10 @@ fn live_send_provisions_an_inbox_that_never_existed() {
 fn live_authenticated_from_cannot_be_forged() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
-    // Asserted rather than merely used: `dial` falls back to plaintext when no
-    // bundle is named, and a plaintext run of THIS test would pass against a
-    // daemon that stamps nothing — green, and proving the opposite of the point.
+    // Asserted rather than merely used, and it is the IDENTITY that needs the
+    // guard: `dial` already fails without a bundle, but a bundle whose agent id
+    // is not `NEXUS_A2A_TEST_IDENTITY` makes this test assert the wrong name.
+    // The pair has to come from one mint.
     std::env::var("NEXUS_A2A_TEST_CERT_DIR")
         .expect("set NEXUS_A2A_TEST_CERT_DIR=<bundle dir>; without mTLS this asserts nothing");
     let identity = std::env::var("NEXUS_A2A_TEST_IDENTITY")
@@ -428,7 +457,7 @@ fn live_authenticated_from_cannot_be_forged() {
 
     // Blocking, not a bare read: see `DELIVERY_WAIT_MS`.
     let (msgs, _next) = mailbox(&client, &recipient, "")
-        .poll(0, DELIVERY_WAIT_MS)
+        .poll_conversation(claimed, 0, DELIVERY_WAIT_MS)
         .expect("read the recipient's inbox");
     let delivered = msgs
         .iter()
@@ -483,10 +512,10 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
 
     let me = "scode-cross-node-probe";
     mailbox(&client, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation("peer-node")
         .expect("ensure inbox on this node");
     let (_history, tail) = mailbox(&client, me, &auth)
-        .poll(0, 0)
+        .poll_conversation("peer-node", 0, 0)
         .expect("seek to tail");
 
     // The inbox has to be visible from the peer node before a write there can
@@ -496,7 +525,10 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
     let peer = dial(&peer_endpoint);
     let replicated = Instant::now();
     loop {
-        if mailbox(&peer, me, &auth).poll(0, 0).is_ok() {
+        if mailbox(&peer, me, &auth)
+            .poll_conversation("peer-node", 0, 0)
+            .is_ok()
+        {
             break;
         }
         assert!(
@@ -512,7 +544,7 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
     // a read that never parked look identical.
     let t0 = Instant::now();
     let (idle_msgs, idle_next) = mailbox(&client, me, &auth)
-        .poll(tail, 800)
+        .poll_conversation("peer-node", tail, 800)
         .expect("idle blocking read");
     let idle_elapsed = t0.elapsed();
     assert!(
@@ -538,7 +570,7 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
 
     let t1 = Instant::now();
     let (msgs, next) = mailbox(&client, me, &auth)
-        .poll(tail, 8_000)
+        .poll_conversation("peer-node", tail, 8_000)
         .expect("armed blocking read");
     let woke = t1.elapsed();
     writer.join().expect("writer thread");
@@ -562,6 +594,66 @@ fn live_blocking_read_wakes_on_a_peer_nodes_write() {
         "a write on {peer_endpoint} woke a tail parked on {endpoint} after {woke:?} \
          (idle timeout was {idle_elapsed:?})"
     );
+
+    // A parked reader alone misses the apply/read lock inversion: apply then
+    // races only a sleeping condvar, never the backend read under its lock.
+    // Keep four tails crossing their read/wait boundary while the other node
+    // commits fresh frames. Every reader must see every body in order.
+    const FRAMES: usize = 128;
+    const READERS: usize = 4;
+    let nonce = fresh();
+    let expected: Vec<_> = (0..FRAMES)
+        .map(|i| format!("replicated-{nonce}-{i}"))
+        .collect();
+    let ready = Arc::new(std::sync::Barrier::new(READERS + 1));
+    let readers: Vec<_> = (0..READERS)
+        .map(|_| {
+            let client = Arc::clone(&client);
+            let auth = auth.clone();
+            let ready = Arc::clone(&ready);
+            thread::spawn(move || {
+                let inbox = mailbox(&client, me, &auth);
+                let mut cursor = next;
+                let mut received = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(30);
+                ready.wait();
+                while received.len() < FRAMES {
+                    assert!(Instant::now() < deadline, "replication stopped at {cursor}");
+                    let (frames, at) = inbox
+                        .poll_conversation("peer-node", cursor, 1)
+                        .expect("concurrent replicated tail must not deadlock");
+                    received.extend(frames.into_iter().map(|frame| frame.body));
+                    cursor = at;
+                }
+                (received, cursor)
+            })
+        })
+        .collect();
+    ready.wait();
+    for body in &expected {
+        send_to(&peer, "peer-node", me, body, &auth).expect("append during concurrent tails");
+    }
+    let mut end = next;
+    for reader in readers {
+        let (received, cursor) = reader.join().expect("tail reader");
+        assert_eq!(
+            received, expected,
+            "every reader must see the complete ordered transcript"
+        );
+        assert_eq!(cursor, next + FRAMES as u64);
+        end = cursor;
+    }
+
+    // Write an acknowledgement from the receiving node and read it on the
+    // original sender: replication must still make progress in both directions.
+    let ack = format!("ack-{nonce}-{FRAMES}");
+    send_to(&client, me, "peer-node", &ack, &auth).expect("acknowledge replicated batch");
+    let (acknowledgements, _) = mailbox(&peer, "peer-node", &auth)
+        .poll_conversation(me, end, DELIVERY_WAIT_MS)
+        .expect("read acknowledgement on original sender");
+    assert_eq!(acknowledgements.len(), 1);
+    assert_eq!(acknowledgements[0].body, ack);
+    println!("{READERS} concurrent tails read all {FRAMES} ordered frames; reverse acknowledgement arrived");
 }
 
 /// Guard the concurrent-dispatch property that lets the receiver share the ONE
@@ -586,10 +678,10 @@ fn live_blocking_read_does_not_stall_shared_client() {
     let me = "scode-starve-probe";
     let shared = dial(&endpoint);
     mailbox(&shared, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation(PROBE_PEER)
         .expect("ensure inbox");
     let (_history, tail) = mailbox(&shared, me, &auth)
-        .poll(0, 0)
+        .poll_conversation(PROBE_PEER, 0, 0)
         .expect("seek to tail");
 
     // Park a 1.5s blocking read on the SHARED client (no writer → it holds its
@@ -598,7 +690,7 @@ fn live_blocking_read_does_not_stall_shared_client() {
         let shared = Arc::clone(&shared);
         let auth = auth.clone();
         thread::spawn(move || {
-            let _ = mailbox(&shared, me, &auth).poll(tail, 1_500);
+            let _ = mailbox(&shared, me, &auth).poll_conversation(PROBE_PEER, tail, 1_500);
         })
     };
     thread::sleep(Duration::from_millis(150)); // let the blocking read park
@@ -629,12 +721,21 @@ fn live_ensure_inbox() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let inbox = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
+    // The PEER matters, not just the inbox. A conversation is addressed by its
+    // pair, and a receiver arms its tail on the conversations its chat list
+    // names at startup — so provisioning `<agent>`↔`PROBE_PEER` and then sending
+    // from someone else leaves the receiver parked on a conversation nobody
+    // speaks in. That is a reader at offset 0 with a valid lease and no message,
+    // which reads exactly like a receive loop that never woke.
+    let peer = std::env::var("NEXUS_A2A_TEST_PEER").unwrap_or_else(|_| PROBE_PEER.to_string());
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
     let client = dial(&endpoint);
+    // One call provisions BOTH sides: `ensure_conversation` files a chat-list
+    // entry under each name.
     mailbox(&client, &inbox, &auth)
-        .ensure_inbox()
+        .ensure_conversation(&peer)
         .expect("ensure inbox");
-    println!("ensured /agents/{inbox}/chat-with-me");
+    println!("ensured the {inbox}<->{peer} conversation");
 }
 
 /// Spawn a co-host responder agent in a running `nexusd-cluster-cohost` daemon
@@ -706,7 +807,7 @@ fn live_peer_markup_is_inert_in_a_prompt() {
 
     // Blocking, not a bare read: see `DELIVERY_WAIT_MS`.
     let (msgs, _next) = mailbox(&client, &recipient, &auth)
-        .poll(0, DELIVERY_WAIT_MS)
+        .poll_conversation("markup-prober", 0, DELIVERY_WAIT_MS)
         .expect("read the recipient's inbox");
     let delivered = msgs
         .iter()
@@ -749,23 +850,27 @@ fn live_peer_markup_is_inert_in_a_prompt() {
 /// ```
 #[test]
 #[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_INBOX"]
-fn live_collect_inbox() {
+fn live_collect_conversations() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
-    let inbox = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
+    let agent = std::env::var("NEXUS_A2A_TEST_INBOX").expect("set NEXUS_A2A_TEST_INBOX=<agent>");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
     let client = dial(&endpoint);
 
-    // poll_new reads inbox_path(self_agent), so pass the target inbox name.
-    // Its self-filter only drops the inbox owner's OWN writes (none here) —
-    // a peer's stamped envelope (e.g. from a real scode send) still surfaces.
-    let (msgs, next) = mailbox(&client, &inbox, &auth).poll(0, 0).expect("collect");
-    println!(
-        "inbox /agents/{inbox}/chat-with-me — {} message(s), tail={next}",
-        msgs.len()
-    );
-    for m in &msgs {
-        println!("  from={:?} body={:?}", m.from, m.body);
+    // Exactly what the receiver enumerates: the chat list first, then each
+    // transcript. "Read the inbox" is no longer one question - an agent has one
+    // conversation per peer, and WHICH peers those are is the first thing worth
+    // printing when a duet looks silent. An empty chat list and an empty
+    // transcript are different diagnoses.
+    let mb = mailbox(&client, &agent, &auth);
+    let peers = mb.list_conversations().expect("list conversations");
+    println!("{agent} has {} conversation(s): {peers:?}", peers.len());
+    for peer in &peers {
+        let msgs = mb.read_conversation(peer).expect("read conversation");
+        println!("  with {peer} - {} message(s)", msgs.len());
+        for m in &msgs {
+            println!("    from={:?} body={:?}", m.from, m.body);
+        }
     }
 }
 
@@ -789,9 +894,23 @@ fn live_collect_inbox() {
 /// returns an `Err` instead of parking is the bound working; that a poll AFTER
 /// `SIGCONT` succeeds is the recovery, which is what makes the receive loop
 /// self-healing rather than permanently deaf.
+///
+/// Windows has no such fault to inject, and the skip is HERE rather than in the
+/// harness because the harness cannot tell: MSYS `kill -STOP` exits 0 and
+/// suspends nothing, so the daemon keeps answering, the poll returns
+/// `Ok(([], 0))`, and the assertion below fails claiming the bound is broken on
+/// a platform where the fault was never injected.
 #[test]
 #[ignore = "requires a running nexusd-cluster the harness can stop; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_DAEMON_PID"]
 fn live_a_silent_server_errors_and_then_recovers() {
+    if cfg!(windows) {
+        eprintln!(
+            "SKIP(silent server): no SIGSTOP that leaves the socket open — \
+             MSYS `kill -STOP` succeeds and suspends nothing"
+        );
+        return;
+    }
+
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let pid: i32 = std::env::var("NEXUS_A2A_TEST_DAEMON_PID")
@@ -804,10 +923,10 @@ fn live_a_silent_server_errors_and_then_recovers() {
     let me = "scode-silent-server-probe";
     let client = dial(&endpoint);
     mailbox(&client, me, &auth)
-        .ensure_inbox()
+        .ensure_conversation(PROBE_PEER)
         .expect("ensure inbox");
     let (_history, tail) = mailbox(&client, me, &auth)
-        .poll(0, 0)
+        .poll_conversation(PROBE_PEER, 0, 0)
         .expect("seek to tail while the daemon still answers");
 
     // A short blocking wait: the deadline derives from it, so the bound under
@@ -816,7 +935,7 @@ fn live_a_silent_server_errors_and_then_recovers() {
 
     signal(pid, "STOP");
     let stopped_at = Instant::now();
-    let result = mailbox(&client, me, &auth).poll(tail, WAIT_MS);
+    let result = mailbox(&client, me, &auth).poll_conversation(PROBE_PEER, tail, WAIT_MS);
     let elapsed = stopped_at.elapsed();
     // Resume before asserting: a panic here must not leave the daemon stopped
     // for the rest of the harness run.
@@ -854,7 +973,7 @@ fn live_a_silent_server_errors_and_then_recovers() {
     // in-flight RPC it abandoned may still be draining.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        match mailbox(&client, me, &auth).poll(tail, WAIT_MS) {
+        match mailbox(&client, me, &auth).poll_conversation(PROBE_PEER, tail, WAIT_MS) {
             Ok((_msgs, next)) => {
                 assert_eq!(next, tail, "an idle poll must not move the cursor");
                 println!("recovered: a poll after SIGCONT succeeded at cursor {next}");
@@ -879,4 +998,417 @@ fn signal(pid: i32, sig: &str) {
         .status()
         .unwrap_or_else(|e| panic!("could not run kill -{sig} {pid}: {e}"));
     assert!(status.success(), "kill -{sig} {pid} failed: {status}");
+}
+
+/// Discovery, from BOTH nodes. The live failure this guards was not "nobody was
+/// listed" — it was that each node listed a DIFFERENT set: Windows saw `mac-ai` and
+/// not `operator`, the Mac saw `operator` and not `mac-ai`, while `stat` found all
+/// of them from either machine. A single-node test cannot see that class at all, so
+/// the assertion has to be made twice, once per endpoint.
+///
+/// The set is asserted EXACTLY, not by `contains`: the same enumeration used to
+/// offer a zone's own storage directories (`raft`, `sm`) as addressable peers, and
+/// "everyone I announced is present" would pass while `raft` sat in the list beside
+/// them.
+///
+/// Needs a two-node cluster; `e2e/nexus-a2a/run-cross-node.sh` stands one up.
+#[test]
+#[ignore = "requires a two-node cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_PEER_ENDPOINT"]
+fn live_agent_list_sees_every_peer_from_either_node() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let peer_endpoint = std::env::var("NEXUS_A2A_TEST_PEER_ENDPOINT")
+        .expect("set NEXUS_A2A_TEST_PEER_ENDPOINT to the OTHER node");
+    assert_ne!(
+        endpoint, peer_endpoint,
+        "both endpoints name the same node, which proves nothing about replication"
+    );
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let here = dial(&endpoint);
+    let there = dial(&peer_endpoint);
+
+    // Two agents, each announcing itself through a DIFFERENT node — which is the
+    // asymmetry the duet had, and the one a single-node run cannot produce.
+    let run = fresh();
+    let local_agent = format!("disco-local-{run}");
+    let remote_agent = format!("disco-remote-{run}");
+    mailbox(&here, &local_agent, &auth)
+        .ensure_presence()
+        .expect("announce the local agent on this node");
+    mailbox(&there, &remote_agent, &auth)
+        .ensure_presence()
+        .expect("announce the remote agent on the other node");
+
+    // Replication is not instantaneous; poll rather than sleep a guess, and fail
+    // with what each node actually returned.
+    for (label, client) in [("this node", &here), ("the other node", &there)] {
+        let mut listed = Vec::new();
+        let deadline = Instant::now() + Duration::from_millis(DELIVERY_WAIT_MS);
+        while Instant::now() < deadline {
+            listed = mailbox(client, &local_agent, &auth)
+                .list_recipients()
+                .expect("enumerate agents");
+            if listed.contains(&local_agent) && listed.contains(&remote_agent) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let mut mine: Vec<String> = listed
+            .iter()
+            .filter(|n| n.ends_with(&run.to_string()))
+            .cloned()
+            .collect();
+        mine.sort();
+        let mut expected = vec![local_agent.clone(), remote_agent.clone()];
+        expected.sort();
+        assert_eq!(
+            mine, expected,
+            "{label} must list both agents, whichever node they announced through; \
+             the full listing was {listed:?}"
+        );
+        for not_an_agent in ["raft", "sm"] {
+            assert!(
+                !listed.iter().any(|n| n == not_an_agent),
+                "{label} offered {not_an_agent} as a peer — the zone's own storage is \
+                 not an agent; the full listing was {listed:?}"
+            );
+        }
+    }
+}
+
+/// Provision the operator's model route over the same authenticated gRPC bind.
+#[test]
+#[ignore = "requires the co-host daemon and model mount environment"]
+fn live_mount_cohost_model() {
+    let client = model_operator();
+    let params = [
+        (
+            "base_url".to_string(),
+            std::env::var("NEXUS_A2A_MODEL_URL").expect("model endpoint"),
+        ),
+        (
+            "api_key".to_string(),
+            std::env::var("NEXUS_A2A_MODEL_KEY").unwrap_or_else(|_| "mock-key-unused".to_string()),
+        ),
+        (
+            "blob_root".to_string(),
+            std::env::var("NEXUS_A2A_MODEL_STORAGE").expect("model storage"),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    client
+        .setattr(nexus_vfs_client::proto::SetattrRequest {
+            path: "/model".to_string(),
+            entry_type: 2,
+            backend_type: "anthropic".to_string(),
+            backend_name: "cohost-model".to_string(),
+            zone_id: std::env::var("NEXUS_A2A_MODEL_ZONE").expect("model zone"),
+            backend_params: params,
+            ..Default::default()
+        })
+        .expect("mount the model through authenticated Setattr");
+}
+
+fn model_operator() -> NexusVfsClient {
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("endpoint");
+    // Mount creation is an operator operation. The harness owns the founder's
+    // node credential; the agent bundle used by the other tests grants no admin.
+    let tls = std::path::PathBuf::from(
+        std::env::var("NEXUS_A2A_MODEL_TLS_DIR").expect("node TLS directory"),
+    );
+    NexusVfsClient::connect_tls(
+        &endpoint,
+        std::fs::read(tls.join("ca.pem")).unwrap(),
+        std::fs::read(tls.join("node.pem")).unwrap(),
+        std::fs::read(tls.join("node-key.pem")).unwrap(),
+        "nexus-node",
+    )
+    .expect("operator mTLS connection")
+}
+
+/// Exercise sub-agent context through a real daemon and its model mount. The
+/// provider scripts delegation; the assertions inspect what the child actually
+/// sent, including fresh VFS memory and a conflicting host instruction file.
+#[test]
+#[ignore = "requires the mock co-host daemon: e2e/nexus-a2a/run-cohost.sh"]
+fn live_cohost_subagent_context() {
+    use serde_json::{json, Value};
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").unwrap();
+    let agent = format!("{}-context", std::env::var("NEXUS_A2A_TEST_INBOX").unwrap());
+    let user = std::env::var("NEXUS_A2A_TEST_REPLY_TO").unwrap();
+    let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
+    let client = dial(&endpoint);
+    let operator = model_operator();
+    let mb = mailbox(&client, &user, "");
+    mb.ensure_conversation(&agent).unwrap();
+
+    let memory_marker = format!("VFS-MEMORY-{}", fresh());
+    let memory_root = format!("/agents/{agent}/memory/agent-memory/general-purpose");
+    operator
+        .write(
+            &format!("{memory_root}/MEMORY.md"),
+            format!("# Project context\nFixture marker: {memory_marker}\n").into_bytes(),
+            "",
+        )
+        .unwrap();
+    let shell = std::path::PathBuf::from(std::env::var("SUDO_CODE_CONFIG_HOME").unwrap())
+        .join("agents")
+        .join(&agent)
+        .join("shell");
+    std::fs::create_dir_all(&shell).unwrap();
+    let host_marker = format!("HOST-INSTRUCTIONS-{}", fresh());
+    let host_instructions = shell.join("AGENTS.md");
+    assert!(
+        !host_instructions.exists(),
+        "fixture must use a fresh agent"
+    );
+    std::fs::write(&host_instructions, &host_marker).unwrap();
+
+    let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
+    let started: Value = serde_json::from_slice(
+        &client
+            .call(
+                "managed_agent.start_session_v1",
+                payload.to_string().as_bytes(),
+                "",
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
+    send_to(
+        &client,
+        &user,
+        &agent,
+        "Delegate the calculation and send its result. PARITY_SCENARIO:cohost_delegate",
+        "",
+    )
+    .unwrap();
+    let reply = wait_live_reply(&mb, &agent, &mut cursor, "\"status\"");
+    let result: Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(result["status"], "completed", "{reply}");
+    assert_eq!(result["result"], "203");
+
+    let requests: Vec<Value> = operator
+        .readdir("/model", "")
+        .unwrap()
+        .iter()
+        .filter(|e| e.name.ends_with(".prompt"))
+        .map(|e| {
+            serde_json::from_slice(&operator.read(&listed_path("/model", &e.name), "").unwrap())
+                .unwrap()
+        })
+        .collect();
+    let child = requests
+        .iter()
+        .find(|r| {
+            r["body"]["system"]
+                .to_string()
+                .contains("background sub-agent of type `general-purpose`")
+        })
+        .expect("capture the child's own request through Nexus");
+    let system = child["body"]["system"].to_string();
+    assert!(
+        system.contains(&memory_marker),
+        "child must receive its own VFS memory, not host memory"
+    );
+    assert!(
+        !system.contains(&host_marker),
+        "host shell instructions must not become VFS workspace instructions"
+    );
+    let workspace = started["workspace_path"]
+        .as_str()
+        .unwrap()
+        .trim_end_matches('/');
+    assert!(
+        system.contains(&format!("Working directory: {workspace}")),
+        "child must name the same VFS workspace as its file tools"
+    );
+    assert!(
+        system.contains("Your files and your shell are in different places"),
+        "child must know where its host-side shell runs"
+    );
+    // Windows joins in the memory loader may use backslashes in displayed
+    // paths; the marker above proves the lookup succeeded on the VFS anyway.
+    assert!(system.replace("\\\\", "/").contains(&memory_root));
+    assert_eq!(child["nexus_http"]["path"], "v1/messages");
+
+    let cancel = json!({"session_id":started["session_id"],"mode":"session"});
+    client
+        .call("managed_agent.cancel_v1", cancel.to_string().as_bytes(), "")
+        .unwrap();
+    println!("COHOST CONTEXT: delegated result, VFS memory, workspace and host isolation verified");
+}
+
+/// Real daemon + real model: a child reads fresh VFS data, the parent writes a
+/// result, then a second mailbox turn consumes it. Inspect native requests in
+/// /model as well as artifacts, so direct HTTP cannot satisfy the acceptance.
+#[test]
+#[ignore = "funded model and fresh daemon: NEXUS_A2A_MODEL_LIVE=1 e2e/nexus-a2a/run-cohost.sh"]
+fn live_cohost_model_workflow() {
+    use serde_json::{json, Value};
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").unwrap();
+    let agent = std::env::var("NEXUS_A2A_TEST_INBOX").unwrap();
+    let user = std::env::var("NEXUS_A2A_TEST_REPLY_TO").unwrap();
+    let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
+    println!("LIVE COHOST: connecting agent and operator");
+    let client = dial(&endpoint);
+    let operator = model_operator();
+    let mb = mailbox(&client, &user, "");
+    println!("LIVE COHOST: ensuring conversation");
+    mb.ensure_conversation(&agent).unwrap();
+    // /proc contains process metadata. Store task files under this agent's
+    // replicated content mount, and verify the fixture before asking for work.
+    let data = format!("/agents/{agent}/quote-review-{}", fresh());
+    let code = format!("BATCH-{}", fresh());
+    let units = fresh() % 17 + 9;
+    let total = units * 29 + 47;
+    let quote = format!("Code: {code}\nUnits: {units}\nUnit price: 29\nDelivery: 47\nSubtotal = units * unit price + delivery.\n");
+    operator
+        .write(&format!("{data}/quote.txt"), quote.as_bytes().to_vec(), "")
+        .unwrap();
+    assert_eq!(
+        operator.read(&format!("{data}/quote.txt"), "").unwrap(),
+        quote.as_bytes()
+    );
+    let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
+    println!("LIVE COHOST: starting managed session");
+    let started: Value = serde_json::from_slice(
+        &client
+            .call(
+                "managed_agent.start_session_v1",
+                payload.to_string().as_bytes(),
+                "",
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let workspace = &data;
+    println!("LIVE COHOST: fresh quote mounted at {workspace}");
+    let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
+    println!("LIVE COHOST: sending delegation turn");
+    send_to(&client, &user, &agent,
+        &format!("Please prepare our sample quote for review. Delegate this complete task to one Explore agent: read {workspace}/quote.txt, calculate units times unit price plus delivery, and report both the quote code and the calculated numeric subtotal. The calculation and its reported result are part of the child's task. After the child finishes, use its result to save {workspace}/result.json with exactly code and subtotal fields (subtotal a JSON number). Reply with the quote code and subtotal once the file is saved."), "").unwrap();
+    let first = wait_live_reply(&mb, &agent, &mut cursor, &code);
+    assert!(first.contains(&total.to_string()), "{first}");
+    let result: Value =
+        serde_json::from_slice(&operator.read(&format!("{data}/result.json"), "").unwrap())
+            .unwrap();
+    assert_eq!(result, json!({"code":code,"subtotal":total}));
+    send_to(&client, &user, &agent,
+        &format!("Read {workspace}/result.json with the file tool, add a fee of 13 to its subtotal, and write {workspace}/final.json with exactly code and total fields. Reply with the code, final total, and FINAL_COMPLETE after saving."), "").unwrap();
+    let final_reply = wait_live_reply(&mb, &agent, &mut cursor, "FINAL_COMPLETE");
+    assert!(
+        final_reply.contains(&code) && final_reply.contains(&(total + 13).to_string()),
+        "{final_reply}"
+    );
+    let result: Value =
+        serde_json::from_slice(&operator.read(&format!("{data}/final.json"), "").unwrap()).unwrap();
+    assert_eq!(result, json!({"code":code,"total":total + 13}));
+
+    verify_live_child(&operator, &agent, &model, &code, total);
+    verify_live_model_requests(&operator);
+    let cancel = json!({"session_id":started["session_id"],"mode":"session"});
+    client
+        .call("managed_agent.cancel_v1", cancel.to_string().as_bytes(), "")
+        .unwrap();
+}
+
+fn verify_live_child(operator: &NexusVfsClient, agent: &str, model: &str, code: &str, total: u64) {
+    let root = format!("/agents/{agent}/subagents");
+    let children: Vec<serde_json::Value> = operator
+        .readdir(&root, "")
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            std::path::Path::new(&e.name)
+                .extension()
+                .is_some_and(|x| x == "json")
+        })
+        .map(|e| {
+            serde_json::from_slice(&operator.read(&listed_path(&root, &e.name), "").unwrap())
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(children.len(), 1, "must actually delegate once");
+    let child = &children[0];
+    assert_eq!(child["model"], model);
+    assert_eq!(child["status"], "completed", "{child}");
+    let result = child["result"].as_str().expect("child result");
+    assert!(
+        result.contains(code) && result.contains(&total.to_string()),
+        "{result}"
+    );
+}
+
+fn verify_live_model_requests(operator: &NexusVfsClient) {
+    use serde_json::Value;
+    let requests: Vec<Value> = operator
+        .readdir("/model", "")
+        .unwrap()
+        .iter()
+        .filter(|e| e.name.ends_with(".prompt"))
+        .map(|e| {
+            serde_json::from_slice(&operator.read(&listed_path("/model", &e.name), "").unwrap())
+                .unwrap()
+        })
+        .collect();
+    assert!(
+        requests.len() >= 5,
+        "parent, child and follow-up must cross the model mount"
+    );
+    assert!(requests
+        .iter()
+        .all(|r| r["nexus_http"]["path"] == "v1/messages"));
+    let delegated = requests.iter().any(|r| {
+        let text = r["body"]["messages"].to_string();
+        let tools = r["body"]["tools"].as_array().expect("native tools");
+        text.contains("quote.txt")
+            && tools.iter().any(|t| t["name"] == "read_file")
+            && tools
+                .iter()
+                .all(|t| t["name"] != "agent_spawn" && t["name"] != "bash")
+    });
+    assert!(
+        delegated,
+        "must capture the child's own native model request"
+    );
+    assert!(requests
+        .iter()
+        .any(|r| r["body"].to_string().contains("FINAL_COMPLETE")));
+    println!("LIVE COHOST: fresh child calculation, two persisted artifacts, second mailbox turn; {} Nexus model requests", requests.len());
+}
+
+fn listed_path(parent: &str, name: &str) -> String {
+    if name.starts_with('/') {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+fn wait_live_reply(mb: &Mailbox, agent: &str, cursor: &mut u64, marker: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let mut last_reply = None;
+    loop {
+        let (messages, next) = mb
+            .poll_conversation(agent, *cursor, DELIVERY_WAIT_MS)
+            .unwrap();
+        *cursor = next;
+        for message in messages {
+            if message.from == agent {
+                println!("LIVE COHOST reply: {}", message.body);
+                if message.body.contains(marker) {
+                    return message.body;
+                }
+                last_reply = Some(message.body);
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "co-host did not finish the step containing {marker}; last reply: {last_reply:?}"
+        );
+    }
 }

@@ -8,8 +8,9 @@
 //! seam as `EngineEvent::HookProgress` (installed per-turn from the observer),
 //! so no renderer type is named below the seam.
 
+use std::io;
 use std::ops::{Deref, DerefMut};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use commands::cwd_prompt_sections;
@@ -24,6 +25,248 @@ use crate::mcp::{
     RuntimeMcpState,
 };
 use crate::tool_executor::{permission_policy, CliToolExecutor};
+
+/// What the HOST supplies to the engine, in place of a working directory.
+///
+/// Two hosts run this engine: the `scode` CLI on a developer's machine, and a
+/// co-hosted agent inside `nexusd-cluster`. They differ in where the agent's
+/// files live and what the agent is called — not in any engine behaviour — so
+/// those are values a host passes, not facts the engine infers from a path.
+///
+/// A co-host has no meaningful current directory. Deriving the workspace, the
+/// agent's identity and the skills listing from one would force it to invent a
+/// plausible path and hope all four derivations agreed with each other.
+pub struct HostContext {
+    /// Co-hosted model traffic must use the session's Nexus filesystem.
+    pub require_model_mount: bool,
+    /// Filesystem the file tools read and write through, and the SSOT for the
+    /// root relative tool paths resolve against ([`runtime::FsBackend::working_root`]).
+    ///
+    /// Kernel-backed for both hosts: a co-hosted agent reaches the daemon's
+    /// kernel in-process, a CLI session its own
+    /// ([`crate::local_kernel::boot_session_fs`]). Which kernel is the host's
+    /// choice; that there is one is not, because a hook, a permission gate and
+    /// an audit row that exist for one host have to exist for the other.
+    pub fs: Arc<dyn runtime::FsBackend>,
+    /// Where the host reads its own files from: configuration, the skills and
+    /// agent-type listings, and the directory a session's agent name is derived
+    /// from when nothing configures one.
+    ///
+    /// Stays on the HOST disk for both hosts, deliberately: a daemon has to
+    /// read its configuration before it can serve the VFS that configuration
+    /// describes, so this is the one root that does NOT follow `fs`. It is also
+    /// why there is no second "workspace root" beside it — a host root that
+    /// answered *some* of these questions differently from `fs` is exactly how
+    /// a session ends up announcing one identity and writing as another.
+    pub config_root: PathBuf,
+    /// The agent's name when the host knows it. `None` means "derive it",
+    /// which is what a CLI session does from its directory and config.
+    pub agent_name: Option<String>,
+    /// The HOST directory this session's host-side execution runs in: `bash`,
+    /// `git`, and every hook that resolves `current_workspace_root()`.
+    ///
+    /// A CLI session's shell root IS its workspace — one directory, reached two
+    /// ways. A co-hosted agent's is not and cannot be: its workspace is a VFS
+    /// path (`/proc/<pid>/workspace`, a per-agent view of DT_LINKs onto the
+    /// repos it was given), and no shell can `cd` into that. So it gets a
+    /// directory of its own on the daemon's host, and the model is told the
+    /// difference (`cohost_shell_prompt_section`).
+    ///
+    /// The value matters because the alternative is not "no scope" but "the
+    /// daemon's scope": `current_workspace_root()` falls through to the process
+    /// working directory, which every co-hosted agent on that daemon shares and
+    /// which is the daemon's own checkout.
+    pub shell_root: PathBuf,
+    /// Where this agent's messages are sent and received, when the host owns
+    /// that. `None` means "resolve it", which is what a CLI session does.
+    ///
+    /// A co-hosted agent's mailbox IS its identity, so it is supplied rather
+    /// than derived: a second one resolved here would give `send` a different
+    /// address than the one the agent receives on, and neither side can see
+    /// the other's answer.
+    pub mailbox: Option<Arc<runtime::mailbox::Mailbox>>,
+}
+
+impl HostContext {
+    /// The CLI's shape: a session at `cwd`, on a kernel of its own.
+    ///
+    /// Booting a kernel here rather than handing the engine the host disk is
+    /// what makes the two hosts one system: the same tools, over the same
+    /// `FsBackend`, against the same VFS semantics, differing only in which
+    /// kernel answers.
+    ///
+    /// What the session may reach is `cwd` plus the configured
+    /// `additionalDirectories`, and is decided HERE rather than passed in:
+    /// every path outside the mounts is refused, so a second caller with a
+    /// second list would be a second answer to what a session is allowed to
+    /// touch.
+    pub fn for_cli_session(cwd: impl Into<PathBuf>) -> io::Result<Self> {
+        let cwd = cwd.into();
+        // Extra mounts beyond cwd (which boot_session_fs already covers via the
+        // filesystem-root mount): `additionalDirectories` names extra working
+        // dirs; `mountRoots` names extra filesystem roots (e.g. `D:\` on a
+        // Windows machine with a second drive -- the cwd drive root is mounted
+        // automatically, other drives are not). Both are per-machine and merge
+        // into one mount list.
+        let mut extra_roots = additional_directories(&cwd)?;
+        extra_roots.extend(mount_roots(&cwd)?);
+        // The name has to be known before the kernel is built: it is the
+        // identity every syscall from this session carries, and resolving it
+        // afterwards would leave the kernel's view of who is writing and the
+        // prompt's claim about who this is free to disagree.
+        let agent_name = agent_name_under(&cwd);
+        let fs = crate::local_kernel::boot_session_fs(&cwd, &extra_roots, &agent_name)?;
+        Ok(Self {
+            fs,
+            // The CLI's three roots are one directory: what it reads its config
+            // from, what its tools address, and where its shell runs.
+            shell_root: cwd.clone(),
+            config_root: cwd,
+            agent_name: Some(agent_name),
+            mailbox: None,
+            require_model_mount: false,
+        })
+    }
+
+    /// The co-host's shape: an agent inside `nexusd-cluster`, on the daemon's
+    /// kernel.
+    ///
+    /// Deliberately adjacent to [`Self::for_cli_session`]: the difference between
+    /// the two hosts is the difference between these two functions, and a reader
+    /// who has to open two files to find it will not find it. Everything either
+    /// host supplies is a VALUE here — no engine behaviour branches on which one
+    /// is running.
+    ///
+    /// * `fs` — the daemon's kernel, so the agent's writes pass the hooks, the
+    ///   audit trail and the permission checks that co-hosting exists for.
+    /// * `config_root` — the daemon's own directory. A daemon reads its
+    ///   configuration before it can serve the VFS that configuration describes.
+    /// * `agent_name` / `mailbox` — from the descriptor, which is the SSOT for
+    ///   who this agent is. Deriving either here would let `send` address one
+    ///   identity while the agent receives on another.
+    /// * `shell_root` — created if missing, one per agent under the config home
+    ///   so it survives a respawn. See the field's docstring for why it cannot be
+    ///   the workspace.
+    pub fn for_cohost_agent(
+        fs: Arc<dyn runtime::FsBackend>,
+        agent_name: &str,
+        mailbox: Arc<runtime::mailbox::Mailbox>,
+    ) -> io::Result<Self> {
+        let shell_root = cohost_shell_root(agent_name);
+        std::fs::create_dir_all(&shell_root)?;
+        Ok(Self {
+            fs,
+            shell_root,
+            config_root: std::env::current_dir()?,
+            agent_name: Some(agent_name.to_string()),
+            mailbox: Some(mailbox),
+            require_model_mount: true,
+        })
+    }
+
+    /// The name this agent answers to.
+    ///
+    /// One definition rather than the two identical blocks this replaces: the
+    /// name feeds both the A2A prompt section and `send` routing, and a
+    /// disagreement between them is an agent that describes itself as one peer
+    /// and delivers as another.
+    #[must_use]
+    pub fn resolved_agent_name(&self) -> String {
+        match &self.agent_name {
+            Some(name) => name.clone(),
+            None => agent_name_under(&self.config_root),
+        }
+    }
+}
+
+/// `<config home>/agents/<name>/shell` — a co-hosted agent's own host-side
+/// directory.
+///
+/// Under the config home rather than a temp directory because it is the agent's,
+/// not the run's: an agent respawned onto the same identity comes back to the
+/// files it left. Per AGENT, not per pid, for the same reason.
+fn cohost_shell_root(agent_name: &str) -> PathBuf {
+    runtime::default_config_home()
+        .join("agents")
+        .join(agent_name)
+        .join("shell")
+}
+
+/// Directories a session may reach beyond the cwd's drive root, from the
+/// `additionalDirectories` configuration key. See [`string_list_config`] for
+/// the parse contract.
+#[inline]
+fn additional_directories(root: &Path) -> io::Result<Vec<PathBuf>> {
+    string_list_config(root, "additionalDirectories")
+}
+
+/// Filesystem roots to mount beyond the cwd's own drive root, from the
+/// `mountRoots` configuration key. Per-machine: the cwd drive root is mounted
+/// automatically, so this exists for the Windows case of a second drive
+/// (`D:\`) a session also needs. Empty on the common single-root setup and on
+/// unix, where the one `/` root already covers everything.
+#[inline]
+fn mount_roots(root: &Path) -> io::Result<Vec<PathBuf>> {
+    string_list_config(root, "mountRoots")
+}
+
+/// Parse a configuration key whose value is a list of paths, shared by
+/// [`additional_directories`] and [`mount_roots`].
+///
+/// A malformed value is an error rather than an empty list: these keys exist to
+/// widen what a session can reach, so silently ignoring one would present the
+/// mount miss as if the directory were forbidden -- with the setting that was
+/// meant to allow it sitting right there, apparently applied. A key that is
+/// absent is a legitimate empty list; only a present-but-wrong-shape value is
+/// the error.
+#[inline]
+fn string_list_config(root: &Path, key: &str) -> io::Result<Vec<PathBuf>> {
+    let config = ConfigLoader::default_for(root)
+        .load()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let Some(value) = config.get(key).cloned() else {
+        return Ok(Vec::new());
+    };
+    let malformed = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{key} must be a list of directory paths"),
+        )
+    };
+    value
+        .as_array()
+        .ok_or_else(malformed)?
+        .iter()
+        .map(|entry| entry.as_str().map(PathBuf::from).ok_or_else(malformed))
+        .collect()
+}
+
+/// The agent name a session under `root` answers to: what the configuration
+/// there says, else what [`runtime::mailbox::local_agent_name`] derives from
+/// the directory itself.
+fn agent_name_under(root: &Path) -> String {
+    let loader = ConfigLoader::default_for(root);
+    let configured = loader.load().ok().and_then(|rc| {
+        rc.get("agentName")
+            .and_then(|v| v.as_str().map(str::to_string))
+    });
+    if let Some(name) = configured
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return name.to_string();
+    }
+    // No configured name: mint one from the workspace and persist it, so this
+    // identity is stable across restarts instead of being re-derived every boot
+    // (a re-derivation drifts when the path spelling changes — e.g. Windows
+    // `\\?\` vs plain — leaving a trail of stale presence dirs). This is the
+    // native analog of nexus minting the name at auth. Best-effort: if the
+    // write fails we still return the derived name for this boot.
+    let minted = runtime::mailbox::local_agent_name(None, root);
+    let _ = loader.set_agent_name(&minted);
+    minted
+}
 
 // === moved from rusty-sudocode-cli/src/main.rs (CORE cluster extraction) ===
 
@@ -64,6 +307,18 @@ pub struct BuiltRuntime {
 }
 
 impl BuiltRuntime {
+    /// Take the engine out, leaving the shell behind.
+    ///
+    /// For a host that drives the runtime itself rather than borrowing it per
+    /// turn — the co-host hands it to the mailbox loop. The SHELL must outlive
+    /// that loop: its `Drop` shuts down MCP servers and plugins, so dropping it
+    /// at spawn time would tear those down under a still-running agent.
+    pub fn take_runtime(
+        &mut self,
+    ) -> Option<ConversationRuntime<EngineApiClient, CliToolExecutor>> {
+        self.runtime.take()
+    }
+
     pub fn new(
         runtime: ConversationRuntime<EngineApiClient, CliToolExecutor>,
         plugin_registry: PluginRegistry,
@@ -286,7 +541,7 @@ pub(crate) fn runtime_hook_config_from_plugin_hooks(
 /// The workspace-root scope must already be active for `cwd`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_engine_runtime(
-    cwd: &Path,
+    host: &HostContext,
     session: Session,
     handle_id: &str,
     config: RuntimeConfig,
@@ -294,11 +549,11 @@ pub fn build_engine_runtime(
     abort_signal: runtime::HookAbortSignal,
     reasoning_effort: Option<String>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    let mut runtime = build_runtime_for_cwd(cwd, session, handle_id, config, session_mcp)?;
+    let mut runtime = build_runtime_for_host(host, session, handle_id, config, session_mcp)?;
     runtime = runtime.with_hook_abort_signal(abort_signal);
     if let Some(rt) = runtime.runtime.as_mut() {
         rt.api_client_mut().set_reasoning_effort(reasoning_effort);
-        let thinking = ConfigLoader::default_for(cwd)
+        let thinking = ConfigLoader::default_for(&host.config_root)
             .load()
             .map_or(true, |cfg| cfg.thinking());
         rt.api_client_mut().set_thinking_enabled(thinking);
@@ -306,19 +561,23 @@ pub fn build_engine_runtime(
     Ok(runtime)
 }
 
-pub fn build_runtime_for_cwd(
-    cwd: &Path,
+pub fn build_runtime_for_host(
+    host: &HostContext,
     session: Session,
     session_id: &str,
     config: RuntimeConfig,
     session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
-    let loader = ConfigLoader::default_for(cwd);
+    let loader = ConfigLoader::default_for(&host.config_root);
     let file_config = loader.load()?;
-    let runtime_plugin_state =
-        build_runtime_plugin_state_with_loader(cwd, &loader, &file_config, session_mcp)?;
+    let runtime_plugin_state = build_runtime_plugin_state_with_loader(
+        &host.config_root,
+        &loader,
+        &file_config,
+        session_mcp,
+    )?;
     build_runtime_with_plugin_state(
-        cwd,
+        host,
         session,
         session_id,
         config,
@@ -328,7 +587,7 @@ pub fn build_runtime_for_cwd(
 }
 
 pub(crate) fn build_runtime_with_plugin_state(
-    cwd: &Path,
+    host: &HostContext,
     mut session: Session,
     session_id: &str,
     mut config: RuntimeConfig,
@@ -346,6 +605,10 @@ pub(crate) fn build_runtime_with_plugin_state(
         plugin_load_outcome,
         mcp_state,
     } = runtime_plugin_state;
+    // Point the built-in file tools at the host's filesystem. Everything
+    // above this line is identical for both hosts; this is the line that
+    // decides whether a write lands on local disk or in the kernel.
+    let tool_registry = tool_registry.with_fs(Arc::clone(&host.fs));
     // Resolve the standalone nexus-A2A session once (fail loud on a partial
     // config or a dial failure). `None` when A2A is off — the fast path that
     // leaves scode behaviour unchanged. Held as `Option<&'static Session>`
@@ -388,7 +651,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         config.permission_mode,
         &feature_config,
         &tool_registry,
-        cwd,
+        &host.config_root,
         config.memory,
     ) {
         Ok(policy) => policy,
@@ -411,10 +674,16 @@ pub(crate) fn build_runtime_with_plugin_state(
     // cache measurement behind the split.
     //
     // This runs for the REPL, `--print`, and ACP sessions alike: they all land
-    // in this function via `build_runtime_for_cwd`.
-    system_prompt
-        .dynamic_sections
-        .extend(cwd_prompt_sections(cwd, Some(&plugin_load_outcome)));
+    // in this function via `build_runtime_for_host`.
+    //
+    // Read from the host's own root, not through `fs`: a skill and an agent
+    // type are host installations (they live beside the configuration that
+    // declares them), so a co-hosted agent gets the daemon's, exactly as it
+    // gets the daemon's auth mode.
+    system_prompt.dynamic_sections.extend(cwd_prompt_sections(
+        &host.config_root,
+        Some(&plugin_load_outcome),
+    ));
     // Deferred tools listing: inject `<available-deferred-tools>` so the
     // model knows which tools exist beyond the core set visible in the API
     // `tools` array. Discovery via ToolSearch, direct execution by name.
@@ -427,22 +696,20 @@ pub(crate) fn build_runtime_with_plugin_state(
     // framing. Every receive path renders the shared REPL section; nexus adds
     // its network note (via `peer_system_prompt`), standalone uses the same
     // local identity the `send` routing below resolves.
-    if let Some(session) = a2a {
+    if host.mailbox.is_some() {
+        // A host that supplied its own mailbox also drives delivery, and the
+        // prose describing that framing travels with the driver rather than
+        // being guessed here — the co-host's messages arrive wrapped in
+        // `[message from <sender>]`, which only its loop knows to emit.
+    } else if let Some(session) = a2a {
         system_prompt
             .dynamic_sections
             .push(session.peer_system_prompt());
     } else {
-        let configured = ConfigLoader::default_for(cwd).load().ok().and_then(|rc| {
-            rc.get("agentName")
-                .and_then(|v| v.as_str().map(str::to_string))
-        });
-        let self_name = runtime::mailbox::local_agent_name(configured.as_deref(), cwd);
+        let self_name = host.resolved_agent_name();
         system_prompt
             .dynamic_sections
-            .push(runtime::agent_mailbox::repl_a2a_prompt_section(
-                &self_name,
-                &[],
-            ));
+            .push(runtime::agent_mailbox::repl_a2a_prompt_section(&self_name));
     }
     let client = match EngineApiClient::new(
         session_id,
@@ -452,6 +719,10 @@ pub(crate) fn build_runtime_with_plugin_state(
         tool_registry.clone(),
         config.enable_tools,
         config.allowed_tools.clone(),
+        &engine_core::ModelAccess {
+            fs: Arc::clone(&host.fs),
+            require_mount: host.require_model_mount,
+        },
     ) {
         Ok(client) => client,
         Err(error) => {
@@ -472,7 +743,9 @@ pub(crate) fn build_runtime_with_plugin_state(
     // No A2A session means no nexus configured, and the resolver answers with
     // workspace-local JSONL — the same code path rather than a fallback branch,
     // which is what stops the two from drifting.
-    if let Some(a2a_session) = a2a {
+    if let Some(mailbox) = host.mailbox.clone() {
+        tool_executor.set_mailbox(mailbox);
+    } else if let Some(a2a_session) = a2a {
         tool_executor.set_mailbox(a2a_session.mailbox());
     } else {
         // Standalone (no nexus): route `send` to the shared same-machine pair
@@ -480,24 +753,18 @@ pub(crate) fn build_runtime_with_plugin_state(
         // in another folder receives it (its poller tails the same
         // `{pair_root}/agents/{name}/chat-with-me`). Without this the send would
         // fall back to workspace-local, which two different folders never share.
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let configured = runtime::ConfigLoader::default_for(&cwd)
-            .load()
-            .ok()
-            .and_then(|rc| {
-                rc.get("agentName")
-                    .and_then(|v| v.as_str().map(str::to_string))
-            });
-        let self_name = runtime::mailbox::local_agent_name(configured.as_deref(), &cwd);
-        tool_executor.set_mailbox(std::sync::Arc::new(runtime::mailbox::Mailbox::new(
-            std::sync::Arc::new(runtime::fs_backend::StdFsBackend),
-            self_name,
-            runtime::mailbox::InboxConvention::PerRecipient {
-                root: runtime::mailbox::local_pair_root()
-                    .to_string_lossy()
-                    .into_owned(),
-            },
-        )));
+        // The SAME name the prompt section above announced. It resolved from
+        // the host context while this read `current_dir()`, so a session whose
+        // directory differed from the process's told the model it was one peer
+        // and delivered as another — silently, since neither side can see the
+        // other's answer.
+        let self_name = host.resolved_agent_name();
+        tool_executor.set_mailbox(std::sync::Arc::new(
+            runtime::mailbox::Mailbox::workspace_local(
+                &runtime::mailbox::local_pair_root(),
+                self_name,
+            ),
+        ));
     }
     let runtime = ConversationRuntime::new_with_features(
         session,

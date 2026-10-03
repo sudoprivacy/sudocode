@@ -62,6 +62,10 @@ pub struct ResolvedProvider {
     /// Merged additively into the outbound payload by the provider client;
     /// empty for models that do not configure it.
     pub extra_body: Map<String, Value>,
+    /// `cache_ttl_1h` from `sudocode.json`; `None` = follow the auth mode.
+    /// Only the Anthropic client reads it — no other provider exposes a
+    /// cache TTL to ask for.
+    pub cache_ttl_1h: Option<bool>,
 }
 
 /// Token-limit metadata for a wire model ID.
@@ -81,11 +85,17 @@ pub struct ModelTokenLimit {
 /// sudorouter `/v1/models` or the bundled fallback JSON). Handles
 /// provider-prefixed model IDs (e.g. `openai/gpt-4.1-mini`) by stripping
 /// the prefix before lookup.
+///
+/// `None` also covers "listed, but with no documented limits" — the SSOT can
+/// say it doesn't know. The only caller is the preflight guard, and skipping
+/// the guard is the right answer there: rejecting a request against an
+/// invented window fails a request the model would have accepted.
 #[must_use]
 pub fn model_token_limit(model_id: &str) -> Option<ModelTokenLimit> {
-    runtime::model_capabilities::lookup(model_id).map(|cap| ModelTokenLimit {
-        max_output_tokens: cap.max_output_tokens,
-        context_window_tokens: cap.context_window,
+    let cap = runtime::model_capabilities::lookup(model_id)?;
+    Some(ModelTokenLimit {
+        max_output_tokens: cap.max_output_tokens?,
+        context_window_tokens: cap.context_window?,
     })
 }
 
@@ -166,7 +176,13 @@ pub fn preflight_message_request(request: &MessageRequest) -> Result<(), ApiErro
     Ok(())
 }
 
-fn estimate_message_request_input_tokens(request: &MessageRequest) -> u32 {
+/// Locally estimated input tokens for a request, from serialized bytes.
+///
+/// `pub(crate)` so the Anthropic preflight can decide, with the same number
+/// this guard used, whether an exact remote count could still change the
+/// verdict — the two must agree about where the line is or the cheap check and
+/// the expensive one disagree about when the expensive one is needed.
+pub(crate) fn estimate_message_request_input_tokens(request: &MessageRequest) -> u32 {
     let mut estimate = estimate_serialized_tokens(&request.messages);
     estimate = estimate.saturating_add(estimate_request_overhead_tokens(
         request.system.as_deref(),
@@ -620,6 +636,7 @@ pub fn resolve_provider_from_config(
         credential,
         model_id: mapping.model.clone(),
         extra_body: model_config.extra_body.clone(),
+        cache_ttl_1h: config.cache_ttl_1h,
     })
 }
 
@@ -667,6 +684,7 @@ fn try_proxy_passthrough(
         model_id: model_id.to_string(),
         // Proxy passthrough has no `models.<alias>` entry to read from.
         extra_body: Map::new(),
+        cache_ttl_1h: config.cache_ttl_1h,
     }))
 }
 
@@ -690,6 +708,9 @@ fn endpoint_type_to_api_format(endpoint_type: &str) -> ApiFormat {
 /// construct their own versioned path (e.g. `/v1/messages`,
 /// `/v1beta/models/...`) — strip the trailing `/v1` to avoid double-prefix.
 fn adjust_base_url_for_format(base_url: &str, api_format: ApiFormat) -> String {
+    if base_url.starts_with("nexus://") {
+        return base_url.to_string();
+    }
     match api_format {
         ApiFormat::OpenAiCompletions | ApiFormat::OpenAiResponses => base_url.to_string(),
         _ => base_url
@@ -776,6 +797,9 @@ fn resolve_credential(
     provider_name: &str,
     connection: &ProviderConnectionConfig,
 ) -> Result<Credential, ApiError> {
+    if connection.base_url.starts_with("nexus://") {
+        return Ok(Credential::None);
+    }
     match auth_mode {
         "api-key" | "proxy" => {
             // Inline API key takes priority.
@@ -891,6 +915,42 @@ mod tests {
         resolve_model(config, alias)
             .map(|m| m.providers.keys().map(String::as_str).collect())
             .unwrap_or_default()
+    }
+
+    /// `cache_ttl_1h` has exactly one home — `sudocode.json` — and one route
+    /// to the client that acts on it. This pins that route: a value set in
+    /// config has to survive resolution, because the only other way to reach
+    /// the same effect would be a second switch somewhere else.
+    #[test]
+    fn cache_ttl_1h_travels_from_config_to_resolved_provider() {
+        let mut config = sample_config();
+        // `sample_config` reads the subscription token from the environment;
+        // inline it so resolution does not depend on the shell.
+        config
+            .auth_modes
+            .get_mut("subscription")
+            .unwrap()
+            .get_mut("claude")
+            .unwrap()
+            .token = Some("sk-inline-oauth-token".to_string());
+
+        // Unset: the Anthropic client falls back to the auth mode's default,
+        // so resolution must not invent one here.
+        let resolved = resolve_provider_from_config("opus", Some(AuthMode::Subscription), &config)
+            .expect("resolve");
+        assert_eq!(resolved.cache_ttl_1h, None);
+
+        for wanted in [true, false] {
+            config.cache_ttl_1h = Some(wanted);
+            let resolved =
+                resolve_provider_from_config("opus", Some(AuthMode::Subscription), &config)
+                    .expect("resolve");
+            assert_eq!(
+                resolved.cache_ttl_1h,
+                Some(wanted),
+                "config must reach the provider unchanged"
+            );
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1063,6 +1123,7 @@ mod tests {
         );
 
         SudoCodeConfig {
+            cache_ttl_1h: None,
             auth_modes,
             models,
             web_search: Default::default(),

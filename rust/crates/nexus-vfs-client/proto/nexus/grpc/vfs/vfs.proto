@@ -394,6 +394,20 @@ message SetattrRequest {
   bool is_external = 13;
   uint64 capacity = 14;
 
+  // Where a DT_LINK points (entry_type == DT_LINK). Absent for every other type.
+  //
+  // `sys_setattr` has always taken a link target; this wire could not carry one, so
+  // `Setattr` over gRPC could only ever create a link with no destination — which is
+  // to say, not a link. The consequence was not theoretical: the A2A chat-list index
+  // is specified as a DT_LINK into the flat conversation store, and because a
+  // standalone agent provisions over THIS transport while a co-hosted one provisions
+  // in-process, the two would have produced different entry types for the same path.
+  // An entry type is immutable, so whichever ran second would fail forever. The
+  // implementation therefore settled on a plain entry holding the target as bytes —
+  // portable, and not what the design says. This field is what lets both transports
+  // create the same thing.
+  optional string link_target = 32;
+
   // ── DT_MOUNT backend-construction params (entry_type == 2) ──────────
   //
   // `backend_type` is the dispatch key (matches DRIVER_* values:

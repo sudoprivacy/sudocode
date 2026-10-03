@@ -49,7 +49,7 @@ fn bash_streaming_shows_progress_for_slow_commands() {
         "unused_live_only",
     );
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
 
     // We should see either the streaming progress markers OR the final
     // tool result — both prove the streaming path executed.

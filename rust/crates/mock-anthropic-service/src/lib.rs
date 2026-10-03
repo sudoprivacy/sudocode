@@ -106,6 +106,7 @@ pub struct CapturedRequest {
 pub struct MockAnthropicService {
     base_url: String,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
+    model_catalog: Arc<Mutex<Option<Value>>>,
     shutdown: Option<oneshot::Sender<()>>,
     join_handle: JoinHandle<()>,
 }
@@ -119,6 +120,8 @@ impl MockAnthropicService {
         let listener = TcpListener::bind(bind_addr).await?;
         let address = listener.local_addr()?;
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let model_catalog = Arc::new(Mutex::new(None));
+        let catalog_state = Arc::clone(&model_catalog);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let request_state = Arc::clone(&requests);
 
@@ -131,8 +134,9 @@ impl MockAnthropicService {
                             break;
                         };
                         let request_state = Arc::clone(&request_state);
+                        let catalog_state = Arc::clone(&catalog_state);
                         tokio::spawn(async move {
-                            let _ = handle_connection(socket, request_state).await;
+                            let _ = handle_connection(socket, request_state, catalog_state).await;
                         });
                     }
                 }
@@ -142,6 +146,7 @@ impl MockAnthropicService {
         Ok(Self {
             base_url: format!("http://{address}"),
             requests,
+            model_catalog,
             shutdown: Some(shutdown_tx),
             join_handle,
         })
@@ -150,6 +155,11 @@ impl MockAnthropicService {
     #[must_use]
     pub fn base_url(&self) -> String {
         self.base_url.clone()
+    }
+
+    /// Serve discovery separately from captured inference requests.
+    pub async fn set_model_catalog(&self, catalog: Value) {
+        *self.model_catalog.lock().await = Some(catalog);
     }
 
     pub async fn captured_requests(&self) -> Vec<CapturedRequest> {
@@ -169,12 +179,24 @@ impl Drop for MockAnthropicService {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     StreamingText,
+    /// A `thinking` block streamed as several `thinking_delta`s (one of them
+    /// spanning a newline, one splitting mid-word) followed by a `signature_delta`
+    /// and then a normal text block. The only scenario that exercises the
+    /// renderer's reasoning path, and the split deltas are the point: the CLI
+    /// writes thinking through on every delta, so a bug that clears the line or
+    /// drops the margin between deltas only shows up when they do not align
+    /// with line boundaries.
+    ThinkingThenText,
     ReadFileRoundtrip,
+    ImageReadRoundtrip,
+    BrowserImageRoundtrip,
+    WebSearchRoundtrip,
     GrepChunkAssembly,
     WriteFileAllowed,
     WriteFileDenied,
     MultiToolTurnRoundtrip,
     BashStdoutRoundtrip,
+    BashCompactResults,
     BashInterruptLongRunning,
     BashPermissionPromptApproved,
     BashPermissionPromptDenied,
@@ -220,6 +242,9 @@ enum Scenario {
     UnifiedSendRoundtrip,
     UnifiedSendFromNamedPeer,
     CohostReply,
+    CohostReadThenReply,
+    CohostDelegate,
+    CohostShellPwd,
     DeferredMcpToolRoundtrip,
     /// Parent turn of the subagent-delegation roundtrip. The parent emits
     /// three `Agent` tool_use blocks (run synchronously) whose prompts each
@@ -291,11 +316,16 @@ impl Scenario {
     fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "streaming_text" => Some(Self::StreamingText),
+            "thinking_then_text" => Some(Self::ThinkingThenText),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
+            "image_read_roundtrip" => Some(Self::ImageReadRoundtrip),
+            "browser_image_roundtrip" => Some(Self::BrowserImageRoundtrip),
+            "web_search_roundtrip" => Some(Self::WebSearchRoundtrip),
             "grep_chunk_assembly" => Some(Self::GrepChunkAssembly),
             "write_file_allowed" => Some(Self::WriteFileAllowed),
             "write_file_denied" => Some(Self::WriteFileDenied),
             "multi_tool_turn_roundtrip" => Some(Self::MultiToolTurnRoundtrip),
+            "bash_compact_results" => Some(Self::BashCompactResults),
             "bash_stdout_roundtrip" => Some(Self::BashStdoutRoundtrip),
             "bash_interrupt_long_running" => Some(Self::BashInterruptLongRunning),
             "bash_permission_prompt_approved" => Some(Self::BashPermissionPromptApproved),
@@ -328,6 +358,9 @@ impl Scenario {
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
             "unified_send_from_named_peer" => Some(Self::UnifiedSendFromNamedPeer),
             "cohost_reply" => Some(Self::CohostReply),
+            "cohost_read_then_reply" => Some(Self::CohostReadThenReply),
+            "cohost_delegate" => Some(Self::CohostDelegate),
+            "cohost_shell_pwd" => Some(Self::CohostShellPwd),
             "deferred_mcp_tool_roundtrip" => Some(Self::DeferredMcpToolRoundtrip),
             "subagent_delegation_parent" => Some(Self::SubagentDelegationParent),
             "subagent_calc_child" => Some(Self::SubagentCalcChild),
@@ -347,11 +380,16 @@ impl Scenario {
     fn name(self) -> &'static str {
         match self {
             Self::StreamingText => "streaming_text",
+            Self::ThinkingThenText => "thinking_then_text",
             Self::ReadFileRoundtrip => "read_file_roundtrip",
+            Self::ImageReadRoundtrip => "image_read_roundtrip",
+            Self::BrowserImageRoundtrip => "browser_image_roundtrip",
+            Self::WebSearchRoundtrip => "web_search_roundtrip",
             Self::GrepChunkAssembly => "grep_chunk_assembly",
             Self::WriteFileAllowed => "write_file_allowed",
             Self::WriteFileDenied => "write_file_denied",
             Self::MultiToolTurnRoundtrip => "multi_tool_turn_roundtrip",
+            Self::BashCompactResults => "bash_compact_results",
             Self::BashStdoutRoundtrip => "bash_stdout_roundtrip",
             Self::BashInterruptLongRunning => "bash_interrupt_long_running",
             Self::BashPermissionPromptApproved => "bash_permission_prompt_approved",
@@ -382,6 +420,9 @@ impl Scenario {
             Self::UnifiedSendRoundtrip => "unified_send_roundtrip",
             Self::UnifiedSendFromNamedPeer => "unified_send_from_named_peer",
             Self::CohostReply => "cohost_reply",
+            Self::CohostReadThenReply => "cohost_read_then_reply",
+            Self::CohostDelegate => "cohost_delegate",
+            Self::CohostShellPwd => "cohost_shell_pwd",
             Self::DeferredMcpToolRoundtrip => "deferred_mcp_tool_roundtrip",
             Self::SubagentDelegationParent => "subagent_delegation_parent",
             Self::SubagentCalcChild => "subagent_calc_child",
@@ -401,8 +442,19 @@ impl Scenario {
 async fn handle_connection(
     mut socket: tokio::net::TcpStream,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
+    model_catalog: Arc<Mutex<Option<Value>>>,
 ) -> io::Result<()> {
     let (method, path, headers, raw_body) = read_http_request(&mut socket).await?;
+    if method == "GET" && path.split('?').next() == Some("/v1/models") {
+        let catalog = model_catalog.lock().await.clone();
+        let (status, body) = catalog.map_or_else(
+            || ("404 Not Found", "{}".to_string()),
+            |catalog| ("200 OK", catalog.to_string()),
+        );
+        let response = http_response(status, "application/json", &body, &[]);
+        socket.write_all(response.as_bytes()).await?;
+        return Ok(());
+    }
     // Normalize the "system" field: when it arrives as an array of content
     // blocks (from cache-control-aware clients), flatten it back into a plain
     // string so that `MessageRequest` deserialization succeeds.
@@ -615,6 +667,43 @@ fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
     })
 }
 
+// Shell commands exercised by the PTY regression; each status must survive
+// the real executor, transcript persistence, and the next provider request.
+fn compact_bash_step(request: &MessageRequest) -> Option<(String, &'static str, Value)> {
+    let completed = request
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|block| {
+            matches!(block, InputContentBlock::ToolResult { tool_use_id, .. }
+            if tool_use_id.starts_with("compact_bash_"))
+        })
+        .count();
+    let steps = [
+        json!({"command":"printf 'compact stdout'"}),
+        json!({"command":"printf 'failure detail' >&2; exit 7"}),
+        json!({"command":"sleep 1", "timeout":10}),
+        json!({"command":"sleep 1", "run_in_background":true}),
+        // Git Bash on Windows represents termination as an exit code, rather
+        // than the Unix signal status; exercise an explicit exit there.
+        json!({"command":if cfg!(unix) { "kill -TERM $$" } else { "exit 143" }}),
+        json!({"command":"awk 'BEGIN { for (i=0;i<4000;i++) print \"large output line\" }'"}),
+        json!({"command":":"}),
+        json!({"command":"printf 'diagnostic only' >&2"}),
+    ];
+    if completed == steps.len() {
+        return Some((
+            format!("compact_bash_{completed}"),
+            "read_tool_output",
+            json!({"id":"compact_bash_5", "offset":60000, "limit":1000}),
+        ));
+    }
+    steps
+        .get(completed)
+        .cloned()
+        .map(|input| (format!("compact_bash_{completed}"), "bash", input))
+}
+
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
     request.messages.iter().rev().find_map(|message| {
         message.content.iter().rev().find_map(|block| match block {
@@ -775,6 +864,27 @@ fn agent_call_input(
 }
 
 fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> SubagentStep {
+    if matches!(scenario, Scenario::CohostDelegate) {
+        let results = tool_results_by_name(request);
+        return if results.contains_key("send") {
+            SubagentStep::Answer("delegation delivered".to_string())
+        } else if let Some((result, _)) = results.get("Agent") {
+            SubagentStep::Tools(vec![(
+                "toolu_delegate_reply",
+                "send",
+                json!({"to": COHOST_REPLY_TO, "message": result, "summary": "child result"}),
+            )])
+        } else {
+            SubagentStep::Tools(vec![(
+                "toolu_delegate",
+                "Agent",
+                json!({
+                    "description": "cohost calculation", "model": "inherit", "run_in_background": false,
+                    "prompt": "PARITY_SCENARIO:subagent_calc_child What is 101 + 102? Reply with ONLY the number."
+                }),
+            )])
+        };
+    }
     let done = latest_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
     match (scenario, done) {
@@ -1027,6 +1137,54 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             streaming_text_sse()
         }
         Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(),
+        Scenario::ThinkingThenText => thinking_then_text_sse(),
+        Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
+            Some((output, is_error)) => {
+                final_text_sse(&format!("search roundtrip error={is_error}: {output}"))
+            }
+            None => tool_use_sse(
+                "toolu_web_search",
+                "WebSearch",
+                &[
+                    r#"{"query":"Rust official website","allowed_domains":["rust-lang.org"],"blocked_domains":["blocked.rust-lang.org"]}"#,
+                ],
+            ),
+        },
+        Scenario::BrowserImageRoundtrip => {
+            let results = tool_results_by_name(request);
+            if results.contains_key("Read") || results.contains_key("read_file") {
+                final_text_sse("browser image received")
+            } else if results.contains_key("bash") {
+                tool_use_sse("browser-read", "Read", &[r#"{"path":"screen.png"}"#])
+            } else {
+                tool_use_sse(
+                    "browser-capture",
+                    "bash",
+                    &[r#"{"command":"bash capture.sh"}"#],
+                )
+            }
+        }
+        Scenario::ImageReadRoundtrip => match latest_tool_result(request) {
+            Some(_) => final_text_sse("image roundtrip complete"),
+            None if request.messages.iter().flat_map(|m| &m.content).any(
+                |b| matches!(b, InputContentBlock::Text { text } if text.contains("IMAGE_SINGLE")),
+            ) =>
+            {
+                tool_use_sse("image-1", "Read", &[r#"{"path":"screen.png"}"#])
+            }
+            None => tool_uses_sse(&[
+                ToolUseSse {
+                    tool_id: "image-1",
+                    tool_name: "Read",
+                    partial_json_chunks: &[r#"{"path":"screen.png"}"#],
+                },
+                ToolUseSse {
+                    tool_id: "text-2",
+                    tool_name: "read_file",
+                    partial_json_chunks: &[r#"{"path":"fixture.txt"}"#],
+                },
+            ]),
+        },
         Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "read_file roundtrip complete: {}",
@@ -1103,6 +1261,10 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 ]),
             }
         }
+        Scenario::BashCompactResults => match compact_bash_step(request) {
+            Some((id, name, input)) => tool_use_sse(&id, name, &[&input.to_string()]),
+            None => final_text_sse("compact bash results verified"),
+        },
         Scenario::BashStdoutRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "bash completed: {}",
@@ -1122,7 +1284,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 "toolu_bash_interrupt",
                 "bash",
                 &[
-                    r#"{"command":"printf 'interrupt-start'; sleep 30; printf 'interrupt-done'","timeout":120000}"#,
+                    r#"{"command":"printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'","timeout":120000}"#,
                 ],
             ),
         },
@@ -1231,7 +1393,9 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             None => tool_use_sse(
                 "toolu_write_plan",
                 "write_plan",
-                &[r##"{"content":"# Plan\n1. First step\n2. Second step"}"##],
+                &[
+                    r##"{"content":"# Plan\n1. First step\n2. Second step","context":"mock context","constraints":"mock constraints","acceptance":"mock acceptance"}"##,
+                ],
             ),
         },
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
@@ -1366,6 +1530,53 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 )],
             ),
         },
+        // Where does a co-hosted agent's shell run? Ask it — `pwd`, then report
+        // the answer to the peer. The assertion is the test's; this only has to
+        // make the agent produce the fact.
+        Scenario::CohostShellPwd => {
+            let results = tool_results_by_name(request);
+            match (results.get("bash"), results.get("send")) {
+                (Some(_), Some((send_output, _))) => {
+                    final_text_sse(&format!("cohost shell pwd complete: {send_output}"))
+                }
+                (Some((bash_output, _)), None) => {
+                    // Built through `json!` rather than a format string: a path is
+                    // the one payload guaranteed to carry separators, and a
+                    // hand-escaped one is a mock that breaks on the platform it
+                    // was not written on.
+                    let input = json!({
+                        "to": COHOST_REPLY_TO,
+                        "message": extract_bash_stdout(bash_output),
+                        "summary": "pwd",
+                    })
+                    .to_string();
+                    tool_use_sse("toolu_cohost_pwd_send", "send", &[&input])
+                }
+                _ => tool_use_sse("toolu_cohost_pwd_bash", "bash", &[r#"{"command":"pwd"}"#]),
+            }
+        }
+        Scenario::CohostReadThenReply => {
+            let results = tool_results_by_name(request);
+            match (results.get("read_file"), results.get("send")) {
+                (Some(_), Some((send_output, _))) => {
+                    final_text_sse(&format!("cohost read-then-reply complete: {send_output}"))
+                }
+                // Read first, then answer the peer with what the workspace said.
+                (Some((read_output, _)), None) => tool_use_sse(
+                    "toolu_cohost_read_reply_send",
+                    "send",
+                    &[&format!(
+                        r#"{{"to":"{COHOST_REPLY_TO}","message":"{}","summary":"reply"}}"#,
+                        extract_read_content(read_output)
+                    )],
+                ),
+                _ => tool_use_sse(
+                    "toolu_cohost_read_reply_read",
+                    "read_file",
+                    &[r#"{"path":"fixture.txt"}"#],
+                ),
+            }
+        }
         Scenario::UnifiedSendFromNamedPeer => match latest_tool_result(request) {
             Some((tool_output, _)) => {
                 final_text_sse(&format!("unified send roundtrip complete: {tool_output}"))
@@ -1435,7 +1646,8 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             let sum = subagent_child_sum(request);
             final_text_sse(&sum.to_string())
         }
-        Scenario::SubagentEventsSync
+        Scenario::CohostDelegate
+        | Scenario::SubagentEventsSync
         | Scenario::SubagentEventsBackground
         | Scenario::SubagentEventsNested
         | Scenario::SubagentEventsCancel
@@ -1450,6 +1662,23 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
 #[allow(clippy::too_many_lines)]
 fn build_message_response(request: &MessageRequest, scenario: Scenario) -> MessageResponse {
     match scenario {
+        Scenario::ThinkingThenText => {
+            // The non-streaming twin of `thinking_then_text_sse`, so the
+            // mock-parity harness sees the same two blocks on both paths.
+            let mut response = text_message_response(
+                "msg_thinking_then_text",
+                "The answer follows the reasoning.",
+            );
+            response.content.insert(
+                0,
+                OutputContentBlock::Thinking {
+                    thinking: "Reasoning step one.\nReasoning step two continues the same line."
+                        .to_string(),
+                    signature: Some("sig_mock_thinking".to_string()),
+                },
+            );
+            response
+        }
         Scenario::MarkdownRenderingShowcase => {
             text_message_response("msg_markdown_showcase", MARKDOWN_SHOWCASE_DOC)
         }
@@ -1459,6 +1688,56 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "Mock streaming says hello from the parity harness.",
             )
         }
+        Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
+            Some((output, is_error)) => text_message_response(
+                "msg_search_final",
+                &format!("search roundtrip error={is_error}: {output}"),
+            ),
+            None => tool_message_response(
+                "msg_search_tool",
+                "toolu_web_search",
+                "WebSearch",
+                json!({"query":"Rust official website","allowed_domains":["rust-lang.org"],"blocked_domains":["blocked.rust-lang.org"]}),
+            ),
+        },
+        Scenario::BrowserImageRoundtrip => {
+            let results = tool_results_by_name(request);
+            if results.contains_key("Read") || results.contains_key("read_file") {
+                text_message_response("browser-done", "browser image received")
+            } else if results.contains_key("bash") {
+                tool_message_response(
+                    "browser-read",
+                    "browser-read",
+                    "Read",
+                    json!({"path":"screen.png"}),
+                )
+            } else {
+                tool_message_response(
+                    "browser-capture",
+                    "browser-capture",
+                    "bash",
+                    json!({"command":"bash capture.sh"}),
+                )
+            }
+        }
+        Scenario::ImageReadRoundtrip => match latest_tool_result(request) {
+            Some(_) => text_message_response("image-done", "image roundtrip complete"),
+            None => tool_message_response_many(
+                "image-read",
+                &[
+                    ToolUseMessage {
+                        tool_id: "image-1",
+                        tool_name: "Read",
+                        input: json!({"path":"screen.png"}),
+                    },
+                    ToolUseMessage {
+                        tool_id: "text-2",
+                        tool_name: "read_file",
+                        input: json!({"path":"fixture.txt"}),
+                    },
+                ],
+            ),
+        },
         Scenario::ReadFileRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_read_file_final",
@@ -1544,6 +1823,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 ),
             }
         }
+        Scenario::BashCompactResults => match compact_bash_step(request) {
+            Some((id, name, input)) => tool_message_response("compact", &id, name, input),
+            None => text_message_response("compact_done", "compact bash results verified"),
+        },
         Scenario::BashStdoutRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_bash_stdout_final",
@@ -1566,7 +1849,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "toolu_bash_interrupt",
                 "bash",
                 json!({
-                    "command": "printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
+                    "command": "printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
                     "timeout": 120000
                 }),
             ),
@@ -1719,7 +2002,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 "msg_write_plan_tool",
                 "toolu_write_plan",
                 "write_plan",
-                json!({"content": "# Plan\n1. First step\n2. Second step"}),
+                json!({"content": "# Plan\n1. First step\n2. Second step", "context": "mock context", "constraints": "mock constraints", "acceptance": "mock acceptance"}),
             ),
         },
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
@@ -1874,6 +2157,56 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"to": UNIFIED_SEND_RECIPIENT, "message": UNIFIED_SEND_BODY, "summary": "greeting test"}),
             ),
         },
+        Scenario::CohostShellPwd => {
+            let results = tool_results_by_name(request);
+            match (results.get("bash"), results.get("send")) {
+                (Some(_), Some((send_output, _))) => text_message_response(
+                    "msg_cohost_shell_pwd_final",
+                    &format!("cohost shell pwd complete: {send_output}"),
+                ),
+                (Some((bash_output, _)), None) => tool_message_response(
+                    "msg_cohost_shell_pwd_send",
+                    "toolu_cohost_pwd_send",
+                    "send",
+                    json!({
+                        "to": COHOST_REPLY_TO,
+                        "message": extract_bash_stdout(bash_output),
+                        "summary": "pwd",
+                    }),
+                ),
+                _ => tool_message_response(
+                    "msg_cohost_shell_pwd_bash",
+                    "toolu_cohost_pwd_bash",
+                    "bash",
+                    json!({"command": "pwd"}),
+                ),
+            }
+        }
+        Scenario::CohostReadThenReply => {
+            let results = tool_results_by_name(request);
+            match (results.get("read_file"), results.get("send")) {
+                (Some(_), Some((send_output, _))) => text_message_response(
+                    "msg_cohost_read_then_reply_final",
+                    &format!("cohost read-then-reply complete: {send_output}"),
+                ),
+                (Some((read_output, _)), None) => tool_message_response(
+                    "msg_cohost_read_then_reply_send",
+                    "toolu_cohost_read_reply_send",
+                    "send",
+                    json!({
+                        "to": COHOST_REPLY_TO,
+                        "message": extract_read_content(read_output),
+                        "summary": "reply",
+                    }),
+                ),
+                _ => tool_message_response(
+                    "msg_cohost_read_then_reply_read",
+                    "toolu_cohost_read_reply_read",
+                    "read_file",
+                    json!({ "path": "fixture.txt" }),
+                ),
+            }
+        }
         Scenario::CohostReply => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_cohost_reply_final",
@@ -1967,7 +2300,8 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             let sum = subagent_child_sum(request);
             text_message_response("msg_subagent_calc_child", &sum.to_string())
         }
-        Scenario::SubagentEventsSync
+        Scenario::CohostDelegate
+        | Scenario::SubagentEventsSync
         | Scenario::SubagentEventsBackground
         | Scenario::SubagentEventsNested
         | Scenario::SubagentEventsCancel
@@ -1982,13 +2316,18 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
 fn request_id_for(scenario: Scenario) -> &'static str {
     match scenario {
         Scenario::StreamingText => "req_streaming_text",
+        Scenario::ThinkingThenText => "req_thinking_then_text",
         Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
+        Scenario::ImageReadRoundtrip => "req_image_read_roundtrip",
+        Scenario::BrowserImageRoundtrip => "req_browser_image_roundtrip",
+        Scenario::WebSearchRoundtrip => "req_web_search_roundtrip",
         Scenario::GrepChunkAssembly => "req_grep_chunk_assembly",
         Scenario::WriteFileAllowed => "req_write_file_allowed",
         Scenario::WriteFileDenied => "req_write_file_denied",
         Scenario::MultiToolTurnRoundtrip => "req_multi_tool_turn_roundtrip",
+        Scenario::BashCompactResults => "req_bash_compact_results",
         Scenario::BashStdoutRoundtrip => "req_bash_stdout_roundtrip",
         Scenario::BashInterruptLongRunning => "req_bash_interrupt_long_running",
         Scenario::BashPermissionPromptApproved => "req_bash_permission_prompt_approved",
@@ -2019,6 +2358,9 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::UnifiedSendRoundtrip => "req_unified_send_roundtrip",
         Scenario::UnifiedSendFromNamedPeer => "req_unified_send_from_named_peer",
         Scenario::CohostReply => "req_cohost_reply",
+        Scenario::CohostReadThenReply => "req_cohost_read_then_reply",
+        Scenario::CohostDelegate => "req_cohost_delegate",
+        Scenario::CohostShellPwd => "req_cohost_shell_pwd",
         Scenario::DeferredMcpToolRoundtrip => "req_deferred_mcp_tool_roundtrip",
         Scenario::SubagentDelegationParent => "req_subagent_delegation_parent",
         Scenario::SubagentCalcChild => "req_subagent_calc_child",
@@ -2065,6 +2407,7 @@ fn text_message_response(id: &str, text: &str) -> MessageResponse {
             ..Usage::default()
         },
         request_id: None,
+        gateway_request_id: None,
     }
 }
 
@@ -2092,6 +2435,7 @@ fn text_message_response_with_usage(
             ..Usage::default()
         },
         request_id: None,
+        gateway_request_id: None,
     }
 }
 
@@ -2142,6 +2486,7 @@ fn tool_message_response_many(id: &str, tool_uses: &[ToolUseMessage<'_>]) -> Mes
             ..Usage::default()
         },
         request_id: None,
+        gateway_request_id: None,
     }
 }
 
@@ -2285,6 +2630,106 @@ fn streaming_text_sse() -> String {
             "type": "message_delta",
             "delta": {"stop_reason": "end_turn", "stop_sequence": null},
             "usage": usage_json(11, 8)
+        }),
+    );
+    append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));
+    body
+}
+
+/// A `thinking` block followed by a text block.
+///
+/// The thinking deltas are deliberately not line-aligned: one carries an
+/// embedded newline and the next resumes mid-sentence, because the renderer
+/// writes reasoning to the terminal on every delta and the failures worth
+/// catching (a spinner clear landing mid-line, a lost margin, a dim run left
+/// open) only appear at those boundaries. A `signature_delta` closes the block,
+/// matching what the real API sends.
+fn thinking_then_text_sse() -> String {
+    let mut body = String::new();
+    append_sse(
+        &mut body,
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_thinking_then_text",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": DEFAULT_MODEL,
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": usage_json(12, 0)
+            }
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_start",
+        json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": null}
+        }),
+    );
+    for chunk in [
+        "Reasoning step one.\nReasoning ",
+        "step two continues the same line.",
+    ] {
+        append_sse(
+            &mut body,
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": chunk}
+            }),
+        );
+    }
+    append_sse(
+        &mut body,
+        "content_block_delta",
+        json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "sig_mock_thinking"}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": 0}),
+    );
+    append_sse(
+        &mut body,
+        "content_block_start",
+        json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_delta",
+        json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "The answer follows the reasoning."}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_stop",
+        json!({"type": "content_block_stop", "index": 1}),
+    );
+    append_sse(
+        &mut body,
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+            "usage": usage_json(12, 9)
         }),
     );
     append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));

@@ -1,0 +1,496 @@
+//! The co-host, proven on a scripted model — no secrets, no network.
+//!
+//! `cohost_live_llm` is the real thing and is `#[ignore]`d for it, so until now
+//! NOTHING automatic ran a co-hosted agent: nexus's duet workflow no-ops on a
+//! missing secret, the A2A live job skips its LLM half for the same reason, and
+//! `cargo test` skipped the ignored test. The co-host was verified by compiling.
+//!
+//! This closes that. The model is `mock-anthropic-service`, which answers a
+//! scripted tool call and then a scripted reply, so the agent's whole turn —
+//! engine, tool registry, kernel-backed file tools, mailbox — runs on loopback
+//! and lands in CI.
+//!
+//! It is also the equivalence proof the two hosts were missing. The scenario
+//! (`read_file_roundtrip`) is one the CLI's own PTY suite runs: a relative
+//! `fixture.txt` read and echoed back. Same script, same engine, one host on a
+//! kernel of its own and one on the daemon's — so a behaviour proven on either
+//! side is a statement about the engine rather than about a host.
+
+mod common;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+
+use common::{
+    agent_workspace, make_desc, mount_agent_world, provision_stream_transcript, send_prompt,
+    user_ctx, wait_for_agent_reply,
+};
+use engine_host::managed_agent::spawn_managed_agent;
+use kernel::kernel::Kernel;
+use kernel::core::agents::registry::AgentDescriptor;
+use runtime::mailbox::{InboxConvention, Mailbox};
+use runtime::{FsBackend, KernelFsBackend};
+
+/// Model alias the scripted config defines. The mock does not care which model
+/// is asked for; the config has to know it, exactly as in production.
+const MODEL: &str = "claude-sonnet";
+
+/// What the workspace fixture says, and so what the agent's reply must carry.
+const FIXTURE_BODY: &str = "alpha parity line";
+
+/// The peer the scripted reply is addressed to.
+///
+/// Taken from the mock rather than chosen here: nothing on this side picks the
+/// agent's reply for it, so the name the script sends to and the name this test
+/// watches have to be the same one.
+const USER: &str = mock_anthropic_service::COHOST_REPLY_TO;
+
+/// The scripted model, and the configuration that points the agent at it.
+///
+/// Both live for the whole test binary: the base URL is baked into the
+/// `sudocode.json` this writes, and `SUDO_CODE_CONFIG_HOME` is process-wide, so
+/// a per-test service would leave one test's config naming another's port.
+struct Harness {
+    runtime: tokio::runtime::Runtime,
+    service: mock_anthropic_service::MockAnthropicService,
+    _config_home: tempfile::TempDir,
+}
+
+impl Harness {
+    /// What the scripted model was actually asked, for a failure to report.
+    ///
+    /// The difference between "the agent never took the message" and "the turn
+    /// ran and the answer did not come back" is the first thing worth knowing,
+    /// and without this a timeout says neither.
+    fn requests_seen(&self) -> usize {
+        self.runtime
+            .block_on(self.service.captured_requests())
+            .len()
+    }
+}
+
+/// The turn each test drives. The `PARITY_SCENARIO:` prefix selects the mock's
+/// script, so the prompt and the script it triggers are named together.
+const READ_THEN_REPLY: &str =
+    "Read fixture.txt and tell me what it says. PARITY_SCENARIO:cohost_read_then_reply";
+const SHELL_PWD: &str = "Run pwd and tell me where your shell is. PARITY_SCENARIO:cohost_shell_pwd";
+
+/// One co-hosted agent at a time in this binary. What the harness configures is
+/// process-global — the scripted model's base URL lives in one
+/// `SUDO_CODE_CONFIG_HOME`, and the runtime build reads and creates state under
+/// it — so two overlapping spawns race over the same directories (`failed to
+/// build the agent runtime: NotFound` under the default parallel runner, green
+/// with `--test-threads=1`, which is the shape of a harness that only looks
+/// fine).
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn harness() -> &'static Harness {
+    static HARNESS: OnceLock<Harness> = OnceLock::new();
+    HARNESS.get_or_init(|| {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("mock service runtime");
+        let service = runtime
+            .block_on(mock_anthropic_service::MockAnthropicService::spawn())
+            .expect("mock anthropic service");
+        let config_home = tempfile::Builder::new()
+            .prefix("cohost-mock-config-")
+            .tempdir()
+            .expect("config home");
+        // ONE auth mode, deliberately. A co-hosted agent has no `--auth` flag —
+        // it resolves the mode from what the config offers, in the order
+        // subscription → proxy → api-key — so a config carrying all three sends
+        // the turn down the subscription OAuth path and out to the real API
+        // (observed: `401 Invalid bearer token`). Offering only `api-key` pins
+        // it on the one whose base URL this config gets to choose, which is the
+        // same mode the PTY harness pins with `--auth api-key`.
+        let config = serde_json::json!({
+            "auth_modes": {
+                "api-key": {
+                    "anthropic": {
+                        "baseUrl": "nexus:///model",
+                        "apiKey": "test-cohost-key",
+                    }
+                }
+            },
+            "models": {
+                MODEL: {
+                    "alias": MODEL,
+                    "name": "Scripted Sonnet",
+                    "input": ["text"],
+                    "providers": {
+                        "api-key": { "provider": "anthropic", "model": "claude-sonnet-4-6" }
+                    }
+                }
+            }
+        });
+        std::fs::write(
+            config_home.path().join("sudocode.json"),
+            serde_json::to_vec_pretty(&config).expect("config serializes"),
+        )
+        .expect("write the scripted sudocode.json");
+        std::env::set_var("SUDO_CODE_CONFIG_HOME", config_home.path());
+        Harness {
+            runtime,
+            service,
+            _config_home: config_home,
+        }
+    })
+}
+
+struct ModelWrites {
+    count: Arc<AtomicUsize>,
+    agent: String,
+}
+impl kernel::core::dispatch::NativeInterceptHook for ModelWrites {
+    fn name(&self) -> &'static str {
+        "model-egress-observer"
+    }
+    fn mutating_path_suffixes(&self) -> &'static [&'static str] {
+        &[".prompt", ".reply"]
+    }
+    fn on_pre(
+        &self,
+        ctx: &kernel::core::dispatch::HookContext,
+    ) -> Result<kernel::core::dispatch::HookOutcome, String> {
+        if let kernel::core::dispatch::HookContext::Write(w) = ctx {
+            if !w.path.starts_with("/model/") {
+                return Ok(kernel::core::dispatch::HookOutcome::Pass);
+            }
+            assert_eq!(w.identity.user_id, "test-owner");
+            assert_eq!(w.identity.agent_id, self.agent);
+            if w.path.ends_with(".prompt") {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        Ok(kernel::core::dispatch::HookOutcome::Pass)
+    }
+}
+
+/// Drive one co-hosted turn and report what came back, and how many times the
+/// model was asked to produce it.
+///
+/// `transcript_is_stream` is whether the pair's transcript is the DT_STREAM a
+/// federated daemon provides, or the DT_REG a conversation degrades to when that
+/// stream cannot be created; an agent has to behave the same on both, so the
+/// shape is a parameter rather than a second copy of this. `prompt` is a
+/// parameter for the same reason: a second scenario is a different question for
+/// the same agent, not a different harness.
+fn run_cohost_turn(
+    pid: &str,
+    agent_id: &str,
+    transcript_is_stream: bool,
+    prompt: &str,
+) -> (String, usize, Arc<dyn FsBackend>) {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let harness = harness();
+    // The scripted model is shared by every test in this binary, so what this
+    // turn cost is a DELTA. Counting the total made the assertion depend on how
+    // many tests ran before it — green alone, red in the suite.
+    let asked_before = harness.requests_seen();
+    let kernel = Arc::new(Kernel::new());
+    mount_agent_world(&kernel);
+    let _model = common::mount_model(
+        &kernel,
+        "anthropic",
+        &harness.service.base_url(),
+        "test-cohost-key",
+    );
+    let model_writes = Arc::new(AtomicUsize::new(0));
+    let hook = kernel
+        .enlist_hook_only_service("model-egress-observer")
+        .expect("model observer");
+    kernel.register_service_hook(
+        &hook,
+        Box::new(ModelWrites {
+            count: Arc::clone(&model_writes),
+            agent: agent_id.to_string(),
+        }),
+    );
+    let desc = make_desc(pid, agent_id, MODEL);
+
+    // The user's side of the VFS: plants the fixture and provisions the
+    // conversation through a real `Mailbox`, so this exercises the production
+    // provisioning path rather than planting entries by hand.
+    // The user's descriptor, planted the way the trusted service plants one,
+    // so the test's writes carry the same authority a real host's would.
+    let user_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &AgentDescriptor {
+            pid: format!("pid-{USER}"),
+            name: USER.to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
+        "/".to_string(),
+    ));
+    let workspace = agent_workspace(pid);
+    user_fs
+        .create_dir_all(&workspace)
+        .expect("plant the agent's workspace");
+    user_fs
+        .write(&format!("{workspace}/fixture.txt"), FIXTURE_BODY.as_bytes())
+        .expect("plant the fixture the model will read");
+
+    let transcript = InboxConvention::new(String::new()).transcript_path(USER, agent_id);
+    if transcript_is_stream {
+        provision_stream_transcript(&kernel, &transcript);
+    }
+    let user_mb = Arc::new(Mailbox::daemon_absolute(
+        Arc::clone(&user_fs),
+        USER.to_string(),
+    ));
+    user_mb
+        .ensure_conversation(agent_id)
+        .expect("provision the conversation with the co-host");
+
+    let handle = spawn_managed_agent(Arc::clone(&kernel), desc, |state, reason| {
+        eprintln!("[agent state] {state:?} reason={reason:?}");
+    })
+    .expect("this host can run an agent: the mock test supplies a config home");
+
+    let ctx = user_ctx();
+    send_prompt(&user_mb, agent_id, prompt);
+
+    let reply = wait_for_agent_reply(
+        &kernel,
+        &transcript,
+        &ctx,
+        agent_id,
+        Duration::from_secs(60),
+    );
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+
+    // A prompt write schedules the provider asynchronously. Aborting the agent
+    // after its mailbox reply can race that last HTTP dispatch, even though the
+    // agent thread has joined. Wait for the writes already recorded by the hook
+    // to reach the mock before comparing the two sides of the transport.
+    let expected = model_writes.load(Ordering::SeqCst);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut asked = harness.requests_seen() - asked_before;
+    while asked < expected && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+        asked = harness.requests_seen() - asked_before;
+    }
+    assert_eq!(
+        expected, asked,
+        "every upstream model call must cross the session filesystem"
+    );
+    let reply = reply.unwrap_or_else(|| {
+        let raw = user_fs
+            .read(&transcript)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_else(|e| format!("<unreadable: {e}>"));
+        panic!("no agent reply within 60s; model asked {asked} time(s); transcript:\n{raw}")
+    });
+    let body = reply
+        .get("body")
+        .and_then(|b| b.as_str())
+        .unwrap_or_default()
+        .to_string();
+    eprintln!("[agent -> user] {body}");
+    (body, asked, user_fs)
+}
+
+/// Delivery ADVANCED the agent's durable read position.
+///
+/// This replaces a turn-count ceiling, and the reason is worth keeping. Delivery is
+/// at-least-once by contract — the read position is one offset for a whole batch, so
+/// a batch the consumer did not finish is read again — and one scripted turn costs
+/// the model three calls (read, send, closing text). The total is therefore a
+/// property of how fast the runner is, not of the code: `asked <= 15` passed on
+/// Windows and Linux and failed on macOS at 16. A threshold tuned to one machine's
+/// number is a test that goes red on a slower machine for a reason that has nothing
+/// to do with the behaviour under test.
+///
+/// The storm this test exists for had a STRUCTURAL signature instead. The DT_REG
+/// fallback carries no `stream_next_offset`, so the durable read position never
+/// advanced and the same envelope was claimed 1030 times in a minute. A position past
+/// zero is the negation of exactly that: it says the consumer COMMITTED what it read,
+/// which is the one thing a storm cannot do. It costs no wall-clock and cannot drift
+/// with a runner's speed.
+///
+/// The count is still PRINTED — it is the first number worth seeing when this fails,
+/// and a regression that re-delivered while advancing would show up there, visible in
+/// the log rather than encoded as a guess.
+fn assert_delivery_advanced_the_cursor(fs: &Arc<dyn FsBackend>, agent_id: &str, asked: usize) {
+    let agent = Mailbox::daemon_absolute(Arc::clone(fs), agent_id.to_string());
+    let position = agent
+        .read_position(USER)
+        .expect("the agent's read register should be readable");
+    eprintln!("[delivery] the model was asked {asked} time(s); read position {position:?}");
+    assert!(
+        matches!(position, Some(offset) if offset > 0),
+        "the agent's durable read position must advance past the envelope it answered          — a position that never moves is the re-claim storm; got {position:?}"
+    );
+}
+
+/// A co-hosted agent reads its workspace through the kernel and replies.
+///
+/// The fixture's content coming back is the assertion, and it only happens if
+/// the whole chain worked: the loop claimed the envelope, the engine asked the
+/// model, the model's `read_file` call reached a kernel-backed tool, the
+/// RELATIVE path resolved against the agent's VFS workspace, and the reply was
+/// appended to the transcript the user reads.
+#[test]
+fn a_cohost_agent_reads_its_workspace_and_replies() {
+    let (body, asked, fs) = run_cohost_turn("cohost-mock-1", "scode-mock", true, READ_THEN_REPLY);
+    assert!(
+        body.contains(FIXTURE_BODY),
+        "the reply should carry what the agent read out of its workspace; got: {body}"
+    );
+    assert_delivery_advanced_the_cursor(&fs, "scode-mock", asked);
+}
+
+/// The same turn, on a transcript that could not become a stream.
+///
+/// `ensure_conversation` asks for a `"wal"` stream and gets a DT_REG whenever
+/// federation is not wired, so this is not a corner case but every
+/// non-federated daemon. Delivery has to be exactly once there too: reading a
+/// byte-addressed transcript used to leave the cursor where it was, so every
+/// poll re-delivered the same envelope and the peer was answered hundreds of
+/// times over (1044 model calls in 60 seconds, measured).
+#[test]
+fn a_conversation_that_is_not_a_stream_still_delivers_once() {
+    let (body, asked, fs) =
+        run_cohost_turn("cohost-mock-2", "scode-mock-jsonl", false, READ_THEN_REPLY);
+    assert!(
+        body.contains(FIXTURE_BODY),
+        "a byte-addressed transcript should carry the same reply; got: {body}"
+    );
+    assert_delivery_advanced_the_cursor(&fs, "scode-mock-jsonl", asked);
+}
+
+/// A co-hosted agent's turn is recorded where its filesystem says sessions live.
+///
+/// The agent ran real turns and kept the whole transcript in memory: its session
+/// had no persistence path, so nothing survived it — no `/sessions/<id>/`, no
+/// `/agents/{name}/sessions/<id>` index, nothing to inspect or resume. Every
+/// piece needed had shipped; the co-host was simply not a consumer of it.
+///
+/// Asserted through the VFS rather than by reading a struct: the point is that
+/// the bytes are addressable by anyone who can reach the kernel, which is what
+/// makes a co-hosted agent's history inspectable at all.
+#[test]
+fn a_cohost_turn_is_recorded_in_the_vfs() {
+    let (_body, _asked, fs) =
+        run_cohost_turn("cohost-mock-3", "scode-mock-session", true, READ_THEN_REPLY);
+
+    let sessions = fs
+        .readdir("/sessions")
+        .expect("the backend's session root should exist after a turn");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "one agent, one session; got {:?}",
+        sessions.iter().map(|e| &e.name).collect::<Vec<_>>()
+    );
+    let id = &sessions[0].name;
+
+    let transcript = fs
+        .read_to_string(&format!("/sessions/{id}/transcript.jsonl"))
+        .expect("the turn should be persisted at the session root");
+    assert!(
+        transcript.contains(FIXTURE_BODY),
+        "the persisted transcript should carry the turn; got: {transcript}"
+    );
+
+    // The per-agent index, planted by `create_handle`. An index, not the SSOT —
+    // but without it nothing can enumerate what an agent has run.
+    assert!(
+        fs.exists(&format!("/agents/scode-mock-session/sessions/{id}"))
+            .unwrap_or(false),
+        "the agent's session index should point at {id}"
+    );
+}
+
+/// A co-hosted agent is not offered crons this daemon will never fire.
+///
+/// The scode scheduler is a CLI process (`scode cron daemon`, or OS cron calling
+/// `scode cron tick`); nexusd does not tick `crons.json`. So a `CronCreate` here
+/// would persist an entry that either never fires or — if a ticker happens to
+/// share this machine's config home — fires later as a standalone CLI run under
+/// a different identity, in a host directory. Both are worse than a refusal.
+///
+/// Both halves are asserted, because hiding the specs only stops a model that
+/// reads the list; one that remembers the name from training calls it anyway.
+#[test]
+fn a_cohost_is_not_offered_crons_this_daemon_will_never_fire() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let _harness = harness();
+    let kernel = Arc::new(Kernel::new());
+    mount_agent_world(&kernel);
+
+    // Through the production spawn path: the declaration is the co-host's own
+    // fact about itself, so asserting it after a real spawn is what proves it is
+    // made at all.
+    let handle = spawn_managed_agent(
+        Arc::clone(&kernel),
+        make_desc("pid-cron", "cron-agent", MODEL),
+        |_, _| {},
+    )
+    .expect("this host can run an agent: the mock test supplies a config home");
+    assert!(
+        tools::cron_tools_disabled(),
+        "spawning a co-hosted agent should declare that this host fires no crons"
+    );
+    assert!(
+        !tools::mvp_tool_specs()
+            .iter()
+            .any(|spec| spec.name.starts_with("Cron")),
+        "the cron tools should not be advertised to a co-hosted agent"
+    );
+    let refused = tools::execute_tool("CronList", &serde_json::json!({}))
+        .expect_err("a cron call must be refused, not answered");
+    assert!(
+        refused.contains("nexusd"),
+        "the refusal should say which host will not fire it; got: {refused}"
+    );
+
+    handle.abort_signal.abort();
+    let _ = handle.join.join();
+}
+
+/// A co-hosted agent's shell runs in a directory of its OWN.
+///
+/// The scope is thread-local on the loop thread, so no test thread can read it —
+/// but the agent can be asked. It runs `pwd` and reports the answer, and the
+/// answer has to be its own directory rather than the daemon's, which is what
+/// `current_workspace_root()` falls through to when no scope is entered. That
+/// default was shared by every co-hosted agent on the daemon and pointed at the
+/// daemon's own git repository, so `git status` — and the git-context hook, and
+/// the stale-branch check — answered about the daemon.
+///
+/// Matched loosely on purpose: `sh -lc pwd` prints an MSYS path on Windows
+/// (`/c/Users/...`) and a canonicalised one on macOS, and the claim here is about
+/// WHICH directory, not how the platform spells it.
+#[test]
+fn a_cohosted_agents_shell_runs_in_its_own_directory() {
+    let agent_id = "scode-mock-shell";
+    let (body, _asked, _fs) = run_cohost_turn("cohost-mock-4", agent_id, true, SHELL_PWD);
+    let reported = body.replace('\\', "/");
+    assert!(
+        reported.contains(&format!("agents/{agent_id}/shell")),
+        "the agent should report its own shell root; got {reported}"
+    );
+}
+
+#[test]
+fn a_cohost_subagent_uses_the_same_model_mount_and_identity() {
+    let (body, asked, _fs) = run_cohost_turn(
+        "cohost-delegate",
+        "scode-mock-delegate",
+        true,
+        "Delegate a calculation and send me the result. PARITY_SCENARIO:cohost_delegate",
+    );
+    assert!(
+        body.contains("203"),
+        "the child must return its calculation, got {body}"
+    );
+    assert!(asked >= 3, "both parent and child must reach the provider");
+}

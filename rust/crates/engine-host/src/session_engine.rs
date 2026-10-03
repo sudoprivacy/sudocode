@@ -62,6 +62,14 @@ fn resume_model_from_config_ssot(
 
 pub struct AcpCliSession {
     pub cwd: PathBuf,
+    /// What this session's engine is hosted ON: its filesystem (a kernel of
+    /// its own), its config root, its identity.
+    ///
+    /// Built once, at session start, and reused by every rebuild. Re-deriving
+    /// it per rebuild would boot a second kernel for the same session — a
+    /// second mount table and a second metastore — so a `/model` switch could
+    /// silently change what the session can reach.
+    pub host: crate::HostContext,
     pub handle: SessionHandle,
     pub runtime: BuiltRuntime,
     pub abort_signal: runtime::HookAbortSignal,
@@ -189,8 +197,10 @@ impl SessionEngine {
         let resolved_auth = resolve_auth_mode(&resolved_model, auth_mode, &sudocode_config)
             .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
         let abort_signal = runtime::HookAbortSignal::new();
+        let host = crate::HostContext::for_cli_session(cwd.clone())
+            .map_err(|e| format!("failed to build the session filesystem: {e}"))?;
         let runtime = build_engine_runtime(
-            &cwd,
+            &host,
             session_state.with_persistence_path(handle.path.clone()),
             &handle.id,
             RuntimeConfig {
@@ -215,6 +225,7 @@ impl SessionEngine {
 
         let session = AcpCliSession {
             cwd,
+            host,
             handle,
             runtime,
             abort_signal,
@@ -272,8 +283,10 @@ impl SessionEngine {
         // Adopt the persisted transcript verbatim — no `new_cli_session_for`, no
         // `save_to_path` (it is already on disk at `handle.path`; re-saving here
         // would rewrite a transcript the turn loop has not touched yet).
+        let host = crate::HostContext::for_cli_session(cwd.clone())
+            .map_err(|e| format!("failed to build the session filesystem: {e}"))?;
         let runtime = build_engine_runtime(
-            &cwd,
+            &host,
             session,
             &handle.id,
             RuntimeConfig {
@@ -294,6 +307,7 @@ impl SessionEngine {
 
         let session = AcpCliSession {
             cwd,
+            host,
             handle,
             runtime,
             abort_signal,
@@ -366,7 +380,7 @@ impl SessionEngine {
         let system_prompt =
             build_acp_system_prompt(&cwd, &session.prompt_overrides, session.memory)?;
         let runtime = build_engine_runtime(
-            &cwd,
+            &session.host,
             new_session,
             &handle.id,
             RuntimeConfig {
@@ -432,6 +446,13 @@ impl SessionEngine {
     /// Config keys ∪ discovery ids, `current` pinned first — the model list the
     /// seam's `ModelChanged` carries and `/model` (no arg) shows.
     fn available_models(&self, current: &str) -> Vec<String> {
+        let catalog = self.lock_session().runtime.api_client().model_catalog();
+        if let Some(catalog) = &catalog {
+            catalog.refresh_in_background();
+        }
+        let _catalog_scope = catalog
+            .as_ref()
+            .map(runtime::model_discovery::ModelCatalog::enter);
         let config = load_sudocode_config_for_current_dir();
         let config_keys: Vec<String> = config.models.keys().cloned().collect();
         let mut available = runtime::model_capabilities::merge_discovery_ids(&config_keys);
@@ -672,10 +693,15 @@ impl engine_core::EngineDelegate for SessionEngine {
         blocks: Vec<runtime::ContentBlock>,
         observer: &mut dyn runtime::RuntimeObserver,
         prompter: &mut dyn runtime::PermissionPrompter,
-    ) -> Result<engine_core::TurnComplete, String> {
+    ) -> Result<engine_core::TurnComplete, runtime::RuntimeError> {
         let mut session = self.lock_session();
         session.abort_signal.reset();
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        session
+            .runtime
+            .session_mut()
+            .repair_orphan_tool_uses()
+            .map_err(|error| runtime::RuntimeError::new(error.to_string()))?;
 
         // Pre-send auto-compaction, budgeted the way the API preflight is
         // (context window minus max output, the fixed per-request overhead, and
@@ -747,35 +773,31 @@ impl engine_core::EngineDelegate for SessionEngine {
                     auto_compaction: None,
                 });
             }
-            pre_send_compaction = attempt.map_err(|error| error.to_string())?;
+            pre_send_compaction =
+                attempt.map_err(|error| runtime::RuntimeError::new(error.to_string()))?;
             // Re-estimate against the hard limit the preflight enforces. Still
             // over → classified error instead of a request that will be rejected.
             let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
             if !budget.fits(new_estimated_tokens + prompt_tokens) {
-                return Err(context_overflow_user_message(
-                    session.runtime.session(),
-                    new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
-                    context_limit,
+                return Err(runtime::RuntimeError::context_window_blocked(
+                    context_overflow_user_message(
+                        session.runtime.session(),
+                        new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
+                        context_limit,
+                    ),
                 ));
             }
         }
 
-        let turn_summary = self
-            .rt()
-            .block_on(
-                session
-                    .runtime
-                    .run_turn_with_blocks(blocks, Some(prompter), Some(observer)),
-            )
-            .map_err(|e| e.to_string())?;
+        let turn_summary = self.rt().block_on(session.runtime.run_turn_with_blocks(
+            blocks,
+            Some(prompter),
+            Some(observer),
+        ))?;
 
-        let path = session.handle.path.clone();
-        session
-            .runtime
-            .session()
-            .save_to_path(&path)
-            .map_err(|e| format!("failed to persist session: {e}"))?;
-
+        // No save here: `run_turn_with_blocks` persists a completed turn itself,
+        // so every host gets it — which is the point, since the co-host is the
+        // host that did not have this line.
         Ok(engine_core::TurnComplete {
             iterations: turn_summary.iterations,
             turn_usage: turn_summary.turn_usage,
@@ -961,6 +983,13 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     fn session_tracer(&self) -> Option<telemetry::SessionTracer>;
     /// A snapshot of the plugin load outcome (for `/skills` resolution).
     fn plugin_load_outcome(&self) -> PluginLoadOutcome;
+    /// The name this session answers to as an A2A peer.
+    ///
+    /// Asked of the session rather than re-derived, so the name the renderer
+    /// listens on is the name the session announces and signs with. Deriving it
+    /// a second time from the process directory is how a session ends up
+    /// described as one peer and delivering as another.
+    fn agent_name(&self) -> String;
     /// Run an `/mcp reconnect|enable|disable <server>` action against the live
     /// MCP state. `None` when no MCP servers are running in this session; else
     /// the action's `Ok(message)` / `Err(message)`.
@@ -969,6 +998,12 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     // --- config reads (engine SSOT) ------------------------------------------
     /// The model in effect.
     fn current_model(&self) -> String;
+    fn available_models(&self) -> Vec<String> {
+        vec![self.current_model()]
+    }
+    fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
+        None
+    }
     /// The effective permission mode.
     fn current_permission_mode(&self) -> PermissionMode;
     /// The resolved auth mode in effect.
@@ -1021,6 +1056,12 @@ pub trait SessionLifecycle: Send + Sync + 'static {
 }
 
 impl SessionLifecycle for SessionEngine {
+    fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
+        self.lock_session().runtime.api_client().model_catalog()
+    }
+    fn available_models(&self) -> Vec<String> {
+        SessionEngine::available_models(self, &self.session_model())
+    }
     fn session_snapshot(&self) -> runtime::Session {
         self.lock_session().runtime.session().clone()
     }
@@ -1058,6 +1099,10 @@ impl SessionLifecycle for SessionEngine {
 
     fn plugin_load_outcome(&self) -> PluginLoadOutcome {
         self.lock_session().runtime.plugin_load_outcome().clone()
+    }
+
+    fn agent_name(&self) -> String {
+        self.lock_session().host.resolved_agent_name()
     }
 
     fn mcp_command(&self, action: &str, server: &str) -> Option<Result<String, String>> {

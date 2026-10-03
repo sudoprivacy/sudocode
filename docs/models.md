@@ -21,11 +21,26 @@ scode --model sonnet --auth subscription
 
 For the canonical live alias list, run `scode --help`.
 
-> **These are convenience aliases, not the full model list.** `scode`
-> routes through the backend (sudorouter), whose live catalog has 170+
-> models - including Gemini (`gemini-3.5-flash`, ...), GPT-5, DeepSeek,
-> GLM, Kimi, MiniMax, and more. Use any catalog model by its full name,
-> e.g. `scode --model gemini-3.5-flash`.
+The aliases are shortcuts. Use `/model` to see models exposed by the current
+endpoint and account, or pass a full model ID with `scode --model <id>`.
+
+## Automatic discovery
+
+For Anthropic and OpenAI-compatible connections, scode queries `/v1/models`
+(or `/models` below a base URL that already includes `/v1`) using the same
+resolved endpoint and credentials as inference. It does not require an account
+named `sudorouter`.
+
+CLI and ACP refresh in the background at startup and when active use finds a
+catalog older than five minutes. A successful refresh updates the running
+session's model picker, completions and capability lookups. Failed or incomplete
+refreshes retain the previous catalog; an empty successful response clears it.
+
+Catalogs live under `cache/model-catalogs/` in the config directory, keyed by a
+hash of the endpoint and authentication headers. Accounts on the same endpoint
+have separate caches. Credentials are never written into these catalog files.
+Provider-managed credential-file connections and native Gemini/Codex discovery retain
+their existing behavior.
 
 ## Config IDs, display names, and deployment IDs
 
@@ -41,6 +56,20 @@ capability lookups, including the output-token ceiling and automatic pressure
 threshold. It must not size a request using a display name, a config alias, or
 an older model recorded in a resumed transcript. Configured token limits match
 full deployment IDs before trying the provider-prefix basename fallback.
+
+## Empty streamed responses
+
+The engine retries a response once when it ends without text or tool content,
+including responses with a normal stop frame or cache metadata. The retry stays
+streaming and uses the same model and credentials. A second empty response fails
+the turn. A completed answer is not regenerated.
+
+An explicit Anthropic `stop_reason: "refusal"` ends the turn with a provider
+refusal error, even when HTTP returned 200 or partial text preceded the refusal.
+The CLI shows the provider's category and explanation when present, records
+reported usage, and never retries that refusal. The live compatibility report
+lists these outcomes as `REFUSED`, separately from successful answers and outages.
+See [Anthropic's refusal protocol](https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback).
 
 ## Provider-specific handling
 
@@ -138,14 +167,21 @@ Add the fields to the model entry in `sudocode.json`:
 ## Per-model token limits — `maxOutputTokens` / `contextWindow`
 
 `scode` reads each model's context window and output-token ceiling from a
-capabilities table that is **compiled into the binary** (refreshed from
-sudorouter's `/v1/models` when available). A model the table has never
-heard of inherits the table's `default` entry — and when the real provider
+active endpoint's catalog. Missing capabilities for known models fall back to
+the bundled table. A model with no published limits uses the table's `default`
+entry — and when the real provider
 ceiling is lower, every request fails:
 
 ```
 <400> InternalError.Algo.InvalidParameter: Range of max_tokens should be [1, 32768]
 ```
+
+The bundled GPT-4o and GPT-4o mini entries use the documented 128,000-token
+context window and 16,384-token output ceiling
+([GPT-4o](https://developers.openai.com/api/docs/models/gpt-4o),
+[GPT-4o mini](https://developers.openai.com/api/docs/models/gpt-4o-mini)).
+This prevents an undocumented gateway entry from receiving the 64,000-token
+fallback and rejecting even a short prompt.
 
 Two optional fields on the model entry override the table:
 
@@ -171,8 +207,8 @@ Two optional fields on the model entry override the table:
 - Both are keyed by the **wire model ID** the entry maps to, so the override
   reaches every code path that asks the capabilities table — main loop,
   subagents, preflight — not just the request builder.
-- Absent means unchanged: the compiled table's numbers apply, exactly as
-  before.
+- When absent, the endpoint's published limits apply, with bundled defaults
+  for missing fields.
 
 ### Subagents and compaction
 
@@ -184,6 +220,12 @@ must supply a model; there is no built-in fallback model for subagents.
 Subagent result summaries use the subagent's resolved model. Manual and
 automatic compaction reuse the current agent's API client and model route;
 they do not select a separate summarization model.
+
+In a co-host deployment, subagents also use the parent's Nexus filesystem for
+workspace instructions and their own agent-type memory directory. Their prompt
+names the VFS workspace and separately identifies the host directory used by
+shell commands. The daemon's shell directory is not a source of workspace
+instructions. Standalone CLI subagents use their local project context.
 
 ### `reasoning_effort` values
 
@@ -201,5 +243,5 @@ To add a new model that requires special handling:
 1. Identify which families above the model belongs to.
 2. Extend the matching detection function in
    `rust/crates/api/src/providers/openai_compat.rs`.
-3. Add a unit test for the detection alongside the existing tests.
+3. Add a PTY regression that checks the provider request and resulting answer.
 4. Add an entry to the relevant section above.

@@ -5,8 +5,8 @@
 //! - Rollback of file operations
 //! - Turn-level file history
 
+use crate::fs_backend::FsBackend;
 use std::collections::HashMap;
-use std::fs;
 use std::path::PathBuf;
 
 use crate::file_intent::{FileIntent, FileOpKind};
@@ -111,16 +111,20 @@ impl TurnFileTracker {
         }
     }
 
-    /// Cleanup draft files for a specific turn.
+    /// Cleanup draft files for a specific turn, through `fs`. Returns the paths
+    /// of the cleaned files.
     ///
-    /// Returns paths of cleaned files.
-    pub fn cleanup_turn_drafts(&mut self, turn_id: &str) -> Vec<PathBuf> {
+    /// The paths came from the tools, so they mean whatever the tools' filesystem
+    /// means. Undoing them with `std::fs` did not just fail to clean the VFS for a
+    /// co-hosted agent — it aimed a `remove_file` at the daemon's own disk at the
+    /// same path.
+    pub fn cleanup_turn_drafts(&mut self, turn_id: &str, fs: &dyn FsBackend) -> Vec<PathBuf> {
         let mut cleaned = Vec::new();
 
         if let Some(ops) = self.turn_files.remove(turn_id) {
             for op in ops {
                 if op.intent == FileIntent::Draft {
-                    let _ = fs::remove_file(&op.path);
+                    let _ = fs.delete(&op.path.to_string_lossy());
                     cleaned.push(op.path);
                 }
             }
@@ -129,10 +133,11 @@ impl TurnFileTracker {
         cleaned
     }
 
-    /// Rollback all file operations for a specific turn.
+    /// Rollback all file operations for a specific turn, through `fs` — see
+    /// [`Self::cleanup_turn_drafts`] for why the filesystem has to be the tools'.
     ///
     /// Returns error messages for failed operations.
-    pub fn rollback_turn(&mut self, turn_id: &str) -> Vec<String> {
+    pub fn rollback_turn(&mut self, turn_id: &str, fs: &dyn FsBackend) -> Vec<String> {
         let mut errors = Vec::new();
 
         if let Some(ops) = self.turn_files.remove(turn_id) {
@@ -141,14 +146,16 @@ impl TurnFileTracker {
                 match op.kind {
                     FileOpKind::Create => {
                         // Delete created file
-                        if let Err(e) = fs::remove_file(&op.path) {
+                        if let Err(e) = fs.delete(&op.path.to_string_lossy()) {
                             errors.push(format!("Failed to delete {:?}: {}", op.path, e));
                         }
                     }
                     FileOpKind::Edit => {
                         // Restore original content
                         if let Some(original) = op.original_content {
-                            if let Err(e) = fs::write(&op.path, original) {
+                            if let Err(e) =
+                                fs.write(&op.path.to_string_lossy(), original.as_bytes())
+                            {
                                 errors.push(format!("Failed to restore {:?}: {}", op.path, e));
                             }
                         }
@@ -165,14 +172,15 @@ impl TurnFileTracker {
         &mut self,
         turn_id: &str,
         strategy: CleanupStrategy,
+        fs: &dyn FsBackend,
     ) -> CleanupResult {
         match strategy {
             CleanupStrategy::DraftsOnly => {
-                let cleaned = self.cleanup_turn_drafts(turn_id);
+                let cleaned = self.cleanup_turn_drafts(turn_id, fs);
                 CleanupResult::DraftsCleaned(cleaned)
             }
             CleanupStrategy::FullRollback => {
-                let errors = self.rollback_turn(turn_id);
+                let errors = self.rollback_turn(turn_id, fs);
                 if errors.is_empty() {
                     CleanupResult::FullRollback
                 } else {
@@ -305,7 +313,7 @@ mod tests {
             requested_path: tracker.workspace_root.join("final.md"),
         });
 
-        let cleaned = tracker.cleanup_turn_drafts("turn-1");
+        let cleaned = tracker.cleanup_turn_drafts("turn-1", &crate::fs_backend::StdFsBackend);
 
         assert_eq!(cleaned.len(), 1);
         assert!(!draft_file.exists()); // Draft file should be removed
@@ -327,7 +335,11 @@ mod tests {
             requested_path: tracker.workspace_root.join("temp.py"),
         });
 
-        let result = tracker.cleanup_with_strategy("turn-1", CleanupStrategy::DraftsOnly);
+        let result = tracker.cleanup_with_strategy(
+            "turn-1",
+            CleanupStrategy::DraftsOnly,
+            &crate::fs_backend::StdFsBackend,
+        );
         assert!(matches!(result, CleanupResult::DraftsCleaned(_)));
 
         cleanup_test_tracker(&tracker);

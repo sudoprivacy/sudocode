@@ -7,6 +7,11 @@
 //! are validated end to end. The paths used (`/ws/…`) do not exist on the
 //! host, so a host-`std::fs` regression would surface as a NotFound
 //! rather than silently passing.
+//!
+//! One test here is deliberately NOT about the VFS: `link` is a contract both
+//! backends answer, and the kernel half used to claim parity with the host half
+//! in a comment while nothing exercised it. The two live next to each other so
+//! the claim is checked rather than asserted.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -123,11 +128,13 @@ fn kernel_with_backend(zone_id: &str) -> Arc<Kernel> {
     kernel
 }
 
-/// A `KernelFsBackend` rooted at `/ws`, over the given kernel.
+/// A `KernelFsBackend` rooted at `/ws`, over the given kernel. The context
+/// names agent-x: the agents-base subtrees (`managed_root`) are keyed by the
+/// context's agent identity, and a context without one roots nothing.
 fn vfs_backend(kernel: &Arc<Kernel>) -> KernelFsBackend<Kernel> {
     KernelFsBackend::new(
         Arc::clone(kernel),
-        OperationContext::new("system", "root", true, None, true),
+        OperationContext::new("system", "root", true, Some("agent-x"), true),
         "/ws",
     )
 }
@@ -202,23 +209,25 @@ fn p1a_resource_targets_require_the_same_delegated_zone_for_cohost_and_subproces
         media_type: None,
         size_bytes: None,
     };
-    assert_eq!(
-        cohost.authorize_resource_ref(&own_ref),
-        subprocess.authorize_resource_ref(&own_ref),
-        "cohost and subprocess must make the same ResourceRef decision",
-    );
+    // The cohost context is trusted-local — a descriptor planted by the
+    // trusted ManagedAgentService is authority by construction — so a
+    // ResourceRef inside its zone and scope is AUTHORIZED, enforced to the
+    // descriptor's scope rules. The subprocess context is host-injected env
+    // without a server-verifiable credential and stays fail-closed.
+    assert!(cohost.authorize_resource_ref(&own_ref).is_ok());
     assert!(matches!(
-        cohost.authorize_resource_ref(&own_ref),
+        subprocess.authorize_resource_ref(&own_ref),
         Err(runtime::zone_context::ZoneAuthError::DelegationInvalid)
     ));
 
     let backend = KernelFsBackend::for_agent_descriptor(Arc::clone(&kernel), &descriptor, "/ws");
-    let denied = backend.write("/ws/allowed.txt", b"zone-scoped");
-    assert_eq!(
-        denied.unwrap_err().kind(),
-        std::io::ErrorKind::PermissionDenied
+    backend
+        .write("/ws/allowed.txt", b"zone-scoped")
+        .expect("a planted descriptor with a /ws write rule authorizes the write");
+    assert!(
+        permission_checks.load(Ordering::Relaxed) > 0,
+        "an authorized write reaches the kernel's permission provider"
     );
-    assert_eq!(permission_checks.load(Ordering::Relaxed), 0);
 
     let foreign_ref = ResourceRef {
         zone_id: "other-zone".to_string(),
@@ -483,7 +492,10 @@ fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
     let fs = vfs_backend(&kernel);
 
     // nexus imposes the flat, session-id-keyed /sessions/ namespace.
-    assert_eq!(fs.managed_sessions_root().as_deref(), Some("/sessions"));
+    assert_eq!(
+        fs.managed_root(runtime::ManagedRoot::Sessions).as_deref(),
+        Some("/sessions")
+    );
 
     // link() creates a DT_LINK pointer (the /agents/{name}/sessions/<sid> index).
     fs.link("/agents/alice/sessions/sid-1", "/sessions/sid-1")
@@ -493,6 +505,91 @@ fn kernel_backend_imposes_flat_sessions_root_and_can_link() {
         .expect("linked path should stat");
     assert_eq!(st.entry_type, DT_LINK, "alias is a DT_LINK");
     assert_eq!(st.link_target.as_deref(), Some("/sessions/sid-1"));
+    // read_link follows the DT_LINK back to its target — the follow half of
+    // link(), matching StdFsBackend::read_link so callers are backend-agnostic.
+    assert_eq!(
+        fs.read_link("/agents/alice/sessions/sid-1")
+            .expect("read_link should resolve the DT_LINK"),
+        "/sessions/sid-1"
+    );
+}
+
+/// The host backend answers `link` with a REAL OS link, needing no privilege.
+///
+/// The other half of the parity the test above claims. It is asserted here
+/// because the kernel half cannot show it: `KernelFsBackend` plants a DT_LINK,
+/// which says nothing about what `StdFsBackend` does on a host filesystem, and
+/// the co-host and a plain `scode` have to behave the same way — the chat-list
+/// index is a pointer at a conversation root on both.
+///
+/// A DIRECTORY target is the case that matters, and is the reason this passes
+/// on Windows without elevation. A native symlink there needs
+/// `SeCreateSymbolicLinkPrivilege` (admin, or Developer Mode); a junction does
+/// not, works for directories, and is a reparse point — so `symlink_metadata`
+/// reports `is_symlink` for it exactly as it does for a Unix symlink. One
+/// assertion therefore covers both platforms, and the daemon never needs a UAC
+/// prompt to index a conversation.
+///
+/// `is_symlink` is the binding assertion: with the platform call removed and
+/// only the pointer-file fallback left, `read_link` still round-trips, so every
+/// other assertion here passes against an implementation that creates no link
+/// at all.
+#[test]
+fn host_backend_links_a_directory_without_a_privilege() {
+    use runtime::StdFsBackend;
+
+    let root = tmp_dir("host-link");
+    let target = root.join("conv-root");
+    std::fs::create_dir_all(&target).expect("target dir");
+    let alias = root.join("idx");
+    let (alias, target) = (
+        alias.to_string_lossy().into_owned(),
+        target.to_string_lossy().into_owned(),
+    );
+
+    let fs = StdFsBackend;
+    fs.link(&alias, &target).expect("link a directory");
+
+    assert!(
+        fs.symlink_metadata(&alias)
+            .expect("lstat the alias")
+            .is_symlink,
+        "a directory target must get a real OS link — a symlink on Unix, a \
+         junction on Windows, neither of which needs a privilege"
+    );
+    assert_eq!(
+        fs.read_link(&alias).expect("read_link the alias"),
+        target,
+        "and it must resolve back to what it points at"
+    );
+    // The NAME is the index contract: it has to be listable whichever shape the
+    // platform produced, because that listing IS the chat list.
+    assert!(
+        fs.readdir(&root.to_string_lossy())
+            .expect("list the directory the index lives in")
+            .iter()
+            .any(|e| e.name == "idx"),
+        "the index must appear in a listing by name"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// A private temp directory per test.
+///
+/// Keyed on a counter rather than the clock: these tests run in parallel, and a
+/// nanosecond stamp is not unique on every platform — two tests that take the
+/// same one share a directory and delete each other's fixtures.
+fn tmp_dir(label: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let p = std::env::temp_dir().join(format!(
+        "scode-{label}-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&p).expect("temp dir");
+    p
 }
 
 #[test]
@@ -572,4 +669,225 @@ fn glob_and_grep_walk_the_vfs_trie() {
     // contain the needle.
     let grepped = grep_search(&fs, &grep_input("needle", root)).expect("VFS grep should succeed");
     assert_eq!(grepped.num_files, 2, "grep should match a.rs and sub/c.rs");
+}
+/// Memory is READ through the backend, so a co-hosted agent recalls what is in
+/// its own subtree of the VFS.
+///
+/// The directory already came from `managed_root`; the reading did not. The
+/// provider handed `/agents/agent-x/memory` to `std::fs`, which names nothing on
+/// any host — so memory was silently empty for every co-hosted agent, with the
+/// files sitting in the VFS where nobody looked. The host path is asserted
+/// absent for the same reason this file uses `/ws`: a regression back to the
+/// host filesystem fails here instead of passing by luck.
+#[test]
+fn memory_is_read_from_the_agents_own_vfs_subtree() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+
+    let dir = fs
+        .managed_root(runtime::ManagedRoot::Memory)
+        .expect("a co-hosted agent roots memory under itself");
+    assert_eq!(dir, "/agents/agent-x/memory");
+    fs.create_dir_all(&dir).expect("create the memory dir");
+    fs.write(
+        &format!("{dir}/MEMORY.md"),
+        b"- [One fact](one.md) - the hook
+",
+    )
+    .expect("write the index");
+    fs.write(
+        &format!("{dir}/one.md"),
+        b"---
+name: one
+description: the one fact
+metadata:
+  type: project
+---
+
+the body
+",
+    )
+    .expect("write the entry");
+
+    let index = runtime::memory::MemoryIndex::load(std::path::Path::new(&dir), &fs)
+        .expect("load memory through the backend");
+    assert_eq!(
+        index.entries().len(),
+        1,
+        "the entry written into the VFS is the entry recalled"
+    );
+    assert_eq!(index.entries()[0].name, "one");
+    assert!(
+        index.index().is_some(),
+        "MEMORY.md is read through the backend too, not just the entries"
+    );
+    assert!(
+        !std::path::Path::new(&dir).exists(),
+        "and none of it was written to the host filesystem"
+    );
+}
+
+/// Two co-hosted agents on one daemon keep their own todo list.
+///
+/// Both halves mattered: the path was derived from the daemon's directory (one
+/// file for every agent), and the store itself was a process-wide `OnceLock`
+/// (one list object for every agent, whoever resolved a path first).
+#[test]
+fn two_cohosted_agents_do_not_share_one_todo_list() {
+    use runtime::{Todo, TodoStatus, TodoStore};
+
+    let kernel = kernel_with_root_backend();
+    let agent = |name: &str| -> Arc<dyn FsBackend> {
+        Arc::new(KernelFsBackend::for_agent_descriptor(
+            Arc::clone(&kernel),
+            &AgentDescriptor {
+                pid: format!("pid-{name}"),
+                name: name.to_string(),
+                owner_id: "test-owner".to_string(),
+                zone_id: "root".to_string(),
+                ..AgentDescriptor::default()
+            },
+            "/ws",
+        ))
+    };
+    let (alice, bob) = (agent("alice"), agent("bob"));
+
+    let alice_path = runtime::todo_store_path(&alice).expect("alice's store path");
+    let bob_path = runtime::todo_store_path(&bob).expect("bob's store path");
+    // `Path::join` writes a host separator; every backend entry point collapses
+    // it back to the VFS spelling, so the comparison is against the VFS form.
+    let norm = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+    assert_eq!(norm(&alice_path), "/agents/alice/.sudocode-todos.json");
+    assert_ne!(
+        alice_path, bob_path,
+        "each agent's list is keyed by the agent, not by a directory they share"
+    );
+
+    TodoStore::load(&alice_path, Arc::clone(&alice)).set(vec![Todo {
+        content: String::from("Run the tests"),
+        status: TodoStatus::InProgress,
+        active_form: String::from("Running the tests"),
+    }]);
+
+    assert_eq!(
+        TodoStore::load(&alice_path, Arc::clone(&alice))
+            .list()
+            .len(),
+        1,
+        "a fresh handle over the same path is the same store — the write persisted"
+    );
+    assert!(
+        TodoStore::load(&bob_path, Arc::clone(&bob))
+            .list()
+            .is_empty(),
+        "and bob's list is untouched by alice's write"
+    );
+}
+/// Two co-hosted agents plan in their own workspaces.
+///
+/// The plan file resolved from the PROCESS working directory, which for a
+/// co-hosted agent is the daemon's — one file for every agent on that daemon, so
+/// two of them planning at once overwrote each other and the plan the user was
+/// asked to approve was not necessarily the one the agent wrote.
+#[test]
+fn a_cohosted_agents_plan_lives_in_its_own_workspace() {
+    // This test asserts the workspace branch of plan resolution: with no
+    // `$SUDOCODE_PLAN_FILE`, the plan lands in the agent's own working root on
+    // its own filesystem. That env var takes precedence when set (correct
+    // product behavior — a live CLI points it at the session's plan), so run
+    // this under the var unset regardless of the ambient environment. Without
+    // this the test passes in CI (clean env) but fails inside a live scode,
+    // whose process has the var pointing at its own session plan.
+    struct UnsetPlanFileEnv(Option<String>);
+    impl Drop for UnsetPlanFileEnv {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(prev) => std::env::set_var("SUDOCODE_PLAN_FILE", prev),
+                None => std::env::remove_var("SUDOCODE_PLAN_FILE"),
+            }
+        }
+    }
+    let _plan_env = UnsetPlanFileEnv(std::env::var("SUDOCODE_PLAN_FILE").ok());
+    std::env::remove_var("SUDOCODE_PLAN_FILE");
+
+    let kernel = kernel_with_root_backend();
+    let agent = |name: &str, workspace: &str| -> Arc<dyn FsBackend> {
+        Arc::new(KernelFsBackend::for_agent_descriptor(
+            Arc::clone(&kernel),
+            &AgentDescriptor {
+                pid: format!("pid-{name}"),
+                name: name.to_string(),
+                owner_id: "test-owner".to_string(),
+                zone_id: "root".to_string(),
+                ..AgentDescriptor::default()
+            },
+            workspace.to_string(),
+        ))
+    };
+    let alice = agent("alice", "/proc/1/workspace");
+    let bob = agent("bob", "/proc/2/workspace");
+
+    let path = runtime::plan_store::write_plan(
+        "## Alice
+1. ship it",
+        &alice,
+    )
+    .expect("a co-hosted agent should be able to write its plan");
+    assert_eq!(
+        path.to_string_lossy().replace('\\', "/"),
+        "/proc/1/workspace/.sudocode/plan.md",
+        "the plan belongs in the agent's own workspace"
+    );
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "and not on the host filesystem"
+    );
+
+    assert_eq!(
+        runtime::plan_store::read_plan(&alice).as_deref(),
+        Some(
+            "## Alice
+1. ship it"
+        ),
+        "it reads back through the same filesystem it was written to"
+    );
+    assert_eq!(
+        runtime::plan_store::read_plan(&bob),
+        None,
+        "and the agent next to it has no plan at all"
+    );
+}
+
+/// A path outside every mount reads back a transparent error, not a bare
+/// not-found. The mount table covers `/mnt`; a read under `/elsewhere` routes
+/// to no mount, and the backend uses `is_mounted` to say so — the message
+/// names the fix (mount its root) instead of implying the file is missing.
+#[test]
+fn a_path_outside_all_mounts_reads_a_transparent_error() {
+    let kernel = Arc::new(Kernel::new());
+    let backend: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
+    // Mount a SUBTREE, not `/`, so `/elsewhere` is genuinely unmounted.
+    kernel
+        .vfs_router_arc()
+        .add_mount("/mnt", "root", Some(backend), false);
+    let fs = KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &AgentDescriptor {
+            pid: "pid-agent-x".to_string(),
+            name: "agent-x".to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
+        "/mnt",
+    );
+
+    let err = fs
+        .read("/elsewhere/secret.txt")
+        .expect_err("a path under no mount must be an error");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        err.to_string().contains("outside this session's mounts"),
+        "unmounted path must read as a transparent mounts error, got: {err}",
+    );
 }

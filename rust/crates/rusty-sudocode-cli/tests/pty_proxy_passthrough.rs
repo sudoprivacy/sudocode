@@ -86,7 +86,7 @@ fn assert_passthrough_answers(label: &str, model: &str, question: &str, answer: 
     )
     .unwrap_or_else(|e| panic!("spawn scode with {model}: {e}"));
 
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     // Let the run finish before judging it: a single digit is far too weak a
     // match to decide on by itself, since a provider error body carries a
     // request id full of digits.
@@ -130,7 +130,7 @@ fn configured_model_still_works() {
 
     let mut sess = env.spawn(&["--permission-mode", "read-only", &prompt]);
 
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     // Mock returns "4" (SingleTurnText scenario), live returns "4" too.
     sess.expect("4")
         .expect("configured model should respond with 4");

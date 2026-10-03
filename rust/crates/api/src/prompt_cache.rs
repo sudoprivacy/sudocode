@@ -1,3 +1,16 @@
+//! Per-session record of how the provider's prompt cache behaved.
+//!
+//! **Only the Anthropic provider feeds this.** The OpenAI-compatible, Gemini
+//! and Codex clients never call in, so a session routed through them leaves
+//! no record here — empty stats mean "not measured", not "no cache problems".
+//!
+//! Extending it is not just wiring. OpenAI reports `cached_tokens` but has no
+//! cache-write concept, so `cache_creation_input_tokens` is always zero there
+//! and a read/(read+write) ratio over mixed providers would read 100% no
+//! matter what actually happened. Break detection would still work; the
+//! totals would not be comparable.
+
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -11,7 +24,7 @@ const DEFAULT_COMPLETION_TTL_SECS: u64 = 30;
 const DEFAULT_PROMPT_TTL_SECS: u64 = 5 * 60;
 const DEFAULT_BREAK_MIN_DROP: u32 = 2_000;
 const MAX_SANITIZED_LENGTH: usize = 80;
-const REQUEST_FINGERPRINT_VERSION: u32 = 1;
+const REQUEST_FINGERPRINT_VERSION: u32 = 2;
 const REQUEST_FINGERPRINT_PREFIX: &str = "v1";
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -49,6 +62,11 @@ pub struct PromptCachePaths {
     pub completion_dir: PathBuf,
     pub session_state_path: PathBuf,
     pub stats_path: PathBuf,
+    /// Append-only, one line per tracked request. `stats.json` is a rollup and
+    /// answers "how is the cache doing"; this answers "what happened, in what
+    /// order, and on whose account" — which a rollup structurally cannot,
+    /// because the moment a prefix goes cold is a point in a sequence.
+    pub requests_path: PathBuf,
 }
 
 impl PromptCachePaths {
@@ -61,6 +79,7 @@ impl PromptCachePaths {
             root,
             session_state_path: session_dir.join("session-state.json"),
             stats_path: session_dir.join("stats.json"),
+            requests_path: session_dir.join("requests.jsonl"),
             session_dir,
             completion_dir,
         }
@@ -80,6 +99,15 @@ pub struct PromptCacheStats {
     pub completion_cache_writes: u64,
     pub expected_invalidations: u64,
     pub unexpected_cache_breaks: u64,
+    /// How many breaks each cause took part in, keyed by [`cache_break_cause`].
+    ///
+    /// One break can have several causes, so these do not sum to the two
+    /// counters above. This is the breakdown `scode cache stats` reports:
+    /// without it the rollup keeps only `last_break_reason`, so a session that
+    /// threw its prefix away ten times over changed tool definitions looked
+    /// the same as one that never did.
+    #[serde(default)]
+    pub breaks_by_cause: BTreeMap<String, u64>,
     pub total_cache_creation_input_tokens: u64,
     pub total_cache_read_input_tokens: u64,
     pub last_cache_creation_input_tokens: Option<u32>,
@@ -90,13 +118,66 @@ pub struct PromptCacheStats {
     pub last_cache_source: Option<String>,
 }
 
+/// Stable, index-free names for what changed, for tallying across sessions.
+///
+/// `reason` is prose and carries message indices, so counting raw reason
+/// strings never aggregates. These do.
+pub mod cache_break_cause {
+    pub const MODEL: &str = "model";
+    pub const SYSTEM: &str = "system";
+    pub const TOOLS: &str = "tools";
+    pub const MESSAGES_REWRITTEN: &str = "messages-rewritten";
+    pub const TTL_EXPIRY: &str = "ttl-expiry";
+    pub const FINGERPRINT_VERSION: &str = "fingerprint-version";
+    pub const UNEXPLAINED: &str = "unexplained";
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheBreakEvent {
     pub unexpected: bool,
     pub reason: String,
+    /// Which parts of the request changed, from [`cache_break_cause`].
+    ///
+    /// Separate from `unexpected`, which asks only whether the request
+    /// explains the break. A break we can explain is still a break we may be
+    /// inflicting on ourselves: a mid-session `tools` change is "explained",
+    /// and it throws away the whole prefix, so bucketing it as expected hid
+    /// exactly the class of defect this record exists to find.
+    #[serde(default)]
+    pub causes: Vec<String>,
     pub previous_cache_read_input_tokens: u32,
     pub current_cache_read_input_tokens: u32,
     pub token_drop: u32,
+}
+
+/// One line of [`PromptCachePaths::requests_path`].
+///
+/// Deliberately small: enough to reconstruct a session's cache history and to
+/// join it against a gateway's own ledger, and nothing else. The join key is
+/// `gateway_request_id` — a pooling gateway records that same value against the
+/// upstream account it picked, so this is what turns "the prefix went cold" into
+/// "the prefix went cold *because the account changed*". Without it those two
+/// are indistinguishable from here, which is why a rollup was never going to be
+/// enough.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheRequestRow {
+    pub at_unix_secs: u64,
+    /// The gateway's correlation id, absent when talking straight to a provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_request_id: Option<String>,
+    /// The provider's (or gateway's own) request id, as the response reported it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+    pub model: String,
+    pub input_tokens: u32,
+    pub cache_read_input_tokens: u32,
+    pub cache_creation_input_tokens: u32,
+    /// Present only when this request broke the cache; `unexpected` separates
+    /// "the request changed, so of course it did" from "it should have hit".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub break_reason: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub break_unexpected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,12 +279,28 @@ impl PromptCache {
         request: &MessageRequest,
         response: &MessageResponse,
     ) -> PromptCacheRecord {
-        self.record_usage_internal(request, &response.usage, Some(response))
+        self.record_usage_internal(
+            request,
+            &response.usage,
+            Some(response),
+            response.gateway_request_id.as_deref(),
+        )
     }
 
+    /// The streaming path, where there is no assembled `MessageResponse`.
+    ///
+    /// `gateway_request_id` is a parameter here rather than being read off
+    /// something, because the stream holds it separately — and passing `None`
+    /// silently costs the account attribution this records, so it is not
+    /// defaulted away.
     #[must_use]
-    pub fn record_usage(&self, request: &MessageRequest, usage: &Usage) -> PromptCacheRecord {
-        self.record_usage_internal(request, usage, None)
+    pub fn record_usage(
+        &self,
+        request: &MessageRequest,
+        usage: &Usage,
+        gateway_request_id: Option<&str>,
+    ) -> PromptCacheRecord {
+        self.record_usage_internal(request, usage, None, gateway_request_id)
     }
 
     fn record_usage_internal(
@@ -211,6 +308,7 @@ impl PromptCache {
         request: &MessageRequest,
         usage: &Usage,
         response: Option<&MessageResponse>,
+        gateway_request_id: Option<&str>,
     ) -> PromptCacheRecord {
         let request_hash = request_hash_hex(request);
         let mut inner = self.lock();
@@ -227,9 +325,30 @@ impl PromptCache {
                 inner.stats.expected_invalidations += 1;
             }
             inner.stats.last_break_reason = Some(event.reason.clone());
+            for cause in &event.causes {
+                *inner
+                    .stats
+                    .breaks_by_cause
+                    .entry(cause.clone())
+                    .or_insert(0) += 1;
+            }
         }
 
         inner.previous = Some(current);
+        append_request_row(
+            &inner.paths,
+            &PromptCacheRequestRow {
+                at_unix_secs: now_unix_secs(),
+                gateway_request_id: gateway_request_id.map(ToOwned::to_owned),
+                provider_request_id: response.and_then(|r| r.request_id.clone()),
+                model: request.model.clone(),
+                input_tokens: usage.input_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                break_reason: cache_break.as_ref().map(|event| event.reason.clone()),
+                break_unexpected: cache_break.as_ref().is_some_and(|event| event.unexpected),
+            },
+        );
         if let Some(response) = response {
             write_completion_entry(&inner.paths, &request_hash, response);
             inner.stats.completion_cache_writes += 1;
@@ -273,7 +392,16 @@ struct TrackedPromptState {
     model_hash: u64,
     system_hash: u64,
     tools_hash: u64,
-    messages_hash: u64,
+    /// Cumulative hash after each message, so two turns can be compared by
+    /// their common prefix rather than by one hash over the whole array.
+    ///
+    /// A single `messages_hash` cannot tell the two apart, and they are not
+    /// remotely equivalent: appending a turn leaves the cached prefix intact,
+    /// while rewriting an earlier message invalidates everything after it.
+    /// Because messages grow on every turn the whole-array hash always
+    /// differed, so "message payload changed" was reported on every break and
+    /// carried no information.
+    message_hashes: Vec<u64>,
     cache_read_input_tokens: u32,
 }
 
@@ -286,7 +414,7 @@ impl TrackedPromptState {
             model_hash: hashes.model,
             system_hash: hashes.system,
             tools_hash: hashes.tools,
-            messages_hash: hashes.messages,
+            message_hashes: message_prefix_hashes(request),
             cache_read_input_tokens: usage.cache_read_input_tokens,
         }
     }
@@ -297,7 +425,6 @@ struct RequestFingerprints {
     model: u64,
     system: u64,
     tools: u64,
-    messages: u64,
 }
 
 impl RequestFingerprints {
@@ -306,7 +433,6 @@ impl RequestFingerprints {
             model: hash_serializable(&request.model),
             system: hash_serializable(&request.system),
             tools: hash_serializable(&request.tools),
-            messages: hash_serializable(&request.messages),
         }
     }
 }
@@ -324,6 +450,7 @@ fn detect_cache_break(
                 "fingerprint version changed (v{} -> v{})",
                 previous.fingerprint_version, current.fingerprint_version
             ),
+            causes: vec![cache_break_cause::FINGERPRINT_VERSION.to_string()],
             previous_cache_read_input_tokens: previous.cache_read_input_tokens,
             current_cache_read_input_tokens: current.cache_read_input_tokens,
             token_drop: previous
@@ -334,22 +461,37 @@ fn detect_cache_break(
     let token_drop = previous
         .cache_read_input_tokens
         .saturating_sub(current.cache_read_input_tokens);
-    if token_drop < config.cache_break_min_drop {
-        return None;
-    }
 
     let mut reasons = Vec::new();
+    let mut causes = Vec::new();
     if previous.model_hash != current.model_hash {
         reasons.push("model changed");
+        causes.push(cache_break_cause::MODEL.to_string());
     }
     if previous.system_hash != current.system_hash {
         reasons.push("system prompt changed");
+        causes.push(cache_break_cause::SYSTEM.to_string());
     }
     if previous.tools_hash != current.tools_hash {
         reasons.push("tool definitions changed");
+        causes.push(cache_break_cause::TOOLS.to_string());
     }
-    if previous.messages_hash != current.messages_hash {
-        reasons.push("message payload changed");
+    // Appending a turn is the normal case and leaves the cached prefix
+    // whole; only a rewrite *inside* the prefix invalidates it. Reporting
+    // both as "message payload changed" made the reason useless, because the
+    // whole-array hash differs on every single turn.
+    let shared = common_prefix_len(&previous.message_hashes, &current.message_hashes);
+    let rewritten = shared < previous.message_hashes.len();
+    let rewrite_detail = rewritten.then(|| {
+        format!(
+            "message history rewritten at index {shared} (had {}, now {})",
+            previous.message_hashes.len(),
+            current.message_hashes.len()
+        )
+    });
+    if let Some(detail) = &rewrite_detail {
+        reasons.push(detail.as_str());
+        causes.push(cache_break_cause::MESSAGES_REWRITTEN.to_string());
     }
 
     let elapsed = current
@@ -357,12 +499,27 @@ fn detect_cache_break(
         .saturating_sub(previous.observed_at_unix_secs);
 
     let (unexpected, reason) = if reasons.is_empty() {
+        // Nothing in the request explains a break, so the only evidence left is
+        // the token counts — and they have to have moved enough to mean
+        // something. This gate belongs *here*, not above the fingerprint
+        // comparison where it used to sit: a prefix thrown away before it was
+        // ever read shows no drop at all. A live 3-turn session revealed a
+        // deferred tool on turn 2, which rewrote the whole prefix (read 0,
+        // written 8421, right after turn 1 wrote 7926) — reads went 0 -> 0, the
+        // drop was zero, and the break this record exists to catch was never
+        // recorded. When the fingerprint says what changed, that IS the
+        // evidence; the drop is only severity.
+        if token_drop < config.cache_break_min_drop {
+            return None;
+        }
         if elapsed > config.prompt_ttl.as_secs() {
+            causes.push(cache_break_cause::TTL_EXPIRY.to_string());
             (
                 false,
                 format!("possible prompt cache TTL expiry after {elapsed}s"),
             )
         } else {
+            causes.push(cache_break_cause::UNEXPLAINED.to_string());
             (
                 true,
                 "cache read tokens dropped while prompt fingerprint remained stable".to_string(),
@@ -375,6 +532,7 @@ fn detect_cache_break(
     Some(CacheBreakEvent {
         unexpected,
         reason,
+        causes,
         previous_cache_read_input_tokens: previous.cache_read_input_tokens,
         current_cache_read_input_tokens: current.cache_read_input_tokens,
         token_drop,
@@ -401,6 +559,28 @@ fn persist_state(inner: &PromptCacheInner) {
     if let Some(previous) = &inner.previous {
         let _ = write_json(&inner.paths.session_state_path, previous);
     }
+}
+
+/// Append one line to the request ledger.
+///
+/// Append rather than rewrite, and one line rather than a document, because the
+/// file has to survive being written by a process that is killed mid-session —
+/// which is the normal way an agent run ends. A partial final line costs one
+/// row; a truncated JSON document would cost the session.
+///
+/// Failures are ignored for the same reason the other writes here are: this is
+/// observability, and losing a row must never fail the request that produced it.
+fn append_request_row(paths: &PromptCachePaths, row: &PromptCacheRequestRow) {
+    let _ = ensure_cache_dirs(paths);
+    let Ok(mut line) = serde_json::to_vec(row) else {
+        return;
+    };
+    line.push(b'\n');
+    let _ = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.requests_path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, &line));
 }
 
 fn write_completion_entry(
@@ -439,6 +619,37 @@ fn request_hash_hex(request: &MessageRequest) -> String {
     )
 }
 
+/// Cumulative hash after each message: element `k` covers `messages[0..=k]`.
+///
+/// Chaining rather than hashing each message alone so that a single
+/// comparison finds the first index where two turns diverge — which is
+/// exactly where the provider's cached prefix stops matching.
+fn message_prefix_hashes(request: &MessageRequest) -> Vec<u64> {
+    let mut acc = FNV_OFFSET_BASIS;
+    request
+        .messages
+        .iter()
+        .map(|message| {
+            let json = serde_json::to_vec(message).unwrap_or_default();
+            for byte in &json {
+                acc ^= u64::from(*byte);
+                acc = acc.wrapping_mul(FNV_PRIME);
+            }
+            acc
+        })
+        .collect()
+}
+
+/// Length of the longest shared leading run — the part of the conversation
+/// both requests agree on byte for byte.
+fn common_prefix_len(previous: &[u64], current: &[u64]) -> usize {
+    previous
+        .iter()
+        .zip(current.iter())
+        .take_while(|(a, b)| a == b)
+        .count()
+}
+
 fn hash_serializable<T: Serialize>(value: &T) -> u64 {
     let json = serde_json::to_vec(value).unwrap_or_default();
     stable_hash_bytes(&json)
@@ -464,20 +675,42 @@ fn hash_string(value: &str) -> u64 {
     stable_hash_bytes(value.as_bytes())
 }
 
+/// Directory holding one subdirectory of stats per session.
+///
+/// Public so a command can enumerate past sessions without each caller
+/// rebuilding the same path and drifting from it.
+#[must_use]
+pub fn cache_root() -> PathBuf {
+    base_cache_root()
+}
+
+/// Resolved through [`runtime::config::default_config_home`] rather than from a
+/// private copy of the same rules, because the two disagreeing is not a
+/// cosmetic bug.
+///
+/// The copy this replaced read `SUDO_CODE_CONFIG_HOME`, then `HOME`, then fell
+/// back to the system temp dir — it was the only home resolver in the workspace
+/// that omitted the Windows `USERPROFILE` fallback (`runtime::config` has it,
+/// the CLI's own test harness was fixed for the same omission). `HOME` is set
+/// inside Git Bash and unset in PowerShell, so on Windows the same machine had
+/// two stores: config loaded from `%USERPROFILE%\.nexus\sudocode` while the
+/// cache was written to `%TEMP%\sudocode-prompt-cache`. That cost three things,
+/// in rising order of importance:
+///
+/// 1. The record landed somewhere Windows disk cleanup deletes, so the
+///    per-request ledger — the only instrument that can attribute a cache break
+///    to a TTL expiry — was disposable.
+/// 2. `stats.json` and the ledger were split across two directories, so no
+///    single store described a user's actual traffic.
+/// 3. `session-state.json` is how break detection remembers the *previous*
+///    request's fingerprint. Resuming a session from a different launch context
+///    silently found no previous state, which disables break detection and the
+///    completion cache for that session — the behavior this module exists to
+///    measure, broken by where it chose to write.
 fn base_cache_root() -> PathBuf {
-    if let Some(config_home) = std::env::var_os("SUDO_CODE_CONFIG_HOME") {
-        return PathBuf::from(config_home)
-            .join("cache")
-            .join("prompt-cache");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".nexus")
-            .join("sudocode")
-            .join("cache")
-            .join("prompt-cache");
-    }
-    std::env::temp_dir().join("sudocode-prompt-cache")
+    runtime::config::default_config_home()
+        .join("cache")
+        .join("prompt-cache")
 }
 
 fn now_unix_secs() -> u64 {
@@ -528,6 +761,58 @@ mod tests {
         assert!(paths.session_state_path.ends_with("session-state.json"));
     }
 
+    /// With `HOME` unset the cache must still land next to the config, not in a
+    /// temp directory.
+    ///
+    /// PowerShell and cmd do not set `HOME`; Git Bash does. The resolver this
+    /// replaced fell through to `std::env::temp_dir()` in that case, so the same
+    /// machine wrote its cache to two different places depending on which shell
+    /// launched `scode` — and the PowerShell half landed where Windows disk
+    /// cleanup deletes it. `session-state.json` is what break detection reads to
+    /// learn the previous request's fingerprint, so a split store silently
+    /// disables break detection for a resumed session.
+    #[test]
+    fn cache_root_follows_the_config_home_on_windows_without_home() {
+        let _guard = test_env_lock();
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            ["SUDO_CODE_CONFIG_HOME", "HOME", "USERPROFILE"]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect();
+        let profile = std::env::temp_dir().join(format!(
+            "prompt-cache-userprofile-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+
+        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", &profile);
+        let root = PromptCachePaths::for_session("profile-session").root;
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert_eq!(
+            root,
+            profile
+                .join(".nexus")
+                .join("sudocode")
+                .join("cache")
+                .join("prompt-cache"),
+            "with HOME unset the cache root must follow USERPROFILE, exactly as \
+             runtime::config::default_config_home resolves it — never the system \
+             temp dir"
+        );
+    }
+
     #[test]
     fn request_fingerprint_drives_unexpected_break_detection() {
         let request = sample_request("same");
@@ -557,6 +842,10 @@ mod tests {
         assert!(event.reason.contains("stable"));
     }
 
+    /// Rewriting an earlier message is the expensive case: the provider's
+    /// prefix stops matching at that index and everything after it is rebuilt.
+    /// The reason has to name the index, otherwise it is indistinguishable
+    /// from the harmless case below.
     #[test]
     fn changed_prompt_marks_break_as_expected() {
         let previous_request = sample_request("first");
@@ -584,7 +873,110 @@ mod tests {
         let event = detect_cache_break(&PromptCacheConfig::default(), Some(&previous), &current)
             .expect("break should be detected");
         assert!(!event.unexpected);
-        assert!(event.reason.contains("message payload changed"));
+        assert!(
+            event
+                .reason
+                .contains("message history rewritten at index 0"),
+            "reason should name where the prefix diverged, got: {}",
+            event.reason
+        );
+    }
+
+    /// Appending a turn is what every normal request does, and it leaves the
+    /// cached prefix whole. Before prefix comparison the whole-array hash
+    /// always differed, so this case was reported identically to a rewrite —
+    /// which made the reason field carry no information at all.
+    #[test]
+    fn appended_turn_is_not_reported_as_a_rewrite() {
+        let previous_request = sample_request("first");
+        let mut current_request = sample_request("first");
+        current_request
+            .messages
+            .push(crate::types::InputMessage::user_text("second"));
+
+        let previous = TrackedPromptState::from_usage(
+            &previous_request,
+            &Usage {
+                cache_read_input_tokens: 6_000,
+                ..Usage::default()
+            },
+        );
+        let current = TrackedPromptState::from_usage(
+            &current_request,
+            &Usage {
+                cache_read_input_tokens: 1_000,
+                ..Usage::default()
+            },
+        );
+
+        let event = detect_cache_break(&PromptCacheConfig::default(), Some(&previous), &current)
+            .expect("a 5k drop still counts as a break");
+        assert!(
+            !event.reason.contains("rewritten"),
+            "an append must not be reported as a rewrite, got: {}",
+            event.reason
+        );
+    }
+
+    /// The ledger is the only thing that can tie a session's cache history to
+    /// the upstream account that served it, so the join key has to survive into
+    /// the file — and the rows have to stay in order, because "the prefix went
+    /// cold here" is a position in a sequence, not an aggregate.
+    #[test]
+    fn request_ledger_records_the_gateway_id_in_order() {
+        let _guard = test_env_lock();
+        let temp_root = std::env::temp_dir().join(format!(
+            "prompt-cache-ledger-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::env::set_var("SUDO_CODE_CONFIG_HOME", &temp_root);
+        let cache = PromptCache::new("ledger-session");
+
+        // Two turns on the same gateway, then one where the gateway said
+        // nothing — the last is what talking straight to a provider looks like,
+        // and it must still produce a row rather than be dropped.
+        for (text, gateway) in [
+            ("first", Some("client:aaa")),
+            ("second", Some("client:bbb")),
+            ("third", None),
+        ] {
+            let mut response = sample_response(100, 5, "ok");
+            response.gateway_request_id = gateway.map(ToOwned::to_owned);
+            let _ = cache.record_response(&sample_request(text), &response);
+        }
+
+        let path = PromptCachePaths::for_session("ledger-session").requests_path;
+        let text = std::fs::read_to_string(&path).expect("the ledger should exist");
+        let rows: Vec<super::PromptCacheRequestRow> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("each line is one row"))
+            .collect();
+
+        assert_eq!(rows.len(), 3, "one row per tracked request");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.gateway_request_id.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("client:aaa".to_string()),
+                Some("client:bbb".to_string()),
+                None
+            ],
+            "the join key must reach the file, in request order, and an absent \
+             gateway must not drop the row"
+        );
+        assert!(
+            rows.iter()
+                .all(|row| row.cache_read_input_tokens == 100 && row.at_unix_secs > 0),
+            "each row carries the usage and a timestamp: {rows:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
     }
 
     #[test]
@@ -733,6 +1125,7 @@ mod tests {
                 ..Usage::default()
             },
             request_id: Some("req_test".to_string()),
+            gateway_request_id: None,
         }
     }
 }

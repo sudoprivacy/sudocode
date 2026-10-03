@@ -7,12 +7,14 @@
 //!
 //! # ChromeSlot pattern
 //!
-//! The REPL chrome uses a **ChromeSlot** convention: each position in the
-//! layout is an enum that renders exactly one variant at a time.  The enum
-//! + match makes the contract visible to any reader:
+//! The REPL chrome uses named slots with explicit content ownership.
+//! `StatusSlot`, `InputSlot`, and `FooterSlot` each select one enum variant;
+//! `PendingSlot` and `TodoSlot` render their current lists and hide when empty:
 //!
 //! ```text
+//! [PendingSlot]   ← in-flight tools and queued messages
 //! [StatusSlot]    ← spinner | turn_result | tips | empty
+//! [TodoSlot]      ← todo summary and items | empty
 //! ──── separator ────
 //! [InputSlot]     ← hint | text_input | question_panel
 //! ──── separator ────
@@ -28,6 +30,9 @@ use std::time::{Duration, Instant};
 
 use commands::suggest_slash_commands;
 use iocraft::prelude::*;
+
+mod ansi_text;
+use ansi_text::AnsiText;
 
 // ── stderr redirect ───────────────────────────────────────────────────
 
@@ -538,8 +543,8 @@ pub enum UiCommand {
     ClearQuestion,
     SetTurnResult(String),
     ShowInputHint(String),
-    /// Update the ContextSlot's todo panel with the current todo list.
-    UpdateContext(Vec<runtime::Todo>),
+    /// Update the `TodoSlot` panel with the current todo list.
+    UpdateTodos(Vec<runtime::Todo>),
     /// A tool call started — append a running (yellow) card to the pending
     /// overlay, in arrival order relative to queued messages.
     ToolStarted {
@@ -560,6 +565,7 @@ pub enum UiCommand {
     /// wholesale list) so tools and messages keep their true interleaving.
     QueuedMessagePush {
         display: String,
+        is_human: bool,
     },
     /// Clear all queued-message items from the pending overlay (tool cards
     /// stay). Sent by the coordinator when the queue drains at a turn boundary.
@@ -588,8 +594,8 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ShowInputHint(text.to_string()));
     }
 
-    pub fn update_context(&self, todos: Vec<runtime::Todo>) {
-        let _ = self.tx.send(UiCommand::UpdateContext(todos));
+    pub fn update_todos(&self, todos: Vec<runtime::Todo>) {
+        let _ = self.tx.send(UiCommand::UpdateTodos(todos));
     }
 
     pub fn tool_started(&self, id: &str, name: &str, input: &str) {
@@ -604,9 +610,10 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ToolFinished { id: id.to_string() });
     }
 
-    pub fn queued_message_push(&self, display: &str) {
+    pub fn queued_message_push(&self, display: &str, is_human: bool) {
         let _ = self.tx.send(UiCommand::QueuedMessagePush {
             display: display.to_string(),
+            is_human,
         });
     }
 
@@ -666,6 +673,34 @@ fn format_paste_placeholder(id: u32, text: &str) -> String {
         format!("[Pasted text #{id}]")
     } else {
         format!("[Pasted text #{id} +{newline_count} lines]")
+    }
+}
+
+/// Apply a paste to a text buffer, shared by the `TextInput.on_paste` handler
+/// and the DialPad custom-input row so bracketed / multi-line paste behaves
+/// identically in both. Normalizes line endings, then either inserts the paste
+/// literally (short single-/double-line) or registers it in `store` under a
+/// fresh id and appends a compact `[Pasted text #N +M lines]` placeholder (long
+/// or multi-line) that `expand_paste_placeholders` restores at submit time.
+/// Returns the new buffer contents.
+fn apply_paste_to_buffer(
+    current: &str,
+    pasted: &str,
+    next_id: &mut u32,
+    store: &mut std::collections::HashMap<u32, String>,
+) -> String {
+    let pasted = normalize_paste_newlines(pasted);
+    if !should_use_paste_placeholder(&pasted) {
+        return format!("{current}{pasted}");
+    }
+    let id = *next_id;
+    *next_id += 1;
+    let placeholder = format_paste_placeholder(id, &pasted);
+    store.insert(id, pasted);
+    if current.is_empty() {
+        placeholder
+    } else {
+        format!("{current}{placeholder}")
     }
 }
 
@@ -770,14 +805,26 @@ fn enter_key_event_for_value(
     if trimmed == "/exit" || trimmed == "/quit" {
         Some(InputEvent::Exit)
     } else {
+        // Strip trailing newline(s): the multiline TextInput inserts a `\n`
+        // for the Enter keypress that submits, and that keystroke can land in
+        // the value before this handler reads it — leaving a spurious trailing
+        // newline on the submitted/queued text. Internal newlines (a real
+        // multi-line message) are preserved; only the submit-newline tail is
+        // removed. SSOT: fixing it here cleans the idle-turn prompt, the queued
+        // text, and therefore what ↑ recalls, all at once.
+        let text = value.trim_end_matches('\n').to_string();
         Some(InputEvent::Submit {
-            text: value.to_string(),
-            display: value.to_string(),
+            text: text.clone(),
+            display: text,
         })
     }
 }
 
-fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -> String {
+fn format_question_panel(
+    question: &QuestionPromptView,
+    selected_index: usize,
+    custom_input: &str,
+) -> String {
     let mut lines = Vec::new();
     if let Some(title) = question.title.as_deref().filter(|title| !title.is_empty()) {
         lines.push(format!("[{title}]"));
@@ -798,7 +845,7 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
     for (index, option) in question.options.iter().enumerate() {
         let selector = if index == selected_index { ">" } else { " " };
         let marker = if option.recommended {
-            " recommended"
+            " (recommended)"
         } else {
             ""
         };
@@ -816,13 +863,35 @@ fn format_question_panel(question: &QuestionPromptView, selected_index: usize) -
         ));
     }
     let max_digit = question.options.len().min(9);
+    // Built-in custom-input row: every DialPad has it. When the question opted
+    // into free text (`allow_custom_input`), it accepts typing in-place; the row
+    // shows the typed buffer (with a caret when selected) or the hint. When the
+    // question did not opt in, the row is omitted.
     if question.allow_custom_input {
-        let hint = question
-            .custom_input_hint
-            .as_deref()
-            .filter(|hint| !hint.is_empty())
-            .unwrap_or("type your own answer");
-        lines.push(format!("  [+] {hint}"));
+        let on_row = selected_index == question.options.len();
+        let selector = if on_row { ">" } else { " " };
+        let body = if custom_input.is_empty() {
+            let hint = question
+                .custom_input_hint
+                .as_deref()
+                .filter(|hint| !hint.is_empty())
+                .unwrap_or("type your own answer");
+            if on_row {
+                // Show a caret so it reads as an active field once selected.
+                format!(
+                    "\u{2588} {}{hint}{}",
+                    crate::render::DIM,
+                    crate::render::RESET
+                )
+            } else {
+                format!("{}{hint}{}", crate::render::DIM, crate::render::RESET)
+            }
+        } else if on_row {
+            format!("{custom_input}\u{2588}")
+        } else {
+            custom_input.to_string()
+        };
+        lines.push(format!("{selector} [+] {body}"));
     }
     let arrow_hint = if question.back_value.is_some() {
         "\u{2190}\u{2192} back/open \u{00b7} "
@@ -1064,27 +1133,8 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
-// ── ContextSlot — persistent area for TodoPanel (+ future sections) ──
+// ── PendingSlot — in-flight tools and queued messages ─────────────────
 
-/// Render the todo panel matching CC's `TodoWrite` layout:
-///
-/// ```text
-/// 5 todos (2 done, 1 in progress, 2 open)
-///   ✓ Update docs
-///   ■ Writing unit tests
-///   □ Fix login bug
-///   … +2 pending, 1 completed
-/// ```
-///
-/// - Header: count summary with done/in_progress/open breakdown
-/// - Each visible todo: icon + label (completed = strikethrough+dim, in_progress = bold activeForm)
-/// - Truncation: dynamic based on terminal height (CC: `min(10, max(3, rows - 14))`)
-/// - Priority order: in_progress > pending > completed; hidden summary
-/// Render the staging overlay: the in-flight tool calls as running (yellow)
-/// L-frame cards, joined into one multi-line string, capped to a height budget
-/// so many concurrent cards can't flood the screen or make every frame redraw
-/// hundreds of lines. Overflow collapses to a `… +N more running` line.
-///
 /// One pending item awaiting the user's eye at a turn boundary: either an
 /// in-flight tool call (rendered as a running L-frame card) or a message queued
 /// for the next turn (a human `❯` line or an inbound A2A `📨` line). They share
@@ -1100,7 +1150,10 @@ pub enum PendingItem {
     /// A message queued for the next turn — `display` is the compact one-line
     /// form (`❯ …` for human, `📨 A2A from X: …` for a peer). Purely transient:
     /// the coordinator echoes the real line to scrollback when it flushes.
-    QueuedMessage { display: String },
+    /// `is_human` distinguishes a typed input from an inbound A2A/peer message
+    /// so the empty-buffer `↑` can pop the newest human chip to match the
+    /// coordinator's `dequeue_last_human`, leaving peer chips in place.
+    QueuedMessage { display: String, is_human: bool },
 }
 
 /// Render the pending overlay: in-flight tool cards and queued messages in one
@@ -1145,7 +1198,7 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
     let mut tools_total = 0usize;
     for item in items {
         match item {
-            PendingItem::QueuedMessage { display } => {
+            PendingItem::QueuedMessage { display, .. } => {
                 // Always render (one line, collapsed), in arrival position.
                 let first = display.lines().next().unwrap_or("");
                 lines.push(format!("{DIM}↳ queued: {first}{RESET}"));
@@ -1179,6 +1232,22 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
     lines.join("\n")
 }
 
+// ── TodoSlot — todo summary and items ─────────────────────────────────
+
+/// Render the todo panel matching CC's `TodoWrite` layout:
+///
+/// ```text
+/// 5 todos (2 done, 1 in progress, 2 open)
+///   ✓ Update docs
+///   ■ Writing unit tests
+///   □ Fix login bug
+///   … +2 pending, 1 completed
+/// ```
+///
+/// - Header: count summary with done/in_progress/open breakdown
+/// - Each visible todo: icon + label (completed = strikethrough+dim, in_progress = bold activeForm)
+/// - Truncation: dynamic based on terminal height (CC: `min(10, max(3, rows - 14))`)
+/// - Priority order: in_progress > pending > completed; hidden summary
 fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
     use crate::render::{ansi_fg, theme, BOLD, DIM, RESET};
 
@@ -1208,20 +1277,22 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
     let open_count = todos.len() - completed_count;
 
     // Header summary line
-    let mut header_parts = vec![format!("{BOLD}{completed_count}{RESET} done")];
+    let mut header = crate::render::StyledLine::muted();
+    header.push_bold(todos.len().to_string());
+    header.push(" todos (");
+    header.push_bold(completed_count.to_string());
+    header.push(" done");
     if in_progress_count > 0 {
-        header_parts.push(format!("{BOLD}{in_progress_count}{RESET} in progress"));
+        header.push(", ");
+        header.push_bold(in_progress_count.to_string());
+        header.push(" in progress");
     }
-    header_parts.push(format!("{BOLD}{open_count}{RESET} open"));
-    let header = format!(
-        "{DIM}{BOLD}{}{RESET}{DIM} todos ({}){}",
-        todos.len(),
-        header_parts.join(", "),
-        RESET
-    );
+    header.push(", ");
+    header.push_bold(open_count.to_string());
+    header.push(" open)");
 
     let mut lines = Vec::with_capacity(todos.len() + 2);
-    lines.push(header);
+    lines.push(header.to_string());
 
     // Sort by priority: in_progress first, then pending, then completed.
     let mut sorted: Vec<&runtime::Todo> = todos.iter().collect();
@@ -1295,19 +1366,28 @@ struct ReplContext {
     permission_mode: String,
     tips_line: String,
     stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>>,
-    /// Todo items for the ContextSlot. Updated by `UiCommand::UpdateContext`
+    /// Todo items for the `TodoSlot`. Updated by `UiCommand::UpdateTodos`
     /// in the tick loop, read during the render phase. Uses `Arc<Mutex>`
     /// instead of a `use_state` hook to avoid shifting hook indices.
-    context_todos: Arc<Mutex<Vec<runtime::Todo>>>,
+    todo_items: Arc<Mutex<Vec<runtime::Todo>>>,
     /// Running tool cards for the StagingSlot overlay, in insertion order.
     /// Pending items for the overlay above the StatusSlot: in-flight tool cards
     /// and queued messages (human + inbound A2A) in one ordered list, so the
     /// overlay shows arrival order across both. `ToolStarted`/`QueuedMessagePush`
     /// append; `ToolFinished` removes a tool by id; `QueuedMessagesClear` drops
-    /// the queued messages. Same `Arc<Mutex>` rationale as `context_todos` —
+    /// the queued messages. Same `Arc<Mutex>` rationale as `todo_items` —
     /// avoids shifting hook indices.
     pending: Arc<Mutex<Vec<PendingItem>>>,
+    /// Empty-buffer `↑` hook: pops the newest **human** queued item out of the
+    /// coordinator's staging area and returns its text for the input slot,
+    /// skipping inbound A2A/peer items. `None` when no queue is wired (the
+    /// handler then walks prompt history as before). Backed by the shared
+    /// `Arc<Mutex<TurnInputCoordinator>>` the coordinator loop also holds.
+    dequeue_hook: Option<UpArrowDequeueHook>,
 }
+
+/// Empty-buffer `↑` dequeue hook — see [`ReplContext::dequeue_hook`].
+pub type UpArrowDequeueHook = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 #[component]
 fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -1319,10 +1399,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let permission_mode = ctx.permission_mode.clone();
     let tips_text = ctx.tips_line.clone();
     let stderr_redir = Arc::clone(&ctx.stderr_redir);
-    let context_todos = Arc::clone(&ctx.context_todos);
-    let context_todos_for_future = Arc::clone(&ctx.context_todos);
+    let todo_items = Arc::clone(&ctx.todo_items);
+    let todo_items_for_future = Arc::clone(&ctx.todo_items);
     let pending = Arc::clone(&ctx.pending);
     let pending_for_future = Arc::clone(&ctx.pending);
+    let pending_for_dequeue = Arc::clone(&ctx.pending);
+    let dequeue_hook = ctx.dequeue_hook.clone();
     drop(ctx);
 
     // use_terminal_size must be called before use_future and use_terminal_events
@@ -1342,15 +1424,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut history = hooks.use_state(Vec::<String>::new);
     let mut history_cursor = hooks.use_state(|| None::<usize>);
     let mut saved_input = hooks.use_state(String::new);
+    // True while the current input buffer was built by ↑ recalling queued
+    // messages from the staging area (as opposed to typed text or history
+    // recall). Lets a subsequent ↑ keep stacking older queued items above the
+    // recalled ones, and is cleared the moment the buffer leaves recall (submit,
+    // Down, or history recall) — mirrors how `history_cursor` marks history
+    // recall mode.
+    let mut is_queued_recall = hooks.use_state(|| false);
     let mut tab_candidates = hooks.use_state(Vec::<String>::new);
     let mut tab_index = hooks.use_state(|| 0usize);
     let mut footer_hint = hooks.use_state(|| None::<(String, Instant)>);
     let mut dialpad_cursor = hooks.use_state(|| 0usize);
-    // When the user starts typing a free-form answer to a DialPad question
-    // (only when the question set `allow_custom_input`), the active question is
-    // captured here so TextInput's Enter routes the typed text back as the
-    // answer instead of submitting it as a new prompt. Cleared on submit/cancel.
-    let mut custom_answer_question = hooks.use_state(|| None::<QuestionPromptView>);
+    // Free-text buffer for a DialPad's built-in custom-input row. Every DialPad
+    // has this row (empty until the question opts in via `allow_custom_input`);
+    // typing appends here in-place — no slot switch, no component-mount race —
+    // mirroring how FuzzySelect owns its `filter`. Cleared when a question opens.
+    let mut dialpad_input = hooks.use_state(String::new);
     // Ephemeral paste store: placeholder_id -> real pasted text.
     // Allocated when the user pastes, freed on submit/clear.
     // Never persisted — the real content goes into the submitted message.
@@ -1381,7 +1470,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // 80ms tick loop: drain output/control channels, update spinner text.
     hooks.use_future(async move {
-        let mut task_hide_deadline: Option<Instant> = None;
+        let mut todo_hide_deadline: Option<Instant> = None;
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
 
@@ -1428,6 +1517,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     .position(|o| o.recommended)
                                     .unwrap_or(0);
                                 dialpad_cursor.set(initial);
+                                dialpad_input.set(String::new());
                                 InputSlot::DialPad(question)
                             };
                             input_slot.set(slot);
@@ -1443,23 +1533,23 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         Ok(UiCommand::ShowInputHint(text)) => {
                             input_slot.set(InputSlot::Hint(text));
                         }
-                        Ok(UiCommand::UpdateContext(todos)) => {
-                            if let Ok(mut items) = context_todos_for_future.lock() {
+                        Ok(UiCommand::UpdateTodos(todos)) => {
+                            if let Ok(mut items) = todo_items_for_future.lock() {
                                 let has_incomplete = todos
                                     .iter()
                                     .any(|t| t.status != runtime::TodoStatus::Completed);
                                 if todos.is_empty() {
                                     // Empty list → hide immediately
                                     items.clear();
-                                    task_hide_deadline = None;
+                                    todo_hide_deadline = None;
                                 } else if has_incomplete {
                                     // Has open todos → show, cancel any hide timer
                                     *items = todos;
-                                    task_hide_deadline = None;
-                                } else if task_hide_deadline.is_none() {
+                                    todo_hide_deadline = None;
+                                } else if todo_hide_deadline.is_none() {
                                     // All terminal → start 5s hide timer
                                     *items = todos;
-                                    task_hide_deadline =
+                                    todo_hide_deadline =
                                         Some(Instant::now() + Duration::from_secs(5));
                                 } else {
                                     *items = todos;
@@ -1482,11 +1572,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     .retain(|p| !matches!(p, PendingItem::Tool(c) if c.id == id));
                             }
                         }
-                        Ok(UiCommand::QueuedMessagePush { display }) => {
+                        Ok(UiCommand::QueuedMessagePush { display, is_human }) => {
                             // Append in arrival order, interleaved with tool
                             // cards, so the overlay mirrors what happened.
                             if let Ok(mut pending) = pending_for_future.lock() {
-                                pending.push(PendingItem::QueuedMessage { display });
+                                pending.push(PendingItem::QueuedMessage { display, is_human });
                             }
                         }
                         Ok(UiCommand::QueuedMessagesClear) => {
@@ -1502,13 +1592,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }
 
-            // Auto-hide task panel 5s after all tasks reach terminal state.
-            if let Some(deadline) = task_hide_deadline {
+            // Auto-hide the TodoSlot 5s after all todos are completed.
+            if let Some(deadline) = todo_hide_deadline {
                 if Instant::now() >= deadline {
-                    if let Ok(mut items) = context_todos_for_future.lock() {
+                    if let Ok(mut items) = todo_items_for_future.lock() {
                         items.clear();
                     }
-                    task_hide_deadline = None;
+                    todo_hide_deadline = None;
                 }
             }
 
@@ -1575,10 +1665,37 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             InputSlot::DialPad(question) => {
                                 let selected = dialpad_cursor.get();
-                                submit_dialpad_selection(question, selected, &input_tx_for_events);
-                                if !*has_submitted.read() { has_submitted.set(true); }
-                                input_value.set(String::new());
-                                input_slot.set(InputSlot::TextInput);
+                                let on_custom_row =
+                                    question.allow_custom_input && selected == question.options.len();
+                                if on_custom_row {
+                                    // On the `[+]` row: submit the typed buffer
+                                    // as the free-text answer. Empty buffer does
+                                    // nothing (stay on the row so the user can
+                                    // type), matching an input field. Expand any
+                                    // paste placeholders so a collapsed paste is
+                                    // sent in full (same as TextInput submit).
+                                    let raw = dialpad_input.read().clone();
+                                    let store_snap = paste_store.read().clone();
+                                    let answer =
+                                        expand_paste_placeholders(&raw, &store_snap).trim().to_string();
+                                    if !answer.is_empty() {
+                                        if !*has_submitted.read() {
+                                            has_submitted.set(true);
+                                        }
+                                        let _ = input_tx_for_events
+                                            .send(InputEvent::QuestionAnswer(answer));
+                                        dialpad_input.set(String::new());
+                                        paste_store.write().clear();
+                                        next_paste_id.set(1);
+                                        input_value.set(String::new());
+                                        input_slot.set(InputSlot::TextInput);
+                                    }
+                                } else {
+                                    submit_dialpad_selection(question, selected, &input_tx_for_events);
+                                    if !*has_submitted.read() { has_submitted.set(true); }
+                                    input_value.set(String::new());
+                                    input_slot.set(InputSlot::TextInput);
+                                }
                             }
                             InputSlot::FuzzySelect(_) => {
                                 // Prefer the highlighted option. If nothing
@@ -1610,22 +1727,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             InputSlot::TextInput => {
                                 let val = input_value.read().clone();
-                                // If we're typing a free-form answer to a
-                                // DialPad question (allow_custom_input), route
-                                // the text back as the answer, not a new prompt.
-                                if custom_answer_question.read().is_some() {
-                                    let trimmed = val.trim();
-                                    if !trimmed.is_empty() {
-                                        if !*has_submitted.read() {
-                                            has_submitted.set(true);
-                                        }
-                                        let _ = input_tx_for_events
-                                            .send(InputEvent::QuestionAnswer(trimmed.to_string()));
-                                        input_value.set(String::new());
-                                        custom_answer_question.set(None);
-                                    }
-                                    return;
-                                }
                                 if let Some(event) = enter_key_event_for_value(None, 0, &val) {
                                     if !*has_submitted.read() { has_submitted.set(true); }
                                     match event {
@@ -1655,6 +1756,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         InputEvent::QuestionAnswer(_) | InputEvent::Abort => {}
                                     }
                                     input_value.set(String::new());
+                                    is_queued_recall.set(false);
                                     if history_cursor.get().is_some() {
                                         history_cursor.set(None);
                                         saved_input.set(String::new());
@@ -1671,6 +1773,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     KeyCode::Down if matches!(current_slot, InputSlot::DialPad(ref q) if !q.options.is_empty()) => {
                         let cur = dialpad_cursor.get();
                         let max = match &current_slot {
+                            // With custom input, options.len() is the extra
+                            // `[+]` row, so the cursor may reach it.
+                            InputSlot::DialPad(q) if q.allow_custom_input => q.options.len(),
                             InputSlot::DialPad(q) => q.options.len().saturating_sub(1),
                             _ => 0,
                         };
@@ -1768,7 +1873,60 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let on_first_line = !val.get(..cursor_pos)
                                 .unwrap_or(&val)
                                 .contains('\n');
-                            if val.is_empty() || (on_first_line && cursor_pos == 0) {
+                            // Queue-recall triggers when the buffer is empty
+                            // (first recall) OR we're already stacking recalled
+                            // items (`is_queued_recall`): each further ↑ pulls the
+                            // next-older queued human message and stacks it ABOVE
+                            // the current buffer, so the slot reads in submit
+                            // order. While stacking, the caret line no longer
+                            // matters — ↑ means "give me the previous queued
+                            // message" until the user edits/submits (which exits
+                            // recall) or the queue runs out of human items.
+                            let is_recall_active = val.is_empty() || is_queued_recall.get();
+                            if is_recall_active {
+                                if let Some(text) =
+                                    dequeue_hook.as_ref().and_then(|hook| hook())
+                                {
+                                    let existing = input_value.read().clone();
+                                    // Older item on top; existing recalled buffer
+                                    // (newer items) below — submit order. Empty
+                                    // buffer → just the recalled text.
+                                    let composed = if existing.is_empty() {
+                                        text
+                                    } else {
+                                        format!("{text}\n{existing}")
+                                    };
+                                    let cursor_offset = composed.len();
+                                    input_value.set(composed);
+                                    is_queued_recall.set(true);
+                                    text_input_handle.write().set_cursor_offset(cursor_offset);
+                                    // Drop the newest human chip from the overlay
+                                    // to match the item just popped from the queue;
+                                    // peer chips are left in place.
+                                    if let Ok(mut pending) = pending_for_dequeue.lock() {
+                                        if let Some(pos) = pending.iter().rposition(|p| {
+                                            matches!(
+                                                p,
+                                                PendingItem::QueuedMessage { is_human: true, .. }
+                                            )
+                                        }) {
+                                            pending.remove(pos);
+                                        }
+                                    }
+                                } else if val.is_empty() {
+                                    // No human queued and buffer empty → walk
+                                    // prompt history as before.
+                                    let h = history.read();
+                                    if !h.is_empty() {
+                                        saved_input.set(val);
+                                        input_value.set(h[h.len() - 1].clone());
+                                        history_cursor.set(Some(h.len() - 1));
+                                    }
+                                }
+                                // else: is_queued_recall active but queue drained of
+                                // human items — nothing more to recall; leave the
+                                // stacked buffer as-is.
+                            } else if on_first_line && cursor_pos == 0 {
                                 let h = history.read();
                                 if !h.is_empty() {
                                     saved_input.set(val);
@@ -1783,6 +1941,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Down if matches!(current_slot, InputSlot::TextInput) => {
+                        is_queued_recall.set(false);
                         if let Some(c) = history_cursor.get() {
                             let h = history.read();
                             if c + 1 < h.len() {
@@ -1808,8 +1967,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     // ── Digit shortcut — DialPad only ─────────────────
+                    // Only when NOT composing free text: an empty custom-input
+                    // buffer AND the cursor not parked on the `[+]` row. Once you
+                    // start typing (or select `[+]`), digits are literal input.
                     KeyCode::Char(ch)
-                        if matches!(current_slot, InputSlot::DialPad(ref q) if q.options.len() >= 2)
+                        if matches!(current_slot, InputSlot::DialPad(ref q)
+                            if q.options.len() >= 2
+                                && dialpad_input.read().is_empty()
+                                && dialpad_cursor.get() != q.options.len())
                             && ch.is_ascii_digit()
                             && !modifiers.contains(KeyModifiers::CONTROL)
                             && !modifiers.contains(KeyModifiers::ALT) =>
@@ -1829,21 +1994,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                         }
                     }
-                    // ── Typing a free-form answer — DialPad with allow_custom_input ──
-                    // A printable character (that is not a digit quick-select)
-                    // switches to TextInput seeded with that char; the active
-                    // question is captured so Enter routes the text back as the
-                    // answer. Only when the question opted in via
-                    // `allow_custom_input`.
+                    // ── Typing a free-form answer — DialPad custom-input row ──
+                    // A printable char (not a digit quick-select) appends to the
+                    // DialPad's in-place custom-input buffer and moves the cursor
+                    // onto the `[+]` row. No slot switch, so a fast keystroke
+                    // burst can't be dropped by a component-mount race. Only when
+                    // the question opted in via `allow_custom_input`.
                     KeyCode::Char(ch)
                         if matches!(current_slot, InputSlot::DialPad(ref q) if q.allow_custom_input)
                             && !modifiers.contains(KeyModifiers::CONTROL)
                             && !modifiers.contains(KeyModifiers::ALT) =>
                     {
                         if let InputSlot::DialPad(ref question) = current_slot {
-                            custom_answer_question.set(Some(question.clone()));
-                            input_slot.set(InputSlot::TextInput);
-                            input_value.set(ch.to_string());
+                            let mut buf = dialpad_input.read().clone();
+                            buf.push(ch);
+                            dialpad_input.set(buf);
+                            dialpad_cursor.set(question.options.len());
                         }
                     }
                     // ── Typing in FuzzySelect updates filter ──────────
@@ -1865,6 +2031,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             fs.apply_filter();
                         }
                     }
+                    KeyCode::Backspace
+                        if matches!(current_slot, InputSlot::DialPad(_))
+                            && !dialpad_input.read().is_empty() =>
+                    {
+                        let mut buf = dialpad_input.read().clone();
+                        buf.pop();
+                        dialpad_input.set(buf);
+                    }
                     // ── Global keys ───────────────────────────────────
                     KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
                         let _ = input_tx_for_events.send(InputEvent::Exit);
@@ -1873,6 +2047,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
                         input_value.set(String::new());
                         history_cursor.set(None);
+                        is_queued_recall.set(false);
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         let now = Instant::now();
@@ -1888,12 +2063,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let hint_msg = format!("{}Press Ctrl-C again to exit{}", crate::render::DIM, crate::render::RESET);
                             footer_hint.set(Some((hint_msg, Instant::now() + ctrlc_hint_ttl())));
                             input_value.set(String::new());
+                            is_queued_recall.set(false);
                         }
                     }
                     KeyCode::Esc => {
-                        // In FuzzySelect/DialPad/Hint, ESC cancels.
-                        // Also drop any in-progress custom answer.
-                        custom_answer_question.set(None);
+                        is_queued_recall.set(false);
+                        // In FuzzySelect/DialPad/Hint, ESC cancels. Also drop any
+                        // in-progress DialPad custom-input buffer.
+                        dialpad_input.set(String::new());
                         if !matches!(current_slot, InputSlot::TextInput | InputSlot::Hint(_)) {
                             input_slot.set(InputSlot::TextInput);
                             input_value.set(String::new());
@@ -1929,6 +2106,40 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             tab_candidates.set(Vec::new());
                         }
                     }
+                }
+            }
+            // Bracketed paste. The iocraft `TextInput` component consumes this
+            // via its own `on_paste` when the TextInput slot is active; for the
+            // DialPad custom-input row (and FuzzySelect filter) that component is
+            // not mounted, so route the paste into the active buffer here using
+            // the SAME normalize/placeholder logic (DRY).
+            TerminalEvent::Paste(pasted) => {
+                let current_slot = input_slot.read().clone();
+                match &current_slot {
+                    InputSlot::DialPad(q)
+                        if q.allow_custom_input
+                            && dialpad_cursor.get() == q.options.len() =>
+                    {
+                        let current = dialpad_input.read().clone();
+                        let mut id = next_paste_id.get();
+                        let mut store = paste_store.write();
+                        let new_val =
+                            apply_paste_to_buffer(&current, &pasted, &mut id, &mut store);
+                        drop(store);
+                        next_paste_id.set(id);
+                        dialpad_input.set(new_val);
+                    }
+                    InputSlot::FuzzySelect(_) => {
+                        // FuzzySelect filters in place; a paste is just more
+                        // filter text (short pastes only — a giant paste as a
+                        // filter is nonsensical, so insert literally).
+                        let mut slot = input_slot.write();
+                        if let InputSlot::FuzzySelect(ref mut fs) = *slot {
+                            fs.filter.push_str(&normalize_paste_newlines(&pasted));
+                            fs.apply_filter();
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}
@@ -1999,7 +2210,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let (panel_text, prompt_label) = match &current_input_slot {
         InputSlot::Hint(_) | InputSlot::TextInput => (None, crate::render::PROMPT_PREFIX),
         InputSlot::DialPad(q) => (
-            Some(format_question_panel(q, dialpad_cursor.get())),
+            Some(format_question_panel(
+                q,
+                dialpad_cursor.get(),
+                &dialpad_input.read(),
+            )),
             "\u{2753} ",
         ),
         InputSlot::FuzzySelect(fs) => (Some(fs.format_panel()), "\u{1f50d} "),
@@ -2010,10 +2225,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sep = "\u{2500}".repeat(w);
     let footer_text = format_footer_text(&footer_slot, &perm);
 
-    // Merge ContextSlot into the upper separator as a single
+    // Merge TodoSlot into the upper separator as a single
     // multi-line Text element so the element tree structure stays
     // identical (avoids iocraft hook-index shifts).
-    let todo_line = context_todos
+    let todo_line = todo_items
         .lock()
         .ok()
         .map(|items| render_todo_panel(&items, term_height as usize))
@@ -2039,26 +2254,33 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     element! {
         View(flex_direction: FlexDirection::Column) {
-            // PendingSlot: tools + queued messages, arrival order. Empty string
-            // renders nothing; element always present to keep hook order.
-            Text(content: pending_text)
+            // PendingSlot: tools + queued messages, arrival order. Rendered only
+            // when non-empty — an empty `Text` is not zero-height in iocraft
+            // (its measure clamps to `height.max(1)`), so an always-present slot
+            // left a stray blank line above the status when nothing was pending.
+            // Match the StatusSlot pattern below: `None` renders zero rows.
+            #(if pending_text.is_empty() {
+                None
+            } else {
+                Some(element! { AnsiText(content: pending_text) })
+            })
             // StatusSlot
             #(match &status_slot {
-                StatusSlot::Spinner(s) => Some(element! { Text(content: s.clone()) }),
-                StatusSlot::TurnResult(s) => Some(element! { Text(content: s.clone(), color: Color::DarkGrey) }),
-                StatusSlot::Tips => Some(element! { Text(content: tips_text.clone(), color: Color::DarkGrey) }),
+                StatusSlot::Spinner(s) => Some(element! { AnsiText(content: s.clone()) }),
+                StatusSlot::TurnResult(s) => Some(element! { AnsiText(content: s.clone()) }),
+                StatusSlot::Tips => Some(element! { AnsiText(content: tips_text.clone(), color: Color::DarkGrey) }),
                 StatusSlot::Empty => None,
             })
-            // Upper chrome: separator (+ ContextSlot + separator when tasks exist)
-            Text(content: upper_sep, color: Color::DarkGrey)
+            // Upper chrome: TodoSlot (when non-empty), then separator
+            AnsiText(content: upper_sep, color: Color::DarkGrey)
             // InputSlot
             #(panel_text.map(|panel| element! {
-                Text(content: panel, color: Color::Cyan)
+                AnsiText(content: panel, color: Color::Cyan)
             }))
             #(if let InputSlot::Hint(ref hint_text) = current_input_slot {
                 element! {
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: hint_text.clone(), color: Color::DarkGrey)
+                        AnsiText(content: hint_text.clone(), color: Color::DarkGrey)
                     }
                 }
             } else if matches!(current_input_slot, InputSlot::DialPad(_)) {
@@ -2091,36 +2313,26 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             auto_grow: true,
                             handle: Some(text_input_handle.clone()),
                             on_change: move |new_val: String| {
+                                // A real user edit ends queue-recall mode: the
+                                // buffer is no longer a pristine stack of
+                                // recalled messages, so the next ↑ should not
+                                // keep prepending queued items onto edited text.
+                                if is_queued_recall.get() {
+                                    is_queued_recall.set(false);
+                                }
                                 input_value.set(new_val);
                             },
                             on_paste: move |pasted: String| {
-                                // Normalize CR / CRLF line endings first so
-                                // line counting, the placeholder, and the
-                                // expanded text are all consistent (Windows
-                                // Terminal pastes carry \r or \r\n).
-                                let pasted = normalize_paste_newlines(&pasted);
+                                is_queued_recall.set(false);
+                                // Normalize + literal-vs-placeholder handling is
+                                // shared with the DialPad custom-input row.
                                 let current = input_value.read().clone();
-                                // Match Claude Code: only long or multi-line
-                                // pastes collapse into a compact placeholder;
-                                // short single-/double-line pastes insert
-                                // literally so the box shows what you pasted.
-                                if !should_use_paste_placeholder(&pasted) {
-                                    input_value.set(format!("{current}{pasted}"));
-                                    return;
-                                }
-                                // Store the real text and replace with a
-                                // compact placeholder so the input box does
-                                // not overflow with potentially huge content.
-                                let id = next_paste_id.get();
-                                next_paste_id.set(id + 1);
-                                let placeholder = format_paste_placeholder(id, &pasted);
-                                paste_store.write().insert(id, pasted);
-                                // Append the placeholder to whatever is already in the box.
-                                input_value.set(if current.is_empty() {
-                                    placeholder
-                                } else {
-                                    format!("{current}{placeholder}")
-                                });
+                                let mut id = next_paste_id.get();
+                                let mut store = paste_store.write();
+                                let new_val =
+                                    apply_paste_to_buffer(&current, &pasted, &mut id, &mut store);
+                                next_paste_id.set(id);
+                                input_value.set(new_val);
                             },
                         )
                     }
@@ -2129,7 +2341,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Separator
             Text(content: sep, color: Color::DarkGrey)
             // FooterSlot
-            Text(content: footer_text, color: Color::DarkGrey)
+            AnsiText(content: footer_text, color: Color::DarkGrey)
         }
     }
 }
@@ -2140,7 +2352,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 /// The coordinator reads `InputEvent`s from `ReplHandle::input_rx` and
 /// sends output text via `ReplHandle::output`. The spinner state is
 /// shared so the runner thread can update it atomically.
-pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle {
+pub fn spawn_repl_ui(
+    permission_mode: &str,
+    startup_banner: &str,
+    todo_items: Vec<runtime::Todo>,
+    dequeue_hook: Option<UpArrowDequeueHook>,
+) -> ReplHandle {
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
     let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(16);
@@ -2157,8 +2374,9 @@ pub fn spawn_repl_ui(permission_mode: &str, startup_banner: &str) -> ReplHandle 
         permission_mode: permission_mode.to_string(),
         tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
         stderr_redir: Arc::clone(&stderr_redir),
-        context_todos: Arc::new(Mutex::new(tools::global_todo_list())),
+        todo_items: Arc::new(Mutex::new(todo_items)),
         pending: Arc::new(Mutex::new(Vec::new())),
+        dequeue_hook,
     };
 
     let banner = startup_banner.to_string();
@@ -2272,6 +2490,7 @@ mod tests {
             PendingItem::Tool(tool_card("1", "bash")),
             PendingItem::QueuedMessage {
                 display: "📨 A2A from mac-ai: hi".to_string(),
+                is_human: false,
             },
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
@@ -2377,11 +2596,41 @@ mod tests {
 
     #[test]
     fn question_panel_marks_selected_option() {
-        let panel = format_question_panel(&question_with_options(), 1);
+        let panel = format_question_panel(&question_with_options(), 1, "");
 
         assert!(panel.contains("[Setup]"));
-        assert!(panel.contains(" [1] Project recommended"));
+        assert!(panel.contains(" [1] Project (recommended)"));
         assert!(panel.contains("> [2] User"));
+    }
+
+    #[test]
+    fn custom_input_row_is_selectable_past_last_option() {
+        let mut question = question_with_options();
+        question.allow_custom_input = true;
+        question.custom_input_hint = Some("type a comment".to_string());
+
+        // Cursor on the `[+]` row (index == options.len()) marks it; empty buffer
+        // shows a caret + the hint. This is the row Up/Down reach and typing
+        // fills in-place.
+        let panel = format_question_panel(&question, question.options.len(), "");
+        assert!(panel.contains("> [+]"));
+        assert!(panel.contains("type a comment"));
+        assert!(panel.contains("  [1] Project"));
+        assert!(panel.contains("  [2] User"));
+    }
+
+    #[test]
+    fn custom_input_row_shows_typed_buffer_in_place() {
+        let mut question = question_with_options();
+        question.allow_custom_input = true;
+
+        // With a non-empty buffer, the `[+]` row renders the typed text (with a
+        // caret when selected) instead of the hint — no slot switch needed.
+        let on_row = format_question_panel(&question, question.options.len(), "hi there");
+        assert!(on_row.contains("> [+] hi there"));
+        let off_row = format_question_panel(&question, 0, "hi there");
+        assert!(off_row.contains("[+] hi there"));
+        assert!(!off_row.contains("type your own answer"));
     }
 
     #[test]
@@ -2458,6 +2707,32 @@ mod tests {
     fn paste_placeholder_multi_line_includes_line_count() {
         let p = format_paste_placeholder(1, "line one\nline two\nline three");
         assert_eq!(p, "[Pasted text #1 +2 lines]");
+    }
+
+    #[test]
+    fn apply_paste_short_single_line_inserts_literally() {
+        let mut store = std::collections::HashMap::new();
+        let mut id = 1u32;
+        let out = apply_paste_to_buffer("hi ", "there", &mut id, &mut store);
+        assert_eq!(out, "hi there");
+        assert!(store.is_empty(), "short paste is literal, not stored");
+        assert_eq!(id, 1, "no id consumed");
+    }
+
+    #[test]
+    fn apply_paste_multi_line_collapses_to_placeholder_and_expands() {
+        let mut store = std::collections::HashMap::new();
+        let mut id = 1u32;
+        // >2 newlines crosses PASTE_PLACEHOLDER_MAX_LINES → placeholder.
+        let pasted = "l1\nl2\nl3\nl4";
+        let out = apply_paste_to_buffer("start ", pasted, &mut id, &mut store);
+        assert_eq!(out, "start [Pasted text #1 +3 lines]");
+        assert_eq!(id, 2, "id consumed");
+        // Round-trips back to the real text at submit time.
+        assert_eq!(
+            expand_paste_placeholders(&out, &store),
+            format!("start {pasted}")
+        );
     }
 
     #[test]

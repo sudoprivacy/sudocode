@@ -59,6 +59,15 @@ pub enum ApiError {
         body_snippet: String,
         source: serde_json::Error,
     },
+    /// A provider explicitly declined the request, including HTTP 200 refusals.
+    /// Preserve usage for accounting, but never retry or accept partial output.
+    ProviderRefusal {
+        provider: String,
+        model: String,
+        category: Option<String>,
+        explanation: Option<String>,
+        usage: Option<Box<crate::types::Usage>>,
+    },
     Api {
         status: reqwest::StatusCode,
         error_type: Option<String>,
@@ -125,7 +134,89 @@ enum ErrorCategory {
     Configuration,
 }
 
+/// The behavior axis: **who can act** on this error. Every layer that decides
+/// what to do with a failure — retry it, hand it back to the model, surface it
+/// to the user, or give up — should branch on this, not re-derive the decision
+/// by string-matching messages.
+///
+/// This is deliberately orthogonal to [`ErrorCategory`]/`safe_failure_class`,
+/// which is the *analytics* axis (telemetry buckets). Two axes, two concerns
+/// (SRP): the same error can be `Transport` here and `provider_transport`
+/// there without either owning the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorAction {
+    /// The transport layer can fix it by trying again: rate limits, 5xx,
+    /// gateway timeouts, dropped connections, truncated streams. Handled by the
+    /// shared retry loop; `is_retryable()` is exactly `action() == Transport`.
+    Transport,
+    /// The model can fix it by revising what it sent: a context-window overflow
+    /// (the runtime compacts and retries) or a request the model constructed
+    /// badly. Fed back into the turn rather than surfaced.
+    ///
+    /// NOTE: context-window is `Model` only while compaction budget remains;
+    /// once exhausted it becomes `Human`. That state-dependent transition lives
+    /// in the runtime (compaction budget), not in this pure classifier — see
+    /// the taxonomy doc §4 / refactor Phase 3.
+    Model,
+    /// Only a human can fix it: missing/invalid credentials, configuration
+    /// errors, a request too large to ever fit. Surface and pause.
+    Human,
+    /// Nobody can fix it by retrying or revising: a malformed server response,
+    /// an unrecoverable local I/O or parse failure. Surface as terminal.
+    Fatal,
+}
+
 impl ApiError {
+    /// The behavior axis — **who can act** on this error. Single source of
+    /// truth for retry-vs-revisit-vs-surface-vs-abort decisions.
+    ///
+    /// `#[inline]` and only reached on the error path, so it costs nothing on
+    /// the success path.
+    #[inline]
+    #[must_use]
+    pub fn action(&self) -> ErrorAction {
+        match self {
+            // Transport: the shared retry loop can recover these.
+            Self::Http(error) if error.is_connect() || error.is_timeout() || error.is_request() => {
+                ErrorAction::Transport
+            }
+            Self::IncompleteStream { .. } => ErrorAction::Transport,
+            Self::Api { retryable, .. } if *retryable => ErrorAction::Transport,
+            Self::RetriesExhausted { last_error, .. } => last_error.action(),
+
+            // Model: the model's context overflowed (runtime compacts + retries)
+            // or the model constructed a request that does not fit the window.
+            Self::ContextWindowExceeded { .. } => ErrorAction::Model,
+            Self::Api { status, body, .. }
+                if status.as_u16() == 400 && looks_like_context_window_error(body) =>
+            {
+                ErrorAction::Model
+            }
+
+            // Human: only a person can supply credentials / fix config / shrink
+            // a request that is too large to ever fit.
+            Self::MissingCredentials { .. }
+            | Self::ExpiredOAuthToken
+            | Self::Auth(_)
+            | Self::InvalidApiKeyEnv(_)
+            | Self::Configuration(_)
+            | Self::RequestBodySizeExceeded { .. } => ErrorAction::Human,
+            Self::Api { status, .. } if matches!(status.as_u16(), 401 | 403 | 413) => {
+                ErrorAction::Human
+            }
+
+            // Fatal: nobody can fix a malformed server response, a bad local
+            // parse, or a non-retryable provider error.
+            Self::Http(_)
+            | Self::Io(_)
+            | Self::Json { .. }
+            | Self::InvalidSseFrame(_)
+            | Self::BackoffOverflow { .. }
+            | Self::ProviderRefusal { .. }
+            | Self::Api { .. } => ErrorAction::Fatal,
+        }
+    }
+
     #[must_use]
     pub const fn missing_credentials(
         provider: &'static str,
@@ -201,9 +292,10 @@ impl ApiError {
         match self {
             // These carry data needed by each predicate method; callers
             // short-circuit before reaching categorize().
-            Self::Http(_) | Self::Api { .. } | Self::RetriesExhausted { .. } => {
-                ErrorCategory::Structured
-            }
+            Self::Http(_)
+            | Self::Api { .. }
+            | Self::RetriesExhausted { .. }
+            | Self::ProviderRefusal { .. } => ErrorCategory::Structured,
             // Transport failures: retryable, safe_failure_class = "provider_transport".
             Self::IncompleteStream { .. }
             | Self::InvalidSseFrame(_)
@@ -225,17 +317,9 @@ impl ApiError {
 
     #[must_use]
     pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Http(error) => error.is_connect() || error.is_timeout() || error.is_request(),
-            Self::Api { retryable, .. } => *retryable,
-            // A stream truncated mid-frame is a transport failure: retry the
-            // whole request rather than surfacing the partial tail as fatal.
-            Self::IncompleteStream { .. } => true,
-            Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
-            // All remaining variants — auth, context-window, I/O, config, etc.
-            // — are not retryable.
-            _ => false,
-        }
+        // The transport layer is exactly the set the retry loop can recover.
+        // Single source: the `ErrorAction` behavior axis.
+        self.action() == ErrorAction::Transport
     }
 
     #[must_use]
@@ -264,6 +348,7 @@ impl ApiError {
     #[must_use]
     pub fn safe_failure_class(&self) -> &'static str {
         match self {
+            Self::ProviderRefusal { .. } => "provider_refusal",
             Self::RetriesExhausted { .. } if self.is_context_window_failure() => "context_window",
             Self::RetriesExhausted { .. } if self.is_generic_fatal_wrapper() => {
                 "provider_retry_exhausted"
@@ -382,7 +467,24 @@ impl Display for ApiError {
             Self::InvalidApiKeyEnv(error) => {
                 write!(f, "failed to read credential environment variable: {error}")
             }
-            Self::Http(error) => write!(f, "http error: {error}"),
+            Self::Http(error) => {
+                write!(f, "http error: {error}")?;
+                // reqwest's own `Display` stops at "error sending request for
+                // url (…)": since 0.12 it deliberately omits the source chain,
+                // and `ApiError`'s `Error` impl exposes no `source()` — so the
+                // only text that says *why* the send failed (connection reset,
+                // TLS handshake failure, operation timed out) was unreachable
+                // from anywhere. That is what eight identical retry lines
+                // naming nothing but the URL cost us: a proxy cutting the
+                // connection, a dead upstream and a plain timeout all rendered
+                // the same, and the retry line is the only record a user has.
+                let mut cause = std::error::Error::source(error);
+                while let Some(source) = cause {
+                    write!(f, ": {source}")?;
+                    cause = source.source();
+                }
+                Ok(())
+            }
             Self::Io(error) => write!(f, "io error: {error}"),
             Self::Json {
                 provider,
@@ -401,6 +503,16 @@ impl Display for ApiError {
                 f,
                 "{provider} stream for model {model} ended mid-frame (truncated response, likely a dropped connection or a proxy cutting the stream); first 200 chars of the incomplete tail: {body_snippet}"
             ),
+            Self::ProviderRefusal { provider, model, category, explanation, .. } => {
+                write!(f, "{provider} provider refused the request for model {model}")?;
+                if let Some(category) = category {
+                    write!(f, " (category: {category})")?;
+                }
+                if let Some(explanation) = explanation {
+                    write!(f, ": {explanation}")?;
+                }
+                Ok(())
+            }
             Self::Api {
                 status,
                 error_type,
@@ -614,9 +726,225 @@ pub fn format_context_window_blocked_error(session_id: &str, error: &ApiError) -
     lines.join("\n")
 }
 
+/// SSOT for which HTTP status codes are worth retrying: transient server,
+/// gateway, and overload responses where the same request may succeed on a
+/// later attempt. Every provider's error mapper routes its status check
+/// through here so the retry set is defined in exactly one place.
+///
+/// Included:
+/// - `408` request timeout, `409` conflict, `429` rate limit
+/// - `500 502 503 504` server + gateway errors
+/// - `520 522 524 525` Cloudflare origin/gateway failures, timeouts, and
+///   edge↔origin SSL handshake failures (a 524 is the gateway giving up on a
+///   slow upstream; the request may or may not have been processed, but
+///   retrying matches every mainstream SDK and the win outweighs the rare
+///   duplicate-generation risk)
+/// - `529` Anthropic "Overloaded"
+///
+/// NOT included: `4xx` client errors (`400 401 403 404 413 422 …`) — a retry
+/// with the same request can never fix them. (`408/409/429` are the deliberate
+/// transient exceptions.) Gateway errors masquerading as `400` are handled
+/// separately per provider via their body-sniffing `is_retryable_400`.
+#[must_use]
+pub const fn is_retryable_http_status(status: u16) -> bool {
+    matches!(
+        status,
+        408 | 409 | 429 | 500 | 502 | 503 | 504 | 520 | 522 | 524 | 525 | 529
+    )
+}
+
+/// SSOT for the "gateway error wearing a 400 mask" heuristic: some gateways and
+/// proxies return HTTP 400 with a body like "HTTP 400 from backend (no
+/// parseable body)" when a transient network blip corrupts the exchange. These
+/// are transport failures, not real bad requests, so they deserve the same
+/// retry treatment as a 502. Genuine client errors (bad parameter, unknown
+/// model, oversized prompt) never contain these phrases and still fail
+/// immediately. Shared by every provider's error mapper.
+#[must_use]
+pub(crate) fn is_retryable_masked_400(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let lowered = body.to_ascii_lowercase();
+    lowered.contains("no parseable body")
+        || lowered.contains("connection reset")
+        || lowered.contains("broken pipe")
+        || lowered.contains("empty reply from server")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{truncate_body_snippet, ApiError};
+    use super::{is_retryable_http_status, truncate_body_snippet, ApiError, ErrorAction};
+
+    /// Build an `ApiError::Api` with a given status/retryable flag/body for the
+    /// classification tests. Mirrors what the provider mappers construct.
+    fn api_error(status: u16, retryable: bool, body: &str) -> ApiError {
+        ApiError::Api {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            error_type: None,
+            message: None,
+            request_id: None,
+            body: body.to_string(),
+            retryable,
+            suggested_action: None,
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn action_buckets_map_who_can_act() {
+        // Transport: retryable provider errors + truncated streams.
+        assert_eq!(api_error(503, true, "").action(), ErrorAction::Transport);
+        assert_eq!(
+            ApiError::IncompleteStream {
+                provider: "anthropic".into(),
+                model: "claude".into(),
+                body_snippet: "data: {".into(),
+            }
+            .action(),
+            ErrorAction::Transport
+        );
+
+        // Model: context-window overflow (runtime compacts + retries).
+        assert_eq!(
+            ApiError::ContextWindowExceeded {
+                model: "claude".into(),
+                estimated_input_tokens: 1,
+                requested_output_tokens: 1,
+                estimated_total_tokens: 2,
+                context_window_tokens: 1,
+            }
+            .action(),
+            ErrorAction::Model
+        );
+        assert_eq!(
+            api_error(400, false, "prompt is too long").action(),
+            ErrorAction::Model
+        );
+
+        // Human: credentials / config / request-too-large / 401·403·413.
+        assert_eq!(
+            ApiError::missing_credentials("anthropic", &["ANTHROPIC_API_KEY"]).action(),
+            ErrorAction::Human
+        );
+        assert_eq!(
+            ApiError::Configuration("no model".into()).action(),
+            ErrorAction::Human
+        );
+        assert_eq!(api_error(401, false, "").action(), ErrorAction::Human);
+        assert_eq!(api_error(403, false, "").action(), ErrorAction::Human);
+        assert_eq!(api_error(413, false, "").action(), ErrorAction::Human);
+        assert_eq!(
+            ApiError::RequestBodySizeExceeded {
+                estimated_bytes: 9,
+                max_bytes: 8,
+                provider: "openai",
+            }
+            .action(),
+            ErrorAction::Human
+        );
+
+        // Fatal: non-retryable provider error, bad local parse, malformed SSE.
+        assert_eq!(api_error(404, false, "").action(), ErrorAction::Fatal);
+        assert_eq!(
+            ApiError::InvalidSseFrame("bad").action(),
+            ErrorAction::Fatal
+        );
+    }
+
+    #[test]
+    fn is_retryable_is_exactly_the_transport_bucket() {
+        // `is_retryable()` is now defined as `action() == Transport`; assert the
+        // equivalence holds across every representative variant so the rewrite
+        // is provably behavior-preserving.
+        let cases = [
+            api_error(503, true, ""),
+            api_error(429, true, ""),
+            api_error(400, false, "prompt is too long"),
+            api_error(401, false, ""),
+            api_error(404, false, ""),
+            api_error(413, false, ""),
+            ApiError::IncompleteStream {
+                provider: "p".into(),
+                model: "m".into(),
+                body_snippet: "x".into(),
+            },
+            ApiError::ContextWindowExceeded {
+                model: "m".into(),
+                estimated_input_tokens: 1,
+                requested_output_tokens: 1,
+                estimated_total_tokens: 2,
+                context_window_tokens: 1,
+            },
+            ApiError::missing_credentials("anthropic", &["ANTHROPIC_API_KEY"]),
+            ApiError::Configuration("x".into()),
+            ApiError::InvalidSseFrame("x"),
+        ];
+        for err in &cases {
+            assert_eq!(
+                err.is_retryable(),
+                err.action() == ErrorAction::Transport,
+                "is_retryable must equal (action == Transport) for {err:?}"
+            );
+        }
+    }
+
+    /// A transport failure must render its cause, not just the URL it failed
+    /// to reach. Built from a real `reqwest::Error` because that type cannot be
+    /// constructed directly, and a synthetic stand-in would prove nothing about
+    /// what reqwest's own `Display` does and does not include.
+    #[tokio::test]
+    async fn http_error_display_carries_the_transport_cause() {
+        // `no_proxy()` keeps this hermetic: with a system proxy configured,
+        // reqwest would dial the proxy instead of the closed port and could
+        // come back with a response rather than a transport error.
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client builds")
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .expect_err("port 1 on loopback must refuse the connection");
+
+        // The instrument has to be able to fail. If reqwest ever stops
+        // attaching a cause, this test must say so instead of passing vacuously
+        // against an error that has nothing to append.
+        let cause = std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .expect("a connect failure must carry its cause as a source");
+        let reqwest_summary = error.to_string();
+
+        let rendered = ApiError::Http(error).to_string();
+        assert!(
+            rendered.contains(&reqwest_summary),
+            "must keep reqwest's own summary: {rendered}"
+        );
+        assert!(
+            rendered.contains(&cause),
+            "must append the source chain, else a timeout, a refused connection \
+             and a proxy cutting the stream all render identically: {rendered} \
+             (cause was {cause})"
+        );
+    }
+
+    #[test]
+    fn retryable_http_status_covers_gateway_and_overload_codes() {
+        // Transient server / gateway / overload — retry may succeed.
+        for status in [408, 409, 429, 500, 502, 503, 504, 520, 522, 524, 525, 529] {
+            assert!(
+                is_retryable_http_status(status),
+                "{status} should be retryable"
+            );
+        }
+        // Client errors — a retry with the same request can never fix them.
+        for status in [200, 400, 401, 403, 404, 413, 422, 501] {
+            assert!(
+                !is_retryable_http_status(status),
+                "{status} must not be retryable"
+            );
+        }
+    }
 
     #[test]
     fn json_deserialize_error_includes_provider_model_and_truncated_body_snippet() {

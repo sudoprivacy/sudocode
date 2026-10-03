@@ -49,25 +49,18 @@ const MAX_CONSECUTIVE_AUTO_COMPACT_NOOPS: u8 = 3;
 /// Message used in synthetic tool results when a turn is interrupted.
 const INTERRUPT_MESSAGE: &str = "Interrupted · What should Sudo Code do instead?";
 
-/// Preserve the bash result wire contract when cancellation wins the race with
-/// the blocking tool task. Other tools have no structured interruption shape.
+/// Cancellation can win before the blocking tool returns its execution result.
+/// Use the same constructor and model projection as an executor-side abort so
+/// synthetic results cannot drift from the bash result contract.
 fn interrupted_tool_output(tool_name: &str) -> String {
     if tool_name.eq_ignore_ascii_case("bash") {
-        serde_json::json!({
-            "stdout": "",
-            "stderr": "Command interrupted by user",
-            "rawOutputPath": null,
-            "interrupted": true,
-            "isImage": null,
-            "backgroundTaskId": null,
-            "backgroundedByUser": null,
-            "assistantAutoBackgrounded": null,
-            "dangerouslyDisableSandbox": null,
-            "returnCodeInterpretation": "interrupted",
-            "noOutputExpected": true,
-            "structuredContent": null,
-            "sandboxStatus": null,
-        })
+        crate::bash::interrupted_bash_output(
+            "Command interrupted by user",
+            "interrupted",
+            None,
+            None,
+        )
+        .model_output()
         .to_string()
     } else {
         INTERRUPT_MESSAGE.to_string()
@@ -122,6 +115,24 @@ pub struct TextCompletionOptions {
     pub max_tokens: u32,
     pub include_tools: bool,
     pub cache_prefix: bool,
+    /// Whether this completion asks the model to think.
+    ///
+    /// It is not only an output-cost knob: the `thinking` parameter is part of
+    /// Anthropic's cache key. A request that replays a prefix the turn stream
+    /// cached while *omitting* `thinking` reads none of it. Measured on a live
+    /// route (`ladder/tools/cache_prefix_probe.py`), same conversation shape,
+    /// one factor changed:
+    ///
+    ///   thinking on both turns ..... turn 2 read 3025 / write  115
+    ///   thinking dropped on turn 2 . turn 2 read    0 / write 3092
+    ///
+    /// Both returned 200 — the blocks in history are accepted either way, so
+    /// nothing fails loudly. It is purely a silent full re-write.
+    ///
+    /// So a completion that exists to *preserve* a prefix has to match the
+    /// stream it borrows from, and one that builds its own prefix is free to
+    /// turn thinking off and save the output tokens.
+    pub thinking_enabled: bool,
 }
 
 /// Provider-neutral completion data; consumers decide whether the finish
@@ -141,6 +152,10 @@ pub enum AssistantEvent {
     Thinking {
         thinking: String,
         signature: Option<String>,
+    },
+    /// Encrypted thinking, carried so it can be replayed. Nothing renders it.
+    RedactedThinking {
+        data: String,
     },
     TextDelta(String),
     ToolUse {
@@ -178,6 +193,14 @@ pub type AssistantEventStream =
 /// abort signal for instant cancellation.
 #[async_trait]
 pub trait ApiClient: Send {
+    /// Whether this session forbids model HTTP outside its Nexus mount.
+    fn requires_model_mount(&self) -> bool {
+        false
+    }
+
+    fn model_catalog(&self) -> Option<crate::model_discovery::ModelCatalog> {
+        None
+    }
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError>;
 
     /// Provider-facing model ID for the active route. Config aliases, display
@@ -245,6 +268,12 @@ pub trait ApiClient: Send {
                     max_tokens,
                     include_tools: false,
                     cache_prefix: false,
+                    // This request builds its own prefix: a compaction-specific
+                    // system prompt, no tools, and `build_compaction_messages`
+                    // has already stripped the thinking blocks. There is no
+                    // cached prefix to match, so thinking here would only add
+                    // output tokens to a summarization.
+                    thinking_enabled: false,
                 },
             )
             .await?;
@@ -252,6 +281,14 @@ pub trait ApiClient: Send {
     }
 
     /// Shared cache-preserving adapter over the older message prefix.
+    ///
+    /// Every field of this request exists to be byte-identical to the turn
+    /// stream it borrows the cached prefix from — same system prompt, same
+    /// tools, same messages, one user turn appended. `thinking` is part of that
+    /// key too, so it has to come from the client rather than be hardcoded off:
+    /// omitting it re-wrote the entire prefix on a live route while still
+    /// returning 200, which made the one compaction path designed to preserve
+    /// the cache the most expensive one in the client.
     async fn send_cache_safe_compaction(
         &mut self,
         mut request: ApiRequest,
@@ -261,6 +298,7 @@ pub trait ApiClient: Send {
         request
             .messages
             .push(ConversationMessage::user_text(compaction_prompt));
+        let thinking_enabled = self.thinking_enabled();
         let response = self
             .complete_text(
                 request,
@@ -268,6 +306,7 @@ pub trait ApiClient: Send {
                     max_tokens,
                     include_tools: true,
                     cache_prefix: true,
+                    thinking_enabled,
                 },
             )
             .await?;
@@ -608,6 +647,8 @@ pub struct ToolDispatchContext {
     pub parent_thinking_enabled: bool,
     /// The parent's routing key, inherited verbatim by spawned subagents.
     pub parent_routing_session_id: Option<String>,
+    /// Host policy inherited by every child, including fallback and summary calls.
+    pub parent_requires_model_mount: bool,
     /// Where a spawned sub-agent reports what it is doing, if the renderer
     /// asked for that (see [`RuntimeObserver::subagent_sink`]).
     pub subagent_sink: Option<crate::subagent_events::SubagentSink>,
@@ -615,6 +656,13 @@ pub struct ToolDispatchContext {
     /// at a time (which is how `agent_spawn` always runs); `None` inside a
     /// concurrent batch.
     pub tool_use_id: Option<String>,
+    /// The parent session's active permission mode. A spawned sub-agent runs
+    /// under this mode rather than an unconditional full-access policy, so a
+    /// read-only session spawns read-only workers and a workspace-write
+    /// session cannot escalate through a child. `None` when the caller is not
+    /// inside a parent tool loop (test harnesses, direct executor calls); the
+    /// spawn path then falls back to a conservative default.
+    pub parent_permission_mode: Option<crate::permissions::PermissionMode>,
 }
 
 impl ToolDispatchContext {
@@ -647,6 +695,21 @@ impl ToolDispatchContext {
 /// state (spinner, prompter) lives behind single-threaded interior mutability
 /// in the impl.
 pub trait ToolExecutor: Send {
+    async fn execute_with_attachments(
+        &self,
+        tool_name: &str,
+        input: &str,
+        ctx: &ToolDispatchContext,
+    ) -> Result<crate::image_input::ToolOutput, ToolError> {
+        let output = self.execute_with_context(tool_name, input, ctx).await?;
+        let model = ctx
+            .parent_assistant_message
+            .as_ref()
+            .and_then(|m| m.model.as_deref())
+            .unwrap_or("");
+        crate::image_input::ToolOutput::from_dispatch(tool_name, output, model)
+    }
+
     async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 
     /// Dispatch with per-call context. Default forwards to
@@ -697,6 +760,13 @@ impl std::error::Error for ToolError {}
 pub struct RuntimeError {
     message: String,
     kind: RuntimeErrorKind,
+    /// `true` when the underlying failure is transport-transient (rate limit,
+    /// 5xx, gateway timeout, dropped/truncated stream) and the same request may
+    /// succeed on a retry. Derived once, at the api→runtime boundary, from
+    /// [`api::ApiError::is_retryable`] (the `ErrorAction::Transport` bucket) —
+    /// so callers branch on this typed bit instead of re-deriving retryability
+    /// by string-matching the rendered message.
+    retryable: bool,
 }
 
 /// Coarse classification of a [`RuntimeError`], for the few failures the
@@ -715,6 +785,7 @@ impl RuntimeError {
         Self {
             message: message.into(),
             kind: RuntimeErrorKind::Generic,
+            retryable: false,
         }
     }
 
@@ -725,12 +796,28 @@ impl RuntimeError {
         Self {
             message: message.into(),
             kind: RuntimeErrorKind::ContextWindowBlocked,
+            retryable: false,
         }
+    }
+
+    /// Set the transport-retryable classification. Chainable so the api→runtime
+    /// boundary can stamp it in one place: `RuntimeError::new(msg).retryable(a)`.
+    #[must_use]
+    pub fn retryable(mut self, retryable: bool) -> Self {
+        self.retryable = retryable;
+        self
     }
 
     #[must_use]
     pub fn is_context_window_blocked(&self) -> bool {
         self.kind == RuntimeErrorKind::ContextWindowBlocked
+    }
+
+    /// `true` when this is a transport-transient failure worth retrying. The
+    /// typed successor to string-matching the message for "timeout"/"503"/etc.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        self.retryable
     }
 }
 
@@ -1394,6 +1481,10 @@ where
                     flush_text_block(&mut text, &mut blocks);
                     push_thinking_block(&mut blocks, thinking, signature);
                 }
+                AssistantEvent::RedactedThinking { data } => {
+                    flush_text_block(&mut text, &mut blocks);
+                    blocks.push(ContentBlock::RedactedThinking { data });
+                }
                 AssistantEvent::TextDelta(delta) => text.push_str(&delta),
                 AssistantEvent::ToolUse {
                     id,
@@ -1615,9 +1706,14 @@ where
             .as_deref()
             .and_then(RuntimeObserver::hook_progress_sink)
             .is_some();
-        let summary = self
-            .run_turn_with_blocks_inner(blocks, prompter, observer)
-            .await;
+        let catalog = self.api_client.model_catalog();
+        let turn = self.run_turn_with_blocks_inner(blocks, prompter, observer);
+        let summary = if let Some(catalog) = catalog {
+            catalog.refresh_in_background();
+            catalog.scope(turn).await
+        } else {
+            turn.await
+        };
         if summary.is_err() {
             self.finish_current_turn_tracking();
         }
@@ -1625,6 +1721,23 @@ where
             self.hook_progress_reporter = None;
         }
         self.api_client.set_retry_sink(None);
+        // A completed turn is a durable fact, so the ENGINE records it rather
+        // than each host remembering to after calling in. The CLI did it from
+        // its call site, and the co-host — a later caller of the same engine —
+        // simply did not have that line: it ran real turns and kept the whole
+        // transcript in memory, so nothing survived the agent.
+        //
+        // Here it is true by construction for any host, present or future. Only
+        // on success, which is the behaviour the CLI's call site had: a failed
+        // turn leaves the session as the close-time save finds it, rather than
+        // committing a half-turn as though it completed.
+        if summary.is_ok() {
+            if let Some(path) = self.session.persistence_path() {
+                self.session.save_to_path(path).map_err(|error| {
+                    RuntimeError::new(format!("failed to persist session: {error}"))
+                })?;
+            }
+        }
         summary
     }
 
@@ -1667,6 +1780,19 @@ where
             }
         }
 
+        let mut prepared_blocks = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            let block = match block {
+                ContentBlock::Image { data, mime_type } => {
+                    let model = self.running_model().to_string();
+                    crate::image_input::prepare_image(&data, &mime_type, &model)
+                        .map_err(RuntimeError::new)?
+                }
+                other => other,
+            };
+            prepared_blocks.push(block);
+        }
+
         // Start file tracking for this turn
         let turn_id = format!(
             "turn-{}-{}",
@@ -1691,7 +1817,7 @@ where
         // assistant message so it persists and re-sums on resume.
         let turn_started_at = std::time::Instant::now();
         self.session
-            .push_user_blocks(blocks)
+            .push_user_blocks(prepared_blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
 
         // Route live plugin-hook progress through the seam: when the observer
@@ -1921,7 +2047,30 @@ where
                                     if let Some(obs) = observer.as_mut() {
                                         match &event {
                                             AssistantEvent::Thinking { thinking, .. } => {
-                                                obs.on_thinking_delta(thinking);
+                                                // A signature-only event carries
+                                                // no text; forwarding it would
+                                                // make renderers open a thinking
+                                                // section with nothing in it.
+                                                if !thinking.is_empty() {
+                                                    obs.on_thinking_delta(thinking);
+                                                }
+                                            }
+                                            // Ciphertext: there is no delta a
+                                            // renderer could show. Printing
+                                            // nothing, though, is
+                                            // indistinguishable from a turn that
+                                            // never thought — so say it once per
+                                            // block, through the same channel the
+                                            // thinking text uses so it lands in
+                                            // the same dim style, and with the
+                                            // wording the export already uses.
+                                            // Display only: the block itself is
+                                            // replayed from the message, not from
+                                            // anything the observer saw.
+                                            AssistantEvent::RedactedThinking { .. } => {
+                                                obs.on_thinking_delta(
+                                                    "[thinking: redacted by the provider]\n",
+                                                );
                                             }
                                             AssistantEvent::TextDelta(delta) => {
                                                 obs.on_text_delta(delta);
@@ -2078,8 +2227,10 @@ where
                 parent_reasoning_effort: self.api_client.reasoning_effort().map(str::to_string),
                 parent_thinking_enabled: self.api_client.thinking_enabled(),
                 parent_routing_session_id: self.api_client.routing_session_id().map(str::to_string),
+                parent_requires_model_mount: self.api_client.requires_model_mount(),
                 subagent_sink: observer.as_deref().and_then(RuntimeObserver::subagent_sink),
                 tool_use_id: None,
+                parent_permission_mode: Some(self.permission_policy.active_mode()),
             };
 
             let mut batch_start = 0usize;
@@ -2188,23 +2339,46 @@ where
                     // `&self.tool_executor`) is already dropped and `&mut self`
                     // is free.
                     let abort_signal = self.hook_abort_signal.clone();
-                    dispatch_context.tool_use_id = None;
-                    let batch_exec = futures::future::join_all(prepared.iter().map(|p| async {
-                        if p.deny_reason.is_some() {
-                            None
-                        } else {
-                            Some(
-                                self.tool_executor
-                                    .execute_with_context(
-                                        &p.tool_name,
-                                        &p.effective_input,
-                                        &dispatch_context,
-                                    )
-                                    .await,
-                            )
+                    // Bounded, not `join_all`: `buffered` keeps at most
+                    // `max_tool_use_concurrency()` executes in flight and still
+                    // yields results in batch order, which phase 3 indexes by.
+                    //
+                    // Each tool gets its own context carrying its own
+                    // `tool_use_id`. The batch used to share one with the id
+                    // blanked — harmless for reads, but a sub-agent spawn needs
+                    // it: `SubagentLink::from_dispatch` gives up without one, so
+                    // a spawn in a batch would run and emit no lifecycle event
+                    // at all. The clone is an `Arc` shuffle, once per tool.
+                    //
+                    // The executor is borrowed once up front: each future is
+                    // `async move` so it can own its context, and moving `self`
+                    // in as well would not compile (nor be wanted — phase 3
+                    // needs `&mut self` right after).
+                    let executor = &self.tool_executor;
+                    let batch_exec = futures::stream::iter(prepared.iter().map(|p| {
+                        let mut ctx = dispatch_context.clone();
+                        ctx.tool_use_id = Some(p.tool_use_id.clone());
+                        async move {
+                            if p.deny_reason.is_some() {
+                                None
+                            } else {
+                                Some(
+                                    executor
+                                        .execute_with_attachments(
+                                            &p.tool_name,
+                                            &p.effective_input,
+                                            &ctx,
+                                        )
+                                        .await,
+                                )
+                            }
                         }
-                    }));
-                    let maybe_results: Option<Vec<Option<Result<String, ToolError>>>> = tokio::select! {
+                    }))
+                    .buffered(max_tool_use_concurrency())
+                    .collect::<Vec<_>>();
+                    let maybe_results: Option<
+                        Vec<Option<Result<crate::image_input::ToolOutput, ToolError>>>,
+                    > = tokio::select! {
                         biased;
                         () = abort_signal.cancelled() => None,
                         results = batch_exec => Some(results),
@@ -2252,12 +2426,14 @@ where
                                 true,
                             )
                         } else {
-                            let (mut output, mut is_error) = match exec_results[offset]
+                            let (mut output, attachments, mut is_error) = match exec_results[offset]
                                 .as_ref()
                                 .expect("permitted tool has an execute result")
                             {
-                                Ok(output) => (output.clone(), false),
-                                Err(error) => (error.to_string(), true),
+                                Ok(output) => {
+                                    (output.text.clone(), output.attachments.clone(), false)
+                                }
+                                Err(error) => (error.to_string(), Vec::new(), true),
                             };
                             if self.hook_abort_signal.is_aborted() {
                                 output =
@@ -2317,10 +2493,13 @@ where
                                     || post_hook_result.is_failed()
                                     || post_hook_result.is_cancelled(),
                             );
-                            ConversationMessage::tool_result(
+                            crate::image_input::ToolOutput {
+                                text: output,
+                                attachments,
+                            }
+                            .into_message(
                                 p.tool_use_id,
                                 p.tool_name,
-                                output,
                                 is_error,
                             )
                         };
@@ -2431,7 +2610,7 @@ where
                         let abort_signal = self.hook_abort_signal.clone();
                         dispatch_context.tool_use_id = Some(tool_use_id.clone());
                         let exec_outcome = {
-                            let exec = self.tool_executor.execute_with_context(
+                            let exec = self.tool_executor.execute_with_attachments(
                                 &tool_name,
                                 &effective_input,
                                 &dispatch_context,
@@ -2473,9 +2652,9 @@ where
                                 iterations,
                             ));
                         };
-                        let (mut output, mut is_error) = match exec_result {
-                            Ok(output) => (output, false),
-                            Err(error) => (error.to_string(), true),
+                        let (mut output, attachments, mut is_error) = match exec_result {
+                            Ok(output) => (output.text, output.attachments, false),
+                            Err(error) => (error.to_string(), Vec::new(), true),
                         };
                         if self.hook_abort_signal.is_aborted() {
                             output = merge_hook_feedback(pre_hook_result.messages(), output, true);
@@ -2537,7 +2716,11 @@ where
 
                         let output =
                             self.maybe_offload_tool_output(&tool_use_id, &tool_name, output);
-                        ConversationMessage::tool_result(tool_use_id, tool_name, output, is_error)
+                        crate::image_input::ToolOutput {
+                            text: output,
+                            attachments,
+                        }
+                        .into_message(tool_use_id, tool_name, is_error)
                     }
                     PermissionOutcome::Deny { reason } => ConversationMessage::tool_result(
                         tool_use_id,
@@ -2778,7 +2961,8 @@ where
     /// Returns paths of cleaned files.
     pub fn cleanup_current_turn_drafts(&mut self) -> Vec<std::path::PathBuf> {
         if let Some(turn_id) = self.current_turn_id.clone() {
-            self.file_tracker.cleanup_turn_drafts(&turn_id)
+            self.file_tracker
+                .cleanup_turn_drafts(&turn_id, self.session.fs_handle().as_ref())
         } else {
             Vec::new()
         }
@@ -2788,7 +2972,8 @@ where
     /// Returns error messages for failed operations.
     pub fn rollback_current_turn(&mut self) -> Vec<String> {
         if let Some(turn_id) = self.current_turn_id.clone() {
-            self.file_tracker.rollback_turn(&turn_id)
+            self.file_tracker
+                .rollback_turn(&turn_id, self.session.fs_handle().as_ref())
         } else {
             Vec::new()
         }
@@ -3324,6 +3509,12 @@ fn build_assistant_message(
                 flush_text_block(&mut text, &mut blocks);
                 push_thinking_block(&mut blocks, thinking, signature);
             }
+            // Kept, not rendered: there is nothing legible in it, but the next
+            // request has to replay it or the cached prefix is rebuilt.
+            AssistantEvent::RedactedThinking { data } => {
+                flush_text_block(&mut text, &mut blocks);
+                blocks.push(ContentBlock::RedactedThinking { data });
+            }
             AssistantEvent::TextDelta(delta) => {
                 text.push_str(&delta);
             }
@@ -3507,9 +3698,20 @@ fn push_thinking_block(
     }) = blocks.last_mut()
     {
         existing.push_str(&thinking);
-        if existing_signature.is_none() {
-            *existing_signature = signature;
+        // Append, don't just fill: a signature can arrive in several deltas, and
+        // keeping only the first chunk produces a block the server rejects as
+        // unverifiable — worse than having none, because it looks signed.
+        if let Some(chunk) = signature {
+            existing_signature
+                .get_or_insert_with(String::new)
+                .push_str(&chunk);
         }
+        return;
+    }
+
+    // A signature with no thinking block to attach to is not a block of its own:
+    // an empty-but-signed thinking block is not something the API will take back.
+    if thinking.is_empty() {
         return;
     }
 
@@ -3546,7 +3748,46 @@ fn is_concurrency_safe_tool(tool_name: &str) -> bool {
             // Process-status reads
             | "pid_status"
             | "pid_output"
+            // Sub-agent spawns. Each child gets its own session, manifest,
+            // client and filesystem handle, so two spawns share no mutable
+            // state of ours. Claude Code declares the same
+            // (`AgentTool.isConcurrencySafe() => true`) and tells the model to
+            // launch several in one message; serialising them here made that
+            // instruction a lie — N delegations cost N sequential runs, each
+            // holding the turn open until it finished or auto-backgrounded at
+            // 120s.
+            | "agent_spawn"
+            | "pid_fork"
     )
+}
+
+/// Ceiling on how many tools of one concurrency-safe batch execute at once.
+///
+/// Claude Code's number (`toolOrchestration.ts`:
+/// `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY || 10`). Until sub-agents joined the
+/// set above there was no ceiling at all — the batch went to `join_all` whole —
+/// which was survivable for file reads and greps and is not now that one batch
+/// entry can be a full model session: an unbounded fan-out arrives upstream as
+/// that many simultaneous requests against a single account.
+const MAX_TOOL_USE_CONCURRENCY: usize = 10;
+
+/// `SUDOCODE_MAX_TOOL_USE_CONCURRENCY` overrides [`MAX_TOOL_USE_CONCURRENCY`].
+///
+/// Worth a knob for the reason Claude Code has one: the useful ceiling is set
+/// by what the upstream account will run at once, not by this process. Past
+/// that point the surplus does not merely wait — a pooled deployment can route
+/// the overflow to a different account, where the system prompt and tools this
+/// batch is sharing have never been cached, so every spilled sub-agent pays to
+/// create the prefix again.
+///
+/// `0` and unparseable values fall back to the default rather than meaning
+/// "no limit": a zero would stall the batch forever.
+fn max_tool_use_concurrency() -> usize {
+    std::env::var("SUDOCODE_MAX_TOOL_USE_CONCURRENCY")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(MAX_TOOL_USE_CONCURRENCY)
 }
 
 /// Per-tool state carried from the serial pre-pass (hooks + permission) of a
@@ -3668,9 +3909,10 @@ fn offload_preview_end(output: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_compact_threshold_for_model, build_assistant_message, ApiClient, ApiRequest,
-        AssistantEvent, AssistantEventStream, AutoCompactionEvent, ConversationRuntime,
-        PromptCacheEvent, RuntimeError, RuntimeObserver, StaticToolExecutor, ToolExecutor,
+        auto_compact_threshold_for_model, build_assistant_message, is_concurrency_safe_tool,
+        max_tool_use_concurrency, push_thinking_block, ApiClient, ApiRequest, AssistantEvent,
+        AssistantEventStream, AutoCompactionEvent, ConversationRuntime, PromptCacheEvent,
+        RuntimeError, RuntimeObserver, StaticToolExecutor, ToolExecutor, MAX_TOOL_USE_CONCURRENCY,
     };
     use crate::compact::CompactionConfig;
     use crate::config::{RuntimeFeatureConfig, RuntimeHookConfig};
@@ -3915,6 +4157,113 @@ mod tests {
             self.active.fetch_sub(1, SeqCst);
             Ok("ok".to_string())
         }
+    }
+
+    /// One assistant message emitting `calls` read-only tool calls, then
+    /// end-turn. Parameterised so a test can ask for a batch deliberately
+    /// wider than the concurrency ceiling.
+    struct WideBatchClient {
+        call_count: usize,
+        calls: usize,
+    }
+
+    #[async_trait]
+    impl ApiClient for WideBatchClient {
+        async fn stream(
+            &mut self,
+            _request: ApiRequest,
+        ) -> Result<AssistantEventStream, RuntimeError> {
+            self.call_count += 1;
+            if self.call_count == 1 {
+                let uses = (0..self.calls)
+                    .map(|i| AssistantEvent::ToolUse {
+                        id: format!("r{i}"),
+                        name: "read_file".to_string(),
+                        input: format!("{{\"path\":\"f{i}\"}}"),
+                        thought_signature: None,
+                    })
+                    .chain(std::iter::once(AssistantEvent::MessageStop))
+                    .collect();
+                Ok(events_to_stream(uses))
+            } else {
+                Ok(events_to_stream(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+    }
+
+    /// Claude Code caps a concurrency-safe batch at 10
+    /// (`toolOrchestration.ts`). Pinned in its own test so the parity is a
+    /// stated fact rather than a coincidence, and so a change to the number
+    /// has to be deliberate.
+    #[test]
+    fn tool_use_concurrency_ceiling_matches_claude_code() {
+        assert_eq!(MAX_TOOL_USE_CONCURRENCY, 10);
+    }
+
+    /// A batch wider than the ceiling must not run wide. Before the ceiling
+    /// existed this peaked at the batch size, which only became dangerous once
+    /// `agent_spawn` joined the concurrency-safe set: each entry is then a full
+    /// model session, and the surplus lands upstream as simultaneous requests
+    /// on one account.
+    ///
+    /// Sized from `max_tool_use_concurrency()` rather than the constant so an
+    /// environment that overrides the limit still exercises the cap instead of
+    /// failing for the wrong reason.
+    #[tokio::test]
+    async fn a_batch_wider_than_the_ceiling_is_capped() {
+        let limit = max_tool_use_concurrency();
+        let calls = limit + 3;
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            WideBatchClient {
+                call_count: 0,
+                calls,
+            },
+            PeakConcurrencyProbe {
+                active: std::sync::Arc::clone(&active),
+                peak: std::sync::Arc::clone(&peak),
+            },
+            PermissionPolicy::new(PermissionMode::Allow),
+            SystemPromptBuilder::new().with_os("linux", "6.8").build(),
+        );
+
+        let summary = runtime
+            .run_turn("read many files", None, None)
+            .await
+            .expect("turn should succeed");
+
+        assert_eq!(
+            summary.tool_results.len(),
+            calls,
+            "every tool in the batch still produces a result"
+        );
+        assert_eq!(
+            peak.load(std::sync::atomic::Ordering::SeqCst),
+            limit,
+            "the batch must be throttled to the ceiling, not run {calls} wide"
+        );
+    }
+
+    /// Sub-agent spawns run in parallel, as they do in Claude Code
+    /// (`AgentTool.isConcurrencySafe() => true`). Named spellings included
+    /// because the model chooses the spelling and canonicalization is what
+    /// makes the set match.
+    #[test]
+    fn sub_agent_spawns_are_concurrency_safe() {
+        for name in ["agent_spawn", "Agent", "pid_fork"] {
+            assert!(
+                is_concurrency_safe_tool(name),
+                "{name} must batch concurrently: serialising delegations makes \
+                 the prompt's \"launch several at once\" advice false"
+            );
+        }
+        // The counter-case: a writer still partitions the run.
+        assert!(!is_concurrency_safe_tool("write_file"));
     }
 
     #[tokio::test]
@@ -5029,6 +5378,230 @@ mod tests {
                 ObservedRuntimeEvent::TextDelta("done".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn thinking_signature_is_assembled_from_its_deltas_and_never_rendered() {
+        /// The real stream shape: thinking text in several deltas, then the
+        /// signature in its own delta(s), which the provider layer carries as
+        /// text-less `Thinking` events. Both halves have to survive — a block
+        /// whose signature is truncated looks signed and is rejected, and a
+        /// block with no signature at all is dropped before the wire, which is
+        /// what made every tool round-trip rebuild the whole cached prefix.
+        struct SignedThinkingApiClient;
+
+        #[async_trait]
+        impl ApiClient for SignedThinkingApiClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Ok(events_to_stream(vec![
+                    AssistantEvent::Thinking {
+                        thinking: "first half ".to_string(),
+                        signature: None,
+                    },
+                    AssistantEvent::Thinking {
+                        thinking: "second half".to_string(),
+                        signature: None,
+                    },
+                    AssistantEvent::Thinking {
+                        thinking: String::new(),
+                        signature: Some("sig-part-1".to_string()),
+                    },
+                    AssistantEvent::Thinking {
+                        thinking: String::new(),
+                        signature: Some("-sig-part-2".to_string()),
+                    },
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            SignedThinkingApiClient,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+        let mut observer = RecordingRuntimeObserver::default();
+
+        runtime
+            .run_turn("think briefly", None, Some(&mut observer))
+            .await
+            .expect("conversation loop should succeed");
+
+        match &runtime.session().messages[1].blocks[0] {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                assert_eq!(thinking, "first half second half");
+                assert_eq!(signature.as_deref(), Some("sig-part-1-sig-part-2"));
+            }
+            other => panic!("expected a signed thinking block, got {other:?}"),
+        }
+
+        // A signature-only event carries no text, so it must not reach a
+        // renderer as an empty thinking delta.
+        assert_eq!(
+            observer.events,
+            vec![
+                ObservedRuntimeEvent::ThinkingDelta("first half ".to_string()),
+                ObservedRuntimeEvent::ThinkingDelta("second half".to_string()),
+                ObservedRuntimeEvent::TextDelta("done".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn redacted_thinking_is_announced_to_the_renderer_and_still_replayed() {
+        /// The provider encrypts a thinking block when the turn trips a safety
+        /// classifier. There is no plaintext for anyone to print, but printing
+        /// nothing is indistinguishable from a turn that never thought — and the
+        /// export already labels it, so the live view has to as well.
+        struct RedactedThinkingApiClient;
+
+        #[async_trait]
+        impl ApiClient for RedactedThinkingApiClient {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Ok(events_to_stream(vec![
+                    AssistantEvent::RedactedThinking {
+                        data: "\"ciphertext\"".to_string(),
+                    },
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::MessageStop,
+                ]))
+            }
+        }
+
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            RedactedThinkingApiClient,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            SystemPrompt::default(),
+        );
+        let mut observer = RecordingRuntimeObserver::default();
+
+        runtime
+            .run_turn("think briefly", None, Some(&mut observer))
+            .await
+            .expect("conversation loop should succeed");
+
+        assert_eq!(
+            observer.events,
+            vec![
+                ObservedRuntimeEvent::ThinkingDelta(
+                    "[thinking: redacted by the provider]\n".to_string()
+                ),
+                ObservedRuntimeEvent::TextDelta("done".to_string()),
+            ]
+        );
+        // The note exists for the renderer only. What goes back on the wire is
+        // the ciphertext the server sent — that is what keeps the prefix cached.
+        assert_eq!(
+            runtime.session().messages[1].blocks[0],
+            ContentBlock::RedactedThinking {
+                data: "\"ciphertext\"".to_string()
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_safe_compaction_asks_for_thinking_exactly_when_the_stream_does() {
+        use super::{TextCompletion, TextCompletionOptions};
+        use crate::session::ConversationMessage;
+        use std::collections::BTreeSet;
+
+        /// `thinking` is part of Anthropic's cache key, so the compaction built
+        /// to reuse the turn stream's prefix has to ask for thinking exactly
+        /// when the stream does — omitting it re-writes the whole prefix and
+        /// still returns 200, so nothing would fail loudly. The standard
+        /// compaction builds its own prefix and should not pay for thinking it
+        /// cannot reuse.
+        #[derive(Default)]
+        struct OptionRecorder {
+            seen: Vec<TextCompletionOptions>,
+        }
+
+        #[async_trait]
+        impl ApiClient for OptionRecorder {
+            async fn stream(
+                &mut self,
+                _request: ApiRequest,
+            ) -> Result<AssistantEventStream, RuntimeError> {
+                Err(RuntimeError::new("not used"))
+            }
+
+            fn thinking_enabled(&self) -> bool {
+                true
+            }
+
+            async fn complete_text(
+                &mut self,
+                _request: ApiRequest,
+                options: TextCompletionOptions,
+            ) -> Result<TextCompletion, RuntimeError> {
+                self.seen.push(options);
+                Ok(TextCompletion {
+                    text: "<summary>a checkpoint</summary>".to_string(),
+                    stop_reason: Some("end_turn".to_string()),
+                    has_tool_calls: false,
+                })
+            }
+        }
+
+        let mut client = OptionRecorder::default();
+        client
+            .send_cache_safe_compaction(
+                ApiRequest {
+                    system_prompt: SystemPrompt::default(),
+                    messages: vec![ConversationMessage::user_text("history")],
+                    trace_id: None,
+                    pre_compact_discovered_tools: BTreeSet::default(),
+                },
+                "summarize",
+                12_000,
+            )
+            .await
+            .expect("cache-safe compaction should succeed");
+        client
+            .send_compaction(
+                "claude-sonnet-4-6",
+                "system",
+                vec![ConversationMessage::user_text("history")],
+                12_000,
+            )
+            .await
+            .expect("standard compaction should succeed");
+
+        assert_eq!(
+            client
+                .seen
+                .iter()
+                .map(|options| options.thinking_enabled)
+                .collect::<Vec<_>>(),
+            vec![true, false],
+        );
+        // The other two fields are the rest of what makes the prefix match;
+        // losing either costs the same read as losing `thinking`.
+        assert!(client.seen[0].include_tools);
+        assert!(client.seen[0].cache_prefix);
+    }
+
+    #[test]
+    fn a_signature_with_no_thinking_block_creates_nothing() {
+        // Defensive: a stream that somehow signs nothing must not produce an
+        // empty-but-signed block, which the API will not take back.
+        let mut blocks = Vec::new();
+        push_thinking_block(&mut blocks, String::new(), Some("orphan".to_string()));
+        assert!(blocks.is_empty(), "unexpected blocks: {blocks:?}");
     }
 
     #[tokio::test]

@@ -91,9 +91,9 @@ impl fmt::Display for MemoryParseError {
 impl std::error::Error for MemoryParseError {}
 
 impl MemoryEntry {
-    /// Parse a memory file from disk. `path` is captured on the returned entry.
-    pub fn from_file(path: &Path) -> std::io::Result<Self> {
-        let raw = std::fs::read_to_string(path)?;
+    /// Parse a memory file from `fs`. `path` is captured on the returned entry.
+    pub fn from_file(path: &Path, fs: &dyn crate::fs_backend::FsBackend) -> std::io::Result<Self> {
+        let raw = fs.read_to_string(&path.to_string_lossy())?;
         Self::parse(&raw, path)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
     }

@@ -1,5 +1,3 @@
-pub mod managed_agent;
-
 /// Test-only seams exposed for integration tests.
 ///
 /// These wrappers cross the crate boundary so `tools/tests/*.rs`
@@ -55,15 +53,60 @@ pub mod testing {
         let input = crate::AgentInput {
             description: format!("test-{subagent_type}"),
             prompt: prompt.to_string(),
+            context: String::new(),
+            constraints: String::new(),
+            acceptance: String::new(),
             subagent_type: Some(subagent_type.to_string()),
             name: None,
             model: Some("test-model".to_string()),
             run_in_background: Some(true),
-            fresh: None,
             auth_mode: None,
             permission_mode: None,
         };
-        crate::prepare_agent_job(input, None).map(|_| ())
+        crate::prepare_agent_job(input, None, runtime::host_fs_arc().clone()).map(|_| ())
+    }
+
+    /// Test seam for `prepare_agent_job` on a GIVEN filesystem, returning the
+    /// manifest it wrote.
+    ///
+    /// The filesystem is the point: preparing a job creates the store directory,
+    /// writes the manifest and lays down the first output file, and for a
+    /// co-hosted agent all three belong in its own VFS subtree rather than on the
+    /// daemon's disk. A seam that always used the host could not tell the
+    /// difference — which is how the store kept being read with `std::fs` after
+    /// its root moved into the VFS.
+    pub fn prepare_agent_job_on(
+        fs: std::sync::Arc<dyn runtime::FsBackend>,
+        subagent_type: &str,
+        prompt: &str,
+    ) -> Result<PreparedPaths, String> {
+        let input = crate::AgentInput {
+            description: format!("store-{subagent_type}"),
+            prompt: prompt.to_string(),
+            context: String::new(),
+            constraints: String::new(),
+            acceptance: String::new(),
+            subagent_type: Some(subagent_type.to_string()),
+            name: None,
+            model: Some("test-model".to_string()),
+            run_in_background: Some(true),
+            auth_mode: None,
+            permission_mode: None,
+        };
+        crate::prepare_agent_job(input, None, fs).map(|prepared| PreparedPaths {
+            agent_id: prepared.manifest.agent_id.clone(),
+            manifest_file: prepared.manifest.manifest_file.clone(),
+            output_file: prepared.manifest.output_file.clone(),
+        })
+    }
+
+    /// The three paths a prepared job put on the filesystem. The manifest's own
+    /// fields are private — deliberately, they are wire shape — so the seam
+    /// hands back exactly what a store test needs to look for.
+    pub struct PreparedPaths {
+        pub agent_id: String,
+        pub manifest_file: String,
+        pub output_file: String,
     }
 
     /// Test seam for `build_forked_messages`. Produces the same
@@ -132,7 +175,7 @@ pub mod testing {
     ) -> Result<(), String> {
         let raw = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
         let manifest: crate::AgentOutput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        crate::record_agent_telemetry(&manifest, telemetry.into())
+        crate::record_agent_telemetry(&manifest, telemetry.into(), runtime::host_fs())
     }
 
     /// Test seam for `record_full_result_path` — mirrors the private
@@ -143,7 +186,7 @@ pub mod testing {
     ) -> Result<(), String> {
         let raw = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
         let manifest: crate::AgentOutput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        crate::record_full_result_path(&manifest, full_path)
+        crate::record_full_result_path(&manifest, full_path, runtime::host_fs())
     }
 
     /// Test seam for `persist_agent_terminal_state_with_telemetry`.
@@ -162,7 +205,15 @@ pub mod testing {
             result,
             error,
             telemetry.map(Into::into),
+            runtime::host_fs(),
         )
+    }
+
+    /// Test seam for the `send` dead-pid guard. Returns `Ok(())` when `to` may
+    /// be sent to (a live pid, or any agent-name), `Err` when it is a
+    /// known-terminal pid. Lets a test exercise the D1 rule without a real send.
+    pub fn reject_dead_pid_for_test(to: &str) -> Result<(), String> {
+        crate::reject_dead_pid(to)
     }
 
     /// Test seam: does the summary-threshold gate — mirrors the
@@ -188,8 +239,9 @@ pub mod testing {
         if full_text.chars().count() <= threshold {
             return Ok((full_text.to_string(), None));
         }
-        let full_path = crate::write_full_result_and_update_manifest(&manifest, full_text)?;
-        crate::record_full_result_path(&manifest, &full_path)?;
+        let full_path =
+            crate::write_full_result_and_update_manifest(&manifest, full_text, runtime::host_fs())?;
+        crate::record_full_result_path(&manifest, &full_path, runtime::host_fs())?;
         Ok((placeholder_summary.to_string(), Some(full_path)))
     }
 }
@@ -247,32 +299,61 @@ fn global_cron_registry() -> &'static CronRegistry {
     })
 }
 
-fn global_todo_store() -> &'static TodoStore {
-    use std::sync::OnceLock;
-    static STORE: OnceLock<TodoStore> = OnceLock::new();
-    STORE.get_or_init(|| {
-        if let Ok(path) = runtime::todo_store::todo_store_path() {
-            TodoStore::load(&path)
-        } else {
-            TodoStore::new()
-        }
-    })
+/// The persisted todo list for this session. Used to seed a REPL's context panel
+/// at startup, before any turn has produced a `TodoWrite` result to read.
+///
+/// Opened per call, never cached in a process global: the store resolves per
+/// filesystem, and a `OnceLock` resolved it once for the whole process — so a
+/// daemon hosting several co-hosted agents gave them all one list, whichever
+/// agent asked first. Every mutation persists immediately, so a fresh handle
+/// over the same path is the same store.
+pub fn todo_list(fs: &Arc<dyn FsBackend>) -> Vec<runtime::Todo> {
+    TodoStore::open(fs).list()
 }
 
-/// Global auth mode set by the CLI at startup. Subagents inherit this so they
-/// use the same credential path as the main agent.
-static GLOBAL_AUTH_MODE: std::sync::OnceLock<api::AuthMode> = std::sync::OnceLock::new();
+/// The auth mode the session's provider resolved to, so a subagent spawned
+/// from it uses the same credential path. A subagent resolves its own provider
+/// on a fresh thread with no handle on the session; with this slot empty it
+/// falls back to `resolve_provider_from_config`'s auto-detect, which prefers
+/// `subscription` and fails outright on a proxy / api-key session.
+///
+/// Overwritable rather than write-once: `/auth` and `/model` rebuild the
+/// runtime, and a subagent spawned after the switch has to use the mode now in
+/// effect. A process hosting several sessions under *different* modes (the
+/// co-host) still has only this one slot — last build wins — which is a limit
+/// of keeping this global at all, not of who writes it.
+static GLOBAL_AUTH_MODE: std::sync::RwLock<Option<api::AuthMode>> = std::sync::RwLock::new(None);
 
-/// Return the current todo list from the global store. Used by the CLI to push
-/// todo state to the ContextSlot after a TodoWrite.
-pub fn global_todo_list() -> Vec<runtime::Todo> {
-    global_todo_store().list()
-}
-
-/// Called by the CLI at startup to set the auth mode for the entire process.
-/// Subagents automatically inherit this unless explicitly overridden.
+/// Publish the resolved auth mode for subagents to inherit. Called by whoever
+/// builds a session's api client — not by a startup path: `--auth` reaches the
+/// REPL and the ACP server by different routes, and when only the REPL
+/// published it, every ACP session's subagents died on "no token available for
+/// subscription provider".
 pub fn set_global_auth_mode(mode: api::AuthMode) {
-    let _ = GLOBAL_AUTH_MODE.set(mode);
+    let mut slot = GLOBAL_AUTH_MODE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *slot = Some(mode);
+}
+
+/// The published auth mode, if a session has built its client yet.
+fn global_auth_mode() -> Option<api::AuthMode> {
+    *GLOBAL_AUTH_MODE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The credential path a spawned subagent gets: an explicit `auth_mode` on the
+/// Agent tool call, else whatever mode the session's own client resolved to.
+///
+/// `None` out of here means "let the child auto-detect", which is only correct
+/// when no session has built a client yet — auto-detect prefers `subscription`
+/// and errors on a proxy / api-key session.
+fn subagent_auth_mode(explicit: Option<&str>) -> Result<Option<api::AuthMode>, String> {
+    match explicit {
+        Some(value) => api::AuthMode::parse(value).map(Some),
+        None => Ok(global_auth_mode()),
+    }
 }
 
 /// In-process registry that tracks running agent threads and allows callers
@@ -323,6 +404,10 @@ impl AgentCompletionRegistry {
     /// Block until the agent reaches a terminal state or the timeout expires.
     /// Returns the terminal manifest on success, or an error message.
     fn await_agent(&self, agent_id: &str, timeout: Duration) -> Result<AgentOutput, String> {
+        // No session filesystem reaches this trait method, so the store is the
+        // host's — which is what it has always been here. A co-hosted caller
+        // goes through the tool dispatch, which carries its own.
+        let fs = runtime::host_fs_arc().as_ref();
         let map = self
             .inner
             .lock()
@@ -330,7 +415,7 @@ impl AgentCompletionRegistry {
         if !map.contains_key(agent_id) {
             // Not registered in-process — try to read from the manifest file.
             drop(map);
-            return read_manifest_from_store(agent_id);
+            return read_manifest_from_store(agent_id, fs);
         }
         let (map, wait_result) = self
             .condvar
@@ -352,12 +437,14 @@ impl AgentCompletionRegistry {
 }
 
 /// Fall back to reading the manifest from the agent store on disk.
-fn read_manifest_from_store(agent_id: &str) -> Result<AgentOutput, String> {
-    let store = agent_store_dir()?;
-    let manifest_path = store.join(format!("{agent_id}.json"));
-    let contents = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        format!("agent {agent_id} not found (no in-process record, no manifest file): {e}")
-    })?;
+fn read_manifest_from_store(agent_id: &str, fs: &dyn FsBackend) -> Result<AgentOutput, String> {
+    let store = agent_store_dir(fs)?;
+    let manifest_path = store_path(&store, &format!("{agent_id}.json"), fs);
+    let contents = fs
+        .read_to_string(&manifest_path.to_string_lossy())
+        .map_err(|e| {
+            format!("agent {agent_id} not found (no in-process record, no manifest file): {e}")
+        })?;
     let manifest: AgentOutput = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
     if manifest.status == "completed" || manifest.status == "failed" {
         Ok(manifest)
@@ -427,11 +514,32 @@ impl From<ToolSpec> for ToolDefinition {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GlobalToolRegistry {
     plugin_tools: Vec<PluginTool>,
     runtime_tools: Vec<RuntimeToolDefinition>,
     enforcer: Option<PermissionEnforcer>,
+    /// Filesystem the built-in file tools act on.
+    ///
+    /// `StdFsBackend` unless a host says otherwise, which is what the CLI
+    /// wants. A co-hosted agent supplies a kernel-backed one so its writes
+    /// land where the hooks, the audit trail and the permission checks are —
+    /// that reach IS the reason to co-host, and a literal backend here is what
+    /// denied it.
+    fs: Arc<dyn FsBackend>,
+}
+
+// Hand-written because `FsBackend` carries no `Debug` bound, and widening the
+// trait to get a derive would push that on every implementor for the sake of
+// one struct's formatting.
+impl std::fmt::Debug for GlobalToolRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GlobalToolRegistry")
+            .field("plugin_tools", &self.plugin_tools)
+            .field("runtime_tools", &self.runtime_tools)
+            .field("enforcer", &self.enforcer)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -449,7 +557,19 @@ impl GlobalToolRegistry {
             plugin_tools: Vec::new(),
             runtime_tools: Vec::new(),
             enforcer: None,
+            fs: Arc::new(StdFsBackend),
         }
+    }
+
+    /// Point the built-in file tools at `fs`.
+    ///
+    /// The one call that makes the same tools reach a different store; every
+    /// other difference between a CLI session and a co-hosted agent is a value
+    /// in `HostContext`, and this is the one that decides where bytes go.
+    #[must_use]
+    pub fn with_fs(mut self, fs: Arc<dyn FsBackend>) -> Self {
+        self.fs = fs;
+        self
     }
 
     pub fn with_plugin_tools(plugin_tools: Vec<PluginTool>) -> Result<Self, String> {
@@ -475,6 +595,7 @@ impl GlobalToolRegistry {
             plugin_tools,
             runtime_tools: Vec::new(),
             enforcer: None,
+            fs: Arc::new(StdFsBackend),
         })
     }
 
@@ -652,11 +773,10 @@ impl GlobalToolRegistry {
         self.runtime_tools.iter().any(|tool| tool.name == name)
     }
 
-    /// Return all tool definitions for the API `tools` array. Core tools
-    /// and previously-discovered tools have `defer_loading: false` (always
-    /// active); other deferred tools have `defer_loading: true` (the API
-    /// knows their schemas but doesn't count them against context until
-    /// the model discovers them through ToolSearch).
+    /// Return all tool definitions for the API `tools` array. Before the first
+    /// ToolSearch, core tools have `defer_loading: false` and everything else
+    /// has `true` — the API knows those schemas but doesn't count them against
+    /// context. After the first ToolSearch, every tool is active.
     /// Requires the `advanced-tool-use` beta header.
     ///
     /// `discovered_tools` comes from [`extract_discovered_tool_names`], which
@@ -664,16 +784,37 @@ impl GlobalToolRegistry {
     /// mechanism: the flag flipping here is what puts a searched-for tool's
     /// schema on the wire. See [`convert_messages`] for why it is not also done
     /// with in-band `tool_reference` blocks.
+    ///
+    /// ONE reveal per session, not one per tool, and the names in
+    /// `discovered_tools` are therefore only read for emptiness. `tools` sits at
+    /// the very front of the cached prefix, so flipping a single `defer_loading`
+    /// invalidates every token behind it — the system blocks and the entire
+    /// message history — and the provider re-bills that rebuild at write price.
+    /// Per-tool reveal costs one full rebuild per ToolSearch, each larger than
+    /// the last; a session that searches five times pays five. The first
+    /// discovery is the only one that buys anything, because it is the one that
+    /// says the model has reached past the core set. After it, the cheapest
+    /// stable state is the whole array on the wire once and read from cache
+    /// afterwards. `<available-deferred-tools>` does not vary with discovery
+    /// (see [`deferred_tool_listing`](Self::deferred_tool_listing)), so the
+    /// system blocks stay byte-identical and the reveal is a single event.
+    ///
+    /// What early reveal costs is small and measurable. The builtin registry is
+    /// 28 tools, 9 of them deferred, and those 9 schemas are 3.3 KB — under a
+    /// thousand tokens of context that now counts from the first search instead
+    /// of the one that named them. `defer_loading` does not withhold the schema
+    /// from the wire either way: the whole array is 21.5 KB deferred and 21.3 KB
+    /// revealed, the difference being nine `"defer_loading":true` keys. Against
+    /// that, a prefix rebuild measured against production traffic is ~310k
+    /// tokens billed at write price. The ratio is not close.
     #[must_use]
     pub fn core_definitions(
         &self,
         allowed_tools: Option<&BTreeSet<String>>,
         discovered_tools: Option<&BTreeSet<String>>,
     ) -> Vec<ToolDefinition> {
-        let is_active = |name: &str| {
-            is_core_tool(name)
-                || discovered_tools.is_some_and(|discovered| discovered.contains(name))
-        };
+        let anything_discovered = discovered_tools.is_some_and(|discovered| !discovered.is_empty());
+        let is_active = |name: &str| is_core_tool(name) || anything_discovered;
         let coord_gate =
             |name: &str| runtime::coordinator_mode::is_tool_allowed_in_coordinator_mode(name);
         let builtin = mvp_tool_specs()
@@ -839,7 +980,7 @@ impl GlobalToolRegistry {
                 input,
                 abort_signal,
                 ctx,
-                &StdFsBackend,
+                &self.fs,
             );
         }
         self.plugin_tools
@@ -907,7 +1048,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "read_file",
-            description: "Read a text file from the workspace. Reads up to 2000 lines by default; a page that would exceed the size cap is shrunk automatically and ends with a [Truncated: PARTIAL view …] banner telling you the offset/limit for the next page. When you already know which part of the file you need, only read that part.",
+            description: "Read a text file or a PNG/JPEG/GIF/WebP image from the workspace. Images are attached for visual inspection; a vision-capable model is required. After a screenshot command, call Read on its saved image path. Text reads up to 2000 lines by default; a page that would exceed the size cap is shrunk automatically and ends with a [Truncated: PARTIAL view …] banner telling you the offset/limit for the next page. When you already know which part of the file you need, only read that part.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1064,8 +1205,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         // ── agent_spawn ───────────────────────────────────────────────
-        // The one spawn tool. `fresh: false` (default) auto-resumes the
-        // agent's most recent session; `true` starts a clean one. A model
+        // The one spawn tool. A sub-agent always starts fresh with an isolated
+        // context (never resumes a prior session); use `pid_fork` to inherit
+        // the current context. A model
         // trained on the CC tool set will name this `Agent` and pass
         // `subagent_type`; `TOOL_ALIASES` + `normalize_agent_spawn_input`
         // accept that spelling without advertising it as a second tool.
@@ -1079,18 +1221,18 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "agent_spawn",
             description: concat!(
-                "Spawn an agent, returning a pid. ",
-                "By default resumes the agent's most recent session (auto-resume). ",
-                "Set `fresh: true` to start a clean session. ",
+                "Spawn a sub-agent, returning a pid. ",
+                "The sub-agent runs in an isolated context (its own system prompt + this task) ",
+                "and does not inherit this conversation; it is a throwaway worker that returns a result. ",
+                "For a substantial task you may frame it with `context`, `constraints`, and `acceptance` (prepended to the sub-agent's prompt); a quick or read-only spawn can just use `prompt`. ",
                 "Runs in the background by default; set `run_in_background: false` for synchronous. ",
                 "Use `pid_output(pid, block: true)` to await a background agent."
             ),
-            input_schema: json!({
+            input_schema: with_task_template(json!({
                 "type": "object",
                 "properties": {
                     "agent": { "type": "string", "description": "Agent type specialization. The available types are listed in the <available-agent-types> section of the system prompt; defaults to general-purpose." },
                     "prompt": { "type": "string", "description": "The full task prompt for the agent." },
-                    "fresh": { "type": "boolean", "description": "When true, start a clean session instead of resuming. Default false (auto-resume)." },
                     "description": { "type": "string", "description": "A short (3-5 word) description of the task." },
                     "name": { "type": "string", "description": "Optional human-readable label for this agent." },
                     "model": { "type": "string", "description": "Model ID override; when omitted, inherits the parent agent's current model." },
@@ -1100,8 +1242,14 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["prompt"],
                 "additionalProperties": false
-            }),
-            required_permission: PermissionMode::DangerFullAccess,
+            }), false),
+            // Read-only: spawning is a read-only ACT. The child never runs with
+            // more authority than the spawning session (it inherits the parent's
+            // mode — see `AgentJob.permission_mode`), so the spawn call itself
+            // does not need to gate at the child's ceiling. Gating it at
+            // DangerFullAccess blocked read-only and workspace-write sessions
+            // from using any sub-agent at all, even a read-only Explore.
+            required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
             name: "ToolSearch",
@@ -1159,19 +1307,20 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "Write an implementation plan and present it to the user for approval before you start changing code.\n\n",
                 "Use this proactively before a non-trivial implementation task — getting sign-off on the approach first prevents wasted effort. Prefer it when ANY of these apply: a new feature, several valid approaches, changes to existing behavior, an architectural choice, edits spanning more than 2-3 files, unclear scope you must explore first, or when the approach could reasonably go multiple ways (if you'd ask a clarifying question about the approach, write a plan instead).\n\n",
                 "Skip it for simple work: one-line or obvious fixes, a single function with clear requirements, tasks the user already specified in detail, or pure research/read-only exploration.\n\n",
-                "Pass the full plan as `content` (markdown). It is saved to the session's plan file and shown to the user, who chooses whether to execute it, comment, or stop. When executing, this plan is the source of truth — write it completely, not a summary."
+                "Fill every field: `context`, `constraints`, and `acceptance` frame the task; `content` is the plan body (the chosen approach and the ordered, file-level steps). Explore first so the plan is concrete enough to execute directly. The saved plan is the source of truth.\n\n",
+                "Revising a plan that is already partway done: if some steps have been completed, remove or tightly collapse the finished parts and keep or refine only what has not been started. The plan should describe the REMAINING work, not repeat what is done."
             ),
-            input_schema: json!({
+            input_schema: with_task_template(json!({
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "The full implementation plan, in markdown."
+                        "description": "The plan body in markdown: the chosen approach and the ordered steps, each naming the file(s) it touches."
                     }
                 },
                 "required": ["content"],
                 "additionalProperties": false
-            }),
+            }), true),
             required_permission: PermissionMode::WorkspaceWrite,
         },
         ToolSpec {
@@ -1341,6 +1490,29 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::ReadOnly,
         },
+        ToolSpec {
+            name: "agent_list",
+            description: concat!(
+                "List every agent you can reach — including ones with no live pid. ",
+                "Each row is an agent NAME (the address) with an `active` flag: ",
+                "active agents have a live pid and receive immediately; inactive ones ",
+                "are still addressable — a message waits in their durable inbox until ",
+                "they next run. Names are the address: to message one, call ",
+                "`send({\"to\": \"<name>\", \"message\": \"...\"})`, copying the name exactly ",
+                "as a row prints it. Read-only discovery; it starts nothing."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "active_only": {
+                        "type": "boolean",
+                        "description": "When true, list only agents that are currently running (have a live pid)."
+                    }
+                },
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
         // ── pid_fork ───────────────────────────────────────────────────
         // Snapshots the current session into a new pid. Equivalent to
         // `agent_spawn(agent="fork")` but exposed as its own tool for
@@ -1419,6 +1591,9 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "result reads `message delivered to <name>`; otherwise it lands in the ",
                 "recipient's workspace mailbox (.sudocode-inbox/<name>.jsonl). ",
                 "When `to` is a pid it is routed to the running process. ",
+                "A pid that has already exited is an error — its message cannot be \
+                 delivered, so use `agent_list` to find a live agent (or a name, \
+                 whose inbox holds the message until it next runs). ",
                 "`to: \"*\"` broadcasts to all teammates (structured messages CANNOT be broadcast). ",
                 "`message` accepts a plain string (pass `summary` too so the UI has a preview) ",
                 "or a structured object {type: shutdown_request|shutdown_response|plan_approval_response, ...}. ",
@@ -1430,7 +1605,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 "When replying to a peer, call this ONLY if you have something to say — ",
                 "staying silent lets the conversation end instead of bouncing forever."
             ),
-            input_schema: json!({
+            input_schema: with_task_template(json!({
                 "type": "object",
                 "properties": {
                     "to": {
@@ -1468,7 +1643,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                 },
                 "required": ["to", "message"],
                 "additionalProperties": false
-            }),
+            }), false),
             required_permission: PermissionMode::WorkspaceWrite,
         },
     ];
@@ -1483,19 +1658,52 @@ fn is_cron_tool(name: &str) -> bool {
     matches!(name, "CronCreate" | "CronDelete" | "CronList")
 }
 
+/// Why this host will not fire a scode cron, once it has said so.
+///
+/// Set by a host that runs the engine IN ITS OWN PROCESS, which cannot use the
+/// environment variable below: that one is read by a scode the host spawned, and
+/// a co-host spawns nothing. Written once at startup and never cleared — a host
+/// does not acquire a cron ticker mid-run — so a plain `OnceLock` is the whole
+/// mechanism. Deliberately not an `env::set_var`: mutating the environment of a
+/// live, threaded daemon to tell one of its own crates something is a race with
+/// every other reader in the process.
+static NO_CRON_TICKER_REASON: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Declare that crons created here would never fire, and why.
+///
+/// `reason` is shown to the model when it tries anyway, so it reads as a fact
+/// about this host rather than a broken tool: a first-timer should learn what to
+/// use instead from the refusal alone.
+pub fn declare_no_cron_ticker(reason: &'static str) {
+    let _ = NO_CRON_TICKER_REASON.set(reason);
+}
+
 /// A host that owns scheduling itself (e.g. sudowork, which runs its own
 /// scheduler and never ticks `crons.json`) sets `SUDOCODE_DISABLE_CRON_TOOLS=1`
-/// when it spawns scode. Without this the agent could "schedule" a task via
-/// `CronCreate` that persists but is never fired by that host — an orphan.
+/// when it spawns scode; a host that co-hosts the engine in-process calls
+/// [`declare_no_cron_ticker`]. Without either the agent could "schedule" a task
+/// via `CronCreate` that persists but is never fired by that host — an orphan.
 /// Only the agent-facing TOOLS are hidden; the `scode cron` CLI (a deliberate
 /// user/host surface) is untouched.
 pub fn cron_tools_disabled() -> bool {
-    std::env::var("SUDOCODE_DISABLE_CRON_TOOLS")
-        .map(|v| {
-            let v = v.trim();
-            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(false)
+    NO_CRON_TICKER_REASON.get().is_some()
+        || std::env::var("SUDOCODE_DISABLE_CRON_TOOLS")
+            .map(|v| {
+                let v = v.trim();
+                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+            })
+            .unwrap_or(false)
+}
+
+/// The refusal a cron call gets on a host that will not fire it.
+fn cron_refusal() -> String {
+    format!(
+        "cron tools are disabled: {}",
+        NO_CRON_TICKER_REASON.get().copied().unwrap_or(
+            "this host owns scheduling and will never fire scode crons — use the \
+             host's scheduler instead"
+        )
+    )
 }
 
 /// Check permission before executing a tool. Returns Err with denial reason if blocked.
@@ -1517,27 +1725,19 @@ pub fn execute_tool(name: &str, input: &Value) -> Result<String, String> {
     execute_tool_with_abort(name, input, None)
 }
 
-/// Dispatch a tool against an explicit filesystem backend.
-///
-/// This is the entry the co-hosted managed agent uses: it passes a
-/// `KernelFsBackend` so the file tools (`read_file` / `write_file` /
-/// `edit_file` / `glob_search` / `grep_search`) hit the VFS in-process via
-/// kernel syscalls instead of the host `std::fs`. The standalone CLI keeps
-/// using [`execute_tool`], which defaults to [`StdFsBackend`].
-pub fn execute_tool_with_backend(
-    name: &str,
-    input: &Value,
-    fs: &dyn FsBackend,
-) -> Result<String, String> {
-    execute_tool_with_enforcer(None, name, input, None, None, fs)
-}
-
 pub fn execute_tool_with_abort(
     name: &str,
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
 ) -> Result<String, String> {
-    execute_tool_with_enforcer(None, name, input, abort_signal, None, &StdFsBackend)
+    execute_tool_with_enforcer(
+        None,
+        name,
+        input,
+        abort_signal,
+        None,
+        runtime::host_fs_arc(),
+    )
 }
 
 /// The alias table's SSOT is [`runtime::tool_names`] — `runtime` sits below
@@ -1553,7 +1753,9 @@ fn execute_tool_with_enforcer(
     input: &Value,
     abort_signal: Option<&HookAbortSignal>,
     ctx: Option<&ToolDispatchContext>,
-    fs: &dyn FsBackend,
+    // The handle, not a borrow of it: a sub-agent outlives this call on its own
+    // thread and has to take the parent's filesystem with it.
+    fs: &Arc<dyn FsBackend>,
 ) -> Result<String, String> {
     let name = canonicalize_tool_name(name);
     let name = name.as_str();
@@ -1599,7 +1801,7 @@ fn execute_tool_with_enforcer(
         "grep_search" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
             from_value::<GrepSearchInput>(input)
-                .and_then(|input| run_grep_search(input, fs, abort_signal))
+                .and_then(|input| run_grep_search(input, fs.as_ref(), abort_signal))
         }
         "WebFetch" => from_value::<WebFetchInput>(input).and_then(run_web_fetch),
         "WebSearch" => from_value::<WebSearchInput>(input).and_then(run_web_search),
@@ -1607,22 +1809,24 @@ fn execute_tool_with_enforcer(
         // agent_spawn. A CC-trained model names this `Agent`;
         // TOOL_ALIASES folds that spelling onto this arm. Normalize `agent` →
         // `subagent_type` so the new schema's field name maps to
-        // `AgentInput`. `fresh` is accepted but currently no-op
-        // (session resume is future work).
+        // `AgentInput`. A stray `fresh` field is accepted but ignored
+        // (sub-agents never resume a session; `fresh` was retired).
         "agent_spawn" => {
             let input = normalize_agent_spawn_input(input);
-            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
+            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx, fs))
         }
         // pid_fork: synthesize an AgentInput with subagent_type="fork"
         // and delegate to the existing fork machinery.
         "pid_fork" => {
             let input = normalize_pid_fork_input(input);
-            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx))
+            from_value::<AgentInput>(&input).and_then(|input| run_agent(input, ctx, fs))
         }
         "ToolSearch" => from_value::<ToolSearchInput>(input).and_then(run_tool_search),
         "Sleep" => from_value::<SleepInput>(input).and_then(|input| run_sleep(input, abort_signal)),
         "Config" => from_value::<ConfigInput>(input).and_then(run_config),
-        "write_plan" => from_value::<WritePlanInput>(input).and_then(run_write_plan),
+        "write_plan" => {
+            from_value::<WritePlanInput>(input).and_then(|input| run_write_plan(input, fs))
+        }
         "StructuredOutput" => {
             from_value::<StructuredOutputInput>(input).and_then(run_structured_output)
         }
@@ -1636,26 +1840,28 @@ fn execute_tool_with_enforcer(
         "AskUserQuestion" => {
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
         }
-        "TodoWrite" => from_value::<TodoWriteInput>(input).and_then(run_todo_write),
+        "TodoWrite" => {
+            from_value::<TodoWriteInput>(input).and_then(|input| run_todo_write(input, fs))
+        }
         // The pid.* family — agent process control.
         "pid_kill" => {
             let input = normalize_pid_input(input);
-            from_value::<TaskIdInput>(&input).and_then(run_pid_kill)
+            from_value::<TaskIdInput>(&input).and_then(|input| run_pid_kill(input, fs.as_ref()))
         }
         "pid_status" => {
             let input = normalize_pid_input(input);
-            run_pid_status(input)
+            run_pid_status(input, fs.as_ref())
         }
         "pid_output" => {
             let input = normalize_pid_output_input(input);
-            from_value::<TaskOutputInput>(&input).and_then(run_pid_output)
+            from_value::<TaskOutputInput>(&input)
+                .and_then(|input| run_pid_output(input, fs.as_ref()))
         }
+        "agent_list" => run_agent_list(input, fs.as_ref()),
         // Defense in depth: the specs are already hidden when the host owns
         // scheduling, so refuse a stale/rogue call rather than persisting a
         // cron nothing will ever fire.
-        "CronCreate" | "CronDelete" | "CronList" if cron_tools_disabled() => Err(String::from(
-            "cron tools are disabled: this host owns scheduling and will never fire scode crons — use the host's scheduler instead",
-        )),
+        "CronCreate" | "CronDelete" | "CronList" if cron_tools_disabled() => Err(cron_refusal()),
         "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
         "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
         "CronList" => run_cron_list(input.clone()),
@@ -1803,7 +2009,7 @@ fn run_ask_user_question_v2(
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
+fn run_todo_write(input: TodoWriteInput, fs: &Arc<dyn FsBackend>) -> Result<String, String> {
     use runtime::todo_store::TodoStatus;
 
     let todos: Vec<runtime::Todo> = input.todos.into_iter().map(Into::into).collect();
@@ -1820,7 +2026,7 @@ fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
     }
     let verification_streak_nudge = runtime::verification_watcher::should_nudge_and_consume();
 
-    let saved = global_todo_store().set(todos);
+    let saved = TodoStore::open(fs).set(todos);
     let mut result = json!({ "todos": saved });
     if let Some(nudge) = verification_streak_nudge {
         result["verificationStreakNudge"] = json!(nudge);
@@ -1828,19 +2034,29 @@ fn run_todo_write(input: TodoWriteInput) -> Result<String, String> {
     to_pretty_json(result)
 }
 
-fn run_pid_status(input: Value) -> Result<String, String> {
+/// The todo list a successful `TodoWrite` result carries, if it is one.
+///
+/// The key is spelled once, beside the `run_todo_write` that writes it, so a
+/// renderer reading the list back cannot drift from the tool that produced it.
+pub fn todos_from_tool_result(output: &str) -> Option<Vec<runtime::Todo>> {
+    let value: Value = serde_json::from_str(output).ok()?;
+    serde_json::from_value(value.get("todos")?.clone()).ok()
+}
+
+fn run_pid_status(input: Value, fs: &dyn FsBackend) -> Result<String, String> {
     let pid = input
         .get("task_id")
         .or_else(|| input.get("pid"))
         .and_then(|v| v.as_str());
 
     if let Some(pid) = pid {
-        let store = agent_store_dir()?;
-        let path = store.join(format!("{pid}.json"));
-        if !path.exists() {
+        let store = agent_store_dir(fs)?;
+        let path = store_path(&store, &format!("{pid}.json"), fs);
+        if !fs.exists(&path.to_string_lossy()).unwrap_or(false) {
             return Err(format!("pid not found: {pid}"));
         }
-        let text = std::fs::read_to_string(&path)
+        let text = fs
+            .read_to_string(&path.to_string_lossy())
             .map_err(|e| format!("read agent manifest {}: {e}", path.display()))?;
         let manifest: AgentOutput =
             serde_json::from_str(&text).map_err(|e| format!("parse agent manifest: {e}"))?;
@@ -1858,7 +2074,7 @@ fn run_pid_status(input: Value) -> Result<String, String> {
         .get("backgrounded_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let agents = list_agent_snapshots_from_store(backgrounded_only).unwrap_or_default();
+    let agents = list_agent_snapshots_from_store_with(backgrounded_only, fs).unwrap_or_default();
 
     to_pretty_json(json!({
         "agents": agents,
@@ -1892,22 +2108,23 @@ pub struct AgentSnapshot {
 /// Errors accessing the directory itself surface as `Err`. Errors
 /// reading individual manifests are logged-then-skipped so a
 /// corrupt file doesn't wipe the whole list.
-pub fn list_agent_snapshots_from_store(
+pub fn list_agent_snapshots_from_store_with(
     backgrounded_only: bool,
+    fs: &dyn FsBackend,
 ) -> Result<Vec<AgentSnapshot>, String> {
-    let store = agent_store_dir()?;
-    let read_dir = match std::fs::read_dir(&store) {
-        Ok(rd) => rd,
+    let store = agent_store_dir(fs)?;
+    let listing = match fs.readdir(&store.to_string_lossy()) {
+        Ok(listing) => listing,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("read agent store {}: {e}", store.display())),
     };
     let mut out = Vec::new();
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+    for entry in listing {
+        if entry.is_dir || !entry.name.ends_with(".json") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        let path = store_path(&store, &entry.name, fs);
+        let Ok(text) = fs.read_to_string(&path.to_string_lossy()) else {
             continue;
         };
         let Ok(manifest) = serde_json::from_str::<AgentOutput>(&text) else {
@@ -1933,22 +2150,156 @@ pub fn list_agent_snapshots_from_store(
     Ok(out)
 }
 
+/// One row of `agent_list`: an addressable agent name. `active` is
+/// `Some(true)` only with positive evidence the agent is running now (a live
+/// sub-agent pid); `Some(false)` for a spawned worker that has finished; and
+/// `None` for a peer whose liveness this session cannot answer (a remote
+/// backend does not report "is a poller live"). An addressable row is reachable
+/// regardless — a `send` waits in its durable inbox until it next runs.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AgentListRow {
+    pub name: String,
+    /// `Some(true)`/`Some(false)` when known (a spawned worker); omitted when
+    /// liveness is unknowable (a peer discovered through the mailbox namespace).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    /// `peer` = an addressable identity in the mailbox namespace (another
+    /// scode/agent); `subagent` = a worker this process spawned.
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+/// Collect the addressable agents this session can reach, plus the workers it
+/// spawned. Peers come from the session mailbox's namespace via
+/// [`runtime::mailbox::Mailbox::list_recipients`] — the ONE backend-routed
+/// enumeration, so it answers the same over a local pair root, a nexus daemon
+/// (gRPC), and an in-process kernel. (Hand-rolling `std::fs` here found only
+/// local disk and probed a filename the conversation contract stopped
+/// creating — it discovered nobody real.)
+///
+/// The sub-agent half is read through `fs` for the same reason: the workers this
+/// session spawned live in ITS store, which for a co-hosted agent is a subtree
+/// of the VFS and not a directory on the daemon's disk.
+pub fn collect_agent_list(
+    active_only: bool,
+    fs: &dyn FsBackend,
+) -> Result<Vec<AgentListRow>, String> {
+    let mailbox = runtime::mailbox::sending_mailbox();
+    let self_name = mailbox.self_id().to_string();
+    // Surface an enumeration failure instead of swallowing it: `list_recipients`
+    // returns `Err` precisely so "I could not read the namespace" stays distinct
+    // from "no one is there". `unwrap_or_default()` collapsed the two, telling the
+    // model nobody exists when the truth is the read failed.
+    let peers = mailbox.list_recipients()?;
+    // The sub-agent store is a local dir; a read failure there is soft — an empty
+    // worker list is a reasonable degrade, and the peers above are the tool's point.
+    let subagents = list_agent_snapshots_from_store_with(true, fs).unwrap_or_default();
+    Ok(merge_agent_list(&peers, &self_name, subagents, active_only))
+}
+
+/// Pure core of [`collect_agent_list`], sources injected so it is testable
+/// without a real backend. `peers` are addressable names from the mailbox
+/// namespace; `self_name` is filtered out (an agent is not its own peer);
+/// `subagents` are already-filtered running snapshots.
+pub fn merge_agent_list(
+    peers: &[String],
+    self_name: &str,
+    subagents: Vec<AgentSnapshot>,
+    active_only: bool,
+) -> Vec<AgentListRow> {
+    use std::collections::BTreeMap;
+    let mut rows: BTreeMap<String, AgentListRow> = BTreeMap::new();
+
+    // Source 1: addressable peers in the mailbox namespace. Liveness is not
+    // knowable from the namespace alone (a remote backend does not report it),
+    // so `active` is left `None` — the row is addressable, not "running".
+    for name in peers {
+        if name == self_name || name.is_empty() {
+            continue; // an agent is not its own peer
+        }
+        rows.entry(name.clone()).or_insert_with(|| AgentListRow {
+            name: name.clone(),
+            active: None,
+            kind: "peer".to_string(),
+            pid: None,
+            role: None,
+        });
+    }
+
+    // Source 2: sub-agents this process spawned (running/backgrounded).
+    for snap in subagents {
+        let status = snap.status.trim().to_ascii_lowercase();
+        let active = status == "running" || status == "backgrounded";
+        let role = snap
+            .subagent_type
+            .clone()
+            .or_else(|| (!snap.description.is_empty()).then(|| snap.description.clone()));
+        let entry = rows
+            .entry(snap.name.clone())
+            .or_insert_with(|| AgentListRow {
+                name: snap.name.clone(),
+                active: Some(active),
+                kind: "subagent".to_string(),
+                pid: Some(snap.agent_id.clone()),
+                role: role.clone(),
+            });
+        // A pid-bearing (active) worker wins a name collision with a peer row.
+        if active {
+            entry.active = Some(true);
+            entry.pid = Some(snap.agent_id.clone());
+            entry.kind = "subagent".to_string();
+            if entry.role.is_none() {
+                entry.role = role;
+            }
+        }
+    }
+
+    let mut out: Vec<AgentListRow> = rows.into_values().collect();
+    if active_only {
+        // Only positively-running rows; unknown-liveness peers are not "active".
+        out.retain(|r| r.active == Some(true));
+    }
+    // Positively-active first, then by name for stable output.
+    out.sort_by(|a, b| {
+        let ak = a.active == Some(true);
+        let bk = b.active == Some(true);
+        bk.cmp(&ak).then_with(|| a.name.cmp(&b.name))
+    });
+    out
+}
+
+fn run_agent_list(input: &Value, fs: &dyn FsBackend) -> Result<String, String> {
+    let active_only = input
+        .get("active_only")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let agents = collect_agent_list(active_only, fs)?;
+    to_pretty_json(json!({
+        "agents": agents,
+        "count": agents.len(),
+    }))
+}
+
 #[allow(clippy::needless_pass_by_value)]
-fn run_pid_kill(input: TaskIdInput) -> Result<String, String> {
+fn run_pid_kill(input: TaskIdInput, fs: &dyn FsBackend) -> Result<String, String> {
     // Terminate a backgrounded agent by pid, marking its manifest stopped in
     // the agent store (the same store pid_status / pid_output read from).
-    let store = agent_store_dir()?;
-    let path = store.join(format!("{}.json", input.task_id));
-    if !path.exists() {
+    let store = agent_store_dir(fs)?;
+    let path = store_path(&store, &format!("{}.json", input.task_id), fs);
+    if !fs.exists(&path.to_string_lossy()).unwrap_or(false) {
         return Err(format!("pid not found: {}", input.task_id));
     }
-    let text = std::fs::read_to_string(&path)
+    let text = fs
+        .read_to_string(&path.to_string_lossy())
         .map_err(|e| format!("read agent manifest {}: {e}", path.display()))?;
     let mut manifest: AgentOutput =
         serde_json::from_str(&text).map_err(|e| format!("parse agent manifest: {e}"))?;
     manifest.status = "stopped".to_string();
     if let Ok(serialized) = serde_json::to_string_pretty(&manifest) {
-        let _ = std::fs::write(&path, serialized);
+        let _ = fs.write(&path.to_string_lossy(), serialized.as_bytes());
     }
     to_pretty_json(json!({
         "pid": manifest.agent_id,
@@ -1958,21 +2309,21 @@ fn run_pid_kill(input: TaskIdInput) -> Result<String, String> {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_pid_output(input: TaskOutputInput) -> Result<String, String> {
+fn run_pid_output(input: TaskOutputInput, fs: &dyn FsBackend) -> Result<String, String> {
     let agent_id = input
         .agent_id
         .as_deref()
         .or(input.task_id.as_deref())
         .ok_or_else(|| String::from("pid is required"))?;
-    let mut result = await_agent_output(agent_id, input.block, input.timeout_ms)?;
+    let mut result = await_agent_output(agent_id, input.block, input.timeout_ms, fs)?;
     if input.merge {
         if let Ok(mut parsed) = serde_json::from_str::<Value>(&result) {
             if let Some(obj) = parsed.as_object_mut() {
                 obj.insert("merge".to_string(), json!(true));
-                let store = agent_store_dir().ok();
+                let store = agent_store_dir(fs).ok();
                 if let Some(store) = store {
-                    let session_path = agent_session_path(&store, agent_id.trim());
-                    if session_path.exists() {
+                    let session_path = agent_session_path(&store, agent_id.trim(), fs);
+                    if fs.exists(&session_path.to_string_lossy()).unwrap_or(false) {
                         obj.insert(
                             "session_path".to_string(),
                             json!(session_path.display().to_string()),
@@ -2000,7 +2351,12 @@ fn agent_await_timeout_cap_ms() -> u64 {
         .unwrap_or(MAX_AGENT_AWAIT_TIMEOUT_MS)
 }
 
-fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<String, String> {
+fn await_agent_output(
+    agent_id: &str,
+    block: bool,
+    timeout_ms: u64,
+    fs: &dyn FsBackend,
+) -> Result<String, String> {
     let agent_id = agent_id.trim();
     if agent_id.is_empty() {
         return Err(String::from("agent_id must not be empty"));
@@ -2008,13 +2364,13 @@ fn await_agent_output(agent_id: &str, block: bool, timeout_ms: u64) -> Result<St
 
     if !block {
         // Non-blocking: read manifest from disk and return current state.
-        if let Ok(manifest) = read_manifest_from_store(agent_id) {
+        if let Ok(manifest) = read_manifest_from_store(agent_id, fs) {
             return format_agent_output(&manifest, "success");
         }
         // Try reading the manifest even if status is still running.
-        let store = agent_store_dir()?;
-        let path = store.join(format!("{agent_id}.json"));
-        return match std::fs::read_to_string(&path) {
+        let store = agent_store_dir(fs)?;
+        let path = store_path(&store, &format!("{agent_id}.json"), fs);
+        return match fs.read_to_string(&path.to_string_lossy()) {
             Ok(contents) => {
                 let manifest: AgentOutput =
                     serde_json::from_str(&contents).map_err(|e| e.to_string())?;
@@ -2420,9 +2776,8 @@ fn normalize_agent_spawn_input(input: &Value) -> Value {
                 Value::String("agent task".to_string()),
             );
         }
-        // `fresh` is accepted but stripped (future work: session resume).
-        // No action needed — `AgentInput` ignores unknown fields via
-        // `from_value` which is permissive by default.
+        // A stray `fresh` field needs no handling: `AgentInput` ignores
+        // unknown fields, and sub-agents never resume a session.
     }
     v
 }
@@ -2504,7 +2859,7 @@ fn write_envelope(
     // The path the convention resolved, not a reconstruction of it. It reaches
     // the model as `mailbox_path`, so it has to be where the envelope actually
     // went — under nexus that is a replicated stream, not a file.
-    let path = PathBuf::from(mailbox.inbox_path(&recipient_sanitized));
+    let path = PathBuf::from(mailbox.transcript_path(&recipient_sanitized));
     mailbox.send(envelope).map(|()| path)
 }
 
@@ -2517,8 +2872,41 @@ fn generate_request_id(prefix: &str, target: &str) -> String {
     format!("{prefix}_{target_slug}_{ts:x}")
 }
 
+/// Refuse a send to a pid that is known-and-dead (design D1: a dead pid errors,
+/// no fallback). "Dead" is narrow on purpose: `to` must be a spawned agent id
+/// this process knows AND that has reached a terminal state — a live pid, or any
+/// agent-name (which is offline-capable, its inbox filled until it next runs),
+/// passes through untouched to the one shared send path.
+///
+/// Liveness is the in-process abort registry; terminal state is the persisted
+/// manifest. `read_manifest_from_store` returns `Ok` ONLY for a terminal
+/// (`completed`/`failed`) manifest, so its `Ok` is exactly "known and dead". A
+/// name with no manifest is not a pid at all — `Err` there means "not dead",
+/// which is why this returns `Ok(())` on that path.
+fn reject_dead_pid(to: &str) -> Result<(), String> {
+    // Live? Then it can receive — not dead.
+    let live = global_agent_abort_signals()
+        .lock()
+        .map(|m| m.contains_key(to))
+        .unwrap_or(false);
+    if live {
+        return Ok(());
+    }
+    // Not live. If it is a KNOWN agent id with a terminal manifest, it is a
+    // dead pid — refuse. Any other case (unknown name, non-terminal) is not a
+    // dead pid and falls through.
+    let fs = runtime::host_fs_arc();
+    if read_manifest_from_store(to, fs.as_ref()).is_ok() {
+        return Err(format!(
+            "agent '{to}' has exited — its pid is dead, so a message cannot reach it. \
+             Use `agent_list` to find a live agent, or `pid_output` to read what it left."
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::needless_pass_by_value)]
-fn run_send_message(input: SendMessageInput) -> Result<String, String> {
+fn run_send_message(mut input: SendMessageInput) -> Result<String, String> {
     if input.to.trim().is_empty() {
         return Err("to must not be empty".to_string());
     }
@@ -2528,10 +2916,52 @@ fn run_send_message(input: SendMessageInput) -> Result<String, String> {
                 .to_string(),
         );
     }
+    // One precondition shared by every send path (plain, broadcast filters it
+    // by construction, structured): refuse a target that is a KNOWN-and-dead
+    // pid, so a message to an exited worker errors instead of provisioning a
+    // phantom inbox nobody reads and reporting success (design D1: a dead pid
+    // has no fallback). A plain agent-name — known or not — is offline-capable
+    // and falls through to the one unchanged send path; only a known-terminal
+    // agent id is refused. Not a second send path: a guard, then the same send.
+    if input.to != "*" {
+        reject_dead_pid(&input.to)?;
+    }
 
-    // Resolved once for the whole call. `send` has one destination namespace
-    // per session, and a broadcast must not re-resolve it per recipient.
-    let mailbox = runtime::mailbox::sending_mailbox();
+    // Optional task-framing: when the caller supplied context/constraints/
+    // acceptance (a task hand-off, not a chat message) and `message` is plain
+    // text, prepend the same Context/Constraints/Acceptance block write_plan and
+    // agent_spawn use, so a handed-off task carries identical structure. Chat
+    // messages omit the fields and are untouched; structured messages ignore it.
+    {
+        let framing = compose_optional_task_framing(
+            input.context.as_deref(),
+            input.constraints.as_deref(),
+            input.acceptance.as_deref(),
+        );
+        if let (Some(framing), Some(text)) = (framing, input.message.as_str()) {
+            input.message = Value::String(format!("{framing}\n{text}"));
+        }
+    }
+
+    // Resolve the destination once: live in-process pids read workspace-local
+    // conversations; named peers keep the session's shared mailbox.
+    // A running in-process sub-agent reads the workspace-local mailbox.
+    // The standalone session mailbox lives under the config home so separate
+    // scode processes can talk across workspaces; using it for a spawned pid
+    // reports a successful send into a conversation the worker never drains.
+    let local_pid = input.to != "*"
+        && global_agent_abort_signals()
+            .lock()
+            .map(|agents| agents.contains_key(&input.to))
+            .unwrap_or(false);
+    let mailbox = if local_pid {
+        std::sync::Arc::new(runtime::mailbox::Mailbox::workspace_local(
+            &current_workspace_root().map_err(|e| e.to_string())?,
+            runtime::mailbox::sending_mailbox().self_id().to_string(),
+        ))
+    } else {
+        runtime::mailbox::sending_mailbox()
+    };
     let sender = resolve_sender(&input, &mailbox);
 
     // ── Plain text branch ──────────────────────────────────────────
@@ -2871,10 +3301,13 @@ fn run_bash(
     abort_signal: Option<&HookAbortSignal>,
 ) -> Result<String, String> {
     if let Some(output) = workspace_test_branch_preflight(&input.command) {
-        return serde_json::to_string_pretty(&output).map_err(|error| error.to_string());
+        return serde_json::to_string_pretty(&output.model_output())
+            .map_err(|error| error.to_string());
     }
     serde_json::to_string_pretty(
-        &execute_bash_with_abort(input, abort_signal).map_err(|error| error.to_string())?,
+        &execute_bash_with_abort(input, abort_signal)
+            .map_err(|error| error.to_string())?
+            .model_output(),
     )
     .map_err(|error| error.to_string())
 }
@@ -2998,6 +3431,7 @@ fn branch_divergence_output(
     );
 
     BashCommandOutput {
+        exit_code: None,
         stdout: String::new(),
         stderr: stderr.clone(),
         raw_output_path: None,
@@ -3034,6 +3468,11 @@ fn branch_divergence_output(
 
 #[allow(clippy::needless_pass_by_value)]
 fn run_read_file(input: ReadFileInput, fs: &dyn FsBackend) -> Result<String, String> {
+    if runtime::image_input::is_image_path(&input.path) {
+        return to_pretty_json(
+            runtime::image_input::read_image(fs, &input.path).map_err(io_to_string)?,
+        );
+    }
     to_pretty_json(read_file(fs, &input.path, input.offset, input.limit).map_err(io_to_string)?)
 }
 
@@ -3186,7 +3625,7 @@ fn run_write_file(input: WriteFileInput, fs: &dyn FsBackend) -> Result<String, S
     let actual_path = match intent {
         runtime::FileIntent::Draft => {
             let workspace_root = std::path::PathBuf::from(fs.working_root().unwrap_or_default());
-            runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
+            runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root, fs)
         }
         runtime::FileIntent::Final => std::path::PathBuf::from(&input.path),
     };
@@ -3217,7 +3656,7 @@ fn run_edit_file(input: EditFileInput, fs: &dyn FsBackend) -> Result<String, Str
     let actual_path = if intent == runtime::FileIntent::Draft
         && !runtime::is_in_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
     {
-        runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root)
+        runtime::redirect_to_drafts(&std::path::PathBuf::from(&input.path), &workspace_root, fs)
     } else {
         std::path::PathBuf::from(&input.path)
     };
@@ -3284,8 +3723,12 @@ fn run_skill(input: SkillInput) -> Result<String, String> {
     to_pretty_json(execute_skill(input)?)
 }
 
-fn run_agent(input: AgentInput, ctx: Option<&ToolDispatchContext>) -> Result<String, String> {
-    to_pretty_json(execute_agent(input, ctx)?)
+fn run_agent(
+    input: AgentInput,
+    ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
+) -> Result<String, String> {
+    to_pretty_json(execute_agent(input, ctx, fs)?)
 }
 
 fn run_tool_search(input: ToolSearchInput) -> Result<String, String> {
@@ -3300,14 +3743,101 @@ fn run_config(input: ConfigInput) -> Result<String, String> {
     to_pretty_json(execute_config(input)?)
 }
 
-fn run_write_plan(input: WritePlanInput) -> Result<String, String> {
+/// The three task-framing fields shared by every task-shaped tool
+/// (`write_plan`, `agent_spawn`, and optionally `send`). Defined once so the
+/// field names, descriptions, and section headings can't drift between tools.
+fn task_template_properties() -> serde_json::Value {
+    json!({
+        "context": {
+            "type": "string",
+            "description": "Necessary background: what the doer needs to know to start (relevant code, prior decisions, the problem)."
+        },
+        "constraints": {
+            "type": "string",
+            "description": "Special restrictions or limits on this task (what NOT to touch, required patterns, dependencies to avoid, scope boundaries)."
+        },
+        "acceptance": {
+            "type": "string",
+            "description": "Acceptance criteria: how we know it succeeded (tests, commands, observable behavior)."
+        }
+    })
+}
+
+/// The names `task_template_properties` requires. Used to splice into a schema's
+/// `required` list on the tools that enforce the template (`write_plan`,
+/// `agent_spawn`); `send` merges the properties but leaves them optional.
+const TASK_TEMPLATE_REQUIRED: [&str; 3] = ["context", "constraints", "acceptance"];
+
+/// Merge the shared task-template properties into a tool's `input_schema`
+/// object, and (when `required`) add them to its `required` array. One place so
+/// `write_plan`/`agent_spawn`/`send` stay in lock-step.
+fn with_task_template(mut schema: serde_json::Value, required: bool) -> serde_json::Value {
+    if let Some(props) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        if let Some(fields) = task_template_properties().as_object() {
+            for (k, v) in fields {
+                props.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    if required {
+        if let Some(req) = schema
+            .get_mut("required")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for name in TASK_TEMPLATE_REQUIRED {
+                if !req.iter().any(|v| v.as_str() == Some(name)) {
+                    req.push(Value::String(name.to_string()));
+                }
+            }
+        }
+    }
+    schema
+}
+
+/// Compose the shared task-framing sections into a markdown block, prepended to
+/// a plan body or a handed-off task prompt so both carry the same structure.
+fn compose_task_framing(context: &str, constraints: &str, acceptance: &str) -> String {
+    format!(
+        "## Context\n{}\n\n## Constraints\n{}\n\n## Acceptance Criteria\n{}\n",
+        context.trim(),
+        constraints.trim(),
+        acceptance.trim(),
+    )
+}
+
+/// Like [`compose_task_framing`] but for the optional `send` path: returns
+/// `None` when none of the three fields carry content (a plain chat message),
+/// so only a genuine task hand-off gets the framing block. Empty fields are
+/// treated as absent.
+fn compose_optional_task_framing(
+    context: Option<&str>,
+    constraints: Option<&str>,
+    acceptance: Option<&str>,
+) -> Option<String> {
+    let context = context.unwrap_or("").trim();
+    let constraints = constraints.unwrap_or("").trim();
+    let acceptance = acceptance.unwrap_or("").trim();
+    if context.is_empty() && constraints.is_empty() && acceptance.is_empty() {
+        return None;
+    }
+    Some(compose_task_framing(context, constraints, acceptance))
+}
+
+fn run_write_plan(input: WritePlanInput, fs: &Arc<dyn FsBackend>) -> Result<String, String> {
     let content = input.content.trim();
     if content.is_empty() {
         return Err(String::from(
             "write_plan requires a non-empty `content`: write the full plan before presenting it.",
         ));
     }
-    let path = runtime::plan_store::write_plan(&input.content)?;
+    // The plan file is the SSOT — always structured: the three framing sections
+    // (enforced as required params) then the plan body.
+    let framing = compose_task_framing(&input.context, &input.constraints, &input.acceptance);
+    let document = format!("{framing}\n{content}\n");
+    let path = runtime::plan_store::write_plan(&document, fs)?;
     to_pretty_json(json!({
         "ok": true,
         "planFile": path.display().to_string(),
@@ -3478,15 +4008,17 @@ struct SkillInput {
 struct AgentInput {
     description: String,
     prompt: String,
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    constraints: String,
+    #[serde(default)]
+    acceptance: String,
     subagent_type: Option<String>,
     name: Option<String>,
     model: Option<String>,
     #[serde(default)]
     run_in_background: Option<bool>,
-    /// When true, start a clean session. When false (default), resume
-    /// the most recent session for this agent name if one exists.
-    #[serde(default)]
-    fresh: Option<bool>,
     /// Explicit auth mode: `"api-key"`, `"proxy"`, or `"subscription"`.
     /// When set, overrides the config's auto-detect priority.
     auth_mode: Option<String>,
@@ -3530,6 +4062,12 @@ struct ConfigInput {
 #[derive(Debug, Deserialize)]
 struct WritePlanInput {
     content: String,
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    constraints: String,
+    #[serde(default)]
+    acceptance: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3741,6 +4279,12 @@ struct SendMessageInput {
     summary: Option<String>,
     #[serde(default)]
     sender: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    constraints: Option<String>,
+    #[serde(default)]
+    acceptance: Option<String>,
 }
 
 /// Default sender name used when the caller doesn't supply one.
@@ -3868,7 +4412,11 @@ pub struct AgentRunTelemetry {
     pub tool_uses: u64,
 }
 
-#[derive(Debug, Clone)]
+// No `Debug` derive: nothing formats a job, and the filesystem it now carries
+// has no `Debug` bound — widening `FsBackend` for one struct's formatting is
+// what `GlobalToolRegistry` already declined to do, and a hand-written impl over
+// these twelve fields would go stale on the thirteenth.
+#[derive(Clone)]
 struct AgentJob {
     manifest: AgentOutput,
     prompt: String,
@@ -3878,8 +4426,9 @@ struct AgentJob {
     /// config as the parent, regardless of CWD changes.
     sudocode_config: SudoCodeConfig,
     fallback_config: ProviderFallbackConfig,
-    /// Auth mode detected from env vars at spawn time so the subagent uses the
-    /// same credential path (api-key / proxy / subscription) as the parent.
+    /// Auth mode captured at spawn time so the subagent uses the same
+    /// credential path (api-key / proxy / subscription) as the parent — see
+    /// [`subagent_auth_mode`]. `None` only when no session has published one.
     auth_mode: Option<api::AuthMode>,
     /// Pre-seeded conversation prefix. Threaded into the child's `Session`
     /// via [`Session::with_messages`] before the first API call. Empty for
@@ -3894,6 +4443,11 @@ struct AgentJob {
     /// differ — so the inherited set is kept as a single value that is
     /// impossible to partially thread through.
     execution: ParentExecution,
+    /// The filesystem the parent runs on, inherited so the sub-agent's tools
+    /// and its store land where its parent's do. A co-hosted parent's
+    /// sub-agent therefore writes through the kernel rather than onto the
+    /// daemon's local disk.
+    fs: Arc<dyn FsBackend>,
     /// Signal wired into the subagent's `ConversationRuntime` via
     /// `with_hook_abort_signal`. Registered by name in
     /// [`global_agent_abort_signals`] so
@@ -3910,6 +4464,12 @@ struct AgentJob {
     /// Where this agent reports what it does, when the renderer driving the
     /// spawning turn asked for that. `None`: the child runs unobserved.
     subagent: Option<SubagentLink>,
+    /// The permission mode this sub-agent runs under, inherited from the
+    /// spawning turn's active mode (see [`ToolDispatchContext::parent_permission_mode`]).
+    /// A sub-agent never runs with more authority than the session that spawned
+    /// it; when the parent mode is unknown (no dispatch context, e.g. a test
+    /// harness), this defaults to the conservative [`PermissionMode::WorkspaceWrite`].
+    permission_mode: PermissionMode,
 }
 
 /// A spawned agent's connection to the renderer's sub-agent sink.
@@ -3973,8 +4533,12 @@ impl SubagentLink {
     /// Report the end of the run from the manifest it persisted. `aborted`
     /// means the agent was stopped from outside (cancel / shutdown request),
     /// which the manifest itself does not record.
-    fn emit_finished(&self, fallback: &AgentOutput, aborted: bool) {
-        let manifest = std::fs::read_to_string(&fallback.manifest_file)
+    fn emit_finished(&self, fallback: &AgentOutput, aborted: bool, fs: &dyn FsBackend) {
+        // The manifest is in the store, so it is read on the store's filesystem —
+        // a co-hosted agent's lifecycle event would otherwise report the fallback
+        // status forever, having looked for the manifest on the daemon's disk.
+        let manifest = fs
+            .read_to_string(&fallback.manifest_file)
             .ok()
             .and_then(|text| serde_json::from_str::<AgentOutput>(&text).ok())
             .unwrap_or_else(|| fallback.clone());
@@ -4163,6 +4727,32 @@ fn execute_web_search(input: &WebSearchInput) -> Result<WebSearchOutput, String>
         std::env::var("SUDOCODE_WEB_SEARCH_PROVIDER").unwrap_or_else(|_| ws.provider.clone());
 
     let mut hits = match provider.as_str() {
+        "bocha" => {
+            let api_key = std::env::var("BOCHA_API_KEY")
+                .ok()
+                .filter(|key| !key.trim().is_empty())
+                .unwrap_or_else(|| {
+                    if ws.provider == "bocha" {
+                        ws.api_key.clone()
+                    } else {
+                        String::new()
+                    }
+                });
+            if api_key.trim().is_empty() || api_key.starts_with('<') {
+                return Err("Bocha search requires BOCHA_API_KEY or web_search.apiKey".into());
+            }
+            let api_url = std::env::var("SUDOCODE_BOCHA_API_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty())
+                .unwrap_or_else(|| {
+                    if ws.provider == "bocha" {
+                        ws.api_url.clone()
+                    } else {
+                        "https://api.bocha.cn/v1/web-search".to_string()
+                    }
+                });
+            execute_bocha_search(input, &api_url, &api_key)?
+        }
         "tavily" => {
             let api_key = std::env::var("SUDOCODE_TAVILY_API_KEY")
                 .ok()
@@ -4332,6 +4922,92 @@ fn execute_duckduckgo_search(input: &WebSearchInput) -> Result<Vec<SearchHit>, S
     }
 
     Ok(hits)
+}
+
+fn execute_bocha_search(
+    input: &WebSearchInput,
+    api_url: &str,
+    api_key: &str,
+) -> Result<Vec<SearchHit>, String> {
+    let client = build_http_client()?;
+    let mut body = serde_json::json!({
+        "query": input.query,
+        "summary": true,
+        "count": 8,
+    });
+    if let Some(allowed) = input
+        .allowed_domains
+        .as_ref()
+        .filter(|domains| !domains.is_empty())
+    {
+        body["include"] = serde_json::json!(allowed.join("|"));
+    }
+    if let Some(blocked) = input
+        .blocked_domains
+        .as_ref()
+        .filter(|domains| !domains.is_empty())
+    {
+        body["exclude"] = serde_json::json!(blocked.join("|"));
+    }
+    let response: serde_json::Value = block_on_http(async {
+        let response = client
+            .post(api_url)
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| format!("Bocha request failed: {error}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("Bocha API returned HTTP {status}"));
+        }
+        response
+            .json()
+            .await
+            .map_err(|error| format!("Failed to parse Bocha response: {error}"))
+    })?;
+    let code = response.get("code").and_then(serde_json::Value::as_u64);
+    if code != Some(200) {
+        return Err(format!(
+            "Bocha API returned unsuccessful or missing code: {code:?}"
+        ));
+    }
+    let data = response
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or("Bocha response is missing search data")?;
+    let Some(pages) = data.get("webPages").filter(|pages| !pages.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let values = pages
+        .get("value")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Bocha response is missing webPages.value")?;
+    Ok(values
+        .iter()
+        .filter_map(|page| {
+            let url = page.get("url")?.as_str()?.trim();
+            if url.is_empty() {
+                return None;
+            }
+            let snippet = ["summary", "snippet"].iter().find_map(|field| {
+                page.get(*field)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned)
+            });
+            Some(SearchHit {
+                title: page
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(url)
+                    .to_string(),
+                url: url.to_string(),
+                snippet,
+            })
+        })
+        .collect())
 }
 
 fn execute_tavily_search(
@@ -4688,11 +5364,12 @@ const DEFAULT_AGENT_MAX_ITERATIONS: usize = 32;
 fn execute_agent(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
 ) -> Result<AgentOutput, String> {
     if input.run_in_background.unwrap_or(true) {
-        execute_agent_with_spawn_and_context(input, ctx, spawn_agent_job)
+        execute_agent_with_spawn_and_context(input, ctx, fs, spawn_agent_job)
     } else {
-        execute_agent_inline(input, ctx)
+        execute_agent_inline(input, ctx, fs)
     }
 }
 
@@ -4702,14 +5379,28 @@ struct PreparedAgent {
 }
 
 fn prepare_agent_job(
-    input: AgentInput,
+    mut input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: Arc<dyn FsBackend>,
 ) -> Result<PreparedAgent, String> {
     if input.description.trim().is_empty() {
         return Err(String::from("description must not be empty"));
     }
     if input.prompt.trim().is_empty() {
         return Err(String::from("prompt must not be empty"));
+    }
+
+    // Frame the task the same way write_plan structures a plan: prepend the
+    // shared Context/Constraints/Acceptance sections (required schema params) to
+    // the child's prompt so the sub-agent receives a fully-framed task. Skip for
+    // a fork child, which inherits the parent's context rather than a fresh task.
+    if normalize_subagent_type(input.subagent_type.as_deref()) != "fork"
+        && !(input.context.trim().is_empty()
+            && input.constraints.trim().is_empty()
+            && input.acceptance.trim().is_empty())
+    {
+        let framing = compose_task_framing(&input.context, &input.constraints, &input.acceptance);
+        input.prompt = format!("{framing}\n{}", input.prompt);
     }
 
     let normalized_subagent_type = normalize_subagent_type(input.subagent_type.as_deref());
@@ -4750,11 +5441,12 @@ fn prepare_agent_job(
     }
 
     let agent_id = make_agent_id();
-    let output_dir = agent_store_dir()?;
-    std::fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
-    sweep_orphaned_tmp_files(&output_dir);
-    let output_file = output_dir.join(format!("{agent_id}.md"));
-    let manifest_file = output_dir.join(format!("{agent_id}.json"));
+    let output_dir = agent_store_dir(fs.as_ref())?;
+    fs.create_dir_all(&output_dir.to_string_lossy())
+        .map_err(|error| error.to_string())?;
+    sweep_orphaned_tmp_files(&output_dir, fs.as_ref());
+    let output_file = store_path(&output_dir, &format!("{agent_id}.md"), fs.as_ref());
+    let manifest_file = store_path(&output_dir, &format!("{agent_id}.json"), fs.as_ref());
 
     let model = resolve_agent_model(input.model.as_deref(), ctx)?;
     let agent_name = input
@@ -4764,7 +5456,7 @@ fn prepare_agent_job(
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| slugify_agent_name(&input.description));
     let created_at = iso8601_now();
-    let system_prompt = build_agent_system_prompt(&normalized_subagent_type)?;
+    let system_prompt = build_agent_system_prompt(&normalized_subagent_type, fs.as_ref())?;
     let allowed_tools = allowed_tools_for_subagent(&normalized_subagent_type);
 
     // Fork subagent: wrap the caller's directive with the non-negotiable
@@ -4772,15 +5464,18 @@ fn prepare_agent_job(
     // way CC-fork's `buildChildMessage()` renders them, and build the
     // inherited message prefix so the child's Session::with_messages
     // pre-seed matches CC-fork's `buildForkedMessages` output.
+    //
+    // Only a fork inherits context. Every other sub-agent starts fresh with
+    // an isolated context - the CC Task model: a delegated worker gets its own
+    // system prompt + this task, never the parent's history and never a prior
+    // same-name agent's session. Session retention is the a2a/peer layer's
+    // job, not a sub-agent's.
     let (prompt_body, inherited_messages) = if is_fork {
         let parent_assistant = ctx
             .and_then(|c| c.parent_assistant_message.as_ref())
             .expect("fork ctx presence checked above");
         let messages = build_forked_messages(&input.prompt, parent_assistant);
         (build_fork_child_message(&input.prompt), messages)
-    } else if !input.fresh.unwrap_or(false) {
-        let resumed = find_resumable_session(&agent_name);
-        (input.prompt.clone(), resumed.unwrap_or_default())
     } else {
         (input.prompt.clone(), Vec::new())
     };
@@ -4800,7 +5495,8 @@ fn prepare_agent_job(
 ",
         agent_id, agent_name, input.description, normalized_subagent_type, created_at, input.prompt
     );
-    std::fs::write(&output_file, output_contents).map_err(|error| error.to_string())?;
+    fs.write(&output_file.to_string_lossy(), output_contents.as_bytes())
+        .map_err(|error| error.to_string())?;
 
     let assigned_color = runtime::agent_color::assign_agent_color(&agent_id).map(str::to_string);
     let manifest = AgentOutput {
@@ -4826,20 +5522,15 @@ fn prepare_agent_job(
         tool_uses: None,
         notified: None,
     };
-    write_agent_manifest(&manifest)?;
+    write_agent_manifest(&manifest, fs.as_ref())?;
 
     // Capture provider config at spawn time so the subagent thread inherits the
     // parent's auth/credential settings rather than re-loading from CWD.
     let sudocode_config = load_sudocode_config();
     let fallback_config = load_provider_fallback_config();
-    // Explicit override from the Agent tool call, falling back to the
-    // process-wide auth mode set by the CLI at startup.
-    let auth_mode = input
-        .auth_mode
-        .as_deref()
-        .map(api::AuthMode::parse)
-        .transpose()?
-        .or_else(|| GLOBAL_AUTH_MODE.get().copied());
+    // Explicit override from the Agent tool call, falling back to the mode the
+    // session's own client resolved to.
+    let auth_mode = subagent_auth_mode(input.auth_mode.as_deref())?;
     // Match CC's two rules exactly (tools/AgentTool/runAgent.ts):
     //
     //   effort:   agentDefinition.effort ?? state.effortValue
@@ -4857,7 +5548,15 @@ fn prepare_agent_job(
     let execution = ParentExecution::from_dispatch(ctx).for_child(is_fork_child);
 
     let subagent = SubagentLink::from_dispatch(ctx, &manifest, background);
+    // A sub-agent inherits the spawning turn's permission mode: it never runs
+    // with more authority than the session that spawned it. No dispatch
+    // context (test harness, direct executor) falls back to the conservative
+    // WorkspaceWrite default rather than the old unconditional full access.
+    let permission_mode = ctx
+        .and_then(|c| c.parent_permission_mode)
+        .unwrap_or(PermissionMode::WorkspaceWrite);
     let job = AgentJob {
+        fs: Arc::clone(&fs),
         manifest: manifest.clone(),
         prompt: prompt_body,
         system_prompt,
@@ -4870,6 +5569,7 @@ fn prepare_agent_job(
         abort_signal: HookAbortSignal::default(),
         workspace: WorkspaceRootHandoff::capture(),
         subagent,
+        permission_mode,
     };
     if let Some(link) = &job.subagent {
         link.emit_started(&manifest);
@@ -4890,7 +5590,7 @@ where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
     input.model.get_or_insert_with(|| "test-model".to_string());
-    execute_agent_with_spawn_and_context(input, None, spawn_fn)
+    execute_agent_with_spawn_and_context(input, None, runtime::host_fs_arc(), spawn_fn)
 }
 
 /// Runtime tool-loop entry point: threads the parent's assistant
@@ -4899,20 +5599,26 @@ where
 fn execute_agent_with_spawn_and_context<F>(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
     spawn_fn: F,
 ) -> Result<AgentOutput, String>
 where
     F: FnOnce(AgentJob) -> Result<(), String>,
 {
-    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
+    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, Arc::clone(fs))?;
     global_agent_registry().register(&manifest.agent_id);
     let subagent = job.subagent.clone();
     if let Err(error) = spawn_fn(job) {
         let error = format!("failed to spawn sub-agent: {error}");
-        let persisted =
-            persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()));
+        let persisted = persist_agent_terminal_state(
+            &manifest,
+            "failed",
+            None,
+            Some(error.clone()),
+            fs.as_ref(),
+        );
         if let Some(link) = &subagent {
-            link.emit_finished(&manifest, false);
+            link.emit_finished(&manifest, false, fs.as_ref());
         }
         persisted?;
         return Err(error);
@@ -4923,8 +5629,9 @@ where
 fn execute_agent_inline(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
 ) -> Result<AgentOutput, String> {
-    execute_agent_inline_with_work(input, ctx, |job| run_agent_job_returning_text(&job))
+    execute_agent_inline_with_work(input, ctx, fs, |job| run_agent_job_returning_text(&job))
 }
 
 /// Default auto-background threshold. Mirrors CC-fork's 120-second
@@ -4978,12 +5685,13 @@ fn auto_background_threshold() -> Option<Duration> {
 fn execute_agent_inline_with_work<W>(
     input: AgentInput,
     ctx: Option<&ToolDispatchContext>,
+    fs: &Arc<dyn FsBackend>,
     work_fn: W,
 ) -> Result<AgentOutput, String>
 where
     W: FnOnce(AgentJob) -> Result<String, String> + Send + 'static,
 {
-    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx)?;
+    let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, Arc::clone(fs))?;
     let subagent = job.subagent.clone();
     let Some(threshold) = auto_background_threshold() else {
         // Auto-bg disabled — original fully-sync path.
@@ -4994,17 +5702,23 @@ where
                 "completed",
                 Some(final_text.as_str()),
                 None,
+                fs.as_ref(),
             ),
             Err(error) => {
-                let _ =
-                    persist_agent_terminal_state(&manifest, "failed", None, Some(error.clone()));
+                let _ = persist_agent_terminal_state(
+                    &manifest,
+                    "failed",
+                    None,
+                    Some(error.clone()),
+                    fs.as_ref(),
+                );
                 Err(format!("sub-agent failed: {error}"))
             }
         };
         if let Some(link) = &subagent {
-            link.emit_finished(&manifest, abort_signal.is_aborted());
+            link.emit_finished(&manifest, abort_signal.is_aborted(), fs.as_ref());
         }
-        return outcome.and_then(|()| reload_manifest_or_fallback(manifest));
+        return outcome.and_then(|()| reload_manifest_or_fallback(manifest, fs.as_ref()));
     };
 
     // Auto-bg enabled: run on a worker thread + await up to threshold.
@@ -5016,6 +5730,10 @@ where
     let bg_agent_id = agent_id.clone();
     let workspace = job.workspace.clone();
     let bg_abort_signal = job.abort_signal.clone();
+    // The worker's own handle, cloned before `job` moves into the closure. A
+    // thread reaching back for the parent's would not compile, which is how this
+    // stays honest about who owns the filesystem it writes through.
+    let bg_fs = Arc::clone(&job.fs);
     std::thread::spawn(move || {
         // Worker threads carry the parent turn's workspace root with them.
         let _workspace = workspace.enter();
@@ -5027,10 +5745,17 @@ where
                     "completed",
                     Some(final_text.as_str()),
                     None,
+                    bg_fs.as_ref(),
                 );
             }
             Ok(Err(err)) => {
-                let _ = persist_agent_terminal_state(&bg_manifest, "failed", None, Some(err));
+                let _ = persist_agent_terminal_state(
+                    &bg_manifest,
+                    "failed",
+                    None,
+                    Some(err),
+                    bg_fs.as_ref(),
+                );
             }
             Err(_) => {
                 let _ = persist_agent_terminal_state(
@@ -5038,21 +5763,22 @@ where
                     "failed",
                     None,
                     Some(String::from("sub-agent thread panicked")),
+                    bg_fs.as_ref(),
                 );
             }
         }
         // Before the completion notice: that is what releases the waiting
         // parent, whose own tool result must come after this agent's end.
         if let Some(link) = &subagent {
-            link.emit_finished(&bg_manifest, bg_abort_signal.is_aborted());
+            link.emit_finished(&bg_manifest, bg_abort_signal.is_aborted(), bg_fs.as_ref());
         }
-        notify_agent_completion(&bg_manifest);
+        notify_agent_completion(&bg_manifest, bg_fs.as_ref());
         unregister_agent_abort_signal(&bg_agent_id);
     });
 
     match global_agent_registry().await_agent(&agent_id, threshold) {
         Ok(final_manifest) => Ok(final_manifest),
-        Err(e) if e.contains("timed out") => Ok(mark_manifest_backgrounded(&manifest)),
+        Err(e) if e.contains("timed out") => Ok(mark_manifest_backgrounded(&manifest, fs.as_ref())),
         Err(e) => Err(e),
     }
 }
@@ -5065,17 +5791,20 @@ where
 /// false so mid-flight `TaskOutput` queries under coord mode still
 /// return JSON (not the `<task-notification>` XML that requires a real
 /// terminal outcome).
-fn mark_manifest_backgrounded(manifest: &AgentOutput) -> AgentOutput {
+fn mark_manifest_backgrounded(manifest: &AgentOutput, fs: &dyn FsBackend) -> AgentOutput {
     let mut updated = manifest.clone();
     updated.status = String::from("backgrounded");
-    let _ = write_agent_manifest(&updated);
+    let _ = write_agent_manifest(&updated, fs);
     updated
 }
 
-fn reload_manifest_or_fallback(manifest: AgentOutput) -> Result<AgentOutput, String> {
+fn reload_manifest_or_fallback(
+    manifest: AgentOutput,
+    fs: &dyn FsBackend,
+) -> Result<AgentOutput, String> {
     // Re-read so lane events + result written by persist are visible;
     // fall back to the in-memory manifest if the re-read blips.
-    std::fs::read_to_string(&manifest.manifest_file)
+    fs.read_to_string(&manifest.manifest_file)
         .map_err(|e| e.to_string())
         .and_then(|s| serde_json::from_str::<AgentOutput>(&s).map_err(|e| e.to_string()))
         .or(Ok(manifest))
@@ -5101,13 +5830,25 @@ fn run_spawned_agent_job(job: AgentJob) {
     let agent_id = job.manifest.agent_id.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_agent_job_returning_text(&job).and_then(|text| {
-            persist_agent_terminal_state(&job.manifest, "completed", Some(text.as_str()), None)
+            persist_agent_terminal_state(
+                &job.manifest,
+                "completed",
+                Some(text.as_str()),
+                None,
+                job.fs.as_ref(),
+            )
         })
     }));
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            let _ = persist_agent_terminal_state(&job.manifest, "failed", None, Some(error));
+            let _ = persist_agent_terminal_state(
+                &job.manifest,
+                "failed",
+                None,
+                Some(error),
+                job.fs.as_ref(),
+            );
         }
         Err(_) => {
             let _ = persist_agent_terminal_state(
@@ -5115,14 +5856,19 @@ fn run_spawned_agent_job(job: AgentJob) {
                 "failed",
                 None,
                 Some(String::from("sub-agent thread panicked")),
+                job.fs.as_ref(),
             );
         }
     }
     if let Some(link) = &job.subagent {
-        link.emit_finished(&job.manifest, job.abort_signal.is_aborted());
+        link.emit_finished(
+            &job.manifest,
+            job.abort_signal.is_aborted(),
+            job.fs.as_ref(),
+        );
     }
     // Signal the completion registry so TaskOutput(agent_id, block=true) callers unblock.
-    notify_agent_completion(&job.manifest);
+    notify_agent_completion(&job.manifest, job.fs.as_ref());
     // Drop the abort-signal registration LAST — a
     // `SendMessage(shutdown_request)` arriving during teardown against
     // an already-completed agent is silently a no-op (returns
@@ -5133,8 +5879,9 @@ fn run_spawned_agent_job(job: AgentJob) {
 }
 
 /// Re-read the persisted manifest and notify the global completion registry.
-fn notify_agent_completion(original_manifest: &AgentOutput) {
-    let manifest = std::fs::read_to_string(&original_manifest.manifest_file)
+fn notify_agent_completion(original_manifest: &AgentOutput, fs: &dyn FsBackend) {
+    let manifest = fs
+        .read_to_string(&original_manifest.manifest_file)
         .ok()
         .and_then(|s| serde_json::from_str::<AgentOutput>(&s).ok())
         .unwrap_or_else(|| {
@@ -5198,14 +5945,14 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
         },
     )?;
 
-    persist_agent_session(&job.manifest, conv_runtime.session());
+    persist_agent_session(&job.manifest, conv_runtime.session(), job.fs.as_ref());
 
     // Fold telemetry into the on-disk manifest BEFORE any downstream
     // step (summarizer, persist) reads it, so the terminal-state
     // write picks up the counts. Best-effort: an IO error here just
     // means the notification will omit `<usage>` counters — not a
     // fatal condition.
-    if let Err(err) = record_agent_telemetry(&job.manifest, cumulative_telemetry) {
+    if let Err(err) = record_agent_telemetry(&job.manifest, cumulative_telemetry, job.fs.as_ref()) {
         eprintln!("sudocode: failed to record agent telemetry on manifest: {err}");
     }
 
@@ -5230,7 +5977,7 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
         // point to the unabridged output. Best-effort: any IO error
         // is logged but not fatal — the parent still receives the
         // summary via the return value.
-        if let Err(err) = record_full_result_path(&job.manifest, &path) {
+        if let Err(err) = record_full_result_path(&job.manifest, &path, job.fs.as_ref()) {
             eprintln!("sudocode: failed to record full-result path on manifest: {err}");
         }
     }
@@ -5269,15 +6016,16 @@ fn telemetry_from_turn(summary: &runtime::TurnSummary) -> (u64, u64) {
 fn record_agent_telemetry(
     manifest: &AgentOutput,
     telemetry: AgentRunTelemetry,
+    fs: &dyn FsBackend,
 ) -> Result<(), String> {
-    let existing = std::fs::read_to_string(&manifest.manifest_file).ok();
+    let existing = fs.read_to_string(&manifest.manifest_file).ok();
     let mut updated: AgentOutput = existing
         .as_deref()
         .and_then(|text| serde_json::from_str::<AgentOutput>(text).ok())
         .unwrap_or_else(|| manifest.clone());
     updated.total_tokens = Some(telemetry.total_tokens);
     updated.tool_uses = Some(telemetry.tool_uses);
-    write_agent_manifest(&updated)
+    write_agent_manifest(&updated, fs)
 }
 
 /// Write `full_text` to `<agent_id>.full.md` sibling next to the
@@ -5286,6 +6034,7 @@ fn record_agent_telemetry(
 fn write_full_result_and_update_manifest(
     manifest: &AgentOutput,
     full_text: &str,
+    fs: &dyn FsBackend,
 ) -> Result<std::path::PathBuf, String> {
     let output_path = std::path::PathBuf::from(&manifest.output_file);
     let sibling = output_path.with_extension("full.md");
@@ -5300,7 +6049,7 @@ fn write_full_result_and_update_manifest(
             .as_deref()
             .unwrap_or("general-purpose"),
     );
-    std::fs::write(&sibling, contents)
+    fs.write(&sibling.to_string_lossy(), contents.as_bytes())
         .map_err(|e| format!("write full-result sibling {}: {e}", sibling.display()))?;
     Ok(sibling)
 }
@@ -5314,16 +6063,17 @@ fn write_full_result_and_update_manifest(
 fn record_full_result_path(
     manifest: &AgentOutput,
     full_path: &std::path::Path,
+    fs: &dyn FsBackend,
 ) -> Result<(), String> {
     let path_str = full_path.display().to_string();
-    let existing = std::fs::read_to_string(&manifest.manifest_file).ok();
+    let existing = fs.read_to_string(&manifest.manifest_file).ok();
     let mut updated: AgentOutput = if let Some(text) = existing {
         serde_json::from_str(&text).unwrap_or_else(|_| manifest.clone())
     } else {
         manifest.clone()
     };
     updated.result_full_path = Some(path_str);
-    write_agent_manifest(&updated)
+    write_agent_manifest(&updated, fs)
 }
 
 fn maybe_summarize_agent_result(
@@ -5337,7 +6087,8 @@ fn maybe_summarize_agent_result(
         return Ok((full_text.to_string(), None));
     }
     // Over threshold: persist full text alongside + summarize.
-    let full_path = write_full_result_and_update_manifest(&job.manifest, full_text)?;
+    let full_path =
+        write_full_result_and_update_manifest(&job.manifest, full_text, job.fs.as_ref())?;
     let summary = run_agent_summarizer(job, full_text)?;
     Ok((summary, Some(full_path)))
 }
@@ -5392,9 +6143,13 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
         &job.sudocode_config,
         &job.fallback_config,
         job.auth_mode,
+        &api::ModelAccess {
+            fs: Arc::clone(&job.fs),
+            require_mount: job.execution.require_model_mount,
+        },
     )?
     .with_parent_execution(job.execution.clone());
-    let permission_policy = agent_permission_policy();
+    let permission_policy = agent_permission_policy(job.permission_mode);
     let tool_executor = SubagentToolExecutor::new(empty_tools);
     let mut system_prompt = SystemPrompt::default();
     system_prompt.dynamic_sections.push(String::from(
@@ -5457,7 +6212,15 @@ fn run_multi_turn_loop<F>(
 where
     F: FnMut(String) -> Result<String, String>,
 {
-    let mut consumed_envelopes = 0usize;
+    // Same mailbox the sender writes to: one conversation model, one code
+    // path. The sub-agent's inbound receive used to read a second, flat
+    // `.sudocode-inbox/<id>.jsonl` path via `agent_mailbox::read_all` while
+    // `send` wrote conversation transcripts through `Mailbox` — so a message
+    // to a running sub-agent never arrived. Draining through `Mailbox` here
+    // closes that gap and retires the divergent path. The per-peer reader
+    // register persists the read position, so there is no in-memory cursor to
+    // lose across turns or a restart.
+    let mailbox = runtime::mailbox::Mailbox::workspace_local(workspace_root, agent_id.to_string());
     let mut current_prompt = initial_prompt;
     let mut last_final_text = String::new();
 
@@ -5468,24 +6231,39 @@ where
             return Ok(last_final_text);
         }
 
-        let envelopes =
-            runtime::agent_mailbox::read_all(workspace_root, agent_id).unwrap_or_default();
-        if envelopes.len() > consumed_envelopes {
-            let new_envelopes = &envelopes[consumed_envelopes..];
+        let new_envelopes = drain_mailbox_unread(&mailbox);
+        if !new_envelopes.is_empty() {
             let has_shutdown = new_envelopes
                 .iter()
                 .any(|env| env.kind == runtime::agent_mailbox::kinds::SHUTDOWN_REQUEST);
-            consumed_envelopes = envelopes.len();
             if has_shutdown {
                 return Ok(last_final_text);
             }
-            current_prompt = compose_next_turn_from_envelopes(new_envelopes);
+            current_prompt = compose_next_turn_from_envelopes(&new_envelopes);
             continue;
         }
 
         return Ok(last_final_text);
     }
     Ok(last_final_text)
+}
+
+/// Drain every unread envelope across all of this agent's conversations,
+/// advancing each conversation's persistent read register. Peers are visited
+/// in the chat list's sorted order so the synthesised prompt is deterministic.
+/// A per-conversation read error is skipped rather than aborting the whole
+/// drain — one unreadable peer must not deafen the agent to the rest.
+fn drain_mailbox_unread(
+    mailbox: &runtime::mailbox::Mailbox,
+) -> Vec<runtime::agent_mailbox::MailboxEnvelope> {
+    let peers = mailbox.list_conversations().unwrap_or_default();
+    let mut envelopes = Vec::new();
+    for peer in peers {
+        if let Ok(mut unread) = mailbox.take_unread(&peer) {
+            envelopes.append(&mut unread);
+        }
+    }
+    envelopes
 }
 
 /// Run one `ConversationRuntime::run_turn` call, handling the
@@ -5596,13 +6374,23 @@ fn build_agent_runtime(
         &job.sudocode_config,
         &job.fallback_config,
         job.auth_mode,
+        &api::ModelAccess {
+            fs: Arc::clone(&job.fs),
+            require_mount: job.execution.require_model_mount,
+        },
     )?
     .with_parent_execution(job.execution.clone());
-    let permission_policy = agent_permission_policy();
+    let permission_policy = agent_permission_policy(job.permission_mode);
     let tool_executor = SubagentToolExecutor::new(allowed_tools)
+        .with_fs(Arc::clone(&job.fs))
         .with_enforcer(PermissionEnforcer::new(permission_policy.clone()));
     Ok(ConversationRuntime::new(
-        Session::new().with_messages(job.inherited_messages.clone()),
+        // The parent's filesystem, so the transcript `persist_agent_session`
+        // writes lands in the store it was told about rather than on the host at
+        // a path only the VFS can hold.
+        Session::new()
+            .with_messages(job.inherited_messages.clone())
+            .with_fs_backend(Arc::clone(&job.fs)),
         api_client,
         tool_executor,
         permission_policy,
@@ -5613,22 +6401,46 @@ fn build_agent_runtime(
     .with_hook_abort_signal(job.abort_signal.clone()))
 }
 
-fn build_agent_system_prompt(subagent_type: &str) -> Result<SystemPrompt, String> {
-    let cwd = current_workspace_root().map_err(|error| error.to_string())?;
+fn build_agent_system_prompt(
+    subagent_type: &str,
+    fs: &dyn FsBackend,
+) -> Result<SystemPrompt, String> {
+    let shell_root = current_workspace_root().map_err(|error| error.to_string())?;
+    let cohost = fs
+        .managed_root(runtime::fs_backend::ManagedRoot::Memory)
+        .is_some();
+    let cwd = if cohost {
+        PathBuf::from(fs.working_root().map_err(|error| error.to_string())?)
+    } else {
+        shell_root.clone()
+    };
     // Route sub-agents through the per-agent-type memory scope
     // (`<workspace>/agent-memory/<subagent_type>/`) so one agent's
     // remembered facts don't leak into another's memory index —
     // mirrors CC-fork's `agentMemory.ts` per-agent scoping. Fork is
     // intentionally scoped too so a fork child's memory is separate
     // from its parent's workspace memory.
-    let mut prompt = runtime::load_system_prompt_for_agent(
-        cwd,
+    let mut prompt = runtime::load_system_prompt_for_agent_with(
+        &cwd,
         runtime::today_local(),
         std::env::consts::OS,
         "unknown",
         subagent_type,
+        if cohost {
+            fs
+        } else {
+            runtime::fs_backend::host_fs()
+        },
     )
     .map_err(|error| error.to_string())?;
+    if cohost {
+        prompt
+            .dynamic_sections
+            .push(runtime::spawn_task::cohost_shell_prompt_section(
+                &cwd.to_string_lossy(),
+                &shell_root,
+            ));
+    }
     if subagent_type == "fork" {
         // Fork subagent gets the parent's default system prompt (via
         // load_system_prompt above) plus a fork-specific behavioral
@@ -5702,36 +6514,42 @@ fn allowed_tools_for_subagent(subagent_type: &str) -> BTreeSet<String> {
         .unwrap_or_else(runtime::agent_types::general_purpose_tools)
 }
 
-fn agent_permission_policy() -> PermissionPolicy {
-    mvp_tool_specs().into_iter().fold(
-        PermissionPolicy::new(PermissionMode::DangerFullAccess),
-        |policy, spec| policy.with_tool_requirement(spec.name, spec.required_permission),
-    )
+fn agent_permission_policy(mode: PermissionMode) -> PermissionPolicy {
+    mvp_tool_specs()
+        .into_iter()
+        .fold(PermissionPolicy::new(mode), |policy, spec| {
+            policy.with_tool_requirement(spec.name, spec.required_permission)
+        })
 }
 
 /// Best-effort removal of `*.tmp` files left behind by a previous crash between
 /// `fs::write` and `fs::rename` in `write_agent_manifest`. Called once per agent
 /// launch so the directory stays clean without a separate startup sweep.
-fn sweep_orphaned_tmp_files(dir: &std::path::Path) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
-                let _ = std::fs::remove_file(path);
-            }
+fn sweep_orphaned_tmp_files(dir: &std::path::Path, fs: &dyn FsBackend) {
+    let Ok(entries) = fs.readdir(&dir.to_string_lossy()) else {
+        return;
+    };
+    for entry in entries {
+        if entry.is_dir || !entry.name.ends_with(".tmp") {
+            continue;
         }
+        let _ = fs.delete(&store_path(dir, &entry.name, fs).to_string_lossy());
     }
 }
 
-fn write_agent_manifest(manifest: &AgentOutput) -> Result<(), String> {
+fn write_agent_manifest(manifest: &AgentOutput, fs: &dyn FsBackend) -> Result<(), String> {
     let mut normalized = manifest.clone();
     normalized.lane_events = dedupe_superseded_commit_events(&normalized.lane_events);
     let json = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
     // Write to a temp file then rename for atomic visibility — prevents a reader
-    // seeing a partially-written file during truncate-then-write.
+    // seeing a partially-written file during truncate-then-write. Both halves go
+    // through `fs`: a rename is only atomic within one filesystem, and these two
+    // paths are in whichever one the store is rooted on.
     let tmp_path = format!("{}.tmp", normalized.manifest_file);
-    std::fs::write(&tmp_path, &json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp_path, &normalized.manifest_file).map_err(|e| e.to_string())
+    fs.write(&tmp_path, json.as_bytes())
+        .map_err(|e| e.to_string())?;
+    fs.rename(&tmp_path, &normalized.manifest_file)
+        .map_err(|e| e.to_string())
 }
 
 fn persist_agent_terminal_state(
@@ -5739,8 +6557,9 @@ fn persist_agent_terminal_state(
     status: &str,
     result: Option<&str>,
     error: Option<String>,
+    fs: &dyn FsBackend,
 ) -> Result<(), String> {
-    persist_agent_terminal_state_with_telemetry(manifest, status, result, error, None)
+    persist_agent_terminal_state_with_telemetry(manifest, status, result, error, None, fs)
 }
 
 /// Terminal-state persistence with optional run telemetry.
@@ -5757,17 +6576,20 @@ fn persist_agent_terminal_state_with_telemetry(
     result: Option<&str>,
     error: Option<String>,
     telemetry: Option<AgentRunTelemetry>,
+    fs: &dyn FsBackend,
 ) -> Result<(), String> {
     let blocker = error.as_deref().map(classify_lane_blocker);
     append_agent_output(
         &manifest.output_file,
         &format_agent_terminal_output(status, result, blocker.as_ref(), error.as_deref()),
+        fs,
     )?;
     // Re-read the current on-disk manifest so fields mutated between
     // spawn and terminal-state (result_full_path from AgentSummary,
     // per-turn telemetry updates) survive the write. Fall back to the
     // caller's snapshot when the disk state is unreadable.
-    let mut next_manifest = std::fs::read_to_string(&manifest.manifest_file)
+    let mut next_manifest = fs
+        .read_to_string(&manifest.manifest_file)
         .ok()
         .and_then(|text| serde_json::from_str::<AgentOutput>(&text).ok())
         .unwrap_or_else(|| manifest.clone());
@@ -5825,7 +6647,7 @@ fn persist_agent_terminal_state_with_telemetry(
     if should_emit {
         next_manifest.notified = Some(true);
     }
-    write_agent_manifest(&next_manifest)?;
+    write_agent_manifest(&next_manifest, fs)?;
 
     if should_emit {
         // The emit helper self-guards on `is_coordinator_mode` —
@@ -6481,14 +7303,8 @@ fn current_git_branch() -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn append_agent_output(path: &str, suffix: &str) -> Result<(), String> {
-    use std::io::Write as _;
-
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .map_err(|error| error.to_string())?;
-    file.write_all(suffix.as_bytes())
+fn append_agent_output(path: &str, suffix: &str, fs: &dyn FsBackend) -> Result<(), String> {
+    fs.append(path, suffix.as_bytes())
         .map_err(|error| error.to_string())
 }
 
@@ -6580,6 +7396,7 @@ struct ProviderEntry {
 /// send no `cache_control` at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParentExecution {
+    require_model_mount: bool,
     /// CC: `agentDefinition.effort ?? state.effortValue` — inherited.
     reasoning_effort: Option<String>,
     /// Extended thinking. True only for a fork child; see [`Self::for_child`].
@@ -6599,6 +7416,7 @@ impl ParentExecution {
             reasoning_effort: ctx.and_then(|c| c.parent_reasoning_effort.clone()),
             thinking_enabled: ctx.is_some_and(|c| c.parent_thinking_enabled),
             routing_session_id: ctx.and_then(|c| c.parent_routing_session_id.clone()),
+            require_model_mount: ctx.is_some_and(|c| c.parent_requires_model_mount),
         }
     }
 
@@ -6639,12 +7457,6 @@ pub(crate) struct ProviderRuntimeClient {
 }
 
 impl ProviderRuntimeClient {
-    #[allow(clippy::needless_pass_by_value)]
-    pub(crate) fn new(model: String, allowed_tools: BTreeSet<String>) -> Result<Self, String> {
-        let fallback_config = load_provider_fallback_config();
-        Self::new_with_fallback_config(model, allowed_tools, &fallback_config)
-    }
-
     /// Carry the parent's inherited settings onto a subagent's client — the
     /// single seam between a spawn and the requests it will send.
     ///
@@ -6665,12 +7477,19 @@ impl ProviderRuntimeClient {
         sudocode_config: &SudoCodeConfig,
         fallback_config: &ProviderFallbackConfig,
         auth_mode: Option<api::AuthMode>,
+        access: &api::ModelAccess,
     ) -> Result<Self, String> {
         let primary_model = fallback_config.primary().map_or(model, str::to_string);
-        let primary = build_provider_entry_with_config(&primary_model, sudocode_config, auth_mode)?;
+        let primary =
+            build_provider_entry_with_config(&primary_model, sudocode_config, auth_mode, access)?;
         let mut chain = vec![primary];
         for fallback_model in fallback_config.fallbacks() {
-            match build_provider_entry_with_config(fallback_model, sudocode_config, auth_mode) {
+            match build_provider_entry_with_config(
+                fallback_model,
+                sudocode_config,
+                auth_mode,
+                access,
+            ) {
                 Ok(entry) => chain.push(entry),
                 Err(error) => {
                     eprintln!(
@@ -6685,50 +7504,19 @@ impl ProviderRuntimeClient {
             execution: ParentExecution::default(),
         })
     }
-
-    #[allow(dead_code, clippy::needless_pass_by_value)]
-    fn new_with_fallback_config(
-        model: String,
-        allowed_tools: BTreeSet<String>,
-        fallback_config: &ProviderFallbackConfig,
-    ) -> Result<Self, String> {
-        let primary_model = fallback_config.primary().map_or(model, str::to_string);
-        let primary = build_provider_entry(&primary_model)?;
-        let mut chain = vec![primary];
-        for fallback_model in fallback_config.fallbacks() {
-            match build_provider_entry(fallback_model) {
-                Ok(entry) => chain.push(entry),
-                Err(error) => {
-                    eprintln!(
-                        "warning: skipping unavailable fallback provider {fallback_model}: {error}"
-                    );
-                }
-            }
-        }
-        Ok(Self {
-            chain,
-            allowed_tools,
-            execution: ParentExecution::default(),
-        })
-    }
-}
-
-#[allow(dead_code)]
-fn build_provider_entry(model: &str) -> Result<ProviderEntry, String> {
-    let sudocode_config = load_sudocode_config();
-    build_provider_entry_with_config(model, &sudocode_config, None)
 }
 
 fn build_provider_entry_with_config(
     model: &str,
     sudocode_config: &SudoCodeConfig,
     auth_mode: Option<api::AuthMode>,
+    access: &api::ModelAccess,
 ) -> Result<ProviderEntry, String> {
     let resolved_provider = resolve_provider_from_config(model, auth_mode, sudocode_config)
         .map_err(|e| e.to_string())?;
     let wire_model = resolved_provider.model_id.clone();
-    let client =
-        ProviderClient::from_resolved(&resolved_provider, auth_mode).map_err(|e| e.to_string())?;
+    let client = ProviderClient::from_resolved_with_access(&resolved_provider, auth_mode, access)
+        .map_err(|e| e.to_string())?;
     Ok(ProviderEntry {
         model: wire_model,
         client,
@@ -6763,14 +7551,33 @@ fn runtime_error_from_api(error: &ApiError) -> RuntimeError {
     if error.is_context_window_failure() {
         RuntimeError::context_window_blocked(error.to_string())
     } else {
-        RuntimeError::new(error.to_string())
+        RuntimeError::new(error.to_string()).retryable(error.is_retryable())
     }
 }
 
 #[async_trait::async_trait]
 impl ApiClient for ProviderRuntimeClient {
+    fn requires_model_mount(&self) -> bool {
+        self.execution.require_model_mount
+    }
+
     fn wire_model_id(&self) -> Option<&str> {
         self.chain.first().map(|entry| entry.model.as_str())
+    }
+
+    /// The routing key this sub-agent's own requests carry, so anything it
+    /// spawns keeps it.
+    ///
+    /// Left to the trait default this returned `None`, which is not merely a
+    /// missing convenience: `ConversationRuntime` reads it to fill
+    /// `parent_routing_session_id` on every tool dispatch, so a sub-agent that
+    /// spawned a further agent handed the child nothing, and the grandchild's
+    /// requests went out with no `metadata.user_id` at all. A pooled upstream
+    /// then has no stable session key for them and re-picks an account per
+    /// turn — the grandchild pays a full prefix rebuild each time, on a family
+    /// of requests whose whole point is that they share the parent's prefix.
+    fn routing_session_id(&self) -> Option<&str> {
+        self.execution.routing_session_id.as_deref()
     }
 
     /// The runtime's default cannot see the tool definitions attached to
@@ -6829,7 +7636,13 @@ impl ApiClient for ProviderRuntimeClient {
                 request,
                 options,
                 tools,
-                self.execution.request_metadata(),
+                api::SessionRequestFields {
+                    metadata: self.execution.request_metadata(),
+                    // Same value `stream` below sends, for the same reason: a
+                    // subagent's compaction replays the prefix its own turns
+                    // wrote, so the session-level parameters have to match.
+                    reasoning_effort: self.execution.reasoning_effort.clone(),
+                },
             )
             .await
     }
@@ -6934,8 +7747,27 @@ async fn stream_with_provider(
                         input.push_str(&partial_json);
                     }
                 }
-                ContentBlockDelta::ThinkingDelta { .. }
-                | ContentBlockDelta::SignatureDelta { .. } => {}
+                // A sub-agent's thinking was dropped on the floor here, which
+                // cost it twice: its own thinking never reached a renderer, and
+                // its assistant turns were replayed without the blocks the
+                // server issued — the prefix-invalidating shape that makes every
+                // tool round-trip a cold cache write. Same contract as the main
+                // path: text deltas stream, the signature follows as a text-less
+                // event so the block it belongs to picks it up.
+                ContentBlockDelta::ThinkingDelta { thinking } => {
+                    if !thinking.is_empty() {
+                        events.push(AssistantEvent::Thinking {
+                            thinking,
+                            signature: None,
+                        });
+                    }
+                }
+                ContentBlockDelta::SignatureDelta { signature } => {
+                    events.push(AssistantEvent::Thinking {
+                        thinking: String::new(),
+                        signature: Some(signature),
+                    });
+                }
             },
             ApiStreamEvent::ContentBlockStop(stop) => {
                 if let Some((id, name, input, thought_signature)) =
@@ -6977,15 +7809,15 @@ async fn stream_with_provider(
         return Ok(events);
     }
 
-    let response = client
-        .send_message(
-            &MessageRequest {
-                stream: false,
-                ..message_request.clone()
-            },
-            None,
-        )
-        .await?;
+    // Nothing usable came out of the stream. Ask once more — same request,
+    // still streamed. This used to re-send with `stream: false`, which on this
+    // path is the shape a connection close kills: a non-streaming request puts
+    // no bytes on the socket until generation has finished, and a connection
+    // that stays byte-quiet for ~50s is closed with no HTTP response at all
+    // (measured: `stream: false` died at 50.3s where `stream: true` had its
+    // first byte at 1.7s and ran 201.8s to completion). A sub-agent's request
+    // carries a whole conversation, so it is exactly the slow kind.
+    let response = client.send_message_streamed(message_request, None).await?;
     let mut events = response_to_events(response);
     push_prompt_cache_record(client, &mut events);
     Ok(events)
@@ -6999,15 +7831,27 @@ struct SubagentToolExecutor {
     /// (`bash`, `Sleep`, `grep_search`, `PowerShell`) stop when it fires;
     /// without it a cancelled agent sat out whatever tool it was running.
     abort_signal: Option<HookAbortSignal>,
+    /// The parent's filesystem. `StdFsBackend` when nothing supplies one, which
+    /// is a standalone CLI's own disk; a co-hosted parent hands down its kernel,
+    /// so a sub-agent's writes pass the same hooks its parent's do.
+    fs: Arc<dyn FsBackend>,
 }
 
 impl SubagentToolExecutor {
     fn new(allowed_tools: BTreeSet<String>) -> Self {
         Self {
             allowed_tools,
+            fs: runtime::host_fs_arc().clone(),
             enforcer: None,
             abort_signal: None,
         }
+    }
+
+    /// Run this sub-agent's tools on `fs` — the filesystem its parent runs on.
+    #[must_use]
+    fn with_fs(mut self, fs: Arc<dyn FsBackend>) -> Self {
+        self.fs = fs;
+        self
     }
 
     fn with_enforcer(mut self, enforcer: PermissionEnforcer) -> Self {
@@ -7041,7 +7885,10 @@ impl ToolExecutor for SubagentToolExecutor {
             &value,
             self.abort_signal.as_ref(),
             Some(ctx),
-            &StdFsBackend,
+            // The parent's filesystem, so a sub-agent's file tools land where
+            // its parent's do — through the kernel for a co-hosted parent,
+            // rather than on the daemon's local disk.
+            &self.fs,
         )
         .map_err(ToolError::new)
     }
@@ -7060,9 +7907,12 @@ fn tool_specs_for_allowed_tools(allowed_tools: Option<&BTreeSet<String>>) -> Vec
 
 /// Scan conversation history for tool names the model has already
 /// discovered via ToolSearch. Returns the set of tool names that
-/// appeared in ToolSearch result `matches` arrays — these should get
-/// `defer_loading: false` in subsequent API calls so the model can
-/// call them directly without re-searching.
+/// appeared in ToolSearch result `matches` arrays. Only whether this set is
+/// EMPTY decides anything: the first non-empty result clears `defer_loading`
+/// for every deferred tool at once (see
+/// [`GlobalToolRegistry::core_definitions`] for why one reveal is cheaper than
+/// one per tool). The names themselves are kept because they are what survives
+/// compaction.
 ///
 /// Mirrors CC's `extractDiscoveredToolNames()`.
 pub fn extract_discovered_tool_names(messages: &[ConversationMessage]) -> BTreeSet<String> {
@@ -7126,7 +7976,26 @@ fn push_output_block(
             };
             pending_tools.insert(block_index, (id, name, initial_input, thought_signature));
         }
-        OutputContentBlock::Thinking { .. } | OutputContentBlock::RedactedThinking { .. } => {}
+        // Same contract as the main path (`engine_client::push_output_block`):
+        // a thinking block arriving whole — from `message_start`, or from the
+        // non-streaming fallback below — carries its signature, and that
+        // signature is what lets the next request replay this turn as the
+        // server issued it. Dropping it here left the sub-agent rebuilding its
+        // whole cached prefix on every tool round-trip.
+        OutputContentBlock::Thinking {
+            thinking,
+            signature,
+        } => {
+            events.push(AssistantEvent::Thinking {
+                thinking,
+                signature,
+            });
+        }
+        OutputContentBlock::RedactedThinking { data } => {
+            events.push(AssistantEvent::RedactedThinking {
+                data: data.to_string(),
+            });
+        }
     }
 }
 
@@ -7199,9 +8068,9 @@ fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
 /// Tools always visible in the API `tools` array — the LLM sees their
 /// full schema on every turn. Everything else is "deferred": listed by
 /// name in `<available-deferred-tools>` and discovered via `ToolSearch`.
-/// Once discovered, [`GlobalToolRegistry::core_definitions`] clears their
-/// `defer_loading` so the next request carries the full schema and the model
-/// calls them directly.
+/// The FIRST ToolSearch clears `defer_loading` on all of them at once (see
+/// [`GlobalToolRegistry::core_definitions`]), so the next request carries every
+/// schema and the model calls any of them directly.
 const CORE_TOOLS: &[&str] = &[
     "bash",
     "read_file",
@@ -7232,10 +8101,27 @@ const CORE_TOOLS: &[&str] = &[
     // answer, and often concluded it could not reply at all. A tool required to
     // finish a core workflow is core.
     "send",
+    // Discovery is the first step of any delegate/message workflow: a model
+    // can't `send` to or `agent_spawn` a teammate it can't see. Deferred, it
+    // would have to ToolSearch for `agent_list` before discovering anyone —
+    // the same round-trip-in-a-core-path problem as `send`/`pid_output`. Core.
+    "agent_list",
     // Plan-before-implement is a proactive default: keep it always-visible so the
     // model reaches for it without a ToolSearch round-trip first (deferring it
     // would suppress exactly the proactivity we want).
     "write_plan",
+    // Checking a claim against the live web is a proactive default, the same
+    // argument as `write_plan`: a tool the model must ToolSearch for first is a
+    // tool it silently skips. Deferred, the failure mode is not an error — it is
+    // answering from stale training data when a search was warranted, which no
+    // test catches and the user sees only as a wrong answer. The two run as a
+    // pair (search yields URLs, fetch reads them), so deferring either one just
+    // moves the round-trip to the other half of the workflow. Their schemas are
+    // ~200 tokens each and sit in the cached tools prefix; a ToolSearch
+    // round-trip resends the whole context. This departs from CC, on the same
+    // grounds as `pid_output` / `send` / `agent_list` above.
+    "WebSearch",
+    "WebFetch",
 ];
 
 pub fn is_core_tool(name: &str) -> bool {
@@ -7412,7 +8298,19 @@ fn canonical_tool_token(value: &str) -> String {
     canonical
 }
 
-fn agent_store_dir() -> Result<std::path::PathBuf, String> {
+/// Where this session's sub-agents live.
+///
+/// The backend answers first (`managed_root(ManagedRoot::SubAgents)`), exactly as
+/// it does for sessions: a co-hosted agent's sub-agents belong under the agent
+/// that spawned them, inside the namespace its kernel serves. Without that this
+/// derived a HOST path from the daemon's own process directory — so every
+/// co-hosted agent on one daemon shared a single `.sudocode-agents/`, outside the
+/// kernel's hooks and audit, invisible to the cluster, and colliding with its
+/// neighbours.
+///
+/// An explicit `SUDOCODE_AGENT_STORE` still wins: it is an operator override, and
+/// the one thing an operator overriding a path wants is for it to be used.
+fn agent_store_dir(fs: &dyn FsBackend) -> Result<std::path::PathBuf, String> {
     if let Ok(raw) = std::env::var("SUDOCODE_AGENT_STORE") {
         let path = std::path::PathBuf::from(&raw);
         // Ensure the returned path is always absolute so that the output_file
@@ -7424,68 +8322,95 @@ fn agent_store_dir() -> Result<std::path::PathBuf, String> {
         let cwd = current_workspace_root().map_err(|error| error.to_string())?;
         return Ok(cwd.join(path));
     }
+    if let Some(root) = fs.managed_root(runtime::ManagedRoot::SubAgents) {
+        return Ok(std::path::PathBuf::from(root));
+    }
     let cwd = current_workspace_root().map_err(|error| error.to_string())?;
     Ok(cwd.join(".sudocode-agents"))
 }
 
-fn agent_session_path(store_dir: &std::path::Path, agent_id: &str) -> std::path::PathBuf {
-    store_dir.join(format!("{agent_id}.session.jsonl"))
+fn agent_session_path(
+    store_dir: &std::path::Path,
+    agent_id: &str,
+    fs: &dyn FsBackend,
+) -> std::path::PathBuf {
+    store_path(store_dir, &format!("{agent_id}.session.jsonl"), fs)
 }
 
-/// Persist the agent's conversation session to disk so a future
-/// `agent_spawn(fresh: false)` with the same name can resume it.
-fn persist_agent_session(manifest: &AgentOutput, session: &Session) {
-    let Ok(store) = agent_store_dir() else {
+/// `<store>/<name>`, spelled by the backend that owns the store.
+///
+/// `Path::join` writes a HOST separator, and while every syscall entry point
+/// collapses one back to the VFS spelling, these paths are recorded in the
+/// manifest and handed to the model and to other tools. A store on a co-hosted
+/// agent's VFS composes with `/` wherever it runs.
+fn store_path(dir: &std::path::Path, name: &str, fs: &dyn FsBackend) -> std::path::PathBuf {
+    std::path::PathBuf::from(fs.join_path(&dir.to_string_lossy(), name))
+}
+
+/// Persist the sub-agent's conversation session to disk, keyed by its unique
+/// agent_id, so `pid_output` can read the result and it is available for debug.
+/// It is never resumed by name - sub-agents are throwaway (or forked).
+fn persist_agent_session(manifest: &AgentOutput, session: &Session, fs: &dyn FsBackend) {
+    let Ok(store) = agent_store_dir(fs) else {
         return;
     };
-    let path = agent_session_path(&store, &manifest.agent_id);
+    let path = agent_session_path(&store, &manifest.agent_id, fs);
     if let Err(e) = session.save_to_path(&path) {
         eprintln!("sudocode: failed to persist agent session: {e}");
     }
 }
 
-/// Find the most recent completed agent with the given slugified name
-/// and return its persisted session messages. Returns `None` when no
-/// resumable session exists.
-fn find_resumable_session(agent_name: &str) -> Option<Vec<ConversationMessage>> {
-    let store = agent_store_dir().ok()?;
-    if !store.exists() {
-        return None;
-    }
-    let mut candidates: Vec<(String, String)> = Vec::new();
-    let entries = std::fs::read_dir(&store).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(manifest) = serde_json::from_str::<AgentOutput>(&text) else {
-            continue;
-        };
-        if manifest.status != "completed" {
-            continue;
-        }
-        if slugify_agent_name(&manifest.name) != agent_name {
-            continue;
-        }
-        candidates.push((manifest.agent_id, manifest.created_at));
-    }
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
-    let best_id = &candidates.first()?.0;
-    let session_path = agent_session_path(&store, best_id);
-    let session = Session::load_from_path(&session_path).ok()?;
-    Some(session.messages.clone())
+/// A fresh agent id, unique even when two spawns land in the same clock tick.
+///
+/// The id is the primary key for everything an agent owns: its manifest
+/// (`{agent_id}.json`), its output (`{agent_id}.md`), its entry in the
+/// completion registry, its abort signal, and the `agentId` every lifecycle
+/// event carries. A duplicate is not a cosmetic clash — one agent's manifest
+/// overwrites the other's and one of the two results is simply lost.
+///
+/// A bare `SystemTime::now()` was not enough for that. Windows' system clock
+/// commonly advances in ~15.6 ms ticks, so two calls inside one tick read the
+/// *same* nanosecond count. That stayed hidden while sibling spawns were
+/// separated by a whole sub-agent run, and stops being hidden the moment two
+/// spawns are dispatched together — which is now the normal case, and was
+/// already the case for two background spawns.
+///
+/// So the counter is clamped to be strictly increasing: the timestamp still
+/// supplies ordering and rough wall-clock meaning, while the clamp supplies
+/// uniqueness without changing the `agent-<digits>` shape that fixtures and
+/// id-derived colours depend on. Uniqueness is per process; two processes
+/// sharing one agent store could still collide on the same nanosecond, exactly
+/// as before.
+fn make_agent_id() -> String {
+    let nanos = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    )
+    .unwrap_or(u64::MAX);
+    format!("agent-{}", monotonic_agent_nanos(nanos))
 }
 
-fn make_agent_id() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("agent-{nanos}")
+/// The clamp behind [`make_agent_id`], split out so it can be tested against a
+/// clock that does not move — which is the only interesting case and the one a
+/// real clock will not reproduce on demand.
+///
+/// Every return value is strictly greater than every value returned before it,
+/// process-wide, so ids are distinct however coarse the clock is.
+fn monotonic_agent_nanos(nanos: u64) -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+
+    let mut previous = LAST.load(Ordering::Relaxed);
+    loop {
+        let candidate = nanos.max(previous.saturating_add(1));
+        match LAST.compare_exchange_weak(previous, candidate, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return candidate,
+            Err(actual) => previous = actual,
+        }
+    }
 }
 
 fn slugify_agent_name(description: &str) -> String {
@@ -7804,7 +8729,12 @@ struct ConfigSettingSpec {
     scope: ConfigScope,
     kind: ConfigKind,
     path: &'static [&'static str],
+    /// What a picker OFFERS.
     options: Option<&'static [&'static str]>,
+    /// What a set ACCEPTS, when that is wider than what it offers — a setting
+    /// with compatibility spellings takes them without listing each in a menu.
+    /// `None` means the menu is the whole truth, which is the usual case.
+    accepts: Option<&'static [&'static str]>,
 }
 
 #[derive(Clone, Copy)]
@@ -7820,6 +8750,7 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             kind: ConfigKind::String,
             path: &["theme"],
             options: None,
+            accepts: None,
         },
         // Per-project selector for which named account (under `auth_modes`) to
         // use. Scope = Settings (project `settings.local.json`, gitignored): a
@@ -7830,90 +8761,108 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             kind: ConfigKind::String,
             path: &["auth_profile"],
             options: None,
+            accepts: None,
         },
         "editorMode" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::String,
             path: &["editorMode"],
             options: Some(&["default", "vim", "emacs"]),
+            accepts: None,
         },
         "verbose" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["verbose"],
             options: None,
+            accepts: None,
         },
         "preferredNotifChannel" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::String,
             path: &["preferredNotifChannel"],
             options: None,
+            accepts: None,
         },
         "autoCompactEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["autoCompactEnabled"],
             options: None,
+            accepts: None,
         },
         "autoDreamEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::Boolean,
             path: &["autoDreamEnabled"],
             options: None,
+            accepts: None,
         },
         "fileCheckpointingEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["fileCheckpointingEnabled"],
             options: None,
+            accepts: None,
         },
         "showTurnDuration" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["showTurnDuration"],
             options: None,
+            accepts: None,
         },
         "terminalProgressBarEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["terminalProgressBarEnabled"],
             options: None,
+            accepts: None,
         },
         "todoFeatureEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::Boolean,
             path: &["todoFeatureEnabled"],
             options: None,
+            accepts: None,
         },
         "model" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::String,
             path: &["model"],
             options: None,
+            accepts: None,
         },
         "alwaysThinkingEnabled" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::Boolean,
             path: &["alwaysThinkingEnabled"],
             options: None,
+            accepts: None,
         },
+        // Options from the parser's own table, not a copy. This list offered
+        // four of the seven spellings and the config UI offered a different
+        // three, so which names existed depended on where you looked.
         "permissions.defaultMode" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::String,
             path: &["permissions", "defaultMode"],
-            options: Some(&["default", "acceptEdits", "dontAsk", "auto"]),
+            options: Some(runtime::PERMISSION_MODE_OPTIONS),
+            accepts: Some(runtime::PERMISSION_MODE_ACCEPTED),
         },
         "language" => ConfigSettingSpec {
             scope: ConfigScope::Settings,
             kind: ConfigKind::String,
             path: &["language"],
             options: None,
+            accepts: None,
         },
         "teammateMode" => ConfigSettingSpec {
             scope: ConfigScope::Global,
             kind: ConfigKind::String,
             path: &["teammateMode"],
             options: Some(&["tmux", "in-process", "auto"]),
+            accepts: None,
         },
         // This process's mailbox identity — the name peers address and the
         // inbox the receiver polls. Settings scope (per-project settings file):
@@ -7925,6 +8874,7 @@ fn supported_config_setting(setting: &str) -> Option<ConfigSettingSpec> {
             kind: ConfigKind::String,
             path: &["agentName"],
             options: None,
+            accepts: None,
         },
         _ => return None,
     })
@@ -7948,11 +8898,16 @@ fn normalize_config_value(spec: ConfigSettingSpec, value: ConfigValue) -> Result
         (ConfigKind::String, ConfigValue::Number(value)) => json!(value),
     };
 
+    // Checked against what this setting ACCEPTS, which for a setting with
+    // compatibility spellings is wider than what its menu offers. The message
+    // still names the menu: a rejection should point at the modes worth choosing,
+    // not recite every alias that happens to parse.
     if let Some(options) = spec.options {
+        let accepted = spec.accepts.unwrap_or(options);
         let Some(as_str) = normalized.as_str() else {
             return Err(String::from("setting requires a string value"));
         };
-        if !options.iter().any(|option| option == &as_str) {
+        if !accepted.iter().any(|option| option == &as_str) {
             return Err(format!(
                 "Invalid value \"{as_str}\". Options: {}",
                 options.join(", ")
@@ -8046,30 +9001,6 @@ fn set_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str], ne
     set_nested_value(map, rest, new_value);
 }
 
-fn remove_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str]) -> bool {
-    let Some((first, rest)) = path.split_first() else {
-        return false;
-    };
-    if rest.is_empty() {
-        return root.remove(*first).is_some();
-    }
-
-    let mut should_remove_parent = false;
-    let removed = root.get_mut(*first).is_some_and(|entry| {
-        entry.as_object_mut().is_some_and(|map| {
-            let removed = remove_nested_value(map, rest);
-            should_remove_parent = removed && map.is_empty();
-            removed
-        })
-    });
-
-    if should_remove_parent {
-        root.remove(*first);
-    }
-
-    removed
-}
-
 #[allow(clippy::needless_pass_by_value)]
 fn execute_powershell(
     input: PowerShellInput,
@@ -8140,6 +9071,7 @@ fn execute_shell_command(
         let pid = child.id();
         drop(child);
         return Ok(runtime::BashCommandOutput {
+            exit_code: None,
             stdout: String::new(),
             stderr: String::new(),
             raw_output_path: None,
@@ -8240,6 +9172,7 @@ fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime:
 
     match result.outcome {
         ShellOutcome::Completed(status) => runtime::BashCommandOutput {
+            exit_code: status.code(),
             stdout: stdout_text,
             stderr: stderr_text,
             raw_output_path: None,
@@ -8258,6 +9191,7 @@ fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime:
             sandbox_status: None,
         },
         ShellOutcome::Interrupted => runtime::BashCommandOutput {
+            exit_code: None,
             stdout: stdout_text,
             stderr: append_status_line(&stderr_text, "Command interrupted by user"),
             raw_output_path: None,
@@ -8273,6 +9207,7 @@ fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime:
             sandbox_status: None,
         },
         ShellOutcome::TimedOut => runtime::BashCommandOutput {
+            exit_code: None,
             stdout: stdout_text,
             stderr: append_status_line(
                 &stderr_text,
@@ -8492,6 +9427,56 @@ pub mod pdf_extract;
 
 #[cfg(test)]
 mod tests {
+    /// A sub-agent never resumes a session, so the retired `fresh` field is not
+    /// in the schema. A caller that still sends it must not break: `AgentInput`
+    /// ignores unknown fields, so the input still deserializes.
+    #[test]
+    fn stray_fresh_field_is_ignored_not_rejected() {
+        let input = super::normalize_agent_spawn_input(&serde_json::json!({
+            "agent": "Explore",
+            "prompt": "look around",
+            "description": "probe",
+            "fresh": true,
+        }));
+        let parsed = super::from_value::<super::AgentInput>(&input)
+            .expect("a stray `fresh` field must be tolerated, not rejected");
+        assert_eq!(parsed.subagent_type.as_deref(), Some("Explore"));
+    }
+
+    /// A subagent must spawn onto the credential path its session is already
+    /// using. It resolves its own provider on a fresh thread with no handle on
+    /// the session, so the mode has to arrive through the published slot; with
+    /// that slot empty the child auto-detects, and auto-detect prefers
+    /// `subscription` and dies with "no token available for subscription
+    /// provider" on a `--auth proxy` session. That was every ACP session until
+    /// the publish moved into the api-client constructor.
+    ///
+    /// Also a cache invariant, not only an auth one: two credential paths are
+    /// two upstream accounts, and the prompt cache is per-account.
+    #[test]
+    fn subagent_inherits_the_mode_the_session_published() {
+        super::set_global_auth_mode(api::AuthMode::Proxy);
+        assert_eq!(
+            super::subagent_auth_mode(None),
+            Ok(Some(api::AuthMode::Proxy)),
+            "a spawn with no explicit mode must inherit the session's, not auto-detect",
+        );
+
+        // An explicit mode on the Agent tool call still wins over the session's.
+        assert_eq!(
+            super::subagent_auth_mode(Some("api-key")),
+            Ok(Some(api::AuthMode::ApiKey)),
+        );
+        assert!(super::subagent_auth_mode(Some("nonsense")).is_err());
+
+        // `/auth` and `/model` rebuild the client, so the slot overwrites: a
+        // child spawned after the switch uses the mode now in effect.
+        super::set_global_auth_mode(api::AuthMode::ApiKey);
+        assert_eq!(
+            super::subagent_auth_mode(None),
+            Ok(Some(api::AuthMode::ApiKey)),
+        );
+    }
     /// Effort and thinking follow CC's two rules, which are deliberately
     /// asymmetric (`tools/AgentTool/runAgent.ts`):
     ///
@@ -8511,6 +9496,7 @@ mod tests {
                 reasoning_effort: Some("high".to_string()),
                 thinking_enabled: parent_thinking,
                 routing_session_id: Some("sess-1".to_string()),
+                require_model_mount: true,
             }
             .for_child(is_fork)
             .thinking_enabled
@@ -8536,6 +9522,7 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             thinking_enabled: true,
             routing_session_id: Some("sess-1".to_string()),
+            require_model_mount: true,
         }
         .for_child(false);
         assert_eq!(ordinary.reasoning_effort.as_deref(), Some("high"));
@@ -8552,6 +9539,7 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             thinking_enabled: true,
             routing_session_id: Some("sess-1".to_string()),
+            require_model_mount: true,
         };
         let client = super::ProviderRuntimeClient {
             chain: Vec::new(),
@@ -8919,6 +9907,7 @@ mod tests {
         assert!(names.contains(&"Skill"));
         assert!(names.contains(&"agent_spawn"));
         assert!(names.contains(&"send"));
+        assert!(names.contains(&"agent_list"));
         assert!(names.contains(&"ToolSearch"));
         assert!(names.contains(&"Sleep"));
         assert!(names.contains(&"Config"));
@@ -8927,8 +9916,51 @@ mod tests {
         assert!(names.contains(&"PowerShell"));
     }
 
-    /// The invariant that keeps a model from having to guess: a capability is
-    /// advertised under exactly ONE name.
+    #[test]
+    fn merge_agent_list_lists_peers_and_running_subagents() {
+        // Peers come from the mailbox namespace (names), not a probed filename.
+        let peers = vec![
+            "alice".to_string(),
+            "bob".to_string(),
+            "me".to_string(), // self — must be filtered out
+        ];
+
+        // one running sub-agent (own name, distinct from peers)
+        let subagents = vec![super::AgentSnapshot {
+            agent_id: "pid-123".to_string(),
+            status: "running".to_string(),
+            name: "researcher".to_string(),
+            description: "dig the docs".to_string(),
+            subagent_type: Some("Explore".to_string()),
+            color: None,
+            created_at: "2026-09-23T00:00:00Z".to_string(),
+        }];
+
+        let rows = super::merge_agent_list(&peers, "me", subagents, false);
+        let by: std::collections::BTreeMap<_, _> =
+            rows.iter().map(|r| (r.name.as_str(), r)).collect();
+
+        assert!(!by.contains_key("me"), "self is not its own peer");
+        // A peer is addressable; liveness is unknown from the namespace → None.
+        assert_eq!(by["alice"].active, None, "peer liveness unknown");
+        assert_eq!(by["alice"].kind, "peer");
+        assert!(by["alice"].pid.is_none());
+        assert_eq!(by["bob"].active, None);
+        // A running sub-agent is positively active, with its pid + role.
+        assert_eq!(by["researcher"].active, Some(true));
+        assert_eq!(by["researcher"].kind, "subagent");
+        assert_eq!(by["researcher"].pid.as_deref(), Some("pid-123"));
+        assert_eq!(by["researcher"].role.as_deref(), Some("Explore"));
+
+        // active_only keeps only positively-running rows (not unknown peers).
+        let active = super::merge_agent_list(&peers, "me", Vec::new(), true);
+        assert!(active.iter().all(|r| r.active == Some(true)));
+        assert!(
+            !active.iter().any(|r| r.name == "alice"),
+            "unknown-liveness peer is not 'active'"
+        );
+    }
+
     ///
     /// It regressed once — `SendMessage`, `send` and `send` were all
     /// advertised at the same time, differing only in which schema field
@@ -9002,6 +10034,30 @@ mod tests {
         assert_eq!(canonicalize_tool_name("send_message"), "send");
         assert_eq!(canonicalize_tool_name("send"), "send");
         assert_eq!(canonicalize_tool_name("TodoWrite"), "TodoWrite");
+    }
+
+    /// Two agents spawned inside one clock tick must not share an id. The id
+    /// names the manifest, the output file, the registry entry and every
+    /// lifecycle event, so a duplicate silently loses one agent's result.
+    ///
+    /// Driven with a frozen timestamp because that is the failing case and a
+    /// real clock will not hold still on request: Windows advances its system
+    /// clock in ~15.6 ms steps, so sibling spawns genuinely read the same
+    /// nanosecond count there.
+    ///
+    /// Asserting a strict increase rather than mere distinctness because the
+    /// counter is process-wide: another test drawing ids concurrently shifts
+    /// the values but cannot break "every id exceeds every earlier id".
+    #[test]
+    fn agent_ids_differ_when_the_clock_stands_still() {
+        let frozen = 1_790_000_000_000_000_000_u64;
+        let drawn: Vec<u64> = (0..64)
+            .map(|_| super::monotonic_agent_nanos(frozen))
+            .collect();
+        assert!(
+            drawn.windows(2).all(|pair| pair[0] < pair[1]),
+            "ids must keep increasing even with a stopped clock, got: {drawn:?}"
+        );
     }
 
     #[test]
@@ -9474,6 +10530,61 @@ mod tests {
             error.contains("apiKey") || error.contains("API key"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn subagent_thinking_block_keeps_its_signature() {
+        // The sub-agent path gets whole thinking blocks from `message_start` and
+        // from the non-streaming fallback. Dropping them here cost the sub-agent
+        // its whole cached prefix on every tool round-trip, because the turn it
+        // replayed was not the turn the server issued.
+        let mut events = Vec::new();
+        let mut pending_tools = BTreeMap::new();
+
+        push_output_block(
+            OutputContentBlock::Thinking {
+                thinking: "weighing the options".to_string(),
+                signature: Some("sig-abc".to_string()),
+            },
+            0,
+            &mut events,
+            &mut pending_tools,
+            true,
+        );
+
+        match &events[..] {
+            [runtime::AssistantEvent::Thinking {
+                thinking,
+                signature,
+            }] => {
+                assert_eq!(thinking, "weighing the options");
+                assert_eq!(signature.as_deref(), Some("sig-abc"));
+            }
+            other => panic!("expected one signed thinking event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subagent_redacted_thinking_block_is_carried_not_dropped() {
+        let mut events = Vec::new();
+        let mut pending_tools = BTreeMap::new();
+
+        push_output_block(
+            OutputContentBlock::RedactedThinking {
+                data: serde_json::Value::String("opaque-ciphertext".to_string()),
+            },
+            0,
+            &mut events,
+            &mut pending_tools,
+            true,
+        );
+
+        match &events[..] {
+            [runtime::AssistantEvent::RedactedThinking { data }] => {
+                assert_eq!(data, "\"opaque-ciphertext\"");
+            }
+            other => panic!("expected one redacted thinking event, got {other:?}"),
+        }
     }
 
     #[test]
@@ -10056,19 +11167,24 @@ mod tests {
             "send is core — replying to an inbound message is the a2a receive path"
         );
         assert_eq!(
+            core_tools.get("agent_list"),
+            Some(&false),
+            "agent_list is core — discovery is the first step of any delegate/message workflow"
+        );
+        assert_eq!(
             core_tools.get("CronCreate"),
             Some(&true),
             "CronCreate should be deferred"
         );
         assert_eq!(
             core_tools.get("WebFetch"),
-            Some(&true),
-            "WebFetch should be deferred"
+            Some(&false),
+            "WebFetch is core — reading a found URL is the second half of the search workflow"
         );
         assert_eq!(
             core_tools.get("WebSearch"),
-            Some(&true),
-            "WebSearch should be deferred"
+            Some(&false),
+            "WebSearch is core — a search the model must ToolSearch for first is a search it skips"
         );
         assert_eq!(
             core_tools.get("TodoWrite"),
@@ -10084,12 +11200,12 @@ mod tests {
         let names: BTreeSet<_> = listing.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains("CronCreate"));
         assert!(
-            names.contains("WebFetch"),
-            "WebFetch should be deferred (CC parity)"
+            !names.contains("WebFetch"),
+            "WebFetch is core — departs from CC, see CORE_TOOLS"
         );
         assert!(
-            names.contains("WebSearch"),
-            "WebSearch should be deferred (CC parity)"
+            !names.contains("WebSearch"),
+            "WebSearch is core — departs from CC, see CORE_TOOLS"
         );
         assert!(names.contains("TodoWrite"));
         assert!(!names.contains("bash"), "bash is core");
@@ -10109,6 +11225,10 @@ mod tests {
 
     #[test]
     fn deferred_tools_prompt_section_has_xml_tags() {
+        // The deferred-tools listing includes the cron tools unless a peer test has
+        // set `SUDOCODE_DISABLE_CRON_TOOLS`; that env var is process-global, so share
+        // the same lock those tests take rather than race their set/remove window.
+        let _guard = env_guard();
         let registry = GlobalToolRegistry::builtin();
         let section = registry.deferred_tools_prompt_section();
         assert!(section.starts_with("<available-deferred-tools>"));
@@ -10118,12 +11238,12 @@ mod tests {
             "CronCreate should be listed"
         );
         assert!(
-            section.contains("\nWebFetch\n"),
-            "WebFetch should be deferred"
+            !section.contains("\nWebFetch\n"),
+            "WebFetch is core — should not appear"
         );
         assert!(
-            section.contains("\nWebSearch\n"),
-            "WebSearch should be deferred"
+            !section.contains("\nWebSearch\n"),
+            "WebSearch is core — should not appear"
         );
         assert!(
             !section.contains("\nSleep\n"),
@@ -10154,9 +11274,10 @@ mod tests {
     /// turn that followed a ToolSearch died in production while this passed.
     ///
     /// Discovery does not need the references: `extract_discovered_tool_names`
-    /// reads `matches` out of this same text and `core_definitions` clears
-    /// `defer_loading` for those names, so the next request carries their full
-    /// schemas. One mechanism, and the text survives for the model to read.
+    /// reads `matches` out of this same text, and a non-empty result is what
+    /// clears `defer_loading` in `core_definitions`, so the next request carries
+    /// the full schemas. One mechanism, and the text survives for the model to
+    /// read.
     #[test]
     fn a_tool_search_result_carries_text_and_no_tool_definitions() {
         use super::extract_discovered_tool_names;
@@ -10255,8 +11376,19 @@ mod tests {
         assert!(discovered.contains("CronList"));
     }
 
+    /// The first ToolSearch reveals EVERY deferred tool, and the second reveals
+    /// nothing because there is nothing left.
+    ///
+    /// Per-tool reveal was the obvious reading of `defer_loading` and the
+    /// expensive one: `tools` is the first thing in the cached prefix, so each
+    /// flag flip invalidates the system blocks and the whole message history
+    /// behind it, and the rebuild is billed at write price. One reveal per
+    /// session bounds that at one rebuild no matter how often the model
+    /// searches. The tools array being byte-identical across the second
+    /// discovery is the property; `defer_loading` on an unsearched tool is just
+    /// how it is spelled.
     #[test]
-    fn discovered_tools_get_defer_loading_false() {
+    fn the_first_discovery_reveals_every_deferred_tool() {
         // Held because this reads the registry, and the registry reads the
         // environment: `cron_tools_hidden_when_host_owns_scheduling` sets
         // `SUDOCODE_DISABLE_CRON_TOOLS` to prove cron tools disappear. Landing
@@ -10268,17 +11400,43 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let registry = GlobalToolRegistry::builtin();
-        let discovered: BTreeSet<String> = ["CronCreate".to_string()].into_iter().collect();
-        let defs = registry.core_definitions(None, Some(&discovered));
-        let cron_create = defs.iter().find(|d| d.name == "CronCreate").unwrap();
+
+        // Nothing searched for yet: core on, the rest deferred.
+        let cold = registry.core_definitions(None, None);
         assert!(
-            !cron_create.defer_loading,
-            "discovered tool should have defer_loading=false"
+            cold.iter().any(|d| d.defer_loading),
+            "before any ToolSearch some tools must still be deferred, or the \
+             mechanism is doing nothing"
         );
-        let cron_list = defs.iter().find(|d| d.name == "CronList").unwrap();
+        let cron_list_cold = cold.iter().find(|d| d.name == "CronList").unwrap();
         assert!(
-            cron_list.defer_loading,
-            "undiscovered deferred tool should still have defer_loading=true"
+            cron_list_cold.defer_loading,
+            "an unsearched deferred tool must stay deferred"
+        );
+
+        let one: BTreeSet<String> = ["CronCreate".to_string()].into_iter().collect();
+        let after_first = registry.core_definitions(None, Some(&one));
+        assert!(
+            after_first.iter().all(|d| !d.defer_loading),
+            "the first discovery reveals everything, not just what was matched: {:?}",
+            after_first
+                .iter()
+                .filter(|d| d.defer_loading)
+                .map(|d| &d.name)
+                .collect::<Vec<_>>()
+        );
+
+        // The bill this exists to avoid: a second discovery must not move a
+        // byte of the array, because `tools` is the head of the cached prefix.
+        let two: BTreeSet<String> = ["CronCreate".to_string(), "CronList".to_string()]
+            .into_iter()
+            .collect();
+        let after_second = registry.core_definitions(None, Some(&two));
+        assert_eq!(
+            serde_json::to_string(&after_first).unwrap(),
+            serde_json::to_string(&after_second).unwrap(),
+            "a later ToolSearch must not change the tools array — every change \
+             there invalidates the whole prefix behind it"
         );
     }
 
@@ -10297,11 +11455,13 @@ mod tests {
             AgentInput {
                 description: "Audit the branch".to_string(),
                 prompt: "Check tests and outstanding work.".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("ship-audit".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10390,11 +11550,13 @@ mod tests {
             AgentInput {
                 description: "Complete the task".to_string(),
                 prompt: "Do the work".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("complete-task".to_string()),
                 model: Some("claude-sonnet-4-6".to_string()),
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10404,6 +11566,7 @@ mod tests {
                     "completed",
                     Some("Finished successfully in commit abc1234"),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10451,11 +11614,13 @@ mod tests {
             AgentInput {
                 description: "Fail the task".to_string(),
                 prompt: "Do the failing work".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Verification".to_string()),
                 name: Some("fail-task".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10465,6 +11630,7 @@ mod tests {
                     "failed",
                     None,
                     Some(String::from("tool failed: simulated failure")),
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10502,11 +11668,13 @@ mod tests {
             AgentInput {
                 description: "Sweep the next backlog item".to_string(),
                 prompt: "Produce a low-signal stop summary".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("summary-floor".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10516,6 +11684,7 @@ mod tests {
                     "completed",
                     Some("commit push everyting, keep sweeping $ralph"),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10551,11 +11720,13 @@ mod tests {
             AgentInput {
                 description: "Recover the stalled audit lane".to_string(),
                 prompt: "Normalize OMX reinjection control prose".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("recovery-lane".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10567,6 +11738,7 @@ mod tests {
                         "Team read-only-audit-only-for-roadm: worker panes stalled, no progress 2m30s. Next: omx team status read-only-audit-only-for-roadm; read worker messages; unblock/reassign or shutdown. [OMX_TMUX_INJECT]",
                     ),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10603,11 +11775,13 @@ mod tests {
             AgentInput {
                 description: "Review commit 1234abcd for ROADMAP #67".to_string(),
                 prompt: "Review the scoped diff".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Verification".to_string()),
                 name: Some("review-lane".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10617,6 +11791,7 @@ mod tests {
                     "completed",
                     Some("APPROVE\n\nTarget: commit 1234abcd\nRationale: scoped diff is safe."),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10647,11 +11822,13 @@ mod tests {
             AgentInput {
                 description: "Scan ROADMAP Immediate Backlog for the next repo-local item".to_string(),
                 prompt: "Choose the next backlog target".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("backlog-scan".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10663,6 +11840,7 @@ mod tests {
                         "Selected next backlog target.\nChosen: ROADMAP #65\nSkipped: ROADMAP #63, ROADMAP #64\nAction: execute\nRationale: #65 is the next repo-local lane-finished metadata task.",
                     ),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10697,11 +11875,13 @@ mod tests {
             AgentInput {
                 description: "Land ROADMAP #64 provenance hardening".to_string(),
                 prompt: "Ship structured artifact provenance".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("artifact-lane".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10713,6 +11893,7 @@ mod tests {
                         "Completed ROADMAP #64. Files: rust/crates/tools/src/lib.rs ROADMAP.md. Diff stat: 2 files, +12/-1. Tested, committed, pushed as commit deadbee.",
                     ),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10771,11 +11952,13 @@ mod tests {
             AgentInput {
                 description: "Close ROADMAP #66 reminder shutdown".to_string(),
                 prompt: "Finish the cron shutdown fix".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("cron-closeout".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -10785,6 +11968,7 @@ mod tests {
                     "completed",
                     Some("Completed ROADMAP #66 after verification."),
                     None,
+                    job.fs.as_ref(),
                 )
             },
         )
@@ -10816,11 +12000,13 @@ mod tests {
             AgentInput {
                 description: "Spawn error task".to_string(),
                 prompt: "Never starts".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: None,
                 name: Some("spawn-error".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11091,7 +12277,7 @@ mod tests {
                 input_path: path.display().to_string(),
             },
             SubagentToolExecutor::new(BTreeSet::from([String::from("read_file")])),
-            agent_permission_policy(),
+            agent_permission_policy(PermissionMode::WorkspaceWrite),
             SystemPrompt::default(),
         );
 
@@ -11151,11 +12337,13 @@ mod tests {
             AgentInput {
                 description: "Calculate 2+2".to_string(),
                 prompt: "What is 2+2?".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("calc-task".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11165,15 +12353,21 @@ mod tests {
                     "completed",
                     Some("The answer is 4"),
                     None,
+                    job.fs.as_ref(),
                 )?;
-                super::notify_agent_completion(&job.manifest);
+                super::notify_agent_completion(&job.manifest, job.fs.as_ref());
                 Ok(())
             },
         )
         .expect("spawn should succeed");
 
-        let result = await_agent_output(&manifest.agent_id, true, 5_000)
-            .expect("blocking await should succeed");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            true,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("blocking await should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["retrieval_status"], "success");
@@ -11198,11 +12392,13 @@ mod tests {
             AgentInput {
                 description: "Failing calc".to_string(),
                 prompt: "Divide by zero".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("fail-calc".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11212,15 +12408,21 @@ mod tests {
                     "failed",
                     None,
                     Some(String::from("division by zero")),
+                    job.fs.as_ref(),
                 )?;
-                super::notify_agent_completion(&job.manifest);
+                super::notify_agent_completion(&job.manifest, job.fs.as_ref());
                 Ok(())
             },
         )
         .expect("spawn should succeed");
 
-        let result = await_agent_output(&manifest.agent_id, true, 5_000)
-            .expect("blocking await of failed agent should succeed");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            true,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("blocking await of failed agent should succeed");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["status"], "failed");
         assert!(value["error"]
@@ -11242,11 +12444,13 @@ mod tests {
             AgentInput {
                 description: "Slow calculation".to_string(),
                 prompt: "What is 6*7?".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: Some("slow-calc".to_string()),
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11261,8 +12465,9 @@ mod tests {
                             "completed",
                             Some("The answer is 42"),
                             None,
+                            job.fs.as_ref(),
                         );
-                        super::notify_agent_completion(&job.manifest);
+                        super::notify_agent_completion(&job.manifest, job.fs.as_ref());
                     })
                     .map(|_| ())
                     .map_err(|e| e.to_string())
@@ -11270,8 +12475,13 @@ mod tests {
         )
         .expect("spawn should succeed");
 
-        let result = await_agent_output(&manifest.agent_id, true, 10_000)
-            .expect("blocking await should succeed after thread finishes");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            true,
+            10_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("blocking await should succeed after thread finishes");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["result"], "The answer is 42");
@@ -11290,11 +12500,13 @@ mod tests {
             AgentInput {
                 description: "Slow task".to_string(),
                 prompt: "Run slowly".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: None,
                 name: None,
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11302,8 +12514,13 @@ mod tests {
         )
         .expect("spawn should succeed");
 
-        let result = await_agent_output(&manifest.agent_id, false, 5_000)
-            .expect("non-blocking poll should not error");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            false,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("non-blocking poll should not error");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["retrieval_status"], "not_ready");
         assert_eq!(value["status"], "running");
@@ -11322,11 +12539,13 @@ mod tests {
             AgentInput {
                 description: "Never completes".to_string(),
                 prompt: "Spin forever".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: None,
                 name: None,
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11335,7 +12554,8 @@ mod tests {
         .expect("spawn should succeed");
 
         let result =
-            await_agent_output(&manifest.agent_id, true, 1).expect("timeout path should return Ok");
+            await_agent_output(&manifest.agent_id, true, 1, runtime::host_fs_arc().as_ref())
+                .expect("timeout path should return Ok");
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(value["retrieval_status"], "timeout");
         assert_eq!(value["status"], "running");
@@ -11388,13 +12608,15 @@ mod tests {
         AgentInput {
             description: format!("auto-bg test: {label}"),
             prompt: format!("scenario={label}"),
+            context: String::new(),
+            constraints: String::new(),
+            acceptance: String::new(),
             subagent_type: None,
             name: Some(format!("auto-bg-{label}")),
             model: Some("test-model".to_string()),
             run_in_background: Some(false),
             auth_mode: None,
             permission_mode: None,
-            fresh: None,
         }
     }
 
@@ -11405,11 +12627,16 @@ mod tests {
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
         std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "5");
 
-        let manifest = execute_agent_inline_with_work(auto_bg_input("fast"), None, |_job| {
-            // Finishes well before the 5-second threshold.
-            std::thread::sleep(Duration::from_millis(50));
-            Ok(String::from("done fast"))
-        })
+        let manifest = execute_agent_inline_with_work(
+            auto_bg_input("fast"),
+            None,
+            runtime::host_fs_arc(),
+            |_job| {
+                // Finishes well before the 5-second threshold.
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(String::from("done fast"))
+            },
+        )
         .expect("fast work should complete via auto-bg await path");
 
         assert_eq!(manifest.status, "completed");
@@ -11429,13 +12656,18 @@ mod tests {
         std::env::set_var("SUDOCODE_AGENT_AUTO_BG_SECS", "1");
 
         let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let manifest = execute_agent_inline_with_work(auto_bg_input("slow"), None, move |_job| {
-            // Block until the test releases us — proves the manifest is
-            // returned from the timeout branch while the worker is
-            // still running.
-            let _ = rx.recv();
-            Ok(String::from("eventually done"))
-        })
+        let manifest = execute_agent_inline_with_work(
+            auto_bg_input("slow"),
+            None,
+            runtime::host_fs_arc(),
+            move |_job| {
+                // Block until the test releases us — proves the manifest is
+                // returned from the timeout branch while the worker is
+                // still running.
+                let _ = rx.recv();
+                Ok(String::from("eventually done"))
+            },
+        )
         .expect("timeout path should still return Ok(manifest)");
 
         assert_eq!(
@@ -11453,8 +12685,13 @@ mod tests {
         // Now release the worker and prove TaskOutput(block=true) eventually
         // sees the "completed" transition.
         let _ = tx.send(());
-        let out = await_agent_output(&manifest.agent_id, true, 5_000)
-            .expect("await should succeed after worker finishes");
+        let out = await_agent_output(
+            &manifest.agent_id,
+            true,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("await should succeed after worker finishes");
         let value: serde_json::Value = serde_json::from_str(&out).expect("valid json");
         assert_eq!(value["status"], "completed");
         assert_eq!(value["result"], "eventually done");
@@ -11474,10 +12711,15 @@ mod tests {
         // With auto-bg disabled, the call must block for the full work
         // duration — no early "backgrounded" return.
         let start = std::time::Instant::now();
-        let manifest = execute_agent_inline_with_work(auto_bg_input("disabled"), None, |_job| {
-            std::thread::sleep(Duration::from_millis(200));
-            Ok(String::from("sync done"))
-        })
+        let manifest = execute_agent_inline_with_work(
+            auto_bg_input("disabled"),
+            None,
+            runtime::host_fs_arc(),
+            |_job| {
+                std::thread::sleep(Duration::from_millis(200));
+                Ok(String::from("sync done"))
+            },
+        )
         .expect("disabled auto-bg must still complete");
         let elapsed = start.elapsed();
 
@@ -11714,8 +12956,10 @@ mod tests {
         )
         .expect("write plan entry");
 
-        let explore_prompt = build_agent_system_prompt("Explore").expect("Explore prompt built");
-        let plan_prompt = build_agent_system_prompt("Plan").expect("Plan prompt built");
+        let explore_prompt = build_agent_system_prompt("Explore", runtime::fs_backend::host_fs())
+            .expect("Explore prompt built");
+        let plan_prompt = build_agent_system_prompt("Plan", runtime::fs_backend::host_fs())
+            .expect("Plan prompt built");
 
         std::env::remove_var("SUDOCODE_MEMORY_DIR");
 
@@ -11754,7 +12998,8 @@ mod tests {
         );
         let _home = HomeGuard::override_home(&home);
 
-        let prompt = build_agent_system_prompt("committee").expect("system prompt build");
+        let prompt = build_agent_system_prompt("committee", runtime::fs_backend::host_fs())
+            .expect("system prompt build");
         let joined = prompt.dynamic_sections.join("\n---section---\n");
         assert!(
             joined.contains("NAMING_COMMITTEE_SENTINEL"),
@@ -11793,11 +13038,13 @@ mod tests {
             AgentInput {
                 description: "Never completes".to_string(),
                 prompt: "Spin forever".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: None,
                 name: None,
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11808,8 +13055,13 @@ mod tests {
         // Request an absurdly long timeout — the cap must clamp it so ACP-style
         // upper-layer callers don't get cut off waiting for taskoutput.
         let start = std::time::Instant::now();
-        let result = await_agent_output(&manifest.agent_id, true, 10 * 60 * 1000)
-            .expect("clamped timeout path should return Ok");
+        let result = await_agent_output(
+            &manifest.agent_id,
+            true,
+            10 * 60 * 1000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect("clamped timeout path should return Ok");
         let elapsed = start.elapsed();
 
         let value: serde_json::Value = serde_json::from_str(&result).expect("valid json");
@@ -11832,8 +13084,13 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create dir");
         std::env::set_var("SUDOCODE_AGENT_STORE", &dir);
 
-        let err = await_agent_output("agent-nonexistent", false, 5_000)
-            .expect_err("missing agent should error");
+        let err = await_agent_output(
+            "agent-nonexistent",
+            false,
+            5_000,
+            runtime::host_fs_arc().as_ref(),
+        )
+        .expect_err("missing agent should error");
         assert!(err.contains("agent not found"), "got: {err}");
 
         std::env::remove_var("SUDOCODE_AGENT_STORE");
@@ -11842,7 +13099,8 @@ mod tests {
 
     #[test]
     fn task_output_rejects_blank_agent_id() {
-        let err = await_agent_output("  ", true, 5_000).expect_err("blank agent_id should fail");
+        let err = await_agent_output("  ", true, 5_000, runtime::host_fs_arc().as_ref())
+            .expect_err("blank agent_id should fail");
         assert!(err.contains("agent_id must not be empty"));
     }
 
@@ -11856,11 +13114,13 @@ mod tests {
             AgentInput {
                 description: "Path test".to_string(),
                 prompt: "Test path".to_string(),
+                context: String::new(),
+                constraints: String::new(),
+                acceptance: String::new(),
                 subagent_type: Some("Explore".to_string()),
                 name: None,
                 model: None,
                 run_in_background: None,
-                fresh: None,
                 auth_mode: None,
                 permission_mode: None,
             },
@@ -11893,7 +13153,7 @@ mod tests {
         std::fs::write(&tmp_path, b"partial").expect("write tmp");
         std::fs::write(&json_path, b"{}").expect("write json");
 
-        sweep_orphaned_tmp_files(&dir);
+        sweep_orphaned_tmp_files(&dir, runtime::host_fs());
 
         assert!(!tmp_path.exists(), ".tmp file should be removed");
         assert!(json_path.exists(), ".json file should be kept");
@@ -11914,7 +13174,8 @@ mod tests {
             .expect("bash should succeed");
         let success_output: serde_json::Value = serde_json::from_str(&success).expect("json");
         assert_eq!(success_output["stdout"], "hello");
-        assert_eq!(success_output["interrupted"], false);
+        assert_eq!(success_output["exit_code"], 0);
+        assert!(success_output.get("interrupted").is_none());
 
         let failure = execute_tool("bash", &json!({ "command": "printf 'oops' >&2; exit 7" }))
             .expect("bash failure should still return structured output");
@@ -12809,5 +14070,77 @@ printf 'pwsh:%s' "$1"
         let out = normalize_pid_input(&input);
         assert_eq!(out["task_id"], "existing");
         assert_eq!(out["pid"], "ignored", "pid kept when task_id exists");
+    }
+
+    fn spec_named(name: &str) -> super::ToolSpec {
+        mvp_tool_specs()
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} spec must exist"))
+    }
+
+    fn required_names(spec: &super::ToolSpec) -> Vec<String> {
+        spec.input_schema["required"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn task_template_fields_required_on_write_plan() {
+        // Enforcement + DRY: the three framing fields are properties AND required
+        // on write_plan (always a heavyweight plan), from the one shared fragment.
+        let spec = spec_named("write_plan");
+        let props = spec.input_schema["properties"].as_object().unwrap();
+        let req = required_names(&spec);
+        for field in super::TASK_TEMPLATE_REQUIRED {
+            assert!(
+                props.contains_key(field),
+                "write_plan missing property {field}"
+            );
+            assert!(
+                req.contains(&field.to_string()),
+                "write_plan must require {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_template_fields_optional_on_agent_spawn_and_send() {
+        // agent_spawn and send span lightweight tasks/chat too, so the fields are
+        // available (DRY, same descriptions) but NOT required — the model frames
+        // a substantial task and omits them for a quick spawn or plain message.
+        for name in ["agent_spawn", "send"] {
+            let spec = spec_named(name);
+            let props = spec.input_schema["properties"].as_object().unwrap();
+            let req = required_names(&spec);
+            for field in super::TASK_TEMPLATE_REQUIRED {
+                assert!(props.contains_key(field), "{name} missing property {field}");
+                assert!(
+                    !req.contains(&field.to_string()),
+                    "{name} must NOT require {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compose_task_framing_orders_sections() {
+        let out = super::compose_task_framing("C", "K", "A");
+        assert_eq!(
+            out,
+            "## Context\nC\n\n## Constraints\nK\n\n## Acceptance Criteria\nA\n"
+        );
+    }
+
+    #[test]
+    fn compose_optional_task_framing_none_when_all_empty() {
+        assert!(super::compose_optional_task_framing(None, None, None).is_none());
+        assert!(super::compose_optional_task_framing(Some(""), Some("  "), None).is_none());
+        assert!(super::compose_optional_task_framing(Some("ctx"), None, None).is_some());
     }
 }

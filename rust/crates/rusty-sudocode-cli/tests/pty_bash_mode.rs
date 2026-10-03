@@ -80,7 +80,7 @@ fn bang_runs_shell_command_without_model_turn() {
     }
 
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("REPL should exit cleanly after /exit; got {e:?}\nPTY screen:\n{screen}")
@@ -112,7 +112,7 @@ fn bang_reports_stderr_and_exit_code() {
     sess.expect("❯").expect("prompt should return");
 
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("REPL should exit cleanly after /exit; got {e:?}\nPTY screen:\n{screen}")

@@ -71,7 +71,7 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
         "bash",
         &prompt,
     ]);
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
     // Wide enough that a hook line never wraps: the assertions below match a
     // whole line, and a wrap would split it across two rows that no single
     // pattern spans.
@@ -137,7 +137,7 @@ fn no_hook_configured_prints_no_hook_progress() {
         "bash",
         &prompt,
     ]);
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
 
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

@@ -13,12 +13,66 @@ mode and, on Linux, optionally through a user-namespace sandbox.
 | `allow` | Tool calls execute as approved by the runner — for non-interactive automation. |
 | `danger-full-access` | All tool calls execute. |
 
-Select a mode with `--permission-mode <MODE>` or set `permissionMode` in
-`.scode.json`. The runtime default is `danger-full-access`.
+Select a mode with `--permission-mode <MODE>` or set
+`permissions.defaultMode` in `.scode.json`. The runtime default is
+`danger-full-access`.
 
 ```bash
 scode --permission-mode workspace-write
 ```
+
+## What a session can reach
+
+A session's file tools act on a VFS, with one mount per directory the
+session is given. Files are mounted where they live, not copied, so they
+remain the source of truth: an editor open beside `scode` edits the same
+bytes, and a change made outside the session is visible inside it.
+
+A session is given its workspace. To give it more, list the directories:
+
+```json
+{ "additionalDirectories": ["/home/you/other-checkout"] }
+```
+
+A path under none of those roots belongs to no mount and is refused — which
+is how a second checkout, an ssh key, or a sibling project stays outside a
+session that was not given it. The setting is not one the agent can change
+for itself; a session that could widen its own reach would not be contained
+by it.
+
+This is the same filesystem a co-hosted agent runs on inside
+`nexusd-cluster`, reached through the same tools. The two hosts differ in
+which kernel answers, not in what a tool call means.
+
+## Co-hosted model requests
+
+Co-hosted agents require a Nexus model mount. Build `nexusd-cohost` with
+`--features daemon,driver-ai` and provision an `anthropic` or `openai` mount
+through the daemon's typed `Setattr` RPC (`entry_type: 2`). The mount owns
+`base_url`, `api_key` and `blob_root` in its `backend_params`.
+
+Point the corresponding provider in `sudocode.json` at that VFS path:
+
+```json
+{
+  "auth_modes": {
+    "api-key": {
+      "anthropic": { "baseUrl": "nexus:///model" }
+    }
+  }
+}
+```
+
+Keep the normal model-to-provider mapping. Credentials belong to the mount;
+scode does not load a provider credential for a `nexus://` route. Requests
+and streamed responses use the session's filesystem identity and kernel
+hooks. Subagents inherit the same requirement, including fallback models,
+summaries, compaction and Anthropic token estimates. A missing or refused
+mount returns an error; an HTTP fallback is refused.
+
+The supported formats are Anthropic Messages, OpenAI Chat Completions and
+OpenAI Responses. Gemini and Codex subscription routes are refused in a
+co-host. Standalone CLI sessions retain their configured HTTP connections.
 
 ## Linux sandbox
 

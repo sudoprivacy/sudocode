@@ -9,8 +9,8 @@
 # ## The version comes from the pin, and only the pin
 #
 # `rust/Cargo.lock` already records the exact nexus-vfs rev the client library
-# is built from. The release tag is derived from it by asking the repo which tag
-# points at that commit — no auth, and nothing to keep in step by hand.
+# is built from, including the release tag. Read that tag directly; a legacy
+# rev-only lock falls back to resolving its tag from the remote.
 #
 # That matters more than the convenience. A daemon at `latest` against a client
 # pinned to some older rev tests a pairing nobody ships, and the failures land
@@ -33,16 +33,31 @@ log() { echo "[fetch-daemon] $*" >&2; }
 die() { echo "[fetch-daemon] $*" >&2; exit 1; }
 
 # ── 1. the pinned rev ────────────────────────────────────────────────────
+# Read the COMMIT, not the pin's spelling. Cargo records a git source as
+# `?<how>#<commit>` — `?rev=X#X`, `?tag=v0.7.14#X`, `?branch=b#X` — so the part
+# after `#` is the resolved commit however the manifest asked for it. Matching
+# `?rev=` alone made a manifest that pins by TAG look like a missing dependency.
+#
+# `|| true` so an empty match reaches the check below: a failing `grep` inside
+# `$( )` under `set -e` kills the script where it stands, and the `die` written
+# for exactly this case never printed — 0.7s, exit 1, not one line of output.
 [ -f "$LOCKFILE" ] || die "no lockfile at $LOCKFILE"
-REV="$(grep -oE 'nexus-vfs\?rev=[0-9a-f]{40}' "$LOCKFILE" | head -1 | cut -d= -f2)"
-[ -n "$REV" ] || die "no nexus-vfs rev in $LOCKFILE — has the dependency moved?"
+REV="$(grep -oE 'nexus-vfs\?[^#"]*#[0-9a-f]{40}' "$LOCKFILE" | head -1 | sed 's/.*#//' || true)"
+[ -n "$REV" ] || die "no nexus-vfs commit in $LOCKFILE — has the dependency moved?"
 
 # ── 2. the tag that points at it ─────────────────────────────────────────
 # `^{}` marks the commit an annotated tag dereferences to, which is the one the
 # lockfile records. Matching the tag object itself would miss every annotated
 # release.
-TAG="$(git ls-remote --tags "$NEXUS_REPO" 2>/dev/null \
-        | awk -v rev="$REV" '$1 == rev && $2 ~ /\^\{\}$/ { sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2; exit }')"
+TAG="$(sed -n 's/.*nexus-vfs?tag=\([^#"]*\)#[0-9a-f]*.*/\1/p' "$LOCKFILE" | sort -u)"
+if [ -z "$TAG" ]; then
+    # Consume ls-remote completely before selecting a match. An early awk exit
+    # in the pipeline can SIGPIPE git under pipefail and abort without a log.
+    refs="$(git ls-remote --tags "$NEXUS_REPO")" \
+        || die "could not resolve the release tag for ${REV:0:9}"
+    TAG="$(printf '%s\n' "$refs" | awk -v rev="$REV" \
+        '$1 == rev && $2 ~ /\^\{\}$/ && !found { sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2; found=1 }')"
+fi
 if [ -z "$TAG" ]; then
     die "rev ${REV:0:9} is not at any nexus-vfs tag.
 

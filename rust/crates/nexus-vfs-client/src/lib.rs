@@ -14,8 +14,8 @@ pub mod proto {
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
 use proto::{
-    CallRequest, DeleteRequest, ReadRequest, SetattrRequest, StreamReadAtRequest,
-    StreamWriteRequest, WriteRequest,
+    CallRequest, DeleteRequest, ReadRequest, ReaddirRequest, SetattrRequest, StatRequest,
+    StreamReadAtRequest, StreamWriteRequest, WriteRequest,
 };
 use std::io;
 use std::sync::mpsc;
@@ -24,6 +24,24 @@ use std::time::Duration;
 /// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
 /// `Setattr` when provisioning a mailbox DT_STREAM.
 const DT_STREAM: i32 = 4;
+
+/// DT_DIR entry-type code, for reading `Readdir` results back.
+const DT_DIR: u32 = 1;
+
+/// The same DT_DIR code as `Setattr` takes it. `Readdir` reports entry types as
+/// `u32` and `Setattr` accepts them as `i32`, so the one value needs both spellings;
+/// naming the second rather than casting at the call site keeps the cast off the
+/// path where a wrong entry type is a silent mis-provision (`DT_LINK = 3` and
+/// `DT_PIPE = 3` once cost this project a chat-list index that was a pipe).
+const DT_DIR_SETATTR: i32 = DT_DIR as i32;
+
+/// DT_LINK entry-type code for `Setattr`.
+///
+/// **6, not 3.** 3 is DT_PIPE's discriminant, and the A2A chat-list index was once
+/// written with it: the syscall dispatches on the integer, so there was no compile
+/// error and no runtime error — the index was simply a pipe, while every
+/// path-composition test stayed green.
+const DT_LINK_SETATTR: i32 = 6;
 
 enum VfsOp {
     Read {
@@ -67,14 +85,27 @@ enum VfsOp {
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<(Vec<u8>, u64, bool)>>,
     },
-    /// `sys_setattr(DT_STREAM)` — create (or no-op if present) a DT_STREAM
-    /// container at `path`. Returns whether it was freshly created.
-    EnsureStream {
-        path: String,
-        io_profile: String,
-        capacity: u64,
-        auth_token: String,
+    /// `sys_setattr(<entry_type>)` — create (or no-op if present) a typed entry at
+    /// `path`. Returns whether it was freshly created.
+    ///
+    /// One op for every typed provision rather than one per type: a stream and a
+    /// directory differ only by the `entry_type` the kernel dispatches on, and a
+    /// second arm would be the same request assembled a second way.
+    EnsureEntry {
+        request: SetattrRequest,
         resp: mpsc::SyncSender<io::Result<bool>>,
+    },
+    /// `Stat` — the TYPED RPC, not the generic Call surface.
+    Stat {
+        path: String,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<VfsStat>>,
+    },
+    /// `Readdir` — the TYPED RPC, not the generic Call surface.
+    Readdir {
+        path: String,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<Vec<VfsDirEntry>>>,
     },
 }
 
@@ -365,21 +396,58 @@ impl NexusVfsClient {
                                         }
                                     }));
                                 }
-                                VfsOp::EnsureStream {
+                                VfsOp::EnsureEntry { request, resp } => {
+                                    let r = client.setattr(deadlined(request, OP_DEADLINE)).await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(r.created)
+                                        }
+                                    }));
+                                }
+                                VfsOp::Stat {
                                     path,
-                                    io_profile,
-                                    capacity,
                                     auth_token,
                                     resp,
                                 } => {
                                     let r = client
-                                        .setattr(deadlined(
-                                            SetattrRequest {
+                                        .stat(deadlined(
+                                            StatRequest {
                                                 path,
                                                 auth_token,
-                                                entry_type: DT_STREAM,
-                                                io_profile,
-                                                capacity,
+                                                ..Default::default()
+                                            },
+                                            OP_DEADLINE,
+                                        ))
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.found {
+                                            Ok(VfsStat {
+                                                size: u64::try_from(r.size).unwrap_or(0),
+                                                is_directory: r.is_directory,
+                                                modified_at_ms: None,
+                                                link_target: Some(r.link_target)
+                                                    .filter(|t| !t.is_empty()),
+                                            })
+                                        } else {
+                                            Err(io::Error::new(
+                                                io::ErrorKind::NotFound,
+                                                format!("{}: not found", r.path),
+                                            ))
+                                        }
+                                    }));
+                                }
+                                VfsOp::Readdir {
+                                    path,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let r = client
+                                        .readdir(deadlined(
+                                            ReaddirRequest {
+                                                path,
+                                                auth_token,
                                                 ..Default::default()
                                             },
                                             OP_DEADLINE,
@@ -389,7 +457,13 @@ impl NexusVfsClient {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
                                         } else {
-                                            Ok(r.created)
+                                            Ok(r.entries
+                                                .into_iter()
+                                                .map(|e| VfsDirEntry {
+                                                    name: e.name,
+                                                    is_directory: e.entry_type == DT_DIR,
+                                                })
+                                                .collect())
                                         }
                                     }));
                                 }
@@ -509,17 +583,66 @@ impl NexusVfsClient {
         capacity: u64,
         auth_token: &str,
     ) -> io::Result<bool> {
-        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.setattr(SetattrRequest {
+            path: path.to_owned(),
+            auth_token: auth_token.to_owned(),
+            entry_type: DT_STREAM,
+            io_profile: io_profile.to_owned(),
+            capacity,
+            ..Default::default()
+        })
+    }
+
+    /// `sys_setattr(DT_LINK)` on `path` — a pointer to `target`, idempotently.
+    /// Returns whether it was freshly created.
+    ///
+    /// The destination lives in the entry's METADATA, which is the point: a mount with
+    /// no content store keeps metadata and drops bytes, so a pointer written as content
+    /// is unreadable exactly where the pointer itself is readable. That is why the A2A
+    /// chat-list index is specified as a DT_LINK and not a file holding a path.
+    ///
+    /// This could not exist until `SetattrRequest` carried a link target. Without it
+    /// the backend's `link()` fell through to the trait's no-op, so a standalone agent
+    /// over this transport planted no index at all and its peer never learned the
+    /// conversation existed — which is why the index was a plain file for as long as it
+    /// was.
+    pub fn ensure_link(&self, path: &str, target: &str, auth_token: &str) -> io::Result<bool> {
+        self.setattr(SetattrRequest {
+            path: path.to_owned(),
+            auth_token: auth_token.to_owned(),
+            entry_type: DT_LINK_SETATTR,
+            link_target: Some(target.to_owned()),
+            ..Default::default()
+        })
+    }
+
+    /// `sys_setattr(DT_DIR)` on `path` — create the directory entry, idempotently.
+    /// Returns whether it was freshly created.
+    ///
+    /// A directory here is a metastore row, not a side effect of writing into it.
+    /// The backend's `create_dir_all` used to be a no-op on the reasoning that "VFS
+    /// servers typically auto-create intermediate paths on write" — which leaves
+    /// nothing at all behind when there is no write, and announcing an agent is
+    /// exactly that case: presence IS the directory. So `ensure_presence` reported
+    /// success and created nothing, and an agent that had announced itself but not
+    /// yet conversed was invisible to every `agent_list` in the cluster.
+    pub fn ensure_dir(&self, path: &str, auth_token: &str) -> io::Result<bool> {
+        self.setattr(SetattrRequest {
+            path: path.to_owned(),
+            auth_token: auth_token.to_owned(),
+            entry_type: DT_DIR_SETATTR,
+            ..Default::default()
+        })
+    }
+
+    /// Apply a typed Setattr request, including operator-provisioned mounts.
+    /// Authorization and backend construction are enforced by the daemon.
+    pub fn setattr(&self, request: SetattrRequest) -> io::Result<bool> {
+        let (resp, rx) = mpsc::sync_channel(1);
         self.tx
-            .send(VfsOp::EnsureStream {
-                path: path.to_owned(),
-                io_profile: io_profile.to_owned(),
-                capacity,
-                auth_token: auth_token.to_owned(),
-                resp: resp_tx,
-            })
+            .send(VfsOp::EnsureEntry { request, resp })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+        await_reply(&rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
     /// Generic Call RPC — sends `method` + JSON `payload` through the
@@ -541,35 +664,36 @@ impl NexusVfsClient {
     ///
     /// Returns `(size, is_directory)` on success.
     pub fn stat(&self, path: &str, auth_token: &str) -> io::Result<VfsStat> {
-        let payload = serde_json::json!({ "path": path });
-        let resp = self.call("stat", payload.to_string().as_bytes(), auth_token)?;
-        let value: serde_json::Value = serde_json::from_slice(&resp)
-            .map_err(|e| io::Error::other(format!("stat response parse: {e}")))?;
-        Ok(VfsStat {
-            size: value["size"].as_u64().unwrap_or(0),
-            is_directory: value["is_directory"].as_bool().unwrap_or(false),
-            modified_at_ms: value["modified_at_ms"].as_i64(),
-        })
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::Stat {
+                path: path.to_owned(),
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
-    /// List directory entries via the generic Call RPC.
+    /// List directory entries.
+    ///
+    /// Over the TYPED `Readdir` RPC, like every other file operation here.
+    /// This and `stat` went through the generic `Call` surface, which the node
+    /// answers with `unknown Call method: readdir — … call those instead`:
+    /// Call carries registry and plugin dispatch, not file ops. Nothing noticed
+    /// while no caller listed a directory; a receiver that finds its
+    /// conversations by listing its chat list notices immediately, and what it
+    /// reports is "no conversations" rather than "this call is not supported".
     pub fn readdir(&self, path: &str, auth_token: &str) -> io::Result<Vec<VfsDirEntry>> {
-        let payload = serde_json::json!({ "path": path });
-        let resp = self.call("readdir", payload.to_string().as_bytes(), auth_token)?;
-        let value: serde_json::Value = serde_json::from_slice(&resp)
-            .map_err(|e| io::Error::other(format!("readdir response parse: {e}")))?;
-        let entries = value
-            .as_array()
-            .ok_or_else(|| io::Error::other("readdir: expected array"))?;
-        Ok(entries
-            .iter()
-            .filter_map(|entry| {
-                Some(VfsDirEntry {
-                    name: entry["name"].as_str()?.to_string(),
-                    is_directory: entry["is_directory"].as_bool().unwrap_or(false),
-                })
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::Readdir {
+                path: path.to_owned(),
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
             })
-            .collect())
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 }
 
@@ -579,6 +703,12 @@ pub struct VfsStat {
     pub size: u64,
     pub is_directory: bool,
     pub modified_at_ms: Option<i64>,
+    /// Where a DT_LINK points; `None` for every other entry type.
+    ///
+    /// Carried because following a link is half of having one: a backend that plants
+    /// links and cannot read them back leaves the caller to guess. The wire has always
+    /// returned this field — only this struct dropped it.
+    pub link_target: Option<String>,
 }
 
 /// Directory entry returned by [`NexusVfsClient::readdir`].
@@ -598,8 +728,27 @@ where
     }
 }
 
+/// Map a node error payload to an `io::Error`, preserving "not found".
+///
+/// Callers BRANCH on that one: a receiver listing a chat list that does not
+/// exist yet has no conversations, which is not the same as a call that
+/// failed. Flattened to `Other`, the two are indistinguishable and the
+/// receiver reports an error where the honest answer is "none yet".
+///
+/// Every other code keeps its message and lands as `Other`, since nothing
+/// downstream tells them apart today.
 fn vfs_err(payload: &[u8]) -> io::Error {
-    io::Error::other(String::from_utf8_lossy(payload).into_owned())
+    /// `FileNotFound` on the node's error enum (`transport/src/grpc.rs`).
+    const FILE_NOT_FOUND: i64 = -32007;
+
+    let text = String::from_utf8_lossy(payload).into_owned();
+    let code = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("code").and_then(serde_json::Value::as_i64));
+    if code == Some(FILE_NOT_FOUND) {
+        return io::Error::new(io::ErrorKind::NotFound, text);
+    }
+    io::Error::other(text)
 }
 
 fn broken_pipe() -> io::Error {

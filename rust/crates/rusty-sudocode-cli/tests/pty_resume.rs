@@ -20,14 +20,14 @@ fn resume_list_shows_sessions_and_exits() {
 
     // Create a session by entering then exiting the REPL.
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
     sess.expect("❯").expect("REPL prompt");
     sess.send("/exit\r").expect("send exit");
     sess.expect_eof().expect("clean exit");
 
     // `--resume list` opens the session browser and exits.
     let mut sess2 = env.spawn(&["--resume", "list"]);
-    sess2.set_default_timeout(Duration::from_secs(5));
+    sess2.set_default_timeout(common::at_least(Duration::from_secs(5)));
 
     sess2.expect("Available sessions").unwrap_or_else(|e| {
         let screen = sess2.render(|s| s.contents());
@@ -56,7 +56,7 @@ fn resume_no_args_resumes_latest() {
 
     // Create a session so there is a latest to resume.
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
-    sess.set_default_timeout(Duration::from_secs(10));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(10)));
     sess.expect("❯").expect("REPL prompt");
     sess.send("/exit\r").expect("send exit");
     sess.expect_eof().expect("clean exit");
@@ -66,7 +66,7 @@ fn resume_no_args_resumes_latest() {
         &["--resume", "--permission-mode", "read-only"],
         &[("EDITOR", "true")],
     );
-    sess2.set_default_timeout(Duration::from_secs(10));
+    sess2.set_default_timeout(common::at_least(Duration::from_secs(10)));
     sess2.expect("❯").unwrap_or_else(|e| {
         let screen = sess2.render(|s| s.contents());
         panic!(
@@ -89,7 +89,7 @@ fn resume_latest_renders_messages_after_banner() {
     // First: run a session with a turn so it has messages.
     let prompt = env.prompt("say hello world", "single_turn_text");
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     sess.expect("❯").expect("REPL prompt");
     let marker = common::turn_status_marker(&sess);
     sess.send(&format!("{prompt}\r")).expect("send prompt");
@@ -102,7 +102,7 @@ fn resume_latest_renders_messages_after_banner() {
         &["--resume", "latest", "--permission-mode", "read-only"],
         &[("EDITOR", "true")],
     );
-    sess2.set_default_timeout(Duration::from_secs(15));
+    sess2.set_default_timeout(common::at_least(Duration::from_secs(15)));
 
     // Should see the banner.
     sess2.expect("Code").unwrap_or_else(|e| {
@@ -161,7 +161,7 @@ fn resume_renders_history_in_iocraft_queue_mode() {
         &["--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     sess.expect("❯").expect("REPL prompt");
     sess.send(&format!("{prompt}\r")).expect("send prompt");
     sess.expect(expected_reply).expect("assistant reply");
@@ -175,7 +175,7 @@ fn resume_renders_history_in_iocraft_queue_mode() {
         &["--resume", "latest", "--permission-mode", "read-only"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess2.set_default_timeout(Duration::from_secs(15));
+    sess2.set_default_timeout(common::at_least(Duration::from_secs(15)));
     sess2.expect(expected_reply).unwrap_or_else(|e| {
         let screen = sess2.render(|s| s.contents());
         panic!(

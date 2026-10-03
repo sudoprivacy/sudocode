@@ -9,7 +9,7 @@
 //! arrives) — unlike `tools::stream_with_provider`, which collects the whole
 //! response before returning and drops thinking deltas (fine for subagents, but
 //! it would lose live token streaming and the "Reasoning…" cue for a human
-//! renderer). It keeps the post-tool stall timeout + non-streaming fallback +
+//! renderer). It keeps the post-tool stall timeout + empty-response retry +
 //! prompt-cache extraction, since those change *which events* are produced (core
 //! behavior), not how they look.
 
@@ -40,6 +40,7 @@ const POST_TOOL_FINAL_SYNTHESIS_PROMPT: &str = "The previous tool execution is c
 /// The engine's provider client. Produces an incremental
 /// [`AssistantEventStream`]; renders nothing.
 pub struct EngineApiClient {
+    require_model_mount: bool,
     client: ProviderClient,
     session_id: String,
     model: String,
@@ -52,6 +53,7 @@ pub struct EngineApiClient {
     /// an unroutable model in terms of its own routing groups, which the user
     /// never configured; naming the account turns that into an actionable edit.
     account: Option<String>,
+    catalog: Option<runtime::model_discovery::ModelCatalog>,
 }
 
 impl EngineApiClient {
@@ -67,6 +69,7 @@ impl EngineApiClient {
     /// Build a client for `model`, resolving the provider from config + auth
     /// mode (identical resolution to the old CLI client, minus the render
     /// plumbing).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         session_id: &str,
         sudocode_config: &SudoCodeConfig,
@@ -75,11 +78,21 @@ impl EngineApiClient {
         tool_registry: GlobalToolRegistry,
         enable_tools: bool,
         allowed_tools: Option<BTreeSet<String>>,
+        access: &api::ModelAccess,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let resolved: ResolvedProvider =
             api::resolve_provider_from_config(model, Some(auth_mode), sudocode_config)?;
-        let mut client = ProviderClient::from_resolved(&resolved, Some(auth_mode))?
-            .with_prompt_cache(PromptCache::new(session_id));
+        let catalog = if resolved.base_url.starts_with("nexus://") || access.require_mount {
+            None
+        } else {
+            api::model_discovery::model_catalog_for_resolved(&resolved)
+        };
+        if let Some(catalog) = &catalog {
+            catalog.refresh_in_background();
+        }
+        let mut client =
+            ProviderClient::from_resolved_with_access(&resolved, Some(auth_mode), access)?
+                .with_prompt_cache(PromptCache::new(session_id));
         let sink = Arc::new(SudoclawLogSink::new()?);
         client = client.with_session_tracer(SessionTracer::new(session_id, sink));
 
@@ -90,7 +103,19 @@ impl EngineApiClient {
             .ok()
             .map(|selected| selected.name.to_string());
 
+        // Publish the mode for subagents, here in the one place every session
+        // (REPL, ACP, co-host) and every `/auth` / `/model` rebuild passes
+        // through holding a concrete `AuthMode` — and only on the success path,
+        // so "published" means a session is actually running on it. A subagent
+        // resolves its provider on its own thread and cannot see this session's
+        // `--auth`; left to auto-detect it picks `subscription` and dies on "no
+        // token available for subscription provider". The note on
+        // `request_metadata` above says why the two must agree: two credential
+        // paths are two upstream accounts, and the prompt cache is per-account.
+        tools::set_global_auth_mode(auth_mode);
+
         Ok(Self {
+            require_model_mount: access.require_mount,
             client,
             session_id: session_id.to_string(),
             model: resolved.model_id.clone(),
@@ -100,6 +125,7 @@ impl EngineApiClient {
             reasoning_effort: None,
             thinking_enabled: true,
             account,
+            catalog,
         })
     }
 
@@ -200,7 +226,7 @@ impl EngineApiClient {
             session_id: self.session_id.clone(),
             account: self.account.clone(),
             model: self.model.clone(),
-            fallback_request: Some(build_non_streaming_fallback_request(
+            retry_request: Some(build_empty_response_retry_request(
                 message_request,
                 is_post_tool,
             )),
@@ -232,8 +258,8 @@ impl EngineApiClient {
 
                     let Some(event) = next else {
                         // Provider stream ended — emit prompt cache + a synthetic
-                        // stop if needed, then fall back to a non-streaming
-                        // request if the stream produced nothing usable.
+                        // stop if needed, then retry once if the stream produced
+                        // nothing usable.
                         if let Some(record) = state.client.take_last_prompt_cache_record() {
                             if let Some(evt) = prompt_cache_record_to_event(record) {
                                 state.buffer.push_back(AssistantEvent::PromptCache(evt));
@@ -242,11 +268,14 @@ impl EngineApiClient {
                         if !state.saw_stop && state.has_content {
                             state.buffer.push_back(AssistantEvent::MessageStop);
                         }
-                        if state.buffer.is_empty() && !state.saw_stop {
-                            if let Some(fallback_request) = state.fallback_request.take() {
+                        // A terminal frame and cache/usage metadata do not make
+                        // an empty response useful. Retry it once regardless of
+                        // how the gateway framed the end of the stream.
+                        if !state.has_content {
+                            if let Some(retry_request) = state.retry_request.take() {
                                 let response = state
                                     .client
-                                    .send_message(&fallback_request, None)
+                                    .send_message_streamed(&retry_request, None)
                                     .await
                                     .map_err(|error| {
                                         runtime_error_from_api(
@@ -309,6 +338,13 @@ impl api::RetryNotifier for RetrySinkNotifier {
 
 #[async_trait]
 impl ApiClient for EngineApiClient {
+    fn requires_model_mount(&self) -> bool {
+        self.require_model_mount
+    }
+
+    fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
+        self.catalog.clone()
+    }
     fn wire_model_id(&self) -> Option<&str> {
         Some(&self.model)
     }
@@ -329,6 +365,10 @@ impl ApiClient for EngineApiClient {
         _model: &str,
         system_prompt: &runtime::SystemPrompt,
     ) -> runtime::ContextBudget {
+        let _catalog_scope = self
+            .catalog
+            .as_ref()
+            .map(runtime::model_discovery::ModelCatalog::enter);
         // Keyed on `self.model`, not the caller's model name, because that is
         // provably what the request will carry (`stream` below builds its
         // `MessageRequest` with `self.model` and
@@ -349,21 +389,35 @@ impl ApiClient for EngineApiClient {
         request: ApiRequest,
         options: runtime::TextCompletionOptions,
     ) -> Result<runtime::TextCompletion, RuntimeError> {
-        let tools = (options.include_tools && self.enable_tools).then(|| {
-            let mut discovered = tools::extract_discovered_tool_names(&request.messages);
-            discovered.extend(request.pre_compact_discovered_tools.iter().cloned());
-            self.tool_registry
-                .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
-        });
-        self.client
-            .complete_text(
-                &self.model,
-                request,
-                options,
-                tools,
-                Some(self.request_metadata()),
-            )
-            .await
+        let catalog = self.catalog.clone();
+        let request = async {
+            let tools = (options.include_tools && self.enable_tools).then(|| {
+                let mut discovered = tools::extract_discovered_tool_names(&request.messages);
+                discovered.extend(request.pre_compact_discovered_tools.iter().cloned());
+                self.tool_registry
+                    .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
+            });
+            self.client
+                .complete_text(
+                    &self.model,
+                    request,
+                    options,
+                    tools,
+                    api::SessionRequestFields {
+                        metadata: Some(self.request_metadata()),
+                        // Mirrors the turn stream below. A completion that
+                        // exists to reuse a turn's prefix has to declare the
+                        // same session-level parameters the turn declared.
+                        reasoning_effort: self.reasoning_effort.clone(),
+                    },
+                )
+                .await
+        };
+        if let Some(catalog) = catalog {
+            catalog.scope(request).await
+        } else {
+            request.await
+        }
     }
 
     fn reasoning_effort(&self) -> Option<&str> {
@@ -379,50 +433,59 @@ impl ApiClient for EngineApiClient {
     }
 
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
-        let is_post_tool = request_ends_with_tool_result(&request);
-        let discovered = self.enable_tools.then(|| {
-            let mut d = tools::extract_discovered_tool_names(&request.messages);
-            d.extend(request.pre_compact_discovered_tools.iter().cloned());
-            d
-        });
-        let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
-            system_static: Some(request.system_prompt.static_text()),
-            system_dynamic: Some(request.system_prompt.dynamic_text()),
-            breakpoint_last_message: true,
-        });
-        let message_request = MessageRequest {
-            model: self.model.clone(),
-            max_tokens: api::max_tokens_for_model(&self.model),
-            messages: tools::convert_messages(&request.messages),
-            system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
-            tools: self.enable_tools.then(|| {
-                self.tool_registry
-                    .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
-            }),
-            tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
-            stream: true,
-            reasoning_effort: self.reasoning_effort.clone(),
-            cache_hints,
-            thinking_enabled: self.thinking_enabled,
-            metadata: Some(self.request_metadata()),
-            ..Default::default()
-        };
+        let catalog = self.catalog.clone();
+        let request = async {
+            let is_post_tool = request_ends_with_tool_result(&request);
+            let discovered = self.enable_tools.then(|| {
+                let mut d = tools::extract_discovered_tool_names(&request.messages);
+                d.extend(request.pre_compact_discovered_tools.iter().cloned());
+                d
+            });
+            let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
+                system_static: Some(request.system_prompt.static_text()),
+                system_dynamic: Some(request.system_prompt.dynamic_text()),
+                breakpoint_last_message: true,
+            });
+            let message_request = MessageRequest {
+                model: self.model.clone(),
+                max_tokens: api::max_tokens_for_model(&self.model),
+                messages: tools::convert_messages(&request.messages),
+                system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
+                tools: self.enable_tools.then(|| {
+                    self.tool_registry
+                        .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
+                }),
+                tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
+                stream: true,
+                reasoning_effort: self.reasoning_effort.clone(),
+                cache_hints,
+                thinking_enabled: self.thinking_enabled,
+                metadata: Some(self.request_metadata()),
+                ..Default::default()
+            };
 
-        // Post-tool continuations get one stall-timeout retry (a nudge); other
-        // turns run a single attempt.
-        let max_attempts = if is_post_tool { 2 } else { 1 };
-        for attempt in 1..=max_attempts {
-            match self
-                .try_start_stream(&message_request, is_post_tool && attempt == 1, is_post_tool)
-                .await
-            {
-                Ok(stream) => return Ok(stream),
-                Err(error)
-                    if error.to_string().contains("post-tool stall") && attempt < max_attempts => {}
-                Err(error) => return Err(error),
+            // Post-tool continuations get one stall-timeout retry (a nudge); other
+            // turns run a single attempt.
+            let max_attempts = if is_post_tool { 2 } else { 1 };
+            for attempt in 1..=max_attempts {
+                match self
+                    .try_start_stream(&message_request, is_post_tool && attempt == 1, is_post_tool)
+                    .await
+                {
+                    Ok(stream) => return Ok(stream),
+                    Err(error)
+                        if error.to_string().contains("post-tool stall")
+                            && attempt < max_attempts => {}
+                    Err(error) => return Err(error),
+                }
             }
+            Err(RuntimeError::new("post-tool continuation nudge exhausted"))
+        };
+        if let Some(catalog) = catalog {
+            catalog.scope(request).await
+        } else {
+            request.await
         }
-        Err(RuntimeError::new("post-tool continuation nudge exhausted"))
     }
 }
 
@@ -464,7 +527,7 @@ fn runtime_error_from_api(
     if error.is_context_window_failure() {
         RuntimeError::context_window_blocked(message)
     } else {
-        RuntimeError::new(message)
+        RuntimeError::new(message).retryable(error.is_retryable())
     }
 }
 
@@ -486,7 +549,9 @@ struct StreamState {
     /// way as failures raised before it — one wording, not two.
     account: Option<String>,
     model: String,
-    fallback_request: Option<MessageRequest>,
+    /// Sent once if the stream ends having produced nothing usable. `None` once
+    /// spent, so an empty answer costs at most one extra turn.
+    retry_request: Option<MessageRequest>,
 }
 
 /// Translate one provider event into zero or more [`AssistantEvent`]s. Pure — no
@@ -528,7 +593,20 @@ fn process_provider_event(
                     signature: None,
                 });
             }
-            ContentBlockDelta::SignatureDelta { .. } => {}
+            // The signature arrives in its own delta, after the thinking text.
+            // Dropping it used to be free-looking — nothing renders it — but it
+            // is what makes the thinking block replayable: `convert_messages`
+            // only sends a thinking block back when it is signed, and a turn
+            // replayed without its thinking block invalidates the whole cached
+            // prefix on every tool round-trip. Carried as a Thinking event with
+            // no text so the block it belongs to picks it up in order; the
+            // observer skips empty deltas so nothing renders.
+            ContentBlockDelta::SignatureDelta { signature } => {
+                buffer.push_back(AssistantEvent::Thinking {
+                    thinking: String::new(),
+                    signature: Some(signature),
+                });
+            }
         },
         StreamEvent::ContentBlockStop(_) => {
             if let Some((id, name, input, thought_signature)) = pending_tool.take() {
@@ -596,7 +674,11 @@ fn push_output_block(
                 signature,
             });
         }
-        OutputContentBlock::RedactedThinking { .. } => {}
+        OutputContentBlock::RedactedThinking { data } => {
+            buffer.push_back(AssistantEvent::RedactedThinking {
+                data: data.to_string(),
+            });
+        }
     }
 }
 
@@ -648,20 +730,35 @@ fn request_ends_with_tool_result(request: &ApiRequest) -> bool {
         .is_some_and(|message| message.role == MessageRole::Tool)
 }
 
-fn build_non_streaming_fallback_request(
+/// The one retry for a stream that ended having produced nothing usable.
+///
+/// This used to re-send the request non-streaming, on the theory that the
+/// streaming transport was what had failed. It is the wrong remedy twice over.
+/// A non-streaming request writes nothing to the socket until generation has
+/// finished, and on this path a connection that stays byte-quiet for ~50s is
+/// closed with no HTTP response at all (measured: `stream: false` died at 50.3s
+/// where `stream: true` had its first byte at 1.7s and ran 201.8s to
+/// completion) — so the retry was in the one shape least likely to survive, and
+/// most likely to be slow, since it carries the whole conversation. And the
+/// transport was rarely the problem in the first place: an upstream that
+/// answers `stream: true` with a whole JSON body is now read directly
+/// (`api::sse`), leaving this retry for the case it actually addresses — the
+/// model returned no usable content.
+///
+/// So the shape is unchanged and the remedy is about content: after a tool
+/// result, drop the tools and ask for a plain final message, which is what
+/// turns a stalled tool loop into an answer.
+fn build_empty_response_retry_request(
     request: &MessageRequest,
     is_post_tool: bool,
 ) -> MessageRequest {
-    let mut fallback = MessageRequest {
-        stream: false,
-        ..request.clone()
-    };
+    let mut retry = request.clone();
     if is_post_tool {
-        fallback.tools = None;
-        fallback.tool_choice = None;
-        fallback
+        retry.tools = None;
+        retry.tool_choice = None;
+        retry
             .messages
             .push(InputMessage::user_text(POST_TOOL_FINAL_SYNTHESIS_PROMPT));
     }
-    fallback
+    retry
 }

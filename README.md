@@ -1,7 +1,6 @@
 <!--
-  Rust-native CLI coding agent for hackers — terminal-native,
-  pipe-composable, scrollback-safe. Built because Claude Code chose
-  non-coders. This README is the canonical voice; sudo-code-roadmap.html holds
+  Rust-native CLI coding agent for hackers — simple, inspectable,
+  composable. This README is the canonical voice; sudo-code-roadmap.html holds
   the engineering plan; docs/ holds mechanism-level reference.
 -->
 
@@ -14,7 +13,7 @@
 <p align="center">
   <a href="#license"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
   <img alt="Rust 2021" src="https://img.shields.io/badge/rust-2021-orange?logo=rust">
-  <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey">
+  <img alt="Platform: macOS, Linux, Windows" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
   <img alt="Protocol" src="https://img.shields.io/badge/protocol-ACP-purple">
   <img alt="Model-agnostic" src="https://img.shields.io/badge/models-Anthropic%20%C2%B7%20OpenAI%20%C2%B7%20xAI%20%C2%B7%20Gemini-blueviolet">
   <a href="./CONTRIBUTING.md"><img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-welcome-success.svg"></a>
@@ -22,21 +21,17 @@
 
 ## FOR HACKERS.
 
-**Built because Claude Code chose non-coders.**
+**Less ceremony. More control.**
 
-There was a time when Claude Code was a real coding agent —
-opinionated, fast, debuggable. The pivot toward onboarding the 99%
-changed that: hidden options because "users might misclick", forced
-auto-updates overriding pinned versions, new surface shipping while
-core surface stayed broken, heavy-user issues going unanswered.
+Sudo Code (`scode`) is a Rust-native CLI coding agent for people who
+live in the terminal and want to understand, compose, and change the
+tools they run. Inline interaction, shell pipes, headless ACP,
+readable sessions, and a choice of model providers. MIT licensed.
 
-Sudo Code is what happens when a heavy user gives up asking and
-starts building.
-
-Rust-native CLI. Inline only — never hijacks your terminal.
-Pipe-composable — works with your shell, doesn't replace it.
-Model-agnostic — your subscription, your choice. Open source — your
-fork, your call.
+The goal is simple: shorten the path from intent to verified work.
+Keep the interface quiet, the important state visible, and the user
+in control. A hacker tool should earn its place in your workflow,
+not become the workflow.
 
 <p align="center">
   <img src="assets/scode-demo.gif" alt="Sudo Code terminal demo" width="900" />
@@ -46,75 +41,57 @@ fork, your call.
 
 ## Who this is for
 
-| FOR | NOT FOR |
-|---|---|
-| The 1% by daily agent token-burn | First-time coders looking for tutorials |
-| Engineers who live in `tmux`, `ssh`, `vscode terminal` | Anyone who wants a GUI |
-| Engineers the system, not the steps — roles, DoD, reviewers; scales 1 → 10 → 100 agents | Drives one agent at a time, prompt by prompt |
-| Wants the process fully exposed — "reading `src/auth.rs:42-89`" not "reading file" — to scan-and-catch | Wants the agent to handle details and surface only the result |
-| Owns the stack they run — pinned versions, readable sessions, forks when needed | Runs whatever the vendor pushes next |
+For engineers who work in `tmux`, SSH, or an IDE terminal; automate
+repeated work; inspect what an agent is doing; and expect to choose
+their models, versions, and tools.
 
-Every row is a productivity differentiator, not a status one. The
-left column pushes productivity further by **engineering the
-interaction**; the right column saves cognitive load by **trusting
-the tool**. Sudo Code optimizes the first axis — which is why we
-expose full process by default. Not for staring. For scan-and-catch
-when something is off, and zero ceremony when it's not.
-
-The end-state of this workflow is one heavy user shipping at the
-productivity of a small team. The arc looks like **1 session →
-7-10 parallel sessions → copilot-worker fleets of 100+ agents**.
-At stage 1 you drive one agent. At stage 2 you parallelise long
-unattended tasks — until mental bandwidth caps around ten. At
-stage 3 a copilot agent reviews worker agents; you supervise the
-copilot, the copilot does the per-agent direction, and the fleet
-scales past anything one person could track. Sudo Code is the
-agent unit at every stage. The collaboration plane that makes
-stage 3 real is described in
-[Position in the larger picture](#position-in-the-larger-picture)
-below.
-
-If the right column is you, this isn't your tool — and that's not a
-problem to solve. **Claude Code, Cursor, GitHub Copilot are excellent
-for the 99%; use those.** Sudo Code is opinionated against the right
-column on purpose. We don't ship modes that bridge the gap, and we
-don't apologize for that.
+"Hacker" describes that relationship with a tool, not a token budget
+or a minimum number of agents. One focused session is a complete
+workflow. When work grows, compose sessions with worktrees, scripts,
+reviewers, and external orchestrators — don't turn the CLI into a
+dashboard. Sudo Code stays the
+[agent unit](#position-in-the-larger-picture).
 
 ---
 
 ## Design principles
 
-Two columns: what we'll always do, what we'll never do. These aren't
-aspirations — they're constraints that shape every PR.
+These are design constraints, not a claim that every implementation
+already meets them. Bugs are gaps to close, not reasons to weaken
+the principles.
 
 ### Always
 
-| | |
+| Principle | What it means in practice |
 |---|---|
-| **Open source. MIT. Forever.** | No secret-sauce room, no "real enterprise tier behind a wall". |
-| **Model-agnostic.** | Your subscription, your key, your proxy. We bind to no vendor. |
-| **Headless first-class.** | What you see in REPL is what runs as a service — same binary, same surface. |
-| **Local-first.** | Zero telemetry by default. Your prompts don't leave your machine unless you tell them to. |
-| **Inline only.** | Your terminal stays yours. Scrollback, tmux, ssh, vscode terminal — all preserved. |
-| **Sole goal: heavy-user productivity.** | Every design decision filters through "does this compress wall-clock between a heavy user's thought and outcome?" If not, it doesn't ship. Comfort, onboarding, compatibility for the 99% — explicitly not our problem. |
-| **Everything is file.** | Config in `.scode.json`. Sessions in jsonl. Plugins on the filesystem. Future state on the [nexus VFS](https://github.com/nexi-lab/nexus) — every secret, stream, agent, audit trace addressable through `sys_read` / `sys_write`. No opaque DBs. No sibling APIs hiding state. |
-| **Session is yours.** | jsonl you can read, fork, replay, `awk` through. Zero lock-in. |
-| **Dogfood non-negotiable.** | The team burns this binary daily. No-dogfood, no release. |
-| **Polish before scope.** | New surface doesn't ship while existing surface is broken. Scope expansion is an admission of failure on the core, not an upgrade. |
+| **Simple, not stripped down.** | Fewer steps, fewer concepts, less visual noise. Keep useful controls accessible; simplicity must not mean hiding capability. |
+| **Control and predictability.** | The user chooses providers, credentials, versions, and permissions. Make defaults understandable, actions interruptible, and consequential changes explicit. |
+| **Evidence over reassurance.** | Show commands, paths, diffs, failures, and costs. Make important activity easy to scan and details available to inspect. "Reading `src/auth.rs:42–89`" beats "working on it". |
+| **Protect work before appearance.** | Preserve input and terminal history during ordinary interaction and resize. A cleaner screen is never a reason to silently discard the user's record. |
+| **Responsive under load.** | Typing, cancellation, and resize matter as much as first-token latency. Measure the real workflow, including memory across long sessions and parallel processes; Rust alone is not evidence of speed. |
+| **Meaningful visual design.** | Amber is the primary accent. Use color, contrast, and spacing to distinguish state, not decorate it. Keep text readable and state understandable without color; no spectacle at the expense of clarity. |
+| **Composable, headless first-class.** | Work with the shell, pipes, scripts, and editors. REPL and ACP share the engine; the CLI is an agent unit, not an orchestration hub. |
+| **Local-first, inspectable state.** | File-based config, JSONL sessions, filesystem plugins. Keep state readable and portable. Model and tool traffic goes to the services the user configures; local-first does not mean offline. |
+| **Polish before scope.** | Dogfood daily. Fix broken core interactions before adding surface area. Address causes at their owning layer, with one source of truth, rather than accumulating local workarounds. |
+
+Your terminal history includes shell commands, build logs, and debug
+output from before `scode` started. A saved agent session is not a
+backup of all of that. If terminal limitations prevent a clean
+redraw, report the limitation and preserve the record. Recovery that
+discards history must be an explicit user choice, with the loss
+explained beforehand — never an automatic resize fix.
 
 ### Never
 
-| | |
+| Boundary | Commitment |
 |---|---|
-| **Closed source.** | No proprietary fork. The repo you see is everything. |
-| **Premium features behind a paywall.** | One binary. No free/pro split. |
-| **Alternate-screen TUI.** | Never hijack your screen. Inline ANSI only. No `ratatui`, no split-pane, no `--tui` flag. |
-| **In-CLI multi-agent dashboard.** | We're a unit. Dashboards belong in sudowork / your tmux / your IDE. |
-| **Vendor lock.** | No proprietary model API. No proprietary protocol — ACP is open. |
-| **Telemetry by default.** | Opt-in is explicit. Not buried in EULA clause 47. |
-| **CLA / copyright assignment.** | Contributors keep their copyright. Commit directly. |
-| **Pivot away from hackers.** | If we ever do, **we fork ourselves**. |
-| **"Some users might misclick" as a reason.** | Hidden options behind config because the 99% might fumble = treating us like the 99%. We're not. Either ship a feature, or don't. |
+| **Closed or paywalled core.** | Open source. MIT. Forever. No free/pro feature split in Sudo Code. |
+| **Vendor lock-in.** | Your supported provider, subscription, key, or proxy. Open ACP integration; no mandatory model vendor. |
+| **Alternate-screen TUI.** | Inline ANSI only. No `ratatui`, split-pane mode, or `--tui` flag. The terminal remains the host. |
+| **In-CLI multi-agent dashboard.** | Orchestration UI belongs in sudowork, tmux, or your IDE. |
+| **Telemetry by default.** | Opt-in must be explicit. |
+| **CLA or copyright assignment.** | Contributors keep their copyright. MIT is the arrangement. |
+| **Trading away user control for mass-market appeal.** | "Some users might misclick" is not a reason to hide a finished feature. Explain consequences; keep the controls. Unfinished experiments follow the [feature-flag policy](./CONTRIBUTING.md#experimental-features--standing-rule). |
 
 ---
 
@@ -279,7 +256,7 @@ scode
 
 # One-shot prompt — pipe-composable, like every unix tool
 scode "explain this codebase" | bat
-scode "list failing tests" --output-format json | jq '.tests[]'
+scode --output-format json prompt "list failing tests" | jq .
 
 # Read a plan from stdin, resume a prior session
 cat plan.md | scode --resume <session-id>

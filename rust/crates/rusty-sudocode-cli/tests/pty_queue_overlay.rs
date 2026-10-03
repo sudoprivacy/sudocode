@@ -24,7 +24,7 @@ fn input_submitted_during_a_turn_shows_in_the_queue_overlay() {
         &["--permission-mode", "danger-full-access"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(Duration::from_secs(30));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
     sess.resize(50, 100).expect("resize pty");
     sess.expect("❯").expect("async REPL initial prompt");
 
@@ -49,6 +49,6 @@ fn input_submitted_during_a_turn_shows_in_the_queue_overlay() {
         .expect("queued input should render in the queue overlay, not scrollback");
 
     sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(Duration::from_secs(15));
+    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
     let _ = sess.expect_eof();
 }

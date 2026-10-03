@@ -134,10 +134,12 @@ fn run_preset(preset: &str, description: &str, worker_task: &str) {
          to run a small task, then report back briefly."
     );
 
-    // danger-full-access because the Agent tool requires it to dispatch.
-    // read-only / workspace-write would hang on the initial permission
-    // prompt. The CHILD sub-agent's tool pool is restricted by its
-    // preset regardless of the PARENT's permission mode.
+    // danger-full-access so the CHILD can run write-side tools if its preset
+    // pool includes them (e.g. general-purpose/Verification): the child
+    // inherits the parent's mode, so a lower parent mode would cap the child.
+    // `agent_spawn` itself only needs read-only now (see
+    // `pty_agent_permission_inheritance`), but these presets exercise the full
+    // tool pool, so the parent stays at danger-full-access here.
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
     sess.set_default_timeout(preset_test_timeout());
 

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,7 +14,8 @@ use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, Session
 
 use crate::error::ApiError;
 use crate::http_transport::{
-    parse_retry_after, request_id_from_headers, HttpTransport, RetryPolicy,
+    gateway_trace_from_headers, parse_retry_after, request_id_from_headers, HttpTransport,
+    RetryPolicy,
 };
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 
@@ -24,6 +26,34 @@ use crate::types::{MessageDeltaEvent, MessageRequest, MessageResponse, StreamEve
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const OAUTH_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
+/// How much of the context window the local estimate has to have consumed
+/// before an exact remote count is worth a network round trip.
+///
+/// Below this, heuristic error cannot flip the verdict, so the exact number
+/// would be bought and thrown away. The local estimate is
+/// serialized-bytes-based and typically within a few percent; 80% leaves it
+/// four times that much room to be wrong before the check stops firing.
+const EXACT_COUNT_WINDOW_PERCENT: u64 = 80;
+
+/// The estimated total at which we start asking the gateway for an exact count.
+fn exact_count_threshold(context_window_tokens: u32) -> u32 {
+    u32::try_from(u64::from(context_window_tokens) * EXACT_COUNT_WINDOW_PERCENT / 100)
+        .unwrap_or(u32::MAX)
+}
+
+/// Whether this error says the endpoint is not implemented here, as opposed to
+/// having failed this once.
+///
+/// Deliberately narrow. A timeout, a 429, or a 5xx are all reasons to skip the
+/// refinement for this request and try again later; only "there is nothing at
+/// this path" is a property of the gateway worth remembering.
+fn error_means_endpoint_absent(error: &ApiError) -> bool {
+    matches!(
+        error,
+        ApiError::Api { status, .. } if matches!(status.as_u16(), 404 | 405 | 501)
+    )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthSource {
@@ -118,6 +148,29 @@ pub struct AnthropicClient {
     /// block. Required for OAuth subscription tokens where the server gates
     /// access by checking the first system block for an exact match.
     oauth_system_prefix: bool,
+    /// Ask Anthropic to hold cached prefixes for an hour instead of the
+    /// five-minute default.
+    ///
+    /// Matches Claude Code, which sets `ttl: "1h"` for subscribers and leaves
+    /// metered API keys on the 5m default (`should1hCacheTTL`): a subscription
+    /// pays for a cache write out of its rate-limit window, where re-creating
+    /// a prefix costs far more than holding it, while a metered key pays 2x
+    /// base for a 1h write against 1.25x for a 5m one.
+    ///
+    /// Resolved once at construction and never re-read. Claude Code latches it
+    /// the same way and says why: flipping the TTL mid-session changes the
+    /// `cache_control` block itself, which busts the very prefix it is meant
+    /// to keep — "~20K tokens per flip" in their note.
+    cache_ttl_1h: bool,
+    /// Set once this base URL has answered `/v1/messages/count_tokens` with a
+    /// status that means the endpoint is not there.
+    ///
+    /// Shared across clones so the answer is learned once per session rather
+    /// than once per client. Anthropic's own API implements the endpoint;
+    /// gateways in front of it frequently do not — `api.sudorouter.ai` returns
+    /// 404 — and re-asking a question that has already been answered "no" is a
+    /// wasted upload of the entire conversation on every turn.
+    count_tokens_unsupported: Arc<AtomicBool>,
 }
 
 impl AnthropicClient {
@@ -132,12 +185,44 @@ impl AnthropicClient {
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             oauth_system_prefix: false,
+            // A bare API key is metered per token: a 1h write bills 2x base
+            // against 1.25x for 5m, so the longer hold has to be asked for.
+            cache_ttl_1h: false,
+            count_tokens_unsupported: Arc::new(AtomicBool::new(false)),
         }
     }
 
     #[must_use]
     pub fn from_auth(auth: AuthSource) -> Self {
         Self::from_auth_with_mode(auth, None)
+    }
+
+    /// Override the 1h cache TTL decision the auth mode made.
+    ///
+    /// The single override seam — `sudocode.json: cache_ttl_1h` reaches the
+    /// client through here and nowhere else, so there is one place to look for
+    /// why a request carries the TTL it does.
+    ///
+    /// Set it before the first request or not at all: the value is part of
+    /// every `cache_control` block, so changing it between turns rewrites the
+    /// cached prefix and throws away what it was holding.
+    #[must_use]
+    pub fn with_cache_ttl_1h(mut self, enabled: bool) -> Self {
+        self.cache_ttl_1h = enabled;
+        self
+    }
+
+    /// Whether this client asks Anthropic to hold cached prefixes for an hour.
+    ///
+    /// Readable so the seam every caller shares can be asserted on. The main
+    /// loop and every sub-agent build their client through
+    /// `ProviderClient::from_resolved`, and a sub-agent that disagreed with its
+    /// parent here would emit a different `cache_control` block for the same
+    /// system prompt and tools — it could not read the prefix its parent had
+    /// already paid to create.
+    #[must_use]
+    pub fn cache_ttl_1h(&self) -> bool {
+        self.cache_ttl_1h
     }
 
     /// Build from an `AuthSource` and an optional explicit `AuthMode`. When
@@ -160,6 +245,8 @@ impl AnthropicClient {
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             oauth_system_prefix: is_subscription,
+            cache_ttl_1h: is_subscription,
+            count_tokens_unsupported: Arc::new(AtomicBool::new(false)),
         };
         if is_subscription {
             // OAuth subscription tokens require the direct Anthropic API
@@ -203,6 +290,13 @@ impl AnthropicClient {
             }
         }
         self
+    }
+
+    pub(crate) fn set_nexus_transport(
+        &mut self,
+        transport: crate::nexus_transport::NexusTransport,
+    ) {
+        self.http.set_nexus_transport(transport);
     }
 
     #[must_use]
@@ -325,6 +419,11 @@ impl AnthropicClient {
 
         let result = self.send_request(&request, trace_id).await?;
         let request_id = request_id_from_headers(result.response.headers());
+        // A gateway's own correlation id, kept alongside the provider's: it is
+        // what a pooling gateway records against the upstream account it chose,
+        // so it is the only way a cache break here can be attributed to an
+        // account change rather than guessed at.
+        let gateway_request_id = gateway_trace_from_headers(result.response.headers());
         let body = result.response.text().await.map_err(ApiError::from)?;
         let mut response = serde_json::from_str::<MessageResponse>(&body).map_err(|error| {
             ApiError::json_deserialize("Anthropic", &request.model, &body, error)
@@ -332,9 +431,24 @@ impl AnthropicClient {
         if response.request_id.is_none() {
             response.request_id = request_id;
         }
+        response.gateway_request_id = gateway_request_id;
 
+        let refusal = crate::sse::refusal_from_response(
+            &serde_json::from_str::<Value>(&body).map_err(ApiError::from)?,
+            "Anthropic",
+            &request.model,
+        );
         if let Some(prompt_cache) = &self.prompt_cache {
-            let record = prompt_cache.record_response(&request, &response);
+            // Refused responses still incur usage, but cannot enter the completion cache.
+            let record = if refusal.is_some() {
+                prompt_cache.record_usage(
+                    &request,
+                    &response.usage,
+                    response.gateway_request_id.as_deref(),
+                )
+            } else {
+                prompt_cache.record_response(&request, &response)
+            };
             self.store_last_prompt_cache_record(record);
         }
         self.http.record_analytics(
@@ -357,7 +471,7 @@ impl AnthropicClient {
                     )),
                 ),
         );
-        Ok(response)
+        refusal.map_or(Ok(response), Err)
     }
 
     pub async fn stream_message(
@@ -371,6 +485,7 @@ impl AnthropicClient {
             .await?;
         Ok(MessageStream {
             request_id: request_id_from_headers(result.response.headers()),
+            gateway_request_id: gateway_trace_from_headers(result.response.headers()),
             client_request_id: Some(result.request_id),
             response: result.response,
             parser: SseParser::new().with_context("Anthropic", request.model.clone()),
@@ -439,7 +554,7 @@ impl AnthropicClient {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let mut body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut body, request);
-        apply_cache_hints(&mut body, request);
+        apply_cache_hints(&mut body, request, self.cache_ttl_1h);
         apply_request_metadata(&mut body, request);
         self.prepend_oauth_system_prefix(&mut body);
         let diagnose_cache = cache_diagnostics_enabled();
@@ -539,11 +654,40 @@ impl AnthropicClient {
             return Ok(());
         };
 
-        // Best-effort refinement using the Anthropic count_tokens endpoint.
-        // On any failure (network, parse, auth), fall back to the local
-        // byte-estimate result which already passed above.
-        let Ok(counted_input_tokens) = self.count_tokens(request).await else {
+        // Refine with the remote count only when an exact answer could change
+        // the verdict.
+        //
+        // This preflight used to fire on every single request, which meant
+        // uploading the whole conversation twice per turn — the count_tokens
+        // body is the same body — to refine a number that had already passed
+        // its check with room to spare. The local estimate is a
+        // serialized-bytes heuristic, so it can be wrong in either direction,
+        // but that only matters near the line: a turn using half its window
+        // cannot be pushed over by heuristic error, and paying a full upload
+        // to confirm that is a cost with no possible benefit.
+        let estimated_total_tokens = registry::estimate_message_request_input_tokens(request)
+            .saturating_add(request.max_tokens);
+        if estimated_total_tokens < exact_count_threshold(limit.context_window_tokens) {
             return Ok(());
+        }
+
+        // A gateway that does not implement the endpoint will not start: once
+        // it has said so, asking again every turn is the same wasted upload
+        // with a known answer.
+        if self.count_tokens_unsupported.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        // Best-effort refinement. On any failure (network, parse, auth), fall
+        // back to the local byte-estimate result which already passed above.
+        let counted_input_tokens = match self.count_tokens(request).await {
+            Ok(counted) => counted,
+            Err(error) => {
+                if error_means_endpoint_absent(&error) {
+                    self.count_tokens_unsupported.store(true, Ordering::Relaxed);
+                }
+                return Ok(());
+            }
         };
         let estimated_total_tokens = counted_input_tokens.saturating_add(request.max_tokens);
         if estimated_total_tokens > limit.context_window_tokens {
@@ -571,31 +715,36 @@ impl AnthropicClient {
         );
         let mut request_body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut request_body, request);
-        apply_cache_hints(&mut request_body, request);
+        apply_cache_hints(&mut request_body, request, self.cache_ttl_1h);
         apply_request_metadata(&mut request_body, request);
         self.prepend_oauth_system_prefix(&mut request_body);
         dump_request_body("count_tokens", &request_body);
-        let mut builder = self
-            .http
-            .raw()
-            .post(&request_url)
-            .header("content-type", "application/json");
+        let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
         if let Some(api_key) = self.auth.api_key() {
-            builder = builder.header("x-api-key", api_key);
+            headers.push(("x-api-key".to_string(), api_key.to_string()));
         }
         if let Some(token) = self.auth.bearer_token() {
-            builder = builder.bearer_auth(token);
+            headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
-        for (header_name, header_value) in self.request_profile.header_pairs() {
-            builder = builder.header(header_name, header_value);
+        for (name, value) in self.request_profile.header_pairs() {
+            headers.push((name.clone(), value.clone()));
         }
-        let response = builder
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(ApiError::from)?;
+        let response = self
+            .http
+            .send_json(
+                &request_url,
+                &headers,
+                &request_body,
+                &RetryPolicy {
+                    max_retries: 0,
+                    ..RetryPolicy::DEFAULT
+                },
+                expect_success,
+                None,
+            )
+            .await?
+            .response;
 
-        let response = expect_success(response).await?;
         let body = response.text().await.map_err(ApiError::from)?;
         let parsed = serde_json::from_str::<CountTokensResponse>(&body).map_err(|error| {
             ApiError::json_deserialize("Anthropic count_tokens", &request.model, &body, error)
@@ -878,6 +1027,10 @@ impl Provider for AnthropicClient {
 pub struct MessageStream {
     /// Provider-returned request ID (from response header).
     request_id: Option<String>,
+    /// The gateway's correlation id for this stream — distinct from
+    /// `client_request_id` below, which this client generates for its own
+    /// tracing. Kept so the prompt-cache ledger can carry it.
+    gateway_request_id: Option<String>,
     /// Client-generated request ID for tracking.
     client_request_id: Option<String>,
     response: reqwest::Response,
@@ -924,26 +1077,76 @@ impl MessageStream {
                 // error when the stream stopped WITHOUT a logical end.
                 let remaining = match self.parser.finish() {
                     Ok(remaining) => remaining,
+                    Err(error @ ApiError::ProviderRefusal { .. }) => {
+                        return Err(self.record_refusal(error))
+                    }
                     Err(_) if self.logically_complete => Vec::new(),
                     Err(error) => return Err(error),
                 };
                 self.pending.extend(remaining);
                 if let Some(event) = self.pending.pop_front() {
+                    // Observe it like any other event: a frame recovered here
+                    // is still a frame upstream sent, and skipping this is how
+                    // a trailing `message_stop` used to go unaccounted for.
+                    self.observe_event(&event);
                     return Ok(Some(event));
                 }
                 return Ok(None);
             }
 
-            match self.response.chunk().await? {
-                Some(chunk) => {
+            match self.response.chunk().await {
+                Ok(Some(chunk)) => {
                     self.scan_chunk_for_cache_diagnosis(&chunk);
-                    self.pending.extend(self.parser.push(&chunk)?);
+                    let events = self
+                        .parser
+                        .push(&chunk)
+                        .map_err(|error| self.record_refusal(error))?;
+                    self.pending.extend(events);
                 }
-                None => {
+                Ok(None) => {
                     self.done = true;
+                }
+                // A body read error before the terminal event is a truncated
+                // stream, just like a partial SSE frame at clean HTTP EOF.
+                // Preserve that transport classification for recovery callers.
+                // Terminal events already set `done` before another read.
+                Err(error) => {
+                    return Err(ApiError::incomplete_stream(
+                        "Anthropic",
+                        &self.request.model,
+                        &error.to_string(),
+                    ));
                 }
             }
         }
+    }
+
+    fn record_refusal(&mut self, error: ApiError) -> ApiError {
+        if let ApiError::ProviderRefusal {
+            model,
+            category,
+            explanation,
+            usage,
+            ..
+        } = &error
+        {
+            self.done = true;
+            self.pending.clear();
+            if let Some(usage) = usage {
+                self.latest_usage = Some((**usage).clone());
+            }
+            self.record_usage_once();
+            if let Some(tracer) = &self.session_tracer {
+                let attributes = serde_json::json!({
+                    "request_id": self.client_request_id,
+                    "model": model,
+                    "category": category,
+                    "explanation": explanation
+                });
+                tracer.record("provider_refusal", attributes.as_object().unwrap().clone());
+            }
+        }
+        error
     }
 
     /// Pull the message id (and any cache diagnosis) out of the raw
@@ -991,42 +1194,70 @@ impl MessageStream {
                 if delta.stop_reason.is_some() {
                     self.done = true;
                     self.logically_complete = true;
+                    // Record the usage *here*, not only on `message_stop`.
+                    // Setting `done` stops next_event from reading another
+                    // chunk, so a `message_stop` upstream sent in a later TCP
+                    // frame is never parsed and never observed — and whether it
+                    // shares a frame with this event is a packet-boundary
+                    // accident. A live 3-turn session recorded only its first
+                    // request for exactly this reason (the gateway framed turn 1
+                    // together and turns 2 and 3 apart), which silently dropped
+                    // two thirds of both the usage telemetry and the prompt-cache
+                    // ledger those numbers are diagnosed from.
+                    self.record_usage_once();
                 }
             }
             StreamEvent::MessageStop(_) => {
                 self.done = true;
                 self.logically_complete = true;
-                if !self.usage_recorded {
-                    if let Some(usage) = self.latest_usage.as_ref() {
-                        if let Some(prompt_cache) = &self.prompt_cache {
-                            let record = prompt_cache.record_usage(&self.request, usage);
-                            *self
-                                .last_prompt_cache_record
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(record);
-                        }
-                        if let Some(tracer) = &self.session_tracer {
-                            // Use client_request_id if available, otherwise generate a fallback
-                            let request_id = self
-                                .client_request_id
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string());
-                            tracer.record_usage_with_cost(
-                                request_id,
-                                usage.input_tokens,
-                                usage.output_tokens,
-                                usage.cache_creation_input_tokens,
-                                usage.cache_read_input_tokens,
-                                usage.cost_units,
-                                usage.cost_currency.as_deref(),
-                            );
-                        }
-                    }
-                    self.usage_recorded = true;
-                }
+                self.record_usage_once();
             }
             _ => {}
         }
+    }
+
+    /// Report the final usage of this message exactly once.
+    ///
+    /// Idempotent because the logical end of a message can be observed twice —
+    /// `message_delta` carrying a `stop_reason` and then `message_stop` — and
+    /// which of the two arrives is not guaranteed.
+    fn record_usage_once(&mut self) {
+        if self.usage_recorded {
+            return;
+        }
+        // No usage seen yet means there is nothing to report; leave the flag
+        // clear so a later frame that does carry usage still gets recorded.
+        let Some(usage) = self.latest_usage.clone() else {
+            return;
+        };
+        if let Some(prompt_cache) = &self.prompt_cache {
+            let record = prompt_cache.record_usage(
+                &self.request,
+                &usage,
+                self.gateway_request_id.as_deref(),
+            );
+            *self
+                .last_prompt_cache_record
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(record);
+        }
+        if let Some(tracer) = &self.session_tracer {
+            // Use client_request_id if available, otherwise generate a fallback
+            let request_id = self
+                .client_request_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            tracer.record_usage_with_cost(
+                request_id,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_input_tokens,
+                usage.cache_read_input_tokens,
+                usage.cost_units,
+                usage.cost_currency.as_deref(),
+            );
+        }
+        self.usage_recorded = true;
     }
 }
 
@@ -1040,7 +1271,8 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_else(|_| String::new());
     let parsed_error = serde_json::from_str::<AnthropicErrorEnvelope>(&body).ok();
-    let retryable = is_retryable_status(status) || is_retryable_400(status, &body);
+    let retryable = crate::error::is_retryable_http_status(status.as_u16())
+        || crate::error::is_retryable_masked_400(status, &body);
 
     Err(ApiError::Api {
         status,
@@ -1056,27 +1288,6 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
         suggested_action: None,
         retry_after,
     })
-}
-
-const fn is_retryable_status(status: reqwest::StatusCode) -> bool {
-    matches!(status.as_u16(), 408 | 409 | 429 | 500 | 502 | 503 | 504)
-}
-
-/// Some gateways and proxies return HTTP 400 with a body like "HTTP 400 from
-/// backend (no parseable body)" when a transient network blip corrupts the
-/// exchange. These are gateway errors wearing a 400 mask, not real bad
-/// requests, so they deserve the same retry treatment as a 502. Genuine
-/// client errors (bad parameter, unknown model, oversized prompt) never
-/// contain these phrases and still fail immediately.
-fn is_retryable_400(status: reqwest::StatusCode, body: &str) -> bool {
-    if status != reqwest::StatusCode::BAD_REQUEST {
-        return false;
-    }
-    let lowered = body.to_ascii_lowercase();
-    lowered.contains("no parseable body")
-        || lowered.contains("connection reset")
-        || lowered.contains("broken pipe")
-        || lowered.contains("empty reply from server")
 }
 
 /// Anthropic API keys (`sk-ant-*`) are accepted over the `x-api-key` header
@@ -1170,7 +1381,7 @@ fn enrich_bearer_auth_error(error: ApiError, auth: &AuthSource) -> ApiError {
 /// Anthropic's minimum `thinking.budget_tokens`. The API rejects a smaller
 /// budget, and additionally requires `budget_tokens < max_tokens` (thinking
 /// tokens are drawn from the same `max_tokens` pool as the visible response).
-const MIN_THINKING_BUDGET: u32 = 1024;
+const MIN_THINKING_BUDGET: u32 = runtime::model_capabilities::MIN_THINKING_BUDGET_TOKENS;
 
 /// Remove beta-only body fields that the standard `/v1/messages` and
 /// `/v1/messages/count_tokens` endpoints reject as `Extra inputs are not
@@ -1193,15 +1404,47 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
         // `1024 <= budget_tokens < max_tokens`. Enable it only when the output
         // budget is large enough to host a thinking budget; otherwise fall back
         // to no thinking (a model whose max output is <= 1024 cannot think).
+        //
+        // Do not "modernize" this to `thinking: {"type": "adaptive"}`.
+        // Anthropic's own guidance deprecates `budget_tokens` in favour of
+        // adaptive on 4.6+ models, so this block reads like stale code — but
+        // that guidance describes the first-party API, and we do not talk to
+        // it. Every request here goes out over a proxy route, and on that route
+        // adaptive was measured to bill `thinking_tokens` as usual while
+        // returning an empty string as the visible text. Paying for reasoning
+        // and rendering nothing is strictly worse than not thinking at all,
+        // which is exactly what a documentation-driven cleanup would ship.
+        // `thinking_budget_is_explicit_not_adaptive` pins the wire shape so the
+        // swap cannot land silently; if you are here to make adaptive work,
+        // verify end-to-end that non-empty text comes back on the proxy route
+        // first, and change the test in the same commit as the code.
         if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
-            // Grant up to half of the output budget to thinking — generous
-            // enough for deep reasoning on large-context models (32k on a 64k
-            // model) while reserving the other half for the visible response so
-            // a coding agent's large edits are never truncated. Clamp into the
-            // API-valid range `[1024, max_tokens)`.
-            let budget_tokens = (request.max_tokens / 2)
-                .max(MIN_THINKING_BUDGET)
-                .min(request.max_tokens - 1);
+            // The budget is a property of the *model*, not of this request's
+            // output cap, because the value of the thinking parameter is part
+            // of Anthropic's cache key. Deriving it here from
+            // `request.max_tokens / 2` is what made a cache-safe compaction
+            // request — same system, same tools, byte-identical message prefix,
+            // but a smaller `max_tokens` — declare `budget_tokens: 6000` where
+            // the turn it was replaying had declared 32000, and read nothing
+            // for it. See `runtime::model_capabilities::thinking_budget_tokens`
+            // for the measurement; both arms were HTTP 200, so this failure has
+            // no symptom other than the bill.
+            //
+            // The clamp below is the API's `budget_tokens < max_tokens` rule.
+            // It keeps the old `max_tokens / 2` split for a cap too small to
+            // host the model's budget, so a small request still reserves half
+            // its output for the visible response instead of spending all but
+            // one token on thinking. Requests in that range (titles, one-line
+            // classifications) have a prefix of their own and nothing to share
+            // with a turn.
+            let model_budget = runtime::model_capabilities::thinking_budget_tokens(&request.model);
+            let budget_tokens = if model_budget < request.max_tokens {
+                model_budget
+            } else {
+                (request.max_tokens / 2)
+                    .max(MIN_THINKING_BUDGET)
+                    .min(request.max_tokens - 1)
+            };
             object.insert(
                 "thinking".to_string(),
                 serde_json::json!({
@@ -1398,7 +1641,21 @@ fn apply_request_metadata(body: &mut Value, request: &MessageRequest) {
 /// - `system_dynamic` → system block with `cache_control: {type: "ephemeral"}`
 /// - `breakpoint_last_message` → `cache_control: {type: "ephemeral"}` on the last
 ///   content block of the last message
-fn apply_cache_hints(body: &mut Value, request: &MessageRequest) {
+fn apply_cache_hints(body: &mut Value, request: &MessageRequest, ttl_1h: bool) {
+    // One helper rather than three literals: the TTL has to be identical on
+    // every block of a request. A request that mixes TTLs splits its own
+    // prefix, which is the failure this is meant to avoid.
+    let cache_control = |scope_global: bool| -> Value {
+        let mut cc = serde_json::Map::new();
+        cc.insert("type".to_string(), Value::String("ephemeral".to_string()));
+        if ttl_1h {
+            cc.insert("ttl".to_string(), Value::String("1h".to_string()));
+        }
+        if scope_global {
+            cc.insert("scope".to_string(), Value::String("global".to_string()));
+        }
+        Value::Object(cc)
+    };
     let Some(hints) = &request.cache_hints else {
         return;
     };
@@ -1413,7 +1670,7 @@ fn apply_cache_hints(body: &mut Value, request: &MessageRequest) {
             system_blocks.push(serde_json::json!({
                 "type": "text",
                 "text": text,
-                "cache_control": { "type": "ephemeral", "scope": "global" },
+                "cache_control": cache_control(true),
             }));
         }
     }
@@ -1422,7 +1679,7 @@ fn apply_cache_hints(body: &mut Value, request: &MessageRequest) {
             system_blocks.push(serde_json::json!({
                 "type": "text",
                 "text": text,
-                "cache_control": { "type": "ephemeral" },
+                "cache_control": cache_control(false),
             }));
         }
     }
@@ -1437,10 +1694,7 @@ fn apply_cache_hints(body: &mut Value, request: &MessageRequest) {
                 if let Some(Value::Array(content)) = last_msg.get_mut("content") {
                     if let Some(last_block) = content.last_mut() {
                         if let Some(block_obj) = last_block.as_object_mut() {
-                            block_obj.insert(
-                                "cache_control".to_string(),
-                                serde_json::json!({ "type": "ephemeral" }),
-                            );
+                            block_obj.insert("cache_control".to_string(), cache_control(false));
                         }
                     }
                 }
@@ -1802,19 +2056,6 @@ mod tests {
     }
 
     #[test]
-    fn retryable_statuses_are_detected() {
-        assert!(super::is_retryable_status(
-            reqwest::StatusCode::TOO_MANY_REQUESTS
-        ));
-        assert!(super::is_retryable_status(
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR
-        ));
-        assert!(!super::is_retryable_status(
-            reqwest::StatusCode::UNAUTHORIZED
-        ));
-    }
-
-    #[test]
     fn tool_delta_variant_round_trips() {
         let delta = ContentBlockDelta::InputJsonDelta {
             partial_json: "{\"city\":\"Paris\"}".to_string(),
@@ -2056,6 +2297,94 @@ mod tests {
                 "budget {budget} must be < max_tokens {max_tokens}"
             );
         }
+    }
+
+    #[test]
+    fn thinking_budget_does_not_move_with_the_requests_output_cap() {
+        // The value of `thinking` is part of Anthropic's prompt-cache key, so
+        // two requests that share a prefix have to declare the same budget even
+        // when they ask for different output caps. Deriving it from
+        // `max_tokens / 2` broke precisely that: a turn asking for 64000
+        // declared 32000, and the cache-safe compaction request replaying that
+        // turn's prefix byte-for-byte asked for 12000, declared 6000, and read
+        // none of it — at HTTP 200. Measured, three interleaved repetitions per
+        // arm (`ladder/tools/cache_prefix_probe.py --pairs
+        // budget-changed-on-turn2 thinking-on-returned`): budget changed on turn
+        // 2 -> read 0 / write 3132, 3153; budget unchanged -> read 3041 / 3026 /
+        // 3020.
+        let budget_for = |max_tokens: u32| {
+            let mut body = serde_json::json!({
+                "model": "claude-sonnet-4-6",
+                "max_tokens": max_tokens,
+            });
+            let request = MessageRequest {
+                model: "claude-sonnet-4-6".to_string(),
+                max_tokens,
+                thinking_enabled: true,
+                ..MessageRequest::default()
+            };
+            super::strip_unsupported_beta_body_fields(&mut body, &request);
+            body["thinking"]["budget_tokens"]
+                .as_u64()
+                .expect("budget_tokens must be a number") as u32
+        };
+
+        let turn = budget_for(64_000);
+        assert_eq!(
+            turn, 32_000,
+            "a turn declares half of the model's request output budget"
+        );
+        assert_eq!(
+            budget_for(44_000),
+            turn,
+            "a request with a smaller cap that can still host the budget must \
+             declare the same number, or it cannot read the turn's prefix"
+        );
+        // A cap too small to host the budget still splits the output in half
+        // rather than spending all but one token on thinking. Such requests
+        // (titles, one-line classifications) have a prefix of their own.
+        assert_eq!(budget_for(12_000), 6_000);
+    }
+
+    #[test]
+    fn thinking_budget_is_explicit_not_adaptive() {
+        // Guards a regression that a reader would otherwise introduce *by
+        // following the documentation*. Anthropic deprecates `budget_tokens` in
+        // favour of `thinking: {"type": "adaptive"}` on 4.6+ models, which makes
+        // the explicit budget in `strip_unsupported_beta_body_fields` look like
+        // code nobody updated.
+        //
+        // We do not reach the first-party API. Every request goes out over a
+        // proxy route, and adaptive was measured there to bill `thinking_tokens`
+        // as usual while returning an empty string as the visible text — we pay
+        // for reasoning and render nothing. That is worse than not thinking, and
+        // it fails silently: the request still returns 200.
+        //
+        // So this asserts the wire shape, not just the budget arithmetic. If
+        // you are changing it, prove non-empty text comes back over the proxy
+        // route first.
+        let mut body = serde_json::json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64_000,
+        });
+        let request = MessageRequest {
+            max_tokens: 64_000,
+            thinking_enabled: true,
+            ..MessageRequest::default()
+        };
+
+        super::strip_unsupported_beta_body_fields(&mut body, &request);
+
+        let thinking = body.get("thinking").expect("thinking must be injected");
+        assert_eq!(
+            thinking["type"], "enabled",
+            "thinking must stay explicitly budgeted; adaptive returns empty \
+             text on the proxy route while still billing thinking tokens"
+        );
+        assert!(
+            thinking.get("budget_tokens").is_some(),
+            "an explicit budget is the point: {thinking}"
+        );
     }
 
     #[test]
@@ -2344,6 +2673,75 @@ mod tests {
         ));
     }
 
+    /// Anthropic holds a cached prefix for five minutes unless the request
+    /// asks for an hour, and the ask lives inside every `cache_control` block.
+    /// A request that carried the TTL on some blocks and not others would
+    /// split its own prefix, so this pins all three together.
+    #[test]
+    fn cache_ttl_1h_marks_every_cache_control_block() {
+        use crate::types::{CacheHints, InputMessage};
+        use telemetry::AnthropicRequestProfile;
+
+        let request = MessageRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages: vec![InputMessage::user_text("question")],
+            system: Some("flat fallback".to_string()),
+            stream: true,
+            cache_hints: Some(CacheHints {
+                system_static: Some("static core instructions".to_string()),
+                system_dynamic: Some("dynamic session context".to_string()),
+                breakpoint_last_message: true,
+            }),
+            ..Default::default()
+        };
+
+        let mut with_ttl = AnthropicRequestProfile::default()
+            .render_json_body(&request)
+            .expect("render body");
+        super::apply_cache_hints(&mut with_ttl, &request, true);
+
+        let sys = with_ttl["system"].as_array().expect("system array");
+        assert_eq!(sys[0]["cache_control"]["ttl"], "1h");
+        assert_eq!(sys[0]["cache_control"]["scope"], "global");
+        assert_eq!(sys[1]["cache_control"]["ttl"], "1h");
+        let last_block = &with_ttl["messages"][0]["content"][0];
+        assert_eq!(last_block["cache_control"]["ttl"], "1h");
+
+        let mut without_ttl = AnthropicRequestProfile::default()
+            .render_json_body(&request)
+            .expect("render body");
+        super::apply_cache_hints(&mut without_ttl, &request, false);
+        let sys = without_ttl["system"].as_array().expect("system array");
+        assert!(
+            sys[0]["cache_control"].get("ttl").is_none(),
+            "5m default must not carry a ttl key"
+        );
+        assert!(without_ttl["messages"][0]["content"][0]["cache_control"]
+            .get("ttl")
+            .is_none());
+    }
+
+    /// A metered API key pays 2x base for a 1h cache write against 1.25x for
+    /// 5m, so it stays on the default; a subscription spends rate-limit
+    /// window instead and is better off holding the prefix.
+    #[test]
+    fn subscription_opts_into_1h_ttl_and_api_key_does_not() {
+        let subscription = AnthropicClient::from_auth_with_mode(
+            AuthSource::BearerToken("sk-ant-oat01-token".to_string()),
+            Some(crate::providers::AuthMode::Subscription),
+        );
+        assert!(
+            subscription.cache_ttl_1h,
+            "subscription should hold cached prefixes for an hour"
+        );
+
+        let api_key = AnthropicClient::new("sk-ant-api03-key");
+        assert!(!api_key.cache_ttl_1h, "metered key stays on the 5m default");
+
+        assert!(!subscription.clone().with_cache_ttl_1h(false).cache_ttl_1h);
+    }
+
     #[test]
     fn apply_cache_hints_produces_system_blocks_and_message_breakpoint() {
         use crate::types::{CacheHints, InputMessage};
@@ -2369,7 +2767,7 @@ mod tests {
         let mut body = AnthropicRequestProfile::default()
             .render_json_body(&request)
             .expect("render body");
-        super::apply_cache_hints(&mut body, &request);
+        super::apply_cache_hints(&mut body, &request, false);
 
         // --- System blocks ---
         let system = body.get("system").expect("system field should exist");

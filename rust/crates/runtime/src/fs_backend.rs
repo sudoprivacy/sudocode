@@ -14,7 +14,8 @@ use std::sync::Arc;
 use crate::workspace_root::current_workspace_root;
 use crate::zone_context::{ContextSource, HostZoneContext, ResourceAccessKind, ZoneAuthError};
 use kernel::core::agents::registry::AgentDescriptor;
-use kernel::kernel::syscall::{KernelSyscall, ReaddirOpts};
+use kernel::kernel::convenience::KernelConvenience;
+use kernel::kernel::syscall::ReaddirOpts;
 use kernel::kernel::OperationContext;
 use kernel::meta_store::{DT_LINK, DT_STREAM};
 
@@ -42,6 +43,36 @@ pub struct FsDirEntry {
 // ---------------------------------------------------------------------------
 // FsBackend trait
 // ---------------------------------------------------------------------------
+
+/// A stored concern whose ROOT the backend decides.
+///
+/// One enum and one method rather than one method per concern. With two it was
+/// tolerable; with memory it would have been three bodies each repeating the same
+/// host-or-VFS decision, so "where does a co-hosted agent's world live" would
+/// have had three answers that could disagree. Here it is one match per backend:
+/// adding a concern is a variant plus an arm, and the compiler requires both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedRoot {
+    /// Session transcripts.
+    Sessions,
+    /// Sub-agents this session spawns: their manifests, outputs and resumable
+    /// sessions.
+    SubAgents,
+    /// Remembered context.
+    Memory,
+    /// The session's todo list.
+    Todos,
+}
+
+/// Names of the per-agent subtrees sudocode creates under the agents base.
+///
+/// The BASES belong to nexus-vfs, which owns the VFS namespace
+/// (`a2a::A2A_INBOX_BASE`, `contracts::SESSIONS_BASE`); these two leaves are
+/// sudocode's own, so they are named once, here, beside the match that uses
+/// them. They are the siblings of `a2a::AGENT_CONVERSATIONS_SEGMENT` and belong
+/// next to it if that crate ever owns them.
+const SUBAGENTS_SEGMENT: &str = "/subagents";
+const MEMORY_SEGMENT: &str = "/memory";
 
 /// Unified filesystem abstraction.
 ///
@@ -100,24 +131,62 @@ pub trait FsBackend: Send + Sync + 'static {
         Ok(false)
     }
 
-    /// The root under which managed sessions live **when the backend imposes
-    /// its own namespace**. nexus (`KernelFsBackend`) → `Some("/sessions")` —
-    /// the flat, session-id-keyed byte-SSOT (no `workspace_hash`). `None`
-    /// (host backends) → the caller uses its own computed root
-    /// (`<cwd>/.scode/sessions/<workspace_hash>/`).
+    /// Where `concern` is stored, when this backend imposes its own namespace.
     ///
-    /// This is what makes the session root swap **with the backend**: callers
-    /// ask the backend rather than hardcoding, so pointing sessions at nexus
-    /// is a backend swap, not a code change to remember.
-    fn managed_sessions_root(&self) -> Option<String> {
+    /// `None` — every host backend, for every concern — means the caller keeps
+    /// its own layout: `<cwd>/.scode/sessions/<workspace_hash>/`,
+    /// `<workspace>/.sudocode-agents/`, `$HOME/.scode/projects/<slug>/memory`.
+    /// A VFS backend answers with a place inside the namespace it serves.
+    ///
+    /// This is what makes a root swap **with the backend**: callers ask rather
+    /// than hardcode, so pointing sessions, sub-agents or memory at nexus is a
+    /// backend swap and not three code changes to remember.
+    fn managed_root(&self, _concern: ManagedRoot) -> Option<String> {
         None
     }
 
-    /// Create a link `alias` → `target` (a pointer, not a byte-copy). On the
-    /// VFS this is a `DT_LINK` (e.g. the `/agents/{name}/sessions/<sid>` enum
-    /// index); on a host FS there is no equivalent, so it is a no-op.
+    /// Create a link `alias` → `target` (a pointer, not a byte-copy).
+    ///
+    /// # The NAME is the cross-backend contract; the SHAPE is not
+    ///
+    /// Every backend must make `alias` appear in a `readdir` of its parent, because
+    /// that listing is what the chat-list index is FOR — a receiver enumerates its
+    /// conversations by name and derives the transcript from the peer name, never from
+    /// this entry's content or type. What the entry IS differs by backend and callers
+    /// must not branch on it:
+    ///
+    /// * the VFS (`KernelFsBackend`, `NexusVfsFsBackend`) makes a real `DT_LINK`, the
+    ///   destination in metadata — which a mount with no content store keeps, while it
+    ///   drops bytes;
+    /// * a host FS makes a pointer FILE holding the target, because a real symlink on
+    ///   Windows needs Developer Mode or admin. A no-op would be the other option and is
+    ///   worse than it sounds: the name would not appear, so a receiver on a host FS
+    ///   could not enumerate its conversations at all.
+    ///
+    /// So `ls -l` on a host FS shows a small text file where the VFS shows a link. That
+    /// is deliberate. [`Self::read_link`] is the follow half and resolves both, which is
+    /// the only way production should ever ask where one points.
+    ///
+    /// The default is a no-op so a backend with no namespace of its own stays silent —
+    /// but a backend that serves a chat list MUST override it, or the index is empty and
+    /// nothing errors.
     fn link(&self, _alias: &str, _target: &str) -> io::Result<()> {
         Ok(())
+    }
+
+    /// Resolve a link `alias` back to the `target` it points at — the follow
+    /// half of [`Self::link`]. The two are a pair: a backend that plants links
+    /// must be able to follow them, or callers see one behaviour on the VFS and
+    /// a silently different one on a host FS (the `link` docstring's failure
+    /// mode, one level up). On the VFS this reads the `DT_LINK` target; on a
+    /// host FS it reads back the pointer file `link` wrote. The default errors
+    /// so a backend that plants no links also follows none, rather than
+    /// pretending a missing link resolved.
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("read_link unsupported by this backend: {alias}"),
+        ))
     }
 
     /// The absolute working root that relative paths resolve against and
@@ -137,7 +206,7 @@ pub trait FsBackend: Send + Sync + 'static {
     /// the host — `StdFsBackend` overrides it with `current_dir` +
     /// `canonicalize` host semantics.
     fn normalize(&self, path: &str) -> io::Result<String> {
-        Ok(lexical_join(&self.working_root()?, path))
+        lexical_join(&self.working_root()?, path)
     }
 
     /// Like [`FsBackend::normalize`] but tolerates a missing final
@@ -206,22 +275,109 @@ pub trait FsBackend: Send + Sync + 'static {
     }
 }
 
-/// Resolve `path` against `root` without touching any filesystem.
+/// The VFS path that names a HOST path.
 ///
-/// Absolute paths (leading `/`) are taken as-is; relative paths are joined
-/// onto `root`. `.` and `..` components are collapsed lexically and the
-/// result is emitted with forward-slash separators (VFS-native). A `..`
-/// that would escape the root is clamped at `/` (no host traversal). This
-/// is the resolution the VFS-backed [`KernelFsBackend`] uses; host paths
-/// go through `StdFsBackend`'s `canonicalize` override instead.
-fn lexical_join(root: &str, path: &str) -> String {
-    let combined = if path.starts_with('/') {
-        path.to_string()
-    } else {
-        format!("{}/{}", root.trim_end_matches('/'), path)
+/// A host directory mounted into the VFS needs exactly one VFS name, and that
+/// name has to agree with what the model later writes: the host mounts a root
+/// at `vfs_path_for_host_path(root)`, and every absolute path a tool is then
+/// handed for a file under it resolves through the same rule. Two rules would
+/// mean a file readable under one spelling and missing under the other.
+///
+/// The host filesystem, for a path that is a HOST path.
+///
+/// The filesystem that answers for a stored concern is the one that ROOTED it.
+/// A backend answers [`FsBackend::managed_root`] with `Some` only for the
+/// concerns it keeps inside its own namespace; `None` means the caller's own
+/// layout, and those layouts are host paths — `$HOME/.scode/projects/<slug>/`,
+/// `<workspace>/.sudocode-agents`, `$SUDOCODE_TODO_STORE`. An operator's
+/// override is a host path for the same reason: it was typed on the host.
+///
+/// Reading them through the SESSION's filesystem is wrong, not merely
+/// roundabout: a CLI session's kernel serves its workspace and nothing else, so
+/// every path outside the workspace is refused. Memory came back empty and an
+/// operator's store override was silently never written.
+///
+/// Zero-sized, so the handle is free; `_arc` exists for the callers that store
+/// one rather than borrow it.
+#[must_use]
+pub fn host_fs() -> &'static (dyn FsBackend + 'static) {
+    static HOST: StdFsBackend = StdFsBackend;
+    &HOST
+}
+
+/// [`host_fs`] as a shareable handle. One `Arc` for the process: the backend is
+/// zero-sized and the handle exists only to satisfy a shared signature.
+#[must_use]
+pub fn host_fs_arc() -> &'static Arc<dyn FsBackend> {
+    static HOST: std::sync::OnceLock<Arc<dyn FsBackend>> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| Arc::new(StdFsBackend))
+}
+
+/// On unix this is the identity — a host path already *is* a VFS path. On
+/// Windows it is not: a host path carries a drive (`C:\a\b`) or a verbatim
+/// prefix (`\\?\C:\a\b`, which is what `canonicalize` yields), and neither is
+/// a VFS path. The drive becomes the leading segment (`/C/a/b`), which keeps
+/// the mapping total and reversible.
+///
+/// The rule is deliberately NOT `cfg(windows)`-gated: a Linux test then proves
+/// the Windows behaviour, and `C:…` is not a relative name any tool emits.
+pub fn vfs_path_for_host_path(path: &std::path::Path) -> io::Result<String> {
+    let as_str = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("host path is not valid UTF-8: {}", path.display()),
+        )
+    })?;
+    match host_absolute_as_vfs(as_str)? {
+        Some(vfs) => Ok(collapse_lexically(&vfs)),
+        None => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("host path is not absolute, so it names no VFS path: {as_str}"),
+        )),
+    }
+}
+
+/// `path`'s absolute VFS form, or `None` when `path` is relative.
+///
+/// Refusing the shapes it cannot map is the point. A UNC path has no drive to
+/// lift and a drive-relative `C:x` has no root at all; treated as "relative"
+/// either would be joined onto the workspace root and silently read a
+/// different file than the caller named.
+fn host_absolute_as_vfs(path: &str) -> io::Result<Option<String>> {
+    if path.starts_with('/') {
+        return Ok(Some(path.to_string()));
+    }
+    let bare = path.strip_prefix(r"\\?\").unwrap_or(path);
+    let unsupported = |what: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{what} has no VFS path: {path}"),
+        ))
     };
+    if bare.starts_with(r"\\") {
+        return unsupported("a UNC path");
+    }
+    let bytes = bare.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let rest = &bare[2..];
+        if !rest.is_empty() && !rest.starts_with(['/', '\\']) {
+            return unsupported("a drive-relative path");
+        }
+        return Ok(Some(format!("/{}{rest}", bare[..1].to_ascii_uppercase())));
+    }
+    if bare.starts_with('\\') {
+        return unsupported("a drive-less rooted path");
+    }
+    Ok(None)
+}
+
+/// Collapse `.` / `..` and emit forward-slash (VFS-native) separators.
+///
+/// A `..` that would escape is clamped at `/`: the VFS namespace has no
+/// parent to walk into, so there is nothing above the root to reach.
+fn collapse_lexically(path: &str) -> String {
     let mut stack: Vec<&str> = Vec::new();
-    for seg in combined.split(['/', '\\']) {
+    for seg in path.split(['/', '\\']) {
         match seg {
             "" | "." => {}
             ".." => {
@@ -231,6 +387,21 @@ fn lexical_join(root: &str, path: &str) -> String {
         }
     }
     format!("/{}", stack.join("/"))
+}
+
+/// Resolve `path` against `root` without touching any filesystem.
+///
+/// Absolute paths — VFS (`/a/b`) or host (`C:\a\b`, see
+/// [`vfs_path_for_host_path`]) — are taken as themselves; relative paths are
+/// joined onto `root`. This is the resolution the VFS-backed
+/// [`KernelFsBackend`] uses; host paths go through `StdFsBackend`'s
+/// `canonicalize` override instead.
+fn lexical_join(root: &str, path: &str) -> io::Result<String> {
+    let combined = match host_absolute_as_vfs(path)? {
+        Some(abs) => abs,
+        None => format!("{}/{}", root.trim_end_matches('/'), path),
+    };
+    Ok(collapse_lexically(&combined))
 }
 
 // Blanket impl: Arc<dyn FsBackend> delegates to the inner backend.
@@ -280,11 +451,14 @@ impl FsBackend for Arc<dyn FsBackend> {
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         (**self).is_append_stream(path)
     }
-    fn managed_sessions_root(&self) -> Option<String> {
-        (**self).managed_sessions_root()
+    fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
+        (**self).managed_root(concern)
     }
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         (**self).link(alias, target)
+    }
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        (**self).read_link(alias)
     }
     fn working_root(&self) -> io::Result<String> {
         (**self).working_root()
@@ -318,9 +492,104 @@ impl FsBackend for Arc<dyn FsBackend> {
 /// down to a direct `std::fs` syscall wrapper with no indirection.
 pub struct StdFsBackend;
 
+/// The unprivileged OS link for this platform: a symlink on Unix, a junction on Windows.
+///
+/// Separated from the caller so the fallback decision reads as one line there. An error
+/// is the caller's signal to fall back, not something to report — a filesystem without
+/// reparse points is a legitimate place to run.
+#[cfg(unix)]
+fn platform_link(alias: &str, target: &str) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, alias)
+}
+
+/// Windows: a JUNCTION, not a symlink.
+///
+/// A symlink needs `SeCreateSymbolicLinkPrivilege` — administrator, or Developer Mode.
+/// A junction needs nothing at all, can be created before its target exists, and reads
+/// back as a link both to PowerShell (`LinkType: Junction`) and to POSIX-flavoured
+/// tools. Verified non-elevated on Windows 11 before this was written.
+///
+/// Shelled out through `mklink /J` rather than `DeviceIoControl` with
+/// `FSCTL_SET_REPARSE_POINT`: the reparse-buffer dance is dozens of lines of `unsafe`
+/// around a hand-built `REPARSE_DATA_BUFFER`, for a call that runs once per conversation
+/// on a provisioning path. `mklink` ships with Windows, so this adds no dependency, and
+/// any failure lands in the same fallback as every other.
+#[cfg(windows)]
+fn platform_link(alias: &str, target: &str) -> io::Result<()> {
+    let status = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J", alias, target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "mklink /J {alias} -> {target} failed"
+        )))
+    }
+}
+
 impl FsBackend for StdFsBackend {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         std::fs::read(path)
+    }
+
+    /// A real OS link where the platform gives one without privilege, else a small
+    /// file holding the path it points at.
+    ///
+    /// Deliberately NOT the inherited no-op. An index built out of links is read back
+    /// by LISTING it — the chat list that tells a receiver which conversations to tail
+    /// is exactly that — so a backend that silently does nothing here yields an empty
+    /// index and a receiver that hears nothing, with no error raised anywhere.
+    ///
+    /// # Why a real link, and why no privilege is needed for one
+    ///
+    /// This used to write a pointer file on every platform, because a native Windows
+    /// symlink needs Developer Mode or admin. That reasoning held for symlinks and was
+    /// applied one step too far: both platforms have an unprivileged answer.
+    ///
+    /// * Unix — `std::os::unix::fs::symlink` never needed a privilege.
+    /// * Windows — a **junction** (a directory reparse point) needs none either, and it
+    ///   can be created before its target exists. Verified non-elevated on Windows 11:
+    ///   `LinkType: Junction`, and Git Bash reports it `lrwxrwxrwx` like a symlink.
+    ///
+    /// Elevating the daemon to get `SeCreateSymbolicLinkPrivilege` was the other option
+    /// and is the wrong trade: it changes the ownership and ACL of everything the
+    /// process creates, not just this entry, and it does nothing for a standalone CLI,
+    /// which must not require an administrator.
+    ///
+    /// The pointer file remains as the fallback for when the platform call fails (a
+    /// filesystem without reparse points, a target on another volume). [`Self::read_link`]
+    /// reads both shapes, so a caller never learns which one it got — and entries
+    /// written before this change are still followable.
+    fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        if let Some(parent) = std::path::Path::new(alias).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // An existing entry is replaced: provisioning is idempotent, and a stale
+        // pointer file would otherwise shadow the link we are asked to plant.
+        if std::fs::symlink_metadata(alias).is_ok() {
+            let _ = std::fs::remove_file(alias);
+            let _ = std::fs::remove_dir(alias);
+        }
+        if platform_link(alias, target).is_ok() {
+            return Ok(());
+        }
+        std::fs::write(alias, target)
+    }
+
+    /// Follow a link planted by [`Self::link`] — the target, whichever shape it is.
+    ///
+    /// A real link answers from `read_link`; a pointer file answers from its body. Both
+    /// because the second is the fallback and also what entries written before real
+    /// links look like, and a reader that handles one of them strands the other.
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        if let Ok(target) = std::fs::read_link(alias) {
+            return Ok(target.to_string_lossy().into_owned());
+        }
+        let bytes = std::fs::read(alias)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -469,20 +738,30 @@ impl FsBackend for StdFsBackend {
 
 /// Kernel-backed filesystem for in-process execution inside nexusd.
 ///
-/// Forwards every operation through the [`KernelSyscall`] trait so managed
+/// Forwards every operation through the [`KernelConvenience`] trait so managed
 /// agents read/write the VFS trie via `sys_read` / `sys_write` /
 /// `sys_stat` / `sys_readdir` instead of touching the host
 /// filesystem.
-pub struct KernelFsBackend<K: KernelSyscall> {
+pub struct KernelFsBackend<K: KernelConvenience> {
     kernel: Arc<K>,
     ctx: OperationContext,
     zone_context: Option<HostZoneContext>,
     /// Absolute VFS path that relative tool paths resolve against and that
     /// `glob` / `grep` default to (e.g. `/proc/{pid}/workspace`).
     workspace_root: String,
+    /// The same directory as the HOST spells it, when the host has its own
+    /// spelling for these files.
+    ///
+    /// `None` for a co-hosted agent: its world IS the VFS, so a VFS path is the
+    /// only name its files have and the name it should report. `Some` for a CLI
+    /// session, whose files are also host files -- the path its user typed and
+    /// the only one its `bash` tool can open. Set, this backend answers in host
+    /// spelling and converts on the way to each syscall
+    /// ([`Self::to_kernel`]), so one file has one name across every tool.
+    host_root: Option<String>,
 }
 
-impl<K: KernelSyscall> KernelFsBackend<K> {
+impl<K: KernelConvenience> KernelFsBackend<K> {
     pub fn new(kernel: Arc<K>, ctx: OperationContext, workspace_root: impl Into<String>) -> Self {
         let source = if ctx.is_system {
             ContextSource::TrustedLocal
@@ -495,6 +774,7 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
             ctx,
             zone_context: Some(zone_context),
             workspace_root: workspace_root.into(),
+            host_root: None,
         }
     }
 
@@ -523,6 +803,7 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
             ctx,
             zone_context: Some(zone_context),
             workspace_root: workspace_root.into(),
+            host_root: None,
         }
     }
 
@@ -545,6 +826,7 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
             ctx,
             zone_context: Some(HostZoneContext::from_planted_descriptor(desc)),
             workspace_root: workspace_root.into(),
+            host_root: None,
         }
     }
 
@@ -552,12 +834,7 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
         let Some(zone_context) = &self.zone_context else {
             return Ok(());
         };
-        let normalized = if path.starts_with('/') {
-            path.to_string()
-        } else {
-            lexical_join(&self.workspace_root, path)
-        }
-        .replace('\\', "/");
+        let normalized = lexical_join(&self.workspace_root, path)?.replace('\\', "/");
         zone_context
             .authorize_path_for(
                 access_kind,
@@ -569,6 +846,84 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
             )
             .map(|_| ())
             .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))
+    }
+
+    /// Answer in the host's spelling, `host_root` being how the host names the
+    /// directory this backend's `workspace_root` mounts.
+    #[must_use]
+    pub fn with_host_root(mut self, host_root: impl Into<String>) -> Self {
+        self.host_root = Some(host_root.into());
+        self
+    }
+
+    /// The VFS path a caller's `path` names.
+    ///
+    /// One entry point for every syscall in this backend, and idempotent: a
+    /// path already in VFS form comes back unchanged, so a method that converts
+    /// and then delegates to another does not convert twice. Relative paths
+    /// resolve against the workspace root; a host-absolute path (`C:\a\b`) is
+    /// mapped by [`vfs_path_for_host_path`]'s rule.
+    fn to_kernel(&self, path: &str) -> io::Result<String> {
+        lexical_join(&self.workspace_root, path)
+    }
+
+    /// Turn a not-found into a transparent error when the cause is that no
+    /// mount covers the path, rather than a missing file. `err` is the
+    /// original not-found (its detail preserved for the missing-file case);
+    /// `caller_path` is the path as the caller spelled it, `vfs` its routed
+    /// form. Only reclassifies `NotFound`; every other error passes through.
+    #[inline]
+    fn explain_not_found(&self, caller_path: &str, vfs: &str, err: io::Error) -> io::Error {
+        if err.kind() == io::ErrorKind::NotFound && !self.kernel.is_mounted(vfs, &self.ctx.zone_id)
+        {
+            return io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{caller_path} is outside this session's mounts \
+                     (add its drive/root to mountRoots or additionalDirectories)"
+                ),
+            );
+        }
+        err
+    }
+
+    /// `<agents base>/<this agent>/<segment>` — a subtree of the agent itself.
+    ///
+    /// `None` when the context names no agent: a subtree keyed by an agent that
+    /// does not exist would be one directory every anonymous caller shared,
+    /// which is the bug this shape exists to prevent.
+    fn agent_subtree(&self, segment: &str) -> Option<String> {
+        let agent = self.ctx.agent_id.as_deref()?;
+        Some(format!("{}/{agent}{segment}", a2a::A2A_INBOX_BASE))
+    }
+
+    /// A VFS path in the spelling this backend ANSWERS in.
+    ///
+    /// The inverse of [`Self::to_kernel`], needed by the one method that returns
+    /// a path the kernel stored rather than one the caller passed: `read_link`
+    /// reads back a `DT_LINK` target, which was converted on the way in.
+    ///
+    /// Asymmetric with the forward direction on purpose. Reading `C:\a\b` as
+    /// drive-absolute is safe on any platform (no unix path looks like that), so
+    /// the forward rule is platform-independent and a unix test proves the
+    /// Windows branch. The reverse is not: `/C/a` is this mapping's output on
+    /// Windows and an ordinary path on unix, so undoing it anywhere else would
+    /// corrupt a perfectly good path.
+    fn to_host(&self, vfs: &str) -> String {
+        if self.host_root.is_none() {
+            return vfs.to_string();
+        }
+        #[cfg(windows)]
+        {
+            let mut segments = vfs.trim_start_matches('/').splitn(2, '/');
+            if let Some(drive) = segments.next() {
+                if drive.len() == 1 && drive.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                    let rest = segments.next().unwrap_or_default().replace('/', "\\");
+                    return format!("{}:\\{rest}", drive.to_ascii_uppercase());
+                }
+            }
+        }
+        vfs.to_string()
     }
 
     /// True when the entry at `path` is a DT_STREAM (native append-log).
@@ -625,18 +980,57 @@ impl<K: KernelSyscall> KernelFsBackend<K> {
 }
 
 /// Map a kernel error to an `io::Error`.
+///
+/// "Not found" is singled out because [`FsBackend`] callers BRANCH on it, and
+/// the two backends have to answer alike: `StdFsBackend` reports a missing file
+/// as [`io::ErrorKind::NotFound`], so a kernel-backed read that reported the
+/// same condition as `Other` turns "this reader has no position yet" into "this
+/// read failed". The receiver then never claims its seat and simply hears
+/// nothing, with the error scrolling past as a retry.
+///
+/// Only a missing ENTRY qualifies. An unmounted path is deliberately left as an
+/// error: "the namespace is not here" is not "there is nothing here", and
+/// collapsing them would have a reader start from zero — replaying a
+/// conversation — every time a mount was late.
+///
+/// The kernel's error type is opaque at this boundary (this is generic over
+/// `impl Debug` precisely so the backend does not depend on it), so the
+/// classification reads the debug text. That is load-bearing enough to be
+/// tested rather than trusted — see `a_missing_path_reports_not_found` in
+/// `runtime/tests/spawn_task.rs`, which fails if the variant is ever renamed.
 fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
-    io::Error::other(format!("{e:?}"))
+    let text = format!("{e:?}");
+    if text.contains("FileNotFound") {
+        return io::Error::new(io::ErrorKind::NotFound, text);
+    }
+    io::Error::other(text)
 }
 
-impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
+impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
-        self.read_unchecked(path)
+        // The message this builds names the path as the CALLER spelled it: an
+        // error a user reads should name the file the way they named it.
+        let vfs = &self.to_kernel(path)?;
+        // A DT_STREAM is read by walking its framed records to the tail; a
+        // single `sys_read` would return only the first record's payload.
+        if self.is_stream_entry(vfs) {
+            return self.read_stream_all(vfs);
+        }
+        self.kernel
+            .sys_read(vfs, &self.ctx, 0, 0)
+            .map_err(kernel_err)
+            .and_then(|r| {
+                r.data.ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, format!("{path}: no data"))
+                })
+            })
+            .map_err(|e| self.explain_not_found(path, vfs, e))
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
         self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.to_kernel(path)?;
         self.kernel
             .sys_write(path, &self.ctx, data, 0)
             .map_err(kernel_err)
@@ -645,6 +1039,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
         self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.to_kernel(path)?;
         // A DT_STREAM appends `data` as one framed record in O(1): `sys_write`
         // pushes to the log tail (the offset arg is ignored for streams).
         // Regular files have no O(1) append, so fall back to read-concat-write
@@ -664,6 +1059,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 
     fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
         self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.to_kernel(path)?;
         // Idempotent: an existing entry (DT_STREAM to append to, or a DT_REG
         // from a prior degraded run) is left as-is.
         if self.kernel.sys_stat(path, &self.ctx.zone_id).is_some() {
@@ -683,7 +1079,6 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
             .kernel
             .sys_setattr(
                 path,
-                &self.ctx,
                 DT_STREAM as i32,
                 "",    // backend_name
                 None,  // backend
@@ -716,7 +1111,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
-        Ok(self.is_stream_entry(path))
+        Ok(self.is_stream_entry(&self.to_kernel(path)?))
     }
 
     fn tail_read(
@@ -726,6 +1121,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.to_kernel(path)?;
         let result = self
             .kernel
             .sys_read(path, &self.ctx, block_ms, cursor)
@@ -735,24 +1131,56 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
                 let next = result
                     .stream_next_offset
                     .map(|n| n as u64)
-                    .unwrap_or(cursor);
+                    // A DT_STREAM reports where its next RECORD begins. A
+                    // byte-addressed entry has no record offset to report, so
+                    // the next cursor is what this read consumed — which is the
+                    // contract `StdFsBackend::tail_read` already answers by
+                    // returning the file's new length.
+                    //
+                    // Returning `cursor` unchanged here meant a reader could
+                    // never advance past a byte-addressed conversation, so every
+                    // poll re-delivered the same envelope: the re-delivery storm,
+                    // measured at 1044 turns in 60 seconds. It is not a corner
+                    // case — a conversation degrades to a DT_REG whenever its
+                    // `"wal"` stream cannot be created, which is any daemon
+                    // without federation wired.
+                    .unwrap_or_else(|| cursor + payload.len() as u64);
                 Ok((payload, next, false))
             }
             _ => Ok((vec![], cursor, true)),
         }
     }
 
-    fn managed_sessions_root(&self) -> Option<String> {
-        // nexus keeps sessions as a flat, session-id-keyed byte-SSOT at the
-        // VFS root — no `.scode`, no `workspace_hash` (isolation is policy +
-        // `owner`, not path). So a `SessionStore` over this backend roots
-        // sessions here automatically.
-        Some("/sessions".to_string())
+    fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
+        // A host-spelled session imposes nothing, for any concern: its
+        // transcripts, sub-agents and memory belong where its own tooling looks
+        // (`scode --resume`, `.sudocode-agents`, the project memory dir), and
+        // they outlive a VFS that exists only while the session does.
+        if self.host_root.is_some() {
+            return None;
+        }
+        match concern {
+            // Flat and session-id-keyed: no `.scode`, no `workspace_hash`,
+            // because isolation here is policy plus `owner`, not path.
+            ManagedRoot::Sessions => Some(contracts::SESSIONS_BASE.to_string()),
+            // Under the spawning agent. Keyed by the agent rather than by a
+            // workspace path, which is what stops two agents on one daemon from
+            // colliding — the host paths these replace are derived from the
+            // daemon's own directory, which every co-hosted agent shares.
+            ManagedRoot::SubAgents => self.agent_subtree(SUBAGENTS_SEGMENT),
+            ManagedRoot::Memory => self.agent_subtree(MEMORY_SEGMENT),
+            // Beside the agent's other state rather than in a subtree of its
+            // own: a todo list is one small file, and a directory per file is a
+            // namespace nobody browses.
+            ManagedRoot::Todos => self.agent_subtree(""),
+        }
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         self.authorize_target(alias, ResourceAccessKind::Write)?;
         self.authorize_target(target, ResourceAccessKind::Write)?;
+        let alias = &self.to_kernel(alias)?;
+        let target = &self.to_kernel(target)?;
         // DT_LINK: a VFS-internal pointer alias → target (e.g. the
         // `/agents/{name}/sessions/<sid>` enum index → `/sessions/<sid>`).
         if let Some(parent) = std::path::Path::new(alias).parent() {
@@ -761,7 +1189,6 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         self.kernel
             .sys_setattr(
                 alias,
-                &self.ctx,
                 DT_LINK as i32,
                 "",   // backend_name
                 None, // backend
@@ -787,8 +1214,29 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
             .map(|_| ())
     }
 
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        let alias = &self.to_kernel(alias)?;
+        // `sys_stat` is lstat — for a `DT_LINK` it fills `link_target` with the
+        // path this alias points at. The host-FS `read_link` returns the same
+        // target string, so a caller resolving a link is backend-agnostic.
+        self.kernel
+            .sys_stat(alias, &self.ctx.zone_id)
+            .and_then(|s| s.link_target)
+            // The target was converted on the way in, so it comes back in VFS
+            // spelling; a caller gets paths in the one spelling this backend
+            // speaks, not two depending on which method answered.
+            .map(|target| self.to_host(&target))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{alias}: not a link or no target"),
+                )
+            })
+    }
+
     fn delete(&self, path: &str) -> io::Result<()> {
         self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.to_kernel(path)?;
         self.kernel
             .sys_unlink(path, &self.ctx, false)
             .map_err(kernel_err)
@@ -797,14 +1245,28 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
+        let vfs = &self.to_kernel(path)?;
         self.kernel
-            .sys_stat(path, &self.ctx.zone_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{path}: not found")))
+            .sys_stat(vfs, &self.ctx.zone_id)
+            .ok_or_else(|| {
+                self.explain_not_found(
+                    path,
+                    vfs,
+                    io::Error::new(io::ErrorKind::NotFound, format!("{path}: not found")),
+                )
+            })
             .map(|s| FsMetadata {
                 len: s.size,
                 is_dir: s.is_directory,
                 is_file: !s.is_directory,
-                is_symlink: false,
+                // A DT_LINK is a link, and this backend plants them — the chat-list
+                // index is one. Hardcoding `false` made "is this a link?" answer
+                // differently on the VFS than on a host FS, for an entry the two
+                // create from the ONE shared `link()` call.
+                //
+                // `sys_stat` is lstat, so this describes the entry itself rather than
+                // whatever it points at, which is what the question means.
+                is_symlink: s.entry_type == DT_LINK,
                 modified: s
                     .modified_at_ms
                     .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)),
@@ -813,6 +1275,7 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.to_kernel(path)?;
         let zone = &self.ctx.zone_id;
         // `sys_readdir` returns `Vec<(child_GLOBAL_path, entry_type)>` —
         // full paths like `/ws/a.rs`, not basenames. The `FsBackend`
@@ -838,11 +1301,13 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 
     fn exists(&self, path: &str) -> io::Result<bool> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
+        let path = &self.to_kernel(path)?;
         Ok(self.kernel.sys_stat(path, &self.ctx.zone_id).is_some())
     }
 
     fn create_dir_all(&self, path: &str) -> io::Result<()> {
         self.authorize_target(path, ResourceAccessKind::Write)?;
+        let path = &self.to_kernel(path)?;
         // Writing `/ws/sub/c.rs` creates only the leaf's metastore entry —
         // the intermediate `/ws/sub` dirent is NOT auto-planted, so a later
         // `readdir("/ws")` would not see `sub` and a recursive walk could
@@ -862,7 +1327,6 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
             }
             let _ = self.kernel.sys_setattr(
                 &prefix,
-                &self.ctx,
                 1, // DT_DIR
                 "",
                 None,
@@ -892,7 +1356,10 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
         self.authorize_target(from, ResourceAccessKind::Write)?;
         self.authorize_target(to, ResourceAccessKind::Write)?;
         // No native rename syscall — compose from read + write + delete.
-        let data = self.read_unchecked(from)?;
+        // `read_unchecked` takes the VFS form (already authorized here), so
+        // convert first: over a host-rooted backend `from` arrives in host
+        // spelling, which the kernel would reject as not starting with `/`.
+        let data = self.read_unchecked(&self.to_kernel(from)?)?;
         self.write(to, &data)?;
         self.delete(from)?;
         Ok(())
@@ -900,12 +1367,16 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
-        // VFS paths are already canonical — no host symlinks to resolve.
-        Ok(path.to_string())
+        // No host canonicalisation: the kernel decides what exists, and
+        // resolving symlinks here would reach past the mount on purpose.
+        self.normalize(path)
     }
 
     fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
-        // VFS has no symlinks — delegate to regular stat.
+        // `sys_stat` / `Stat` are lstat: they describe the entry, not what it points
+        // at, so a plain delegation IS the no-follow answer. (It used to say "VFS has
+        // no symlinks", which stopped being true the moment these backends started
+        // planting DT_LINKs.)
         self.stat(path)
     }
 
@@ -915,11 +1386,63 @@ impl<K: KernelSyscall + Send + Sync + 'static> FsBackend for KernelFsBackend<K> 
     }
 
     fn working_root(&self) -> io::Result<String> {
-        Ok(self.workspace_root.clone())
+        Ok(self
+            .host_root
+            .clone()
+            .unwrap_or_else(|| self.workspace_root.clone()))
     }
-    // `normalize` / `normalize_allow_missing` use the trait's lexical
-    // default: VFS paths are already canonical, and canonicalising them
-    // against the host (`StdFsBackend`'s override) would corrupt them.
+
+    /// Absolute, lexically clean, in this backend's spelling.
+    ///
+    /// Host spelling keeps the host's separators and drive, so what a tool
+    /// reports is what the user typed and what `bash` will accept.
+    /// `normalize_allow_missing` is the trait's default, which is this: the
+    /// resolution is lexical either way, so a missing leaf is not special.
+    fn normalize(&self, path: &str) -> io::Result<String> {
+        match &self.host_root {
+            Some(root) => Ok(host_lexical_join(root, path)),
+            None => lexical_join(&self.workspace_root, path),
+        }
+    }
+
+    fn join_path(&self, dir: &str, name: &str) -> String {
+        match self.host_root {
+            // Host separators, for the same reason `StdFsBackend` uses them:
+            // the composed path is handed back to the user and to `bash`.
+            Some(_) => std::path::Path::new(dir)
+                .join(name)
+                .to_string_lossy()
+                .into_owned(),
+            None => format!("{}/{}", dir.trim_end_matches(['/', '\\']), name),
+        }
+    }
+}
+
+/// Resolve `path` against `root` in HOST spelling, touching no filesystem.
+///
+/// The host-side twin of [`lexical_join`]: relative paths join onto `root`,
+/// `.` / `..` collapse lexically, and the result keeps the platform's own
+/// separators. Deliberately not `canonicalize`: the kernel is the authority for
+/// what exists, and resolving symlinks here would reach past the mount that
+/// contains the session.
+fn host_lexical_join(root: &str, path: &str) -> String {
+    use std::path::{Component, Path, PathBuf};
+    let candidate = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        Path::new(root).join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out.to_string_lossy().into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -957,12 +1480,7 @@ impl NexusVfsFsBackend {
     }
 
     fn authorize_target(&self, path: &str, access_kind: ResourceAccessKind) -> io::Result<()> {
-        let normalized = if path.starts_with('/') {
-            path.to_string()
-        } else {
-            lexical_join("/", path)
-        }
-        .replace('\\', "/");
+        let normalized = lexical_join("/", path)?.replace('\\', "/");
         self.zone_context
             .authorize_path_for(
                 access_kind,
@@ -996,7 +1514,16 @@ impl FsBackend for NexusVfsFsBackend {
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
         self.authorize_target(path, ResourceAccessKind::Write)?;
-        if path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX) {
+        // Ask the predicate rather than restating it. This branch spelled
+        // spelled the mailbox leaf on its own, so when the mailbox moved
+        // to `…/transcript` it quietly took the read-modify-write path below:
+        // every append re-read the stream through `read` (which yields its FIRST
+        // frame), concatenated the new envelope onto that, and wrote the pair
+        // back as a single frame. Two JSON objects in one frame parse as
+        // neither, so every message after the first became unreadable — sends
+        // reporting success, a receiver seeing nothing, and only a real daemon
+        // able to show it.
+        if self.is_append_stream(path)? {
             self.client
                 .stream_write(path, data.to_vec(), &self.auth_token)
                 .map(|_offset| ())
@@ -1016,7 +1543,7 @@ impl FsBackend for NexusVfsFsBackend {
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
-        Ok(path.ends_with(crate::mailbox::CHAT_WITH_ME_SUFFIX))
+        Ok(crate::mailbox::is_conversation_transcript_path(path))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
@@ -1031,7 +1558,9 @@ impl FsBackend for NexusVfsFsBackend {
             len: stat.size,
             is_dir: stat.is_directory,
             is_file: !stat.is_directory,
-            is_symlink: false,
+            // A link is one whichever backend answers. `Stat` is lstat, so a target
+            // present means this entry IS the link rather than the thing it points at.
+            is_symlink: stat.link_target.is_some(),
             modified: stat
                 .modified_at_ms
                 .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)),
@@ -1044,7 +1573,20 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(entries
             .into_iter()
             .map(|e| FsDirEntry {
-                name: e.name,
+                // The node answers with FULL paths; `FsDirEntry::name` is an
+                // entry name, which is what the other backends return and what
+                // callers join back onto the directory they listed. Passed
+                // through whole it is not a name at all: a receiver enumerating
+                // its chat list read `/agents/me/conversations/<peer>` as the
+                // peer's NAME, derived a conversation id from that string, and
+                // tailed a transcript nobody writes to — reporting
+                // `StreamNotFound` in a loop while messages waited elsewhere.
+                name: e
+                    .name
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(e.name.as_str())
+                    .to_string(),
                 is_dir: e.is_directory,
             })
             .collect())
@@ -1055,9 +1597,91 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(self.client.stat(path, &self.auth_token).is_ok())
     }
 
+    /// A DT_LINK, with the destination in the entry's metadata.
+    ///
+    /// This backend was the one that could not do it: `Setattr` carried no link target
+    /// on the wire, so `link` fell through to the trait's silent no-op and a standalone
+    /// agent over this transport planted no chat-list index at all — a receiver that
+    /// never learned the conversation existed. That is why the index was a plain file
+    /// holding a path, on every backend, including the two that could do better.
+    ///
+    /// The wire carries it now (nexi-lab/nexus-vfs#362), so all three backends realise
+    /// the same shared `link()` call: a DT_LINK here and on the in-process kernel, a
+    /// pointer file on the host FS where no privilege-free symlink exists.
+    fn link(&self, alias: &str, target: &str) -> io::Result<()> {
+        self.authorize_target(alias, ResourceAccessKind::Write)?;
+        self.authorize_target(target, ResourceAccessKind::Write)?;
+        if let Some(parent) = std::path::Path::new(alias).parent() {
+            let _ = self.create_dir_all(&parent.to_string_lossy());
+        }
+        self.client.ensure_link(alias, target, &self.auth_token)?;
+        // Read the target back, because a daemon that predates the wire field ignores
+        // it: `Setattr` would succeed, the entry would exist as a link to NOWHERE, and
+        // the chat-list index would list a peer whose conversation cannot be found.
+        // An unknown proto field is dropped silently by design, so the only way to know
+        // it landed is to ask. One stat, on a provisioning path that runs once per
+        // conversation.
+        match self.read_link(alias) {
+            Ok(got) if got == target => Ok(()),
+            Ok(got) => Err(io::Error::other(format!(
+                "{alias}: link target came back as {got:?}, expected {target:?}"
+            ))),
+            Err(e) => Err(io::Error::other(format!(
+                "{alias}: the daemon accepted the link but reports no target ({e}) — it \
+                 is older than the `Setattr` link_target field, so the index would name \
+                 a conversation nobody can follow"
+            ))),
+        }
+    }
+
+    /// Follow a link planted by [`Self::link`] — the target out of its metadata.
+    ///
+    /// Reads `link_target`, not the body: a pointer whose destination is content is
+    /// unreadable on a mount that keeps metadata and drops bytes, which is the mount
+    /// shape federation uses.
+    fn read_link(&self, alias: &str) -> io::Result<String> {
+        self.authorize_target(alias, ResourceAccessKind::Read)?;
+        self.client
+            .stat(alias, &self.auth_token)?
+            .link_target
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{alias}: not a link or no target"),
+                )
+            })
+    }
+
+    /// Provision each component as a DT_DIR, idempotently.
+    ///
+    /// This used to return `Ok(())` having done nothing, on the reasoning that "VFS
+    /// servers typically auto-create intermediate paths on write". A write does plant
+    /// rows — but there is no write here, and the one caller that matters is
+    /// `Mailbox::ensure_presence`, whose whole job is to announce an agent by
+    /// creating a directory. So it reported success and created nothing: an agent
+    /// that had announced itself but not yet conversed was invisible to every
+    /// `agent_list` in the cluster, on every node, and the call that was supposed to
+    /// make it visible said it had.
+    ///
+    /// Per component rather than the leaf alone, which is what `create_dir_all`
+    /// promises and what the in-process a2a provisioner does for the same paths.
+    ///
+    /// The `exists` fast path is there because most callers are writes asking for a
+    /// parent that is already present — the same steady-state exit
+    /// `a2a::ensure_conversation` takes, and for the same reason: one `stat` beats N
+    /// `setattr` round trips on a path that is already provisioned. A write does
+    /// plant its own rows, so the cost this adds to a write is that one `stat`.
     fn create_dir_all(&self, path: &str) -> io::Result<()> {
         self.authorize_target(path, ResourceAccessKind::Write)?;
-        // VFS servers typically auto-create intermediate paths on write.
+        if self.exists(path)? {
+            return Ok(());
+        }
+        let mut prefix = String::with_capacity(path.len());
+        for component in path.split('/').filter(|c| !c.is_empty()) {
+            prefix.push('/');
+            prefix.push_str(component);
+            self.client.ensure_dir(&prefix, &self.auth_token)?;
+        }
         Ok(())
     }
 
@@ -1070,15 +1694,6 @@ impl FsBackend for NexusVfsFsBackend {
         Ok(())
     }
 
-    fn link(&self, alias: &str, target: &str) -> io::Result<()> {
-        self.authorize_target(alias, ResourceAccessKind::Write)?;
-        self.authorize_target(target, ResourceAccessKind::Write)?;
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            ZoneAuthError::DelegationInvalid,
-        ))
-    }
-
     fn canonicalize(&self, path: &str) -> io::Result<String> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
         // VFS paths are already canonical over gRPC — no host symlinks.
@@ -1086,7 +1701,10 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn symlink_metadata(&self, path: &str) -> io::Result<FsMetadata> {
-        // VFS has no symlinks — delegate to regular stat.
+        // `sys_stat` / `Stat` are lstat: they describe the entry, not what it points
+        // at, so a plain delegation IS the no-follow answer. (It used to say "VFS has
+        // no symlinks", which stopped being true the moment these backends started
+        // planting DT_LINKs.)
         self.stat(path)
     }
 
@@ -1143,6 +1761,18 @@ mod tests {
         let text = fs.read_to_string(&path).unwrap();
         assert_eq!(text, "line1\nline2\n");
         fs.delete(&path).unwrap();
+    }
+
+    #[test]
+    fn std_backend_link_read_link_round_trip() {
+        // link() plants a pointer file; read_link() follows it back to the
+        // target — the host-FS pair matching the VFS DT_LINK plant+follow, so a
+        // caller resolving a link sees the same target on both backends.
+        let alias = temp_path("link-alias");
+        let fs = StdFsBackend;
+        fs.link(&alias, "/sessions/sid-xyz").unwrap();
+        assert_eq!(fs.read_link(&alias).unwrap(), "/sessions/sid-xyz");
+        fs.delete(&alias).unwrap();
     }
 
     #[test]

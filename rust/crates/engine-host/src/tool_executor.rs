@@ -579,24 +579,11 @@ impl CliToolExecutor {
             return execute_normally();
         }
 
-        // Truncate the plan to a summary for the confirmation dialog.
-        let plan_summary = {
-            let lines: Vec<&str> = plan_display.lines().collect();
-            let display_limit = 20;
-            let mut summary = lines
-                .iter()
-                .take(display_limit)
-                .copied()
-                .collect::<Vec<_>>()
-                .join("\n");
-            if lines.len() > display_limit {
-                summary.push_str(&format!(
-                    "\n... ({} more lines)",
-                    lines.len() - display_limit
-                ));
-            }
-            summary
-        };
+        // Show the FULL plan in the approval dialog — the user reviews the whole
+        // thing before approving. (The plan is also in scrollback + the plan
+        // file; the dialog must not hide any of it behind a "... N more lines"
+        // summary.)
+        let plan_summary = plan_display.clone();
 
         // Ask the user how to proceed — ACROSS THE SEAM. The pump's
         // QuestionAdapter turns this into a QuestionRequest the renderer answers
@@ -658,20 +645,33 @@ impl CliToolExecutor {
 
         match choice.as_str() {
             "1" => {
-                let result = execute_normally()?;
+                let _ = execute_normally()?;
                 // Store the plan for LiveCli::run_turn to pick up: it clears the
                 // session and re-runs with the plan (the file's content) as the
-                // new prompt.
+                // new prompt. The approval + cleared-context indication is added
+                // to that fresh prompt by the renderer.
                 let plan_for_execution = if plan_text.trim().is_empty() {
                     plan_display
                 } else {
                     plan_text
                 };
                 set_pending_plan_execution(plan_for_execution);
-                Ok(result)
+                Ok(
+                    "The user APPROVED the plan and chose to clear context and execute it. \
+                     The conversation is being reset; you will receive the approved plan as a \
+                     fresh prompt to implement now."
+                        .to_string(),
+                )
             }
             // Keep context & execute: the plan file is written, the model proceeds.
-            "2" => execute_normally(),
+            "2" => {
+                let _ = execute_normally()?;
+                Ok(
+                    "The user APPROVED the plan and chose to keep the current context and execute \
+                     it now. Proceed to implement the approved plan (in the plan file / above)."
+                        .to_string(),
+                )
+            }
             // Exit plan: the plan file is written for reference, but nothing runs.
             "4" => {
                 let _ = execute_normally()?;

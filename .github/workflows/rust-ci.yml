@@ -359,6 +359,14 @@ jobs:
           workspaces: rust -> target
       - name: Compile benches (catches API drift without paying full sample cost)
         run: cargo bench --workspace --no-run
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build release CLI for startup acceptance
+        run: cargo build --release -p rusty-sudocode-cli --bin scode
+      - name: Check complete process startup budget
+        shell: bash
+        run: python ../e2e/startup/run.py --bin target/release/scode${{ runner.os == 'Windows' && '.exe' || '' }} --budget-ms 100
 
   clippy-workspace:
     name: cargo clippy --workspace (${{ matrix.os }})

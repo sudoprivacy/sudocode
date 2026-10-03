@@ -22,6 +22,7 @@ mod input_queue;
 mod render;
 mod render_engine;
 mod repl_ui;
+mod startup;
 
 use engine_acp::AcpError;
 use engine_core::{
@@ -606,9 +607,10 @@ fn run_config_account(
 }
 
 fn main() {
+    startup::initialize();
     // Must run before any output so early raw ANSI escapes render correctly on
     // the Windows console (see `enable_windows_ansi_support`).
-    enable_windows_ansi_support();
+    startup::measure("console", enable_windows_ansi_support);
 
     if let Err(error) = run() {
         // (error handling below — success path returns from main normally)
@@ -849,10 +851,11 @@ fn merge_prompt_with_stdin(prompt: &str, stdin_content: Option<&str>) -> String 
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let (action, prompt_overrides) = parse_args_with_prompt_overrides(&args)?;
+    let (action, prompt_overrides) =
+        startup::measure("arguments", || parse_args_with_prompt_overrides(&args))?;
     // Only writer in the process; a second `set` cannot happen.
     set_cli_prompt_overrides(prompt_overrides);
-    auto_migrate_legacy_config();
+    startup::measure("legacy_config", auto_migrate_legacy_config);
     // Informational commands (help, version, config, login, logout) are
     // dispatched immediately and must never block on a credential check.
     // If an ensure_authenticated() call is ever added below this point it
@@ -890,7 +893,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             date,
             output_format,
         } => print_system_prompt(cwd, date, output_format)?,
-        CliAction::Version { output_format } => print_version(output_format)?,
+        CliAction::Version { output_format } => {
+            startup::measure("version_output", || print_version(output_format))?;
+        }
         CliAction::ResumeSession {
             session_path,
             commands,
@@ -3892,14 +3897,17 @@ impl LiveCli {
         // REPL; `enable_tools=false` is a non-interactive one-shot knob the
         // seam doesn't model (SessionEngine is single-purpose here).
         let _ = enable_tools;
-        let system_prompt = build_system_prompt()?;
+        let system_prompt = startup::measure("system_prompt", build_system_prompt)?;
         let cwd = env::current_dir()?;
-        let sudocode_config = require_sudocode_config_for_cwd(&cwd)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let sudocode_config =
+            startup::measure("auth_config", || require_sudocode_config_for_cwd(&cwd))
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
         // Load model capabilities SSOT (bundled fallback or cached from last refresh).
         let config_home = runtime::default_config_home();
-        runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
+        startup::measure("model_capabilities", || {
+            runtime::model_capabilities::load(&config_home, &runtime::fs_backend::StdFsBackend);
+        });
 
         let auth_resolved = resolve_auth_mode(&model, auth_mode, &sudocode_config)?;
         tools::set_global_auth_mode(auth_resolved);
@@ -3908,21 +3916,23 @@ impl LiveCli {
         // persistence, tracer are all applied inside `SessionEngine::build`).
         let mcp_servers = std::collections::BTreeMap::new();
         let engine = Arc::new(
-            SessionEngine::build(
-                &cwd,
-                &mcp_servers,
-                runtime::SystemPromptOverrides::default(),
-                // The REPL always uses memory; the per-session switch is an
-                // ACP-client knob (`_meta.sudocode.memory`).
-                runtime::memory::MemoryMode::Enabled,
-                system_prompt,
-                model.clone(),
-                Some(model),
-                allowed_tools,
-                Some(permission_mode),
-                reasoning_effort,
-                auth_mode,
-            )
+            startup::measure("engine_build", || {
+                SessionEngine::build(
+                    &cwd,
+                    &mcp_servers,
+                    runtime::SystemPromptOverrides::default(),
+                    // The REPL always uses memory; the per-session switch is an
+                    // ACP-client knob (`_meta.sudocode.memory`).
+                    runtime::memory::MemoryMode::Enabled,
+                    system_prompt,
+                    model.clone(),
+                    Some(model),
+                    allowed_tools,
+                    Some(permission_mode),
+                    reasoning_effort,
+                    auth_mode,
+                )
+            })
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?,
         );
         let engine_handle = EngineSession::spawn(engine.clone() as Arc<dyn EngineDelegate>);

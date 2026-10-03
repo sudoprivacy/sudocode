@@ -229,6 +229,9 @@ jobs:
       - build-linux-x64
       - build
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-publication
+      cancel-in-progress: false
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -268,21 +271,46 @@ jobs:
             echo "name=$tag" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload release assets
+      - name: Prepare release publication
+        id: publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          # Never hide an already public release on a recovery run.
+          draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null || echo true)
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+          mirror=false
+          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ "$draft" == false ]]; then
+              published=$(mktemp -d)
+              gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS.txt --dir "$published"
+              cmp dist/SHA256SUMS.txt "$published/SHA256SUMS.txt" || { echo 'Published stable assets differ; rerun the failed publication job with its original artifacts'; exit 1; }
+            fi
+            if [[ -n "$TENCENT_SECRET_ID" || -n "$TENCENT_SECRET_KEY" ]]; then
+              [[ -n "$TENCENT_SECRET_ID" && -n "$TENCENT_SECRET_KEY" ]] || { echo 'Incomplete COS credentials'; exit 1; }
+              mirror=true
+            fi
+          fi
+          echo "mirror=$mirror" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release assets while pending
+        if: steps.publication.outputs.draft == 'true' || steps.meta.outputs.prerelease == 'true'
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.meta.outputs.name }}
           prerelease: ${{ steps.meta.outputs.prerelease }}
+          draft: ${{ steps.publication.outputs.draft }}
           files: |
             dist/scode-*
             dist/scode_*.deb
             dist/SHA256SUMS.txt
           fail_on_unmatched_files: true
 
-      - name: Upload to Tencent COS
-        # `release/latest/` mirrors the newest *stable* only — nightly and RC
-        # prereleases stay on GitHub.
-        if: github.ref_name != 'nightly' && !contains(github.ref_name, '-') && env.TENCENT_SECRET_ID != '' && env.TENCENT_SECRET_KEY != ''
+      - name: Stage and verify immutable Tencent COS release
+        if: steps.publication.outputs.mirror == 'true'
         env:
           TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
           TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
@@ -294,12 +322,14 @@ jobs:
             -s "$TENCENT_SECRET_KEY" \
             -b sudowork-release-1309794936 \
             -e cos.accelerate.myqcloud.com
-          for file in dist/scode-*.tar.gz dist/scode-*.zip dist/scode_*.deb; do
-            [ -f "$file" ] || continue
-            filename=$(basename "$file")
-            echo "Uploading $filename"
-            coscmd upload "$file" "sudocode/release/latest/$filename"
-          done
-          coscmd upload install.sh "sudocode/release/latest/install.sh"
-          coscmd upload dist/SHA256SUMS.txt "sudocode/release/latest/SHA256SUMS.txt"
-          echo "Done: https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest/"
+          python3 scripts/publish_release_mirror.py stage --version "$GITHUB_REF_NAME"
+
+      - name: Finalize GitHub release
+        if: steps.publication.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+
+      - name: Promote verified mirror version
+        if: steps.publication.outputs.mirror == 'true'
+        run: python3 scripts/publish_release_mirror.py promote --version "$GITHUB_REF_NAME"

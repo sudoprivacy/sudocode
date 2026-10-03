@@ -10,6 +10,8 @@
 #                       Use this to point at a mirror (e.g. Tencent COS) for
 #                       faster downloads in China. The checksum file is always
 #                       fetched from GitHub Releases for security.
+#                       A /latest URL resolves version.txt once and downloads
+#                       from the immutable sibling /vX.Y.Z directory.
 #                       Example: https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest
 #   NO_COLOR            Disable ANSI color output when set.
 #
@@ -253,6 +255,27 @@ resolve_latest_version() {
     printf '%s' "$_v"
 }
 
+MIRROR_BASE="${SCODE_MIRROR:-}"
+MIRROR_BASE="${MIRROR_BASE%/}"
+case "$MIRROR_BASE" in
+    */latest)
+        # Resolve a single commit point. During publication/recovery this can
+        # remain at the previous complete release while GitHub has a newer one.
+        if [ -z "$VERSION" ]; then
+            mirror_version=$(http_get "$MIRROR_BASE/version.txt" 2>/dev/null || true)
+            if printf '%s\n' "$mirror_version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+                VERSION="$mirror_version"
+            else
+                warn "mirror has no valid version pointer; using GitHub"
+                MIRROR_BASE=""
+            fi
+        fi
+        if [ -n "$MIRROR_BASE" ]; then
+            MIRROR_BASE="${MIRROR_BASE%/latest}/$VERSION"
+        fi
+        ;;
+esac
+
 if [ -z "$VERSION" ]; then
     info "resolving latest release from ${API_BASE}/latest"
     VERSION=$(resolve_latest_version)
@@ -272,14 +295,14 @@ ARCHIVE="scode-${TARGET}.tar.gz"
 # Checksums always come from GitHub Releases (authoritative source).
 CHECKSUM_URL="${DOWNLOAD_BASE}/${VERSION}/${CHECKSUM_FILE}"
 # Archive may come from a mirror when SCODE_MIRROR is set.
-if [ -n "${SCODE_MIRROR:-}" ]; then
-    ARCHIVE_URL="${SCODE_MIRROR%/}/${ARCHIVE}"
+if [ -n "$MIRROR_BASE" ]; then
+    ARCHIVE_URL="${MIRROR_BASE}/${ARCHIVE}"
 else
     ARCHIVE_URL="${DOWNLOAD_BASE}/${VERSION}/${ARCHIVE}"
 fi
 
 info "target: ${C_BOLD}${TARGET}${C_RESET}"
-[ -n "${SCODE_MIRROR:-}" ] && info "mirror: ${C_BOLD}${SCODE_MIRROR%/}${C_RESET}"
+[ -n "$MIRROR_BASE" ] && info "mirror: ${C_BOLD}${MIRROR_BASE}${C_RESET}"
 if [ "$INSTALL_DIR_FORCED" -eq 1 ]; then
     info "install dir: ${INSTALL_DIR}"
 else

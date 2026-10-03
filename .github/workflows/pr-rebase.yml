@@ -1,0 +1,31 @@
+name: PR merge hygiene
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-rebase-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  rebase:
+    name: Block Merge Commits in PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Inspect the PR head, not GitHub's synthetic test merge commit.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch current main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - name: Require a clean rebase
+        run: python3 .github/scripts/check_pr_rebase.py origin/main HEAD
+      - name: Exercise real Git histories
+        run: python3 e2e/pr-rebase/run.py

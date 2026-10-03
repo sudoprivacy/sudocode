@@ -547,7 +547,12 @@ Once approved, a maintainer merges with **`--merge`** (not squash)
 to preserve the feature-branch commit history. The "Block Merge
 Commits in PR" CI check requires you to **rebase** (not merge) when
 syncing your feature branch onto the latest `main` —
-`git rebase main` + `git push --force-with-lease` is the safe form.
+`git fetch origin`, `git rebase origin/main`, then
+`git push --force-with-lease` is the safe form. The required check
+examines the actual PR head, rejects PR-only merge commits and new
+conflict markers, and runs for every PR regardless of changed paths.
+Strict branch protection also requires the PR to remain up to date
+and pass the required CI checks before merging, including for admins.
 
 ## Reporting bugs & requesting features
 

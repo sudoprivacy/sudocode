@@ -1126,7 +1126,7 @@ dependencies = [
 [[package]]
 name = "crossterm"
 version = "0.29.0"
-source = "git+https://github.com/sudoprivacy/crossterm.git?rev=601066983ccf8c0962ddb043208d7ed0b8182908#601066983ccf8c0962ddb043208d7ed0b8182908"
+source = "git+https://github.com/sudoprivacy/crossterm.git?rev=7fe30871bcf73234eb1b1977155f287543b3539b#7fe30871bcf73234eb1b1977155f287543b3539b"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm_winapi",
@@ -2423,7 +2423,7 @@ dependencies = [
 [[package]]
 name = "iocraft"
 version = "0.8.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?rev=472964d0a4894269c56daad78392ac3bb34222e6#472964d0a4894269c56daad78392ac3bb34222e6"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=2939c52fdd662273f91e54e10e9e25eea27f030a#2939c52fdd662273f91e54e10e9e25eea27f030a"
 dependencies = [
  "bitflags 2.13.1",
  "crossterm 0.29.0",
@@ -2438,7 +2438,7 @@ dependencies = [
 [[package]]
 name = "iocraft-macros"
 version = "0.2.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?rev=472964d0a4894269c56daad78392ac3bb34222e6#472964d0a4894269c56daad78392ac3bb34222e6"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=2939c52fdd662273f91e54e10e9e25eea27f030a#2939c52fdd662273f91e54e10e9e25eea27f030a"
 dependencies = [
  "proc-macro2",
  "quote",

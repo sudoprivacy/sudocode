@@ -1,0 +1,241 @@
+{
+  "revision": "b741e480e203f037ca726bc2a76d99a8e8668e66",
+  "source": "openai/codex",
+  "themes": [
+    {
+      "samples": [
+        {
+          "code": "echo \"CODEX_SINGLE_LINE_OUTPUT\"",
+          "language": "bash",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(137, 180, 250)",
+                "text": "echo"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "CODEX_SINGLE_LINE_OUTPUT"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              }
+            ]
+          ]
+        },
+        {
+          "code": "# Shell colors\necho \"CODEX_SHELL_OUTPUT\"\necho \"MULTILINE\nCONTINUATION\"",
+          "language": "bash",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "#"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": " Shell colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(137, 180, 250)",
+                "text": "echo"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "CODEX_SHELL_OUTPUT"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(137, 180, 250)",
+                "text": "echo"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "MULTILINE"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "CONTINUATION"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              }
+            ]
+          ]
+        }
+      ],
+      "theme": "catppuccin-mocha"
+    },
+    {
+      "samples": [
+        {
+          "code": "echo \"CODEX_SINGLE_LINE_OUTPUT\"",
+          "language": "bash",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(30, 102, 245)",
+                "text": "echo"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "CODEX_SINGLE_LINE_OUTPUT"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              }
+            ]
+          ]
+        },
+        {
+          "code": "# Shell colors\necho \"CODEX_SHELL_OUTPUT\"\necho \"MULTILINE\nCONTINUATION\"",
+          "language": "bash",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "#"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": " Shell colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(30, 102, 245)",
+                "text": "echo"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "CODEX_SHELL_OUTPUT"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(30, 102, 245)",
+                "text": "echo"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "MULTILINE"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "CONTINUATION"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              }
+            ]
+          ]
+        }
+      ],
+      "theme": "catppuccin-latte"
+    }
+  ],
+  "two_face": "0.5.1"
+}

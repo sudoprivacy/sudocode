@@ -1140,7 +1140,14 @@ impl TerminalRenderer {
             return code.to_string();
         };
         let mut output = String::new();
-        highlighted.write_ansi(0..highlighted.text.len(), &mut output);
+        let mut offset = 0;
+        // Each source line must carry its own style escapes: tool cards add
+        // frame/prompt prefixes with resets between lines after highlighting.
+        for line in highlighted.text.split_inclusive('\n') {
+            let end = offset + line.len();
+            highlighted.write_ansi(offset..end, &mut output);
+            offset = end;
+        }
         output
     }
 

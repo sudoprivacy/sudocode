@@ -416,10 +416,24 @@ fn diff_roundtrip(light: bool) {
         "input during colored preview",
     );
     assert_cell(&sess, "draft-copy-test", "Default", "Default");
+    // Resize, input and async wakeups can share a native readiness batch.
+    // Each key must appear without a second key waking a stalled reader.
+    let mut draft = String::from("draft-copy-test");
+    for (width, key) in [(94, "1"), (86, "2"), (100, "3")] {
+        sess.resize(60, width).unwrap();
+        sess.send(key).unwrap();
+        draft.push_str(key);
+        common::expect_input_line(
+            &sess,
+            &draft,
+            common::DEFAULT_TIMEOUT,
+            "input immediately after preview resize",
+        );
+    }
     sess.resize(60, 78).unwrap();
     common::expect_screen(
         &sess,
-        |s| s.contains("NEW_MARKER") && s.contains("draft-copy-test"),
+        |s| s.contains("NEW_MARKER") && s.contains(&draft),
         common::DEFAULT_TIMEOUT,
         "reflowed preview",
     );
@@ -471,4 +485,158 @@ fn dark_diff_keeps_backgrounds_through_preview_resize_and_scrollback() {
 #[test]
 fn light_diff_keeps_backgrounds_through_preview_resize_and_scrollback() {
     diff_roundtrip(true);
+}
+
+fn expect_bash_sample(sess: &PtySession, sample: &Value, prefix: &str, no_color: bool) {
+    common::expect_screen(
+        sess,
+        |_| {
+            sess.render(|screen| {
+                let raw = screen.raw();
+                let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+                for spans in sample["rows"].as_array().unwrap() {
+                    let spans = spans.as_array().unwrap();
+                    let source: String = spans
+                        .iter()
+                        .map(|span| span["text"].as_str().unwrap())
+                        .collect();
+                    let needle = format!("{prefix}{source}");
+                    let Some(row) = rows.iter().rposition(|s| s.contains(&needle)) else {
+                        return false;
+                    };
+                    let start = rows[row].find(&needle).unwrap() + prefix.len();
+                    let mut col = unicode_width::UnicodeWidthStr::width(&rows[row][..start]);
+                    for span in spans {
+                        for ch in span["text"].as_str().unwrap().chars() {
+                            let cell = raw
+                                .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
+                                .unwrap();
+                            let foreground = if no_color {
+                                "Default"
+                            } else {
+                                span["foreground"].as_str().unwrap()
+                            };
+                            if (!ch.is_whitespace()
+                                && format!("{:?}", cell.fgcolor()) != foreground)
+                                || format!("{:?}", cell.bgcolor()) != "Default"
+                                || cell.bold() != (!no_color && span["bold"].as_bool().unwrap())
+                                || cell.italic()
+                                || cell.underline()
+                            {
+                                return false;
+                            }
+                            col += 1;
+                        }
+                    }
+                }
+                true
+            })
+        },
+        common::DEFAULT_TIMEOUT,
+        "Bash command cells match original Codex colors",
+    );
+}
+
+fn bash_roundtrip(light: bool, no_color: bool) {
+    use mock_anthropic_service::{CODEX_BASH_MULTI, CODEX_BASH_SINGLE};
+    let reference: Value =
+        serde_json::from_str(include_str!("fixtures/codex_bash_colors.json")).unwrap();
+    let samples = reference["themes"][usize::from(light)]["samples"]
+        .as_array()
+        .unwrap();
+    assert_eq!(samples[0]["code"], CODEX_BASH_SINGLE);
+    assert_eq!(samples[1]["code"], CODEX_BASH_MULTI);
+    let env = TestEnv::new("codex-bash");
+    let config = env.workspace_root().join(".nexus/sudocode");
+    std::fs::create_dir_all(&config).unwrap();
+    let hook = if cfg!(windows) {
+        r#"if /I "%HOOK_TOOL_NAME%"=="bash" (for /L %i in (1,1,60) do @if not exist color-bash-release (ping -n 2 127.0.0.1 >nul))"#
+    } else {
+        r#"case "$HOOK_TOOL_NAME" in bash|Bash) while [ ! -f color-bash-release ]; do sleep 0.05; done;; esac"#
+    };
+    std::fs::write(
+        config.join("settings.json"),
+        serde_json::json!({"hooks":{"PreToolUse":[hook]}}).to_string(),
+    )
+    .unwrap();
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("COLORFGBG", if light { "0;15" } else { "15;0" }),
+            ("NO_COLOR", if no_color { "1" } else { "" }),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ],
+    );
+    sess.resize(80, 100).unwrap();
+    sess.expect("❯").unwrap();
+    let prompt = env.prompt(
+        &format!(
+            "Run these two scripts with Bash, in separate calls and exactly as written. First:\n{CODEX_BASH_SINGLE}\nSecond:\n{CODEX_BASH_MULTI}\nThen say only Color bash done."
+        ),
+        "codex_bash_showcase",
+    );
+    sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains("Pasted") || s.contains("PARITY_SCENARIO:"),
+        common::DEFAULT_TIMEOUT,
+        "Bash prompt pasted",
+    );
+    sess.send("\r").unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains(&format!("Bash({CODEX_BASH_SINGLE})")),
+        common::LIVE_TURN_BUDGET,
+        "running Bash header",
+    );
+    expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
+    sess.send("\x1b[200~draft '$HOME' && echo hi\x1b[201~")
+        .unwrap();
+    common::expect_input_line(
+        &sess,
+        "draft '$HOME' && echo hi",
+        common::DEFAULT_TIMEOUT,
+        "paste beside highlighted running command",
+    );
+    assert_cell(&sess, "draft '$HOME' && echo hi", "Default", "Default");
+    sess.resize(80, 78).unwrap();
+    expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
+    sess.send("\x15").unwrap();
+    common::expect_screen(
+        &sess,
+        |s| common::input_line_of(s).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "clear Bash draft while the spinner remains active",
+    );
+    std::fs::write(env.workspace_root().join("color-bash-release"), "release").unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains("Color bash done.") && s.contains("ctx "),
+        common::LIVE_TURN_BUDGET,
+        "completed Bash calls",
+    );
+    expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
+    expect_bash_sample(&sess, &samples[1], "│ $ ", no_color);
+    // Actual process output stays plain; command styles cannot bleed into it.
+    for output in ["CODEX_SHELL_OUTPUT", "MULTILINE", "CONTINUATION"] {
+        assert_cell(&sess, output, "Default", "Default");
+    }
+    finish(&mut sess);
+}
+
+#[test]
+fn dark_bash_commands_match_codex_in_preview_and_scrollback() {
+    bash_roundtrip(false, false);
+}
+
+#[test]
+fn light_bash_commands_match_codex_in_preview_and_scrollback() {
+    bash_roundtrip(true, false);
+}
+
+#[test]
+fn no_color_bash_commands_preserve_plain_source_and_output() {
+    bash_roundtrip(false, true);
 }

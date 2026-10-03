@@ -148,7 +148,9 @@ health indicators keep their semantic colors. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
 
 Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
-themes, including inline code, language grammars, and added/removed diff fills.
+themes, including inline code, Bash command previews, language grammars, and
+added/removed diff fills. Bash commands are highlighted in both running and
+completed cards; stdout/stderr retain the producing program’s own colors.
 The default REPL queries the terminal palette once at startup, with a shared
 250 ms deadline and preservation of queued keys and pastes. Native Windows
 console windows can also supply their color table; ConPTY does not use its

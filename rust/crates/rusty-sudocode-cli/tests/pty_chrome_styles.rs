@@ -252,7 +252,7 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
 
 #[test]
 fn todo_summary_scopes_every_count_and_label_in_both_themes() {
-    for (background, muted) in [("15;0", "Idx(243)"), ("0;15", "Idx(245)")] {
+    for (background, muted) in [("15;0", "Idx(247)"), ("0;15", "Idx(241)")] {
         for statuses in [
             vec!["completed"],
             vec!["completed", "in_progress", "pending"],
@@ -305,8 +305,8 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
     // Exercise both palettes and the warning/error -> muted transition as well
     // as the healthy-cache -> muted transition.
     for (background, muted, hit_color, error_color) in [
-        ("15;0", "Idx(243)", "Idx(220)", "Idx(9)"),
-        ("0;15", "Idx(245)", "Idx(130)", "Idx(1)"),
+        ("15;0", "Idx(247)", "Idx(220)", "Idx(9)"),
+        ("0;15", "Idx(241)", "Idx(130)", "Idx(1)"),
     ] {
         for (read, creation, hit, write) in
             [(7500, 2500, "⚡75%", "✎25%"), (9000, 1000, "⚡90%", "✎10%")]

@@ -8,9 +8,12 @@ use crossterm::style::{Color, Stylize};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Style as SyntectStyle, Theme, ThemeSet};
+use syntect::highlighting::{Style as SyntectStyle, Theme};
 use syntect::parsing::SyntaxSet;
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
+
+mod color_theme;
+pub use color_theme::{theme, ColorTheme};
 
 mod styled_line;
 pub(crate) mod styled_text;
@@ -109,174 +112,6 @@ fn ranges_to_plain(ranges: &[(SyntectStyle, &str)]) -> String {
     out
 }
 
-/// Semantic color theme — coder picks a scenario token, never a raw color.
-///
-/// Two built-in palettes: `dark()` (default) and `light()` for light
-/// terminal backgrounds.  All rendering code references `theme.xxx`;
-/// switching palette changes every color at once.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ColorTheme {
-    // ── Semantic tokens ──────────────────────────────────────────────
-    /// Primary emphasis — prompt glyph, H1 heading, box title.
-    pub primary: Color,
-    /// Success — tool done, write result, spinner complete.
-    pub success: Color,
-    /// Error — failed, denied, cancelled.
-    pub error: Color,
-    /// Warning — permission prompt title, edit label, stalled spinner.
-    pub warning: Color,
-    /// Info — spinner active, thinking indicator.
-    pub info: Color,
-    /// Muted — footer hints, dim text, labels, separators.
-    pub muted: Color,
-    /// Emphasis — italic text in markdown.
-    pub emphasis: Color,
-    /// Strong — bold text in markdown.
-    pub strong: Color,
-    /// Link — hyperlinks.
-    pub link: Color,
-    /// Inline code — backtick spans.
-    pub code: Color,
-    /// Code block background (256-color index).
-    pub code_bg: u8,
-    /// Border — box/table/code fence chrome.
-    pub border: Color,
-    /// Diff added line.
-    pub diff_added: Color,
-    /// Diff removed line.
-    pub diff_removed: Color,
-    /// Hook feedback text.
-    pub hook_feedback: Color,
-    /// Logo primary color.
-    pub logo: Color,
-    /// Logo accent ("Code" wordmark).
-    pub logo_accent: Color,
-    /// Blockquote prefix.
-    pub quote: Color,
-    /// H2 heading.
-    pub heading_h2: Color,
-    /// H3 heading.
-    pub heading_h3: Color,
-    /// H4+ heading.
-    pub heading_h4: Color,
-}
-
-impl ColorTheme {
-    // ── Sudoprivacy VI palette ─────────────────────────────────────
-    //
-    // Brand colors (from sudowork.sudoprivacy.com):
-    //   amber  #F59E0B  → ANSI 214  primary brand touch-point
-    //   teal   #0D9488  → ANSI 36   secondary brand touch-point
-    //
-    // Semantic colors (industry standard, not brand-specific):
-    //   success = green, error = red, diff = green/red
-    //
-    // Derived:
-    //   warning = yellow/ochre; links = blue; inline code = violet
-    //   muted    = VI grey #6b7280     → ANSI 243
-    //   border   = VI border #E5E7EB   → ANSI 248
-
-    /// Dark terminal background (default).
-    #[must_use]
-    pub fn dark() -> Self {
-        Self {
-            primary: Color::AnsiValue(214),       // amber #F59E0B
-            success: Color::Green,                // semantic
-            error: Color::Red,                    // semantic
-            warning: Color::AnsiValue(220),       // yellow, distinct from info/success
-            info: Color::AnsiValue(36),           // teal #0D9488
-            muted: Color::AnsiValue(243),         // grey #767676
-            emphasis: Color::AnsiValue(214),      // amber (italic text)
-            strong: Color::White,                 // bold text
-            link: Color::AnsiValue(75),           // blue
-            code: Color::AnsiValue(177),          // violet
-            code_bg: 236,                         // dark grey bg
-            border: Color::AnsiValue(248),        // light grey
-            diff_added: Color::AnsiValue(70),     // semantic green
-            diff_removed: Color::AnsiValue(203),  // semantic red
-            hook_feedback: Color::AnsiValue(214), // amber
-            logo: Color::AnsiValue(214),          // amber
-            logo_accent: Color::AnsiValue(36),    // teal
-            quote: Color::AnsiValue(243),         // grey
-            heading_h2: Color::White,
-            heading_h3: Color::AnsiValue(36),  // teal
-            heading_h4: Color::AnsiValue(243), // grey
-        }
-    }
-
-    /// Light terminal background.
-    #[must_use]
-    pub fn light() -> Self {
-        Self {
-            primary: Color::AnsiValue(172),       // darker amber #D97706
-            success: Color::DarkGreen,            // semantic
-            error: Color::DarkRed,                // semantic
-            warning: Color::AnsiValue(130),       // ochre on a light background
-            info: Color::AnsiValue(30),           // dark teal
-            muted: Color::AnsiValue(245),         // medium grey
-            emphasis: Color::AnsiValue(172),      // darker amber
-            strong: Color::Black,                 // bold text
-            link: Color::AnsiValue(25),           // dark blue
-            code: Color::AnsiValue(90),           // dark violet
-            code_bg: 253,                         // light grey bg
-            border: Color::AnsiValue(250),        // light grey
-            diff_added: Color::AnsiValue(22),     // semantic dark green
-            diff_removed: Color::AnsiValue(124),  // semantic dark red
-            hook_feedback: Color::AnsiValue(172), // darker amber
-            logo: Color::AnsiValue(172),          // darker amber
-            logo_accent: Color::AnsiValue(30),    // dark teal
-            quote: Color::AnsiValue(245),         // grey
-            heading_h2: Color::Black,
-            heading_h3: Color::AnsiValue(30),  // dark teal
-            heading_h4: Color::AnsiValue(245), // grey
-        }
-    }
-
-    /// Detect terminal background and pick the appropriate palette.
-    #[must_use]
-    pub fn detect() -> Self {
-        if Self::is_light_background() {
-            Self::light()
-        } else {
-            Self::dark()
-        }
-    }
-
-    /// ANSI escape for the border color.
-    #[inline]
-    pub fn border_fg(&self) -> String {
-        ansi_fg(self.border)
-    }
-
-    /// ANSI escape for the muted color.
-    #[inline]
-    pub fn muted_fg(&self) -> String {
-        ansi_fg(self.muted)
-    }
-
-    /// ANSI escape for the code block background.
-    #[inline]
-    pub fn code_bg_seq(&self) -> String {
-        format!("\x1b[48;5;{}m", self.code_bg)
-    }
-
-    fn is_light_background() -> bool {
-        // Check COLORFGBG (format: "fg;bg", light if bg >= 8).
-        if let Ok(val) = std::env::var("COLORFGBG") {
-            if let Some(bg) = val.rsplit(';').next().and_then(|s| s.parse::<u8>().ok()) {
-                return bg >= 8 && bg != 8; // 8 = dark grey, not light
-            }
-        }
-        false
-    }
-}
-
-impl Default for ColorTheme {
-    fn default() -> Self {
-        Self::detect()
-    }
-}
-
 /// Convert a `Color` to its ANSI foreground escape sequence.
 #[inline]
 pub fn ansi_fg(color: Color) -> String {
@@ -324,15 +159,6 @@ pub const PROMPT_GLYPH: &str = "\u{276f}";
 /// The prompt glyph followed by one space — the exact prefix a prompt line
 /// starts with.
 pub const PROMPT_PREFIX: &str = "\u{276f} ";
-
-/// Process-wide theme, detected once at startup.
-static THEME: std::sync::OnceLock<ColorTheme> = std::sync::OnceLock::new();
-
-/// Get the global color theme (auto-detected on first call).
-#[inline]
-pub fn theme() -> &'static ColorTheme {
-    THEME.get_or_init(ColorTheme::detect)
-}
 
 /// Shared spinner reference for streaming and tool execution layers.
 /// Clone is cheap — `ProgressBar` is internally `Arc`-wrapped.
@@ -835,10 +661,7 @@ fn syntax_resources() -> &'static SyntaxResources {
     static RESOURCES: std::sync::OnceLock<SyntaxResources> = std::sync::OnceLock::new();
     RESOURCES.get_or_init(|| SyntaxResources {
         syntax_set: SyntaxSet::load_defaults_newlines(),
-        theme: ThemeSet::load_defaults()
-            .themes
-            .remove("base16-ocean.dark")
-            .unwrap_or_default(),
+        theme: theme().syntax.to_syntect(theme().code_bg),
     })
 }
 
@@ -851,7 +674,7 @@ pub struct TerminalRenderer {
 impl Default for TerminalRenderer {
     fn default() -> Self {
         Self {
-            color_theme: ColorTheme::default(),
+            color_theme: *theme(),
             color_support: ColorSupport::detect(),
         }
     }
@@ -1341,7 +1164,7 @@ impl TerminalRenderer {
         ) {
             return line.to_string();
         }
-        apply_code_block_background(line)
+        apply_code_block_background(line, self.color_theme.code_bg)
     }
 
     pub fn stream_markdown(&self, markdown: &str, out: &mut impl Write) -> io::Result<()> {
@@ -1381,8 +1204,7 @@ impl MarkdownStreamState {
     }
 }
 
-fn apply_code_block_background(line: &str) -> String {
-    let bg = theme().code_bg;
+fn apply_code_block_background(line: &str, bg: u8) -> String {
     let trimmed = line.trim_end_matches('\n');
     let trailing_newline = if trimmed.len() == line.len() {
         ""

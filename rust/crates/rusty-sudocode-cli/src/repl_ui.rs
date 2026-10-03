@@ -561,8 +561,18 @@ impl FuzzySelectState {
 #[derive(Clone, Debug)]
 pub struct ToolCard {
     pub id: String,
-    pub name: String,
-    pub input: String,
+    content: Arc<crate::cli::format::ToolCardContent>,
+}
+
+impl ToolCard {
+    fn new(id: String, name: &str, input: &str) -> Self {
+        Self {
+            id,
+            // Parsing and syntax highlighting happen once per tool event,
+            // never on spinner ticks or keystrokes. Layout still adapts on resize.
+            content: Arc::new(crate::cli::format::tool_call_start_content(name, input)),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1288,11 +1298,13 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
             }
             PendingItem::Tool(card) => {
                 tools_total += 1;
-                let card_lines: Vec<String> =
-                    crate::cli::format::format_tool_call_start(&card.name, &card.input)
-                        .lines()
-                        .map(str::to_string)
-                        .collect();
+                let card_lines: Vec<String> = crate::cli::format::render_tool_card(
+                    &card.content,
+                    crate::cli::format::ToolStatus::Running,
+                )
+                .lines()
+                .map(str::to_string)
+                .collect();
                 // Reserve one line for the overflow marker when more tools than
                 // fit remain. Keep whole cards.
                 let fits = tool_lines_used + card_lines.len() <= tool_budget.saturating_sub(1)
@@ -1651,7 +1663,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Ok(UiCommand::ToolStarted { id, name, input }) => {
                             if let Ok(mut pending) = pending_for_future.lock() {
-                                pending.push(PendingItem::Tool(ToolCard { id, name, input }));
+                                pending.push(PendingItem::Tool(ToolCard::new(id, &name, &input)));
                             }
                         }
                         Ok(UiCommand::ToolFinished { id }) => {
@@ -2540,11 +2552,7 @@ mod tests {
     use super::*;
 
     fn tool_card(id: &str, name: &str) -> ToolCard {
-        ToolCard {
-            id: id.to_string(),
-            name: name.to_string(),
-            input: "{}".to_string(),
-        }
+        ToolCard::new(id.to_string(), name, "{}")
     }
 
     fn strip_ansi(s: &str) -> String {

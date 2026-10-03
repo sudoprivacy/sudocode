@@ -133,12 +133,12 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
 
 #[test]
 fn unicode_columns_and_semantic_colors_dark() {
-    showcase("15;0", "Idx(75)", "Idx(177)");
+    showcase("15;0", "Idx(75)", "Rgb(166, 227, 161)");
 }
 
 #[test]
 fn unicode_columns_and_semantic_colors_light() {
-    showcase("0;15", "Idx(25)", "Idx(90)");
+    showcase("0;15", "Idx(25)", "Rgb(64, 160, 43)");
 }
 
 #[test]
@@ -252,7 +252,12 @@ fn measure_keys(sess: &mut PtySession, phase: &str) {
         samples[56]
     );
     sess.send("\x15").expect("clear draft");
-    common::expect_input_line_cleared(sess, common::DEFAULT_TIMEOUT, "draft cleared");
+    common::expect_screen(
+        sess,
+        |s| common::input_line_of(s).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "draft cleared",
+    );
 }
 
 #[cfg(unix)]
@@ -275,3 +280,68 @@ fn report_resources(phase: &str) {
 
 #[cfg(not(unix))]
 fn report_resources(_phase: &str) {}
+
+#[test]
+#[ignore = "manual release A/B measurement"]
+fn release_pending_diff_measurement() {
+    let env = TestEnv::new("diff-measurement");
+    std::fs::write(
+        env.workspace_root().join("colors.rs"),
+        format!(
+            "fn main() {{\n{}\n}}\n",
+            mock_anthropic_service::CODEX_DIFF_OLD
+        ),
+    )
+    .unwrap();
+    let config = env.workspace_root().join(".nexus/sudocode");
+    std::fs::create_dir_all(&config).unwrap();
+    let hook = if cfg!(windows) {
+        r#"if /I "%HOOK_TOOL_NAME%"=="edit_file" (for /L %i in (1,1,60) do @if not exist color-diff-release (ping -n 2 127.0.0.1 >nul))"#
+    } else {
+        r#"case "$HOOK_TOOL_NAME" in edit_file|Edit) while [ ! -f color-diff-release ]; do sleep 0.05; done;; esac"#
+    };
+    std::fs::write(
+        config.join("settings.json"),
+        serde_json::json!({"hooks":{"PreToolUse":[hook]}}).to_string(),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("COLORFGBG", "15;0"),
+            ("NO_COLOR", ""),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ],
+    );
+    sess.resize(50, 120).unwrap();
+    sess.expect("❯").unwrap();
+    println!(
+        "RENDER_STARTUP no_palette_reply_ms={:.3}",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    let prompt = env.prompt(
+        "Replace old_message with new_message in colors.rs and say Color diff done.",
+        "codex_diff_showcase",
+    );
+    sess.send(&format!("{prompt}\r")).unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains("Editing colors.rs") && s.contains("NEW_MARKER"),
+        common::LIVE_TURN_BUDGET,
+        "pending diff",
+    );
+    report_resources("pending_diff_before_input");
+    measure_keys(&mut sess, "pending_diff");
+    report_resources("pending_diff_after_input");
+    std::fs::write(env.workspace_root().join("color-diff-release"), "release").unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains("Color diff done.") && s.contains("ctx "),
+        common::LIVE_TURN_BUDGET,
+        "edit finished",
+    );
+    finish(&mut sess);
+}

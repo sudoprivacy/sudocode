@@ -217,6 +217,8 @@ enum Scenario {
     MarkdownRenderingShowcase,
     UnicodeRenderingShowcase,
     SyntaxHighlightShowcase,
+    CodexColorsShowcase,
+    CodexDiffShowcase,
     SleepOverMaxRoundtrip,
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
@@ -356,6 +358,8 @@ impl Scenario {
             "markdown_rendering_showcase" => Some(Self::MarkdownRenderingShowcase),
             "unicode_rendering_showcase" => Some(Self::UnicodeRenderingShowcase),
             "syntax_highlight_showcase" => Some(Self::SyntaxHighlightShowcase),
+            "codex_colors_showcase" => Some(Self::CodexColorsShowcase),
+            "codex_diff_showcase" => Some(Self::CodexDiffShowcase),
             "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
             "fork_subagent_recursion_guard_roundtrip" => {
                 Some(Self::ForkSubagentRecursionGuardRoundtrip)
@@ -426,6 +430,8 @@ impl Scenario {
             Self::MarkdownRenderingShowcase => "markdown_rendering_showcase",
             Self::UnicodeRenderingShowcase => "unicode_rendering_showcase",
             Self::SyntaxHighlightShowcase => "syntax_highlight_showcase",
+            Self::CodexColorsShowcase => "codex_colors_showcase",
+            Self::CodexDiffShowcase => "codex_diff_showcase",
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
             Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
@@ -1287,6 +1293,18 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(MARKDOWN_SHOWCASE_DOC),
         Scenario::UnicodeRenderingShowcase => markdown_showcase_sse(UNICODE_SHOWCASE_DOC),
         Scenario::SyntaxHighlightShowcase => markdown_showcase_sse(SYNTAX_SHOWCASE_DOC),
+        Scenario::CodexColorsShowcase => markdown_showcase_sse(CODEX_COLORS_SHOWCASE_DOC),
+        Scenario::CodexDiffShowcase => match latest_tool_result(request) {
+            Some(_) => final_text_sse("Color diff done."),
+            None => tool_use_sse(
+                "toolu_color_diff",
+                "edit_file",
+                &[&json!({
+                    "path": "colors.rs", "old_string": CODEX_DIFF_OLD, "new_string": CODEX_DIFF_NEW
+                })
+                .to_string()],
+            ),
+        },
         Scenario::ThinkingThenText => thinking_then_text_sse(),
         Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
             Some((output, is_error)) => {
@@ -1843,6 +1861,20 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::SyntaxHighlightShowcase => {
             text_message_response("msg_syntax_showcase", SYNTAX_SHOWCASE_DOC)
         }
+        Scenario::CodexColorsShowcase => {
+            text_message_response("msg_codex_colors", CODEX_COLORS_SHOWCASE_DOC)
+        }
+        Scenario::CodexDiffShowcase => match latest_tool_result(request) {
+            Some(_) => text_message_response("msg_color_diff_done", "Color diff done."),
+            None => tool_message_response(
+                "msg_color_diff",
+                "toolu_color_diff",
+                "edit_file",
+                json!({
+                    "path": "colors.rs", "old_string": CODEX_DIFF_OLD, "new_string": CODEX_DIFF_NEW
+                }),
+            ),
+        },
         Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
             text_message_response(
                 "msg_streaming_text",
@@ -2487,6 +2519,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
         Scenario::UnicodeRenderingShowcase => "req_unicode_showcase",
         Scenario::SyntaxHighlightShowcase => "req_syntax_showcase",
+        Scenario::CodexColorsShowcase => "req_codex_colors",
+        Scenario::CodexDiffShowcase => "req_codex_diff",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
         Scenario::SkillReadRoundtrip => "req_skill_read_roundtrip",
         Scenario::ImageReadRoundtrip => "req_image_read_roundtrip",
@@ -2672,6 +2706,9 @@ pub const MARKDOWN_SHOWCASE_DOC: &str = "Intro:\n- alpha\n- beta\n\n## Section\n
 
 /// Deterministic terminal-column and semantic-style fixture for PTY acceptance.
 pub const UNICODE_SHOWCASE_DOC: &str = "CJK:界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\n\nEmoji:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa👩🏽‍💻END\n\nCombining:aaaaaaaaaaaaaaaaaaaaaaaaaaaae\u{301}END\n\n| Key | Value |\n| --- | --- |\n| 中文 | 通过 |\n| ASCII | ok |\n\n[LINK](https://example.com) and `CODE`\n\nUnicode done.";
+
+/// Source samples also rendered by the pinned Codex highlighter for PTY comparison.
+pub const CODEX_COLORS_SHOWCASE_DOC: &str = include_str!("fixtures/codex-colors.md");
 
 /// Repeated highlighted turns for release process measurements.
 pub const SYNTAX_SHOWCASE_DOC: &str = r#"```rust
@@ -3287,3 +3324,7 @@ fn mcp_echo_verdict(tool_output: &str) -> String {
         })
         .unwrap_or_else(|| "echo MISSING".to_string())
 }
+
+/// Long source rows exercise both syntax and wrapped diff backgrounds.
+pub const CODEX_DIFF_OLD: &str = r#"    let old_message = "OLD_MARKER source text stays selectable across the wrapped diff continuation, including punctuation: $HOME and ~/.zshrc";"#;
+pub const CODEX_DIFF_NEW: &str = r#"    let new_message = "NEW_MARKER source text stays selectable across the wrapped diff continuation, including punctuation: $HOME and ~/.zshrc";"#;

@@ -1,93 +1,8 @@
-//! Shared UI and syntax palette. Color choices live here; renderers consume roles.
-//!
-//! Syntax colors use the fixed xterm 256-color cube/ramp so truecolor and
-//! indexed output have the same contrast. Code text, including comments,
-//! targets at least 4.5:1 against each built-in code background. The terminal
-//! still owns its surrounding background and may customize its palette.
+//! UI palette and terminal background selection. Code colors use Codex's
+//! bundled Catppuccin themes through the sibling code_theme module.
 
+use super::{ansi_fg, terminal_palette};
 use crossterm::style::Color;
-use syntect::highlighting::{
-    Color as SyntaxColor, FontStyle, StyleModifier, Theme, ThemeItem, ThemeSettings,
-};
-
-use super::ansi_fg;
-
-/// Syntax roles in the fixed xterm palette (indices 16–255).
-/// Shared hues are assigned from the same tokens as UI chrome in each palette.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyntaxPalette {
-    pub foreground: u8,
-    pub comment: u8,
-    pub keyword: u8,
-    pub string: u8,
-    pub constant: u8,
-    pub function: u8,
-    pub type_name: u8,
-    pub punctuation: u8,
-    pub invalid: u8,
-}
-
-impl SyntaxPalette {
-    /// Build once with the lazily loaded syntax resources, never per frame.
-    pub(super) fn to_syntect(self, background: u8) -> Theme {
-        let roles = [
-            ("comment", self.comment),
-            ("string", self.string),
-            ("constant, support.constant", self.constant),
-            ("keyword, storage, entity.name.tag", self.keyword),
-            (
-                "entity.name.function, support.function, entity.other.attribute-name",
-                self.function,
-            ),
-            (
-                "entity.name.type, entity.name.class, entity.name.struct, entity.name.enum, entity.name.trait, support.type, support.class",
-                self.type_name,
-            ),
-            ("punctuation, keyword.operator", self.punctuation),
-            ("punctuation.definition.string", self.string),
-            ("markup.inserted", self.string),
-            ("markup.deleted", self.invalid),
-            ("meta.diff.header, markup.heading", self.function),
-            ("invalid", self.invalid),
-        ];
-        Theme {
-            name: Some("Sudo Code semantic palette".into()),
-            settings: ThemeSettings {
-                foreground: Some(syntax_color(self.foreground)),
-                background: Some(syntax_color(background)),
-                ..ThemeSettings::default()
-            },
-            scopes: roles
-                .into_iter()
-                .map(|(selector, index)| ThemeItem {
-                    scope: selector.parse().expect("built-in syntax selector"),
-                    style: StyleModifier {
-                        foreground: Some(syntax_color(index)),
-                        // Keep emphasis consistent in truecolor and 256-color output.
-                        font_style: Some(FontStyle::empty()),
-                        ..StyleModifier::default()
-                    },
-                })
-                .collect(),
-            ..Theme::default()
-        }
-    }
-}
-
-/// Expand fixed palette values exactly, without depending on the user's ANSI
-/// 0–15 colors. These values also round-trip through the indexed output path.
-fn syntax_color(index: u8) -> SyntaxColor {
-    assert!(index >= 16, "syntax colors must use the fixed palette");
-    let (r, g, b) = if index >= 232 {
-        let value = 8 + (index - 232) * 10;
-        (value, value, value)
-    } else {
-        let cube = [0, 95, 135, 175, 215, 255];
-        let n = usize::from(index - 16);
-        (cube[n / 36], cube[n / 6 % 6], cube[n % 6])
-    };
-    SyntaxColor { r, g, b, a: 255 }
-}
 
 /// Semantic color theme — coder picks a scenario token, never a raw color.
 ///
@@ -96,8 +11,6 @@ fn syntax_color(index: u8) -> SyntaxColor {
 /// switching palette changes every color at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTheme {
-    /// Syntax colors share the UI palette and its background selection.
-    pub syntax: SyntaxPalette,
     // ── Semantic tokens ──────────────────────────────────────────────
     /// Primary emphasis — prompt glyph, H1 heading, box title.
     pub primary: Color,
@@ -117,8 +30,8 @@ pub struct ColorTheme {
     pub strong: Color,
     /// Link — hyperlinks.
     pub link: Color,
-    /// Inline code — backtick spans.
-    pub code: Color,
+    /// Selects the adaptive default syntax theme.
+    pub light_background: bool,
     /// Code block background (256-color index).
     pub code_bg: u8,
     /// Border — box/table/code fence chrome.
@@ -154,7 +67,7 @@ impl ColorTheme {
     //   success = green, error = red, diff = green/red
     //
     // Derived:
-    //   warning = yellow/ochre; links = blue; inline code = violet
+    //   warning = yellow/ochre; links = blue; code uses Catppuccin
     //   muted = readable grey; decorative borders stay subordinate to text
     // Light mode deepens amber/teal instead of reusing low-contrast brand swatches.
 
@@ -164,19 +77,7 @@ impl ColorTheme {
         let primary = 214;
         let muted = 247;
         let link = 75;
-        let code = 177;
         Self {
-            syntax: SyntaxPalette {
-                foreground: 252,
-                comment: muted,
-                keyword: primary,
-                string: 108,
-                constant: code,
-                function: link,
-                type_name: code,
-                punctuation: muted,
-                invalid: 210,
-            },
             primary: Color::AnsiValue(primary),  // amber #F59E0B
             success: Color::Green,               // semantic
             error: Color::Red,                   // semantic
@@ -186,15 +87,15 @@ impl ColorTheme {
             emphasis: Color::AnsiValue(primary), // amber (italic text)
             strong: Color::White,                // bold text
             link: Color::AnsiValue(link),        // blue
-            code: Color::AnsiValue(code),        // violet
-            code_bg: 236,                        // dark grey bg
-            border: Color::AnsiValue(248),       // light grey
-            diff_added: Color::AnsiValue(70),    // semantic green
-            diff_removed: Color::AnsiValue(203), // semantic red
+            light_background: false,
+            code_bg: 236,                             // dark grey bg
+            border: Color::AnsiValue(248),            // light grey
+            diff_added: Color::AnsiValue(70),         // semantic green
+            diff_removed: Color::AnsiValue(203),      // semantic red
             hook_feedback: Color::AnsiValue(primary), // amber
-            logo: Color::AnsiValue(primary),     // amber
-            logo_accent: Color::AnsiValue(36),   // teal
-            quote: Color::AnsiValue(muted),      // grey
+            logo: Color::AnsiValue(primary),          // amber
+            logo_accent: Color::AnsiValue(36),        // teal
+            quote: Color::AnsiValue(muted),           // grey
             heading_h2: Color::White,
             heading_h3: Color::AnsiValue(36),    // teal
             heading_h4: Color::AnsiValue(muted), // grey
@@ -207,19 +108,7 @@ impl ColorTheme {
         let primary = 94;
         let muted = 241;
         let link = 25;
-        let code = 90;
         Self {
-            syntax: SyntaxPalette {
-                foreground: 236,
-                comment: muted,
-                keyword: primary,
-                string: 22,
-                constant: code,
-                function: link,
-                type_name: code,
-                punctuation: muted,
-                invalid: 124,
-            },
             primary: Color::AnsiValue(primary), // deep amber, readable on light backgrounds
             success: Color::DarkGreen,          // semantic
             error: Color::DarkRed,              // semantic
@@ -229,15 +118,15 @@ impl ColorTheme {
             emphasis: Color::AnsiValue(primary), // darker amber
             strong: Color::Black,               // bold text
             link: Color::AnsiValue(link),       // dark blue
-            code: Color::AnsiValue(code),       // dark violet
-            code_bg: 255,                       // light grey bg
-            border: Color::AnsiValue(muted),    // light grey
-            diff_added: Color::AnsiValue(22),   // semantic dark green
-            diff_removed: Color::AnsiValue(124), // semantic dark red
+            light_background: true,
+            code_bg: 255,                             // light grey bg
+            border: Color::AnsiValue(muted),          // light grey
+            diff_added: Color::AnsiValue(22),         // semantic dark green
+            diff_removed: Color::AnsiValue(124),      // semantic dark red
             hook_feedback: Color::AnsiValue(primary), // darker amber
-            logo: Color::AnsiValue(primary),    // darker amber
-            logo_accent: Color::AnsiValue(23),  // deep teal
-            quote: Color::AnsiValue(muted),     // grey
+            logo: Color::AnsiValue(primary),          // darker amber
+            logo_accent: Color::AnsiValue(23),        // deep teal
+            quote: Color::AnsiValue(muted),           // grey
             heading_h2: Color::Black,
             heading_h3: Color::AnsiValue(23),    // deep teal
             heading_h4: Color::AnsiValue(muted), // grey
@@ -272,7 +161,10 @@ impl ColorTheme {
         format!("\x1b[48;5;{}m", self.code_bg)
     }
 
-    fn is_light_background() -> bool {
+    pub(super) fn is_light_background() -> bool {
+        if let Some(background) = terminal_palette::background() {
+            return terminal_palette::is_light(background);
+        }
         // Check COLORFGBG (format: "fg;bg", light if bg >= 8).
         if let Ok(val) = std::env::var("COLORFGBG") {
             if let Some(bg) = val.rsplit(';').next().and_then(|s| s.parse::<u8>().ok()) {
@@ -289,7 +181,7 @@ impl Default for ColorTheme {
     }
 }
 
-/// Process-wide theme, detected once for both chrome and syntax highlighting.
+/// Process-wide UI theme, detected once after the startup palette probe.
 static THEME: std::sync::OnceLock<ColorTheme> = std::sync::OnceLock::new();
 
 #[inline]

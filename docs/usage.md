@@ -147,6 +147,19 @@ theme-selected muted foreground without an additional dim attribute; cache
 health indicators keep their semantic colors. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
 
+Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
+themes, including inline code, language grammars, and added/removed diff fills.
+The default REPL queries the terminal palette once at startup, with a shared
+250 ms deadline and preservation of queued keys and pastes. Native Windows
+console windows can also supply their color table; ConPTY does not use its
+backing console as the visible palette. If the query is unsupported,
+`COLORFGBG` selects the theme (dark otherwise). `NO_COLOR` skips the query and
+colors; noninteractive commands do not query the terminal. The legacy REPL
+uses `COLORFGBG`. Running tool previews cache syntax highlighting; repainting
+or editing input does not reparse their code. Output stays in native terminal
+scrollback, with no alternate screen. Terminal theme changes take effect on
+the next launch.
+
 Resizing the terminal reflows the live UI in place: status, Todo, and queued
 message panels remain transient rather than leaving duplicate frames in the
 conversation. The current input draft is retained. For UI that fits within

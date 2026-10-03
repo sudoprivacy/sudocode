@@ -26,7 +26,7 @@ crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
 # Draft integration: blocked on iocraft PR #5's full resize acceptance.
-iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "caaf19e23185a6ca55d48575f217b524c9063951" }
+iocraft = { git = "https://github.com/sudoprivacy/iocraft", rev = "587ccc8f5e6321bf49c3c6bcc27ddc54d28d9b06" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"

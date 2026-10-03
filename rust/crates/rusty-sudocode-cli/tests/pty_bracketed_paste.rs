@@ -2,7 +2,7 @@
 //!
 //! When text is pasted, the terminal wraps it in a bracketed-paste sequence
 //! (ESC[200~ … ESC[201~). crossterm parses this into a single Event::Paste,
-//! iocraft forwards it as TerminalEvent::Paste, and the REPL's `on_paste`
+//! iocraft forwards it as TerminalEvent::Paste, and the REPL's `on_edit`
 //! handler decides — matching Claude Code — whether to collapse it into a
 //! compact `[Pasted text #N +M lines]` placeholder (long or multi-line
 //! pastes) or insert it literally (short single-/double-line pastes). On

@@ -5,42 +5,11 @@ use std::fmt::Write as _;
 use engine_core::{AuthMode, ProviderKind};
 use runtime::{self, TokenUsage};
 use std::time::Duration;
+#[cfg(test)]
 use unicode_width::UnicodeWidthStr;
 
-// ---------------------------------------------------------------------------
-// Display width helpers
-// ---------------------------------------------------------------------------
-
-/// Compute the display width of a string, stripping ANSI escape sequences
-/// and accounting for unicode character widths (CJK = 2 columns, etc.).
-///
-/// This is the single source of truth for terminal column calculations.
-/// Use this instead of `chars().count()` or `.len()` whenever sizing
-/// borders, padding, or alignment.
-pub(crate) fn display_width(s: &str) -> usize {
-    strip_ansi_codes(s).width()
-}
-
-/// Strip ANSI SGR escape sequences (`ESC[...m`) from a string.
-fn strip_ansi_codes(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-    output
-}
+pub(crate) use crate::render::text_layout::display_width;
+use crate::render::text_layout::{truncate_to_width, wrap_ansi_to_width};
 
 use crate::render::StyledLine;
 use crate::render::{ansi_bold_fg, ansi_fg, theme, BOLD, DIM, PROMPT_PREFIX, RESET};
@@ -1011,76 +980,6 @@ pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) ->
     out
 }
 
-/// Hard-wrap a possibly-ANSI-styled string to `width` visible columns,
-/// returning one string per wrapped row. ANSI SGR escapes are copied verbatim
-/// and don't count toward width; each row is closed with `RESET` so a color
-/// opened before the break doesn't bleed past the frame bar of the next row.
-/// An empty input yields one empty row (so a blank body line still renders a
-/// framed blank row rather than vanishing).
-fn wrap_ansi_to_width(s: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![s.to_string()];
-    }
-    let mut rows = Vec::new();
-    let mut cur = String::new();
-    let mut vis = 0usize;
-    let mut carried_style = false;
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            // Copy the whole CSI sequence verbatim (ESC [ ... final-byte).
-            cur.push(ch);
-            if chars.peek() == Some(&'[') {
-                cur.push(chars.next().unwrap());
-                for c in chars.by_ref() {
-                    cur.push(c);
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-            carried_style = true;
-            continue;
-        }
-        // A tab has no intrinsic display width (`UnicodeWidthChar::width`
-        // returns `None`), but visually advances to the next 8-column tab stop.
-        // Counting it as 0 undercounts the row, so the terminal wraps it and
-        // the continuation escapes the frame. Expand it to spaces up to the
-        // next tab stop instead.
-        if ch == '\t' {
-            let advance = 8 - (vis % 8);
-            if vis + advance > width && vis > 0 {
-                if carried_style {
-                    cur.push_str(RESET);
-                }
-                rows.push(std::mem::take(&mut cur));
-                vis = 0;
-            }
-            let advance = 8 - (vis % 8);
-            for _ in 0..advance {
-                cur.push(' ');
-            }
-            vis += advance;
-            continue;
-        }
-        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if vis + ch_w > width && vis > 0 {
-            if carried_style {
-                cur.push_str(RESET);
-            }
-            rows.push(std::mem::take(&mut cur));
-            vis = 0;
-        }
-        cur.push(ch);
-        vis += ch_w;
-    }
-    rows.push(cur);
-    if rows.is_empty() {
-        rows.push(String::new());
-    }
-    rows
-}
-
 pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error: bool) -> String {
     let (payload, hook_feedback) = split_hook_feedback(output);
     let status = if is_error {
@@ -1318,29 +1217,6 @@ fn stdout_stderr_card(
     }
 
     ToolCardContent::new(header, body)
-}
-
-/// Truncate a string to fit within `max_width` display columns, appending `…`
-/// if truncated. Strips ANSI codes for width calculation but preserves them in
-/// output up to the cut point.
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    let stripped = strip_ansi_codes(s);
-    if UnicodeWidthStr::width(stripped.as_str()) <= max_width {
-        return s.to_string();
-    }
-    // Walk characters of the stripped version, accumulating display width.
-    let mut width = 0usize;
-    let mut byte_end = 0usize;
-    for ch in stripped.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width + 1 > max_width {
-            // +1 for the trailing `…`
-            break;
-        }
-        width += ch_width;
-        byte_end += ch.len_utf8();
-    }
-    format!("{}…", &stripped[..byte_end])
 }
 
 pub(crate) fn read_card(
@@ -2137,7 +2013,7 @@ fn format_token_count_round(n: u32) -> String {
     }
 }
 
-/// What one finished turn cost, for [`format_turn_status_line`].
+/// What one finished turn cost, for [`turn_status_line`].
 ///
 /// Grouped rather than passed positionally: the line summarises a single turn,
 /// and a call site with three `Option`s in a row is one transposition away from
@@ -2240,7 +2116,7 @@ fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<StyledLine> {
 /// cache indicators retain their semantic colors without added dim. Turn and tokens are
 /// kept compact (`turn 3`, `3.2k tokens`) so the line stays single-row even at
 /// narrow widths.
-pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
+pub(crate) fn turn_status_line(status: &TurnStatus<'_>) -> StyledLine {
     let &TurnStatus {
         model,
         turn,
@@ -2304,7 +2180,12 @@ pub(crate) fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
         line.push(" · ");
         line.push(branch);
     }
-    line.to_string()
+    line
+}
+
+#[cfg(test)]
+fn format_turn_status_line(status: &TurnStatus<'_>) -> String {
+    turn_status_line(status).to_string()
 }
 
 /// The cost of one `usage`, as a display string without any prefix: the real
@@ -2410,14 +2291,14 @@ pub(crate) fn format_permission_prompt_box(
     ]
     .into_iter()
     .chain(reason.map(|r| format!("Reason    {r}")))
-    .map(|line| line.chars().count())
+    .map(|line| display_width(&line))
     .collect();
     let inner_width = visible_widths
         .iter()
         .copied()
         .max()
         .unwrap_or(0)
-        .max(title.chars().count() + 4);
+        .max(display_width(title) + 4);
     let border = "─".repeat(inner_width + 2);
 
     let t = theme();
@@ -2428,7 +2309,7 @@ pub(crate) fn format_permission_prompt_box(
     let dim = DIM;
 
     let mut out = String::new();
-    let title_dashes = "─".repeat(inner_width.saturating_sub(title.chars().count() + 2));
+    let title_dashes = "─".repeat(inner_width.saturating_sub(display_width(title) + 2));
     let _ = writeln!(
         out,
         "  {grey}╭─ {bold_yellow}{title}{reset}{grey} {title_dashes}─╮{reset}"

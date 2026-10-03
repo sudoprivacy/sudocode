@@ -305,8 +305,8 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
     // Exercise both palettes and the warning/error -> muted transition as well
     // as the healthy-cache -> muted transition.
     for (background, muted, hit_color, error_color) in [
-        ("15;0", "Idx(243)", "Idx(79)", "Idx(9)"),
-        ("0;15", "Idx(245)", "Idx(30)", "Idx(1)"),
+        ("15;0", "Idx(243)", "Idx(220)", "Idx(9)"),
+        ("0;15", "Idx(245)", "Idx(130)", "Idx(1)"),
     ] {
         for (read, creation, hit, write) in
             [(7500, 2500, "⚡75%", "✎25%"), (9000, 1000, "⚡90%", "✎10%")]

@@ -5,6 +5,8 @@ The code-color adapter follows `openai/codex` revision
 
 - `codex-rs/tui/src/render/highlight.rs`: Catppuccin Mocha/Latte, scope colors,
   language aliases, bold-only syntax attributes, and highlighting limits.
+- `codex-rs/tui/src/markdown_render.rs`: heading/emphasis attributes, inline
+  code, links, list markers, quotes, and unframed fenced code in `render.rs`.
 - `codex-rs/tui/src/diff_render.rs`: default added/removed backgrounds.
 - `codex-rs/tui/src/color.rs` and `style/contrast.rs`: color distance, blending,
   contrast threshold and bounded foreground cache. Adaptations live in scode's
@@ -20,3 +22,10 @@ selected each bundled default theme and serialized source text, foregrounds,
 and bold flags; contrast samples used the default diff fills. Only terminal
 palette plumbing was stubbed for the truecolor samples. PTY assertions compare
 actual rendered terminal cells against this independently generated fixture.
+
+`tests/fixtures/codex_styles.json` also covers Markdown roles and indexed
+terminal colors. Regenerate it from the pinned local Codex checkout with
+`python3 e2e/codex-style/capture.py --codex <checkout> --work-dir <scratch-dir>
+--output rust/crates/rusty-sudocode-cli/tests/fixtures/codex_styles.json`.
+The scratch executable compiles the original style/highlighting helpers;
+it is separate from scode's dependency graph.

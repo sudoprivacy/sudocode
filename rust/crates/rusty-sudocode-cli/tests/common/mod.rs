@@ -533,7 +533,8 @@ impl TestEnv {
         }
     }
 
-    fn new_mock(label: &str) -> Self {
+    /// Use an exact fixture when acceptance depends on byte counts or malformed input.
+    pub fn new_mock(label: &str) -> Self {
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
         let server = runtime
             .block_on(MockAnthropicService::spawn())

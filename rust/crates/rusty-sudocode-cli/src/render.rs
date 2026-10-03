@@ -4,18 +4,19 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crossterm::style::{Color, Stylize};
+use crossterm::style::{Color, ContentStyle, Stylize};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 mod code_theme;
-mod color_theme;
-pub use color_theme::{theme, ColorTheme};
 mod color_math;
+mod color_theme;
 pub(crate) mod diff_colors;
+pub(crate) mod terminal_palette;
+pub use color_theme::{theme, ColorTheme};
+
 mod styled_line;
 pub(crate) mod styled_text;
-pub(crate) mod terminal_palette;
 pub(crate) mod text_layout;
 pub(crate) use styled_line::StyledLine;
 use text_layout::display_width as visible_width;
@@ -73,13 +74,22 @@ impl ColorSupport {
     }
 }
 
-/// Approximate an RGB triple to the nearest 256-color palette index.
-///
-/// Match Codex's perceptual distance over the terminal-independent palette.
+/// Match the perceptually closest fixed xterm color, as Codex does.
 fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
     match color_math::foreground((r, g, b), None, ColorSupport::Ansi256) {
         Color::AnsiValue(index) => index,
         _ => unreachable!("a complete fixed palette always has a nearest color"),
+    }
+}
+
+impl ColorSupport {
+    fn color(self, color: Color) -> Color {
+        match (self, color) {
+            (Self::NoColor, _) => Color::Reset,
+            (Self::Ansi16, Color::Rgb { .. }) => Color::Reset,
+            (Self::Ansi256, Color::Rgb { r, g, b }) => Color::AnsiValue(rgb_to_ansi256(r, g, b)),
+            (_, color) => color,
+        }
     }
 }
 
@@ -549,6 +559,7 @@ const TOP_LEVEL_LIST_INDENT: usize = 2;
 struct RenderState {
     emphasis: usize,
     strong: usize,
+    strikethrough: usize,
     heading_level: Option<u8>,
     quote: usize,
     list_stack: Vec<ListKind>,
@@ -575,34 +586,29 @@ struct LinkState {
 }
 
 impl RenderState {
-    fn style_text(&self, text: &str, theme: &ColorTheme) -> String {
-        let mut style = text.stylize();
-
-        if matches!(self.heading_level, Some(1 | 2)) || self.strong > 0 {
+    fn text_style(&self, theme: &ColorTheme) -> ContentStyle {
+        // Codex Markdown uses terminal foreground and typographic hierarchy.
+        let mut style = ContentStyle::default();
+        if matches!(self.heading_level, Some(1..=3)) || self.strong > 0 {
             style = style.bold();
         }
-        if self.emphasis > 0 {
+        if self.heading_level == Some(1) {
+            style = style.underlined();
+        }
+        if matches!(self.heading_level, Some(3..=6)) || self.emphasis > 0 {
             style = style.italic();
         }
-
-        if let Some(level) = self.heading_level {
-            style = match level {
-                1 => style.with(theme.primary),
-                2 => style.with(theme.heading_h2),
-                3 => style.with(theme.heading_h3),
-                _ => style.with(theme.heading_h4),
-            };
-        } else if self.strong > 0 {
-            style = style.with(theme.strong);
-        } else if self.emphasis > 0 {
-            style = style.with(theme.emphasis);
+        if self.strikethrough > 0 {
+            style = style.crossed_out();
         }
-
         if self.quote > 0 {
             style = style.with(theme.quote);
         }
+        style
+    }
 
-        format!("{style}")
+    fn style_text(&self, text: &str, theme: &ColorTheme) -> String {
+        self.text_style(theme).apply(text).to_string()
     }
 
     fn append_raw(&mut self, output: &mut String, text: &str) {
@@ -689,7 +695,11 @@ impl TerminalRenderer {
             );
         }
 
-        output
+        if self.color_support == ColorSupport::NoColor {
+            styled_text::StyledText::from_ansi(&output).text
+        } else {
+            output
+        }
     }
 
     #[must_use]
@@ -807,7 +817,7 @@ impl TerminalRenderer {
                     output.push('\n');
                 }
             }
-            Event::Start(Tag::Item) => Self::start_item(state, output),
+            Event::Start(Tag::Item) => self.start_item(state, output),
             Event::Start(Tag::CodeBlock(kind)) => {
                 *in_code_block = true;
                 *code_language = match kind {
@@ -815,7 +825,6 @@ impl TerminalRenderer {
                     CodeBlockKind::Fenced(lang) => lang.to_string(),
                 };
                 code_buffer.clear();
-                self.start_code_block(code_language, output);
             }
             Event::End(TagEnd::CodeBlock) => {
                 self.finish_code_block(code_buffer, code_language, output);
@@ -827,11 +836,18 @@ impl TerminalRenderer {
             Event::End(TagEnd::Emphasis) => state.emphasis = state.emphasis.saturating_sub(1),
             Event::Start(Tag::Strong) => state.strong += 1,
             Event::End(TagEnd::Strong) => state.strong = state.strong.saturating_sub(1),
+            Event::Start(Tag::Strikethrough) => state.strikethrough += 1,
+            Event::End(TagEnd::Strikethrough) => {
+                state.strikethrough = state.strikethrough.saturating_sub(1);
+            }
             Event::Code(code) => {
-                let color =
-                    code_theme::inline_color(self.color_theme.light_background, self.color_support);
-                let rendered = format!("{}", code.with(color));
-                state.append_raw(output, &rendered);
+                let style = state
+                    .text_style(&self.color_theme)
+                    .with(code_theme::inline_color(
+                        self.color_theme.light_background,
+                        self.color_support,
+                    ));
+                state.append_raw(output, &style.apply(code).to_string());
             }
             Event::Rule => output.push_str("---\n"),
             Event::Text(text) => {
@@ -857,24 +873,15 @@ impl TerminalRenderer {
             }
             Event::End(TagEnd::Link) => {
                 if let Some(link) = state.link_stack.pop() {
-                    let label = if link.text.is_empty() {
-                        link.destination.clone()
-                    } else {
-                        link.text
-                    };
-                    let rendered = format!(
-                        "{}",
-                        format!("[{label}]({})", link.destination)
-                            .underlined()
-                            .with(self.color_theme.link)
-                    );
+                    let rendered = self.render_link(&link);
                     state.append_raw(output, &rendered);
                 }
             }
             Event::Start(Tag::Image { dest_url, .. }) => {
                 let rendered = format!(
                     "{}",
-                    format!("[image:{dest_url}]").with(self.color_theme.link)
+                    format!("[image:{dest_url}]")
+                        .with(self.color_support.color(self.color_theme.link))
                 );
                 state.append_raw(output, &rendered);
             }
@@ -922,6 +929,51 @@ impl TerminalRenderer {
         }
     }
 
+    fn render_link(&self, link: &LinkState) -> String {
+        let label = styled_text::StyledText::from_ansi(&link.text);
+        let destination = &link.destination;
+        let local = destination.starts_with('/')
+            || destination.starts_with("~/")
+            || destination.starts_with("./")
+            || destination.starts_with("../")
+            || destination.starts_with("file://")
+            || destination.starts_with("\\\\")
+            || matches!(destination.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic());
+        if local {
+            let target = ContentStyle::default()
+                .with(code_theme::inline_color(
+                    self.color_theme.light_background,
+                    self.color_support,
+                ))
+                .apply(destination);
+            let name = label.text.trim();
+            if name.is_empty() || name == destination || destination.ends_with(&format!("/{name}"))
+            {
+                return target.to_string();
+            }
+            return format!("{} ({target})", link.text);
+        }
+        let mut rendered = String::new();
+        let foreground = self.color_support.color(self.color_theme.link);
+        for (style, text) in label.spans(0..label.text.len()) {
+            let _ = write!(
+                rendered,
+                "{}",
+                style.with(foreground).underlined().apply(text)
+            );
+        }
+        // Keep the destination usable in terminals without hyperlink support.
+        if label.text != *destination {
+            let target = destination.as_str().with(foreground).underlined();
+            if label.text.is_empty() {
+                let _ = write!(rendered, "{target}");
+            } else {
+                let _ = write!(rendered, " ({target})");
+            }
+        }
+        rendered
+    }
+
     fn start_heading(state: &mut RenderState, level: u8, output: &mut String) {
         state.heading_level = Some(level);
         if output.is_empty() {
@@ -948,10 +1000,10 @@ impl TerminalRenderer {
 
     fn start_quote(&self, state: &mut RenderState, output: &mut String) {
         state.quote += 1;
-        let _ = write!(output, "{}", "│ ".with(self.color_theme.quote));
+        let _ = write!(output, "{}", "> ".with(self.color_theme.quote));
     }
 
-    fn start_item(state: &mut RenderState, output: &mut String) {
+    fn start_item(&self, state: &mut RenderState, output: &mut String) {
         let indent = state.list_indents.last().copied().unwrap_or(0);
         output.push_str(&" ".repeat(indent));
 
@@ -972,26 +1024,23 @@ impl TerminalRenderer {
         // continuation lines align to this. `chars().count()` is the right
         // width here — both marker shapes are single-column characters.
         state.item_content_col = indent + marker.chars().count();
-        output.push_str(&marker);
-    }
-
-    fn start_code_block(&self, code_language: &str, output: &mut String) {
-        let label = if code_language.is_empty() {
-            "code".to_string()
+        if matches!(state.list_stack.last(), Some(ListKind::Ordered { .. })) {
+            let _ = write!(
+                output,
+                "{}",
+                marker.with(self.color_theme.ordered_list_marker)
+            );
         } else {
-            code_language.to_string()
-        };
-        let _ = writeln!(
-            output,
-            "{}",
-            format!("╭─ {label}").bold().with(self.color_theme.border)
-        );
+            output.push_str(&marker);
+        }
     }
 
     fn finish_code_block(&self, code_buffer: &str, code_language: &str, output: &mut String) {
         output.push_str(&self.highlight_code(code_buffer, code_language));
-        let _ = write!(output, "{}", "╰─".bold().with(self.color_theme.border));
-        output.push_str("\n\n");
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push('\n');
     }
 
     fn push_text(
@@ -1068,7 +1117,7 @@ impl TerminalRenderer {
             let cell = row.get(index).map_or("", String::as_str);
             line.push(' ');
             if is_header {
-                let _ = write!(line, "{}", cell.bold().with(self.color_theme.primary));
+                let _ = write!(line, "{}", cell.bold());
             } else {
                 line.push_str(cell);
             }
@@ -1556,9 +1605,8 @@ mod tests {
 
     #[test]
     fn rgb_to_ansi256_maps_cube_corners() {
-        assert_eq!(rgb_to_ansi256(0, 0, 0), 16); // black grayscale shortcut
-                                                 // Perceptual quantization selects the exact white cube entry.
-        assert_eq!(rgb_to_ansi256(255, 255, 255), 231);
+        assert_eq!(rgb_to_ansi256(0, 0, 0), 16);
+        assert_eq!(rgb_to_ansi256(255, 255, 255), 231); // exact white in the fixed cube
         assert_eq!(rgb_to_ansi256(255, 0, 0), 16 + 36 * 5); // pure red
         assert_eq!(rgb_to_ansi256(0, 255, 0), 16 + 6 * 5); // pure green
         assert_eq!(rgb_to_ansi256(0, 0, 255), 16 + 5); // pure blue

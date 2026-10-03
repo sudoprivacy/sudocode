@@ -83,20 +83,34 @@ explained beforehand — never an automatic resize fix.
 
 The inline renderer measures terminal columns and keeps grapheme clusters
 intact when wrapping responses, tables, and tool cards. Continued tool rows
-retain their text styles. Amber remains the main accent; links use blue,
-and warnings use yellow (ochre on light backgrounds). Code follows Codex's
-default Catppuccin Mocha/Latte themes, including the theme's Markdown inline
-code color and syntax colors from the same grammar bundle. Code blocks keep
-the terminal background; syntax italics and underlines are suppressed.
-Status summaries pass structured styles directly to iocraft. External ANSI
-content is decoded at the boundary, and syntax grammars are loaded only when
-needed and shared across turns. `render/color_theme.rs` owns UI colors and
-background selection; `render/code_theme.rs` adapts Codex's bundled syntax
-themes. Added/removed diff fills use Codex's defaults, with text adjusted to
-4.5:1 contrast against the painted surface. A bounded startup probe detects
-the terminal background while retaining queued input. Unknown languages stay
-plain; `NO_COLOR` disables code colors and the probe.
+retain their text styles. Amber remains the brand accent. Markdown follows
+[Codex's default styles](https://github.com/openai/codex/blob/b741e480e203f037ca726bc2a76d99a8e8668e66/codex-rs/tui/src/markdown_render.rs):
+headings and emphasis use the terminal foreground with typographic emphasis,
+inline code and file links use the syntax theme's inline-code scope, web links
+use blue with an underline, and ordered markers use terminal bright blue.
+Inline code omits literal backticks; fenced code has no added frame or fill.
 
+Status summaries pass structured styles directly to iocraft. External ANSI
+content is decoded at the boundary. The shared ColorTheme selects the bundled
+Catppuccin Mocha/Latte themes from two-face 0.5.1, matching the Codex reference's
+assets. Syntax grammars and the selected theme load only when needed and are
+shared across turns. Truecolor preserves theme RGB values; indexed terminals
+use Codex-compatible perceptual matching to the fixed xterm palette. Code
+keeps the terminal background, so contrast follows the selected theme and the
+terminal's colors rather than a fixed scode code-block background. Unknown
+languages and input beyond Codex's highlighting limits (512 KiB, 10,000 lines,
+or a line over 4 KiB) remain plain. NO_COLOR disables Markdown styling.
+
+PTY acceptance compares actual terminal cells with the committed Codex style
+reference in rusty-sudocode-cli/tests/fixtures/codex_styles.json. Regenerate it
+from a local Codex checkout with e2e/codex-style/capture.py; that standalone
+reference build uses upstream helpers, and does not add ratatui to scode.
+
+The shared code_theme adapter also supplies running and completed diff cards.
+Added/removed diff fills use Codex defaults, with text adjusted to 4.5:1
+contrast against the painted surface. The existing bounded startup palette
+probe detects the terminal background while retaining queued input; COLORFGBG
+is its fallback. NO_COLOR disables both Markdown styling and the probe.
 
 ### Never
 

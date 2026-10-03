@@ -58,6 +58,8 @@ fn foreground(color: syntect::highlighting::Color, support: ColorSupport) -> Col
 }
 
 fn syntax(language: &str) -> Option<&'static SyntaxReference> {
+    // CommonMark info strings can include metadata after the language token.
+    let language = language.split([',', ' ', '\t']).next().unwrap_or("");
     let syntaxes = syntax_set();
     let lower = language.to_ascii_lowercase();
     let token = match lower.as_str() {

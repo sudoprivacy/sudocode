@@ -423,10 +423,10 @@ impl ApiClient for EngineApiClient {
         let catalog = self.catalog.clone();
         let request = async {
             let tools = (options.include_tools && self.enable_tools).then(|| {
-                let mut discovered = tools::extract_discovered_tool_names(&request.messages);
-                discovered.extend(request.pre_compact_discovered_tools.iter().cloned());
-                self.tool_registry
-                    .core_definitions(self.allowed_tools.as_ref(), Some(&discovered))
+                self.request_tool_definitions(
+                    &request.messages,
+                    &request.pre_compact_discovered_tools,
+                )
             });
             self.client
                 .complete_text(
@@ -468,11 +468,6 @@ impl ApiClient for EngineApiClient {
         let catalog = self.catalog.clone();
         let request = async {
             let is_post_tool = request_ends_with_tool_result(&request);
-            let discovered = self.enable_tools.then(|| {
-                let mut d = tools::extract_discovered_tool_names(&request.messages);
-                d.extend(request.pre_compact_discovered_tools.iter().cloned());
-                d
-            });
             let cache_hints = (!request.system_prompt.is_empty()).then(|| CacheHints {
                 system_static: Some(request.system_prompt.static_text()),
                 system_dynamic: Some(request.system_prompt.dynamic_text()),
@@ -484,8 +479,10 @@ impl ApiClient for EngineApiClient {
                 messages: tools::convert_messages(&request.messages),
                 system: (!request.system_prompt.is_empty()).then(|| request.system_prompt.render()),
                 tools: self.enable_tools.then(|| {
-                    self.tool_registry
-                        .core_definitions(self.allowed_tools.as_ref(), discovered.as_ref())
+                    self.request_tool_definitions(
+                        &request.messages,
+                        &request.pre_compact_discovered_tools,
+                    )
                 }),
                 tool_choice: self.enable_tools.then_some(ToolChoice::Auto),
                 stream: true,

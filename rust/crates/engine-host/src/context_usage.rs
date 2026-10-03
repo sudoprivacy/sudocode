@@ -16,7 +16,7 @@ use std::path::Path;
 
 use runtime::agent_types::{available_agent_types, format_agent_line, AGENT_TYPES_SECTION_TAG};
 use runtime::custom_agents::{load_md_agents, standard_custom_agent_dirs};
-use runtime::{estimate_session_tokens, ProjectContext, SystemPrompt};
+use runtime::{estimate_session_tokens, ApiClient, ProjectContext, SystemPrompt};
 
 use crate::runtime_build::BuiltRuntime;
 
@@ -175,6 +175,10 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
         return ContextUsage::default();
     };
     let client = runtime.api_client();
+    let catalog = client.model_catalog();
+    let _catalog_scope = catalog
+        .as_ref()
+        .map(runtime::model_discovery::ModelCatalog::enter);
     let session = runtime.session();
     let model = client.model().to_string();
 

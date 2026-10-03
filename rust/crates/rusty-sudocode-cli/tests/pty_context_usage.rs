@@ -22,7 +22,7 @@ fn exit_repl(sess: &mut pty_expect::PtySession) {
     sess.expect("❯").expect("prompt before exit");
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));
-    let _ = sess.expect_eof();
+    assert_eq!(sess.expect_eof().expect("REPL exits after /context"), 0);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ fn context_renders_grid_and_legend_on_fresh_session() {
 
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));
-    let _ = sess.expect_eof();
+    assert_eq!(sess.expect_eof().expect("REPL exits after /context"), 0);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -109,7 +109,7 @@ fn context_all_lists_tools_and_agent_types() {
 
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(Duration::from_secs(15));
-    let _ = sess.expect_eof();
+    assert_eq!(sess.expect_eof().expect("REPL exits after /context"), 0);
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -190,5 +190,33 @@ fn context_rejects_unknown_argument() {
     sess.expect("Unknown argument clear")
         .expect("names the rejected argument");
 
+    exit_repl(&mut sess);
+}
+
+/// Endpoint-discovered limits must agree with the engine's request budget,
+/// even when the endpoint overrides the built-in capabilities table.
+#[test]
+fn context_uses_the_sessions_discovered_model_window() {
+    let env = TestEnv::new("context-discovered-window");
+    if env.is_live() {
+        return;
+    }
+    let model = "claude-sonnet-4-6";
+    env.set_model_catalog(serde_json::json!({"data": [{
+        "id": model, "context_window": 1_000_000, "max_output_tokens": 64_000
+    }]}));
+    env.prime_model_catalog();
+    let mut sess = env.spawn(&["--permission-mode", "read-only"]);
+    sess.expect("❯")
+        .unwrap_or_else(|error| panic!("REPL prompt: {error}; {}", screen_tail(&sess, 6000)));
+    sess.send("/context\r").unwrap();
+    sess.expect("Context Usage").unwrap();
+    sess.expect_within("/1m tokens", Duration::from_secs(5))
+        .unwrap_or_else(|error| {
+            panic!(
+                "discovered window missing: {error}; {}",
+                screen_tail(&sess, 6000)
+            )
+        });
     exit_repl(&mut sess);
 }

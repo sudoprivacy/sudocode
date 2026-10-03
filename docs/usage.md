@@ -207,6 +207,8 @@ count and a token total; `/context all` expands it to one line per tool,
 agent type, memory file, and skill. Tool definitions are counted exactly as
 the next request would carry them: a deferred tool the model has not yet
 discovered through ToolSearch is listed but costs no tokens.
+The window and auto-compaction reserve use the current session's endpoint
+catalog, including discovered limits that override the built-in model table.
 
 ## Compacting a long conversation
 

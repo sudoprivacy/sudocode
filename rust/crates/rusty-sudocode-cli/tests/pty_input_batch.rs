@@ -1,5 +1,5 @@
 //! Real PTY acceptance of application edits followed immediately by typing.
-//! SCODE_TEST_BACKEND=live uses the configured real API for paste submission.
+//! `SCODE_TEST_BACKEND=live` uses the configured real API for paste submission.
 mod common;
 
 use common::TestEnv;

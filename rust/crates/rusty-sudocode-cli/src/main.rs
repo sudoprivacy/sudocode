@@ -5462,7 +5462,13 @@ impl LiveCli {
         let status = std::process::Command::new(program)
             .args(args)
             .arg(path)
-            .status()?;
+            .status()
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("Failed to launch editor '{editor}': {error}"),
+                )
+            })?;
         if !status.success() {
             return Err(format!("Editor '{}' exited with {}", editor, status).into());
         }

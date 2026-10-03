@@ -36,7 +36,7 @@ if sys.platform != 'win32':
     assert termios.tcgetattr(sys.stdin)[3] & termios.ICANON
 print('EDITOR_READY', file=sys.stderr, flush=True)
 text = input()
-pathlib.Path(sys.argv[1]).write_text(text + '\n')
+pathlib.Path(sys.argv[1]).write_bytes((text + '\n').encode())
 print('EDITOR_DONE', flush=True)
 "#,
     );
@@ -90,7 +90,7 @@ fn memory_editor_failures_restore_terminal_input() {
         child.send("/memory\r").unwrap();
         child
             .expect(if is_missing {
-                r"\(os error"
+                "Failed to launch editor"
             } else {
                 "exited with"
             })
@@ -114,7 +114,7 @@ fn memory_picker_cancels_and_selects_without_a_second_input_reader() {
         "select editor",
         r#"
 import pathlib, sys
-pathlib.Path(sys.argv[1]).write_text('selected memory\n')
+pathlib.Path(sys.argv[1]).write_bytes(b'selected memory\n')
 "#,
     );
     let mut child = env.spawn_with_env(

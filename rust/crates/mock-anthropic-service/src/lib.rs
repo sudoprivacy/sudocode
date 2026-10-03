@@ -2674,7 +2674,36 @@ pub const MARKDOWN_SHOWCASE_DOC: &str = "Intro:\n- alpha\n- beta\n\n## Section\n
 pub const UNICODE_SHOWCASE_DOC: &str = "CJK:界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\n\nEmoji:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa👩🏽‍💻END\n\nCombining:aaaaaaaaaaaaaaaaaaaaaaaaaaaae\u{301}END\n\n| Key | Value |\n| --- | --- |\n| 中文 | 通过 |\n| ASCII | ok |\n\n[LINK](https://example.com) and `CODE`\n\nUnicode done.";
 
 /// Repeated highlighted turns for release process measurements.
-const SYNTAX_SHOWCASE_DOC: &str = "```rust\nfn main() {\n    let values = [1, 2, 3];\n    for value in values {\n        println!(\"value: {value}\");\n    }\n}\n```\n\nHighlight done.";
+pub const SYNTAX_SHOWCASE_DOC: &str = r#"```rust
+// ThemeComment
+struct ThemeType;
+fn palette_probe(count: usize) -> bool {
+    let message = "ThemeString";
+    count >= 42 && !message.is_empty()
+}
+```
+
+```python
+# PythonComment
+def python_probe(count):
+    return "PythonString" if count > 7 else None
+```
+
+```json
+{"theme_key": "JsonString", "count": 42, "ready": true}
+```
+
+```unknown-language
+plain_identifier <opaque> 42
+```
+
+```diff
+@@ -1 +1 @@
+-removed_value
++added_value
+```
+
+Highlight done."#;
 
 /// Stream `MARKDOWN_SHOWCASE_DOC` as several text deltas with boundaries that
 /// deliberately fall mid-line, so the CLI's blank-line chunker — not the

@@ -13764,7 +13764,9 @@ printf 'pwsh:%s' "$1"
 
         let result = execute_tool(
             "PowerShell",
-            &json!({"command": "Write-Output hello", "timeout": 1000}),
+            // This checks PATH resolution and argument passing, not startup
+            // latency. A fresh executable can take over a second to start.
+            &json!({"command": "Write-Output hello", "timeout": 10_000}),
         )
         .expect("PowerShell should succeed");
 
@@ -13778,7 +13780,9 @@ printf 'pwsh:%s' "$1"
         let _ = std::fs::remove_dir_all(dir);
 
         let output: serde_json::Value = serde_json::from_str(&result).expect("json");
-        assert_eq!(output["stdout"], "pwsh:Write-Output hello");
+        assert_eq!(output["exit_code"], 0, "{output}");
+        assert_eq!(output["interrupted"], false, "{output}");
+        assert_eq!(output["stdout"], "pwsh:Write-Output hello", "{output}");
         assert!(output["stderr"].as_str().expect("stderr").is_empty());
 
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");

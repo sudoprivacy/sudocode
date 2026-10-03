@@ -87,7 +87,13 @@ retain their text styles. Amber remains the main accent; links use blue,
 inline code uses violet, and warnings use yellow (ochre on light backgrounds).
 Status summaries pass structured styles directly to iocraft. External ANSI
 content is decoded at the boundary, and syntax grammars are loaded only when
-needed and shared across turns.
+needed and shared across turns. `render/color_theme.rs` owns both UI and syntax
+colors: keywords share the amber accent, functions use blue, types/constants
+use violet, and strings use green. Code foregrounds and comments target at least
+4.5:1 contrast against the built-in dark/light code backgrounds, with matching
+truecolor and 256-color palettes. These checks assume the standard xterm palette;
+terminal palette overrides can change the result. Unrecognized languages retain
+readable plain text, and `NO_COLOR` disables code highlighting and its background.
 
 ### Never
 

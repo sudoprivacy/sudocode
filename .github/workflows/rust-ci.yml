@@ -27,6 +27,8 @@ on:
       - rust/**
       # The a2a-live job RUNS these; without them a harness change ships untested.
       - e2e/**
+      - install.sh
+      - scripts/publish_release_mirror.py
   pull_request:
     branches:
       - main
@@ -51,6 +53,8 @@ on:
       - rust/**
       # The a2a-live job RUNS these; without them a harness change ships untested.
       - e2e/**
+      - install.sh
+      - scripts/publish_release_mirror.py
   workflow_dispatch:
 
 concurrency:
@@ -65,6 +69,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  release-mirror:
+    name: release mirror recovery
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Exercise interrupted publication and real installer
+        run: python3 e2e/release-mirror/run.py
+
   doc-source-of-truth:
     name: docs source-of-truth
     runs-on: ubuntu-latest

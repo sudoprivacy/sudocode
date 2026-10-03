@@ -275,8 +275,23 @@ Three channels, one build path (`release.yml` builds whatever tag lands):
   prerelease. Promotion is by commit, not by copying artifacts — the
   rebuild keeps one publish path and the commit is what soaked.
 - **stable** — tag `vX.Y.Z` on the RC's commit once it has soaked.
-  Stable tags also mirror to the Tencent COS `release/latest/` bucket;
-  nightly and RC stay on GitHub only.
+  Stable tags also mirror to immutable Tencent COS `release/vX.Y.Z/`
+  directories when COS credentials are configured; nightly and RC stay on
+  GitHub only. Publication uploads the GitHub assets as a draft, stages every
+  mirror artifact and reads it back to verify SHA-256, then publishes GitHub
+  and switches `release/latest/version.txt`. Installers resolve that pointer
+  once, keeping the previous complete version usable during recovery. Without
+  COS credentials the release is GitHub-only; partial credentials fail the job.
+
+Rerun a failed **publish-release job** with its original build artifacts to
+recover mirror delivery; do not move the tag. Matching immutable objects are
+verified and skipped, differing objects fail without replacement, and an older
+retry cannot move the mirror pointer backward. A public stable release is never
+made draft or overwritten on retry. If GitHub finalization succeeds but pointer
+promotion fails, the previous mirror remains usable until that retry completes.
+`python3 e2e/release-mirror/run.py` exercises interrupted uploads, retry, version
+pinning and checksum rejection with the real publisher and installer through a
+local HTTP mirror; it is also a CI gate.
 
 Sudo Code forbids `unsafe_code` workspace-wide (`unsafe_code = "forbid"`
 in `rust/Cargo.toml`). Relaxing this for a single crate goes through

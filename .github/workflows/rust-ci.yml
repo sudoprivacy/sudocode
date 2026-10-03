@@ -188,6 +188,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+      - name: PTY prefix and scoped-context contract
+        # Exercise the real CLI and capture its final HTTP requests. Pin the
+        # mock transport so a live-backend override cannot skip these checks.
+        env:
+          SCODE_TEST_BACKEND: mock
+        run: cargo test --workspace --test pty_cache_prefix --test pty_compaction_safety -- --nocapture
       - name: Run workspace tests
         # Keep panic diagnostics visible if a Windows PTY aborts before libtest
         # can print its captured failure output.

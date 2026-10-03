@@ -426,6 +426,22 @@ If you change anything that touches the system prompt, the tool list, or the
 message history, take a reading before and after — the cost of getting this
 wrong does not show up as a failure.
 
+Main turns, subagent turns, and compaction share
+`api::session_message_request`. Add session-level request fields there rather
+than assembling another request in a caller. `SystemPrompt` uses copy-on-write
+sections and cached rendering; session snapshots survive compact/resume/fork.
+Do not refresh file-derived context as a side effect of compaction.
+
+Run `SCODE_TEST_BACKEND=mock cargo test --workspace --test pty_cache_prefix --test pty_compaction_safety`
+from `rust/` after changing these paths. The **PTY prefix and scoped-context
+contract** CI step runs both suites on Linux, macOS, and Windows before the full
+workspace suite. These PTYs capture HTTP bodies after
+provider conversion and compare the stable prefix through retries, discovery,
+compaction, forks, and restart. They also exercise explicit prompt replacement.
+The scoped-context cases verify config roots, CLI package discovery, layered
+memory, and memory write permissions through the real CLI.
+Mock usage numbers are fixtures, not evidence of real provider cache hits.
+
 ## Running the CLI locally
 
 For the canonical CLI surface, run `cargo run --bin scode -- --help`.

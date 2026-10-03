@@ -1,7 +1,6 @@
 //! UI adapters for structured text and external ANSI content.
 //! The canvas owns terminal writes; control sequences are never replayed.
-//! MixedText supports foregrounds and attributes but not per-span backgrounds;
-//! the shared model retains backgrounds for direct ANSI output.
+//! Foregrounds, backgrounds and attributes use the same spans as scrollback.
 
 use crate::render::styled_text::StyledText;
 use crossterm::style::{Attribute, Color as TerminalColor};
@@ -35,6 +34,7 @@ fn contents(text: &StyledText, default_color: Option<Color>) -> Vec<MixedTextCon
             let mut span = MixedTextContent::default();
             span.text = text.replace('\t', " ").replace('\r', "");
             span.color = style.foreground_color.and_then(ui_color).or(default_color);
+            span.background_color = style.background_color.and_then(ui_color);
             span.weight = if has(Attribute::Bold) {
                 Weight::Bold
             } else {

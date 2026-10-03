@@ -81,7 +81,22 @@ pub(crate) fn wrap_ansi_to_width(input: &str, width: usize) -> Vec<String> {
     let source = StyledText::from_ansi(input);
     wrap_line(&source, 0..source.text.len(), width, 0)
         .into_iter()
-        .map(|(row, _)| {
+        .map(|(mut row, columns)| {
+            let fill = row
+                .spans(0..row.text.len())
+                .last()
+                .and_then(|(style, _)| style.background_color);
+            if let Some(background) = fill {
+                if columns < width {
+                    row.push(
+                        crossterm::style::ContentStyle {
+                            background_color: Some(background),
+                            ..Default::default()
+                        },
+                        &" ".repeat(width - columns),
+                    );
+                }
+            }
             let mut output = String::new();
             row.write_ansi(0..row.text.len(), &mut output);
             output

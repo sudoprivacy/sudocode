@@ -84,7 +84,10 @@ explained beforehand — never an automatic resize fix.
 The inline renderer measures terminal columns and keeps grapheme clusters
 intact when wrapping responses, tables, and tool cards. Continued tool rows
 retain their text styles. Amber remains the main accent; links use blue,
-inline code uses violet, and warnings use yellow (ochre on light backgrounds).
+and warnings use yellow (ochre on light backgrounds). Code follows Codex's
+default Catppuccin Mocha/Latte themes, including the theme's Markdown inline
+code color and syntax colors from the same grammar bundle. Code blocks keep
+the terminal background; syntax italics and underlines are suppressed.
 Status summaries pass structured styles directly to iocraft. External ANSI
 content is decoded at the boundary, and syntax grammars are loaded only when
 needed and shared across turns. `render/color_theme.rs` owns both UI and syntax

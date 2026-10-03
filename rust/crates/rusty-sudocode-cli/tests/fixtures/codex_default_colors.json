@@ -1,0 +1,1247 @@
+{
+  "revision": "b741e480e203f037ca726bc2a76d99a8e8668e66",
+  "source": "openai/codex",
+  "themes": [
+    {
+      "diff_added_string": "Rgb(166, 227, 161)",
+      "diff_removed_string": "Rgb(166, 227, 161)",
+      "inline_foreground": "Rgb(166, 227, 161)",
+      "samples": [
+        {
+          "code": "// Rust colors\nfn greet(name: &str) -> String {\n    format!(\"Hello {name}: {}\", 42)\n}\n",
+          "language": "rust",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "//"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": " Rust colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "fn"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(137, 180, 250)",
+                "text": "greet"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "("
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(235, 160, 172)",
+                "text": "name"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ":"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(235, 160, 172)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(148, 226, 213)",
+                "text": "&"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "str"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ")"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "->"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " String"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "{"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": "    "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(137, 180, 250)",
+                "text": "format!"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "("
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "Hello "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(245, 194, 231)",
+                "text": "{name}"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": ": "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(245, 194, 231)",
+                "text": "{}"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ","
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(250, 179, 135)",
+                "text": "42"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ")"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "}"
+              }
+            ]
+          ]
+        },
+        {
+          "code": "// TypeScript colors\nconst enabled: boolean = true;\nconst message = `Hello ${enabled}`;\n",
+          "language": "typescript",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "//"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": " TypeScript colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "const"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": "enabled"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(148, 226, 213)",
+                "text": ":"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(249, 226, 175)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "boolean"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(249, 226, 175)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(148, 226, 213)",
+                "text": "="
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(250, 179, 135)",
+                "text": "true"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ";"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "const"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": "message"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(148, 226, 213)",
+                "text": "="
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "`"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "Hello "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "${"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": "enabled"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "}"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "`"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ";"
+              }
+            ]
+          ]
+        },
+        {
+          "code": "# Python colors\ndef greet(name: str):\n    return f\"Hello {name}\", 42\n",
+          "language": "python3",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "#"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": " Python colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "def"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(137, 180, 250)",
+                "text": "greet"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "("
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(235, 160, 172)",
+                "text": "name"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ":"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(235, 160, 172)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "str"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ")"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ":"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": "    "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "return"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "f"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "Hello "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "{"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": "name"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "}"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": ", "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(250, 179, 135)",
+                "text": "42"
+              }
+            ]
+          ]
+        },
+        {
+          "code": "# Shell colors\nexport GREETING=\"hello\"\nprintf '%s\\n' \"$GREETING\"\n",
+          "language": "shell",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "#"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": " Shell colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "export"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": "GREETING"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(148, 226, 213)",
+                "text": "="
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "hello"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(137, 180, 250)",
+                "text": "printf"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "'"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "%s\\n"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "'"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(243, 139, 168)",
+                "text": "$"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": "GREETING"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(166, 227, 161)",
+                "text": "\""
+              }
+            ]
+          ]
+        },
+        {
+          "code": "/* multiline color\n comment continuation */\nlet answer = 42;\n",
+          "language": "rust",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "/*"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": " multiline color"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": " comment continuation "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": "*/"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(203, 166, 247)",
+                "text": "let"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " answer "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(148, 226, 213)",
+                "text": "="
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(205, 214, 244)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(250, 179, 135)",
+                "text": "42"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(147, 153, 178)",
+                "text": ";"
+              }
+            ]
+          ]
+        }
+      ],
+      "theme": "catppuccin-mocha"
+    },
+    {
+      "diff_added_string": "Rgb(50, 126, 34)",
+      "diff_removed_string": "Rgb(49, 124, 33)",
+      "inline_foreground": "Rgb(64, 160, 43)",
+      "samples": [
+        {
+          "code": "// Rust colors\nfn greet(name: &str) -> String {\n    format!(\"Hello {name}: {}\", 42)\n}\n",
+          "language": "rust",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "//"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": " Rust colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "fn"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(30, 102, 245)",
+                "text": "greet"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "("
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(230, 69, 83)",
+                "text": "name"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ":"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(230, 69, 83)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(23, 146, 153)",
+                "text": "&"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "str"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ")"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "->"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " String"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "{"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": "    "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(30, 102, 245)",
+                "text": "format!"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "("
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "Hello "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(234, 118, 203)",
+                "text": "{name}"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": ": "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(234, 118, 203)",
+                "text": "{}"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ","
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(254, 100, 11)",
+                "text": "42"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ")"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "}"
+              }
+            ]
+          ]
+        },
+        {
+          "code": "// TypeScript colors\nconst enabled: boolean = true;\nconst message = `Hello ${enabled}`;\n",
+          "language": "typescript",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "//"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": " TypeScript colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "const"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": "enabled"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(23, 146, 153)",
+                "text": ":"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(223, 142, 29)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "boolean"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(223, 142, 29)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(23, 146, 153)",
+                "text": "="
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(254, 100, 11)",
+                "text": "true"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ";"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "const"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": "message"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(23, 146, 153)",
+                "text": "="
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "`"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "Hello "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "${"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": "enabled"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "}"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "`"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ";"
+              }
+            ]
+          ]
+        },
+        {
+          "code": "# Python colors\ndef greet(name: str):\n    return f\"Hello {name}\", 42\n",
+          "language": "python3",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "#"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": " Python colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "def"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(30, 102, 245)",
+                "text": "greet"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "("
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(230, 69, 83)",
+                "text": "name"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ":"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(230, 69, 83)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "str"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ")"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ":"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": "    "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "return"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "f"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "Hello "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "{"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": "name"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "}"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": ", "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(254, 100, 11)",
+                "text": "42"
+              }
+            ]
+          ]
+        },
+        {
+          "code": "# Shell colors\nexport GREETING=\"hello\"\nprintf '%s\\n' \"$GREETING\"\n",
+          "language": "shell",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "#"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": " Shell colors"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "export"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": "GREETING"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(23, 146, 153)",
+                "text": "="
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "hello"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(30, 102, 245)",
+                "text": "printf"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "'"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "%s\\n"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "'"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(210, 15, 57)",
+                "text": "$"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": "GREETING"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(64, 160, 43)",
+                "text": "\""
+              }
+            ]
+          ]
+        },
+        {
+          "code": "/* multiline color\n comment continuation */\nlet answer = 42;\n",
+          "language": "rust",
+          "rows": [
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "/*"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": " multiline color"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": " comment continuation "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": "*/"
+              }
+            ],
+            [
+              {
+                "bold": false,
+                "foreground": "Rgb(136, 57, 239)",
+                "text": "let"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " answer "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(23, 146, 153)",
+                "text": "="
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(76, 79, 105)",
+                "text": " "
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(254, 100, 11)",
+                "text": "42"
+              },
+              {
+                "bold": false,
+                "foreground": "Rgb(124, 127, 147)",
+                "text": ";"
+              }
+            ]
+          ]
+        }
+      ],
+      "theme": "catppuccin-latte"
+    }
+  ],
+  "two_face": "0.5.1"
+}

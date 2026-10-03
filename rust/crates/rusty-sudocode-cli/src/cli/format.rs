@@ -814,10 +814,13 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
 /// real result forever. Scrollback carries exactly one card per call: the
 /// completed (green/red) [`format_tool_result`].
 pub(crate) fn format_tool_call_start(name: &str, input: &str) -> String {
+    render_tool_card(&tool_call_start_content(name, input), ToolStatus::Running)
+}
+
+pub(crate) fn tool_call_start_content(name: &str, input: &str) -> ToolCardContent {
     let in_val: serde_json::Value =
         serde_json::from_str(input).unwrap_or(serde_json::Value::String(input.to_string()));
-    let content = tool_card_content(name, &in_val, None, ToolStatus::Running);
-    render_tool_card(&content, ToolStatus::Running)
+    tool_card_content(name, &in_val, None, ToolStatus::Running)
 }
 
 /// The single source of truth for a tool card's semantic content, shared by the
@@ -899,6 +902,7 @@ pub(crate) enum ToolStatus {
 /// produce this; [`render_tool_card`] is the single place that adds the
 /// status-colored L-frame. New tools only supply a header (and optional
 /// body) and inherit the unified look automatically.
+#[derive(Debug)]
 pub(crate) struct ToolCardContent {
     /// First line: tool identity + summary. May carry emoji and the tool's
     /// own identity color (bash muted, write green, edit warning, …).
@@ -1389,8 +1393,11 @@ pub(crate) fn write_card(
     };
     header.push_str(&identity_annotation(input));
     match original {
-        Some(prev) if kind != "create" => match format_full_replace_diff_preview(prev, new_content)
-        {
+        Some(prev) if kind != "create" => match format_full_replace_diff_preview(
+            prev,
+            new_content,
+            language_token_from_path(&path),
+        ) {
             Some(preview) => ToolCardContent::new(header, preview),
             None => ToolCardContent::header_only(header),
         },
@@ -1403,7 +1410,11 @@ pub(crate) fn write_card(
 /// to skip identical head/tail, then prints up to
 /// `DIFF_PREVIEW_MAX_BODY_LINES` of removed and added lines with a hunk
 /// header. Returns `None` when the contents are byte-identical.
-pub(crate) fn format_full_replace_diff_preview(original: &str, updated: &str) -> Option<String> {
+pub(crate) fn format_full_replace_diff_preview(
+    original: &str,
+    updated: &str,
+    language: &str,
+) -> Option<String> {
     if original == updated {
         return None;
     }
@@ -1431,6 +1442,7 @@ pub(crate) fn format_full_replace_diff_preview(original: &str, updated: &str) ->
         &old_lines,
         head,
         edit_start_line,
+        language,
     ))
 }
 
@@ -1482,8 +1494,9 @@ pub(crate) fn edit_card(
     // (completed), render the proper context-windowed diff; otherwise (staging,
     // before the result arrives) render the full old→new block — never just the
     // first line, which used to make a multi-line edit look like a one-liner.
-    let preview = format_edit_diff_preview(original, old_value, new_value)
-        .or_else(|| format_old_new_diff(old_value, new_value));
+    let language = language_token_from_path(&path);
+    let preview = format_edit_diff_preview(original, old_value, new_value, language)
+        .or_else(|| format_old_new_diff(old_value, new_value, language));
 
     let warning = ansi_bold_fg(theme().warning);
     let verb = if status == ToolStatus::Running {
@@ -1503,27 +1516,20 @@ pub(crate) fn edit_card(
 /// Every changed line is shown (capped per side by
 /// `DIFF_PREVIEW_MAX_BODY_LINES`) — the SSOT diff-body renderer, not a
 /// first-line-only summary. Returns `None` when both sides are empty.
-fn format_old_new_diff(old_value: &str, new_value: &str) -> Option<String> {
+fn format_old_new_diff(old_value: &str, new_value: &str, language: &str) -> Option<String> {
     if old_value.is_empty() && new_value.is_empty() {
         return None;
     }
-    let t = theme();
-    let removed = ansi_fg(t.diff_removed);
-    let added = ansi_fg(t.diff_added);
-    let mut out: Vec<String> = Vec::new();
-    push_body_lines(
-        &mut out,
-        &old_value.lines().collect::<Vec<_>>(),
-        '-',
-        &removed,
-    );
-    push_body_lines(
-        &mut out,
-        &new_value.lines().collect::<Vec<_>>(),
-        '+',
-        &added,
-    );
-    Some(out.join("\n"))
+    Some(
+        render_colored_diff(
+            &[],
+            &old_value.lines().collect::<Vec<_>>(),
+            &new_value.lines().collect::<Vec<_>>(),
+            &[],
+            language,
+        )
+        .join("\n"),
+    )
 }
 
 /// Render a context-windowed diff for the first occurrence of `old_string`
@@ -1540,6 +1546,7 @@ pub(crate) fn format_edit_diff_preview(
     original: &str,
     old_string: &str,
     new_string: &str,
+    language: &str,
 ) -> Option<String> {
     if original.is_empty() || old_string.is_empty() {
         return None;
@@ -1573,6 +1580,7 @@ pub(crate) fn format_edit_diff_preview(
         &original_lines,
         pre_context_start,
         edit_start_line,
+        language,
     ))
 }
 
@@ -1585,6 +1593,7 @@ fn render_diff_window(
     original_lines: &[&str],
     pre_context_start: usize,
     edit_start_line_1based: usize,
+    language: &str,
 ) -> String {
     let mut out: Vec<String> = Vec::new();
     let pre_context = &original_lines
@@ -1601,8 +1610,6 @@ fn render_diff_window(
 
     let t = theme();
     let muted = ansi_fg(t.muted);
-    let removed = ansi_fg(t.diff_removed);
-    let added = ansi_fg(t.diff_added);
     out.push(format!(
         "{muted}@@ -{},{} +{},{} @@{RESET}",
         edit_start_line_1based,
@@ -1610,33 +1617,56 @@ fn render_diff_window(
         edit_start_line_1based,
         new_body.len(),
     ));
-    for line in pre_context {
-        out.push(format!("{DIM}  {line}{RESET}"));
-    }
-    push_body_lines(&mut out, old_body, '-', &removed);
-    push_body_lines(&mut out, new_body, '+', &added);
-    for line in post_context {
-        out.push(format!("{DIM}  {line}{RESET}"));
-    }
+    out.extend(render_colored_diff(
+        pre_context,
+        old_body,
+        new_body,
+        post_context,
+        language,
+    ));
     out.join("\n")
 }
 
-fn push_body_lines(out: &mut Vec<String>, body: &[&str], sign: char, color: &str) {
-    let limit = DIFF_PREVIEW_MAX_BODY_LINES;
-    if body.len() <= limit {
-        for line in body {
-            out.push(format!("{color}{sign} {line}{RESET}"));
+/// Feed the visible hunk through one parser, then insert collapse notices without
+/// letting their prose become source code or allocating styles for hidden rows.
+fn render_colored_diff(
+    pre: &[&str],
+    old: &[&str],
+    new: &[&str],
+    post: &[&str],
+    language: &str,
+) -> Vec<String> {
+    let count = |body: &[&str]| {
+        if body.len() > DIFF_PREVIEW_MAX_BODY_LINES {
+            DIFF_PREVIEW_MAX_BODY_LINES - 1
+        } else {
+            body.len()
         }
-    } else {
-        let head = limit.saturating_sub(1);
-        for line in &body[..head] {
-            out.push(format!("{color}{sign} {line}{RESET}"));
-        }
-        out.push(format!(
-            "{DIM}{sign} … +{} more lines{RESET}",
-            body.len() - head,
-        ));
+    };
+    let old_count = count(old);
+    let new_count = count(new);
+    let rows: Vec<_> = pre
+        .iter()
+        .map(|line| (' ', *line))
+        .chain(old[..old_count].iter().map(|line| ('-', *line)))
+        .chain(new[..new_count].iter().map(|line| ('+', *line)))
+        .chain(post.iter().map(|line| (' ', *line)))
+        .collect();
+    let mut rendered = crate::render::diff_colors::render_rows(&rows, language);
+    // Insert from the end so the earlier row offsets remain valid.
+    if new_count < new.len() {
+        rendered.insert(
+            pre.len() + old_count + new_count,
+            format!("{DIM}+ … +{} more lines{RESET}", new.len() - new_count),
+        );
     }
+    if old_count < old.len() {
+        rendered.insert(
+            pre.len() + old_count,
+            format!("{DIM}- … +{} more lines{RESET}", old.len() - old_count),
+        );
+    }
+    rendered
 }
 
 fn count_non_overlapping(haystack: &str, needle: &str) -> usize {
@@ -3790,7 +3820,7 @@ mod tests {
     #[test]
     fn format_edit_diff_preview_shows_context_around_change() {
         let original = "line 1\nline 2\nline 3\nold line\nline 5\nline 6\nline 7\n";
-        let preview = format_edit_diff_preview(original, "old line", "new line").unwrap();
+        let preview = format_edit_diff_preview(original, "old line", "new line", "").unwrap();
         let plain = strip_ansi(&preview);
         // Hunk header pointing at line 4.
         assert!(plain.contains("@@ -4,1 +4,1 @@"), "{plain}");
@@ -3818,7 +3848,7 @@ mod tests {
             .map(|n| format!("new{n}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let preview = format_edit_diff_preview(&original, &old_str, &new_str).unwrap();
+        let preview = format_edit_diff_preview(&original, &old_str, &new_str, "").unwrap();
         let plain = strip_ansi(&preview);
         // Body collapses at DIFF_PREVIEW_MAX_BODY_LINES (8) per side.
         assert!(plain.contains("- old1"), "{plain}");
@@ -3833,9 +3863,9 @@ mod tests {
     fn format_edit_diff_preview_returns_none_without_anchor() {
         // Empty original / old_string means we cannot anchor the window —
         // caller falls back to single-line summary.
-        assert!(format_edit_diff_preview("", "x", "y").is_none());
-        assert!(format_edit_diff_preview("foo", "", "y").is_none());
-        assert!(format_edit_diff_preview("foo", "not present", "y").is_none());
+        assert!(format_edit_diff_preview("", "x", "y", "").is_none());
+        assert!(format_edit_diff_preview("foo", "", "y", "").is_none());
+        assert!(format_edit_diff_preview("foo", "not present", "y", "").is_none());
     }
 
     #[test]
@@ -3849,7 +3879,7 @@ mod tests {
         let original =
             "fn header() {}\n\nfn caller() {\n    let x = 1;\n    old_function();\n    return x;\n}\n";
         let preview =
-            format_edit_diff_preview(original, "old_function()", "new_function()").unwrap();
+            format_edit_diff_preview(original, "old_function()", "new_function()", "").unwrap();
         let plain = strip_ansi(&preview);
         // Hunk header points at line 5 (the line containing the match),
         // not line 6.

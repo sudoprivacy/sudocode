@@ -25,7 +25,7 @@ engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
-iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "60bb2014696471e1febe505784b3a23e7c601b05" }
+iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "4f90405557da1d4ac46155f03804a10fc1144013" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"
@@ -44,6 +44,8 @@ sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"
 syntect = "5"
+# Match the grammar/theme bundle in the Codex reference revision.
+two-face = { version = "=0.5.1", default-features = false, features = ["syntect-onig"] }
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "time"] }
 tools = { path = "../tools" }
 unicode-width = "0.2"

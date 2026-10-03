@@ -3110,6 +3110,7 @@ fn run_repl_iocraft_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    render::terminal_palette::initialize();
     cli.is_repl = true;
     // Banner + restored history: on resume the iocraft REPL must replay the
     // session's messages to scrollback (same as the rustyline path), not just

@@ -7,16 +7,15 @@ use std::time::Instant;
 use crossterm::style::{Color, Stylize};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Style as SyntectStyle, Theme};
-use syntect::parsing::SyntaxSet;
-use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
+mod code_theme;
 mod color_theme;
 pub use color_theme::{theme, ColorTheme};
-
+mod color_math;
+pub(crate) mod diff_colors;
 mod styled_line;
 pub(crate) mod styled_text;
+pub(crate) mod terminal_palette;
 pub(crate) mod text_layout;
 pub(crate) use styled_line::StyledLine;
 use text_layout::display_width as visible_width;
@@ -27,7 +26,7 @@ use text_layout::display_width as visible_width;
 /// only advertise 256-color or 16-color these can render as garbage or as the
 /// wrong colors. Detect once at renderer construction and route the highlight
 /// path accordingly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorSupport {
     /// No ANSI color (`NO_COLOR` set, `TERM=dumb`, or `TERM` unset).
     NoColor,
@@ -76,40 +75,12 @@ impl ColorSupport {
 
 /// Approximate an RGB triple to the nearest 256-color palette index.
 ///
-/// Uses the standard 6×6×6 RGB cube (indices 16–231) plus the 24-step
-/// grayscale ramp (232–255) for near-gray inputs.
+/// Match Codex's perceptual distance over the terminal-independent palette.
 fn rgb_to_ansi256(r: u8, g: u8, b: u8) -> u8 {
-    if r == g && g == b {
-        if r < 8 {
-            return 16;
-        }
-        let idx: u16 = 232 + (u16::from(r) - 8) / 10;
-        return u8::try_from(idx.min(255)).expect("idx clamped to <=255");
+    match color_math::foreground((r, g, b), None, ColorSupport::Ansi256) {
+        Color::AnsiValue(index) => index,
+        _ => unreachable!("a complete fixed palette always has a nearest color"),
     }
-    let to_cube = |v: u8| -> u16 { u16::from(v) * 5 / 255 };
-    let r5 = to_cube(r);
-    let g5 = to_cube(g);
-    let b5 = to_cube(b);
-    u8::try_from(16 + 36 * r5 + 6 * g5 + b5).expect("cube index fits in u8")
-}
-
-/// Render syntect ranges as 256-color escape sequences.
-fn ranges_to_256_color_escaped(ranges: &[(SyntectStyle, &str)]) -> String {
-    let mut out = String::new();
-    for (style, text) in ranges {
-        let fg = rgb_to_ansi256(style.foreground.r, style.foreground.g, style.foreground.b);
-        let _ = write!(out, "\u{1b}[38;5;{fg}m{text}\u{1b}[0m");
-    }
-    out
-}
-
-/// Strip styling from syntect ranges and concatenate the text.
-fn ranges_to_plain(ranges: &[(SyntectStyle, &str)]) -> String {
-    let mut out = String::with_capacity(ranges.iter().map(|(_, s)| s.len()).sum());
-    for (_, text) in ranges {
-        out.push_str(text);
-    }
-    out
 }
 
 /// Convert a `Color` to its ANSI foreground escape sequence.
@@ -650,21 +621,6 @@ impl RenderState {
     }
 }
 
-/// Syntect grammars are immutable and expensive to inflate. Load them only
-/// when highlighting is needed, then share them across turns and file cards.
-struct SyntaxResources {
-    syntax_set: SyntaxSet,
-    theme: Theme,
-}
-
-fn syntax_resources() -> &'static SyntaxResources {
-    static RESOURCES: std::sync::OnceLock<SyntaxResources> = std::sync::OnceLock::new();
-    RESOURCES.get_or_init(|| SyntaxResources {
-        syntax_set: SyntaxSet::load_defaults_newlines(),
-        theme: theme().syntax.to_syntect(theme().code_bg),
-    })
-}
-
 #[derive(Debug)]
 pub struct TerminalRenderer {
     color_theme: ColorTheme,
@@ -674,7 +630,7 @@ pub struct TerminalRenderer {
 impl Default for TerminalRenderer {
     fn default() -> Self {
         Self {
-            color_theme: *theme(),
+            color_theme: ColorTheme::default(),
             color_support: ColorSupport::detect(),
         }
     }
@@ -872,7 +828,9 @@ impl TerminalRenderer {
             Event::Start(Tag::Strong) => state.strong += 1,
             Event::End(TagEnd::Strong) => state.strong = state.strong.saturating_sub(1),
             Event::Code(code) => {
-                let rendered = format!("{}", format!("`{code}`").with(self.color_theme.code));
+                let color =
+                    code_theme::inline_color(self.color_theme.light_background, self.color_support);
+                let rendered = format!("{}", code.with(color));
                 state.append_raw(output, &rendered);
             }
             Event::Rule => output.push_str("---\n"),
@@ -1124,47 +1082,17 @@ impl TerminalRenderer {
 
     #[must_use]
     pub fn highlight_code(&self, code: &str, language: &str) -> String {
-        if self.color_support == ColorSupport::NoColor {
-            return code.to_string();
-        }
-
-        let resources = syntax_resources();
-        let syntax = resources
-            .syntax_set
-            .find_syntax_by_token(language)
-            .unwrap_or_else(|| resources.syntax_set.find_syntax_plain_text());
-        let mut syntax_highlighter = HighlightLines::new(syntax, &resources.theme);
-        let mut colored_output = String::new();
-
-        for line in LinesWithEndings::from(code) {
-            match syntax_highlighter.highlight_line(line, &resources.syntax_set) {
-                Ok(ranges) => {
-                    let escaped = match self.color_support {
-                        ColorSupport::TrueColor => as_24_bit_terminal_escaped(&ranges[..], false),
-                        ColorSupport::Ansi256 => ranges_to_256_color_escaped(&ranges[..]),
-                        ColorSupport::Ansi16 | ColorSupport::NoColor => {
-                            ranges_to_plain(&ranges[..])
-                        }
-                    };
-                    colored_output.push_str(&self.apply_code_block_background(&escaped));
-                }
-                Err(_) => colored_output.push_str(&self.apply_code_block_background(line)),
-            }
-        }
-
-        colored_output
-    }
-
-    fn apply_code_block_background(&self, line: &str) -> String {
-        // Background tint relies on 256-color escapes; skip when the terminal
-        // can't render them cleanly.
-        if matches!(
+        let Some(highlighted) = code_theme::highlight(
+            code,
+            language,
+            self.color_theme.light_background,
             self.color_support,
-            ColorSupport::NoColor | ColorSupport::Ansi16
-        ) {
-            return line.to_string();
-        }
-        apply_code_block_background(line, self.color_theme.code_bg)
+        ) else {
+            return code.to_string();
+        };
+        let mut output = String::new();
+        highlighted.write_ansi(0..highlighted.text.len(), &mut output);
+        output
     }
 
     pub fn stream_markdown(&self, markdown: &str, out: &mut impl Write) -> io::Result<()> {
@@ -1202,18 +1130,6 @@ impl MarkdownStreamState {
             Some(renderer.markdown_to_ansi(&pending))
         }
     }
-}
-
-fn apply_code_block_background(line: &str, bg: u8) -> String {
-    let trimmed = line.trim_end_matches('\n');
-    let trailing_newline = if trimmed.len() == line.len() {
-        ""
-    } else {
-        "\n"
-    };
-    let reset_with_bg = format!("\u{1b}[0;48;5;{bg}m");
-    let with_background = trimmed.replace("\u{1b}[0m", &reset_with_bg);
-    format!("\u{1b}[48;5;{bg}m{with_background}{RESET}{trailing_newline}")
 }
 
 /// Pre-process raw markdown so that fenced code blocks whose body contains
@@ -1641,8 +1557,8 @@ mod tests {
     #[test]
     fn rgb_to_ansi256_maps_cube_corners() {
         assert_eq!(rgb_to_ansi256(0, 0, 0), 16); // black grayscale shortcut
-                                                 // Pure white maps through the grayscale ramp; clamps to the top.
-        assert_eq!(rgb_to_ansi256(255, 255, 255), 255);
+                                                 // Perceptual quantization selects the exact white cube entry.
+        assert_eq!(rgb_to_ansi256(255, 255, 255), 231);
         assert_eq!(rgb_to_ansi256(255, 0, 0), 16 + 36 * 5); // pure red
         assert_eq!(rgb_to_ansi256(0, 255, 0), 16 + 6 * 5); // pure green
         assert_eq!(rgb_to_ansi256(0, 0, 255), 16 + 5); // pure blue

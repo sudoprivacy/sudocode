@@ -416,10 +416,24 @@ fn diff_roundtrip(light: bool) {
         "input during colored preview",
     );
     assert_cell(&sess, "draft-copy-test", "Default", "Default");
+    // Resize, input and async wakeups can share a native readiness batch.
+    // Each key must appear without a second key waking a stalled reader.
+    let mut draft = String::from("draft-copy-test");
+    for (width, key) in [(94, "1"), (86, "2"), (100, "3")] {
+        sess.resize(60, width).unwrap();
+        sess.send(key).unwrap();
+        draft.push_str(key);
+        common::expect_input_line(
+            &sess,
+            &draft,
+            common::DEFAULT_TIMEOUT,
+            "input immediately after preview resize",
+        );
+    }
     sess.resize(60, 78).unwrap();
     common::expect_screen(
         &sess,
-        |s| s.contains("NEW_MARKER") && s.contains("draft-copy-test"),
+        |s| s.contains("NEW_MARKER") && s.contains(&draft),
         common::DEFAULT_TIMEOUT,
         "reflowed preview",
     );

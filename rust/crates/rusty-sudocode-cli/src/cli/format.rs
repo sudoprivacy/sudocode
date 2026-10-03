@@ -1090,7 +1090,9 @@ pub(crate) fn bash_card(
     let mut header = if command.is_empty() {
         format!("{muted}Bash{RESET}")
     } else {
-        format!("{muted}Bash{RESET}({})", truncate_for_summary(command, 120))
+        let summary = crate::render::TerminalRenderer::new()
+            .highlight_code(&truncate_for_summary(command, 120), "bash");
+        format!("{muted}Bash{RESET}({summary})")
     };
     header.push_str(&identity_annotation(input));
 
@@ -1144,7 +1146,10 @@ fn command_body_preamble(command: &str) -> Option<String> {
         return None;
     }
     let mut preamble = String::new();
-    for line in command.split('\n') {
+    // Highlight the whole script before adding display prefixes, preserving
+    // multiline strings and heredocs without treating `$ ` as source code.
+    let highlighted = crate::render::TerminalRenderer::new().highlight_code(command, "bash");
+    for line in highlighted.split('\n') {
         let _ = writeln!(preamble, "{DIM}${RESET} {line}");
     }
     // Dim rule (structure, not status) dividing command from output.

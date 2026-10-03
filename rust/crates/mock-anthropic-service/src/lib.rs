@@ -220,6 +220,7 @@ enum Scenario {
     CodexColorsShowcase,
     CodexDiffShowcase,
     SyntaxHighlightLimits,
+    CodexBashShowcase,
     SleepOverMaxRoundtrip,
     ForkSubagentRecursionGuardRoundtrip,
     LlmCompactionRoundtrip,
@@ -362,6 +363,7 @@ impl Scenario {
             "codex_colors_showcase" => Some(Self::CodexColorsShowcase),
             "codex_diff_showcase" => Some(Self::CodexDiffShowcase),
             "syntax_highlight_limits" => Some(Self::SyntaxHighlightLimits),
+            "codex_bash_showcase" => Some(Self::CodexBashShowcase),
             "sleep_over_max_roundtrip" => Some(Self::SleepOverMaxRoundtrip),
             "fork_subagent_recursion_guard_roundtrip" => {
                 Some(Self::ForkSubagentRecursionGuardRoundtrip)
@@ -435,6 +437,7 @@ impl Scenario {
             Self::CodexColorsShowcase => "codex_colors_showcase",
             Self::CodexDiffShowcase => "codex_diff_showcase",
             Self::SyntaxHighlightLimits => "syntax_highlight_limits",
+            Self::CodexBashShowcase => "codex_bash_showcase",
             Self::SleepOverMaxRoundtrip => "sleep_over_max_roundtrip",
             Self::ForkSubagentRecursionGuardRoundtrip => "fork_subagent_recursion_guard_roundtrip",
             Self::LlmCompactionRoundtrip => "llm_compaction_roundtrip",
@@ -1297,6 +1300,10 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::UnicodeRenderingShowcase => markdown_showcase_sse(UNICODE_SHOWCASE_DOC),
         Scenario::SyntaxHighlightShowcase => markdown_showcase_sse(SYNTAX_SHOWCASE_DOC),
         Scenario::CodexColorsShowcase => markdown_showcase_sse(CODEX_COLORS_SHOWCASE_DOC),
+        Scenario::CodexBashShowcase => match codex_bash_input(request) {
+            Some((id, input)) => tool_use_sse(id, "bash", &[&input.to_string()]),
+            None => final_text_sse("Color bash done."),
+        },
         Scenario::CodexDiffShowcase => match latest_tool_result(request) {
             Some(_) => final_text_sse("Color diff done."),
             None => tool_use_sse(
@@ -1868,6 +1875,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::CodexColorsShowcase => {
             text_message_response("msg_codex_colors", CODEX_COLORS_SHOWCASE_DOC)
         }
+        Scenario::CodexBashShowcase => match codex_bash_input(request) {
+            Some((id, input)) => tool_message_response("msg_color_bash", id, "bash", input),
+            None => text_message_response("msg_color_bash_done", "Color bash done."),
+        },
         Scenario::CodexDiffShowcase => match latest_tool_result(request) {
             Some(_) => text_message_response("msg_color_diff_done", "Color diff done."),
             None => tool_message_response(
@@ -2529,6 +2540,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::CodexColorsShowcase => "req_codex_colors",
         Scenario::CodexDiffShowcase => "req_codex_diff",
         Scenario::SyntaxHighlightLimits => "req_syntax_limits",
+        Scenario::CodexBashShowcase => "req_codex_bash",
         Scenario::ReadFileRoundtrip => "req_read_file_roundtrip",
         Scenario::SkillReadRoundtrip => "req_skill_read_roundtrip",
         Scenario::ImageReadRoundtrip => "req_image_read_roundtrip",
@@ -2714,6 +2726,22 @@ pub const MARKDOWN_SHOWCASE_DOC: &str = "Intro:\n- alpha\n- beta\n\n## Section\n
 
 /// Deterministic terminal-column and semantic-style fixture for PTY acceptance.
 pub const UNICODE_SHOWCASE_DOC: &str = "CJK:界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\n\nEmoji:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa👩🏽‍💻END\n\nCombining:aaaaaaaaaaaaaaaaaaaaaaaaaaaae\u{301}END\n\n| Key | Value |\n| --- | --- |\n| 中文 | 通过 |\n| ASCII | ok |\n\n[LINK](https://example.com) and `CODE`\n\nUnicode done.";
+
+/// Source samples also rendered by the pinned Codex highlighter for PTY comparison.
+pub const CODEX_BASH_SINGLE: &str = r#"echo "CODEX_SINGLE_LINE_OUTPUT""#;
+pub const CODEX_BASH_MULTI: &str =
+    "# Shell colors\necho \"CODEX_SHELL_OUTPUT\"\necho \"MULTILINE\nCONTINUATION\"";
+
+fn codex_bash_input(request: &MessageRequest) -> Option<(&'static str, Value)> {
+    let (id, command) = match latest_tool_result(request) {
+        None => ("toolu_color_bash_single", CODEX_BASH_SINGLE),
+        Some((output, false)) if output.contains("CODEX_SINGLE_LINE_OUTPUT") => {
+            ("toolu_color_bash_multi", CODEX_BASH_MULTI)
+        }
+        Some(_) => return None,
+    };
+    Some((id, json!({"command": command})))
+}
 
 /// Source samples also rendered by the pinned Codex highlighter for PTY comparison.
 pub const CODEX_COLORS_SHOWCASE_DOC: &str = include_str!("fixtures/codex-colors.md");

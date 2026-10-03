@@ -733,29 +733,32 @@ fn memory_defaults_preserve_legacy_facts_and_explicit_override_is_isolated() {
         "global.md",
         "GLOBAL_DEFAULT_FACT",
     );
-    // macOS may spell the temp root through /var or /private/var.
-    let roots = [
-        env.workspace_root().to_path_buf(),
-        env.workspace_root().canonicalize().unwrap(),
-    ];
-    let legacy_dirs: Vec<_> = roots
-        .iter()
-        .map(|root| {
-            let slug: String = root
-                .to_string_lossy()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .collect();
-            env.workspace_root()
-                .join("home/.scode/projects")
-                .join(slug)
-                .join("memory")
-        })
+    // Use the actual repository root spelling, just as existing memory does.
+    // A temp path can use Windows short names or a macOS /var alias, while the
+    // child cwd and canonicalize() can each return a different spelling.
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(env.workspace_root())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "--quiet"]);
+    let git_root = git(&["rev-parse", "--show-toplevel"]);
+    let slug: String = git_root
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    for dir in &legacy_dirs {
-        seed_memory(dir, "legacy.md", "LEGACY_PROJECT_FACT");
-        seed_memory(dir, "collision.md", "SHADOWED_LEGACY_FACT");
-    }
+    let legacy_dir = env
+        .workspace_root()
+        .join("home/.scode/projects")
+        .join(slug)
+        .join("memory");
+    seed_memory(&legacy_dir, "legacy.md", "LEGACY_PROJECT_FACT");
+    seed_memory(&legacy_dir, "collision.md", "SHADOWED_LEGACY_FACT");
     let mut cli = env.spawn(&[]);
     common::expect_input_line_cleared(&cli, WAIT, "default memory ready");
     turn(&mut cli, "Continue with existing memory.");
@@ -769,11 +772,9 @@ fn memory_defaults_preserve_legacy_facts_and_explicit_override_is_isolated() {
         assert!(text.contains(marker), "missing {marker}");
     }
     assert!(!text.contains("SHADOWED_LEGACY_FACT"));
-    for dir in &legacy_dirs {
-        assert!(std::fs::read_to_string(dir.join("collision.md"))
-            .unwrap()
-            .contains("SHADOWED_LEGACY_FACT"));
-    }
+    assert!(std::fs::read_to_string(legacy_dir.join("collision.md"))
+        .unwrap()
+        .contains("SHADOWED_LEGACY_FACT"));
     let isolated = env.workspace_root().join("isolated-memory");
     seed_memory(&isolated, "only.md", "ISOLATED_MEMORY_FACT");
     let mut cli = env.spawn_with_env(&[], &[("SUDOCODE_MEMORY_DIR", isolated.to_str().unwrap())]);

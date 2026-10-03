@@ -1076,6 +1076,80 @@ fn live_agent_list_sees_every_peer_from_either_node() {
     }
 }
 
+/// One session attached to BOTH a local same-machine pair and a nexus daemon
+/// sees every peer from both in ONE `agent_list`, each tagged with where it was
+/// found — the cross-namespace discovery the Directory exists for, against a
+/// real daemon rather than a temp dir.
+///
+/// The single-node endpoint suffices: the point is the UNION of two namespaces
+/// in one listing, not replication between nexus nodes (that is the test above).
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_CERT_DIR"]
+fn live_directory_unions_local_and_nexus_peers() {
+    use runtime::directory::{Directory, Member};
+
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let run = fresh();
+
+    // A nexus peer announces itself on the daemon.
+    let nexus_peer = format!("union-nexus-{run}");
+    let client = dial(&endpoint);
+    mailbox(&client, &nexus_peer, &auth)
+        .ensure_presence()
+        .expect("announce the nexus peer");
+
+    // A local peer announces itself in a same-machine pair root (a second scode
+    // in another folder is exactly this).
+    let pair_root = std::env::temp_dir().join(format!("scode-union-{run}"));
+    std::fs::create_dir_all(&pair_root).expect("make the local pair root");
+    let local_peer = format!("union-local-{run}");
+    Mailbox::workspace_local(&pair_root, local_peer.clone())
+        .ensure_presence()
+        .expect("announce the local peer");
+
+    // The session: its own identity on each namespace, local primary + nexus.
+    let me = format!("union-self-{run}");
+    let directory = Directory::new(vec![
+        Member {
+            label: "local",
+            mailbox: Arc::new(Mailbox::workspace_local(&pair_root, me.clone())),
+        },
+        Member {
+            label: "nexus",
+            mailbox: Arc::new(Mailbox::over_nexus(Arc::clone(&client), me.clone(), auth.clone())),
+        },
+    ]);
+
+    // Poll: nexus presence is not instantaneous. Assert BOTH peers appear, each
+    // tagged with the one namespace it lives in.
+    let deadline = Instant::now() + Duration::from_millis(DELIVERY_WAIT_MS);
+    let mut recips = Vec::new();
+    while Instant::now() < deadline {
+        recips = directory.list_recipients().expect("enumerate the directory");
+        let has_local = recips.iter().any(|r| r.name == local_peer);
+        let has_nexus = recips.iter().any(|r| r.name == nexus_peer);
+        if has_local && has_nexus {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let local_row = recips
+        .iter()
+        .find(|r| r.name == local_peer)
+        .unwrap_or_else(|| panic!("the local peer must appear; listing was {recips:?}"));
+    assert_eq!(local_row.sources, vec!["local"], "the local peer is tagged local-only");
+    let nexus_row = recips
+        .iter()
+        .find(|r| r.name == nexus_peer)
+        .unwrap_or_else(|| panic!("the nexus peer must appear; listing was {recips:?}"));
+    assert_eq!(nexus_row.sources, vec!["nexus"], "the nexus peer is tagged nexus-only");
+
+    let _ = std::fs::remove_dir_all(&pair_root);
+}
+
 /// Provision the operator's model route over the same authenticated gRPC bind.
 #[test]
 #[ignore = "requires the co-host daemon and model mount environment"]

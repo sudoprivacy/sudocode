@@ -1230,7 +1230,7 @@ fn strip_ansi(input: &str) -> String {
 
 /// One pending item awaiting the user's eye at a turn boundary: either an
 /// in-flight tool call (rendered as a running L-frame card) or a message queued
-/// for the next turn (a human `❯` line or an inbound A2A `📨` line). They share
+/// for the next turn (a human `❯` line or an inbound A2A `←` line). They share
 /// one ordered list so the overlay shows exactly what arrived, in arrival order
 /// — a tool starting, then a peer message, then another tool, interleave the
 /// way they happened rather than being grouped into two panes.
@@ -1241,7 +1241,7 @@ pub enum PendingItem {
     /// engine, not here).
     Tool(ToolCard),
     /// A message queued for the next turn — `display` is the compact one-line
-    /// form (`❯ …` for human, `📨 A2A from X: …` for a peer). Purely transient:
+    /// form (`❯ …` for human, `← sender: …` for a peer). Purely transient:
     /// the coordinator echoes the real line to scrollback when it flushes.
     /// `is_human` distinguishes a typed input from an inbound A2A/peer message
     /// so the empty-buffer `↑` removes all human chips (matching the
@@ -1262,7 +1262,7 @@ pub enum PendingItem {
 /// engine commits finished tool cards; the coordinator echoes flushed messages).
 /// Height budget mirrors the task panel: `min(10, max(3, rows-14))`, hidden
 /// entirely on a very short terminal.
-fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
+fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: usize) -> String {
     use crate::render::{DIM, RESET};
 
     if items.is_empty() {
@@ -1294,7 +1294,10 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
             PendingItem::QueuedMessage { display, .. } => {
                 // Always render (one line, collapsed), in arrival position.
                 let first = display.lines().next().unwrap_or("");
-                lines.push(format!("{DIM}↳ queued: {first}{RESET}"));
+                lines.push(crate::render::text_layout::truncate_to_width(
+                    &format!("{DIM}↳ queued: {first}{RESET}"),
+                    term_width,
+                ));
             }
             PendingItem::Tool(card) => {
                 tools_total += 1;
@@ -2334,7 +2337,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     // PendingSlot: in-flight tool cards (yellow L-frames) and queued messages
-    // (human `❯` / inbound A2A `📨`) in one ordered overlay, in arrival order.
+    // (human `❯` / inbound A2A `←`) in one ordered overlay, in arrival order.
     // Built as one multi-line string so the element tree keeps a fixed shape
     // (empty string when nothing pending) — same hook-index rationale as the
     // todo panel. A pure overlay: it never commits to scrollback (the render
@@ -2343,7 +2346,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending_text = pending
         .lock()
         .ok()
-        .map(|items| render_pending_overlay(&items, term_height as usize))
+        .map(|items| render_pending_overlay(&items, term_height as usize, w))
         .unwrap_or_default();
 
     element! {
@@ -2537,14 +2540,14 @@ mod tests {
 
     #[test]
     fn pending_overlay_empty_when_nothing_pending() {
-        assert_eq!(render_pending_overlay(&[], 40), "");
+        assert_eq!(render_pending_overlay(&[], 40, 80), "");
     }
 
     #[test]
     fn pending_overlay_hidden_on_short_terminal() {
         // ≤10 rows: hide entirely rather than crowd out the prompt.
         assert_eq!(
-            render_pending_overlay(&[PendingItem::Tool(tool_card("1", "bash"))], 8),
+            render_pending_overlay(&[PendingItem::Tool(tool_card("1", "bash"))], 8, 80),
             ""
         );
     }
@@ -2555,7 +2558,7 @@ mod tests {
             PendingItem::Tool(tool_card("1", "bash")),
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
-        let plain = strip_ansi(&render_pending_overlay(&items, 40));
+        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
         // Each running call is a Running L-frame card (╭─ header … ╰─).
         assert_eq!(plain.matches("╭─").count(), 2, "{plain}");
         // Headers show the canonical tool label (`Bash`, `Read`) — the SAME
@@ -2572,14 +2575,14 @@ mod tests {
         let items = vec![
             PendingItem::Tool(tool_card("1", "bash")),
             PendingItem::QueuedMessage {
-                display: "📨 A2A from mac-ai: hi".to_string(),
+                display: "← mac-ai: hi".to_string(),
                 is_human: false,
             },
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
-        let plain = strip_ansi(&render_pending_overlay(&items, 40));
+        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
         let bash_at = plain.find("Bash").expect("bash card");
-        let msg_at = plain.find("A2A from mac-ai").expect("queued message");
+        let msg_at = plain.find("← mac-ai").expect("queued message");
         let read_at = plain.find("Read").expect("read card");
         assert!(
             bash_at < msg_at && msg_at < read_at,
@@ -2596,7 +2599,7 @@ mod tests {
         let items: Vec<PendingItem> = (0..8)
             .map(|i| PendingItem::Tool(tool_card(&i.to_string(), "bash")))
             .collect();
-        let plain = strip_ansi(&render_pending_overlay(&items, 24));
+        let plain = strip_ansi(&render_pending_overlay(&items, 24, 80));
         assert!(
             plain.contains("more running"),
             "expected overflow summary: {plain}"

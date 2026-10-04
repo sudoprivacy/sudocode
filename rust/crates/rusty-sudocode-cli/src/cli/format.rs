@@ -79,14 +79,7 @@ pub(crate) fn render_message(
             if text.is_empty() {
                 return None;
             }
-            // Render exactly the plain `❯ text` prompt echo — no surrounding
-            // horizontal rules. The rules were added in the original resume
-            // work to "match live output", but the live iocraft REPL never
-            // commits a ruled box to scrollback (the input widget is a canvas
-            // that redraws away); the rules only made a resumed message look
-            // like the live input box below it.
-            let (echo, _) = format_input_echo(&text, term_width);
-            out.push_str(&echo);
+            out.push_str(&super::received::render_prompt(&text, term_width, renderer));
         }
         runtime::MessageRole::Assistant => {
             for block in &msg.blocks {

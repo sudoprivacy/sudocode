@@ -9,6 +9,7 @@ pub(crate) mod help;
 pub(crate) mod lifecycle;
 pub(crate) mod memory_ui;
 pub(crate) mod pager;
+pub(crate) mod received;
 pub(crate) mod session;
 pub(crate) mod session_ui;
 pub(crate) mod status;

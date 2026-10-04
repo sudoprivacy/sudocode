@@ -1,25 +1,7 @@
-//! PTY mock tests for inbound A2A message rendering — no daemon, no LLM `send`.
-//!
-//! A2A is DRY with human input, so a peer message must surface the same way an
-//! input does, differing only in marker (`📨 A2A from X: …` vs `❯`):
-//!   1. Received while idle → echoed to scrollback now (bold `📨` line) and a
-//!      turn starts to handle it.
-//!   2. Received during a running turn → held in the pending overlay as
-//!      `↳ queued: 📨 A2A from X: …` (not scrollback), flushed at the turn
-//!      boundary.
-//!
-//! Instead of a daemon or a second process, the test writes an envelope directly
-//! into the receiver's own same-machine inbox (`{pair_root}/agents/{self}/
-//! chat-with-me`) — exactly what a peer's `send` would produce — and reads the
-//! receiver's REPL.
-//!
-//! The receiver's name is derived from its cwd, and that path can differ from
-//! what the test sees (macOS resolves the temp dir through a `/private` symlink,
-//! changing the FNV path hash), so the test does NOT recompute the name. It
-//! discovers it: the local poller creates `agents/{self}/` with a `.cursor-{self}`
-//! sibling on its startup seek. Finding that cursor is the readiness signal — the
-//! seek has run, so a message injected afterward lands after the tail and cannot
-//! be skipped — and its directory is the receiver's real inbox.
+//! PTY acceptance for inbound A2A: isolated real mailbox delivery, queueing,
+//! source styling and persisted replay. Runs with mock or live model backends.
+//! Peer messages share input scheduling, but retain their sender and quote
+//! gutter instead of impersonating the human prompt or the assistant answer.
 
 mod common;
 
@@ -33,7 +15,7 @@ use runtime::mailbox::{local_pair_root_in, Mailbox};
 const BUDGET: Duration = Duration::from_secs(30);
 
 /// Match physical screen rows: `contents()` joins rows marked as soft-wrapped
-/// by ConPTY, which can join the input to its separators and footer. Keep the
+/// by `ConPTY`, which can join the input to its separators and footer. Keep the
 /// real row boundaries so caret and multiline-order assertions remain exact.
 fn wait_for_screen(sess: &PtySession, context: &str, predicate: impl Fn(&str) -> bool) {
     common::expect_screen(
@@ -161,33 +143,130 @@ fn inject(env: &TestEnv, receiver: &str, from: &str, body: &str) {
         .expect("inject a2a envelope");
 }
 
-/// Idle receipt: the message lands in scrollback with the `📨` marker.
+fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
+    let env = TestEnv::new("a2a-received-style");
+    let vars = [
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+        ("NO_COLOR", if no_color { "1" } else { "" }),
+        ("TERM", "xterm-256color"),
+        ("COLORTERM", "truecolor"),
+        ("COLORFGBG", background),
+    ];
+    let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &vars);
+    sess.resize(80, 52).unwrap();
+    common::expect_input_line_cleared(&sess, BUDGET, "receiver ready");
+    let receiver = wait_for_receiver(&env);
+    let marker = common::turn_status_marker(&sess);
+    let body = format!(
+        "Pong received.\n\n**Strong** and `code`.\n\n```rust\nlet value = 7;\n```\n\n{}\n\nA2A-BODY-END\n\nReply only with A2A-ACK. Do not call tools.",
+        "界".repeat(60)
+    );
+    let body = format!(
+        "{body}\n\n{}",
+        env.prompt("Reply only with A2A-ACK.", "single_turn_text")
+    );
+    inject(&env, &receiver, "mac-ai", &body);
+    wait_for_screen(&sess, "complete received block", |s| {
+        s.contains("│ A2A-BODY-END")
+    });
+    let live = received_block(&sess, sender_color, no_color);
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "received message handled",
+    );
+    exit(&mut sess);
+
+    let mut resumed = env.spawn_with_env(
+        &["--resume", "latest", "--permission-mode", "read-only"],
+        &vars,
+    );
+    resumed.resize(80, 52).unwrap();
+    wait_for_screen(&resumed, "restored received block", |s| {
+        s.contains("│ A2A-BODY-END")
+    });
+    assert_eq!(
+        received_block(&resumed, sender_color, no_color),
+        live,
+        "live and replay must use the same layout"
+    );
+    exit(&mut resumed);
+}
+
+fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<String> {
+    sess.render(|screen| {
+        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        let start = rows
+            .iter()
+            .position(|r| r == "← mac-ai")
+            .expect("sender header");
+        let end = rows
+            .iter()
+            .position(|r| r == "│ A2A-BODY-END")
+            .expect("body tail");
+        assert!(
+            rows[start + 1..=end].iter().all(|r| r.starts_with('│')),
+            "every body row needs a gutter: {rows:?}"
+        );
+        assert!(!rows.join("\n").contains("<mailbox-message"));
+        let rendered = rows[start..=end].join("\n");
+        assert!(
+            rendered.contains("Strong and code."),
+            "inline Markdown: {rendered}"
+        );
+        assert!(
+            rendered.contains("let value = 7;"),
+            "complete code body: {rendered}"
+        );
+        let header = screen.raw().cell(u16::try_from(start).unwrap(), 2).unwrap();
+        assert_eq!(format!("{:?}", header.fgcolor()), sender_color);
+        let body = screen
+            .raw()
+            .cell(u16::try_from(start + 1).unwrap(), 2)
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", body.fgcolor()),
+            "Default",
+            "plain body color"
+        );
+        assert!(!body.bold(), "only Markdown emphasis should be bold");
+        let border = screen
+            .raw()
+            .cell(u16::try_from(start + 1).unwrap(), 0)
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", border.fgcolor()),
+            if no_color {
+                "Default"
+            } else if sender_color == "Rgb(28, 100, 200)" {
+                "Idx(241)"
+            } else {
+                "Idx(247)"
+            }
+        );
+        assert_eq!(
+            rows[start..=end].join("").matches('界').count(),
+            60,
+            "full Unicode body"
+        );
+        rows[start..=end].to_vec()
+    })
+}
+
 #[test]
 fn a2a_received_while_idle_surfaces_in_scrollback() {
-    let env = TestEnv::new("a2a-idle");
-    // Receiver must run the async REPL (the only loop that polls) — pin queue
-    // mode so the harness default of `off` can't turn the poller off.
-    let mut sess = env.spawn_with_env(
-        &["--permission-mode", "workspace-write"],
-        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
-    );
-    sess.set_default_timeout(BUDGET);
-    sess.resize(50, 100).expect("resize pty");
-    sess.expect("❯").expect("async REPL initial prompt");
+    receive_and_resume("15;0", "Rgb(99, 168, 248)", false);
+}
 
-    let receiver = wait_for_receiver(&env);
-    inject(&env, &receiver, "mac-ai", "A2A-IDLE-MARKER");
+#[test]
+fn a2a_received_light_theme_and_replay() {
+    receive_and_resume("0;15", "Rgb(28, 100, 200)", false);
+}
 
-    // The `📨 A2A from mac-ai: …` line is the whole receive chain: poller woke,
-    // coordinator took the message, it rendered with the peer marker.
-    sess.expect("A2A from mac-ai")
-        .expect("idle a2a should surface with the 📨 marker");
-    sess.expect("A2A-IDLE-MARKER")
-        .expect("the message body should be shown");
-
-    sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
-    let _ = sess.expect_eof();
+#[test]
+fn a2a_received_without_color_and_replay() {
+    receive_and_resume("15;0", "Default", true);
 }
 
 /// `↑` with a human message and an a2a message both queued must pop the
@@ -236,12 +315,12 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
 
     // Then a peer a2a lands AFTER it — now the queue tail is the peer item.
     inject(&env, &receiver, "mac-ai", "A2A-SKIP-MARKER");
-    sess.expect("\u{21b3} queued: \u{1f4e8} A2A from mac-ai")
+    sess.expect("\u{21b3} queued: ← mac-ai")
         .expect("a2a should be queued behind the human message");
 
     wait_for_screen(&sess, "both chips must be queued before recall", |screen| {
         has_chip(screen, HUMAN_MARKER)
-            && has_chip(screen, "A2A from mac-ai")
+            && has_chip(screen, "← mac-ai")
             && input_text(screen).is_empty()
     });
     sess.send("\x1b[A").expect("send Up-arrow");
@@ -251,46 +330,123 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
         |screen| {
             input_text(screen) == HUMAN_MARKER
                 && !has_chip(screen, HUMAN_MARKER)
-                && has_chip(screen, "A2A from mac-ai")
+                && has_chip(screen, "← mac-ai")
         },
     );
     exit(&mut sess);
 }
 
-/// During-turn receipt: the message is held in the pending overlay, not
-/// scrollback, as a `↳ queued: 📨 …` line.
+/// A queued preview resizes in one row, leaves editing responsive, then flushes
+/// the full body exactly once. The preview must never replace the queued body.
 #[test]
 fn a2a_received_during_a_turn_shows_in_pending_overlay() {
-    let env = TestEnv::new("a2a-busy");
+    let (env, mut sess) = queued_session("a2a-busy", &[]);
+    let receiver = wait_for_receiver(&env);
+    let first = format!("A2A-BUSY-MARKER {}", "preview ".repeat(12));
+    let body = format!("{first}\n\nQUEUED-BODY-END\n\nReply only with A2A-ACK. Do not call tools.");
+    let body = format!(
+        "{body}\n\n{}",
+        env.prompt("Reply only with A2A-ACK.", "single_turn_text")
+    );
+    inject(&env, &receiver, "mac-ai", &body);
+    wait_for_screen(&sess, "peer preview queued", |s| has_chip(s, "← mac-ai"));
+    sess.resize(60, 42).unwrap();
+    wait_for_screen(&sess, "narrow one-line preview", |s| {
+        s.lines()
+            .any(|l| l.contains("queued: ← mac-ai") && l.ends_with('…'))
+            && !s.contains("QUEUED-BODY-END")
+    });
+    sess.send("draft-中文").unwrap();
+    common::expect_input_line(&sess, "draft-中文", BUDGET, "typing with peer queued");
+    sess.resize(60, 180).unwrap();
+    wait_for_screen(&sess, "widened preview recovers full first line", |s| {
+        s.lines()
+            .any(|l| l.contains("queued: ← mac-ai") && l.contains(first.trim_end()))
+    });
+    sess.send(&"\x7f".repeat(8)).unwrap(); // Clear the draft before checking readiness.
+    common::expect_input_line_cleared(&sess, BUDGET, "draft cleared");
+    sess.send("\x1b").unwrap(); // Cancel Bash; the queued peer now runs.
+    wait_for_screen(&sess, "complete peer body flushed", |s| {
+        s.contains("│ QUEUED-BODY-END") && !has_chip(s, "← mac-ai")
+    });
+    sess.render(|screen| {
+        let text = screen.raw().contents();
+        assert_eq!(text.lines().filter(|l| l.trim() == "← mac-ai").count(), 1);
+        assert!(!text.contains("<mailbox-message"));
+    });
+    exit(&mut sess);
+}
+
+/// Legacy sessions may mix humans and multiple peer envelopes in one queued
+/// turn. Recognize complete wrappers only, leaving quoted examples untouched.
+#[test]
+fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
+    use runtime::{ContentBlock, ConversationMessage, Session};
+    let env = TestEnv::new_mock("a2a-mixed-replay");
+    let mut saved = Session::new().with_workspace_root(env.workspace_root().to_path_buf());
+    saved
+        .push_user_text(concat!(
+            "HUMAN-BEFORE\n\n",
+            "<mailbox-message from=\"peer-one\">\nFIRST-PEER\n</mailbox-message>\n\n",
+            "HUMAN-BETWEEN\n\n",
+            "<mailbox-message from=\"peer-two&amp;three\">\nSECOND-PEER\n</mailbox-message>\n\n",
+            "HUMAN-AFTER"
+        ))
+        .unwrap();
+    saved
+        .push_user_text(concat!(
+            "Keep this example literal:\n\n```xml\n\n",
+            "<mailbox-message from=\"code-example\">\nEXAMPLE-BODY\n</mailbox-message>\n\n```\n\n",
+            "Malformed wrapper:\n\n<mailbox-message from=\"incomplete\">\nKEEP-THIS-TEXT"
+        ))
+        .unwrap();
+    saved
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "ASSISTANT-REPLY".into(),
+        }]))
+        .unwrap();
+    let path = env.workspace_root().join("peer-history.jsonl");
+    saved.save_to_path(&path).unwrap();
     let mut sess = env.spawn_with_env(
-        &["--permission-mode", "danger-full-access"],
+        &["--resume", path.to_str().unwrap()],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    sess.set_default_timeout(BUDGET);
-    sess.resize(50, 100).expect("resize pty");
-    sess.expect("❯").expect("async REPL initial prompt");
-
-    let receiver = wait_for_receiver(&env);
-
-    // Put the receiver in a long-running turn so the injected a2a is queued.
-    let prompt = env.prompt(
-        "Run exactly this bash command, nothing else: \
-         printf 'interrupt-start'; sleep 30",
-        "bash_interrupt_long_running",
-    );
-    sess.send(&format!("{prompt}\r")).expect("send long prompt");
-    sess.expect("interrupt-start")
-        .expect("bash tool should start before we inject the a2a");
-
-    inject(&env, &receiver, "mac-ai", "A2A-BUSY-MARKER");
-
-    // Held in the overlay as a queued peer line, NOT committed to scrollback yet.
-    sess.expect("\u{21b3} queued: \u{1f4e8} A2A from mac-ai")
-        .expect("during-turn a2a should render in the pending overlay");
-
-    sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
-    let _ = sess.expect_eof();
+    sess.resize(80, 100).unwrap();
+    wait_for_screen(&sess, "mixed history restored", |s| {
+        s.contains("ASSISTANT-REPLY")
+    });
+    sess.render(|screen| {
+        let text = screen.raw().contents();
+        let needles = [
+            "❯ HUMAN-BEFORE",
+            "← peer-one",
+            "│ FIRST-PEER",
+            "❯ HUMAN-BETWEEN",
+            "← peer-two&three",
+            "│ SECOND-PEER",
+            "❯ HUMAN-AFTER",
+            "ASSISTANT-REPLY",
+        ];
+        let offsets: Vec<_> = needles
+            .iter()
+            .map(|needle| {
+                text.find(needle)
+                    .unwrap_or_else(|| panic!("missing {needle}: {text}"))
+            })
+            .collect();
+        assert!(offsets.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            text.contains("<mailbox-message from=\"code-example\">"),
+            "{text}"
+        );
+        assert!(
+            text.contains("<mailbox-message from=\"incomplete\">"),
+            "{text}"
+        );
+        assert!(!text.contains("← code-example"));
+        assert!(!text.contains("← incomplete"));
+    });
+    exit(&mut sess);
 }
 
 /// Typing after recall must append to the last line, including UTF-8 text.

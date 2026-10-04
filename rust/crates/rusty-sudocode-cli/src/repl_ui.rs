@@ -1230,7 +1230,7 @@ fn strip_ansi(input: &str) -> String {
 
 /// One pending item awaiting the user's eye at a turn boundary: either an
 /// in-flight tool call (rendered as a running L-frame card) or a message queued
-/// for the next turn (a human `❯` line or an inbound A2A `←` line). They share
+/// for the next turn (a human `❯` line or an inbound `Message from …` line). They share
 /// one ordered list so the overlay shows exactly what arrived, in arrival order
 /// — a tool starting, then a peer message, then another tool, interleave the
 /// way they happened rather than being grouped into two panes.
@@ -1241,7 +1241,7 @@ pub enum PendingItem {
     /// engine, not here).
     Tool(ToolCard),
     /// A message queued for the next turn — `display` is the compact one-line
-    /// form (`❯ …` for human, `← sender: …` for a peer). Purely transient:
+    /// form (`❯ …` for human, `Message from sender: …` for a peer). Purely transient:
     /// the coordinator echoes the real line to scrollback when it flushes.
     /// `is_human` distinguishes a typed input from an inbound A2A/peer message
     /// so the empty-buffer `↑` removes all human chips (matching the
@@ -2337,7 +2337,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     // PendingSlot: in-flight tool cards (yellow L-frames) and queued messages
-    // (human `❯` / inbound A2A `←`) in one ordered overlay, in arrival order.
+    // (human `❯` / inbound `Message from …`) in one ordered overlay, in arrival order.
     // Built as one multi-line string so the element tree keeps a fixed shape
     // (empty string when nothing pending) — same hook-index rationale as the
     // todo panel. A pure overlay: it never commits to scrollback (the render
@@ -2575,14 +2575,14 @@ mod tests {
         let items = vec![
             PendingItem::Tool(tool_card("1", "bash")),
             PendingItem::QueuedMessage {
-                display: "← mac-ai: hi".to_string(),
+                display: "Message from mac-ai: hi".to_string(),
                 is_human: false,
             },
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
         let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
         let bash_at = plain.find("Bash").expect("bash card");
-        let msg_at = plain.find("← mac-ai").expect("queued message");
+        let msg_at = plain.find("Message from mac-ai").expect("queued message");
         let read_at = plain.find("Read").expect("read card");
         assert!(
             bash_at < msg_at && msg_at < read_at,

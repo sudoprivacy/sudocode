@@ -7,9 +7,8 @@
 use pulldown_cmark::{Event, Parser, Tag};
 
 use crate::render::{
-    styled_text::StyledText,
-    text_layout::{truncate_to_width, wrap_ansi_to_width},
-    theme, ColorSupport, TerminalRenderer, RESET,
+    left_frame, styled_text::StyledText, text_layout::truncate_to_width, theme, ColorSupport,
+    TerminalRenderer, RESET,
 };
 
 struct ReceivedMessage<'a> {
@@ -116,7 +115,7 @@ impl ReceivedMessage<'_> {
             format!(" · {}", self.kind)
         };
         format!(
-            "{RESET}{}← {RESET}{}{sender}{RESET}{}{suffix}{RESET}",
+            "{RESET}{}Message from {RESET}{}{sender}{RESET}{}{suffix}{RESET}",
             theme().muted_fg(),
             theme().peer_sender_fg(),
             theme().muted_fg(),
@@ -124,18 +123,14 @@ impl ReceivedMessage<'_> {
     }
 
     fn render(&self, width: usize, renderer: &TerminalRenderer) -> String {
-        let mut lines = vec![truncate_to_width(&self.header(), width)];
-        let body_width = width.saturating_sub(2).max(1);
-        let body = renderer.render_markdown_with_width(self.body, body_width);
-        // Paragraphs, code and tables share the existing Markdown renderer.
-        // Wrap remaining long prose with the same grapheme/style layout used
-        // by tool frames, retaining the gutter on every physical row.
-        for line in body.trim_end_matches('\n').split('\n') {
-            for row in wrap_ansi_to_width(line, body_width) {
-                lines.push(format!("{}│{RESET} {row}", theme().muted_fg()));
-            }
-        }
-        let output = lines.join("\n");
+        let body = renderer.render_markdown_with_width(self.body, left_frame::body_width(width));
+        let output = left_frame::render(
+            &self.header(),
+            [body.trim_end_matches('\n')],
+            width,
+            theme().muted,
+            false,
+        );
         if renderer.color_support() == ColorSupport::NoColor {
             StyledText::from_ansi(&output).text
         } else {

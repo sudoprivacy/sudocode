@@ -937,52 +937,33 @@ impl ToolCardContent {
 /// ethos. The frame carries the status color; the tool name inside `header`
 /// keeps its own identity color. There is no response bullet — the frame is the cue.
 pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
-    use std::fmt::Write as _;
+    use crate::render::left_frame;
+
     let colors = theme().tool_borders();
     let color = match status {
         ToolStatus::Running => colors.running,
         ToolStatus::Ok => colors.success,
         ToolStatus::Error => colors.error,
     };
-    let frame = ansi_fg(color);
-    let cap = if color == Color::Reset {
-        String::new()
-    } else {
-        format!("{BOLD}{frame}")
-    };
-    let top = format!("{cap}\u{256d}\u{2500}{RESET}");
-    let bar = format!("{frame}\u{2502}{RESET}");
-    let bottom = format!("{cap}\u{2570}\u{2500}{RESET}");
-    // Wrap every content line to the width left after the 2-column `│ ` prefix,
-    // then prefix each wrapped segment with the bar. A line longer than the
-    // terminal would otherwise be wrapped by the terminal itself, and that
-    // continuation would carry no `│` — spilling past the left frame. Wrapping
-    // here (not truncating) keeps all content and keeps every visible row
-    // inside the frame. This is the single place that guarantees framed output
-    // stays framed — extractors need not each reason about width.
     let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-    let content_width = term_width.saturating_sub(2).max(1);
-    let mut out = String::new();
-    // The top cap takes three columns, versus two for body rows. Keep the
-    // original identity cached so a running card can reveal more on resize.
+    // Keep the full identity cached so a running card reveals more on resize.
     let header = content.header.replace(['\n', '\r', '\t'], " ");
-    let header_width = term_width.saturating_sub(3);
-    let is_truncated = display_width(&header) > header_width;
-    let _ = write!(out, "{top} {}", truncate_to_width(&header, header_width));
+    let is_truncated = display_width(&header) > left_frame::header_width(term_width);
     let command = content
         .command
         .as_ref()
         .filter(|command| is_truncated || command.contains(['\n', '\r', '\t']))
         .map(|command| command_body_preamble(command));
-    for body in command.iter().chain(content.body.iter()) {
-        for line in body.split('\n') {
-            for seg in wrap_ansi_to_width(line, content_width) {
-                let _ = write!(out, "\n{bar} {seg}");
-            }
-        }
-    }
-    let _ = write!(out, "\n{bottom}");
-    out
+    left_frame::render(
+        &header,
+        command
+            .iter()
+            .chain(content.body.iter())
+            .map(String::as_str),
+        term_width,
+        color,
+        true,
+    )
 }
 
 pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error: bool) -> String {

@@ -167,7 +167,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     );
     inject(&env, &receiver, "mac-ai", &body);
     wait_for_screen(&sess, "complete received block", |s| {
-        s.contains("│ A2A-BODY-END")
+        s.contains("│ A2A-BODY-END") && s.contains("╰─")
     });
     let live = received_block(&sess, sender_color, no_color);
     common::expect_turn_complete_after(
@@ -184,7 +184,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     );
     resumed.resize(80, 52).unwrap();
     wait_for_screen(&resumed, "restored received block", |s| {
-        s.contains("│ A2A-BODY-END")
+        s.contains("│ A2A-BODY-END") && s.contains("╰─")
     });
     assert_eq!(
         received_block(&resumed, sender_color, no_color),
@@ -199,14 +199,15 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
         let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
         let start = rows
             .iter()
-            .position(|r| r == "← mac-ai")
+            .position(|r| r == "╭─ Message from mac-ai")
             .expect("sender header");
-        let end = rows
-            .iter()
-            .position(|r| r == "│ A2A-BODY-END")
-            .expect("body tail");
+        let end = start
+            + rows[start..]
+                .iter()
+                .position(|r| r == "╰─")
+                .expect("message frame end");
         assert!(
-            rows[start + 1..=end].iter().all(|r| r.starts_with('│')),
+            rows[start + 1..end].iter().all(|r| r.starts_with('│')),
             "every body row needs a gutter: {rows:?}"
         );
         assert!(!rows.join("\n").contains("<mailbox-message"));
@@ -219,8 +220,12 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
             rendered.contains("let value = 7;"),
             "complete code body: {rendered}"
         );
-        let header = screen.raw().cell(u16::try_from(start).unwrap(), 2).unwrap();
+        let header = screen
+            .raw()
+            .cell(u16::try_from(start).unwrap(), 16)
+            .unwrap();
         assert_eq!(format!("{:?}", header.fgcolor()), sender_color);
+        assert!(!header.dim(), "peer identity must keep its blue contrast");
         let body = screen
             .raw()
             .cell(u16::try_from(start + 1).unwrap(), 2)
@@ -231,20 +236,25 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
             "plain body color"
         );
         assert!(!body.bold(), "only Markdown emphasis should be bold");
+        assert!(!body.dim(), "body must retain normal brightness");
         let border = screen
             .raw()
             .cell(u16::try_from(start + 1).unwrap(), 0)
             .unwrap();
-        assert_eq!(
-            format!("{:?}", border.fgcolor()),
-            if no_color {
-                "Default"
-            } else if sender_color == "Rgb(28, 100, 200)" {
-                "Idx(241)"
-            } else {
-                "Idx(247)"
-            }
-        );
+        let muted = if no_color {
+            "Default"
+        } else if sender_color == "Rgb(28, 100, 200)" {
+            "Idx(241)"
+        } else {
+            "Idx(247)"
+        };
+        assert_eq!(format!("{:?}", border.fgcolor()), muted);
+        for (row, col) in [(start, 0), (start, 3), (start + 1, 0), (end, 0)] {
+            let cell = screen.raw().cell(u16::try_from(row).unwrap(), col).unwrap();
+            assert_eq!(format!("{:?}", cell.fgcolor()), muted);
+            assert!(!cell.dim(), "do not dim the muted frame a second time");
+            assert!(!cell.bold(), "message chrome stays quiet");
+        }
         assert_eq!(
             rows[start..=end].join("").matches('界').count(),
             60,
@@ -315,12 +325,12 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
 
     // Then a peer a2a lands AFTER it — now the queue tail is the peer item.
     inject(&env, &receiver, "mac-ai", "A2A-SKIP-MARKER");
-    sess.expect("\u{21b3} queued: ← mac-ai")
+    sess.expect("\u{21b3} queued: Message from mac-ai")
         .expect("a2a should be queued behind the human message");
 
     wait_for_screen(&sess, "both chips must be queued before recall", |screen| {
         has_chip(screen, HUMAN_MARKER)
-            && has_chip(screen, "← mac-ai")
+            && has_chip(screen, "Message from mac-ai")
             && input_text(screen).is_empty()
     });
     sess.send("\x1b[A").expect("send Up-arrow");
@@ -330,7 +340,7 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
         |screen| {
             input_text(screen) == HUMAN_MARKER
                 && !has_chip(screen, HUMAN_MARKER)
-                && has_chip(screen, "← mac-ai")
+                && has_chip(screen, "Message from mac-ai")
         },
     );
     exit(&mut sess);
@@ -349,11 +359,13 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
         env.prompt("Reply only with A2A-ACK.", "single_turn_text")
     );
     inject(&env, &receiver, "mac-ai", &body);
-    wait_for_screen(&sess, "peer preview queued", |s| has_chip(s, "← mac-ai"));
+    wait_for_screen(&sess, "peer preview queued", |s| {
+        has_chip(s, "Message from mac-ai")
+    });
     sess.resize(60, 42).unwrap();
     wait_for_screen(&sess, "narrow one-line preview", |s| {
         s.lines()
-            .any(|l| l.contains("queued: ← mac-ai") && l.ends_with('…'))
+            .any(|l| l.contains("queued: Message from mac-ai") && l.ends_with('…'))
             && !s.contains("QUEUED-BODY-END")
     });
     sess.send("draft-中文").unwrap();
@@ -361,17 +373,26 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     sess.resize(60, 180).unwrap();
     wait_for_screen(&sess, "widened preview recovers full first line", |s| {
         s.lines()
-            .any(|l| l.contains("queued: ← mac-ai") && l.contains(first.trim_end()))
+            .any(|l| l.contains("queued: Message from mac-ai") && l.contains(first.trim_end()))
     });
     sess.send(&"\x7f".repeat(8)).unwrap(); // Clear the draft before checking readiness.
-    common::expect_input_line_cleared(&sess, BUDGET, "draft cleared");
+                                           // A running turn keeps the status animation moving. Observe the input,
+                                           // rather than requiring the entire terminal to stop repainting.
+    wait_for_screen(&sess, "draft cleared", |screen| {
+        screen.contains('❯') && input_text(screen).is_empty()
+    });
     sess.send("\x1b").unwrap(); // Cancel Bash; the queued peer now runs.
     wait_for_screen(&sess, "complete peer body flushed", |s| {
-        s.contains("│ QUEUED-BODY-END") && !has_chip(s, "← mac-ai")
+        s.contains("│ QUEUED-BODY-END") && !has_chip(s, "Message from mac-ai")
     });
     sess.render(|screen| {
         let text = screen.raw().contents();
-        assert_eq!(text.lines().filter(|l| l.trim() == "← mac-ai").count(), 1);
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.trim() == "╭─ Message from mac-ai")
+                .count(),
+            1
+        );
         assert!(!text.contains("<mailbox-message"));
     });
     exit(&mut sess);
@@ -419,10 +440,10 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
         let text = screen.raw().contents();
         let needles = [
             "❯ HUMAN-BEFORE",
-            "← peer-one",
+            "Message from peer-one",
             "│ FIRST-PEER",
             "❯ HUMAN-BETWEEN",
-            "← peer-two&three",
+            "Message from peer-two&three",
             "│ SECOND-PEER",
             "❯ HUMAN-AFTER",
             "ASSISTANT-REPLY",
@@ -443,8 +464,8 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
             text.contains("<mailbox-message from=\"incomplete\">"),
             "{text}"
         );
-        assert!(!text.contains("← code-example"));
-        assert!(!text.contains("← incomplete"));
+        assert!(!text.contains("Message from code-example"));
+        assert!(!text.contains("Message from incomplete"));
     });
     exit(&mut sess);
 }

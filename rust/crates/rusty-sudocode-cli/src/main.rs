@@ -3291,7 +3291,7 @@ fn run_repl_iocraft_dispatch(
                     // Echo the queued items to scrollback now, as they actually
                     // run — the coordinator deferred these from submit time so a
                     // queued item never looked sent. Each carries its marker
-                    // kind (`❯` human / `←` peer). Then clear the queued
+                    // kind (`❯` human / message frame for peers). Then clear the queued
                     // messages from the pending overlay: they're leaving the queue.
                     for echo in &next.echoes {
                         match echo.kind {

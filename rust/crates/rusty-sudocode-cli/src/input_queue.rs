@@ -99,7 +99,7 @@ impl QueueMode {
 /// humans (paste collapsed to a placeholder chip), the complete envelope for
 /// peers so their body can be laid out at the width at flush time. The UI keeps
 /// a separate one-line peer preview outside this scheduling queue.
-/// `kind` selects the scrollback marker at flush — `❯` for human input, `←`
+/// `kind` selects the scrollback marker at flush — `❯` for human input, a message frame
 /// for an inbound A2A peer message. Both echo on flush (symmetric): the queued
 /// item lands in scrollback at the moment it actually runs, never earlier.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,7 +162,7 @@ pub struct NextTurn {
     pub prompt: String,
     /// The scrollback lines to echo for this run, in submission order (every
     /// queued item echoes on flush now — human and peer alike). Each carries the
-    /// marker `kind` so the caller renders `❯`/`←` correctly. Empty for an idle
+    /// marker `kind` so the caller renders human echoes and peer frames correctly. Empty for an idle
     /// submit, whose echo the coordinator prints directly.
     pub echoes: Vec<EchoLine>,
     /// How many queued items this run consumed.

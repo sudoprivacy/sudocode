@@ -41,7 +41,19 @@ pub(crate) fn wrap_line(
     width: usize,
     initial_col: usize,
 ) -> Vec<(StyledText, usize)> {
+    wrap_line_with_indent(source, range, width, initial_col, 0)
+}
+
+fn wrap_line_with_indent(
+    source: &StyledText,
+    range: Range<usize>,
+    width: usize,
+    initial_col: usize,
+    continuation_indent: usize,
+) -> Vec<(StyledText, usize)> {
     let width = width.max(1);
+    let indent = continuation_indent.min(width.saturating_sub(2));
+    let padding = " ".repeat(indent);
     let mut rows = Vec::new();
     let mut row = StyledText::default();
     let mut col = initial_col;
@@ -54,7 +66,8 @@ pub(crate) fn wrap_line(
             for _ in 0..cells {
                 if col >= width {
                     rows.push((std::mem::take(&mut row), col));
-                    col = 0;
+                    row.push(crossterm::style::ContentStyle::default(), &padding);
+                    col = indent;
                 }
                 row.push(style, " ");
                 col += 1;
@@ -62,7 +75,8 @@ pub(crate) fn wrap_line(
         } else {
             if col > 0 && col + cells > width {
                 rows.push((std::mem::take(&mut row), col));
-                col = 0;
+                row.push(crossterm::style::ContentStyle::default(), &padding);
+                col = indent;
             }
             for (style, part) in source.spans(start..start + grapheme.len()) {
                 row.push(style, part);
@@ -75,11 +89,16 @@ pub(crate) fn wrap_line(
 }
 
 pub(crate) fn wrap_ansi_to_width(input: &str, width: usize) -> Vec<String> {
+    wrap_ansi_with_indent(input, width, 0)
+}
+
+/// Wrap styled list content with hanging indentation on continuation rows.
+pub(crate) fn wrap_ansi_with_indent(input: &str, width: usize, indent: usize) -> Vec<String> {
     if width == 0 {
         return vec![input.to_string()];
     }
     let source = StyledText::from_ansi(input);
-    wrap_line(&source, 0..source.text.len(), width, 0)
+    wrap_line_with_indent(&source, 0..source.text.len(), width, 0, indent)
         .into_iter()
         .map(|(mut row, columns)| {
             let fill = row

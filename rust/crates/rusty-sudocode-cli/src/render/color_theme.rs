@@ -157,6 +157,11 @@ impl ColorTheme {
         }
     }
 
+    /// Tool identities share the Codex accent used by transcript links.
+    pub fn tool_name_fg(&self) -> String {
+        ansi_fg(ColorSupport::detect().color(self.link))
+    }
+
     /// ANSI escape for the border color.
     #[inline]
     pub fn border_fg(&self) -> String {

@@ -564,7 +564,7 @@ struct RenderState {
     quote: usize,
     list_stack: Vec<ListKind>,
     /// Column where markers of the list at each `list_stack` level start.
-    /// Top-level lists start at 0; a nested list starts at its parent item's
+    /// Top-level lists start at 2; a nested list starts at its parent item's
     /// content column, so its markers align under the parent's text
     /// regardless of the parent marker's width ("• " = 2, "10. " = 4).
     list_indents: Vec<usize>,
@@ -572,6 +572,8 @@ struct RenderState {
     /// marker width). Continuation lines inside the item (soft/hard breaks)
     /// indent to this column so they align under the first line's text.
     item_content_col: usize,
+    parent_item_cols: Vec<usize>,
+    max_width: usize,
     /// Set by the driver loop at `Start(Tag::List)`: true when the source has
     /// no blank line between the previous block and this top-level list.
     bind_top_level_list: bool,
@@ -586,6 +588,24 @@ struct LinkState {
 }
 
 impl RenderState {
+    /// Close the current list line while its semantic content column is known.
+    /// This handles terminal soft wraps as well as authored Markdown breaks.
+    fn wrap_list_line(&self, output: &mut String) {
+        if self.list_stack.is_empty() || output.ends_with('\n') {
+            return;
+        }
+        let start = output.rfind('\n').map_or(0, |pos| pos + 1);
+        let line = &output[start..];
+        if text_layout::display_width(line) <= self.max_width {
+            return;
+        }
+        let wrapped =
+            text_layout::wrap_ansi_with_indent(line, self.max_width, self.item_content_col)
+                .join("\n");
+        output.truncate(start);
+        output.push_str(&wrapped);
+    }
+
     fn text_style(&self, theme: &ColorTheme) -> ContentStyle {
         // Codex Markdown uses terminal foreground and typographic hierarchy.
         let mut style = ContentStyle::default();
@@ -666,9 +686,17 @@ impl TerminalRenderer {
 
     #[must_use]
     pub fn render_markdown(&self, markdown: &str) -> String {
+        self.render_markdown_with_width(markdown, query_terminal_width())
+    }
+
+    #[must_use]
+    pub(crate) fn render_markdown_with_width(&self, markdown: &str, width: usize) -> String {
         let normalized = normalize_nested_fences(markdown);
         let mut output = String::new();
-        let mut state = RenderState::default();
+        let mut state = RenderState {
+            max_width: width.max(1),
+            ..RenderState::default()
+        };
         let mut code_language = String::new();
         let mut code_buffer = String::new();
         let mut in_code_block = false;
@@ -761,10 +789,13 @@ impl TerminalRenderer {
                 // ends with its own newline; pushing another here opened a
                 // blank hole between the nested items and the next sibling.
                 if !output.ends_with('\n') {
+                    state.wrap_list_line(output);
                     state.append_raw(output, "\n");
                 }
+                state.item_content_col = state.parent_item_cols.pop().unwrap_or(0);
             }
             Event::SoftBreak | Event::HardBreak => {
+                state.wrap_list_line(output);
                 state.append_raw(output, "\n");
                 // Inside a list item, align the continuation line under the
                 // item's text — without this it landed at column 0, hanging
@@ -791,6 +822,7 @@ impl TerminalRenderer {
                     // break — so without this the child items rendered inline
                     // after their parent ("• outer  • inner" on one row).
                     if !output.ends_with('\n') {
+                        state.wrap_list_line(output);
                         output.push('\n');
                     }
                     // Nested markers start at the parent item's content
@@ -1004,6 +1036,7 @@ impl TerminalRenderer {
     }
 
     fn start_item(&self, state: &mut RenderState, output: &mut String) {
+        state.parent_item_cols.push(state.item_content_col);
         let indent = state.list_indents.last().copied().unwrap_or(0);
         output.push_str(&" ".repeat(indent));
 
@@ -1173,7 +1206,7 @@ impl MarkdownStreamState {
         let split = find_stream_safe_boundary(&self.pending)?;
         let ready = self.pending[..split].to_string();
         self.pending.drain(..split);
-        Some(renderer.markdown_to_ansi(&ready))
+        Some(renderer.render_markdown_with_width(&ready, query_terminal_width().saturating_sub(2)))
     }
 
     #[must_use]
@@ -1183,7 +1216,10 @@ impl MarkdownStreamState {
             None
         } else {
             let pending = std::mem::take(&mut self.pending);
-            Some(renderer.markdown_to_ansi(&pending))
+            Some(
+                renderer
+                    .render_markdown_with_width(&pending, query_terminal_width().saturating_sub(2)),
+            )
         }
     }
 }
@@ -1460,6 +1496,11 @@ impl ResponseGlyphState {
             decoder: styled_text::AnsiDecoder::new(),
             parser: vte::Parser::new(),
         }
+    }
+
+    /// Apply the current viewport before emitting the next response chunk.
+    pub(crate) fn set_width(&mut self, terminal_width: usize) {
+        self.max_col = terminal_width.max(4);
     }
 
     /// Process a rendered ANSI text chunk. Returns the wrapped+margined output.

@@ -86,6 +86,11 @@ impl EngineEventRenderer {
         }
     }
 
+    fn apply_response(&mut self, text: &str) -> String {
+        self.glyph.set_width(query_terminal_width());
+        self.glyph.apply(text)
+    }
+
     fn write_out(&mut self, text: &str) {
         if let Some(writer) = self.output_writer.as_mut() {
             let _ = write!(writer, "{text}").and_then(|()| writer.flush());
@@ -149,7 +154,7 @@ impl EngineEventRenderer {
         while let Some(newline) = self.thinking_pending.find('\n') {
             let line: String = self.thinking_pending.drain(..=newline).collect();
             let rendered = render_thinking_line(&line);
-            let prefixed = self.glyph.apply(&rendered);
+            let prefixed = self.apply_response(&rendered);
             self.write_out(&prefixed);
         }
     }
@@ -172,7 +177,7 @@ impl EngineEventRenderer {
             if !self.thinking_pending.is_empty() {
                 let rendered = render_thinking_line(&self.thinking_pending);
                 self.thinking_pending.clear();
-                let prefixed = self.glyph.apply(&rendered);
+                let prefixed = self.apply_response(&rendered);
                 self.write_out(&prefixed);
             }
             // Close the dim block with a blank line so the answer does not
@@ -184,7 +189,7 @@ impl EngineEventRenderer {
             } else {
                 "\n"
             };
-            let closed = self.glyph.apply(separator);
+            let closed = self.apply_response(separator);
             self.write_out(&closed);
         }
     }
@@ -199,7 +204,7 @@ impl EngineEventRenderer {
                     }
                     if let Some(rendered) = self.markdown.push(&self.renderer, &text) {
                         self.pause_spinner();
-                        let prefixed = self.glyph.apply(&rendered);
+                        let prefixed = self.apply_response(&rendered);
                         self.write_out(&prefixed);
                     }
                 }
@@ -239,7 +244,7 @@ impl EngineEventRenderer {
                         // 0. Reasoning is written at line boundaries and has the
                         // same protection.
                         self.pause_spinner();
-                        let header = self.glyph.apply(&crate::cli::format::thinking_header());
+                        let header = self.apply_response(&crate::cli::format::thinking_header());
                         self.write_out(&header);
                         self.thinking_printed = true;
                     }
@@ -251,7 +256,7 @@ impl EngineEventRenderer {
             EngineEvent::ToolCall { id, name, input } => {
                 self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
-                    let prefixed = self.glyph.apply(&rendered);
+                    let prefixed = self.apply_response(&rendered);
                     self.write_out(&prefixed);
                 }
                 // Remember the arguments so the completed card can show what was
@@ -320,7 +325,7 @@ impl EngineEventRenderer {
                 // line inherit the dim attribute.
                 self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
-                    let prefixed = self.glyph.apply(&rendered);
+                    let prefixed = self.apply_response(&rendered);
                     self.write_out(&prefixed);
                 }
                 self.pause_spinner();
@@ -333,7 +338,7 @@ impl EngineEventRenderer {
                 // the next prompt is not written into an open dim run.
                 self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
-                    let prefixed = self.glyph.apply(&rendered);
+                    let prefixed = self.apply_response(&rendered);
                     self.write_out(&prefixed);
                 }
                 RenderOutcome::Done

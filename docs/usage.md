@@ -142,7 +142,14 @@ tool-card borders show status without extra icons: amber while running, the
 code theme's green on success, and red on failure. The opening and closing
 caps stay bold to separate adjacent calls; long vertical borders use normal
 weight without dimming. Colors adapt to dark/light backgrounds and terminal
-color depth. Queued messages are dimmed, and Todo
+color depth. Tool names use the shared Codex blue accent. Titles occupy one
+row and use an ellipsis when they exceed the available width. Running titles
+reflow on resize; completed titles remain as printed in terminal scrollback.
+Bash commands that cannot fit the title are preserved in the card body. Long
+list items keep their continuation lines aligned with the item text, including
+in session replay. Replayed message blocks have one blank separator.
+
+Queued messages are dimmed, and Todo
 items distinguish active and completed states. This uses the same palette as
 the transcript; it does not introduce a new color theme. Completed Todo labels
 retain their dim strikethrough. Todo summaries use one muted foreground for all

@@ -1297,7 +1297,9 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             streaming_text_sse()
         }
         Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(MARKDOWN_SHOWCASE_DOC),
-        Scenario::UnicodeRenderingShowcase => markdown_showcase_sse(UNICODE_SHOWCASE_DOC),
+        Scenario::UnicodeRenderingShowcase => markdown_showcase_sse(&format!(
+            "{UNICODE_SHOWCASE_DOC}\n\n{LIST_WRAP_DOC}\n\nLists done."
+        )),
         Scenario::SyntaxHighlightShowcase => markdown_showcase_sse(SYNTAX_SHOWCASE_DOC),
         Scenario::CodexColorsShowcase => markdown_showcase_sse(CODEX_COLORS_SHOWCASE_DOC),
         Scenario::CodexBashShowcase => match codex_bash_input(request) {
@@ -1866,9 +1868,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::MarkdownRenderingShowcase => {
             text_message_response("msg_markdown_showcase", MARKDOWN_SHOWCASE_DOC)
         }
-        Scenario::UnicodeRenderingShowcase => {
-            text_message_response("msg_unicode_showcase", UNICODE_SHOWCASE_DOC)
-        }
+        Scenario::UnicodeRenderingShowcase => text_message_response(
+            "msg_unicode_showcase",
+            &format!("{UNICODE_SHOWCASE_DOC}\n\n{LIST_WRAP_DOC}\n\nLists done."),
+        ),
         Scenario::SyntaxHighlightShowcase => {
             text_message_response("msg_syntax_showcase", SYNTAX_SHOWCASE_DOC)
         }
@@ -2726,6 +2729,9 @@ pub const MARKDOWN_SHOWCASE_DOC: &str = "Intro:\n- alpha\n- beta\n\n## Section\n
 
 /// Deterministic terminal-column and semantic-style fixture for PTY acceptance.
 pub const UNICODE_SHOWCASE_DOC: &str = "CJK:界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\n\nEmoji:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa👩🏽‍💻END\n\nCombining:aaaaaaaaaaaaaaaaaaaaaaaaaaaae\u{301}END\n\n| Key | Value |\n| --- | --- |\n| 中文 | 通过 |\n| ASCII | ok |\n\n[LINK](https://example.com) and `CODE`\n\nUnicode done.";
+
+/// Long styled lists shared by streamed and resumed terminal acceptance.
+pub const LIST_WRAP_DOC: &str = "9. ListWrap: `ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz界界界界👩🏽‍💻END`\n   - NestedWrap: **ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzEND**\n10. NextWrap: `ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzEND`";
 
 /// Source samples also rendered by the pinned Codex highlighter for PTY comparison.
 pub const CODEX_BASH_SINGLE: &str = r#"echo "CODEX_SINGLE_LINE_OUTPUT""#;

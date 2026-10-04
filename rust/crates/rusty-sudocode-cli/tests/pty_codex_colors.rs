@@ -595,6 +595,51 @@ fn expect_completed_bash_borders(sess: &PtySession, light: bool, no_color: bool)
     expect_tool_border(sess, "Bash(# Shell colors", success, no_color);
 }
 
+fn assert_running_title_resizes(sess: &mut PtySession, header: &str, light: bool, no_color: bool) {
+    assert_cell(
+        sess,
+        "Bash(",
+        if no_color {
+            "Default"
+        } else if light {
+            "Rgb(28, 100, 200)"
+        } else {
+            "Rgb(99, 168, 248)"
+        },
+        "Default",
+    );
+    // A running title occupies exactly one row, and resizing can reveal the
+    // original cached identity again without losing the user's draft.
+    sess.resize(80, 28).unwrap();
+    common::expect_screen(
+        sess,
+        |s| {
+            s.lines()
+                .any(|line| line.starts_with("╭─ Bash(") && line.ends_with('…'))
+        },
+        common::DEFAULT_TIMEOUT,
+        "single-row clipped title",
+    );
+    sess.render(|screen| {
+        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        let start = rows
+            .iter()
+            .rposition(|row| row.starts_with("╭─ Bash("))
+            .unwrap();
+        assert!(
+            rows[start + 1].starts_with("╰─"),
+            "title must not occupy body rows: {rows:?}"
+        );
+    });
+    sess.resize(80, 100).unwrap();
+    common::expect_screen(
+        sess,
+        |s| s.contains(header),
+        common::DEFAULT_TIMEOUT,
+        "full title restored on widening",
+    );
+}
+
 fn bash_roundtrip(light: bool, no_color: bool) {
     use mock_anthropic_service::{CODEX_BASH_MULTI, CODEX_BASH_SINGLE};
     let reference: Value =
@@ -659,6 +704,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
         "Idx(214)"
     };
     expect_tool_border(&sess, &header, running, no_color);
+    assert_running_title_resizes(&mut sess, &header, light, no_color);
     sess.send("\x1b[200~draft '$HOME' && echo hi\x1b[201~")
         .unwrap();
     common::expect_input_line(

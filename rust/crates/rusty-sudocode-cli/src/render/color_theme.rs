@@ -17,8 +17,9 @@ pub struct ToolBorderColors {
 /// Semantic color theme — coder picks a scenario token, never a raw color.
 ///
 /// Two built-in palettes: `dark()` (default) and `light()` for light
-/// terminal backgrounds.  All rendering code references `theme.xxx`;
-/// switching palette changes every color at once.
+/// terminal backgrounds. Renderers select semantic roles here; `code_theme`
+/// only adapts and caches the bundled syntax assets. Syntax-backed roles are
+/// resolved on demand so constructing the theme does not load those assets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTheme {
     /// Selects the adaptive default syntax theme in code_theme.
@@ -32,8 +33,6 @@ pub struct ColorTheme {
     pub error: Color,
     /// Warning — permission prompt title, edit label, stalled spinner.
     pub warning: Color,
-    /// Info — spinner active, thinking indicator.
-    pub info: Color,
     /// Muted — footer hints, dim text, labels, separators.
     pub muted: Color,
     /// Link — hyperlinks.
@@ -83,7 +82,6 @@ impl ColorTheme {
             success: Color::Green,              // semantic
             error: Color::Red,                  // semantic
             warning: Color::AnsiValue(220),     // yellow, distinct from info/success
-            info: Color::AnsiValue(36),         // teal #0D9488
             muted: Color::AnsiValue(muted),     // readable muted grey
             link: Color::Rgb {
                 r: 99,
@@ -113,7 +111,6 @@ impl ColorTheme {
             success: Color::DarkGreen,          // semantic
             error: Color::DarkRed,              // semantic
             warning: Color::AnsiValue(130),     // ochre on a light background
-            info: Color::AnsiValue(23),         // deep teal
             muted: Color::AnsiValue(muted),     // readable muted grey
             link: Color::Rgb {
                 r: 28,
@@ -142,17 +139,32 @@ impl ColorTheme {
         }
     }
 
-    /// Resolve tool-specific roles from the shared brand and syntax palettes.
-    /// Syntax colors are loaded lazily, only when a tool card needs them.
+    /// Info — active spinner, thinking indicator and informational labels.
+    /// Shares the soft-green palette source with completed tool borders.
+    pub fn info(&self) -> Color {
+        self.soft_green(ColorSupport::detect())
+    }
+
+    /// Inline-code and file-link foreground from the selected syntax asset.
+    pub(super) fn inline_code_color(&self, support: ColorSupport) -> Color {
+        code_theme::inline_color(self.light_background, support)
+    }
+
+    /// The single soft-green definition used by semantic UI roles.
+    fn soft_green(&self, support: ColorSupport) -> Color {
+        if support == ColorSupport::Ansi16 {
+            self.success
+        } else {
+            self.inline_code_color(support)
+        }
+    }
+
+    /// Resolve tool-specific roles through the central semantic palette.
     pub fn tool_borders(&self) -> ToolBorderColors {
         let support = ColorSupport::detect();
         ToolBorderColors {
             running: support.color(self.primary),
-            success: if support == ColorSupport::Ansi16 {
-                self.success
-            } else {
-                code_theme::inline_color(self.light_background, support)
-            },
+            success: self.soft_green(support),
             error: support.color(self.error),
         }
     }

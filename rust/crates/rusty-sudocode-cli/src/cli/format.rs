@@ -2329,7 +2329,7 @@ pub(crate) fn format_permission_prompt_box(
     let grey = ansi_fg(t.muted);
     let reset = RESET;
     let bold_yellow = ansi_bold_fg(t.warning);
-    let bold_cyan = ansi_bold_fg(t.info);
+    let bold_info = ansi_bold_fg(t.info());
     let dim = DIM;
 
     let mut out = String::new();
@@ -2340,7 +2340,7 @@ pub(crate) fn format_permission_prompt_box(
     );
     let _ = writeln!(
         out,
-        "  {grey}│{reset} Tool      {bold_cyan}{tool_name}{reset}"
+        "  {grey}│{reset} Tool      {bold_info}{tool_name}{reset}"
     );
     let _ = writeln!(out, "  {grey}│{reset} Action    {dim}{action}{reset}");
     let _ = writeln!(

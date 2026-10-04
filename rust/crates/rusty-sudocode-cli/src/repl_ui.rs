@@ -306,7 +306,7 @@ impl SpinnerState {
             if is_stalled {
                 crate::render::ansi_fg(t.warning)
             } else {
-                crate::render::ansi_fg(t.info)
+                crate::render::ansi_fg(t.info())
             }
         };
         format!("{color}{line}{}", crate::render::RESET)
@@ -1359,7 +1359,7 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
 
     let t = theme();
     let success = ansi_fg(t.success);
-    let info = ansi_fg(t.info);
+    let info = ansi_fg(t.info());
 
     let completed_count = todos
         .iter()

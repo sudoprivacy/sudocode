@@ -405,7 +405,7 @@ impl SpinnerHandle {
                     let color = if is_stalled {
                         ansi_fg(theme().warning)
                     } else {
-                        ansi_fg(theme().info)
+                        ansi_fg(theme().info())
                     };
                     let colored = format!("{color}{line}{RESET}");
                     pb.set_message(colored);
@@ -875,10 +875,7 @@ impl TerminalRenderer {
             Event::Code(code) => {
                 let style = state
                     .text_style(&self.color_theme)
-                    .with(code_theme::inline_color(
-                        self.color_theme.light_background,
-                        self.color_support,
-                    ));
+                    .with(self.color_theme.inline_code_color(self.color_support));
                 state.append_raw(output, &style.apply(code).to_string());
             }
             Event::Rule => output.push_str("---\n"),
@@ -973,10 +970,7 @@ impl TerminalRenderer {
             || matches!(destination.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic());
         if local {
             let target = ContentStyle::default()
-                .with(code_theme::inline_color(
-                    self.color_theme.light_background,
-                    self.color_support,
-                ))
+                .with(self.color_theme.inline_code_color(self.color_support))
                 .apply(destination);
             let name = label.text.trim();
             if name.is_empty() || name == destination || destination.ends_with(&format!("/{name}"))

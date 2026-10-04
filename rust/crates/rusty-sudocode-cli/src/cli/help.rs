@@ -406,7 +406,7 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
 /// Apply per-line color to a unified-diff string.
 ///
 /// - `+++` / `---` file headers and `diff --git` lines: bold.
-/// - `@@` hunk headers: cyan.
+/// - `@@` hunk headers: the theme info color.
 /// - Lines starting with a lone `+`: green (added).
 /// - Lines starting with a lone `-`: red (removed).
 /// - Everything else: unchanged.
@@ -416,7 +416,7 @@ pub(crate) fn render_diff_report_for(cwd: &Path) -> Result<String, Box<dyn std::
 pub(crate) fn colorize_unified_diff(diff: &str) -> String {
     let t = theme();
     let bold = BOLD;
-    let info = ansi_fg(t.info);
+    let info = ansi_fg(t.info());
     let added = ansi_fg(t.diff_added);
     let removed = ansi_fg(t.diff_removed);
     let mut out = String::with_capacity(diff.len() + diff.lines().count() * 8);
@@ -894,7 +894,7 @@ mod tests {
         let t = theme();
         let added = ansi_fg(t.diff_added);
         let removed = ansi_fg(t.diff_removed);
-        let info = ansi_fg(t.info);
+        let info = ansi_fg(t.info());
 
         let diff = "diff --git a/foo b/foo\n--- a/foo\n+++ b/foo\n@@ -1,1 +1,1 @@\n-old\n+new\n unchanged\n";
         let painted = colorize_unified_diff(diff);

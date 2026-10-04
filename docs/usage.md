@@ -142,7 +142,10 @@ tool-card borders show status without extra icons: amber while running, the
 code theme's green on success, and red on failure. The opening and closing
 caps stay bold to separate adjacent calls; long vertical borders use normal
 weight without dimming. Colors adapt to dark/light backgrounds and terminal
-color depth. Tool names use the shared Codex blue accent. Titles occupy one
+color depth. `ColorTheme` is the single semantic color interface; its `info`
+role (including Thinking/Reasoning) and successful tool borders share one
+soft-green definition. Syntax-backed colors load on demand and stay cached.
+Tool names use the shared Codex blue accent. Titles occupy one
 row and use an ellipsis when they exceed the available width. Running titles
 reflow on resize; completed titles remain as printed in terminal scrollback.
 Bash commands that cannot fit the title are preserved in the card body. Long

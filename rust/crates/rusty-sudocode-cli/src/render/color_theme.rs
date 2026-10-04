@@ -5,7 +5,14 @@
 
 use crossterm::style::Color;
 
-use super::{ansi_fg, terminal_palette};
+use super::{ansi_fg, code_theme, terminal_palette, ColorSupport};
+
+/// Tool frames carry execution status without competing with their content.
+pub struct ToolBorderColors {
+    pub running: Color,
+    pub success: Color,
+    pub error: Color,
+}
 
 /// Semantic color theme — coder picks a scenario token, never a raw color.
 ///
@@ -132,6 +139,21 @@ impl ColorTheme {
             Self::light()
         } else {
             Self::dark()
+        }
+    }
+
+    /// Resolve tool-specific roles from the shared brand and syntax palettes.
+    /// Syntax colors are loaded lazily, only when a tool card needs them.
+    pub fn tool_borders(&self) -> ToolBorderColors {
+        let support = ColorSupport::detect();
+        ToolBorderColors {
+            running: support.color(self.primary),
+            success: if support == ColorSupport::Ansi16 {
+                self.success
+            } else {
+                code_theme::inline_color(self.light_background, support)
+            },
+            error: support.color(self.error),
         }
     }
 

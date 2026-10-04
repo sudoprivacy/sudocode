@@ -537,6 +537,64 @@ fn expect_bash_sample(sess: &PtySession, sample: &Value, prefix: &str, no_color:
     );
 }
 
+fn expect_tool_border(sess: &PtySession, header: &str, foreground: &str, no_color: bool) {
+    common::expect_screen(
+        sess,
+        |_| {
+            sess.render(|screen| {
+                let raw = screen.raw();
+                let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+                let Some(start) = rows.iter().rposition(|row| row.contains(header)) else {
+                    return false;
+                };
+                // No new icon or column: the original opening frame precedes
+                // the tool name, and every following row shares its column.
+                if !rows[start].starts_with(&format!("╭─ {header}")) {
+                    return false;
+                }
+                let Some(end) = (start + 1..rows.len()).find(|&row| rows[row].starts_with("╰─"))
+                else {
+                    return false;
+                };
+                (start..=end).all(|row| {
+                    let cap = row == start || row == end;
+                    if !cap && !rows[row].starts_with('│') {
+                        return false;
+                    }
+                    (0..if cap { 2 } else { 1 }).all(|col| {
+                        let cell = raw.cell(u16::try_from(row).unwrap(), col).unwrap();
+                        format!("{:?}", cell.fgcolor()) == foreground
+                            && format!("{:?}", cell.bgcolor()) == "Default"
+                            && cell.bold() == (cap && !no_color)
+                            && !cell.dim()
+                    })
+                })
+            })
+        },
+        common::DEFAULT_TIMEOUT,
+        "tool status color, bold endpoints and normal vertical border",
+    );
+}
+
+fn expect_completed_bash_borders(sess: &PtySession, light: bool, no_color: bool) {
+    let reference: Value =
+        serde_json::from_str(include_str!("fixtures/codex_default_colors.json")).unwrap();
+    let success = if no_color {
+        "Default"
+    } else {
+        reference["themes"][usize::from(light)]["inline_foreground"]
+            .as_str()
+            .unwrap()
+    };
+    expect_tool_border(
+        sess,
+        &format!("Bash({})", mock_anthropic_service::CODEX_BASH_SINGLE),
+        success,
+        no_color,
+    );
+    expect_tool_border(sess, "Bash(# Shell colors", success, no_color);
+}
+
 fn bash_roundtrip(light: bool, no_color: bool) {
     use mock_anthropic_service::{CODEX_BASH_MULTI, CODEX_BASH_SINGLE};
     let reference: Value =
@@ -592,6 +650,15 @@ fn bash_roundtrip(light: bool, no_color: bool) {
         "running Bash header",
     );
     expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
+    let header = format!("Bash({CODEX_BASH_SINGLE})");
+    let running = if no_color {
+        "Default"
+    } else if light {
+        "Idx(94)"
+    } else {
+        "Idx(214)"
+    };
+    expect_tool_border(&sess, &header, running, no_color);
     sess.send("\x1b[200~draft '$HOME' && echo hi\x1b[201~")
         .unwrap();
     common::expect_input_line(
@@ -603,6 +670,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     assert_cell(&sess, "draft '$HOME' && echo hi", "Default", "Default");
     sess.resize(80, 78).unwrap();
     expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
+    expect_tool_border(&sess, &header, running, no_color);
     sess.send("\x15").unwrap();
     common::expect_screen(
         &sess,
@@ -619,6 +687,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     );
     expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
     expect_bash_sample(&sess, &samples[1], "│ $ ", no_color);
+    expect_completed_bash_borders(&sess, light, no_color);
     // Actual process output stays plain; command styles cannot bleed into it.
     for output in ["CODEX_SHELL_OUTPUT", "MULTILINE", "CONTINUATION"] {
         assert_cell(&sess, output, "Default", "Default");
@@ -639,4 +708,31 @@ fn light_bash_commands_match_codex_in_preview_and_scrollback() {
 #[test]
 fn no_color_bash_commands_preserve_plain_source_and_output() {
     bash_roundtrip(false, true);
+}
+
+#[test]
+fn denied_tool_keeps_a_red_border_without_a_new_status_icon() {
+    let env = TestEnv::new_mock("tool-border-denied");
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("COLORFGBG", "15;0"),
+            ("NO_COLOR", ""),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ],
+    );
+    sess.resize(60, 100).unwrap();
+    sess.expect("❯").unwrap();
+    sess.send("PARITY_SCENARIO:bash_stdout_roundtrip\r")
+        .unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains("bash completed:") && s.contains("ctx ") && s.contains("Bash("),
+        common::DEFAULT_TIMEOUT,
+        "denied Bash result",
+    );
+    expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(9)", false);
+    finish(&mut sess);
 }

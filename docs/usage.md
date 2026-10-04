@@ -138,7 +138,11 @@ lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
 The live UI retains the existing formatter colors and supported text styles:
-running tool cards use the amber accent, queued messages are dimmed, and Todo
+tool-card borders show status without extra icons: amber while running, the
+code theme's green on success, and red on failure. The opening and closing
+caps stay bold to separate adjacent calls; long vertical borders use normal
+weight without dimming. Colors adapt to dark/light backgrounds and terminal
+color depth. Queued messages are dimmed, and Todo
 items distinguish active and completed states. This uses the same palette as
 the transcript; it does not introduce a new color theme. Completed Todo labels
 retain their dim strikethrough. Todo summaries use one muted foreground for all

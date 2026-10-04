@@ -926,8 +926,9 @@ impl ToolCardContent {
 }
 
 /// SSOT for how a tool call looks on screen: an L-frame whose color carries
-/// the status. `╭─ header` / `│ body…` / `╰─`, colored yellow (running),
-/// green (ok), or red (error).
+/// the status. `╭─ header` / `│ body…` / `╰─`, colored amber (running),
+/// syntax-theme green (ok), or red (error). Bold caps distinguish adjacent
+/// calls; the long vertical border uses normal weight without dimming.
 ///
 /// Deliberately never draws a right border: tool output carries ANSI, tabs,
 /// and CJK width, so a closed box's right edge is unreliable — a left frame
@@ -936,18 +937,21 @@ impl ToolCardContent {
 /// keeps its own identity color. There is no response bullet — the frame is the cue.
 pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
     use std::fmt::Write as _;
-    let t = theme();
-    let frame = match status {
-        // Running uses the brand amber (primary), NOT warning/teal: teal read
-        // too close to the success green, so an in-flight card looked already
-        // done. Amber vs green vs red now reads at a glance.
-        ToolStatus::Running => ansi_bold_fg(t.primary),
-        ToolStatus::Ok => ansi_bold_fg(t.success),
-        ToolStatus::Error => ansi_bold_fg(t.error),
+    let colors = theme().tool_borders();
+    let color = match status {
+        ToolStatus::Running => colors.running,
+        ToolStatus::Ok => colors.success,
+        ToolStatus::Error => colors.error,
     };
-    let top = format!("{frame}\u{256d}\u{2500}{RESET}");
+    let frame = ansi_fg(color);
+    let cap = if color == Color::Reset {
+        String::new()
+    } else {
+        format!("{BOLD}{frame}")
+    };
+    let top = format!("{cap}\u{256d}\u{2500}{RESET}");
     let bar = format!("{frame}\u{2502}{RESET}");
-    let bottom = format!("{frame}\u{2570}\u{2500}{RESET}");
+    let bottom = format!("{cap}\u{2570}\u{2500}{RESET}");
     // Wrap every content line to the width left after the 2-column `│ ` prefix,
     // then prefix each wrapped segment with the bar. A line longer than the
     // terminal would otherwise be wrapped by the terminal itself, and that
@@ -2976,16 +2980,20 @@ mod tests {
     }
 
     #[test]
-    fn render_tool_card_running_color_differs_from_ok() {
+    fn render_tool_card_status_colors_respect_terminal_support() {
         // Bug 3: running used warning/teal, too close to success green. It now
         // uses the brand amber (primary) so the three states read distinctly.
         let content = ToolCardContent::header_only("Bash".to_string());
         let running = render_tool_card(&content, ToolStatus::Running);
         let ok = render_tool_card(&content, ToolStatus::Ok);
-        assert_ne!(
-            running, ok,
-            "running and ok cards must differ (distinct frame color)"
-        );
+        if crate::render::ColorSupport::detect() == crate::render::ColorSupport::NoColor {
+            assert_eq!(running, ok, "plain output must not contain status colors");
+        } else {
+            assert_ne!(
+                running, ok,
+                "running and ok cards must differ (distinct frame color)"
+            );
+        }
     }
 
     #[test]

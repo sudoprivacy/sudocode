@@ -548,6 +548,7 @@ pub struct RuntimeToolDefinition {
     pub description: Option<String>,
     pub input_schema: Value,
     pub required_permission: PermissionMode,
+    pub is_concurrency_safe: bool,
 }
 
 impl GlobalToolRegistry {
@@ -771,6 +772,14 @@ impl GlobalToolRegistry {
     #[must_use]
     pub fn has_runtime_tool(&self, name: &str) -> bool {
         self.runtime_tools.iter().any(|tool| tool.name == name)
+    }
+
+    /// Scheduling metadata is deliberately independent of authorization.
+    #[must_use]
+    pub fn runtime_tool_is_concurrency_safe(&self, name: &str) -> bool {
+        self.runtime_tools
+            .iter()
+            .any(|tool| tool.name == name && tool.is_concurrency_safe)
     }
 
     /// Return all tool definitions for the API `tools` array. Before the first
@@ -7954,25 +7963,45 @@ impl ToolExecutor for SubagentToolExecutor {
         input: &str,
         ctx: &ToolDispatchContext,
     ) -> Result<String, ToolError> {
-        if !self.allowed_tools.contains(tool_name) {
+        if !self.allowed_tools.contains(tool_name)
+            && !self
+                .allowed_tools
+                .contains(&canonicalize_tool_name(tool_name))
+        {
             return Err(ToolError::new(format!(
                 "tool `{tool_name}` is not enabled for this sub-agent"
             )));
         }
         let value = serde_json::from_str(input)
             .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-        execute_tool_with_enforcer(
-            self.enforcer.as_ref(),
-            tool_name,
-            &value,
-            self.abort_signal.as_ref(),
-            Some(ctx),
-            // The parent's filesystem, so a sub-agent's file tools land where
-            // its parent's do — through the kernel for a co-hosted parent,
-            // rather than on the daemon's local disk.
-            &self.fs,
-        )
-        .map_err(ToolError::new)
+        let tool_name = tool_name.to_string();
+        let enforcer = self.enforcer.clone();
+        let abort = self.abort_signal.clone();
+        let fs = Arc::clone(&self.fs);
+        let ctx = ctx.clone();
+        let workspace = WorkspaceRootHandoff::capture();
+        let directory = runtime::mailbox::scoped_directory();
+        // Like the parent executor, keep blocking tools off the async polling
+        // thread. Otherwise a batch of sub-agent reads still executes serially
+        // and prevents cancellation from being observed during a slow call.
+        tokio::task::spawn_blocking(move || {
+            let _workspace = workspace.enter();
+            if abort.as_ref().is_some_and(HookAbortSignal::is_aborted) {
+                return Err(ToolError::new("tool cancelled before execution"));
+            }
+            let _directory = runtime::mailbox::MailboxScope::enter(directory);
+            execute_tool_with_enforcer(
+                enforcer.as_ref(),
+                &tool_name,
+                &value,
+                abort.as_ref(),
+                Some(&ctx),
+                &fs,
+            )
+            .map_err(ToolError::new)
+        })
+        .await
+        .map_err(|error| ToolError::new(format!("tool task join error: {error}")))?
     }
 
     fn set_abort_signal(&mut self, abort_signal: HookAbortSignal) {
@@ -10289,6 +10318,7 @@ mod tests {
                     "properties": { "text": { "type": "string" } },
                     "additionalProperties": false
                 }),
+                is_concurrency_safe: false,
                 required_permission: runtime::PermissionMode::ReadOnly,
             }])
             .expect("runtime tools should register");

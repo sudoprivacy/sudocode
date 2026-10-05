@@ -48,7 +48,7 @@ const MCP_SESSION_ID: HeaderName = HeaderName::from_static("mcp-session-id");
 
 /// A live MCP Streamable HTTP connection: a single endpoint driven over one
 /// [`reqwest::Client`], optionally tracking a server-assigned session id.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct McpHttpConnection {
     client: Client,
     endpoint: Url,
@@ -278,6 +278,10 @@ async fn read_limited(response: reqwest::Response, max_bytes: usize) -> io::Resu
 
 #[async_trait]
 impl McpConnection for McpHttpConnection {
+    fn fork_request(&self) -> Option<Box<dyn McpConnection>> {
+        Some(Box::new(self.clone()))
+    }
+
     async fn initialize(
         &mut self,
         id: JsonRpcId,

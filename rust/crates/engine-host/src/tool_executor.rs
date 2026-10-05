@@ -157,12 +157,60 @@ fn execute_runtime_tool_with_state(
     mcp_state: Option<&Arc<Mutex<RuntimeMcpState>>>,
     tool_name: &str,
     value: serde_json::Value,
+    abort: Option<&runtime::HookAbortSignal>,
 ) -> Result<String, ToolError> {
     let Some(mcp_state) = mcp_state else {
         return Err(ToolError::new(format!(
             "runtime tool `{tool_name}` is unavailable without configured MCP servers"
         )));
     };
+    let routed = if tool_name == "MCPTool" {
+        let input: McpToolRequest =
+            serde_json::from_value(value.clone()).map_err(|e| ToolError::new(e.to_string()))?;
+        Some((
+            input
+                .qualified_name
+                .or(input.tool)
+                .ok_or_else(|| ToolError::new("missing required field `qualifiedName`"))?,
+            input.arguments,
+        ))
+    } else if !matches!(
+        tool_name,
+        "ListMcpResourcesTool" | "ReadMcpResourceTool" | "ListMcpPromptsTool" | "GetMcpPromptTool"
+    ) {
+        Some((tool_name.to_string(), Some(value.clone())))
+    } else {
+        None
+    };
+    if let Some((name, arguments)) = routed {
+        let prepared = mcp_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prepare_shared_call(&name, arguments)?;
+        if let Some((handle, mut call)) = prepared {
+            let result = handle.block_on(async {
+                if let Some(abort) = abort {
+                    tokio::select! { biased;
+                        () = abort.cancelled() => None,
+                        result = call.execute() => Some(result),
+                    }
+                } else {
+                    Some(call.execute().await)
+                }
+            });
+            let Some(result) = result else {
+                return Err(ToolError::new("MCP tool cancelled"));
+            };
+            mcp_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finish_shared_call(call, &result)?;
+            return RuntimeMcpState::format_tool_response(
+                &name,
+                result.map_err(|e| ToolError::new(e.to_string()))?,
+            );
+        }
+    }
     let mut mcp_state = mcp_state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -232,6 +280,30 @@ fn parse_tool_call_input(input: &str) -> Result<serde_json::Value, ToolError> {
 }
 
 impl ToolExecutor for CliToolExecutor {
+    fn is_concurrency_safe(&self, name: &str, input: &str) -> bool {
+        let name = tools::canonicalize_tool_name(name);
+        if self.tool_registry.has_runtime_tool(&name) {
+            let target = if name == "MCPTool" {
+                serde_json::from_str::<serde_json::Value>(input)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("qualifiedName")
+                            .or_else(|| v.get("tool"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+            } else {
+                Some(name)
+            };
+            // Discovery captured transport capability once. Classification
+            // never waits on a reconnecting server's manager lock.
+            return target.is_some_and(|target| {
+                self.tool_registry.runtime_tool_is_concurrency_safe(&target)
+            });
+        }
+        runtime::tool_concurrency::builtin_is_concurrency_safe(&name, input)
+    }
+
     async fn execute(&self, tool_name: &str, input: &str) -> Result<String, ToolError> {
         self.execute_with_context(tool_name, input, &runtime::ToolDispatchContext::default())
             .await
@@ -312,6 +384,12 @@ impl ToolExecutor for CliToolExecutor {
             let workspace = WorkspaceRootHandoff::capture();
             tokio::task::spawn_blocking(move || {
                 let _workspace = workspace.enter();
+                if abort_signal
+                    .as_ref()
+                    .is_some_and(runtime::HookAbortSignal::is_aborted)
+                {
+                    return Err(ToolError::new("tool cancelled before execution"));
+                }
                 // The session's mailbox rides along by value, so it lands on
                 // whichever blocking thread took this call. A thread-local
                 // captured on the turn's thread would not have: this closure
@@ -352,7 +430,12 @@ impl ToolExecutor for CliToolExecutor {
                 // transport is a property of the session, the destination a
                 // property of the name, and neither is a fork in the dispatcher.
                 let result = if is_mcp_tool {
-                    execute_runtime_tool_with_state(mcp_state.as_ref(), &tool_name, value)
+                    execute_runtime_tool_with_state(
+                        mcp_state.as_ref(),
+                        &tool_name,
+                        value,
+                        abort_signal.as_ref(),
+                    )
                 } else {
                     registry
                         .execute_with_abort_and_context(

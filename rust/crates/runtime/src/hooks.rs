@@ -87,6 +87,8 @@ pub trait HookProgressReporter: Send {
 #[derive(Debug, Clone)]
 pub struct HookAbortSignal {
     aborted: Arc<AtomicBool>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+    turn_generation: Option<u64>,
     notify: Arc<tokio::sync::Notify>,
 }
 
@@ -94,6 +96,8 @@ impl Default for HookAbortSignal {
     fn default() -> Self {
         Self {
             aborted: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_generation: None,
             notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -112,12 +116,29 @@ impl HookAbortSignal {
 
     /// Clear the abort flag so a new turn can run.
     pub fn reset(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.aborted.store(false, Ordering::SeqCst);
     }
 
     #[must_use]
     pub fn is_aborted(&self) -> bool {
         self.aborted.load(Ordering::SeqCst)
+            || self
+                .turn_generation
+                .is_some_and(|generation| generation != self.generation.load(Ordering::SeqCst))
+    }
+
+    /// A blocking tool must stay cancelled when the next turn resets the
+    /// session signal. Capturing a generation prevents a late-starting worker
+    /// from reviving a cancelled invocation in that next turn.
+    #[must_use]
+    pub fn for_current_turn(&self) -> Self {
+        Self {
+            turn_generation: self
+                .turn_generation
+                .or_else(|| Some(self.generation.load(Ordering::SeqCst))),
+            ..self.clone()
+        }
     }
 
     /// Returns a future that resolves when the abort signal is triggered.

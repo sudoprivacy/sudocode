@@ -5,9 +5,12 @@
 //! The transport-agnostic manager (`McpServerManager`), JSON-RPC message
 //! shapes, and error type live in `mcp_server_manager.rs`.
 
+use crate::mcp_stdio_rpc::StdioRpc;
 use std::collections::BTreeMap;
 use std::io;
 use std::process::Stdio;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -19,18 +22,18 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use crate::mcp_client::{McpClientBootstrap, McpClientTransport, McpStdioTransport};
 use crate::mcp_connection::McpConnection;
 use crate::mcp_server_manager::{
-    JsonRpcId, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpGetPromptParams,
-    McpGetPromptResult, McpInitializeParams, McpInitializeResult, McpListPromptsParams,
-    McpListPromptsResult, McpListResourcesParams, McpListResourcesResult, McpListToolsParams,
-    McpListToolsResult, McpProgressNotification, McpReadResourceParams, McpReadResourceResult,
-    McpToolCallParams, McpToolCallResult,
+    JsonRpcId, JsonRpcRequest, JsonRpcResponse, McpGetPromptParams, McpGetPromptResult,
+    McpInitializeParams, McpInitializeResult, McpListPromptsParams, McpListPromptsResult,
+    McpListResourcesParams, McpListResourcesResult, McpListToolsParams, McpListToolsResult,
+    McpReadResourceParams, McpReadResourceResult, McpToolCallParams, McpToolCallResult,
 };
 
 #[derive(Debug)]
 pub struct McpStdioProcess {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    child: Arc<Mutex<Child>>,
+    stdin: Arc<Mutex<ChildStdin>>,
+    stdout: Option<BufReader<ChildStdout>>,
+    rpc: Option<Arc<StdioRpc>>,
 }
 
 impl McpStdioProcess {
@@ -57,18 +60,19 @@ impl McpStdioProcess {
             .ok_or_else(|| io::Error::other("stdio MCP process missing stdout pipe"))?;
 
         Ok(Self {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
+            child: Arc::new(Mutex::new(child)),
+            stdin: Arc::new(Mutex::new(stdin)),
+            stdout: Some(BufReader::new(stdout)),
+            rpc: None,
         })
     }
 
     pub async fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stdin.write_all(bytes).await
+        self.stdin.lock().await.write_all(bytes).await
     }
 
     pub async fn flush(&mut self) -> io::Result<()> {
-        self.stdin.flush().await
+        self.stdin.lock().await.flush().await
     }
 
     pub async fn write_line(&mut self, line: &str) -> io::Result<()> {
@@ -79,7 +83,7 @@ impl McpStdioProcess {
 
     pub async fn read_line(&mut self) -> io::Result<String> {
         let mut line = String::new();
-        let bytes_read = self.stdout.read_line(&mut line).await?;
+        let bytes_read = self.raw_reader()?.read_line(&mut line).await?;
         if bytes_read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -91,17 +95,17 @@ impl McpStdioProcess {
 
     pub async fn read_available(&mut self) -> io::Result<Vec<u8>> {
         let mut buffer = vec![0_u8; 4096];
-        let read = self.stdout.read(&mut buffer).await?;
+        let read = self.raw_reader()?.read(&mut buffer).await?;
         buffer.truncate(read);
         Ok(buffer)
     }
 
     pub async fn write_frame(&mut self, payload: &[u8]) -> io::Result<()> {
-        crate::mcp_ndjson_transport::write_msg(&mut self.stdin, payload).await
+        crate::mcp_ndjson_transport::write_msg(&mut *self.stdin.lock().await, payload).await
     }
 
     pub async fn read_frame(&mut self) -> io::Result<Vec<u8>> {
-        crate::mcp_ndjson_transport::read_msg(&mut self.stdout)
+        crate::mcp_ndjson_transport::read_msg(self.raw_reader()?)
             .await?
             .ok_or_else(|| {
                 io::Error::new(
@@ -140,56 +144,24 @@ impl McpStdioProcess {
         method: impl Into<String>,
         params: Option<TParams>,
     ) -> io::Result<JsonRpcResponse<TResult>> {
-        let method = method.into();
-        let request = JsonRpcRequest::new(id.clone(), method.clone(), params);
-        self.send_request(&request).await?;
-
-        loop {
-            let payload = self.read_frame().await?;
-            let raw: serde_json::Value = serde_json::from_slice(&payload)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-
-            // Notifications have no `id` or a null `id`.
-            if raw.get("id").is_none() || raw.get("id") == Some(&serde_json::Value::Null) {
-                if let Ok(notification) = serde_json::from_value::<JsonRpcNotification>(raw) {
-                    if notification.method == "notifications/progress" {
-                        if let Some(params) = notification.params {
-                            if let Ok(progress) =
-                                serde_json::from_value::<McpProgressNotification>(params)
-                            {
-                                crate::mcp_server_manager::emit_mcp_progress(progress);
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-
-            let response: JsonRpcResponse<TResult> = serde_json::from_value(raw)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-
-            if response.jsonrpc != "2.0" {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "MCP response for {method} used unsupported jsonrpc version `{}`",
-                        response.jsonrpc
-                    ),
-                ));
-            }
-
-            if response.id != id {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "MCP response for {method} used mismatched id: expected {id:?}, got {:?}",
-                        response.id
-                    ),
-                ));
-            }
-
-            return Ok(response);
+        if self.rpc.is_none() {
+            let reader = self
+                .stdout
+                .take()
+                .ok_or_else(|| io::Error::other("MCP response reader unavailable"))?;
+            self.rpc = Some(Arc::new(StdioRpc::start(self.stdin.clone(), reader)));
         }
+        self.rpc
+            .as_ref()
+            .expect("MCP response router")
+            .request(id, method.into(), params)
+            .await
+    }
+
+    fn raw_reader(&mut self) -> io::Result<&mut BufReader<ChildStdout>> {
+        self.stdout
+            .as_mut()
+            .ok_or_else(|| io::Error::other("raw reads unavailable after JSON-RPC starts"))
     }
 
     pub async fn initialize(
@@ -249,32 +221,42 @@ impl McpStdioProcess {
     }
 
     pub async fn terminate(&mut self) -> io::Result<()> {
-        self.child.kill().await
+        self.child.lock().await.kill().await
     }
 
     pub async fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
-        self.child.wait().await
+        self.child.lock().await.wait().await
     }
 
-    pub fn has_exited(&mut self) -> io::Result<bool> {
-        Ok(self.child.try_wait()?.is_some())
+    pub async fn has_exited(&mut self) -> io::Result<bool> {
+        Ok(self.child.lock().await.try_wait()?.is_some())
     }
 
     pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
-        if self.child.try_wait()?.is_none() {
-            match self.child.kill().await {
+        let mut child = self.child.lock().await;
+        if child.try_wait()?.is_none() {
+            match child.kill().await {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::InvalidInput => {}
                 Err(error) => return Err(error),
             }
         }
-        let _ = self.child.wait().await?;
+        let _ = child.wait().await?;
         Ok(())
     }
 }
 
 #[async_trait]
 impl McpConnection for McpStdioProcess {
+    fn fork_request(&self) -> Option<Box<dyn McpConnection>> {
+        Some(Box::new(Self {
+            child: self.child.clone(),
+            stdin: self.stdin.clone(),
+            stdout: None,
+            rpc: Some(self.rpc.as_ref()?.clone()),
+        }))
+    }
+
     async fn initialize(
         &mut self,
         id: JsonRpcId,
@@ -332,7 +314,7 @@ impl McpConnection for McpStdioProcess {
     }
 
     async fn has_exited(&mut self) -> io::Result<bool> {
-        Self::has_exited(self)
+        Self::has_exited(self).await
     }
 
     async fn shutdown(&mut self) {

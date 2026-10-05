@@ -552,6 +552,14 @@ impl RuntimeObserver for ObserverAdapter {
         });
     }
 
+    fn on_tool_started(&mut self, id: &str, name: &str, input: &str) {
+        let _ = self.tx.send(EngineEvent::ToolStarted {
+            id: id.into(),
+            name: name.into(),
+            input: input.into(),
+        });
+    }
+
     fn on_tool_result(&mut self, tool_use_id: &str, tool_name: &str, output: &str, is_error: bool) {
         let _ = self.tx.send(EngineEvent::ToolResult {
             id: tool_use_id.into(),

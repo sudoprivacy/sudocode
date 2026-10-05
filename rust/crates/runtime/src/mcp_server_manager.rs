@@ -631,6 +631,7 @@ struct ManagedMcpServer {
     bootstrap: McpClientBootstrap,
     process: Option<Box<dyn McpConnection>>,
     initialized: bool,
+    generation: u64,
     /// Total spawn attempts (including retries) made against this server.
     /// Capped at MCP_SPAWN_ATTEMPT_LIMIT to short-circuit the spawn loop.
     spawn_attempts: u32,
@@ -646,9 +647,36 @@ impl ManagedMcpServer {
             bootstrap,
             process: None,
             initialized: false,
+            generation: 0,
             spawn_attempts: 0,
             permanent_failure: None,
         }
+    }
+}
+
+/// A request on an already initialized shared connection. The host releases
+/// its manager lock before awaiting it, so independent responses can overlap.
+#[derive(Debug)]
+pub struct PendingMcpToolCall {
+    server_name: String,
+    generation: u64,
+    timeout_ms: u64,
+    process: Box<dyn McpConnection>,
+    id: JsonRpcId,
+    params: McpToolCallParams,
+}
+
+impl PendingMcpToolCall {
+    pub async fn execute(
+        &mut self,
+    ) -> Result<JsonRpcResponse<McpToolCallResult>, McpServerManagerError> {
+        McpServerManager::run_process_request(
+            &self.server_name,
+            "tools/call",
+            self.timeout_ms,
+            self.process.call_tool(self.id.clone(), self.params.clone()),
+        )
+        .await
     }
 }
 
@@ -809,6 +837,65 @@ impl McpServerManager {
             unsupported_servers: self.unsupported_servers.clone(),
             degraded_startup,
         }
+    }
+
+    /// Whether this discovered tool's transport shares an initialized session
+    /// across independent requests. Metadata controls *permission to overlap*;
+    /// this checks actual transport capability, not that metadata.
+    pub fn supports_concurrent_tool(&self, name: &str) -> bool {
+        self.tool_index
+            .get(name)
+            .and_then(|route| self.servers.get(&route.server_name))
+            .and_then(|server| server.process.as_ref())
+            .is_some_and(|process| process.fork_request().is_some())
+    }
+
+    pub async fn prepare_concurrent_tool_call(
+        &mut self,
+        name: &str,
+        arguments: Option<JsonValue>,
+    ) -> Result<Option<PendingMcpToolCall>, McpServerManagerError> {
+        let route = self.tool_index.get(name).cloned().ok_or_else(|| {
+            McpServerManagerError::UnknownTool {
+                qualified_name: name.to_string(),
+            }
+        })?;
+        self.ensure_server_ready(&route.server_name).await?;
+        let timeout_ms = self.tool_call_timeout_ms(&route.server_name)?;
+        let id = self.take_request_id();
+        let server = self.server_mut(&route.server_name)?;
+        Ok(server
+            .process
+            .as_ref()
+            .and_then(|process| process.fork_request())
+            .map(|process| PendingMcpToolCall {
+                server_name: route.server_name,
+                generation: server.generation,
+                timeout_ms,
+                process,
+                id,
+                params: McpToolCallParams {
+                    name: route.raw_name,
+                    arguments,
+                    meta: None,
+                },
+            }))
+    }
+
+    pub async fn finish_concurrent_tool_call(
+        &mut self,
+        call: PendingMcpToolCall,
+        should_reset: bool,
+    ) -> Result<(), McpServerManagerError> {
+        if should_reset
+            && self
+                .servers
+                .get(&call.server_name)
+                .is_some_and(|server| server.generation == call.generation)
+        {
+            self.reset_server(&call.server_name).await?;
+        }
+        Ok(())
     }
 
     pub async fn call_tool(
@@ -1408,7 +1495,7 @@ impl McpServerManager {
         )
     }
 
-    fn should_reset_server(error: &McpServerManagerError) -> bool {
+    pub fn should_reset_server(error: &McpServerManagerError) -> bool {
         matches!(
             error,
             McpServerManagerError::Transport { .. }
@@ -1517,6 +1604,7 @@ impl McpServerManager {
                     }
                 };
                 let server = self.server_mut(server_name)?;
+                server.generation = server.generation.wrapping_add(1);
                 server.process = Some(process);
                 server.initialized = false;
             }

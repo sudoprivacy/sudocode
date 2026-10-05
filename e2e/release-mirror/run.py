@@ -116,7 +116,7 @@ else:
         assert (result.returncode == 0) == success, result.stdout + result.stderr
         return result
 
-    def prepare(version):
+    def prepare(version, *, is_bundle=False):
         dist = root / version
         dist.mkdir()
         for target in ("linux-x64", "linux-arm64", "macos-x64", "macos-arm64"):
@@ -128,6 +128,10 @@ else:
         for arch in ("x64", "arm64"):
             (dist / f"scode-windows-{arch}.zip").write_bytes(version.encode())
         (dist / f"scode_{version[1:]}_amd64.deb").write_bytes(version.encode())
+        if is_bundle:
+            shutil.copyfile(
+                dist / "scode-linux-x64.tar.gz", dist / "scode-linux-x64-bundle.tar.gz"
+            )
         checksums = "".join(
             f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
             for path in sorted(dist.iterdir())
@@ -174,7 +178,31 @@ else:
     assert not pointer.exists()
     publish("promote", "v1.0.0")
     install("v1.0.0")
-    prepare("v1.0.1")
+    prepare("v1.0.1", is_bundle=True)
+    dist = root / "v1.0.1"
+    manifest = dist / "SHA256SUMS.txt"
+    original_manifest = manifest.read_text()
+    before = len(uploads())
+    extra = dist / "scode-unrecognized.tar.gz"
+    extra.write_bytes(b"unexpected archive")
+    manifest.write_text(
+        original_manifest + f"{hashlib.sha256(extra.read_bytes()).hexdigest()}  {extra.name}\n"
+    )
+    assert "release artifact set differs" in publish("stage", "v1.0.1", success=False).stderr
+    extra.unlink()
+    manifest.write_text("".join(
+        line for line in original_manifest.splitlines(True)
+        if "scode-linux-arm64.tar.gz" not in line
+    ))
+    assert "release artifact set differs" in publish("stage", "v1.0.1", success=False).stderr
+    manifest.write_text(original_manifest)
+    assert len(uploads()) == before, "invalid manifests must fail before uploading"
+    bundle = dist / "scode-linux-x64-bundle.tar.gz"
+    original_bundle = bundle.read_bytes()
+    bundle.write_bytes(b"corrupt bundle")
+    assert "local checksum mismatch" in publish("stage", "v1.0.1", success=False).stderr
+    assert len(uploads()) == before
+    bundle.write_bytes(original_bundle)
     before = len(uploads())
     publish("stage", "v1.0.1", success=False, extra={"MIRROR_FAIL_AT": str(before + 4)})
     staged = uploads()[before:]
@@ -191,6 +219,7 @@ else:
     publish("promote", "v1.0.1", success=False, extra={"MIRROR_FAIL_AT": str(len(uploads()) + 2)})
     install("v1.0.0")
     publish("promote", "v1.0.1")
+    assert (public / "sudocode/release/v1.0.1" / bundle.name).read_bytes() == original_bundle
     install("v1.0.1")
     install("v1.0.0", "--version", "v1.0.0")
     publish("promote", "v1.0.0")

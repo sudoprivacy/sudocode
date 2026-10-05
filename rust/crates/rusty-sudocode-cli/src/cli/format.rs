@@ -79,24 +79,16 @@ pub(crate) fn render_message(
             if text.is_empty() {
                 return None;
             }
-            // Render exactly the plain `❯ text` prompt echo — no surrounding
-            // horizontal rules. The rules were added in the original resume
-            // work to "match live output", but the live iocraft REPL never
-            // commits a ruled box to scrollback (the input widget is a canvas
-            // that redraws away); the rules only made a resumed message look
-            // like the live input box below it.
-            let (echo, _) = format_input_echo(&text, term_width);
-            out.push_str(&echo);
+            out.push_str(&super::received::render_prompt(&text, term_width, renderer));
         }
         runtime::MessageRole::Assistant => {
             for block in &msg.blocks {
                 match block {
                     runtime::ContentBlock::Text { text } if !text.is_empty() => {
-                        let rendered = renderer.render_markdown(text);
-                        if !out.is_empty() {
-                            out.push('\n');
-                        }
-                        out.push_str(&rendered);
+                        let rendered = renderer.render_markdown_with_width(text, term_width);
+                        crate::render::layout_policy::LayoutPolicy::append_block(
+                            &mut out, &rendered,
+                        );
                     }
                     runtime::ContentBlock::Thinking { thinking, .. }
                         if !thinking.trim().is_empty() =>
@@ -107,12 +99,11 @@ pub(crate) fn render_message(
                         // model wrote for itself, and letting a stray `#` or
                         // `*` in it become a heading or emphasis would make it
                         // louder than the answer it belongs under.
-                        if !out.is_empty() {
-                            out.push('\n');
-                        }
-                        out.push_str(&thinking_header());
-                        out.push_str(&dim_thinking(thinking.trim_end()));
-                        out.push('\n');
+                        let thinking =
+                            format!("{}{}", thinking_header(), dim_thinking(thinking.trim_end()));
+                        crate::render::layout_policy::LayoutPolicy::append_block(
+                            &mut out, &thinking,
+                        );
                     }
                     runtime::ContentBlock::ToolUse { id, input, .. } => {
                         // Mirror the live render engine exactly: a ToolUse only
@@ -142,14 +133,14 @@ pub(crate) fn render_message(
                     is_error,
                 } = block
                 {
-                    if !out.is_empty() {
-                        out.push('\n');
-                    }
                     // Pair this result with the input remembered from its call
                     // (`""` if the call is missing, e.g. a truncated session) —
                     // the same pairing the live render engine does.
                     let input = tool_inputs.take(tool_use_id);
-                    out.push_str(&format_tool_result(tool_name, &input, output, *is_error));
+                    crate::render::layout_policy::LayoutPolicy::append_block(
+                        &mut out,
+                        &format_tool_result(tool_name, &input, output, *is_error),
+                    );
                 }
             }
             if out.is_empty() {
@@ -159,6 +150,7 @@ pub(crate) fn render_message(
         runtime::MessageRole::System => return None,
     }
 
+    out.truncate(out.trim_end_matches('\n').len());
     Some(out)
 }
 
@@ -171,14 +163,14 @@ pub(crate) fn render_messages(
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
 ) -> String {
-    let mut parts = Vec::new();
+    let mut output = String::new();
     let mut tool_inputs = ToolInputRegistry::default();
     for msg in messages {
         if let Some(rendered) = render_message(msg, term_width, renderer, &mut tool_inputs) {
-            parts.push(rendered);
+            crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
         }
     }
-    parts.join("\n")
+    output
 }
 
 /// `true` for Text blocks the runtime injected (date announcements,
@@ -889,6 +881,8 @@ pub(crate) fn split_hook_feedback(output: &str) -> (&str, Option<&str>) {
 /// [`render_tool_card`] and nothing else encodes "did this tool succeed."
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ToolStatus {
+    /// Requested, waiting for hooks, approval or an execution slot.
+    Queued,
     /// In flight — yellow frame. Rendered in the staging area.
     Running,
     /// Completed successfully — green frame.
@@ -904,30 +898,38 @@ pub(crate) enum ToolStatus {
 /// body) and inherit the unified look automatically.
 #[derive(Debug)]
 pub(crate) struct ToolCardContent {
-    /// First line: tool identity + summary. May carry emoji and the tool's
-    /// own identity color (bash muted, write green, edit warning, …).
+    /// Unabridged identity; layout fits it to one physical row at paint time.
     pub header: String,
     /// Optional multi-line body, already styled/highlighted, with **no**
     /// leading prefix — `render_tool_card` owns the frame.
     pub body: Option<String>,
+    /// Highlighted Bash input, retained separately from the result (including
+    /// errors). Show it when the one-line header cannot contain the command.
+    command: Option<String>,
 }
 
 impl ToolCardContent {
     fn header_only(header: String) -> Self {
-        Self { header, body: None }
+        Self {
+            header,
+            body: None,
+            command: None,
+        }
     }
 
     fn new(header: String, body: String) -> Self {
         Self {
             header,
             body: Some(body),
+            command: None,
         }
     }
 }
 
 /// SSOT for how a tool call looks on screen: an L-frame whose color carries
-/// the status. `╭─ header` / `│ body…` / `╰─`, colored yellow (running),
-/// green (ok), or red (error).
+/// the status. `╭─ header` / `│ body…` / `╰─`, colored amber (running),
+/// syntax-theme green (ok), or red (error). Bold caps distinguish adjacent
+/// calls; the long vertical border uses normal weight without dimming.
 ///
 /// Deliberately never draws a right border: tool output carries ANSI, tabs,
 /// and CJK width, so a closed box's right edge is unreliable — a left frame
@@ -935,53 +937,43 @@ impl ToolCardContent {
 /// ethos. The frame carries the status color; the tool name inside `header`
 /// keeps its own identity color. There is no response bullet — the frame is the cue.
 pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
-    use std::fmt::Write as _;
-    let t = theme();
-    let frame = match status {
-        // Running uses the brand amber (primary), NOT warning/teal: teal read
-        // too close to the success green, so an in-flight card looked already
-        // done. Amber vs green vs red now reads at a glance.
-        ToolStatus::Running => ansi_bold_fg(t.primary),
-        ToolStatus::Ok => ansi_bold_fg(t.success),
-        ToolStatus::Error => ansi_bold_fg(t.error),
+    render_tool_card_with_width(content, status, crate::render::query_terminal_width())
+}
+
+/// The layout owner supplies its width, so all cards in one UI frame use the
+/// same terminal-size snapshot instead of racing independent ioctl queries.
+pub(crate) fn render_tool_card_with_width(
+    content: &ToolCardContent,
+    status: ToolStatus,
+    term_width: usize,
+) -> String {
+    use crate::render::left_frame;
+
+    let colors = theme().tool_borders();
+    let color = match status {
+        ToolStatus::Queued => colors.queued,
+        ToolStatus::Running => colors.running,
+        ToolStatus::Ok => colors.success,
+        ToolStatus::Error => colors.error,
     };
-    let top = format!("{frame}\u{256d}\u{2500}{RESET}");
-    let bar = format!("{frame}\u{2502}{RESET}");
-    let bottom = format!("{frame}\u{2570}\u{2500}{RESET}");
-    // Wrap every content line to the width left after the 2-column `│ ` prefix,
-    // then prefix each wrapped segment with the bar. A line longer than the
-    // terminal would otherwise be wrapped by the terminal itself, and that
-    // continuation would carry no `│` — spilling past the left frame. Wrapping
-    // here (not truncating) keeps all content and keeps every visible row
-    // inside the frame. This is the single place that guarantees framed output
-    // stays framed — extractors need not each reason about width.
-    let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
-    let content_width = term_width.saturating_sub(2).max(1);
-    let mut out = String::new();
-    // Header may itself contain newlines (e.g. a multi-line command echoed in
-    // the identity). Split on them first — exactly like the body — so every
-    // physical line gets a frame prefix; otherwise an embedded `\n` produces a
-    // row with no `│` that spills past the left frame.
-    let mut first_row = true;
-    for line in content.header.split('\n') {
-        for seg in wrap_ansi_to_width(line, content_width) {
-            let prefix = if first_row { &top } else { &bar };
-            if !first_row {
-                out.push('\n');
-            }
-            let _ = write!(out, "{prefix} {seg}");
-            first_row = false;
-        }
-    }
-    if let Some(body) = &content.body {
-        for line in body.split('\n') {
-            for seg in wrap_ansi_to_width(line, content_width) {
-                let _ = write!(out, "\n{bar} {seg}");
-            }
-        }
-    }
-    let _ = write!(out, "\n{bottom}");
-    out
+    // Keep the full identity cached so a running card reveals more on resize.
+    let header = content.header.replace(['\n', '\r', '\t'], " ");
+    let is_truncated = display_width(&header) > left_frame::header_width(term_width);
+    let command = content
+        .command
+        .as_ref()
+        .filter(|command| is_truncated || command.contains(['\n', '\r', '\t']))
+        .map(|command| command_body_preamble(command, term_width));
+    left_frame::render(
+        &header,
+        command
+            .iter()
+            .chain(content.body.iter())
+            .map(String::as_str),
+        term_width,
+        color,
+        true,
+    )
 }
 
 pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error: bool) -> String {
@@ -1073,6 +1065,11 @@ pub(crate) fn first_visible_line(text: &str) -> &str {
         .unwrap_or(text)
 }
 
+/// One theme role for every tool identity, independent of execution status.
+fn tool_label(name: &str) -> String {
+    format!("{}{name}{RESET}", theme().tool_name_fg())
+}
+
 pub(crate) fn bash_card(
     input: &serde_json::Value,
     output: Option<&serde_json::Value>,
@@ -1086,13 +1083,20 @@ pub(crate) fn bash_card(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
 
-    let muted = ansi_fg(theme().muted);
-    let mut header = if command.is_empty() {
-        format!("{muted}Bash{RESET}")
+    let label = tool_label("Bash");
+    // Pending cards only display the title; avoid highlighting an entire
+    // script until its completed card needs the full command body.
+    let visible_command = if output.is_none() {
+        first_visible_line(command)
     } else {
-        let summary = crate::render::TerminalRenderer::new()
-            .highlight_code(&truncate_for_summary(command, 120), "bash");
-        format!("{muted}Bash{RESET}({summary})")
+        command
+    };
+    let highlighted =
+        crate::render::TerminalRenderer::new().highlight_code(visible_command, "bash");
+    let mut header = if command.is_empty() {
+        label
+    } else {
+        format!("{label}({})", first_visible_line(&highlighted))
     };
     header.push_str(&identity_annotation(input));
 
@@ -1100,13 +1104,6 @@ pub(crate) fn bash_card(
         // Staging: no result yet — identity only.
         return ToolCardContent::header_only(header);
     };
-
-    // When the header could not show the whole command — it spans multiple
-    // lines, or a single line longer than the 120-char summary cap — echo the
-    // full command verbatim at the top of the body, each line `$ `-prefixed
-    // (shell convention) so it reads distinctly from the output below. A hacker
-    // tool favors transparency: the exact command run is never hidden.
-    let command_preamble = command_body_preamble(command);
 
     // Background id / return-code interpretation live in `output`.
     if let Some(task_id) = output
@@ -1131,64 +1128,41 @@ pub(crate) fn bash_card(
         .and_then(|v| v.as_str())
         .unwrap_or_default();
 
-    stdout_stderr_card(header, command_preamble, stdout_text, stderr_text)
+    let mut content = stdout_stderr_card(header, stdout_text, stderr_text);
+    content.command = (!command.is_empty()).then_some(highlighted);
+    content
 }
 
-/// Build the `$ `-prefixed full-command preamble for a bash card body, or
-/// `None` when the header already shows the whole command (single line ≤120
-/// chars). Multi-line commands get one `$ ` per line; the preamble is closed
-/// with a dim horizontal rule that separates the command from the output.
-fn command_body_preamble(command: &str) -> Option<String> {
+/// Prefix an already highlighted script without reparsing it at paint time.
+fn command_body_preamble(highlighted: &str, term_width: usize) -> String {
     use std::fmt::Write as _;
-    let is_multiline = command.contains('\n');
-    let is_overlong = command.chars().count() > 120;
-    if !is_multiline && !is_overlong {
-        return None;
-    }
     let mut preamble = String::new();
-    // Highlight the whole script before adding display prefixes, preserving
-    // multiline strings and heredocs without treating `$ ` as source code.
-    let highlighted = crate::render::TerminalRenderer::new().highlight_code(command, "bash");
     for line in highlighted.split('\n') {
         let _ = writeln!(preamble, "{DIM}${RESET} {line}");
     }
     // Dim rule (structure, not status) dividing command from output.
-    let rule_width = crossterm::terminal::size()
-        .map_or(24, |(cols, _)| (cols as usize).saturating_sub(6).min(24));
+    let rule_width = term_width.saturating_sub(6).min(24);
     let _ = write!(
         preamble,
         "{DIM}{}{RESET}",
         "\u{2500}".repeat(rule_width.max(1))
     );
-    Some(preamble)
+    preamble
 }
 
 /// Shared stdout/stderr body builder used by [`bash_card`]. Combines the two
-/// streams, drops blank lines, and applies the per-tool line cap from
-/// `TOOL_OUTPUT_DISPLAY_MAX_LINES`. When `command_preamble` is present it is
-/// placed above the output (the verbatim `$ `-prefixed command + a dim rule).
+/// streams, preserves internal blank lines, and applies the per-tool line cap from
+/// `TOOL_OUTPUT_DISPLAY_MAX_LINES`. Command input is kept separately so it
+/// can be laid out at the current terminal width, even for failed calls.
 /// Returns a [`ToolCardContent`]; the L-frame prefix is applied later by
 /// [`render_tool_card`].
-fn stdout_stderr_card(
-    header: String,
-    command_preamble: Option<String>,
-    stdout: &str,
-    stderr: &str,
-) -> ToolCardContent {
+fn stdout_stderr_card(header: String, stdout: &str, stderr: &str) -> ToolCardContent {
     use std::fmt::Write as _;
 
-    let all_output: Vec<&str> = stdout
-        .lines()
-        .chain(stderr.lines())
-        .filter(|line| !line.trim().is_empty())
-        .collect();
+    let all_output: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
 
     if all_output.is_empty() {
-        // No output: still show the full command if the header truncated it.
-        return match command_preamble {
-            Some(preamble) => ToolCardContent::new(header, preamble),
-            None => ToolCardContent::header_only(header),
-        };
+        return ToolCardContent::header_only(header);
     }
 
     let term_width = crossterm::terminal::size()
@@ -1201,13 +1175,9 @@ fn stdout_stderr_card(
     let preview_count = TOOL_OUTPUT_DISPLAY_MAX_LINES;
     let mut body = String::new();
 
-    // Verbatim command sits above the output, separated by its own dim rule.
-    if let Some(preamble) = &command_preamble {
-        body.push_str(preamble);
-        body.push('\n');
-    }
-
-    for (i, line) in all_output.iter().take(preview_count).enumerate() {
+    let visible = &all_output[..all_output.len().min(preview_count)];
+    let highlighted = super::unified_diff::highlight(visible);
+    for (i, line) in highlighted.iter().enumerate() {
         let truncated = truncate_to_width(line, max_content_width);
         if i > 0 {
             body.push('\n');
@@ -1236,7 +1206,7 @@ pub(crate) fn read_card(
     let path = extract_tool_path(input);
     let Some(output) = output else {
         // Staging: identity only.
-        let mut header = format!("{DIM}Read {path}{RESET}");
+        let mut header = format!("{} {path}", tool_label("Read"));
         header.push_str(&identity_annotation(input));
         return ToolCardContent::header_only(header);
     };
@@ -1258,7 +1228,7 @@ pub(crate) fn read_card(
         .get("totalLines")
         .or_else(|| file.get("total_lines"))
         .and_then(serde_json::Value::as_u64);
-    let mut header = format!("{DIM}Read {path}{RESET}");
+    let mut header = format!("{} {path}", tool_label("Read"));
     if let Some(total) = total_lines {
         let _ = write!(header, " {DIM}({total} lines){RESET}");
     }
@@ -1346,7 +1316,6 @@ pub(crate) fn write_card(
     output: Option<&serde_json::Value>,
     _status: ToolStatus,
 ) -> ToolCardContent {
-    let success = ansi_bold_fg(theme().success);
     let Some(output) = output else {
         // Staging: identity from input (path + content line count).
         let path = extract_tool_path(input);
@@ -1354,7 +1323,10 @@ pub(crate) fn write_card(
             .get("content")
             .and_then(serde_json::Value::as_str)
             .map_or(0, |content| content.lines().count());
-        let mut header = format!("{success}✏️ Write {path}{RESET} {DIM}({lines} lines){RESET}");
+        let mut header = format!(
+            "✏️ {} {path} {DIM}({lines} lines){RESET}",
+            tool_label("Write")
+        );
         header.push_str(&identity_annotation(input));
         return ToolCardContent::header_only(header);
     };
@@ -1379,6 +1351,7 @@ pub(crate) fn write_card(
     let new_line_count = new_content.lines().count();
     let original = output.get("originalFile").and_then(|value| value.as_str());
     let verb = if kind == "create" { "Wrote" } else { "Updated" };
+    let label = tool_label(verb);
     let mut header = match original {
         Some(prev) if kind != "create" => {
             let prev_lines = prev.lines().count();
@@ -1389,11 +1362,11 @@ pub(crate) fn write_card(
                 std::cmp::Ordering::Equal => String::new(),
             };
             format!(
-                "{success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines, was {prev_lines}{delta_str}){RESET}",
+                "✏️ {label} {path} {DIM}({new_line_count} lines, was {prev_lines}{delta_str}){RESET}",
             )
         }
         _ => {
-            format!("{success}✏️ {verb} {path}{RESET} {DIM}({new_line_count} lines){RESET}",)
+            format!("✏️ {label} {path} {DIM}({new_line_count} lines){RESET}")
         }
     };
     header.push_str(&identity_annotation(input));
@@ -1503,13 +1476,12 @@ pub(crate) fn edit_card(
     let preview = format_edit_diff_preview(original, old_value, new_value, language)
         .or_else(|| format_old_new_diff(old_value, new_value, language));
 
-    let warning = ansi_bold_fg(theme().warning);
     let verb = if status == ToolStatus::Running {
         "Editing"
     } else {
         "Edited"
     };
-    let mut header = format!("{warning}📝 {verb} {path}{suffix}{RESET}");
+    let mut header = format!("📝 {} {path}{suffix}", tool_label(verb));
     header.push_str(&identity_annotation(input));
     match preview {
         Some(preview) => ToolCardContent::new(header, preview),
@@ -1657,7 +1629,7 @@ fn render_colored_diff(
         .chain(new[..new_count].iter().map(|line| ('+', *line)))
         .chain(post.iter().map(|line| (' ', *line)))
         .collect();
-    let mut rendered = crate::render::diff_colors::render_rows(&rows, language);
+    let mut rendered = crate::render::diff_colors::render_rows(&rows, language, " ");
     // Insert from the end so the earlier row offsets remain valid.
     if new_count < new.len() {
         rendered.insert(
@@ -1693,12 +1665,12 @@ fn count_non_overlapping(haystack: &str, needle: &str) -> usize {
 /// without ever saying what was searched for.
 #[inline]
 fn search_identity(label: &str, input: &serde_json::Value) -> String {
-    let muted = ansi_fg(theme().muted);
+    let tool_name = tool_label(label);
     let pattern = input
         .get("pattern")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("?");
-    let mut header = format!("{muted}{label}{RESET}({pattern})");
+    let mut header = format!("{tool_name}({pattern})");
     if let Some(scope) = input.get("path").and_then(serde_json::Value::as_str) {
         if !scope.is_empty() {
             header.push_str(&format!(" {DIM}in {scope}{RESET}"));
@@ -1752,8 +1724,7 @@ pub(crate) fn generic_tool_card(
     output: Option<&serde_json::Value>,
     _status: ToolStatus,
 ) -> ToolCardContent {
-    let muted = ansi_fg(theme().muted);
-    let mut header = format!("{muted}{name}{RESET}");
+    let mut header = tool_label(name);
     // Show any scalar arguments so an unknown tool still says what it was
     // called with, then any LLM description.
     let args = summarize_scalar_args(input);
@@ -1817,12 +1788,12 @@ fn web_search_card(
     output: Option<&serde_json::Value>,
     _status: ToolStatus,
 ) -> ToolCardContent {
-    let muted = ansi_fg(theme().muted);
+    let tool_name = tool_label("WebSearch");
     let query = input
         .get("query")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("?");
-    let mut header = format!("{muted}WebSearch{RESET}({query})");
+    let mut header = format!("{tool_name}({query})");
     header.push_str(&identity_annotation(input));
     let Some(output) = output else {
         return ToolCardContent::header_only(header);
@@ -1877,7 +1848,7 @@ fn skill_card(
     output: Option<&serde_json::Value>,
     _status: ToolStatus,
 ) -> ToolCardContent {
-    let muted = ansi_fg(theme().muted);
+    let tool_name = tool_label("Skill");
     let null = serde_json::Value::Null;
     let out = output.unwrap_or(&null);
     let path = {
@@ -1888,7 +1859,7 @@ fn skill_card(
             p
         }
     };
-    let mut header = format!("{muted}Skill{RESET}({path})");
+    let mut header = format!("{tool_name}({path})");
     header.push_str(&identity_annotation(input));
     let Some(output) = output else {
         return ToolCardContent::header_only(header);
@@ -1903,14 +1874,14 @@ fn read_tool_output_card(
     output: Option<&serde_json::Value>,
     _status: ToolStatus,
 ) -> ToolCardContent {
-    let muted = ansi_fg(theme().muted);
+    let tool_name = tool_label("read_tool_output");
     let Some(output) = output else {
         // Staging: identity from input (the id being paged).
         let id = field(input, &serde_json::Value::Null, "id");
         let mut header = if id.is_empty() {
-            format!("{muted}read_tool_output{RESET}")
+            tool_name
         } else {
-            format!("{muted}read_tool_output{RESET}({id})")
+            format!("{tool_name}({id})")
         };
         header.push_str(&identity_annotation(input));
         return ToolCardContent::header_only(header);
@@ -1930,8 +1901,7 @@ fn read_tool_output_card(
                 p
             }
         };
-        let header =
-            format!("{muted}read_tool_output{RESET} {total_matches} match(es) for {pattern}");
+        let header = format!("{tool_name} {total_matches} match(es) for {pattern}");
         let mut body = String::new();
         for hit in matches.iter().take(TOOL_OUTPUT_DISPLAY_MAX_LINES) {
             let line = hit
@@ -1969,9 +1939,9 @@ fn read_tool_output_card(
     );
     let header = match total {
         Some(total) => {
-            format!("{muted}read_tool_output{RESET} bytes {start}–{end} of {total}")
+            format!("{tool_name} bytes {start}–{end} of {total}")
         }
-        None => format!("{muted}read_tool_output{RESET} bytes {start}–{end}"),
+        None => format!("{tool_name} bytes {start}–{end}"),
     };
     if preview.is_empty() {
         ToolCardContent::header_only(header)
@@ -2340,7 +2310,7 @@ pub(crate) fn format_permission_prompt_box(
     let grey = ansi_fg(t.muted);
     let reset = RESET;
     let bold_yellow = ansi_bold_fg(t.warning);
-    let bold_cyan = ansi_bold_fg(t.info);
+    let bold_info = ansi_bold_fg(t.info());
     let dim = DIM;
 
     let mut out = String::new();
@@ -2351,7 +2321,7 @@ pub(crate) fn format_permission_prompt_box(
     );
     let _ = writeln!(
         out,
-        "  {grey}│{reset} Tool      {bold_cyan}{tool_name}{reset}"
+        "  {grey}│{reset} Tool      {bold_info}{tool_name}{reset}"
     );
     let _ = writeln!(out, "  {grey}│{reset} Action    {dim}{action}{reset}");
     let _ = writeln!(
@@ -2968,24 +2938,28 @@ mod tests {
                 "every card row must start with a frame glyph: {line:?}"
             );
         }
-        // The second header line survived as its own framed row.
+        // Embedded newlines become spaces within the single title row.
         assert!(
-            plain.lines().any(|l| l.contains("git status")),
-            "multi-line header second line must render: {plain:?}"
+            plain.lines().next().unwrap().contains("cd foo git status"),
+            "multi-line identity stays on the title row: {plain:?}"
         );
     }
 
     #[test]
-    fn render_tool_card_running_color_differs_from_ok() {
+    fn render_tool_card_status_colors_respect_terminal_support() {
         // Bug 3: running used warning/teal, too close to success green. It now
         // uses the brand amber (primary) so the three states read distinctly.
         let content = ToolCardContent::header_only("Bash".to_string());
         let running = render_tool_card(&content, ToolStatus::Running);
         let ok = render_tool_card(&content, ToolStatus::Ok);
-        assert_ne!(
-            running, ok,
-            "running and ok cards must differ (distinct frame color)"
-        );
+        if crate::render::ColorSupport::detect() == crate::render::ColorSupport::NoColor {
+            assert_eq!(running, ok, "plain output must not contain status colors");
+        } else {
+            assert_ne!(
+                running, ok,
+                "running and ok cards must differ (distinct frame color)"
+            );
+        }
     }
 
     #[test]

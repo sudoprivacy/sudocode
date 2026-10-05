@@ -179,6 +179,10 @@ impl Drop for MockAnthropicService {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     StreamingText,
+    SpinnerActivity,
+    BashRenderFixture,
+    TranscriptSpacing,
+    ToolConcurrency,
     /// A `thinking` block streamed as several `thinking_delta`s (one of them
     /// spanning a newline, one splitting mid-word) followed by a `signature_delta`
     /// and then a normal text block. The only scenario that exercises the
@@ -329,6 +333,10 @@ impl Scenario {
     fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "streaming_text" => Some(Self::StreamingText),
+            "spinner_activity" => Some(Self::SpinnerActivity),
+            "bash_render_fixture" => Some(Self::BashRenderFixture),
+            "tool_concurrency" => Some(Self::ToolConcurrency),
+            "transcript_spacing" => Some(Self::TranscriptSpacing),
             "thinking_then_text" => Some(Self::ThinkingThenText),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
             "skill_read_roundtrip" => Some(Self::SkillReadRoundtrip),
@@ -403,6 +411,10 @@ impl Scenario {
     fn name(self) -> &'static str {
         match self {
             Self::StreamingText => "streaming_text",
+            Self::SpinnerActivity => "spinner_activity",
+            Self::BashRenderFixture => "bash_render_fixture",
+            Self::ToolConcurrency => "tool_concurrency",
+            Self::TranscriptSpacing => "transcript_spacing",
             Self::ThinkingThenText => "thinking_then_text",
             Self::ReadFileRoundtrip => "read_file_roundtrip",
             Self::SkillReadRoundtrip => "skill_read_roundtrip",
@@ -539,6 +551,18 @@ async fn handle_connection(
         raw_body,
     });
 
+    if scenario == Scenario::SpinnerActivity && request.stream {
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        for (delay, chunk) in spinner_activity_stream() {
+            tokio::time::sleep(delay).await;
+            socket.write_all(chunk.as_bytes()).await?;
+        }
+        return Ok(());
+    }
     if scenario == Scenario::DelayedText {
         tokio::time::sleep(DELAYED_TEXT_LATENCY).await;
     }
@@ -658,6 +682,46 @@ fn normalize_system_field(raw_body: &str) -> String {
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+struct ConcurrencyCall {
+    id: String,
+    name: String,
+    input: Value,
+}
+
+// The PTY fixture supplies the provider's batch, then drives actual tools.
+// It controls arrival order without substituting a fake executor or clock.
+fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|m| m.content.iter().rev())
+        .find_map(|block| {
+            let InputContentBlock::Text { text } = block else {
+                return None;
+            };
+            let (_, batch) = text.split_once("TOOL_BATCH:")?;
+            serde_json::Deserializer::from_str(batch)
+                .into_iter::<Vec<Value>>()
+                .next()?
+                .ok()
+        })
+        .expect("tool_concurrency requires TOOL_BATCH JSON")
+        .into_iter()
+        .map(|call| ConcurrencyCall {
+            id: call["id"].as_str().expect("call id").to_string(),
+            name: call["name"].as_str().expect("call name").to_string(),
+            input: call["input"].clone(),
+        })
+        .collect()
+}
+
+fn concurrency_batch_complete(request: &MessageRequest) -> bool {
+    concurrency_calls(request).iter().all(|call| request.messages.iter().flat_map(|m| &m.content).any(|block| {
+        matches!(block, InputContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &call.id)
+    }))
 }
 
 fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
@@ -1293,11 +1357,62 @@ fn read_roundtrip_input(scenario: Scenario) -> Value {
 
 fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
     match scenario {
+        Scenario::SpinnerActivity => spinner_activity_stream()
+            .into_iter()
+            .map(|(_, chunk)| chunk)
+            .collect(),
+        Scenario::ToolConcurrency => match concurrency_batch_complete(request) {
+            false => {
+                let calls = concurrency_calls(request);
+                let inputs: Vec<_> = calls.iter().map(|call| call.input.to_string()).collect();
+                let chunks: Vec<_> = inputs.iter().map(|input| [input.as_str()]).collect();
+                let uses: Vec<_> = calls
+                    .iter()
+                    .zip(&chunks)
+                    .map(|(call, chunks)| ToolUseSse {
+                        tool_id: &call.id,
+                        tool_name: &call.name,
+                        partial_json_chunks: chunks,
+                    })
+                    .collect();
+                tool_uses_sse(&uses)
+            }
+            true => final_text_sse("Concurrency batch done."),
+        },
+        Scenario::TranscriptSpacing => match latest_tool_result(request) {
+            None => tool_uses_sse_with_prelude(
+                &[
+                    ToolUseSse {
+                        tool_id: "toolu_spacing_1",
+                        tool_name: "bash",
+                        partial_json_chunks: &[r#"{"command":"cat spacing-one.txt"}"#],
+                    },
+                    ToolUseSse {
+                        tool_id: "toolu_spacing_2",
+                        tool_name: "bash",
+                        partial_json_chunks: &[r#"{"command":"cat spacing-two.txt"}"#],
+                    },
+                ],
+                12,
+                Some("Spacing intro.\n\n"),
+            ),
+            Some(_) => final_text_sse(SPACING_FINAL),
+        },
+        Scenario::BashRenderFixture => match latest_tool_result(request) {
+            None => tool_use_sse(
+                "toolu_render_fixture",
+                "bash",
+                &[&json!({"command": "cat render-output.txt"}).to_string()],
+            ),
+            Some(_) => final_text_sse("Render fixture done."),
+        },
         Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
             streaming_text_sse()
         }
         Scenario::MarkdownRenderingShowcase => markdown_showcase_sse(MARKDOWN_SHOWCASE_DOC),
-        Scenario::UnicodeRenderingShowcase => markdown_showcase_sse(UNICODE_SHOWCASE_DOC),
+        Scenario::UnicodeRenderingShowcase => markdown_showcase_sse(&format!(
+            "{UNICODE_SHOWCASE_DOC}\n\n{LIST_WRAP_DOC}\n\nLists done."
+        )),
         Scenario::SyntaxHighlightShowcase => markdown_showcase_sse(SYNTAX_SHOWCASE_DOC),
         Scenario::CodexColorsShowcase => markdown_showcase_sse(CODEX_COLORS_SHOWCASE_DOC),
         Scenario::CodexBashShowcase => match codex_bash_input(request) {
@@ -1846,6 +1961,61 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
 #[allow(clippy::too_many_lines)]
 fn build_message_response(request: &MessageRequest, scenario: Scenario) -> MessageResponse {
     match scenario {
+        Scenario::SpinnerActivity => text_message_response(
+            "msg_activity",
+            "progress progress progress progress progress resumed",
+        ),
+        Scenario::ToolConcurrency => match concurrency_batch_complete(request) {
+            false => {
+                let calls = concurrency_calls(request);
+                let uses: Vec<_> = calls
+                    .iter()
+                    .map(|call| ToolUseMessage {
+                        tool_id: &call.id,
+                        tool_name: &call.name,
+                        input: call.input.clone(),
+                    })
+                    .collect();
+                tool_message_response_many("msg_concurrency", &uses)
+            }
+            true => text_message_response("msg_concurrency_done", "Concurrency batch done."),
+        },
+        Scenario::TranscriptSpacing => match latest_tool_result(request) {
+            None => {
+                let mut response = tool_message_response_many(
+                    "msg_spacing",
+                    &[
+                        ToolUseMessage {
+                            tool_id: "toolu_spacing_1",
+                            tool_name: "bash",
+                            input: json!({"command":"cat spacing-one.txt"}),
+                        },
+                        ToolUseMessage {
+                            tool_id: "toolu_spacing_2",
+                            tool_name: "bash",
+                            input: json!({"command":"cat spacing-two.txt"}),
+                        },
+                    ],
+                );
+                response.content.insert(
+                    0,
+                    OutputContentBlock::Text {
+                        text: "Spacing intro.\n\n".into(),
+                    },
+                );
+                response
+            }
+            Some(_) => text_message_response("msg_spacing_done", SPACING_FINAL),
+        },
+        Scenario::BashRenderFixture => match latest_tool_result(request) {
+            None => tool_message_response(
+                "msg_render_fixture",
+                "toolu_render_fixture",
+                "bash",
+                json!({"command": "cat render-output.txt"}),
+            ),
+            Some(_) => text_message_response("msg_render_done", "Render fixture done."),
+        },
         Scenario::ThinkingThenText => {
             // The non-streaming twin of `thinking_then_text_sse`, so the
             // mock-parity harness sees the same two blocks on both paths.
@@ -1866,9 +2036,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         Scenario::MarkdownRenderingShowcase => {
             text_message_response("msg_markdown_showcase", MARKDOWN_SHOWCASE_DOC)
         }
-        Scenario::UnicodeRenderingShowcase => {
-            text_message_response("msg_unicode_showcase", UNICODE_SHOWCASE_DOC)
-        }
+        Scenario::UnicodeRenderingShowcase => text_message_response(
+            "msg_unicode_showcase",
+            &format!("{UNICODE_SHOWCASE_DOC}\n\n{LIST_WRAP_DOC}\n\nLists done."),
+        ),
         Scenario::SyntaxHighlightShowcase => {
             text_message_response("msg_syntax_showcase", SYNTAX_SHOWCASE_DOC)
         }
@@ -2532,6 +2703,10 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
 fn request_id_for(scenario: Scenario) -> &'static str {
     match scenario {
         Scenario::StreamingText => "req_streaming_text",
+        Scenario::SpinnerActivity => "req_spinner_activity",
+        Scenario::BashRenderFixture => "req_bash_render_fixture",
+        Scenario::ToolConcurrency => "req_tool_concurrency",
+        Scenario::TranscriptSpacing => "req_transcript_spacing",
         Scenario::ThinkingThenText => "req_thinking_then_text",
         Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
@@ -2716,6 +2891,10 @@ fn tool_message_response_many(id: &str, tool_uses: &[ToolUseMessage<'_>]) -> Mes
     }
 }
 
+/// Completed answer with intentional empty code rows for spacing acceptance.
+pub const SPACING_FINAL: &str =
+    "Spacing done.\n\n```text\nCODE_START\n\n\nCODE_END\n```\n\nSpacing end.";
+
 /// Markdown document exercising the terminal renderer's block-spacing and
 /// list-marker rules: an adjacent label+list (must bind), a heading (exactly
 /// one blank line before it), an author-written blank line before a list
@@ -2726,6 +2905,9 @@ pub const MARKDOWN_SHOWCASE_DOC: &str = "Intro:\n- alpha\n- beta\n\n## Section\n
 
 /// Deterministic terminal-column and semantic-style fixture for PTY acceptance.
 pub const UNICODE_SHOWCASE_DOC: &str = "CJK:界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\n\nEmoji:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa👩🏽‍💻END\n\nCombining:aaaaaaaaaaaaaaaaaaaaaaaaaaaae\u{301}END\n\n| Key | Value |\n| --- | --- |\n| 中文 | 通过 |\n| ASCII | ok |\n\n[LINK](https://example.com) and `CODE`\n\nUnicode done.";
+
+/// Long styled lists shared by streamed and resumed terminal acceptance.
+pub const LIST_WRAP_DOC: &str = "9. ListWrap: `ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz界界界界👩🏽‍💻END`\n   - NestedWrap: **ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzEND**\n10. NextWrap: `ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzEND`";
 
 /// Source samples also rendered by the pinned Codex highlighter for PTY comparison.
 pub const CODEX_BASH_SINGLE: &str = r#"echo "CODEX_SINGLE_LINE_OUTPUT""#;
@@ -3096,6 +3278,14 @@ fn tool_uses_sse(tool_uses: &[ToolUseSse<'_>]) -> String {
 }
 
 fn tool_uses_sse_with_context(tool_uses: &[ToolUseSse<'_>], input_tokens: u32) -> String {
+    tool_uses_sse_with_prelude(tool_uses, input_tokens, None)
+}
+
+fn tool_uses_sse_with_prelude(
+    tool_uses: &[ToolUseSse<'_>],
+    input_tokens: u32,
+    prelude: Option<&str>,
+) -> String {
     let mut body = String::new();
     let message_id = tool_uses.first().map_or_else(
         || "msg_tool_use".to_string(),
@@ -3118,7 +3308,25 @@ fn tool_uses_sse_with_context(tool_uses: &[ToolUseSse<'_>], input_tokens: u32) -
             }
         }),
     );
+    if let Some(text) = prelude {
+        append_sse(
+            &mut body,
+            "content_block_start",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        );
+        append_sse(
+            &mut body,
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}),
+        );
+        append_sse(
+            &mut body,
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":0}),
+        );
+    }
     for (index, tool_use) in tool_uses.iter().enumerate() {
+        let index = index + usize::from(prelude.is_some());
         append_sse(
             &mut body,
             "content_block_start",
@@ -3164,6 +3372,37 @@ fn tool_uses_sse_with_context(tool_uses: &[ToolUseSse<'_>], input_tokens: u32) -
     );
     append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));
     body
+}
+
+/// Exercise a real HTTP stream: initial wait, steady progress beyond three
+/// seconds, a pause beyond the stall threshold, then a new delta and completion.
+fn spinner_activity_stream() -> Vec<(Duration, String)> {
+    let template = final_text_sse("");
+    let (prefix, rest) = template.split_once("event: content_block_delta").unwrap();
+    let (_, suffix) = rest.split_once("event: content_block_stop").unwrap();
+    let mut chunks = vec![(Duration::ZERO, prefix.to_string())];
+    for index in 0..6 {
+        let mut delta = String::new();
+        append_sse(
+            &mut delta,
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": if index == 5 { "resumed" } else { "progress " }}
+            }),
+        );
+        let millis = match index {
+            0 => 4000,
+            5 => 4500,
+            _ => 1000,
+        };
+        chunks.push((Duration::from_millis(millis), delta));
+    }
+    chunks.push((
+        Duration::from_secs(2),
+        format!("event: content_block_stop{suffix}"),
+    ));
+    chunks
 }
 
 fn final_text_sse(text: &str) -> String {

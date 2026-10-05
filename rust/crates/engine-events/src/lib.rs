@@ -162,6 +162,13 @@ pub enum EngineEvent {
         name: String,
         input: String,
     },
+    /// An authorized invocation acquired an execution slot. Input includes
+    /// any hook rewrite; merely receiving ToolCall does not mean it is running.
+    ToolStarted {
+        id: String,
+        name: String,
+        input: String,
+    },
     /// An invocation was denied by policy, a hook, or the renderer's answer.
     PermissionDenied {
         id: String,

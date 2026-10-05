@@ -132,7 +132,7 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
         .expect("completed label is crossed out");
     sess.expect("❯").expect("input ready");
     expect_style(&sess, "✓", ("Idx(10)", false, false));
-    expect_style(&sess, "■", ("Idx(36)", false, false));
+    expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
     expect_style(&sess, "Checking styles", ("Idx(8)", true, false));
     expect_style(&sess, "Finished parser", ("Idx(8)", false, true));
     expect_style(&sess, "Review output", ("Idx(8)", false, false));
@@ -140,6 +140,104 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     resize_idle_chrome(&mut sess, 30, 68);
     expect_style(&sess, "Checking styles", ("Idx(8)", true, false));
     exit(&mut sess);
+}
+
+fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
+    let reference: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/codex_styles.json")).unwrap();
+    let variant = format!(
+        "{}-{}",
+        if light { "light" } else { "dark" },
+        if truecolor { "truecolor" } else { "indexed" }
+    );
+    let palette = &reference["variants"][variant];
+    let index = usize::try_from(palette["roles"]["inline"].as_u64().unwrap()).unwrap();
+    let green = if no_color {
+        "Default"
+    } else {
+        palette["styles"][index]["fg"].as_str().unwrap()
+    };
+    let env = TestEnv::new("info-shared-green");
+    let store = env.workspace_root().join("todos.json");
+    std::fs::write(&store, r#"[{"content":"Check info colors","status":"in_progress","activeForm":"Checking info colors"}]"#).unwrap();
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("SUDOCODE_TODO_STORE", store.to_str().unwrap()),
+            ("NO_COLOR", if no_color { "1" } else { "" }),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", if truecolor { "truecolor" } else { "" }),
+            ("COLORFGBG", if light { "0;15" } else { "15;0" }),
+        ],
+    );
+    sess.resize(50, 100).unwrap();
+    sess.expect("❯").unwrap();
+    // Both a persistent info label and the active status slot use the role.
+    expect_style(&sess, "■", (green, false, false));
+    let marker = common::turn_status_marker(&sess);
+    let prompt = env.prompt(
+        "What is 17 times 23? Work it out, then give the number.",
+        "delayed_text",
+    );
+    sess.send(&format!("{prompt}\r")).unwrap();
+    common::expect_screen(
+        &sess,
+        |_| {
+            ["Thinking...", "Reasoning..."].iter().any(|label| {
+                attributes(&sess, label)
+                    .is_some_and(|(color, bold, dim)| color == green && !bold && !dim)
+            })
+        },
+        common::LIVE_TURN_BUDGET,
+        "active status uses theme info green",
+    );
+    sess.send("info-draft").unwrap();
+    common::expect_input_line(
+        &sess,
+        "info-draft",
+        common::DEFAULT_TIMEOUT,
+        "typing beside info status",
+    );
+    expect_style(&sess, "info-draft", ("Default", false, false));
+    sess.send("\x15").unwrap();
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "clear draft");
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "info turn completed",
+    );
+    let marker = common::turn_status_marker(&sess);
+    let prompt = env.prompt(
+        "Run exactly this Bash command: printf 'alpha from bash'. Then say done.",
+        "bash_stdout_roundtrip",
+    );
+    sess.send(&format!("{prompt}\r")).unwrap();
+    common::expect_turn_complete_after(&sess, &marker, common::LIVE_TURN_BUDGET, "tool completed");
+    expect_style(&sess, "╰─", (green, !no_color, false));
+    exit(&mut sess);
+}
+
+#[test]
+fn dark_info_matches_the_shared_green() {
+    info_uses_shared_green(false, true, false);
+}
+
+#[test]
+fn light_info_matches_the_shared_green() {
+    info_uses_shared_green(true, true, false);
+}
+
+#[test]
+fn indexed_info_matches_the_shared_green() {
+    info_uses_shared_green(false, false, false);
+    info_uses_shared_green(true, false, false);
+}
+
+#[test]
+fn no_color_info_uses_the_default_foreground() {
+    info_uses_shared_green(false, true, true);
 }
 
 #[test]

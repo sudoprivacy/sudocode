@@ -1,6 +1,6 @@
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -12,6 +12,10 @@ mod code_theme;
 mod color_math;
 mod color_theme;
 pub(crate) mod diff_colors;
+pub(crate) mod layout_policy;
+pub(crate) mod left_frame;
+pub(crate) mod spinner_progress;
+use spinner_progress::SpinnerProgress;
 pub(crate) mod terminal_palette;
 pub use color_theme::{theme, ColorTheme};
 
@@ -146,7 +150,7 @@ pub const PROMPT_PREFIX: &str = "\u{276f} ";
 #[derive(Clone)]
 pub struct SpinnerRef {
     pb: ProgressBar,
-    response_bytes: Arc<AtomicU32>,
+    progress: Arc<SpinnerProgress>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     phase: Option<Arc<Mutex<crate::repl_ui::TurnPhase>>>,
@@ -156,30 +160,12 @@ pub struct SpinnerRef {
 }
 
 impl SpinnerRef {
-    /// Create a `SpinnerRef` from shared atomics (used by iocraft
-    /// `TurnRenderer` which manages its own spinner rendering).
-    /// The `ProgressBar` is a hidden dummy — only the atomics matter.
-    pub fn from_state(
-        response_bytes: &Arc<AtomicU32>,
-        is_thinking: &Arc<AtomicBool>,
-        is_paused: &Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            pb: ProgressBar::hidden(),
-            response_bytes: Arc::clone(response_bytes),
-            is_thinking: Arc::clone(is_thinking),
-            is_paused: Arc::clone(is_paused),
-            phase: None,
-            managed: true,
-        }
-    }
-
     /// Create a `SpinnerRef` from a `SpinnerState`. Convenience wrapper
-    /// around `from_state` for the iocraft REPL path.
+    /// for the iocraft REPL path, sharing the same activity clock.
     pub fn from_spinner_state(state: &crate::repl_ui::SpinnerState) -> Self {
         Self {
             pb: ProgressBar::hidden(),
-            response_bytes: Arc::clone(&state.response_bytes),
+            progress: Arc::clone(&state.progress),
             is_thinking: Arc::new(AtomicBool::new(false)),
             is_paused: Arc::new(AtomicBool::new(false)),
             phase: Some(state.phase_arc()),
@@ -215,6 +201,7 @@ impl SpinnerRef {
 
     /// Resume the spinner after a pause.
     pub fn resume(&self) {
+        self.progress.record_activity();
         if let Some(ref phase) = self.phase {
             *phase.lock().unwrap() = crate::repl_ui::TurnPhase::Thinking;
         }
@@ -222,6 +209,7 @@ impl SpinnerRef {
     }
 
     pub fn set_thinking(&self, on: bool) {
+        self.progress.record_activity();
         if let Some(ref phase) = self.phase {
             *phase.lock().unwrap() = if on {
                 crate::repl_ui::TurnPhase::Reasoning
@@ -243,14 +231,14 @@ impl SpinnerRef {
     }
 
     pub fn add_response_bytes(&self, n: u32) {
-        self.response_bytes.fetch_add(n, Ordering::Relaxed);
+        self.progress.add_response_bytes(n);
     }
 }
 
 /// Owns the spinner lifecycle. Created in `run_turn()`, shared via `SpinnerRef`.
 pub struct SpinnerHandle {
     pb: ProgressBar,
-    response_bytes: Arc<AtomicU32>,
+    progress: Arc<SpinnerProgress>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     token_budget: Option<u32>,
@@ -268,7 +256,6 @@ impl SpinnerHandle {
     const FRAMES_THINKING: &[&str] = &["◐", "◓", "◑", "◒"];
     const LABEL_THINKING: &str = "🧠 Reasoning...";
     const SHOW_TOKENS_AFTER_SECS: f64 = 1.0;
-    const STALL_THRESHOLD_SECS: f64 = 3.0;
 
     #[must_use]
     pub fn new(
@@ -280,14 +267,14 @@ impl SpinnerHandle {
         let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
         pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
 
-        let response_bytes = Arc::new(AtomicU32::new(0));
+        let progress = Arc::new(SpinnerProgress::new());
         let is_thinking = Arc::new(AtomicBool::new(false));
         let is_paused = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
 
         let mut handle = Self {
             pb,
-            response_bytes,
+            progress,
             is_thinking,
             is_paused,
             token_budget,
@@ -307,7 +294,7 @@ impl SpinnerHandle {
     pub fn spinner_ref(&self) -> SpinnerRef {
         SpinnerRef {
             pb: self.pb.clone(),
-            response_bytes: Arc::clone(&self.response_bytes),
+            progress: Arc::clone(&self.progress),
             is_thinking: Arc::clone(&self.is_thinking),
             is_paused: Arc::clone(&self.is_paused),
             phase: None,
@@ -318,7 +305,7 @@ impl SpinnerHandle {
     fn start_updater(&mut self) {
         let pb = self.pb.clone();
         let stop = Arc::clone(&self.stop);
-        let response_bytes = Arc::clone(&self.response_bytes);
+        let progress = Arc::clone(&self.progress);
         let is_thinking = Arc::clone(&self.is_thinking);
         let is_paused = Arc::clone(&self.is_paused);
         let label = self.label.clone();
@@ -328,19 +315,8 @@ impl SpinnerHandle {
 
         self.updater = Some(std::thread::spawn(move || {
             let mut frame_index: usize = 0;
-            let mut last_bytes_seen: u32 = 0;
-            let mut last_bytes_change = Instant::now();
-            let mut was_paused = false;
-
             while !stop.load(Ordering::SeqCst) {
                 let paused = is_paused.load(Ordering::SeqCst);
-                // Reset stall timer when resuming from a pause (tool
-                // execution just finished).
-                if was_paused && !paused {
-                    last_bytes_change = Instant::now();
-                }
-                was_paused = paused;
-
                 if !paused {
                     let thinking = is_thinking.load(Ordering::SeqCst);
                     let frames: &[&str] = if thinking {
@@ -364,7 +340,7 @@ impl SpinnerHandle {
                     }
                     let _ = write!(line, " ({elapsed:.1}s)");
 
-                    let bytes = response_bytes.load(Ordering::Relaxed);
+                    let bytes = progress.response_bytes();
                     if bytes > 0 && elapsed >= SpinnerHandle::SHOW_TOKENS_AFTER_SECS {
                         let approx_tokens = bytes / 4;
                         if let Some(budget) = token_budget {
@@ -392,21 +368,7 @@ impl SpinnerHandle {
                         }
                     }
 
-                    // Stall detection
-                    if bytes != last_bytes_seen {
-                        last_bytes_seen = bytes;
-                        last_bytes_change = Instant::now();
-                    }
-                    let is_stalled = bytes > 0
-                        && !thinking
-                        && last_bytes_change.elapsed().as_secs_f64()
-                            >= SpinnerHandle::STALL_THRESHOLD_SECS;
-
-                    let color = if is_stalled {
-                        ansi_fg(theme().warning)
-                    } else {
-                        ansi_fg(theme().info)
-                    };
+                    let color = theme().spinner_fg(progress.is_stalled(thinking));
                     let colored = format!("{color}{line}{RESET}");
                     pb.set_message(colored);
                     pb.tick();
@@ -564,7 +526,7 @@ struct RenderState {
     quote: usize,
     list_stack: Vec<ListKind>,
     /// Column where markers of the list at each `list_stack` level start.
-    /// Top-level lists start at 0; a nested list starts at its parent item's
+    /// Top-level lists start at 2; a nested list starts at its parent item's
     /// content column, so its markers align under the parent's text
     /// regardless of the parent marker's width ("• " = 2, "10. " = 4).
     list_indents: Vec<usize>,
@@ -572,6 +534,8 @@ struct RenderState {
     /// marker width). Continuation lines inside the item (soft/hard breaks)
     /// indent to this column so they align under the first line's text.
     item_content_col: usize,
+    parent_item_cols: Vec<usize>,
+    max_width: usize,
     /// Set by the driver loop at `Start(Tag::List)`: true when the source has
     /// no blank line between the previous block and this top-level list.
     bind_top_level_list: bool,
@@ -586,6 +550,24 @@ struct LinkState {
 }
 
 impl RenderState {
+    /// Close the current list line while its semantic content column is known.
+    /// This handles terminal soft wraps as well as authored Markdown breaks.
+    fn wrap_list_line(&self, output: &mut String) {
+        if self.list_stack.is_empty() || output.ends_with('\n') {
+            return;
+        }
+        let start = output.rfind('\n').map_or(0, |pos| pos + 1);
+        let line = &output[start..];
+        if text_layout::display_width(line) <= self.max_width {
+            return;
+        }
+        let wrapped =
+            text_layout::wrap_ansi_with_indent(line, self.max_width, self.item_content_col)
+                .join("\n");
+        output.truncate(start);
+        output.push_str(&wrapped);
+    }
+
     fn text_style(&self, theme: &ColorTheme) -> ContentStyle {
         // Codex Markdown uses terminal foreground and typographic hierarchy.
         let mut style = ContentStyle::default();
@@ -666,9 +648,17 @@ impl TerminalRenderer {
 
     #[must_use]
     pub fn render_markdown(&self, markdown: &str) -> String {
+        self.render_markdown_with_width(markdown, query_terminal_width())
+    }
+
+    #[must_use]
+    pub(crate) fn render_markdown_with_width(&self, markdown: &str, width: usize) -> String {
         let normalized = normalize_nested_fences(markdown);
         let mut output = String::new();
-        let mut state = RenderState::default();
+        let mut state = RenderState {
+            max_width: width.max(1),
+            ..RenderState::default()
+        };
         let mut code_language = String::new();
         let mut code_buffer = String::new();
         let mut in_code_block = false;
@@ -761,10 +751,13 @@ impl TerminalRenderer {
                 // ends with its own newline; pushing another here opened a
                 // blank hole between the nested items and the next sibling.
                 if !output.ends_with('\n') {
+                    state.wrap_list_line(output);
                     state.append_raw(output, "\n");
                 }
+                state.item_content_col = state.parent_item_cols.pop().unwrap_or(0);
             }
             Event::SoftBreak | Event::HardBreak => {
+                state.wrap_list_line(output);
                 state.append_raw(output, "\n");
                 // Inside a list item, align the continuation line under the
                 // item's text — without this it landed at column 0, hanging
@@ -791,6 +784,7 @@ impl TerminalRenderer {
                     // break — so without this the child items rendered inline
                     // after their parent ("• outer  • inner" on one row).
                     if !output.ends_with('\n') {
+                        state.wrap_list_line(output);
                         output.push('\n');
                     }
                     // Nested markers start at the parent item's content
@@ -843,10 +837,7 @@ impl TerminalRenderer {
             Event::Code(code) => {
                 let style = state
                     .text_style(&self.color_theme)
-                    .with(code_theme::inline_color(
-                        self.color_theme.light_background,
-                        self.color_support,
-                    ));
+                    .with(self.color_theme.inline_code_color(self.color_support));
                 state.append_raw(output, &style.apply(code).to_string());
             }
             Event::Rule => output.push_str("---\n"),
@@ -941,10 +932,7 @@ impl TerminalRenderer {
             || matches!(destination.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic());
         if local {
             let target = ContentStyle::default()
-                .with(code_theme::inline_color(
-                    self.color_theme.light_background,
-                    self.color_support,
-                ))
+                .with(self.color_theme.inline_code_color(self.color_support))
                 .apply(destination);
             let name = label.text.trim();
             if name.is_empty() || name == destination || destination.ends_with(&format!("/{name}"))
@@ -1004,6 +992,7 @@ impl TerminalRenderer {
     }
 
     fn start_item(&self, state: &mut RenderState, output: &mut String) {
+        state.parent_item_cols.push(state.item_content_col);
         let indent = state.list_indents.last().copied().unwrap_or(0);
         output.push_str(&" ".repeat(indent));
 
@@ -1173,7 +1162,7 @@ impl MarkdownStreamState {
         let split = find_stream_safe_boundary(&self.pending)?;
         let ready = self.pending[..split].to_string();
         self.pending.drain(..split);
-        Some(renderer.markdown_to_ansi(&ready))
+        Some(renderer.render_markdown_with_width(&ready, query_terminal_width().saturating_sub(2)))
     }
 
     #[must_use]
@@ -1183,7 +1172,10 @@ impl MarkdownStreamState {
             None
         } else {
             let pending = std::mem::take(&mut self.pending);
-            Some(renderer.markdown_to_ansi(&pending))
+            Some(
+                renderer
+                    .render_markdown_with_width(&pending, query_terminal_width().saturating_sub(2)),
+            )
         }
     }
 }
@@ -1460,6 +1452,11 @@ impl ResponseGlyphState {
             decoder: styled_text::AnsiDecoder::new(),
             parser: vte::Parser::new(),
         }
+    }
+
+    /// Apply the current viewport before emitting the next response chunk.
+    pub(crate) fn set_width(&mut self, terminal_width: usize) {
+        self.max_col = terminal_width.max(4);
     }
 
     /// Process a rendered ANSI text chunk. Returns the wrapped+margined output.

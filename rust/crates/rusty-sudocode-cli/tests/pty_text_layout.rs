@@ -37,8 +37,9 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
     // production engine, Markdown renderer, inline history and terminal.
     let prompt = env.prompt(
         &format!(
-            "Reply with exactly this Markdown, without an enclosing code fence:\n{}",
-            mock_anthropic_service::UNICODE_SHOWCASE_DOC
+            "Reply with exactly this Markdown, without an enclosing code fence:\n{}\n\n{}\n\nLists done.",
+            mock_anthropic_service::UNICODE_SHOWCASE_DOC,
+            mock_anthropic_service::LIST_WRAP_DOC
         ),
         "unicode_rendering_showcase",
     );
@@ -64,7 +65,7 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
         .expect("emoji cluster must not be split by a line break");
     common::expect_screen(
         &sess,
-        |s| s.contains("Unicode done.") && s.contains("ctx "),
+        |s| s.contains("Lists done.") && s.contains("ctx "),
         Duration::from_secs(90),
         "completed unicode turn",
     );
@@ -129,6 +130,156 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
                 .unwrap();
             assert_eq!(format!("{:?}", cell.fgcolor()), color, "{label} color");
         }
+    });
+    assert_list_continuations(&sess, 2);
+    finish(&mut sess);
+}
+
+fn assert_list_continuations(sess: &PtySession, margin: usize) {
+    sess.render(|screen| {
+        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        for (marker, content_col, expected) in [
+            (
+                "9. ListWrap: ",
+                5,
+                "ListWrap: ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz界界界界👩🏽‍💻END",
+            ),
+            (
+                "• NestedWrap: ",
+                7,
+                "NestedWrap: ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzEND",
+            ),
+            (
+                "10. NextWrap: ",
+                6,
+                "NextWrap: ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzEND",
+            ),
+        ] {
+            let start = rows
+                .iter()
+                .rposition(|row| row.contains(marker))
+                .expect("list item");
+            let label = marker.split_once(' ').unwrap().1;
+            let label_start = rows[start].find(label).unwrap();
+            assert_eq!(rows[start][..label_start].width(), content_col + margin);
+            let mut text = rows[start][label_start..].to_string();
+            let padding = " ".repeat(content_col + margin);
+            let mut count = 0;
+            for row in &rows[start + 1..] {
+                if text.ends_with("END") {
+                    break;
+                }
+                assert!(
+                    row.starts_with(&padding),
+                    "continuation aligned to content: {row:?} in {rows:?}"
+                );
+                text.push_str(row[padding.len()..].trim_end());
+                count += 1;
+            }
+            assert!(count > 0, "exercise terminal wrapping");
+            assert_eq!(text, expected, "styled list preserves every grapheme");
+        }
+    });
+}
+
+#[test]
+fn resumed_cards_keep_full_commands_and_one_blank_separator() {
+    resumed_card_layout(false);
+}
+
+#[test]
+fn resumed_failed_card_keeps_the_full_command() {
+    resumed_card_layout(true);
+}
+
+fn resumed_card_layout(is_error: bool) {
+    use runtime::{ContentBlock, ConversationMessage, Session};
+    let env = TestEnv::new_mock("resumed-card-layout");
+    let mut saved = Session::new().with_workspace_root(env.workspace_root().to_path_buf());
+    saved.push_user_text("Review layout").unwrap();
+    let command = "printf 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'\necho COMMAND_END";
+    saved
+        .push_message(ConversationMessage::assistant(vec![
+            ContentBlock::Text {
+                text: format!("{}\n\nBefore tool.", mock_anthropic_service::LIST_WRAP_DOC),
+            },
+            ContentBlock::ToolUse {
+                id: "layout-tool".into(),
+                name: "bash".into(),
+                input: serde_json::json!({"command":command,"description":"Inspect full input"})
+                    .to_string(),
+                thought_signature: None,
+            },
+        ]))
+        .unwrap();
+    saved
+        .push_message(ConversationMessage::tool_result(
+            "layout-tool",
+            "bash",
+            if is_error {
+                "OUTPUT_END: command denied".into()
+            } else {
+                serde_json::json!({"stdout":"OUTPUT_END","stderr":""}).to_string()
+            },
+            is_error,
+        ))
+        .unwrap();
+    saved
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "After tool.".into(),
+        }]))
+        .unwrap();
+    let path = env.workspace_root().join("layout-session.jsonl");
+    saved.save_to_path(&path).unwrap();
+    let mut sess = env.spawn_with_env(
+        &["--resume", path.to_str().unwrap()],
+        &[
+            ("NO_COLOR", ""),
+            ("COLORFGBG", "15;0"),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ],
+    );
+    sess.resize(80, 40).unwrap();
+    sess.expect("❯").unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains("After tool."),
+        common::DEFAULT_TIMEOUT,
+        "replayed transcript",
+    );
+    assert_list_continuations(&sess, 0);
+    sess.render(|screen| {
+        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        let start = rows
+            .iter()
+            .position(|row| row.starts_with("╭─ Bash("))
+            .unwrap();
+        assert!(
+            rows[start].ends_with('…'),
+            "one-row clipped header: {rows:?}"
+        );
+        assert!(
+            rows[start + 1].starts_with("│ $ printf"),
+            "body starts immediately after title"
+        );
+        let before = rows.iter().position(|row| row == "Before tool.").unwrap();
+        assert_eq!(start, before + 2, "one blank row before card: {rows:?}");
+        let end = (start + 1..rows.len())
+            .find(|&row| rows[row].starts_with("╰─"))
+            .unwrap();
+        let after = rows.iter().position(|row| row == "After tool.").unwrap();
+        assert_eq!(after, end + 2, "one blank row after card: {rows:?}");
+        let body: String = rows[start + 1..end]
+            .iter()
+            .map(|row| row.strip_prefix("│ ").unwrap())
+            .collect();
+        assert!(
+            body.contains("$ printf 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'"),
+            "full first command: {body}"
+        );
+        assert!(body.contains("$ echo COMMAND_END"));
+        assert!(body.contains("OUTPUT_END"));
     });
     finish(&mut sess);
 }

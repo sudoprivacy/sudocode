@@ -218,6 +218,41 @@ impl RuntimeMcpState {
         ))
     }
 
+    pub(crate) fn prepare_shared_call(
+        &mut self,
+        name: &str,
+        arguments: Option<serde_json::Value>,
+    ) -> Result<Option<(tokio::runtime::Handle, runtime::PendingMcpToolCall)>, ToolError> {
+        let runtime = self.runtime.as_ref().expect("MCP runtime present");
+        Self::block_on_isolated(
+            runtime,
+            self.manager.prepare_concurrent_tool_call(name, arguments),
+        )
+        .map(|call| call.map(|call| (runtime.handle().clone(), call)))
+        .map_err(|error| ToolError::new(error.to_string()))
+    }
+
+    pub(crate) fn finish_shared_call(
+        &mut self,
+        call: runtime::PendingMcpToolCall,
+        result: &Result<
+            runtime::JsonRpcResponse<runtime::McpToolCallResult>,
+            runtime::McpServerManagerError,
+        >,
+    ) -> Result<(), ToolError> {
+        Self::block_on_isolated(
+            self.runtime.as_ref().expect("MCP runtime present"),
+            self.manager.finish_concurrent_tool_call(
+                call,
+                result.as_ref().err().is_some_and(|error| {
+                    !matches!(error, runtime::McpServerManagerError::Timeout { .. })
+                        && runtime::McpServerManager::should_reset_server(error)
+                }),
+            ),
+        )
+        .map_err(|error| ToolError::new(error.to_string()))
+    }
+
     pub fn call_tool(
         &mut self,
         qualified_tool_name: &str,
@@ -230,6 +265,13 @@ impl RuntimeMcpState {
             self.manager.call_tool(qualified_tool_name, arguments),
         )
         .map_err(|error| ToolError::new(error.to_string()))?;
+        Self::format_tool_response(qualified_tool_name, response)
+    }
+
+    pub(crate) fn format_tool_response(
+        qualified_tool_name: &str,
+        response: runtime::JsonRpcResponse<runtime::McpToolCallResult>,
+    ) -> Result<String, ToolError> {
         if let Some(error) = response.error {
             return Err(ToolError::new(format!(
                 "MCP tool `{qualified_tool_name}` returned JSON-RPC error: {} ({})",
@@ -242,7 +284,13 @@ impl RuntimeMcpState {
                 "MCP tool `{qualified_tool_name}` returned no result payload"
             ))
         })?;
-        serde_json::to_string_pretty(&result).map_err(|error| ToolError::new(error.to_string()))
+        let output = serde_json::to_string_pretty(&result)
+            .map_err(|error| ToolError::new(error.to_string()))?;
+        if result.is_error == Some(true) {
+            Err(ToolError::new(output))
+        } else {
+            Ok(output)
+        }
     }
 
     pub fn list_resources_for_server(&mut self, server_name: &str) -> Result<String, ToolError> {
@@ -466,7 +514,13 @@ pub fn build_runtime_mcp_state(
     let mut runtime_tools = discovery
         .tools
         .iter()
-        .map(mcp_runtime_tool_definition)
+        .map(|tool| {
+            let mut definition = mcp_runtime_tool_definition(tool);
+            definition.is_concurrency_safe &= mcp_state
+                .manager
+                .supports_concurrent_tool(&tool.qualified_name);
+            definition
+        })
         .collect::<Vec<_>>();
     if !mcp_state.server_names().is_empty() {
         runtime_tools.extend(mcp_wrapper_tool_definitions());
@@ -500,6 +554,12 @@ pub(crate) fn mcp_runtime_tool_definition(tool: &runtime::ManagedMcpTool) -> Run
             .clone()
             .unwrap_or_else(|| json!({ "type": "object", "additionalProperties": true })),
         required_permission: permission_mode_for_mcp_tool(&tool.tool),
+        is_concurrency_safe: tool
+            .tool
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("readOnlyHint").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false),
     }
 }
 
@@ -519,6 +579,7 @@ pub(crate) fn mcp_wrapper_tool_definitions() -> Vec<RuntimeToolDefinition> {
                 "required": ["qualifiedName"],
                 "additionalProperties": false
             }),
+            is_concurrency_safe: false,
             required_permission: PermissionMode::DangerFullAccess,
         },
         RuntimeToolDefinition {
@@ -534,6 +595,7 @@ pub(crate) fn mcp_wrapper_tool_definitions() -> Vec<RuntimeToolDefinition> {
                 },
                 "additionalProperties": false
             }),
+            is_concurrency_safe: false,
             required_permission: PermissionMode::ReadOnly,
         },
         RuntimeToolDefinition {
@@ -548,6 +610,7 @@ pub(crate) fn mcp_wrapper_tool_definitions() -> Vec<RuntimeToolDefinition> {
                 "required": ["server", "uri"],
                 "additionalProperties": false
             }),
+            is_concurrency_safe: false,
             required_permission: PermissionMode::ReadOnly,
         },
         RuntimeToolDefinition {
@@ -563,6 +626,7 @@ pub(crate) fn mcp_wrapper_tool_definitions() -> Vec<RuntimeToolDefinition> {
                 },
                 "additionalProperties": false
             }),
+            is_concurrency_safe: false,
             required_permission: PermissionMode::ReadOnly,
         },
         RuntimeToolDefinition {
@@ -581,6 +645,7 @@ pub(crate) fn mcp_wrapper_tool_definitions() -> Vec<RuntimeToolDefinition> {
                 "required": ["server", "name"],
                 "additionalProperties": false
             }),
+            is_concurrency_safe: false,
             required_permission: PermissionMode::ReadOnly,
         },
     ]

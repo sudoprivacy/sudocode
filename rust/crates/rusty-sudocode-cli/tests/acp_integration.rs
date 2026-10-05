@@ -3646,6 +3646,8 @@ fn dump_subagent_events(label: &str, notifs: &[Value]) {
 /// more digits), the palette colour hashed from an agent id, and the size
 /// estimate that depends on path lengths. Background children are given time
 /// to finish so a late update would be caught too.
+/// Independent terminal tool updates may arrive in completion order; only
+/// contiguous runs of those updates are reordered for the comparison.
 ///
 /// Regenerate (only when an off-path change is intended) with
 /// `SUDOCODE_UPDATE_ACP_FIXTURES=1`.
@@ -3714,13 +3716,56 @@ async fn acp_subagent_events_off_matches_pre_contract_output() {
         } else {
             let expected = fs::read_to_string(&fixture).expect("fixture");
             assert!(
-                actual == expected,
+                canonicalize_terminal_tool_updates(&actual)
+                    == canonicalize_terminal_tool_updates(&expected),
                 "{scenario}: output without the opt-in changed.\n--- expected\n{expected}\n--- actual\n{actual}"
             );
         }
         client.shutdown().await;
         workspace.cleanup();
     }
+}
+
+/// Preserve the wire payload and ordering except for adjacent tool completions.
+#[cfg(unix)]
+fn canonicalize_terminal_tool_updates(transcript: &str) -> String {
+    let mut lines: Vec<_> = transcript
+        .lines()
+        .map(|line| {
+            // Golden normalization uses a bare <N> for numeric fields. Parse
+            // a disposable copy only to identify terminal updates and ids.
+            let message: Value =
+                serde_json::from_str(&line.replace("<N>", "0")).expect("normalized ACP message");
+            let update = &message["params"]["update"];
+            let id = (update["sessionUpdate"] == "tool_call_update"
+                && matches!(update["status"].as_str(), Some("completed" | "failed")))
+            .then(|| {
+                update["toolCallId"]
+                    .as_str()
+                    .expect("tool call id")
+                    .to_owned()
+            });
+            (id, line)
+        })
+        .collect();
+    let mut start = 0;
+    while start < lines.len() {
+        if lines[start].0.is_none() {
+            start += 1;
+            continue;
+        }
+        let end = start
+            + lines[start..]
+                .iter()
+                .take_while(|(id, _)| id.is_some())
+                .count();
+        lines[start..end].sort_by(|left, right| left.0.cmp(&right.0));
+        start = end;
+    }
+    lines
+        .into_iter()
+        .map(|(_, line)| format!("{line}\n"))
+        .collect()
 }
 
 /// Replace the number following `key` with `<N>`.

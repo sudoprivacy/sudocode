@@ -1,6 +1,8 @@
 //! Code colors follow openai/codex at b741e480e203f037ca726bc2a76d99a8e8668e66:
 //! tui/src/render/highlight.rs and tui/src/markdown_render.rs. Both renderers
 //! use the same two-face grammar/theme bundle; only the terminal adapter differs.
+//! This is an internal syntax adapter and asset cache, not another UI theme.
+//! Semantic UI color selection belongs to `ColorTheme`.
 
 use std::sync::OnceLock;
 

@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::stream::Stream;
 use futures::StreamExt;
 use serde_json::{Map, Value};
 use telemetry::SessionTracer;
+
+mod tool_execution;
 
 use crate::compact::{
     autocompact_buffer_tokens, compact_session, compact_session_cache_safe, compact_session_sync,
@@ -378,6 +381,10 @@ pub trait RuntimeObserver {
 
     fn on_tool_use(&mut self, _id: &str, _name: &str, _input: &str) {}
 
+    /// Execution actually acquired a slot, after hooks and authorization.
+    /// Requested calls can wait behind a writer or the concurrency limit.
+    fn on_tool_started(&mut self, _id: &str, _name: &str, _input: &str) {}
+
     /// A policy or hook denied a specific invocation, without requiring UI.
     fn on_permission_denied(&mut self, _id: &str, _name: &str, _input: &str, _reason: &str) {}
 
@@ -698,6 +705,13 @@ impl ToolDispatchContext {
 /// state (spinner, prompter) lives behind single-threaded interior mutability
 /// in the impl.
 pub trait ToolExecutor: Send {
+    /// Scheduling capability of the effective (post-hook) invocation.
+    /// Dynamic executors may add metadata-backed tools without changing the
+    /// conversation scheduler. Permission checks remain independent.
+    fn is_concurrency_safe(&self, tool_name: &str, input: &str) -> bool {
+        crate::tool_concurrency::builtin_is_concurrency_safe(tool_name, input)
+    }
+
     async fn execute_with_attachments(
         &self,
         tool_name: &str,
@@ -992,7 +1006,10 @@ pub struct AutoCompactionEvent {
 pub struct ConversationRuntime<C, T> {
     session: Session,
     api_client: C,
-    tool_executor: T,
+    // Borrow a local Arc during dispatch so completion hooks can mutate the
+    // session while sibling futures share &T. Mutex requires only T: Send,
+    // not Sync; the executor stays owned even if a caller drops the turn future.
+    tool_executor: Arc<Mutex<T>>,
     permission_policy: PermissionPolicy,
     system_prompt: SystemPrompt,
     /// Date (`YYYY-MM-DD`) the session currently treats as "today". The
@@ -1074,7 +1091,7 @@ where
         Self {
             session,
             api_client,
-            tool_executor,
+            tool_executor: Arc::new(Mutex::new(tool_executor)),
             permission_policy,
             system_prompt,
             prompt_known_date: None,
@@ -1142,7 +1159,7 @@ where
 
     #[must_use]
     pub fn with_hook_abort_signal(mut self, hook_abort_signal: HookAbortSignal) -> Self {
-        self.tool_executor
+        self.tool_executor_mut()
             .set_abort_signal(hook_abort_signal.clone());
         self.hook_abort_signal = hook_abort_signal;
         self
@@ -1462,7 +1479,15 @@ where
         // Verify tool executor is responsive with a non-destructive probe
         // Using glob_search with a pattern that won't match anything
         let probe_input = r#"{"pattern": "*.health-check-probe-"}"#;
-        match self.tool_executor.execute("glob_search", probe_input).await {
+        // A new turn can compact before its first tool batch. Do not reuse the
+        // previous batch's cancellation generation for this independent probe.
+        let abort = self.hook_abort_signal.for_current_turn();
+        self.tool_executor_mut().set_abort_signal(abort);
+        match self
+            .tool_executor_mut()
+            .execute("glob_search", probe_input)
+            .await
+        {
             Ok(_) => Ok(()),
             Err(e) => Err(format!("Tool executor probe failed: {e}")),
         }
@@ -1622,26 +1647,6 @@ where
             // unbounded prompt; fall back to a bounded truncation (shared with bash).
             Err(_) => crate::bash::truncate_output(&output, threshold),
         }
-    }
-
-    fn push_interrupted_tool_results(
-        &mut self,
-        observer: &mut Option<&mut dyn RuntimeObserver>,
-        iterations: usize,
-        tool_results: &mut Vec<ConversationMessage>,
-        pending_tool_uses: &[(String, String, String)],
-        start_index: usize,
-    ) -> Result<(), RuntimeError> {
-        for (tool_use_id, tool_name, _) in &pending_tool_uses[start_index..] {
-            let result_message = ConversationMessage::tool_result(
-                tool_use_id.clone(),
-                tool_name.clone(),
-                interrupted_tool_output(tool_name),
-                true,
-            );
-            self.push_tool_result_message(observer, iterations, tool_results, result_message)?;
-        }
-        Ok(())
     }
 
     fn cancelled_summary(
@@ -2224,7 +2229,7 @@ where
             // identical across all tool_uses emitted in the same
             // assistant message, so cloning once here (rather than per
             // tool_use iteration) saves an O(n_tools) allocation.
-            let mut dispatch_context = ToolDispatchContext {
+            let dispatch_context = ToolDispatchContext {
                 parent_assistant_message: Some(assistant_message),
                 parent_session_messages: self.session.messages.clone(),
                 tool_results_dir: self.session.tool_results_dir(),
@@ -2243,528 +2248,37 @@ where
                 parent_permission_mode: Some(self.permission_policy.active_mode()),
             };
 
-            let mut batch_start = 0usize;
-            while batch_start < pending_tool_uses.len() {
-                // Group a run of consecutive concurrency-safe tools into one
-                // batch whose (I/O-bound) executes overlap; anything else is a
-                // serial singleton. Order across batches is preserved.
-                let mut batch_end = batch_start + 1;
-                if is_concurrency_safe_tool(&pending_tool_uses[batch_start].1) {
-                    while batch_end < pending_tool_uses.len()
-                        && is_concurrency_safe_tool(&pending_tool_uses[batch_end].1)
-                    {
-                        batch_end += 1;
-                    }
-                }
-
-                if batch_end - batch_start > 1 {
-                    // ── Concurrency-safe batch ─────────────────────────────
-                    // Phase 1 (serial, &mut self): pre-hook + permission.
-                    let mut prepared: Vec<PreparedTool> =
-                        Vec::with_capacity(batch_end - batch_start);
-                    for i in batch_start..batch_end {
-                        if self.hook_abort_signal.is_aborted() {
-                            self.push_interrupted_tool_results(
-                                &mut observer,
-                                iterations,
-                                &mut tool_results,
-                                &pending_tool_uses,
-                                i,
-                            )?;
-                            return Ok(self.cancelled_summary(
-                                assistant_messages,
-                                tool_results,
-                                prompt_cache_events,
-                                iterations,
-                            ));
-                        }
-                        let (tool_use_id, tool_name, input) = pending_tool_uses[i].clone();
-                        let pre_hook_result = self.run_pre_tool_use_hook(&tool_name, &input);
-                        let effective_input = pre_hook_result
-                            .updated_input()
-                            .map_or_else(|| input.clone(), ToOwned::to_owned);
-                        let permission_context = PermissionContext::new(
-                            pre_hook_result.permission_override(),
-                            pre_hook_result.permission_reason().map(ToOwned::to_owned),
-                        );
-                        let outcome = if pre_hook_result.is_cancelled() {
-                            PermissionOutcome::Deny {
-                                reason: format_hook_message(
-                                    &pre_hook_result,
-                                    &format!("PreToolUse hook cancelled tool `{tool_name}`"),
-                                ),
-                            }
-                        } else if pre_hook_result.is_failed() {
-                            PermissionOutcome::Deny {
-                                reason: format_hook_message(
-                                    &pre_hook_result,
-                                    &format!("PreToolUse hook failed for tool `{tool_name}`"),
-                                ),
-                            }
-                        } else if pre_hook_result.is_denied() {
-                            PermissionOutcome::Deny {
-                                reason: format_hook_message(
-                                    &pre_hook_result,
-                                    &format!("PreToolUse hook denied tool `{tool_name}`"),
-                                ),
-                            }
-                        } else if let Some(prompt) = prompter.as_mut() {
-                            self.permission_policy.authorize_with_context(
-                                &tool_name,
-                                &effective_input,
-                                &permission_context,
-                                Some(*prompt),
-                            )
-                        } else {
-                            self.permission_policy.authorize_with_context(
-                                &tool_name,
-                                &effective_input,
-                                &permission_context,
-                                None,
-                            )
-                        };
-                        let deny_reason = match outcome {
-                            PermissionOutcome::Allow => {
-                                self.record_tool_started(iterations, &tool_name);
-                                None
-                            }
-                            PermissionOutcome::Deny { reason } => {
-                                if let Some(obs) = observer.as_mut() {
-                                    obs.on_permission_denied(
-                                        &tool_use_id,
-                                        &tool_name,
-                                        &effective_input,
-                                        &reason,
-                                    );
-                                }
-                                Some(reason)
-                            }
-                        };
-                        prepared.push(PreparedTool {
-                            tool_use_id,
-                            tool_name,
-                            effective_input,
-                            pre_hook_result,
-                            deny_reason,
-                        });
-                    }
-
-                    // Phase 2 (concurrent, &self): overlap the executes of the
-                    // permitted tools — only `&self.tool_executor` and the owned
-                    // inputs enter the futures, never `&mut self`.
-                    // Race the concurrent batch against the abort signal so a
-                    // hung tool cannot pin the turn open with committed tool_use
-                    // blocks that never receive a tool_result. The push happens
-                    // *after* the select! so the batch future (which borrows
-                    // `&self.tool_executor`) is already dropped and `&mut self`
-                    // is free.
-                    let abort_signal = self.hook_abort_signal.clone();
-                    // Bounded, not `join_all`: `buffered` keeps at most
-                    // `max_tool_use_concurrency()` executes in flight and still
-                    // yields results in batch order, which phase 3 indexes by.
-                    //
-                    // Each tool gets its own context carrying its own
-                    // `tool_use_id`. The batch used to share one with the id
-                    // blanked — harmless for reads, but a sub-agent spawn needs
-                    // it: `SubagentLink::from_dispatch` gives up without one, so
-                    // a spawn in a batch would run and emit no lifecycle event
-                    // at all. The clone is an `Arc` shuffle, once per tool.
-                    //
-                    // The executor is borrowed once up front: each future is
-                    // `async move` so it can own its context, and moving `self`
-                    // in as well would not compile (nor be wanted — phase 3
-                    // needs `&mut self` right after).
-                    let executor = &self.tool_executor;
-                    let batch_exec = futures::stream::iter(prepared.iter().map(|p| {
-                        let mut ctx = dispatch_context.clone();
-                        ctx.tool_use_id = Some(p.tool_use_id.clone());
-                        async move {
-                            if p.deny_reason.is_some() {
-                                None
-                            } else {
-                                Some(
-                                    executor
-                                        .execute_with_attachments(
-                                            &p.tool_name,
-                                            &p.effective_input,
-                                            &ctx,
-                                        )
-                                        .await,
-                                )
-                            }
-                        }
-                    }))
-                    .buffered(max_tool_use_concurrency())
-                    .collect::<Vec<_>>();
-                    let maybe_results: Option<
-                        Vec<Option<Result<crate::image_input::ToolOutput, ToolError>>>,
-                    > = tokio::select! {
-                        biased;
-                        () = abort_signal.cancelled() => None,
-                        results = batch_exec => Some(results),
-                    };
-                    let Some(exec_results) = maybe_results else {
-                        // Aborted mid-batch: answer every tool_use in this batch
-                        // and any still-pending ones with a synthetic interrupted
-                        // tool_result, then finish the turn.
-                        for p in &prepared {
-                            let result_message = ConversationMessage::tool_result(
-                                p.tool_use_id.clone(),
-                                p.tool_name.clone(),
-                                interrupted_tool_output(&p.tool_name),
-                                true,
-                            );
-                            self.push_tool_result_message(
-                                &mut observer,
-                                iterations,
-                                &mut tool_results,
-                                result_message,
-                            )?;
-                        }
-                        self.push_interrupted_tool_results(
-                            &mut observer,
-                            iterations,
-                            &mut tool_results,
-                            &pending_tool_uses,
-                            batch_end,
-                        )?;
-                        return Ok(self.cancelled_summary(
-                            assistant_messages,
-                            tool_results,
-                            prompt_cache_events,
-                            iterations,
-                        ));
-                    };
-
-                    // Phase 3 (serial, &mut self): post-hook + push, in order.
-                    for (offset, p) in prepared.into_iter().enumerate() {
-                        let result_message = if let Some(reason) = p.deny_reason {
-                            ConversationMessage::tool_result(
-                                p.tool_use_id,
-                                p.tool_name,
-                                merge_hook_feedback(p.pre_hook_result.messages(), reason, true),
-                                true,
-                            )
-                        } else {
-                            let (mut output, attachments, mut is_error) = match exec_results[offset]
-                                .as_ref()
-                                .expect("permitted tool has an execute result")
-                            {
-                                Ok(output) => {
-                                    (output.text.clone(), output.attachments.clone(), false)
-                                }
-                                Err(error) => (error.to_string(), Vec::new(), true),
-                            };
-                            if self.hook_abort_signal.is_aborted() {
-                                output =
-                                    merge_hook_feedback(p.pre_hook_result.messages(), output, true);
-                                let result_message = ConversationMessage::tool_result(
-                                    p.tool_use_id,
-                                    p.tool_name,
-                                    output,
-                                    true,
-                                );
-                                self.push_tool_result_message(
-                                    &mut observer,
-                                    iterations,
-                                    &mut tool_results,
-                                    result_message,
-                                )?;
-                                self.push_interrupted_tool_results(
-                                    &mut observer,
-                                    iterations,
-                                    &mut tool_results,
-                                    &pending_tool_uses,
-                                    batch_start + offset + 1,
-                                )?;
-                                return Ok(self.cancelled_summary(
-                                    assistant_messages,
-                                    tool_results,
-                                    prompt_cache_events,
-                                    iterations,
-                                ));
-                            }
-                            output =
-                                merge_hook_feedback(p.pre_hook_result.messages(), output, false);
-                            let post_hook_result = if is_error {
-                                self.run_post_tool_use_failure_hook(
-                                    &p.tool_name,
-                                    &p.effective_input,
-                                    &output,
-                                )
-                            } else {
-                                self.run_post_tool_use_hook(
-                                    &p.tool_name,
-                                    &p.effective_input,
-                                    &output,
-                                    false,
-                                )
-                            };
-                            if post_hook_result.is_denied()
-                                || post_hook_result.is_failed()
-                                || post_hook_result.is_cancelled()
-                            {
-                                is_error = true;
-                            }
-                            output = merge_hook_feedback(
-                                post_hook_result.messages(),
-                                output,
-                                post_hook_result.is_denied()
-                                    || post_hook_result.is_failed()
-                                    || post_hook_result.is_cancelled(),
-                            );
-                            crate::image_input::ToolOutput {
-                                text: output,
-                                attachments,
-                            }
-                            .into_message(
-                                p.tool_use_id,
-                                p.tool_name,
-                                is_error,
-                            )
-                        };
-                        self.push_tool_result_message(
-                            &mut observer,
-                            iterations,
-                            &mut tool_results,
-                            result_message,
-                        )?;
-                    }
-
-                    batch_start = batch_end;
-                    continue;
-                }
-
-                // ── Serial singleton (existing per-tool flow) ──────────────
-                let tool_index = batch_start;
-                batch_start = batch_end;
-                if self.hook_abort_signal.is_aborted() {
-                    self.push_interrupted_tool_results(
-                        &mut observer,
-                        iterations,
-                        &mut tool_results,
-                        &pending_tool_uses,
-                        tool_index,
-                    )?;
-                    return Ok(self.cancelled_summary(
-                        assistant_messages,
-                        tool_results,
-                        prompt_cache_events,
-                        iterations,
-                    ));
-                }
-
-                let (tool_use_id, tool_name, input) = pending_tool_uses[tool_index].clone();
-                let pre_hook_result = self.run_pre_tool_use_hook(&tool_name, &input);
-                if self.hook_abort_signal.is_aborted() {
-                    self.push_interrupted_tool_results(
-                        &mut observer,
-                        iterations,
-                        &mut tool_results,
-                        &pending_tool_uses,
-                        tool_index,
-                    )?;
-                    return Ok(self.cancelled_summary(
-                        assistant_messages,
-                        tool_results,
-                        prompt_cache_events,
-                        iterations,
-                    ));
-                }
-
-                let effective_input = pre_hook_result
-                    .updated_input()
-                    .map_or_else(|| input.clone(), ToOwned::to_owned);
-                let permission_context = PermissionContext::new(
-                    pre_hook_result.permission_override(),
-                    pre_hook_result.permission_reason().map(ToOwned::to_owned),
-                );
-
-                let permission_outcome = if pre_hook_result.is_cancelled() {
-                    PermissionOutcome::Deny {
-                        reason: format_hook_message(
-                            &pre_hook_result,
-                            &format!("PreToolUse hook cancelled tool `{tool_name}`"),
-                        ),
-                    }
-                } else if pre_hook_result.is_failed() {
-                    PermissionOutcome::Deny {
-                        reason: format_hook_message(
-                            &pre_hook_result,
-                            &format!("PreToolUse hook failed for tool `{tool_name}`"),
-                        ),
-                    }
-                } else if pre_hook_result.is_denied() {
-                    PermissionOutcome::Deny {
-                        reason: format_hook_message(
-                            &pre_hook_result,
-                            &format!("PreToolUse hook denied tool `{tool_name}`"),
-                        ),
-                    }
-                } else if let Some(prompt) = prompter.as_mut() {
-                    self.permission_policy.authorize_with_context(
-                        &tool_name,
-                        &effective_input,
-                        &permission_context,
-                        Some(*prompt),
-                    )
-                } else {
-                    self.permission_policy.authorize_with_context(
-                        &tool_name,
-                        &effective_input,
-                        &permission_context,
-                        None,
-                    )
-                };
-
-                if let PermissionOutcome::Deny { reason } = &permission_outcome {
-                    if let Some(obs) = observer.as_mut() {
-                        obs.on_permission_denied(
-                            &tool_use_id,
-                            &tool_name,
-                            &effective_input,
-                            reason,
-                        );
-                    }
-                }
-                let result_message = match permission_outcome {
-                    PermissionOutcome::Allow => {
-                        self.record_tool_started(iterations, &tool_name);
-                        // Race tool execution against the abort signal. A naked
-                        // `.await` only observes the abort *after* the tool
-                        // returns; a tool that hangs (e.g. a sub-agent stuck
-                        // retrying a bad endpoint) would never yield, so ESC could
-                        // not interrupt it and the already-committed `tool_use`
-                        // would be left without a matching `tool_result` —
-                        // producing a session the API rejects on resume.
-                        let abort_signal = self.hook_abort_signal.clone();
-                        dispatch_context.tool_use_id = Some(tool_use_id.clone());
-                        let exec_outcome = {
-                            let exec = self.tool_executor.execute_with_attachments(
-                                &tool_name,
-                                &effective_input,
-                                &dispatch_context,
-                            );
-                            tokio::select! {
-                                biased;
-                                () = abort_signal.cancelled() => None,
-                                res = exec => Some(res),
-                            }
-                        };
-                        let Some(exec_result) = exec_outcome else {
-                            // Aborted mid-execution: answer this tool_use (and any
-                            // still-pending ones) with a synthetic interrupted
-                            // tool_result so the persisted transcript keeps the
-                            // "every tool_use has a tool_result" invariant.
-                            let result_message = ConversationMessage::tool_result(
-                                tool_use_id,
-                                tool_name.clone(),
-                                interrupted_tool_output(&tool_name),
-                                true,
-                            );
-                            self.push_tool_result_message(
-                                &mut observer,
-                                iterations,
-                                &mut tool_results,
-                                result_message,
-                            )?;
-                            self.push_interrupted_tool_results(
-                                &mut observer,
-                                iterations,
-                                &mut tool_results,
-                                &pending_tool_uses,
-                                tool_index + 1,
-                            )?;
-                            return Ok(self.cancelled_summary(
-                                assistant_messages,
-                                tool_results,
-                                prompt_cache_events,
-                                iterations,
-                            ));
-                        };
-                        let (mut output, attachments, mut is_error) = match exec_result {
-                            Ok(output) => (output.text, output.attachments, false),
-                            Err(error) => (error.to_string(), Vec::new(), true),
-                        };
-                        if self.hook_abort_signal.is_aborted() {
-                            output = merge_hook_feedback(pre_hook_result.messages(), output, true);
-                            let result_message = ConversationMessage::tool_result(
-                                tool_use_id,
-                                tool_name,
-                                output,
-                                true,
-                            );
-                            self.push_tool_result_message(
-                                &mut observer,
-                                iterations,
-                                &mut tool_results,
-                                result_message,
-                            )?;
-                            self.push_interrupted_tool_results(
-                                &mut observer,
-                                iterations,
-                                &mut tool_results,
-                                &pending_tool_uses,
-                                tool_index + 1,
-                            )?;
-                            return Ok(self.cancelled_summary(
-                                assistant_messages,
-                                tool_results,
-                                prompt_cache_events,
-                                iterations,
-                            ));
-                        }
-                        output = merge_hook_feedback(pre_hook_result.messages(), output, false);
-
-                        let post_hook_result = if is_error {
-                            self.run_post_tool_use_failure_hook(
-                                &tool_name,
-                                &effective_input,
-                                &output,
-                            )
-                        } else {
-                            self.run_post_tool_use_hook(
-                                &tool_name,
-                                &effective_input,
-                                &output,
-                                false,
-                            )
-                        };
-                        if post_hook_result.is_denied()
-                            || post_hook_result.is_failed()
-                            || post_hook_result.is_cancelled()
-                        {
-                            is_error = true;
-                        }
-                        output = merge_hook_feedback(
-                            post_hook_result.messages(),
-                            output,
-                            post_hook_result.is_denied()
-                                || post_hook_result.is_failed()
-                                || post_hook_result.is_cancelled(),
-                        );
-
-                        let output =
-                            self.maybe_offload_tool_output(&tool_use_id, &tool_name, output);
-                        crate::image_input::ToolOutput {
-                            text: output,
-                            attachments,
-                        }
-                        .into_message(tool_use_id, tool_name, is_error)
-                    }
-                    PermissionOutcome::Deny { reason } => ConversationMessage::tool_result(
-                        tool_use_id,
-                        tool_name,
-                        merge_hook_feedback(pre_hook_result.messages(), reason, true),
-                        true,
-                    ),
-                };
-                self.push_tool_result_message(
+            let tool_abort = self.hook_abort_signal.for_current_turn();
+            self.tool_executor_mut().set_abort_signal(tool_abort);
+            let executor = Arc::clone(&self.tool_executor);
+            // This single turn owns the executor lock; parallel calls share
+            // its &T, not separate per-call locks. No task waits for this lock.
+            #[allow(clippy::await_holding_lock)]
+            let dispatch = {
+                let executor = executor
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                self.execute_tool_calls(
+                    &*executor,
+                    tool_execution::ToolBatch {
+                        calls: &pending_tool_uses,
+                        context: &dispatch_context,
+                        iteration: iterations,
+                    },
                     &mut observer,
-                    iterations,
+                    &mut prompter,
                     &mut tool_results,
-                    result_message,
-                )?;
+                )
+                .await
+            };
+            drop(executor);
+            if dispatch? {
+                return Ok(self.cancelled_summary(
+                    assistant_messages,
+                    tool_results,
+                    prompt_cache_events,
+                    iterations,
+                ));
             }
         }
 
@@ -2957,7 +2471,10 @@ where
     }
 
     pub fn tool_executor_mut(&mut self) -> &mut T {
-        &mut self.tool_executor
+        Arc::get_mut(&mut self.tool_executor)
+            .expect("executor outside dispatch")
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn session_mut(&mut self) -> &mut Session {
@@ -3751,44 +3268,9 @@ fn push_thinking_block(
     });
 }
 
-/// Whether a tool is safe to run concurrently with its siblings in the same
-/// assistant turn. Conservative: only read-only tools (they neither mutate the
-/// workspace nor prompt the user) qualify, so a run of them can overlap their
-/// I/O-bound execution while writers, bash, and interactive tools stay serial.
-///
-/// Names are sudocode's actual tool ids; membership mirrors Claude Code's
-/// `isReadOnly() == true` set (GlobTool / GrepTool / FileReadTool /
-/// ToolSearchTool / ListMcpResourcesTool / ReadMcpResourceTool).
-/// `AgentTool` is read-only in CC (it delegates permission to its children) but
-/// is kept serial here for now — concurrent sub-agent spawns are a separate,
-/// larger step. Extend cautiously (e.g. same-class writes on distinct paths)
-/// only behind a conflict check.
+#[cfg(test)]
 fn is_concurrency_safe_tool(tool_name: &str) -> bool {
-    // Canonicalize first: the name arrives as the model spelled it.
-    // Matching the raw name is how names silently fell out of this set
-    // after renames.
-    matches!(
-        crate::tool_names::canonicalize_tool_name(tool_name).as_str(),
-        // File reads
-        "read_file"
-            | "glob_search"
-            | "grep_search"
-            // Search
-            | "ToolSearch"
-            // Process-status reads
-            | "pid_status"
-            | "pid_output"
-            // Sub-agent spawns. Each child gets its own session, manifest,
-            // client and filesystem handle, so two spawns share no mutable
-            // state of ours. Claude Code declares the same
-            // (`AgentTool.isConcurrencySafe() => true`) and tells the model to
-            // launch several in one message; serialising them here made that
-            // instruction a lie — N delegations cost N sequential runs, each
-            // holding the turn open until it finished or auto-backgrounded at
-            // 120s.
-            | "agent_spawn"
-            | "pid_fork"
-    )
+    crate::tool_concurrency::builtin_is_concurrency_safe(tool_name, "{}")
 }
 
 /// Ceiling on how many tools of one concurrency-safe batch execute at once.
@@ -3818,19 +3300,6 @@ fn max_tool_use_concurrency() -> usize {
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|limit| *limit > 0)
         .unwrap_or(MAX_TOOL_USE_CONCURRENCY)
-}
-
-/// Per-tool state carried from the serial pre-pass (hooks + permission) of a
-/// concurrency-safe batch to the serial post-pass (post-hook + push), across
-/// the concurrent execute phase in between.
-struct PreparedTool {
-    tool_use_id: String,
-    tool_name: String,
-    effective_input: String,
-    pre_hook_result: HookRunResult,
-    /// `None` when permission was granted (the tool is executed); `Some(reason)`
-    /// when denied before dispatch (no execute, the reason becomes the result).
-    deny_reason: Option<String>,
 }
 
 fn format_hook_message(result: &HookRunResult, fallback: &str) -> String {

@@ -4,12 +4,13 @@
 
 use crossterm::style::{Color, ContentStyle};
 
-use super::{code_theme, color_math, styled_text::StyledText, ColorSupport, ColorTheme};
+use super::{code_theme, color_math, styled_text::StyledText, theme, ColorSupport};
 
 /// Highlight a complete hunk, preserving parser state across its source rows.
-pub(crate) fn render_rows(rows: &[(char, &str)], language: &str) -> Vec<String> {
+pub(crate) fn render_rows(rows: &[(char, &str)], language: &str, separator: &str) -> Vec<String> {
     let support = ColorSupport::detect();
-    let light = ColorTheme::is_light_background();
+    let palette = theme();
+    let light = palette.light_background;
     let code = rows
         .iter()
         .map(|(_, text)| *text)
@@ -24,13 +25,8 @@ pub(crate) fn render_rows(rows: &[(char, &str)], language: &str) -> Vec<String> 
     let mut offset = 0;
     rows.iter()
         .map(|(sign, text)| {
-            let bg = background(*sign, light, support);
-            let sign_color = match (sign, support) {
-                (_, ColorSupport::NoColor) => None,
-                ('+', _) => Some(Color::DarkGreen),
-                ('-', _) => Some(Color::DarkRed),
-                _ => None,
-            };
+            let bg = palette.diff_background(*sign, support);
+            let sign_color = palette.diff_sign_color(*sign, support);
             let mut output = StyledText::default();
             output.push(
                 ContentStyle {
@@ -38,7 +34,7 @@ pub(crate) fn render_rows(rows: &[(char, &str)], language: &str) -> Vec<String> 
                     background_color: bg,
                     ..ContentStyle::default()
                 },
-                &format!("{sign} "),
+                &format!("{sign}{separator}"),
             );
             if let Some(source) = &highlighted {
                 for (mut style, content) in source.spans(offset..offset + text.len()) {
@@ -77,28 +73,4 @@ pub(crate) fn render_rows(rows: &[(char, &str)], language: &str) -> Vec<String> 
             ansi
         })
         .collect()
-}
-
-fn background(sign: char, light: bool, support: ColorSupport) -> Option<Color> {
-    let rgb = match (sign, light) {
-        ('+', false) => (33, 58, 43),
-        ('-', false) => (74, 34, 29),
-        ('+', true) => (218, 251, 225),
-        ('-', true) => (255, 235, 233),
-        _ => return None,
-    };
-    match support {
-        ColorSupport::TrueColor => Some(Color::Rgb {
-            r: rgb.0,
-            g: rgb.1,
-            b: rgb.2,
-        }),
-        ColorSupport::Ansi256 => Some(Color::AnsiValue(match (sign, light) {
-            ('+', false) => 22,
-            ('-', false) => 52,
-            ('+', true) => 194,
-            _ => 224,
-        })),
-        ColorSupport::Ansi16 | ColorSupport::NoColor => None,
-    }
 }

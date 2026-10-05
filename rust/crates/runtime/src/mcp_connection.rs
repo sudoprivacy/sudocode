@@ -23,6 +23,12 @@ use crate::mcp_server_manager::{
 /// A live MCP transport connection over which JSON-RPC requests can be driven.
 #[async_trait]
 pub trait McpConnection: Send + std::fmt::Debug {
+    /// A request handle on this initialized session. Unsupported transports
+    /// return None and remain serial; cloning must never spawn another server.
+    fn fork_request(&self) -> Option<Box<dyn McpConnection>> {
+        None
+    }
+
     /// Send `initialize` and read the handshake response.
     async fn initialize(
         &mut self,

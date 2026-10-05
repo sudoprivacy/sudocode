@@ -23,7 +23,7 @@
 
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -155,7 +155,7 @@ pub enum TurnPhase {
 /// by the runner thread.
 #[derive(Clone)]
 pub struct SpinnerState {
-    pub response_bytes: Arc<AtomicU32>,
+    pub(crate) progress: Arc<crate::render::spinner_progress::SpinnerProgress>,
     phase: Arc<Mutex<TurnPhase>>,
     active: Arc<AtomicBool>,
     start_time: Arc<Mutex<Instant>>,
@@ -169,7 +169,7 @@ impl SpinnerState {
     #[must_use]
     pub fn new_inactive() -> Self {
         Self {
-            response_bytes: Arc::new(AtomicU32::new(0)),
+            progress: Arc::new(crate::render::spinner_progress::SpinnerProgress::new()),
             phase: Arc::new(Mutex::new(TurnPhase::Thinking)),
             active: Arc::new(AtomicBool::new(false)),
             start_time: Arc::new(Mutex::new(Instant::now())),
@@ -181,7 +181,7 @@ impl SpinnerState {
 
     /// Reset and activate for a new turn.
     pub fn start_turn(&self, label: &str, model: Option<&str>, token_budget: Option<u32>) {
-        self.response_bytes.store(0, Ordering::SeqCst);
+        self.progress.reset();
         *self.phase.lock().unwrap() = TurnPhase::Thinking;
         *self.start_time.lock().unwrap() = Instant::now();
         *self.label.lock().unwrap() = label.to_string();
@@ -265,7 +265,7 @@ impl SpinnerState {
         }
         let _ = write!(line, " ({elapsed:.1}s)");
 
-        let bytes = self.response_bytes.load(Ordering::Relaxed);
+        let bytes = self.progress.response_bytes();
         let token_budget = *self.token_budget.lock().unwrap();
         if bytes > 0 && elapsed >= 1.0 {
             let approx_tokens = bytes / 4;
@@ -297,18 +297,8 @@ impl SpinnerState {
             }
         }
 
-        let t = crate::render::theme();
-        let color = if is_retry {
-            crate::render::ansi_fg(t.warning)
-        } else {
-            // Stall detection: yellow when no new bytes for 3+ seconds.
-            let is_stalled = bytes > 0 && !is_reasoning && elapsed > 3.0;
-            if is_stalled {
-                crate::render::ansi_fg(t.warning)
-            } else {
-                crate::render::ansi_fg(t.info)
-            }
-        };
+        let color =
+            crate::render::theme().spinner_fg(is_retry || self.progress.is_stalled(is_reasoning));
         format!("{color}{line}{}", crate::render::RESET)
     }
 }
@@ -561,6 +551,8 @@ impl FuzzySelectState {
 #[derive(Clone, Debug)]
 pub struct ToolCard {
     pub id: String,
+    input: String,
+    status: crate::cli::format::ToolStatus,
     content: Arc<crate::cli::format::ToolCardContent>,
 }
 
@@ -568,6 +560,8 @@ impl ToolCard {
     fn new(id: String, name: &str, input: &str) -> Self {
         Self {
             id,
+            input: input.to_string(),
+            status: crate::cli::format::ToolStatus::Queued,
             // Parsing and syntax highlighting happen once per tool event,
             // never on spinner ticks or keystrokes. Layout still adapts on resize.
             content: Arc::new(crate::cli::format::tool_call_start_content(name, input)),
@@ -577,6 +571,11 @@ impl ToolCard {
 
 #[derive(Clone, Debug)]
 pub enum UiCommand {
+    ToolQueued {
+        id: String,
+        name: String,
+        input: String,
+    },
     ShowQuestion(QuestionPromptView),
     ClearQuestion,
     SetTurnResult(Arc<StyledText>),
@@ -616,6 +615,13 @@ pub struct UiCommandSender {
 }
 
 impl UiCommandSender {
+    pub fn tool_queued(&self, id: &str, name: &str, input: &str) {
+        let _ = self.tx.send(UiCommand::ToolQueued {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: input.to_string(),
+        });
+    }
     pub fn show_question(&self, question: QuestionPromptView) {
         let _ = self.tx.send(UiCommand::ShowQuestion(question));
     }
@@ -1092,6 +1098,16 @@ impl OutputSender {
         let _ = self.tx.send(OutputMsg::Line(text.to_string()));
     }
 
+    /// Commit a complete transcript echo through the existing output channel.
+    /// One payload avoids separately allocating/sending its separator rows.
+    #[inline]
+    pub(crate) fn print_block(&self, mut text: String) {
+        crate::render::layout_policy::LayoutPolicy::finish_block(&mut text);
+        if !text.is_empty() {
+            let _ = self.tx.send(OutputMsg::Raw(text));
+        }
+    }
+
     pub fn suspend(&self) -> io::Result<TerminalSuspension> {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (resume_tx, resume_rx) = mpsc::sync_channel(1);
@@ -1230,7 +1246,7 @@ fn strip_ansi(input: &str) -> String {
 
 /// One pending item awaiting the user's eye at a turn boundary: either an
 /// in-flight tool call (rendered as a running L-frame card) or a message queued
-/// for the next turn (a human `❯` line or an inbound A2A `📨` line). They share
+/// for the next turn (a human `❯` line or an inbound `Message from …` line). They share
 /// one ordered list so the overlay shows exactly what arrived, in arrival order
 /// — a tool starting, then a peer message, then another tool, interleave the
 /// way they happened rather than being grouped into two panes.
@@ -1241,7 +1257,7 @@ pub enum PendingItem {
     /// engine, not here).
     Tool(ToolCard),
     /// A message queued for the next turn — `display` is the compact one-line
-    /// form (`❯ …` for human, `📨 A2A from X: …` for a peer). Purely transient:
+    /// form (`❯ …` for human, `Message from sender: …` for a peer). Purely transient:
     /// the coordinator echoes the real line to scrollback when it flushes.
     /// `is_human` distinguishes a typed input from an inbound A2A/peer message
     /// so the empty-buffer `↑` removes all human chips (matching the
@@ -1256,13 +1272,13 @@ pub enum PendingItem {
 /// user is waiting to see (a queued input, an inbound A2A), and each is one
 /// line, so all of them always render, in arrival order. Tool cards fill the
 /// remaining budget in arrival order; excess tool cards collapse to a
-/// `… +N more running` line so a busy turn can't push a message out of view.
+/// `… +N more tools` line so a busy turn can't push a message out of view.
 ///
 /// A pure projection of `items` — it never commits to scrollback (the render
 /// engine commits finished tool cards; the coordinator echoes flushed messages).
 /// Height budget mirrors the task panel: `min(10, max(3, rows-14))`, hidden
 /// entirely on a very short terminal.
-fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
+fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: usize) -> String {
     use crate::render::{DIM, RESET};
 
     if items.is_empty() {
@@ -1285,44 +1301,55 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize) -> String {
     // least room for the overflow marker if there are any tools.
     let tool_budget = max_lines.saturating_sub(message_count);
 
-    let mut lines: Vec<String> = Vec::new();
-    let mut tool_lines_used = 0usize;
-    let mut tools_shown = 0usize;
-    let mut tools_total = 0usize;
-    for item in items {
-        match item {
-            PendingItem::QueuedMessage { display, .. } => {
-                // Always render (one line, collapsed), in arrival position.
-                let first = display.lines().next().unwrap_or("");
-                lines.push(format!("{DIM}↳ queued: {first}{RESET}"));
-            }
-            PendingItem::Tool(card) => {
-                tools_total += 1;
-                let card_lines: Vec<String> = crate::cli::format::render_tool_card(
+    let cards: Vec<_> = items
+        .iter()
+        .map(|item| match item {
+            PendingItem::Tool(card) => Some(
+                crate::cli::format::render_tool_card_with_width(
                     &card.content,
-                    crate::cli::format::ToolStatus::Running,
+                    card.status,
+                    term_width,
                 )
                 .lines()
                 .map(str::to_string)
-                .collect();
-                // Reserve one line for the overflow marker when more tools than
-                // fit remain. Keep whole cards.
-                let fits = tool_lines_used + card_lines.len() <= tool_budget.saturating_sub(1)
-                    || (tools_shown == 0 && tool_lines_used + card_lines.len() <= tool_budget);
-                if fits {
-                    for l in card_lines {
-                        lines.push(l);
-                        tool_lines_used += 1;
-                    }
+                .collect::<Vec<_>>(),
+            ),
+            PendingItem::QueuedMessage { .. } => None,
+        })
+        .collect();
+    let tool_lines: usize = cards.iter().flatten().map(Vec::len).sum();
+    let tools_total = cards.iter().flatten().count();
+    // Reserve the marker only when something really overflows. Five compact
+    // two-line cards fit in ten rows; reserving unconditionally hid the fifth.
+    let visible_budget = tool_budget.saturating_sub(usize::from(tool_lines > tool_budget));
+    let mut lines = Vec::new();
+    let mut tool_lines_used = 0;
+    let mut tools_shown = 0;
+    for (item, card_lines) in items.iter().zip(cards) {
+        match item {
+            PendingItem::QueuedMessage { display, .. } => {
+                let first = display.lines().next().unwrap_or("");
+                lines.push(crate::render::text_layout::truncate_to_width(
+                    &format!("{DIM}↳ queued: {first}{RESET}"),
+                    term_width,
+                ));
+            }
+            PendingItem::Tool(_) => {
+                let card_lines = card_lines.expect("tool card projection");
+                if tool_lines_used + card_lines.len() <= visible_budget {
+                    tool_lines_used += card_lines.len();
+                    lines.extend(card_lines);
                     tools_shown += 1;
                 }
             }
         }
     }
-
     let tools_hidden = tools_total - tools_shown;
     if tools_hidden > 0 {
-        lines.push(format!("{DIM}… +{tools_hidden} more running{RESET}"));
+        lines.push(crate::render::text_layout::truncate_to_width(
+            &format!("{DIM}… +{tools_hidden} more tools{RESET}"),
+            term_width,
+        ));
     }
     lines.join("\n")
 }
@@ -1359,7 +1386,7 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
 
     let t = theme();
     let success = ansi_fg(t.success);
-    let info = ansi_fg(t.info);
+    let info = ansi_fg(t.info());
 
     let completed_count = todos
         .iter()
@@ -1654,9 +1681,25 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 }
                             }
                         }
-                        Ok(UiCommand::ToolStarted { id, name, input }) => {
+                        Ok(UiCommand::ToolQueued { id, name, input }) => {
                             if let Ok(mut pending) = pending_for_future.lock() {
                                 pending.push(PendingItem::Tool(ToolCard::new(id, &name, &input)));
+                            }
+                        }
+                        Ok(UiCommand::ToolStarted { id, name, input }) => {
+                            if let Ok(mut pending) = pending_for_future.lock() {
+                                if let Some(PendingItem::Tool(card)) = pending.iter_mut().find(
+                                    |item| matches!(item, PendingItem::Tool(card) if card.id == id),
+                                ) {
+                                    if card.input != input {
+                                        card.content =
+                                            Arc::new(crate::cli::format::tool_call_start_content(
+                                                &name, &input,
+                                            ));
+                                        card.input = input;
+                                    }
+                                    card.status = crate::cli::format::ToolStatus::Running;
+                                }
                             }
                         }
                         Ok(UiCommand::ToolFinished { id }) => {
@@ -2333,8 +2376,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         format!("{todo_line}\n{sep}")
     };
 
-    // PendingSlot: in-flight tool cards (yellow L-frames) and queued messages
-    // (human `❯` / inbound A2A `📨`) in one ordered overlay, in arrival order.
+    // PendingSlot: queued/running tool cards and queued messages
+    // (human `❯` / inbound `Message from …`) in one ordered overlay, in arrival order.
     // Built as one multi-line string so the element tree keeps a fixed shape
     // (empty string when nothing pending) — same hook-index rationale as the
     // todo panel. A pure overlay: it never commits to scrollback (the render
@@ -2343,7 +2386,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let pending_text = pending
         .lock()
         .ok()
-        .map(|items| render_pending_overlay(&items, term_height as usize))
+        .map(|items| render_pending_overlay(&items, term_height as usize, w))
         .unwrap_or_default();
 
     element! {
@@ -2537,14 +2580,14 @@ mod tests {
 
     #[test]
     fn pending_overlay_empty_when_nothing_pending() {
-        assert_eq!(render_pending_overlay(&[], 40), "");
+        assert_eq!(render_pending_overlay(&[], 40, 80), "");
     }
 
     #[test]
     fn pending_overlay_hidden_on_short_terminal() {
         // ≤10 rows: hide entirely rather than crowd out the prompt.
         assert_eq!(
-            render_pending_overlay(&[PendingItem::Tool(tool_card("1", "bash"))], 8),
+            render_pending_overlay(&[PendingItem::Tool(tool_card("1", "bash"))], 8, 80),
             ""
         );
     }
@@ -2555,7 +2598,7 @@ mod tests {
             PendingItem::Tool(tool_card("1", "bash")),
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
-        let plain = strip_ansi(&render_pending_overlay(&items, 40));
+        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
         // Each running call is a Running L-frame card (╭─ header … ╰─).
         assert_eq!(plain.matches("╭─").count(), 2, "{plain}");
         // Headers show the canonical tool label (`Bash`, `Read`) — the SAME
@@ -2572,14 +2615,14 @@ mod tests {
         let items = vec![
             PendingItem::Tool(tool_card("1", "bash")),
             PendingItem::QueuedMessage {
-                display: "📨 A2A from mac-ai: hi".to_string(),
+                display: "Message from mac-ai: hi".to_string(),
                 is_human: false,
             },
             PendingItem::Tool(tool_card("2", "read_file")),
         ];
-        let plain = strip_ansi(&render_pending_overlay(&items, 40));
+        let plain = strip_ansi(&render_pending_overlay(&items, 40, 80));
         let bash_at = plain.find("Bash").expect("bash card");
-        let msg_at = plain.find("A2A from mac-ai").expect("queued message");
+        let msg_at = plain.find("Message from mac-ai").expect("queued message");
         let read_at = plain.find("Read").expect("read card");
         assert!(
             bash_at < msg_at && msg_at < read_at,
@@ -2596,9 +2639,9 @@ mod tests {
         let items: Vec<PendingItem> = (0..8)
             .map(|i| PendingItem::Tool(tool_card(&i.to_string(), "bash")))
             .collect();
-        let plain = strip_ansi(&render_pending_overlay(&items, 24));
+        let plain = strip_ansi(&render_pending_overlay(&items, 24, 80));
         assert!(
-            plain.contains("more running"),
+            plain.contains("more tools"),
             "expected overflow summary: {plain}"
         );
         let shown = plain.matches("╭─").count();

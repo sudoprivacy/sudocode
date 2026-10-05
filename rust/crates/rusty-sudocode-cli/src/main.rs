@@ -3075,35 +3075,24 @@ impl Drop for ReplTurnCancelMonitor {
 fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
     let mut lines = display.split('\n');
     if let Some(first) = lines.next() {
-        output.println(&format!(
-            "{}{}{} {first}",
-            render::BOLD,
-            render::PROMPT_GLYPH,
-            RESET
-        ));
+        let mut rendered = format!("{}{}{} {first}", render::BOLD, render::PROMPT_GLYPH, RESET);
         for line in lines {
-            output.println(&format!("  {line}"));
+            rendered.push_str("\n  ");
+            rendered.push_str(line);
         }
-        output.println("");
+        output.print_block(rendered);
     }
 }
 
-/// Write an inbound A2A peer message to scrollback. Mirrors
-/// [`echo_submit_to_scrollback`] but the `display` already carries its own
-/// `📨 A2A from X: …` marker, so it is printed verbatim (bold, first line) with
-/// continuation lines indented — the peer counterpart of the human `❯` echo,
-/// committed at the moment the message is actually handed to a turn. Same
-/// trailing blank line so the peer message doesn't butt up against the turn
-/// output it triggers.
-fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
-    let mut lines = display.split('\n');
-    if let Some(first) = lines.next() {
-        output.println(&format!("{}{first}{}", render::BOLD, RESET));
-        for line in lines {
-            output.println(&format!("  {line}"));
-        }
-        output.println("");
-    }
+/// Commit a received envelope through the same formatter used by replay.
+/// Keep model-facing markup in the queue, and project it only at the UI edge.
+fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
+    let rendered = cli::received::render_prompt(
+        prompt,
+        render::query_terminal_width(),
+        &render::TerminalRenderer::new(),
+    );
+    output.print_block(rendered);
 }
 
 fn run_repl_iocraft_dispatch(
@@ -3297,7 +3286,7 @@ fn run_repl_iocraft_dispatch(
                     // Echo the queued items to scrollback now, as they actually
                     // run — the coordinator deferred these from submit time so a
                     // queued item never looked sent. Each carries its marker
-                    // kind (`❯` human / `📨` peer). Then clear the queued
+                    // kind (`❯` human / message frame for peers). Then clear the queued
                     // messages from the pending overlay: they're leaving the queue.
                     for echo in &next.echoes {
                         match echo.kind {
@@ -3331,10 +3320,10 @@ fn run_repl_iocraft_dispatch(
                 // boundary. Keep their origin distinct in the UI and history.
                 let (prompt, display, kind, ack) = match event {
                     CoordinatorEvent::PeerMessage(msg, ack) => {
-                        let display = format!("\u{1f4e8} A2A from {}: {}", msg.from, msg.body);
+                        let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
                         (
-                            tools::compose_next_turn_from_envelopes(&[msg]),
-                            display,
+                            prompt.clone(),
+                            prompt,
                             input_queue::QueuedKind::Peer,
                             Some(ack),
                         )
@@ -3370,7 +3359,12 @@ fn run_repl_iocraft_dispatch(
                         },
                         input_queue::QueueMode::Queue,
                     );
-                    repl_ui_cmd.queued_message_push(&display, false);
+                    let preview = if kind == input_queue::QueuedKind::Peer {
+                        cli::received::queued_preview(&display)
+                    } else {
+                        display
+                    };
+                    repl_ui_cmd.queued_message_push(&preview, false);
                 }
                 // Taken: the message is this process's responsibility now, so
                 // the receiver may advance its cursor. What remains — the
@@ -4320,12 +4314,12 @@ impl LiveCli {
                 EngineEvent::TextDelta { text } => outcome.final_text.push_str(text),
                 EngineEvent::ToolCall { id, name, input } => {
                     outcome.final_text.clear();
-                    // Staging overlay (iocraft REPL only): show a running
-                    // yellow card for this in-flight call. Pure overlay — the
+                    // Staging overlay (iocraft REPL only): the request is
+                    // queued until ToolStarted acquires a slot. The
                     // finished card is committed to scrollback by the renderer
                     // on the ordered output channel, not from here.
                     if let Some(ui) = ui {
-                        ui.tool_started(id, name, input);
+                        ui.tool_queued(id, name, input);
                     }
                     // Parity: `--output-format json` emits the tool input as the
                     // raw argument STRING exactly as the model produced it — the
@@ -4337,6 +4331,11 @@ impl LiveCli {
                         "name": name,
                         "input": input,
                     }));
+                }
+                EngineEvent::ToolStarted { id, name, input } => {
+                    if let Some(ui) = ui {
+                        ui.tool_started(id, name, input);
+                    }
                 }
                 EngineEvent::ToolResult {
                     id,

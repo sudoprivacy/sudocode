@@ -5,13 +5,22 @@
 
 use crossterm::style::Color;
 
-use super::{ansi_fg, terminal_palette};
+use super::{ansi_fg, code_theme, terminal_palette, ColorSupport};
+
+/// Tool frames carry execution status without competing with their content.
+pub struct ToolBorderColors {
+    pub queued: Color,
+    pub running: Color,
+    pub success: Color,
+    pub error: Color,
+}
 
 /// Semantic color theme — coder picks a scenario token, never a raw color.
 ///
 /// Two built-in palettes: `dark()` (default) and `light()` for light
-/// terminal backgrounds.  All rendering code references `theme.xxx`;
-/// switching palette changes every color at once.
+/// terminal backgrounds. Renderers select semantic roles here; `code_theme`
+/// only adapts and caches the bundled syntax assets. Syntax-backed roles are
+/// resolved on demand so constructing the theme does not load those assets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTheme {
     /// Selects the adaptive default syntax theme in code_theme.
@@ -25,8 +34,6 @@ pub struct ColorTheme {
     pub error: Color,
     /// Warning — permission prompt title, edit label, stalled spinner.
     pub warning: Color,
-    /// Info — spinner active, thinking indicator.
-    pub info: Color,
     /// Muted — footer hints, dim text, labels, separators.
     pub muted: Color,
     /// Link — hyperlinks.
@@ -76,7 +83,6 @@ impl ColorTheme {
             success: Color::Green,              // semantic
             error: Color::Red,                  // semantic
             warning: Color::AnsiValue(220),     // yellow, distinct from info/success
-            info: Color::AnsiValue(36),         // teal #0D9488
             muted: Color::AnsiValue(muted),     // readable muted grey
             link: Color::Rgb {
                 r: 99,
@@ -106,7 +112,6 @@ impl ColorTheme {
             success: Color::DarkGreen,          // semantic
             error: Color::DarkRed,              // semantic
             warning: Color::AnsiValue(130),     // ochre on a light background
-            info: Color::AnsiValue(23),         // deep teal
             muted: Color::AnsiValue(muted),     // readable muted grey
             link: Color::Rgb {
                 r: 28,
@@ -133,6 +138,103 @@ impl ColorTheme {
         } else {
             Self::dark()
         }
+    }
+
+    /// Diff markers and fills are shared by Edit previews and shell patches.
+    pub(super) fn diff_sign_color(&self, sign: char, support: ColorSupport) -> Option<Color> {
+        match (sign, support) {
+            (_, ColorSupport::NoColor) => None,
+            ('+', _) => Some(Color::DarkGreen),
+            ('-', _) => Some(Color::DarkRed),
+            _ => None,
+        }
+    }
+
+    /// File headers use the existing identity accent; hunk metadata is muted.
+    pub fn diff_header_fg(&self, is_file: bool) -> String {
+        let support = ColorSupport::detect();
+        ansi_fg(support.color(if is_file { self.link } else { self.muted }))
+    }
+
+    /// Codex-compatible diff fills, resolved with the rest of the color theme.
+    pub(super) fn diff_background(&self, sign: char, support: ColorSupport) -> Option<Color> {
+        let rgb = match (sign, self.light_background) {
+            ('+', false) => (33, 58, 43),
+            ('-', false) => (74, 34, 29),
+            ('+', true) => (218, 251, 225),
+            ('-', true) => (255, 235, 233),
+            _ => return None,
+        };
+        match support {
+            ColorSupport::TrueColor => Some(Color::Rgb {
+                r: rgb.0,
+                g: rgb.1,
+                b: rgb.2,
+            }),
+            ColorSupport::Ansi256 => Some(Color::AnsiValue(match (sign, self.light_background) {
+                ('+', false) => 22,
+                ('-', false) => 52,
+                ('+', true) => 194,
+                _ => 224,
+            })),
+            ColorSupport::Ansi16 | ColorSupport::NoColor => None,
+        }
+    }
+
+    /// Info — active spinner, thinking indicator and informational labels.
+    /// Shares the soft-green palette source with completed tool borders.
+    pub fn info(&self) -> Color {
+        self.soft_green(ColorSupport::detect())
+    }
+
+    /// Spinner activity and waiting share the info/warning semantic roles.
+    pub fn spinner_fg(&self, is_warning: bool) -> String {
+        let support = ColorSupport::detect();
+        let color = if is_warning {
+            self.warning
+        } else {
+            self.soft_green(support)
+        };
+        ansi_fg(support.color(color))
+    }
+
+    /// Inline-code and file-link foreground from the selected syntax asset.
+    pub(super) fn inline_code_color(&self, support: ColorSupport) -> Color {
+        code_theme::inline_color(self.light_background, support)
+    }
+
+    /// The single soft-green definition used by semantic UI roles.
+    fn soft_green(&self, support: ColorSupport) -> Color {
+        if support == ColorSupport::Ansi16 {
+            self.success
+        } else {
+            self.inline_code_color(support)
+        }
+    }
+
+    /// Resolve tool-specific roles through the central semantic palette.
+    pub fn tool_borders(&self) -> ToolBorderColors {
+        let support = ColorSupport::detect();
+        ToolBorderColors {
+            queued: support.color(self.muted),
+            running: support.color(self.primary),
+            success: self.soft_green(support),
+            error: support.color(self.error),
+        }
+    }
+
+    /// Tool identities share the Codex accent used by transcript links.
+    pub fn tool_name_fg(&self) -> String {
+        self.identity_fg()
+    }
+
+    /// Incoming peer identities use the same blue accent as tool identities.
+    pub fn peer_sender_fg(&self) -> String {
+        self.identity_fg()
+    }
+
+    fn identity_fg(&self) -> String {
+        ansi_fg(ColorSupport::detect().color(self.link))
     }
 
     /// ANSI escape for the border color.

@@ -46,6 +46,7 @@ pub mod mcp_server;
 mod mcp_server_manager;
 mod mcp_sse;
 mod mcp_stdio;
+mod mcp_stdio_rpc;
 pub mod mcp_tool_bridge;
 mod mcp_ws;
 pub mod memory;
@@ -78,6 +79,7 @@ pub mod summary_compression;
 pub mod task_packet;
 mod time;
 pub mod todo_store;
+pub mod tool_concurrency;
 pub mod tool_names;
 #[cfg(test)]
 mod trust_resolver;
@@ -174,7 +176,7 @@ pub use mcp_server_manager::{
     McpProgressNotification, McpPrompt, McpPromptArgument, McpPromptContent, McpPromptMessage,
     McpReadResourceParams, McpReadResourceResult, McpResource, McpResourceContents,
     McpServerManager, McpServerManagerError, McpTool, McpToolCallContent, McpToolCallParams,
-    McpToolCallResult, McpToolDiscoveryReport, UnsupportedMcpServer,
+    McpToolCallResult, McpToolDiscoveryReport, PendingMcpToolCall, UnsupportedMcpServer,
 };
 pub use mcp_stdio::{spawn_mcp_stdio_process, McpStdioProcess};
 pub use oauth::{

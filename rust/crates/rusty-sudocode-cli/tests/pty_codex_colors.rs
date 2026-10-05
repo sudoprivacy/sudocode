@@ -611,32 +611,37 @@ fn assert_running_title_resizes(sess: &mut PtySession, header: &str, light: bool
     // A running title occupies exactly one row, and resizing can reveal the
     // original cached identity again without losing the user's draft.
     sess.resize(80, 28).unwrap();
+    expect_single_row_bash_title(sess, |row| row.ends_with('…'), "single-row clipped title");
+    sess.resize(80, 100).unwrap();
+    expect_single_row_bash_title(
+        sess,
+        |row| row.contains(header),
+        "full title restored on widening",
+    );
+}
+
+fn expect_single_row_bash_title(
+    sess: &PtySession,
+    matches_title: impl Fn(&str) -> bool,
+    context: &str,
+) {
     common::expect_screen(
         sess,
-        |s| {
-            s.lines()
-                .any(|line| line.starts_with("╭─ Bash(") && line.ends_with('…'))
+        |_| {
+            sess.render(|screen| {
+                // contents() joins soft-wrapped rows. ConPTY may mark an
+                // exact-width title as wrapped, even though its cap is on the
+                // next physical row. Check the actual grid in one snapshot.
+                let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+                rows.windows(2).any(|pair| {
+                    pair[0].starts_with("╭─ Bash(")
+                        && matches_title(&pair[0])
+                        && pair[1].trim() == "╰─"
+                })
+            })
         },
         common::DEFAULT_TIMEOUT,
-        "single-row clipped title",
-    );
-    sess.render(|screen| {
-        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
-        let start = rows
-            .iter()
-            .rposition(|row| row.starts_with("╭─ Bash("))
-            .unwrap();
-        assert!(
-            rows[start + 1].starts_with("╰─"),
-            "title must not occupy body rows: {rows:?}"
-        );
-    });
-    sess.resize(80, 100).unwrap();
-    common::expect_screen(
-        sess,
-        |s| s.contains(header),
-        common::DEFAULT_TIMEOUT,
-        "full title restored on widening",
+        context,
     );
 }
 

@@ -260,7 +260,13 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
             60,
             "full Unicode body"
         );
-        rows[start..=end].to_vec()
+        // ConPTY can encode trailing blank cells as either literal spaces or
+        // erased cells. Compare visible physical rows, keeping all leading
+        // indentation, interior spacing and blank rows (styles checked above).
+        rows[start..=end]
+            .iter()
+            .map(|row| row.trim_end_matches(' ').to_owned())
+            .collect()
     })
 }
 

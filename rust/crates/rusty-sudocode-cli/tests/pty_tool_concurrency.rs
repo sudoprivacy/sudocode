@@ -358,6 +358,25 @@ if p.get('command')=='cat rewrite.txt':
 }
 
 struct Server(std::process::Child);
+
+impl Server {
+    fn wait_ready(&mut self, root: &Path) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Ok(port) = std::fs::read_to_string(root.join("http-port")) {
+                return port;
+            }
+            let status = self.0.try_wait().expect("poll HTTP fixture process");
+            assert!(
+                status.is_none() && Instant::now() < deadline,
+                "HTTP fixture did not become ready (exit: {status:?}): {}",
+                std::fs::read_to_string(root.join("http-server.log")).unwrap_or_default()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -377,19 +396,19 @@ fn configure_mcp(env: &TestEnv, http: bool) -> Option<Server> {
     let root = env.workspace_root();
     let script = root.join("concurrent_mcp.py");
     std::fs::write(&script, include_str!("fixtures/concurrent_mcp.py")).unwrap();
-    let server = http.then(|| {
+    let mut server = http.then(|| {
         Server(
             std::process::Command::new(common::resolve_python())
                 .arg(&script)
                 .arg("http")
                 .current_dir(root)
+                .stderr(std::fs::File::create(root.join("http-server.log")).unwrap())
                 .spawn()
                 .unwrap(),
         )
     });
-    let config = if http {
-        wait_file(env, "http-port");
-        let port = std::fs::read_to_string(root.join("http-port")).unwrap();
+    let config = if let Some(server) = server.as_mut() {
+        let port = server.wait_ready(root);
         json!({"type":"http", "url": format!("http://127.0.0.1:{port}/mcp")})
     } else {
         json!({"command":common::resolve_python(), "args":[script], "cwd":root})

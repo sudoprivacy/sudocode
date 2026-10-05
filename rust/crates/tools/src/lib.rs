@@ -11373,7 +11373,16 @@ mod tests {
             "total_deferred_tools": 10,
             "pending_mcp_servers": null,
         });
-        let messages = vec![ConversationMessage {
+        // A provider-bound result must answer an actual assistant call.
+        let mut messages = vec![ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "tu_1".to_string(),
+                name: "ToolSearch".to_string(),
+                input: r#"{"query":"cron"}"#.to_string(),
+                thought_signature: None,
+            },
+        ])];
+        messages.push(ConversationMessage {
             role: MessageRole::Tool,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: "tu_1".to_string(),
@@ -11384,10 +11393,10 @@ mod tests {
             usage: None,
             model: None,
             duration_ms: None,
-        }];
+        });
         let converted = convert_messages(&messages);
-        assert_eq!(converted.len(), 1);
-        let content = match &converted[0].content[0] {
+        assert_eq!(converted.len(), 2);
+        let content = match &converted[1].content[0] {
             api::InputContentBlock::ToolResult { content, .. } => content,
             _ => panic!("expected ToolResult"),
         };

@@ -253,6 +253,15 @@ scode --resume path/to/session.jsonl
 
 `--resume` replays the named session into the REPL with full context.
 
+The shared engine reconciles interrupted tool exchanges before continuing. It
+accepts results stored in either `tool` or `user` messages and leaves complete
+exchanges unchanged. A call that never returned receives a cancellation result.
+An unmatched, late or duplicate result is sent to the model as marked historical
+text, including its tool name, ID, output and error state. Its structured source
+record remains intact for session replay and `/undo`; recovery never reruns a
+tool. The same rule applies to ACP, model changes and subsequent tool round trips,
+without retrying a malformed request or discarding the transcript.
+
 ## Health check
 
 ```bash

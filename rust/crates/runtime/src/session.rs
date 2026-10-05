@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Display, Formatter};
 use std::path::{Path, PathBuf};
@@ -561,121 +562,30 @@ impl Session {
             }
             Err(_) | Ok(_) => Self::from_jsonl(&contents)?,
         };
-        // Defensive repair: a session persisted mid-tool-call (e.g. the process
-        // was killed, or crashed, while a tool was still running) can contain a
-        // `tool_use` with no following `tool_result`. The Anthropic API rejects
-        // such a history on resume ("`tool_use` ids were found without
-        // `tool_result` blocks immediately after"). Backfill a synthetic error
-        // result for any orphan so the transcript is always resumable, no matter
-        // how it was persisted. Applied in-memory on every load (idempotent).
+        // Recover interrupted calls without changing existing result records:
+        // local consumers such as /undo still need their structured payloads.
         session.sanitize_orphan_tool_uses();
         Ok(session.with_persistence_path(path.to_path_buf()))
     }
 
     /// Repair unfinished tool batches before a new turn uses this history.
-    /// Persist the repair so later turns and resumed sessions see the same order.
+    /// Persist the repair without rewriting existing tool result records.
     pub fn repair_orphan_tool_uses(&mut self) -> Result<usize, SessionError> {
-        if !self.has_orphan_tool_uses() {
+        let repairs = ToolHistoryRepairs::plan(&self.messages);
+        if repairs.missing.is_empty() {
             return Ok(0);
         }
         let original = self.messages.clone();
-        let inserted = self.sanitize_orphan_tool_uses();
-        if inserted > 0 {
-            if let Err(error) = self.rewrite_persisted() {
-                self.messages = original;
-                return Err(error);
-            }
+        let repaired = repairs.apply_missing(&mut self.messages);
+        if let Err(error) = self.rewrite_persisted() {
+            self.messages = original;
+            return Err(error);
         }
-        Ok(inserted)
+        Ok(repaired)
     }
 
-    fn has_orphan_tool_uses(&self) -> bool {
-        let mut index = 0;
-        while index < self.messages.len() {
-            let message = &self.messages[index];
-            index += 1;
-            if message.role != MessageRole::Assistant {
-                continue;
-            }
-            let mut pending: std::collections::HashSet<&str> = message
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
-                    _ => None,
-                })
-                .collect();
-            if pending.is_empty() {
-                continue;
-            }
-            while index < self.messages.len() && self.messages[index].role == MessageRole::Tool {
-                for block in &self.messages[index].blocks {
-                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                        pending.remove(tool_use_id.as_str());
-                    }
-                }
-                index += 1;
-            }
-            if !pending.is_empty() {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Backfill results after the contiguous Tool messages answering each
-    /// assistant batch, before any later user or assistant message.
     fn sanitize_orphan_tool_uses(&mut self) -> usize {
-        const ORPHAN_TOOL_RESULT_MESSAGE: &str =
-            "[Tool call was interrupted before it returned — no result was produced. Treated as cancelled.]";
-
-        let mut repaired: Vec<ConversationMessage> = Vec::with_capacity(self.messages.len());
-        let mut inserted = 0usize;
-        let mut messages = std::mem::take(&mut self.messages).into_iter().peekable();
-        while let Some(message) = messages.next() {
-            let calls: Vec<(String, String)> = if message.role == MessageRole::Assistant {
-                message
-                    .blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::ToolUse { id, name, .. } => Some((id.clone(), name.clone())),
-                        _ => None,
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            repaired.push(message);
-            if calls.is_empty() {
-                continue;
-            }
-            let mut answered = std::collections::HashSet::new();
-            while messages
-                .peek()
-                .is_some_and(|next| next.role == MessageRole::Tool)
-            {
-                let result = messages.next().expect("peeked tool message");
-                for block in &result.blocks {
-                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                        answered.insert(tool_use_id.clone());
-                    }
-                }
-                repaired.push(result);
-            }
-            for (tool_use_id, tool_name) in calls {
-                if answered.insert(tool_use_id.clone()) {
-                    repaired.push(ConversationMessage::tool_result(
-                        tool_use_id,
-                        tool_name,
-                        ORPHAN_TOOL_RESULT_MESSAGE,
-                        true,
-                    ));
-                    inserted += 1;
-                }
-            }
-        }
-        self.messages = repaired;
-        inserted
+        ToolHistoryRepairs::plan(&self.messages).apply_missing(&mut self.messages)
     }
 
     pub fn push_message(&mut self, message: ConversationMessage) -> Result<(), SessionError> {
@@ -1768,6 +1678,123 @@ fn workspace_root_to_string(path: &Path) -> Result<String, SessionError> {
             path.display()
         ))
     })
+}
+
+/// Return a model-safe view while preserving structured source records for
+/// replay, undo and persistence. Healthy history is borrowed unchanged.
+#[must_use]
+pub fn model_tool_history(messages: &[ConversationMessage]) -> Cow<'_, [ConversationMessage]> {
+    let repairs = ToolHistoryRepairs::plan(messages);
+    if repairs.is_empty() {
+        return Cow::Borrowed(messages);
+    }
+    let mut history = messages.to_vec();
+    repairs.apply(&mut history);
+    Cow::Owned(history)
+}
+
+/// A single reconciliation plan serves persisted, imported and active history.
+/// Planning borrows the valid prefix; only damaged histories allocate repairs.
+#[derive(Default)]
+struct ToolHistoryRepairs {
+    missing: Vec<(usize, Vec<ConversationMessage>)>,
+    unpaired: Vec<(usize, usize)>,
+}
+
+impl ToolHistoryRepairs {
+    fn is_empty(&self) -> bool {
+        self.missing.is_empty() && self.unpaired.is_empty()
+    }
+
+    fn plan(messages: &[ConversationMessage]) -> Self {
+        let mut repairs = Self::default();
+        let mut pending: Vec<(&str, &str)> = Vec::new();
+        for (index, message) in messages.iter().enumerate() {
+            // Anthropic-format history and fork prefixes put results in User
+            // messages, while our executor writes Tool messages. Both are the
+            // same batch. Plain user input ends a batch, even after a cancel.
+            let is_result_message = matches!(message.role, MessageRole::Tool | MessageRole::User)
+                && message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. }));
+            if !is_result_message {
+                repairs.finish_batch(index, &mut pending);
+            }
+            if message.role == MessageRole::Assistant {
+                pending.extend(message.blocks.iter().filter_map(|block| match block {
+                    ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+                    _ => None,
+                }));
+            }
+            for (block_index, block) in message.blocks.iter().enumerate() {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                    if let Some(position) = pending
+                        .iter()
+                        .position(|(id, _)| *id == tool_use_id)
+                        .filter(|_| is_result_message)
+                    {
+                        pending.remove(position);
+                    } else {
+                        repairs.unpaired.push((index, block_index));
+                    }
+                }
+            }
+        }
+        repairs.finish_batch(messages.len(), &mut pending);
+        repairs
+    }
+
+    fn finish_batch(&mut self, before: usize, pending: &mut Vec<(&str, &str)>) {
+        if pending.is_empty() {
+            return;
+        }
+        self.missing.push((before, pending.drain(..).map(|(id, name)| {
+            ConversationMessage::tool_result(id, name,
+                "[Tool call was interrupted before it returned — no result was produced. Treated as cancelled.]", true)
+        }).collect()));
+    }
+
+    fn apply(self, messages: &mut Vec<ConversationMessage>) -> usize {
+        let count = self.unpaired.len()
+            + self
+                .missing
+                .iter()
+                .map(|(_, batch)| batch.len())
+                .sum::<usize>();
+        for (message, block) in self.unpaired {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                tool_name,
+                output,
+                is_error,
+            } = &messages[message].blocks[block]
+            else {
+                unreachable!("repair plan refers to a tool result")
+            };
+            // Keep output, provenance and failure state as historical context.
+            // Re-running a tool or inventing its arguments could repeat writes.
+            messages[message].blocks[block] = ContentBlock::Text {
+                text: format!("[Unpaired historical tool result: {tool_name}, id={tool_use_id}, is_error={is_error}]\n{output}"),
+            };
+        }
+        Self {
+            missing: self.missing,
+            unpaired: Vec::new(),
+        }
+        .apply_missing(messages);
+        count
+    }
+
+    /// Only interrupted calls change durable history. Unpaired result records
+    /// retain their type and metadata; the model projection renders them as text.
+    fn apply_missing(self, messages: &mut Vec<ConversationMessage>) -> usize {
+        let count = self.missing.iter().map(|(_, batch)| batch.len()).sum();
+        for (before, batch) in self.missing.into_iter().rev() {
+            messages.splice(before..before, batch);
+        }
+        count
+    }
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {

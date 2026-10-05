@@ -111,6 +111,8 @@ impl ProviderClient {
 /// Convert active conversation messages to provider input, preserving tool pairs.
 #[must_use]
 pub fn convert_messages(messages: &[ConversationMessage]) -> Vec<InputMessage> {
+    let history = runtime::model_tool_history(messages);
+    let messages = history.as_ref();
     let mut result: Vec<InputMessage> = Vec::with_capacity(messages.len());
     for message in messages {
         let role = match message.role {
@@ -403,7 +405,8 @@ mod tests {
             tool_use(),
         ])]);
 
-        assert_eq!(converted.len(), 1);
+        // The unfinished tool call also receives a cancellation result.
+        assert_eq!(converted.len(), 2);
         // Order matters as much as presence: the API takes the thinking block
         // only as the first block of the assistant turn that produced it.
         match &converted[0].content[..] {
@@ -431,7 +434,8 @@ mod tests {
             tool_use(),
         ])]);
 
-        assert_eq!(converted.len(), 1);
+        // The unfinished tool call also receives a cancellation result.
+        assert_eq!(converted.len(), 2);
         assert!(
             matches!(
                 converted[0].content[..],
@@ -470,7 +474,8 @@ mod tests {
             tool_use(),
         ])]);
 
-        assert_eq!(converted.len(), 1);
+        // The unfinished tool call also receives a cancellation result.
+        assert_eq!(converted.len(), 2);
         match &converted[0].content[..] {
             [InputContentBlock::RedactedThinking { data }, InputContentBlock::ToolUse { .. }] => {
                 assert_eq!(data, &serde_json::json!("opaque-ciphertext"));

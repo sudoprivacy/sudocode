@@ -222,8 +222,8 @@ pub use sandbox::{
     SandboxRequest, SandboxStatus,
 };
 pub use session::{
-    ContentBlock, ConversationMessage, HostedSessionIdentity, MessageRole, Session,
-    SessionCompaction, SessionError, SessionFork, SessionPromptEntry,
+    model_tool_history, ContentBlock, ConversationMessage, HostedSessionIdentity, MessageRole,
+    Session, SessionCompaction, SessionError, SessionFork, SessionPromptEntry,
 };
 pub use sse::{IncrementalSseParser, SseEvent};
 pub use stale_base::{

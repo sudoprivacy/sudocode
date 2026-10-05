@@ -138,8 +138,9 @@ lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
 The live UI retains the existing formatter colors and supported text styles:
-tool-card borders show status without extra icons: amber while running, the
-code theme's green on success, and red on failure. The opening and closing
+tool-card borders show status without extra icons: muted while waiting for
+hooks, approval, or an execution slot; amber while running; the code theme's
+green on success; and red on failure. The opening and closing
 caps stay bold to separate adjacent calls; long vertical borders use normal
 weight without dimming. Colors adapt to dark/light backgrounds and terminal
 color depth. `ColorTheme` is the single semantic color interface; its `info`
@@ -151,6 +152,18 @@ reflow on resize; completed titles remain as printed in terminal scrollback.
 Bash commands that cannot fit the title are preserved in the card body. Long
 list items keep their continuation lines aligned with the item text, including
 in session replay. Replayed message blocks have one blank separator.
+
+Independent reads, searches, sub-agent calls, and recognized read-only Bash
+commands can execute concurrently, with a default limit of ten. Writes,
+interactive tools, and unrecognized Bash commands run serially. MCP tools
+can overlap when they declare `readOnlyHint` and use stdio or Streamable HTTP;
+other MCP transports and resource/prompt wrappers remain serial. A visible
+tool card may still be queued: the amber border marks actual execution.
+Completed results appear immediately, even while another call is still running.
+
+Incoming peer messages appear in a separate `Message from <peer>` frame with
+muted content and a blue peer name. This presentation does not alter the
+message envelope or content supplied to the model.
 
 Queued messages are dimmed, and Todo
 items distinguish active and completed states. This uses the same palette as
@@ -165,6 +178,7 @@ Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
 themes, including inline code, Bash command previews, language grammars, and
 added/removed diff fills. Bash commands are highlighted in both running and
 completed cards; stdout/stderr retain the producing program’s own colors.
+Recognized plain unified diffs reuse the Edit palette; ordinary logs stay plain.
 The default REPL queries the terminal palette once at startup, with a shared
 250 ms deadline and preservation of queued keys and pastes. Native Windows
 console windows can also supply their color table; ConPTY does not use its
@@ -188,15 +202,12 @@ the viewport, resize clears only the live UI from its retained start position,
 without clearing the preceding conversation or purging terminal scrollback.
 
 While a turn is running, messages you submit wait in the staging area.
-Press ↑ on an empty input to recall the newest queued human message for
-editing; its staging entry disappears. Further ↑ presses prepend older
-queued human messages, preserving their original submit order. The cursor
-stays at the end of the recalled text. Peer/A2A messages remain queued.
-Typing, pasting, or pressing ↓ ends this recall sequence and restores
-normal cursor navigation. When no human messages remain queued, further
-↑ presses preserve the recalled text; submitting it queues the edited
-text again. On an empty input with no queued human message, ↑ recalls
-prompt history.
+Press ↑ on an empty input to bring all queued human messages back for editing,
+joined in their original submit order. Their staging entries disappear;
+peer/A2A messages remain queued. The cursor starts at the end of the recalled
+text, and further arrow presses use normal cursor navigation. Submitting it
+queues the edited text again. On an empty input with no queued human message,
+↑ recalls prompt history.
 
 A line starting with `!` runs the rest as a shell command instead of
 sending it to the model:

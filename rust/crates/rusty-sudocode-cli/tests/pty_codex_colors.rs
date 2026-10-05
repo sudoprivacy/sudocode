@@ -782,3 +782,178 @@ fn denied_tool_keeps_a_red_border_without_a_new_status_icon() {
     expect_tool_border(&sess, "Bash(printf 'alpha from bash')", "Idx(9)", false);
     finish(&mut sess);
 }
+
+// Complete hunks, blank context and ordinary +/- logs in a real Bash result.
+const BASH_PATCH: &str = "+ ordinary before\ndiff --git a/sample.rs b/sample.rs\nindex abc123..def456 100644\n--- a/sample.rs\n+++ b/sample.rs\n@@ -1,2 +1,2 @@\n-let old = \"OLD_MARKER\";\n+let new = \"NEW_MARKER\";\n \n@@ -8 +8 @@\n-old_tail\n+new_tail\n+ ordinary after\n- ordinary after\n";
+
+fn has_stdout(value: &Value, expected: &str) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.get("stdout").and_then(Value::as_str) == Some(expected)
+                || map.values().any(|v| has_stdout(v, expected))
+        }
+        Value::Array(values) => values.iter().any(|v| has_stdout(v, expected)),
+        Value::String(text) => {
+            serde_json::from_str::<Value>(text).is_ok_and(|v| has_stdout(&v, expected))
+        }
+        _ => false,
+    }
+}
+
+fn bash_output_session(env: &TestEnv, output: &str, light: bool, no_color: bool) -> PtySession {
+    std::fs::write(env.workspace_root().join("render-output.txt"), output).unwrap();
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+            ("COLORFGBG", if light { "0;15" } else { "15;0" }),
+            ("NO_COLOR", if no_color { "1" } else { "" }),
+            ("TERM", "xterm-256color"),
+            ("COLORTERM", "truecolor"),
+        ],
+    );
+    sess.resize(60, 100).unwrap();
+    sess.expect("❯").unwrap();
+    let prompt = env.prompt("Run exactly `cat render-output.txt` using Bash. Then say only Render fixture done. Do not quote the file contents in your reply.", "bash_render_fixture");
+    sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains("Pasted") || s.contains("PARITY_SCENARIO:") || s.contains("Do not quote"),
+        common::DEFAULT_TIMEOUT,
+        "Bash prompt pasted",
+    );
+    sess.send("\r").unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains("Render fixture done.") && s.contains("ctx "),
+        if env.is_mock() {
+            common::DEFAULT_TIMEOUT
+        } else {
+            common::LIVE_TURN_BUDGET
+        },
+        "Bash result complete",
+    );
+    if env.is_mock() {
+        let bodies = env.captured_message_bodies();
+        let final_request: Value = serde_json::from_str(bodies.last().unwrap()).unwrap();
+        let message_text = final_request["messages"].to_string();
+        assert!(message_text.contains("tool_result"), "the real tool ran");
+        // Renderer-generated SGR must never be written back into model history.
+        if !output.contains('\x1b') {
+            assert!(!message_text.contains("\\u001b"));
+        }
+        assert!(
+            has_stdout(&final_request["messages"], output),
+            "model receives the exact raw stdout"
+        );
+    }
+    sess
+}
+
+fn bash_patch_roundtrip(light: bool, no_color: bool) {
+    let env = TestEnv::new("bash-patch");
+    let mut sess = bash_output_session(&env, BASH_PATCH, light, no_color);
+    for needle in ["+ ordinary before", "+ ordinary after", "- ordinary after"] {
+        assert_cell(&sess, needle, "Default", "Default");
+    }
+    let reference: Value =
+        serde_json::from_str(include_str!("fixtures/codex_default_colors.json")).unwrap();
+    let reference = &reference["themes"][usize::from(light)];
+    for (needle, fg, bg) in [
+        (
+            "OLD_MARKER",
+            "diff_removed_string",
+            if light {
+                "Rgb(255, 235, 233)"
+            } else {
+                "Rgb(74, 34, 29)"
+            },
+        ),
+        (
+            "NEW_MARKER",
+            "diff_added_string",
+            if light {
+                "Rgb(218, 251, 225)"
+            } else {
+                "Rgb(33, 58, 43)"
+            },
+        ),
+    ] {
+        assert_cell(
+            &sess,
+            needle,
+            if no_color {
+                "Default"
+            } else {
+                reference[fg].as_str().unwrap()
+            },
+            if no_color { "Default" } else { bg },
+        );
+    }
+    // A blank context row must count toward the first hunk, so the second
+    // hunk and the ordinary log after its declared end are classified correctly.
+    sess.render(|screen| {
+        let raw = screen.raw();
+        let (row, line) = raw
+            .rows(0, raw.size().1)
+            .enumerate()
+            .find(|(_, s)| s.contains("+new_tail"))
+            .unwrap();
+        let col = unicode_width::UnicodeWidthStr::width(&line[..line.find("+new_tail").unwrap()]);
+        let cell = raw
+            .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", cell.bgcolor()),
+            if no_color {
+                "Default"
+            } else if light {
+                "Rgb(218, 251, 225)"
+            } else {
+                "Rgb(33, 58, 43)"
+            }
+        );
+    });
+    finish(&mut sess);
+}
+
+#[test]
+fn dark_bash_diff_reuses_edit_palette_and_preserves_plain_logs() {
+    bash_patch_roundtrip(false, false);
+}
+#[test]
+fn light_bash_diff_reuses_edit_palette_and_preserves_plain_logs() {
+    bash_patch_roundtrip(true, false);
+}
+#[test]
+fn no_color_bash_diff_stays_plain() {
+    bash_patch_roundtrip(false, true);
+}
+
+#[test]
+fn bash_diff_preserves_native_ansi() {
+    let env = TestEnv::new("bash-native-ansi");
+    let output = format!("\x1b[36mNative cyan\x1b[0m\n{BASH_PATCH}");
+    let mut sess = bash_output_session(&env, &output, false, false);
+    assert_cell(&sess, "Native cyan", "Idx(6)", "Default");
+    assert_cell(&sess, "NEW_MARKER", "Default", "Default");
+    finish(&mut sess);
+}
+
+#[test]
+fn bash_diff_handles_new_deleted_and_truncated_files() {
+    let env = TestEnv::new("bash-patch-limits");
+    let output = "--- /dev/null\n+++ b/added.txt\n@@ -0,0 +1 @@\n+ADDED_FILE\n--- a/deleted.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-DELETED_FILE\n\\ No newline at end of file\n--- a/long.txt\n+++ b/long.txt\n@@ -1,40 +1,40 @@\n-TRUNCATED_OLD\n+TRUNCATED_NEW\n context\n".to_string()+&" context\n".repeat(40);
+    let mut sess = bash_output_session(&env, &output, false, false);
+    for (needle, foreground, background) in [
+        ("+ADDED_FILE", "Idx(2)", "Rgb(33, 58, 43)"),
+        ("-DELETED_FILE", "Idx(1)", "Rgb(74, 34, 29)"),
+        ("+TRUNCATED_NEW", "Idx(2)", "Rgb(33, 58, 43)"),
+    ] {
+        assert_cell(&sess, needle, foreground, background);
+    }
+    assert!(sess
+        .render(|s| s.raw().contents())
+        .contains("full output preserved in session"));
+    finish(&mut sess);
+}

@@ -1,6 +1,6 @@
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -13,6 +13,8 @@ mod color_math;
 mod color_theme;
 pub(crate) mod diff_colors;
 pub(crate) mod left_frame;
+pub(crate) mod spinner_progress;
+use spinner_progress::SpinnerProgress;
 pub(crate) mod terminal_palette;
 pub use color_theme::{theme, ColorTheme};
 
@@ -147,7 +149,7 @@ pub const PROMPT_PREFIX: &str = "\u{276f} ";
 #[derive(Clone)]
 pub struct SpinnerRef {
     pb: ProgressBar,
-    response_bytes: Arc<AtomicU32>,
+    progress: Arc<SpinnerProgress>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     phase: Option<Arc<Mutex<crate::repl_ui::TurnPhase>>>,
@@ -157,30 +159,12 @@ pub struct SpinnerRef {
 }
 
 impl SpinnerRef {
-    /// Create a `SpinnerRef` from shared atomics (used by iocraft
-    /// `TurnRenderer` which manages its own spinner rendering).
-    /// The `ProgressBar` is a hidden dummy — only the atomics matter.
-    pub fn from_state(
-        response_bytes: &Arc<AtomicU32>,
-        is_thinking: &Arc<AtomicBool>,
-        is_paused: &Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            pb: ProgressBar::hidden(),
-            response_bytes: Arc::clone(response_bytes),
-            is_thinking: Arc::clone(is_thinking),
-            is_paused: Arc::clone(is_paused),
-            phase: None,
-            managed: true,
-        }
-    }
-
     /// Create a `SpinnerRef` from a `SpinnerState`. Convenience wrapper
-    /// around `from_state` for the iocraft REPL path.
+    /// for the iocraft REPL path, sharing the same activity clock.
     pub fn from_spinner_state(state: &crate::repl_ui::SpinnerState) -> Self {
         Self {
             pb: ProgressBar::hidden(),
-            response_bytes: Arc::clone(&state.response_bytes),
+            progress: Arc::clone(&state.progress),
             is_thinking: Arc::new(AtomicBool::new(false)),
             is_paused: Arc::new(AtomicBool::new(false)),
             phase: Some(state.phase_arc()),
@@ -216,6 +200,7 @@ impl SpinnerRef {
 
     /// Resume the spinner after a pause.
     pub fn resume(&self) {
+        self.progress.record_activity();
         if let Some(ref phase) = self.phase {
             *phase.lock().unwrap() = crate::repl_ui::TurnPhase::Thinking;
         }
@@ -223,6 +208,7 @@ impl SpinnerRef {
     }
 
     pub fn set_thinking(&self, on: bool) {
+        self.progress.record_activity();
         if let Some(ref phase) = self.phase {
             *phase.lock().unwrap() = if on {
                 crate::repl_ui::TurnPhase::Reasoning
@@ -244,14 +230,14 @@ impl SpinnerRef {
     }
 
     pub fn add_response_bytes(&self, n: u32) {
-        self.response_bytes.fetch_add(n, Ordering::Relaxed);
+        self.progress.add_response_bytes(n);
     }
 }
 
 /// Owns the spinner lifecycle. Created in `run_turn()`, shared via `SpinnerRef`.
 pub struct SpinnerHandle {
     pb: ProgressBar,
-    response_bytes: Arc<AtomicU32>,
+    progress: Arc<SpinnerProgress>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
     token_budget: Option<u32>,
@@ -269,7 +255,6 @@ impl SpinnerHandle {
     const FRAMES_THINKING: &[&str] = &["◐", "◓", "◑", "◒"];
     const LABEL_THINKING: &str = "🧠 Reasoning...";
     const SHOW_TOKENS_AFTER_SECS: f64 = 1.0;
-    const STALL_THRESHOLD_SECS: f64 = 3.0;
 
     #[must_use]
     pub fn new(
@@ -281,14 +266,14 @@ impl SpinnerHandle {
         let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stdout());
         pb.set_style(ProgressStyle::with_template("{msg}").unwrap());
 
-        let response_bytes = Arc::new(AtomicU32::new(0));
+        let progress = Arc::new(SpinnerProgress::new());
         let is_thinking = Arc::new(AtomicBool::new(false));
         let is_paused = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
 
         let mut handle = Self {
             pb,
-            response_bytes,
+            progress,
             is_thinking,
             is_paused,
             token_budget,
@@ -308,7 +293,7 @@ impl SpinnerHandle {
     pub fn spinner_ref(&self) -> SpinnerRef {
         SpinnerRef {
             pb: self.pb.clone(),
-            response_bytes: Arc::clone(&self.response_bytes),
+            progress: Arc::clone(&self.progress),
             is_thinking: Arc::clone(&self.is_thinking),
             is_paused: Arc::clone(&self.is_paused),
             phase: None,
@@ -319,7 +304,7 @@ impl SpinnerHandle {
     fn start_updater(&mut self) {
         let pb = self.pb.clone();
         let stop = Arc::clone(&self.stop);
-        let response_bytes = Arc::clone(&self.response_bytes);
+        let progress = Arc::clone(&self.progress);
         let is_thinking = Arc::clone(&self.is_thinking);
         let is_paused = Arc::clone(&self.is_paused);
         let label = self.label.clone();
@@ -329,19 +314,8 @@ impl SpinnerHandle {
 
         self.updater = Some(std::thread::spawn(move || {
             let mut frame_index: usize = 0;
-            let mut last_bytes_seen: u32 = 0;
-            let mut last_bytes_change = Instant::now();
-            let mut was_paused = false;
-
             while !stop.load(Ordering::SeqCst) {
                 let paused = is_paused.load(Ordering::SeqCst);
-                // Reset stall timer when resuming from a pause (tool
-                // execution just finished).
-                if was_paused && !paused {
-                    last_bytes_change = Instant::now();
-                }
-                was_paused = paused;
-
                 if !paused {
                     let thinking = is_thinking.load(Ordering::SeqCst);
                     let frames: &[&str] = if thinking {
@@ -365,7 +339,7 @@ impl SpinnerHandle {
                     }
                     let _ = write!(line, " ({elapsed:.1}s)");
 
-                    let bytes = response_bytes.load(Ordering::Relaxed);
+                    let bytes = progress.response_bytes();
                     if bytes > 0 && elapsed >= SpinnerHandle::SHOW_TOKENS_AFTER_SECS {
                         let approx_tokens = bytes / 4;
                         if let Some(budget) = token_budget {
@@ -393,21 +367,7 @@ impl SpinnerHandle {
                         }
                     }
 
-                    // Stall detection
-                    if bytes != last_bytes_seen {
-                        last_bytes_seen = bytes;
-                        last_bytes_change = Instant::now();
-                    }
-                    let is_stalled = bytes > 0
-                        && !thinking
-                        && last_bytes_change.elapsed().as_secs_f64()
-                            >= SpinnerHandle::STALL_THRESHOLD_SECS;
-
-                    let color = if is_stalled {
-                        ansi_fg(theme().warning)
-                    } else {
-                        ansi_fg(theme().info())
-                    };
+                    let color = theme().spinner_fg(progress.is_stalled(thinking));
                     let colored = format!("{color}{line}{RESET}");
                     pb.set_message(colored);
                     pb.tick();

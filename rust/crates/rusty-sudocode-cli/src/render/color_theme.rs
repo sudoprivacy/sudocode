@@ -139,10 +139,62 @@ impl ColorTheme {
         }
     }
 
+    /// Diff markers and fills are shared by Edit previews and shell patches.
+    pub(super) fn diff_sign_color(&self, sign: char, support: ColorSupport) -> Option<Color> {
+        match (sign, support) {
+            (_, ColorSupport::NoColor) => None,
+            ('+', _) => Some(Color::DarkGreen),
+            ('-', _) => Some(Color::DarkRed),
+            _ => None,
+        }
+    }
+
+    /// File headers use the existing identity accent; hunk metadata is muted.
+    pub fn diff_header_fg(&self, is_file: bool) -> String {
+        let support = ColorSupport::detect();
+        ansi_fg(support.color(if is_file { self.link } else { self.muted }))
+    }
+
+    /// Codex-compatible diff fills, resolved with the rest of the color theme.
+    pub(super) fn diff_background(&self, sign: char, support: ColorSupport) -> Option<Color> {
+        let rgb = match (sign, self.light_background) {
+            ('+', false) => (33, 58, 43),
+            ('-', false) => (74, 34, 29),
+            ('+', true) => (218, 251, 225),
+            ('-', true) => (255, 235, 233),
+            _ => return None,
+        };
+        match support {
+            ColorSupport::TrueColor => Some(Color::Rgb {
+                r: rgb.0,
+                g: rgb.1,
+                b: rgb.2,
+            }),
+            ColorSupport::Ansi256 => Some(Color::AnsiValue(match (sign, self.light_background) {
+                ('+', false) => 22,
+                ('-', false) => 52,
+                ('+', true) => 194,
+                _ => 224,
+            })),
+            ColorSupport::Ansi16 | ColorSupport::NoColor => None,
+        }
+    }
+
     /// Info — active spinner, thinking indicator and informational labels.
     /// Shares the soft-green palette source with completed tool borders.
     pub fn info(&self) -> Color {
         self.soft_green(ColorSupport::detect())
+    }
+
+    /// Spinner activity and waiting share the info/warning semantic roles.
+    pub fn spinner_fg(&self, is_warning: bool) -> String {
+        let support = ColorSupport::detect();
+        let color = if is_warning {
+            self.warning
+        } else {
+            self.soft_green(support)
+        };
+        ansi_fg(support.color(color))
     }
 
     /// Inline-code and file-link foreground from the selected syntax asset.

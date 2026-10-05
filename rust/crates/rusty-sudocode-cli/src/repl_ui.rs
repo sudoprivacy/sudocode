@@ -23,7 +23,7 @@
 
 use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -155,7 +155,7 @@ pub enum TurnPhase {
 /// by the runner thread.
 #[derive(Clone)]
 pub struct SpinnerState {
-    pub response_bytes: Arc<AtomicU32>,
+    pub(crate) progress: Arc<crate::render::spinner_progress::SpinnerProgress>,
     phase: Arc<Mutex<TurnPhase>>,
     active: Arc<AtomicBool>,
     start_time: Arc<Mutex<Instant>>,
@@ -169,7 +169,7 @@ impl SpinnerState {
     #[must_use]
     pub fn new_inactive() -> Self {
         Self {
-            response_bytes: Arc::new(AtomicU32::new(0)),
+            progress: Arc::new(crate::render::spinner_progress::SpinnerProgress::new()),
             phase: Arc::new(Mutex::new(TurnPhase::Thinking)),
             active: Arc::new(AtomicBool::new(false)),
             start_time: Arc::new(Mutex::new(Instant::now())),
@@ -181,7 +181,7 @@ impl SpinnerState {
 
     /// Reset and activate for a new turn.
     pub fn start_turn(&self, label: &str, model: Option<&str>, token_budget: Option<u32>) {
-        self.response_bytes.store(0, Ordering::SeqCst);
+        self.progress.reset();
         *self.phase.lock().unwrap() = TurnPhase::Thinking;
         *self.start_time.lock().unwrap() = Instant::now();
         *self.label.lock().unwrap() = label.to_string();
@@ -265,7 +265,7 @@ impl SpinnerState {
         }
         let _ = write!(line, " ({elapsed:.1}s)");
 
-        let bytes = self.response_bytes.load(Ordering::Relaxed);
+        let bytes = self.progress.response_bytes();
         let token_budget = *self.token_budget.lock().unwrap();
         if bytes > 0 && elapsed >= 1.0 {
             let approx_tokens = bytes / 4;
@@ -297,18 +297,8 @@ impl SpinnerState {
             }
         }
 
-        let t = crate::render::theme();
-        let color = if is_retry {
-            crate::render::ansi_fg(t.warning)
-        } else {
-            // Stall detection: yellow when no new bytes for 3+ seconds.
-            let is_stalled = bytes > 0 && !is_reasoning && elapsed > 3.0;
-            if is_stalled {
-                crate::render::ansi_fg(t.warning)
-            } else {
-                crate::render::ansi_fg(t.info())
-            }
-        };
+        let color =
+            crate::render::theme().spinner_fg(is_retry || self.progress.is_stalled(is_reasoning));
         format!("{color}{line}{}", crate::render::RESET)
     }
 }

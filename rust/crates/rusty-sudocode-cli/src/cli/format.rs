@@ -1142,7 +1142,7 @@ fn command_body_preamble(highlighted: &str) -> String {
 }
 
 /// Shared stdout/stderr body builder used by [`bash_card`]. Combines the two
-/// streams, drops blank lines, and applies the per-tool line cap from
+/// streams, drops empty lines, and applies the per-tool line cap from
 /// `TOOL_OUTPUT_DISPLAY_MAX_LINES`. Command input is kept separately so it
 /// can be laid out at the current terminal width, even for failed calls.
 /// Returns a [`ToolCardContent`]; the L-frame prefix is applied later by
@@ -1153,7 +1153,8 @@ fn stdout_stderr_card(header: String, stdout: &str, stderr: &str) -> ToolCardCon
     let all_output: Vec<&str> = stdout
         .lines()
         .chain(stderr.lines())
-        .filter(|line| !line.trim().is_empty())
+        // A space-only row can be significant unified-diff context.
+        .filter(|line| !line.is_empty())
         .collect();
 
     if all_output.is_empty() {
@@ -1170,7 +1171,9 @@ fn stdout_stderr_card(header: String, stdout: &str, stderr: &str) -> ToolCardCon
     let preview_count = TOOL_OUTPUT_DISPLAY_MAX_LINES;
     let mut body = String::new();
 
-    for (i, line) in all_output.iter().take(preview_count).enumerate() {
+    let visible = &all_output[..all_output.len().min(preview_count)];
+    let highlighted = super::unified_diff::highlight(visible);
+    for (i, line) in highlighted.iter().enumerate() {
         let truncated = truncate_to_width(line, max_content_width);
         if i > 0 {
             body.push('\n');
@@ -1622,7 +1625,7 @@ fn render_colored_diff(
         .chain(new[..new_count].iter().map(|line| ('+', *line)))
         .chain(post.iter().map(|line| (' ', *line)))
         .collect();
-    let mut rendered = crate::render::diff_colors::render_rows(&rows, language);
+    let mut rendered = crate::render::diff_colors::render_rows(&rows, language, " ");
     // Insert from the end so the earlier row offsets remain valid.
     if new_count < new.len() {
         rendered.insert(

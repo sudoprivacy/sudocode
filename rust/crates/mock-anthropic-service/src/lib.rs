@@ -179,6 +179,8 @@ impl Drop for MockAnthropicService {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     StreamingText,
+    SpinnerActivity,
+    BashRenderFixture,
     /// A `thinking` block streamed as several `thinking_delta`s (one of them
     /// spanning a newline, one splitting mid-word) followed by a `signature_delta`
     /// and then a normal text block. The only scenario that exercises the
@@ -329,6 +331,8 @@ impl Scenario {
     fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "streaming_text" => Some(Self::StreamingText),
+            "spinner_activity" => Some(Self::SpinnerActivity),
+            "bash_render_fixture" => Some(Self::BashRenderFixture),
             "thinking_then_text" => Some(Self::ThinkingThenText),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
             "skill_read_roundtrip" => Some(Self::SkillReadRoundtrip),
@@ -403,6 +407,8 @@ impl Scenario {
     fn name(self) -> &'static str {
         match self {
             Self::StreamingText => "streaming_text",
+            Self::SpinnerActivity => "spinner_activity",
+            Self::BashRenderFixture => "bash_render_fixture",
             Self::ThinkingThenText => "thinking_then_text",
             Self::ReadFileRoundtrip => "read_file_roundtrip",
             Self::SkillReadRoundtrip => "skill_read_roundtrip",
@@ -539,6 +545,18 @@ async fn handle_connection(
         raw_body,
     });
 
+    if scenario == Scenario::SpinnerActivity && request.stream {
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        for (delay, chunk) in spinner_activity_stream() {
+            tokio::time::sleep(delay).await;
+            socket.write_all(chunk.as_bytes()).await?;
+        }
+        return Ok(());
+    }
     if scenario == Scenario::DelayedText {
         tokio::time::sleep(DELAYED_TEXT_LATENCY).await;
     }
@@ -1293,6 +1311,18 @@ fn read_roundtrip_input(scenario: Scenario) -> Value {
 
 fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
     match scenario {
+        Scenario::SpinnerActivity => spinner_activity_stream()
+            .into_iter()
+            .map(|(_, chunk)| chunk)
+            .collect(),
+        Scenario::BashRenderFixture => match latest_tool_result(request) {
+            None => tool_use_sse(
+                "toolu_render_fixture",
+                "bash",
+                &[&json!({"command": "cat render-output.txt"}).to_string()],
+            ),
+            Some(_) => final_text_sse("Render fixture done."),
+        },
         Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
             streaming_text_sse()
         }
@@ -1848,6 +1878,19 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
 #[allow(clippy::too_many_lines)]
 fn build_message_response(request: &MessageRequest, scenario: Scenario) -> MessageResponse {
     match scenario {
+        Scenario::SpinnerActivity => text_message_response(
+            "msg_activity",
+            "progress progress progress progress progress resumed",
+        ),
+        Scenario::BashRenderFixture => match latest_tool_result(request) {
+            None => tool_message_response(
+                "msg_render_fixture",
+                "toolu_render_fixture",
+                "bash",
+                json!({"command": "cat render-output.txt"}),
+            ),
+            Some(_) => text_message_response("msg_render_done", "Render fixture done."),
+        },
         Scenario::ThinkingThenText => {
             // The non-streaming twin of `thinking_then_text_sse`, so the
             // mock-parity harness sees the same two blocks on both paths.
@@ -2535,6 +2578,8 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
 fn request_id_for(scenario: Scenario) -> &'static str {
     match scenario {
         Scenario::StreamingText => "req_streaming_text",
+        Scenario::SpinnerActivity => "req_spinner_activity",
+        Scenario::BashRenderFixture => "req_bash_render_fixture",
         Scenario::ThinkingThenText => "req_thinking_then_text",
         Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
@@ -3170,6 +3215,37 @@ fn tool_uses_sse_with_context(tool_uses: &[ToolUseSse<'_>], input_tokens: u32) -
     );
     append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));
     body
+}
+
+/// Exercise a real HTTP stream: initial wait, steady progress beyond three
+/// seconds, a pause beyond the stall threshold, then a new delta and completion.
+fn spinner_activity_stream() -> Vec<(Duration, String)> {
+    let template = final_text_sse("");
+    let (prefix, rest) = template.split_once("event: content_block_delta").unwrap();
+    let (_, suffix) = rest.split_once("event: content_block_stop").unwrap();
+    let mut chunks = vec![(Duration::ZERO, prefix.to_string())];
+    for index in 0..6 {
+        let mut delta = String::new();
+        append_sse(
+            &mut delta,
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": if index == 5 { "resumed" } else { "progress " }}
+            }),
+        );
+        let millis = match index {
+            0 => 4000,
+            5 => 4500,
+            _ => 1000,
+        };
+        chunks.push((Duration::from_millis(millis), delta));
+    }
+    chunks.push((
+        Duration::from_secs(2),
+        format!("event: content_block_stop{suffix}"),
+    ));
+    chunks
 }
 
 fn final_text_sse(text: &str) -> String {

@@ -1118,7 +1118,11 @@ fn live_directory_unions_local_and_nexus_peers() {
         },
         Member {
             label: "nexus",
-            mailbox: Arc::new(Mailbox::over_nexus(Arc::clone(&client), me.clone(), auth.clone())),
+            mailbox: Arc::new(Mailbox::over_nexus(
+                Arc::clone(&client),
+                me.clone(),
+                auth.clone(),
+            )),
         },
     ]);
 
@@ -1127,7 +1131,9 @@ fn live_directory_unions_local_and_nexus_peers() {
     let deadline = Instant::now() + Duration::from_millis(DELIVERY_WAIT_MS);
     let mut recips = Vec::new();
     while Instant::now() < deadline {
-        recips = directory.list_recipients().expect("enumerate the directory");
+        recips = directory
+            .list_recipients()
+            .expect("enumerate the directory");
         let has_local = recips.iter().any(|r| r.name == local_peer);
         let has_nexus = recips.iter().any(|r| r.name == nexus_peer);
         if has_local && has_nexus {
@@ -1140,12 +1146,20 @@ fn live_directory_unions_local_and_nexus_peers() {
         .iter()
         .find(|r| r.name == local_peer)
         .unwrap_or_else(|| panic!("the local peer must appear; listing was {recips:?}"));
-    assert_eq!(local_row.sources, vec!["local"], "the local peer is tagged local-only");
+    assert_eq!(
+        local_row.sources,
+        vec!["local"],
+        "the local peer is tagged local-only"
+    );
     let nexus_row = recips
         .iter()
         .find(|r| r.name == nexus_peer)
         .unwrap_or_else(|| panic!("the nexus peer must appear; listing was {recips:?}"));
-    assert_eq!(nexus_row.sources, vec!["nexus"], "the nexus peer is tagged nexus-only");
+    assert_eq!(
+        nexus_row.sources,
+        vec!["nexus"],
+        "the nexus peer is tagged nexus-only"
+    );
 
     let _ = std::fs::remove_dir_all(&pair_root);
 }

@@ -182,6 +182,7 @@ enum Scenario {
     SpinnerActivity,
     BashRenderFixture,
     TranscriptSpacing,
+    ToolConcurrency,
     /// A `thinking` block streamed as several `thinking_delta`s (one of them
     /// spanning a newline, one splitting mid-word) followed by a `signature_delta`
     /// and then a normal text block. The only scenario that exercises the
@@ -334,6 +335,7 @@ impl Scenario {
             "streaming_text" => Some(Self::StreamingText),
             "spinner_activity" => Some(Self::SpinnerActivity),
             "bash_render_fixture" => Some(Self::BashRenderFixture),
+            "tool_concurrency" => Some(Self::ToolConcurrency),
             "transcript_spacing" => Some(Self::TranscriptSpacing),
             "thinking_then_text" => Some(Self::ThinkingThenText),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
@@ -411,6 +413,7 @@ impl Scenario {
             Self::StreamingText => "streaming_text",
             Self::SpinnerActivity => "spinner_activity",
             Self::BashRenderFixture => "bash_render_fixture",
+            Self::ToolConcurrency => "tool_concurrency",
             Self::TranscriptSpacing => "transcript_spacing",
             Self::ThinkingThenText => "thinking_then_text",
             Self::ReadFileRoundtrip => "read_file_roundtrip",
@@ -679,6 +682,46 @@ fn normalize_system_field(raw_body: &str) -> String {
 
 fn find_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+struct ConcurrencyCall {
+    id: String,
+    name: String,
+    input: Value,
+}
+
+// The PTY fixture supplies the provider's batch, then drives actual tools.
+// It controls arrival order without substituting a fake executor or clock.
+fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|m| m.content.iter().rev())
+        .find_map(|block| {
+            let InputContentBlock::Text { text } = block else {
+                return None;
+            };
+            let (_, batch) = text.split_once("TOOL_BATCH:")?;
+            serde_json::Deserializer::from_str(batch)
+                .into_iter::<Vec<Value>>()
+                .next()?
+                .ok()
+        })
+        .expect("tool_concurrency requires TOOL_BATCH JSON")
+        .into_iter()
+        .map(|call| ConcurrencyCall {
+            id: call["id"].as_str().expect("call id").to_string(),
+            name: call["name"].as_str().expect("call name").to_string(),
+            input: call["input"].clone(),
+        })
+        .collect()
+}
+
+fn concurrency_batch_complete(request: &MessageRequest) -> bool {
+    concurrency_calls(request).iter().all(|call| request.messages.iter().flat_map(|m| &m.content).any(|block| {
+        matches!(block, InputContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &call.id)
+    }))
 }
 
 fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
@@ -1318,6 +1361,24 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             .into_iter()
             .map(|(_, chunk)| chunk)
             .collect(),
+        Scenario::ToolConcurrency => match concurrency_batch_complete(request) {
+            false => {
+                let calls = concurrency_calls(request);
+                let inputs: Vec<_> = calls.iter().map(|call| call.input.to_string()).collect();
+                let chunks: Vec<_> = inputs.iter().map(|input| [input.as_str()]).collect();
+                let uses: Vec<_> = calls
+                    .iter()
+                    .zip(&chunks)
+                    .map(|(call, chunks)| ToolUseSse {
+                        tool_id: &call.id,
+                        tool_name: &call.name,
+                        partial_json_chunks: chunks,
+                    })
+                    .collect();
+                tool_uses_sse(&uses)
+            }
+            true => final_text_sse("Concurrency batch done."),
+        },
         Scenario::TranscriptSpacing => match latest_tool_result(request) {
             None => tool_uses_sse_with_prelude(
                 &[
@@ -1904,6 +1965,21 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             "msg_activity",
             "progress progress progress progress progress resumed",
         ),
+        Scenario::ToolConcurrency => match concurrency_batch_complete(request) {
+            false => {
+                let calls = concurrency_calls(request);
+                let uses: Vec<_> = calls
+                    .iter()
+                    .map(|call| ToolUseMessage {
+                        tool_id: &call.id,
+                        tool_name: &call.name,
+                        input: call.input.clone(),
+                    })
+                    .collect();
+                tool_message_response_many("msg_concurrency", &uses)
+            }
+            true => text_message_response("msg_concurrency_done", "Concurrency batch done."),
+        },
         Scenario::TranscriptSpacing => match latest_tool_result(request) {
             None => {
                 let mut response = tool_message_response_many(
@@ -2629,6 +2705,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::StreamingText => "req_streaming_text",
         Scenario::SpinnerActivity => "req_spinner_activity",
         Scenario::BashRenderFixture => "req_bash_render_fixture",
+        Scenario::ToolConcurrency => "req_tool_concurrency",
         Scenario::TranscriptSpacing => "req_transcript_spacing",
         Scenario::ThinkingThenText => "req_thinking_then_text",
         Scenario::DelayedText => "req_delayed_text",

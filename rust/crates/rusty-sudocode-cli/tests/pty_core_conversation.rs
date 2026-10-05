@@ -143,8 +143,10 @@ fn multi_tool_roundtrip() {
         &prompt,
     ]);
 
+    sess.resize(120, 120).unwrap();
+
     // Agent trigger: verify tool usage in PTY output.
-    // Mock: deterministic tool call order. Live: model may call tools
+    // Mock: deterministic requests, independently completing tools. Live: model may call tools
     // in any order or use different tools — verify at least one tool
     // call appears and the response references the fixture content.
     sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
@@ -152,10 +154,16 @@ fn multi_tool_roundtrip() {
         // The card header now shows the canonical tool label (`Read`, `Grep`),
         // not the wire name (`read_file`, `grep_search`), consistently in the
         // running overlay and the completed scrollback card.
-        sess.expect("(?i)read")
-            .expect("should see read tool call (agent trigger)");
-        sess.expect("(?i)grep")
-            .expect("should see grep_search tool call (agent trigger)");
+        common::expect_screen(
+            &sess,
+            |screen| {
+                screen.contains("╭─ Read fixture.txt")
+                    && screen.contains("╭─ Grep(")
+                    && screen.contains("multi-tool roundtrip complete:")
+            },
+            common::at_least(Duration::from_secs(60)),
+            "both completed tool identities and final response, in any order",
+        );
     } else {
         sess.expect("(?i)(read_file|grep|fixture|parity)")
             .expect("should see tool call or response referencing fixture");

@@ -696,14 +696,15 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     );
     expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
     let header = format!("Bash({CODEX_BASH_SINGLE})");
-    let running = if no_color {
+    // The PreToolUse hook is holding this request before execution.
+    let queued = if no_color {
         "Default"
     } else if light {
-        "Idx(94)"
+        "Idx(241)"
     } else {
-        "Idx(214)"
+        "Idx(247)"
     };
-    expect_tool_border(&sess, &header, running, no_color);
+    expect_tool_border(&sess, &header, queued, no_color);
     assert_running_title_resizes(&mut sess, &header, light, no_color);
     sess.send("\x1b[200~draft '$HOME' && echo hi\x1b[201~")
         .unwrap();
@@ -716,7 +717,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     assert_cell(&sess, "draft '$HOME' && echo hi", "Default", "Default");
     sess.resize(80, 78).unwrap();
     expect_bash_sample(&sess, &samples[0], "Bash(", no_color);
-    expect_tool_border(&sess, &header, running, no_color);
+    expect_tool_border(&sess, &header, queued, no_color);
     sess.send("\x15").unwrap();
     common::expect_screen(
         &sess,

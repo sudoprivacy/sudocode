@@ -314,11 +314,11 @@ fn run_duet(transport: &Transport) {
     );
 
     // ── 4. The receiver surfaces it ────────────────────────────────────────
-    // The REPL announces a peer message as `📨 A2A from <name>: <body>`. Seeing
+    // The REPL frames a peer message under `Message from <name>`. Seeing
     // it is the whole chain: the tool resolved the recipient's path, the
     // transport carried the envelope, the parked receiver woke, and the
     // coordinator loop took the message.
-    expect_on_screen(&mut receiver, &format!("A2A from {expected_from}"));
+    expect_on_screen(&mut receiver, &format!("Message from {expected_from}"));
     expect_on_screen(&mut receiver, "hello from unified send");
 
     // The receiver's OWN read position must advance past what it consumed.

@@ -23,7 +23,7 @@
 //! tells the receiver how to behave: the inbound envelope reaches it through
 //! `compose_next_turn_from_envelopes`, and whether it answers is its own
 //! decision under its own system prompt. So the assertion is on what the
-//! runtime prints — `📨 A2A from <sender>` — and NOT on the model choosing to
+//! runtime prints — `Message from <sender>` — and NOT on the model choosing to
 //! reply. A test that demanded a reply would be grading the model, and would
 //! fail for reasons that have nothing to do with the transport.
 //!
@@ -222,7 +222,7 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
     // The node stamps `from` from the presented certificate, so the name on the
     // receiver's screen is the SENDER's true identity — never what the sender
     // claimed. That is the auth-on property this test exists for.
-    expect_on_screen(&mut receiver, &format!("A2A from {SENDER}"));
+    expect_on_screen(&mut receiver, &format!("Message from {SENDER}"));
     expect_on_screen(&mut receiver, "LIVE-DUET-PROBE");
 
     // Print the receiving end on SUCCESS too, not only when it fails. What this

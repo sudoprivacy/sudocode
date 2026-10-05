@@ -309,29 +309,31 @@ fn up_arrow_recall_places_caret_at_end_of_text() {
     exit(&mut sess);
 }
 
-/// Repeated recall preserves submit order and stops at a drained queue.
+/// One `↑` recalls ALL queued human messages at once (pop-all), joined in
+/// submit order, oldest-at-top — matching Claude Code's `popAllEditable`.
 #[test]
-fn up_arrow_twice_stacks_two_queued_humans_in_order() {
+fn up_arrow_recalls_all_queued_humans_in_submit_order() {
     const FIRST: &str = "FIRST-QUEUED";
     const SECOND: &str = "SECOND-QUEUED";
-    let (_env, mut sess) = queued_session("a2a-up-stack", &[FIRST, SECOND]);
-    sess.send("\x1b[A").expect("recall newest");
-    wait_for_screen(&sess, "newest recalled first", |screen| {
-        input_text(screen) == SECOND && !has_chip(screen, SECOND) && has_chip(screen, FIRST)
-    });
-    sess.send("\x1b[A").expect("recall older");
+    let (_env, mut sess) = queued_session("a2a-up-popall", &[FIRST, SECOND]);
     let stacked = format!("{FIRST}\n{SECOND}");
-    wait_for_screen(&sess, "both messages stacked in submit order", |screen| {
-        input_text(screen) == stacked && !has_chip(screen, FIRST) && !has_chip(screen, SECOND)
-    });
-    sess.send("!").expect("type at end of stacked input");
-    wait_for_screen(&sess, "stack caret must remain on final line", |screen| {
+    sess.send("\x1b[A").expect("recall all queued humans");
+    wait_for_screen(
+        &sess,
+        "one ↑ pulls back both messages in submit order, both chips cleared",
+        |screen| {
+            input_text(screen) == stacked && !has_chip(screen, FIRST) && !has_chip(screen, SECOND)
+        },
+    );
+    // Caret sits at the end: a typed char appends to the last line.
+    sess.send("!").expect("type at end of recalled stack");
+    wait_for_screen(&sess, "caret at end of recalled block", |screen| {
         input_text(screen) == format!("{stacked}!")
     });
-    // Submit and recall again: verify that the composed multiline text goes
-    // through the real queue without losing either message or its newline.
+    // Resubmit the edited multiline block and recall it again: proves the
+    // composed text round-trips through the real queue without losing a line.
     sess.send("\r").expect("resubmit stack");
-    wait_for_screen(&sess, "edited stack queued", |screen| {
+    wait_for_screen(&sess, "edited stack re-queued", |screen| {
         input_text(screen).is_empty() && has_chip(screen, FIRST)
     });
     sess.send("\x1b[A").expect("recall edited stack");
@@ -341,56 +343,33 @@ fn up_arrow_twice_stacks_two_queued_humans_in_order() {
     exit(&mut sess);
 }
 
-/// Editing or pasting ends recall mode: ↑ moves the cursor, not another item.
+/// After pop-all recall, editing the buffer then pressing `↑` does NOT pull
+/// more queued items (the queue's human side is already empty) — it just moves
+/// the cursor. Guards that recall took everything in one step and that a later
+/// ↑ on edited text is ordinary cursor movement, not another recall.
 #[test]
-fn editing_recalled_input_keeps_older_message_queued() {
-    for (label, edit) in [("typed", "!"), ("pasted", "\x1b[200~!\x1b[201~")] {
-        const OLDER: &str = "OLDER-QUEUED";
-        const NEWER: &str = "NEWER-QUEUED";
-        let (_env, mut sess) = queued_session(label, &[OLDER, NEWER]);
-        sess.send("\x1b[A").expect("recall newest");
-        wait_for_screen(&sess, "newest recalled", |screen| {
-            input_text(screen) == NEWER
-        });
-        sess.send(edit).expect("edit recalled input");
-        wait_for_screen(&sess, "edit applied", |screen| {
-            input_text(screen) == format!("{NEWER}!")
-        });
-        sess.send("\x1b[A@").expect("Up then type sentinel");
-        wait_for_screen(
-            &sess,
-            "edited input must leave older item queued",
-            |screen| {
-                let input = input_text(screen);
-                input.contains(NEWER)
-                    && input.contains('!')
-                    && input.contains('@')
-                    && !input.contains(OLDER)
-                    && has_chip(screen, OLDER)
-            },
-        );
-        exit(&mut sess);
-    }
-}
-
-/// Down exits recall mode and restores ordinary cursor navigation.
-#[test]
-fn down_after_recall_keeps_older_message_queued() {
-    const OLDER: &str = "OLDER-QUEUED";
-    const NEWER: &str = "NEWER-QUEUED";
-    let (_env, mut sess) = queued_session("a2a-up-down", &[OLDER, NEWER]);
-    sess.send("\x1b[A").expect("recall newest");
-    wait_for_screen(&sess, "newest recalled", |screen| {
-        input_text(screen) == NEWER
+fn up_arrow_after_pop_all_does_not_recall_again() {
+    const FIRST: &str = "FIRST-QUEUED";
+    const SECOND: &str = "SECOND-QUEUED";
+    let (_env, mut sess) = queued_session("a2a-up-norepeat", &[FIRST, SECOND]);
+    let stacked = format!("{FIRST}\n{SECOND}");
+    sess.send("\x1b[A").expect("recall all");
+    wait_for_screen(&sess, "both recalled at once", |screen| {
+        input_text(screen) == stacked && !has_chip(screen, FIRST) && !has_chip(screen, SECOND)
     });
-    sess.send("\x1b[B\x1b[A@")
-        .expect("Down, Up then type sentinel");
-    wait_for_screen(&sess, "Down must end queue recall", |screen| {
+    // Edit, then ↑ + type a sentinel: the buffer keeps its content (no new
+    // recall appears), proving the queue was fully drained by the first ↑.
+    sess.send("!").expect("edit recalled stack");
+    wait_for_screen(&sess, "edit applied", |screen| {
+        input_text(screen) == format!("{stacked}!")
+    });
+    sess.send("\x1b[A@").expect("Up then sentinel");
+    wait_for_screen(&sess, "no second recall; content intact", |screen| {
         let input = input_text(screen);
-        input.contains(NEWER)
+        input.contains(FIRST)
+            && input.contains(SECOND)
+            && input.contains('!')
             && input.contains('@')
-            && !input.contains(OLDER)
-            && has_chip(screen, OLDER)
     });
     exit(&mut sess);
 }

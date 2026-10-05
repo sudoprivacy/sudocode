@@ -3155,7 +3155,7 @@ fn run_repl_iocraft_dispatch(
             coord
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .dequeue_last_human()
+                .dequeue_all_human()
         })
     };
     let repl = repl_ui::spawn_repl_ui(&permission_label, &banner, seed_todos, Some(dequeue_hook));

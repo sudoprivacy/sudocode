@@ -285,12 +285,33 @@ impl TurnInputCoordinator {
     /// the newest Human item is removed. Returns `None` when the queue holds no
     /// Human item (all-Peer or empty), in which case the caller falls through
     /// to its normal empty-buffer `↑` behavior (prompt history).
-    pub fn dequeue_last_human(&mut self) -> Option<String> {
-        let idx = self
-            .queue
-            .iter()
-            .rposition(|q| q.kind == QueuedKind::Human)?;
-        self.queue.remove(idx).map(|q| q.text)
+    /// Up-arrow recall: remove **all** queued human items and return their
+    /// text joined by newlines in submit (FIFO) order, so the input slot reads
+    /// oldest-at-top. Mirrors Claude Code's `popAllEditable`: one `↑` pulls
+    /// back everything the user typed while the turn ran, in one step — not one
+    /// item per press.
+    ///
+    /// Peer (inbound A2A) items are skipped — machine-delivered, not typed —
+    /// and left in the queue in their original positions. Returns `None` when
+    /// the queue holds no human item (all-Peer or empty), so the caller falls
+    /// through to its normal empty-buffer `↑` behavior (prompt history).
+    pub fn dequeue_all_human(&mut self) -> Option<String> {
+        if !self.queue.iter().any(|q| q.kind == QueuedKind::Human) {
+            return None;
+        }
+        // Partition in place: collect human texts in order, retain every
+        // non-human item (Peer / Subagent — machine-delivered, not typed).
+        let mut humans = Vec::new();
+        let mut rest = VecDeque::with_capacity(self.queue.len());
+        for item in std::mem::take(&mut self.queue) {
+            if item.kind == QueuedKind::Human {
+                humans.push(item.text);
+            } else {
+                rest.push_back(item);
+            }
+        }
+        self.queue = rest;
+        Some(humans.join("\n"))
     }
 
     /// Drop everything without running any of it. Used by shutdown / /clear.
@@ -384,41 +405,49 @@ mod queue_docs {
     }
 
     #[test]
-    fn dequeue_last_human_pops_newest_for_up_arrow_refill() {
+    fn dequeue_all_human_returns_all_in_submit_order() {
+        // One ↑ pops ALL human items at once, joined oldest-at-top (submit
+        // order), and empties the human side of the queue.
         let mut c = TurnInputCoordinator::new();
         let mode = QueueMode::Queue;
         c.submit_during_turn(human("first"), mode);
         c.submit_during_turn(human("second"), mode);
         c.submit_during_turn(human("third"), mode);
-        assert_eq!(c.dequeue_last_human(), Some("third".to_string()));
-        assert_eq!(c.dequeue_last_human(), Some("second".to_string()));
-        assert_eq!(c.peek_display(), vec!["first"]);
+        assert_eq!(
+            c.dequeue_all_human(),
+            Some("first\nsecond\nthird".to_string())
+        );
+        assert_eq!(c.pending(), 0);
+        // Nothing left to recall.
+        assert_eq!(c.dequeue_all_human(), None);
     }
 
     #[test]
-    fn dequeue_last_human_skips_trailing_peer_and_leaves_it_queued() {
-        // A peer (a2a) message queued AFTER a human one must be skipped: `↑`
-        // pulls the human text into the edit buffer and the peer item stays in
-        // the queue, in place, to flush on turn end.
+    fn dequeue_all_human_skips_peers_and_leaves_them_queued() {
+        // Peer (a2a) items interleaved with humans must be skipped: `↑` pulls
+        // only the human texts (in order) and every peer item stays in the
+        // queue, in its original relative order, to flush on turn end.
         let mut c = TurnInputCoordinator::new();
         let mode = QueueMode::Queue;
-        c.submit_during_turn(human("my message"), mode);
-        c.submit_during_turn(QueuedInput::peer("peer-text", "peer-display"), mode);
-        assert_eq!(c.dequeue_last_human(), Some("my message".to_string()));
-        // The peer item is untouched and still pending.
-        assert_eq!(c.pending(), 1);
-        assert_eq!(c.peek_display(), vec!["peer-display"]);
+        c.submit_during_turn(human("h1"), mode);
+        c.submit_during_turn(QueuedInput::peer("p1-text", "p1-display"), mode);
+        c.submit_during_turn(human("h2"), mode);
+        c.submit_during_turn(QueuedInput::peer("p2-text", "p2-display"), mode);
+        assert_eq!(c.dequeue_all_human(), Some("h1\nh2".to_string()));
+        // Both peers untouched and still pending, in order.
+        assert_eq!(c.pending(), 2);
+        assert_eq!(c.peek_display(), vec!["p1-display", "p2-display"]);
     }
 
     #[test]
-    fn dequeue_last_human_returns_none_when_only_peer_items_queued() {
+    fn dequeue_all_human_returns_none_when_only_peer_items_queued() {
         // All-peer queue: `↑` finds no human item, returns None so the caller
         // falls through to prompt-history. No peer item is popped.
         let mut c = TurnInputCoordinator::new();
         let mode = QueueMode::Queue;
         c.submit_during_turn(QueuedInput::peer("a", "a"), mode);
         c.submit_during_turn(QueuedInput::peer("b", "b"), mode);
-        assert_eq!(c.dequeue_last_human(), None);
+        assert_eq!(c.dequeue_all_human(), None);
         assert_eq!(c.pending(), 2);
     }
 

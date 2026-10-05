@@ -1244,8 +1244,8 @@ pub enum PendingItem {
     /// form (`❯ …` for human, `📨 A2A from X: …` for a peer). Purely transient:
     /// the coordinator echoes the real line to scrollback when it flushes.
     /// `is_human` distinguishes a typed input from an inbound A2A/peer message
-    /// so the empty-buffer `↑` can pop the newest human chip to match the
-    /// coordinator's `dequeue_last_human`, leaving peer chips in place.
+    /// so the empty-buffer `↑` removes all human chips (matching the
+    /// coordinator's `dequeue_all_human`) while leaving peer chips in place.
     QueuedMessage { display: String, is_human: bool },
 }
 
@@ -1522,13 +1522,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut history = hooks.use_state(Vec::<String>::new);
     let mut history_cursor = hooks.use_state(|| None::<usize>);
     let mut saved_input = hooks.use_state(String::new);
-    // True while the current input buffer was built by ↑ recalling queued
-    // messages from the staging area (as opposed to typed text or history
-    // recall). Lets a subsequent ↑ keep stacking older queued items above the
-    // recalled ones, and is cleared the moment the buffer leaves recall (submit,
-    // Down, or history recall) — mirrors how `history_cursor` marks history
-    // recall mode.
-    let mut is_queued_recall = hooks.use_state(|| false);
     let mut tab_candidates = hooks.use_state(Vec::<String>::new);
     let mut tab_index = hooks.use_state(|| 0usize);
     let mut footer_hint = hooks.use_state(|| None::<(String, Instant)>);
@@ -1861,7 +1854,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         InputEvent::QuestionAnswer(_) | InputEvent::Abort => {}
                                     }
                                     input_value.set(String::new());
-                                    is_queued_recall.set(false);
                                     if history_cursor.get().is_some() {
                                         history_cursor.set(None);
                                         saved_input.set(String::new());
@@ -1978,49 +1970,32 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let on_first_line = !val.get(..cursor_pos)
                                 .unwrap_or(&val)
                                 .contains('\n');
-                            // Queue-recall triggers when the buffer is empty
-                            // (first recall) OR we're already stacking recalled
-                            // items (`is_queued_recall`): each further ↑ pulls the
-                            // next-older queued human message and stacks it ABOVE
-                            // the current buffer, so the slot reads in submit
-                            // order. While stacking, the caret line no longer
-                            // matters — ↑ means "give me the previous queued
-                            // message" until the user edits/submits (which exits
-                            // recall) or the queue runs out of human items.
-                            let is_recall_active = val.is_empty() || is_queued_recall.get();
-                            if is_recall_active {
-                                if let Some(text) =
+                            if val.is_empty() {
+                                // Empty buffer: `↑` first tries to recall queued
+                                // HUMAN messages. One press pulls back ALL of
+                                // them at once (joined in submit order,
+                                // oldest-at-top), skipping any a2a/peer items
+                                // which stay queued — mirroring Claude Code's
+                                // `popAllEditable`. If nothing human is queued,
+                                // fall through to walking prompt history.
+                                if let Some(recalled) =
                                     dequeue_hook.as_ref().and_then(|hook| hook())
                                 {
-                                    let existing = input_value.read().clone();
-                                    // Older item on top; existing recalled buffer
-                                    // (newer items) below — submit order. Empty
-                                    // buffer → just the recalled text.
-                                    let composed = if existing.is_empty() {
-                                        text
-                                    } else {
-                                        format!("{text}\n{existing}")
-                                    };
-                                    let cursor_offset = composed.len();
-                                    input_value.set(composed);
-                                    is_queued_recall.set(true);
+                                    let cursor_offset = recalled.len();
+                                    input_value.set(recalled);
                                     text_input_handle.write().set_cursor_offset(cursor_offset);
-                                    // Drop the newest human chip from the overlay
-                                    // to match the item just popped from the queue;
-                                    // peer chips are left in place.
+                                    // Remove ALL human chips from the overlay to
+                                    // match the items just popped; peer chips
+                                    // stay.
                                     if let Ok(mut pending) = pending_for_dequeue.lock() {
-                                        if let Some(pos) = pending.iter().rposition(|p| {
-                                            matches!(
+                                        pending.retain(|p| {
+                                            !matches!(
                                                 p,
                                                 PendingItem::QueuedMessage { is_human: true, .. }
                                             )
-                                        }) {
-                                            pending.remove(pos);
-                                        }
+                                        });
                                     }
-                                } else if val.is_empty() {
-                                    // No human queued and buffer empty → walk
-                                    // prompt history as before.
+                                } else {
                                     let h = history.read();
                                     if !h.is_empty() {
                                         saved_input.set(val);
@@ -2028,9 +2003,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                         history_cursor.set(Some(h.len() - 1));
                                     }
                                 }
-                                // else: is_queued_recall active but queue drained of
-                                // human items — nothing more to recall; leave the
-                                // stacked buffer as-is.
                             } else if on_first_line && cursor_pos == 0 {
                                 let h = history.read();
                                 if !h.is_empty() {
@@ -2046,7 +2018,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Down if matches!(current_slot, InputSlot::TextInput) => {
-                        is_queued_recall.set(false);
                         if let Some(c) = history_cursor.get() {
                             let h = history.read();
                             if c + 1 < h.len() {
@@ -2152,7 +2123,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
                         input_value.set(String::new());
                         history_cursor.set(None);
-                        is_queued_recall.set(false);
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         let now = Instant::now();
@@ -2168,11 +2138,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             let hint_msg = format!("{}Press Ctrl-C again to exit{}", crate::render::DIM, crate::render::RESET);
                             footer_hint.set(Some((hint_msg, Instant::now() + ctrlc_hint_ttl())));
                             input_value.set(String::new());
-                            is_queued_recall.set(false);
                         }
                     }
                     KeyCode::Esc => {
-                        is_queued_recall.set(false);
                         // In FuzzySelect/DialPad/Hint, ESC cancels. Also drop any
                         // in-progress DialPad custom-input buffer.
                         dialpad_input.set(String::new());
@@ -2439,17 +2407,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             auto_grow: true,
                             handle: Some(text_input_handle.clone()),
                             on_change: move |new_val: String| {
-                                // A real user edit ends queue-recall mode: the
-                                // buffer is no longer a pristine stack of
-                                // recalled messages, so the next ↑ should not
-                                // keep prepending queued items onto edited text.
-                                if is_queued_recall.get() {
-                                    is_queued_recall.set(false);
-                                }
                                 input_value.set(new_val);
                             },
                             on_paste: move |pasted: String| {
-                                is_queued_recall.set(false);
                                 // Normalize + literal-vs-placeholder handling is
                                 // shared with the DialPad custom-input row.
                                 let current = input_value.read().clone();

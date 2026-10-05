@@ -41,7 +41,7 @@ fn agent_list_discovers_a_peer_provisioned_through_the_mailbox() {
     // thread so `collect_agent_list` (via `sending_mailbox()`) uses it — the
     // same handle `send` resolves.
     let me = Arc::new(Mailbox::workspace_local(&root, "me".to_string()));
-    let _scope = MailboxScope::enter(me);
+    let _scope = MailboxScope::enter(Arc::new(runtime::directory::Directory::single("local", me)));
 
     // The host filesystem, because `SUDOCODE_AGENT_STORE` above names a host
     // directory: the sub-agent half of the list is read through the session's
@@ -79,7 +79,7 @@ fn collect_agent_list_surfaces_a_read_failure_instead_of_empty() {
     let me = Arc::new(Mailbox::workspace_local(&root, "me".to_string()));
     // agents_dir is `<root>/agents`; plant a file there so readdir errors.
     std::fs::write(root.join("agents"), b"not a directory").unwrap();
-    let _scope = MailboxScope::enter(me);
+    let _scope = MailboxScope::enter(Arc::new(runtime::directory::Directory::single("local", me)));
 
     let result = tools::collect_agent_list(false, &runtime::fs_backend::StdFsBackend);
     assert!(

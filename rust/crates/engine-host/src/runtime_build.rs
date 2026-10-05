@@ -767,29 +767,45 @@ pub(crate) fn build_runtime_with_plugin_state(
     // No A2A session means no nexus configured, and the resolver answers with
     // workspace-local JSONL — the same code path rather than a fallback branch,
     // which is what stops the two from drifting.
-    if let Some(mailbox) = host.mailbox.clone() {
-        tool_executor.set_mailbox(mailbox);
-    } else if let Some(a2a_session) = a2a {
-        tool_executor.set_mailbox(a2a_session.mailbox());
+    // Collect every namespace this session is attached to into ONE directory —
+    // the single place local-versus-nexus is decided. `agent_list` enumerates
+    // across the whole set and `send` routes within it, so a recipient name
+    // means the same destination to the `send` tool, to a sub-agent reporting
+    // back, and to the receiver tailing its own inbox. A one-member directory is
+    // the standalone or nexus-only case and behaves exactly as the lone mailbox
+    // did; several members is a session on more than one namespace at once.
+    use runtime::directory::{Directory, Member};
+    let directory = if let Some(mailbox) = host.mailbox.clone() {
+        // A co-hosted managed agent lives inside the daemon over its own backend;
+        // there is no same-machine pair beside it, so its one namespace is it.
+        Directory::new(vec![Member {
+            label: "nexus",
+            mailbox,
+        }])
     } else {
-        // Standalone (no nexus): route `send` to the shared same-machine pair
-        // root under this process's resolved identity, so a peer scode started
-        // in another folder receives it (its poller tails the same
-        // `{pair_root}/agents/{name}/chat-with-me`). Without this the send would
-        // fall back to workspace-local, which two different folders never share.
-        // The SAME name the prompt section above announced. It resolved from
-        // the host context while this read `current_dir()`, so a session whose
-        // directory differed from the process's told the model it was one peer
-        // and delivered as another — silently, since neither side can see the
-        // other's answer.
+        // A standalone session always has the same-machine pair namespace (a peer
+        // scode in another folder tails the shared pair root); when nexus is also
+        // configured its namespace is added, so both are discoverable at once
+        // without the model choosing. The pair member is primary: it carries the
+        // session's identity and the unqualified `self_id`.
         let self_name = host.resolved_agent_name();
-        tool_executor.set_mailbox(std::sync::Arc::new(
-            runtime::mailbox::Mailbox::workspace_local(
-                &runtime::mailbox::local_pair_root(),
-                self_name,
-            ),
+        let local = std::sync::Arc::new(runtime::mailbox::Mailbox::workspace_local(
+            &runtime::mailbox::local_pair_root(),
+            self_name,
         ));
-    }
+        let mut members = vec![Member {
+            label: "local",
+            mailbox: local,
+        }];
+        if let Some(a2a_session) = a2a {
+            members.push(Member {
+                label: "nexus",
+                mailbox: a2a_session.mailbox(),
+            });
+        }
+        Directory::new(members)
+    };
+    tool_executor.set_directory(std::sync::Arc::new(directory));
     let runtime = ConversationRuntime::new_with_features(
         session,
         client,

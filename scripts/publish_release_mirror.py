@@ -50,8 +50,13 @@ def payload(dist, installer, version):
         for platform in ("linux-x64", "linux-arm64", "macos-x64", "macos-arm64")
     } | {f"scode-windows-{arch}.zip" for arch in ("x64", "arm64")}
     required.add(f"scode_{version[1:]}_amd64.deb")
-    if set(files) != required:
-        raise ValueError(f"release artifact set differs: {set(files) ^ required}")
+    # Older releases have no bundle. When present, it is covered by the same
+    # manifest and immutable readback checks as every required platform archive.
+    optional = {"scode-linux-x64-bundle.tar.gz"}
+    missing = required - set(files)
+    unexpected = set(files) - required - optional
+    if missing or unexpected:
+        raise ValueError(f"release artifact set differs: {missing | unexpected}")
     return {**files, "SHA256SUMS.txt": checksums, "install.sh": installer}
 
 

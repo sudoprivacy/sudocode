@@ -15,13 +15,18 @@ on:
         options:
           - all
           - linux-x64
+      resume_tag:
+        description: 'Resume a stable release using its existing GitHub assets (no rebuild)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: release-${{ inputs.resume_tag || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && !inputs.resume_tag }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,7 +34,7 @@ env:
 jobs:
   build-linux-x64:
     name: build-linux-x64
-    if: github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' || inputs.build_scope == 'linux-x64'
+    if: ${{ !inputs.resume_tag && (github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' || inputs.build_scope == 'linux-x64') }}
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -139,7 +144,7 @@ jobs:
 
   build:
     name: build-${{ matrix.name }}
-    if: github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all'
+    if: ${{ !inputs.resume_tag && (github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -224,11 +229,17 @@ jobs:
 
   publish-release:
     name: publish-release
-    if: startsWith(github.ref, 'refs/tags/')
+    if: >-
+      always() && !cancelled() &&
+      ((startsWith(github.ref, 'refs/tags/') && needs.build-linux-x64.result == 'success' && needs.build.result == 'success') ||
+      (github.event_name == 'workflow_dispatch' && inputs.resume_tag != ''))
     needs:
       - build-linux-x64
       - build
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.resume_tag || github.ref_name }}
+      RELEASE_INSTALLER: ${{ inputs.resume_tag && 'release-installer.sh' || 'install.sh' }}
     concurrency:
       group: release-publication
       cancel-in-progress: false
@@ -237,17 +248,33 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Download build artifacts
+        if: inputs.resume_tag == ''
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
       - name: Generate checksums
+        if: inputs.resume_tag == ''
         shell: bash
         run: |
           set -euo pipefail
           cd dist
           sha256sum scode-* scode_*.deb > SHA256SUMS.txt
+
+      - name: Restore original release assets and installer
+        if: inputs.resume_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Recovery requires a stable version tag'; exit 1; }
+          [[ "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq .isPrerelease)" == false ]]
+          gh release download "$RELEASE_TAG" --dir dist --pattern 'scode-*' --pattern 'scode_*.deb' --pattern SHA256SUMS.txt
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git show "$RELEASE_TAG:install.sh" > "$RELEASE_INSTALLER"
+          # Keep the original manifest and binaries; never regenerate or re-upload them.
+          (cd dist && sha256sum --check --strict SHA256SUMS.txt)
 
       # `nightly` is a rolling prerelease: same tag every night, assets
       # overwritten in place, name carries the date + short sha so `scode
@@ -258,7 +285,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
+          tag="$RELEASE_TAG"
           short="$(git rev-parse --short "$GITHUB_SHA")"
           if [[ "$tag" == "nightly" ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
@@ -280,13 +307,13 @@ jobs:
         run: |
           set -euo pipefail
           # Never hide an already public release on a recovery run.
-          draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null || echo true)
+          draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null || echo true)
           echo "draft=$draft" >> "$GITHUB_OUTPUT"
           mirror=false
-          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             if [[ "$draft" == false ]]; then
               published=$(mktemp -d)
-              gh release download "$GITHUB_REF_NAME" --pattern SHA256SUMS.txt --dir "$published"
+              gh release download "$RELEASE_TAG" --pattern SHA256SUMS.txt --dir "$published"
               cmp dist/SHA256SUMS.txt "$published/SHA256SUMS.txt" || { echo 'Published stable assets differ; rerun the failed publication job with its original artifacts'; exit 1; }
             fi
             if [[ -n "$TENCENT_SECRET_ID" || -n "$TENCENT_SECRET_KEY" ]]; then
@@ -297,7 +324,7 @@ jobs:
           echo "mirror=$mirror" >> "$GITHUB_OUTPUT"
 
       - name: Upload release assets while pending
-        if: steps.publication.outputs.draft == 'true' || steps.meta.outputs.prerelease == 'true'
+        if: inputs.resume_tag == '' && (steps.publication.outputs.draft == 'true' || steps.meta.outputs.prerelease == 'true')
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.meta.outputs.name }}
@@ -322,14 +349,14 @@ jobs:
             -s "$TENCENT_SECRET_KEY" \
             -b sudowork-release-1309794936 \
             -e cos.accelerate.myqcloud.com
-          python3 scripts/publish_release_mirror.py stage --version "$GITHUB_REF_NAME"
+          python3 scripts/publish_release_mirror.py stage --version "$RELEASE_TAG" --installer "$RELEASE_INSTALLER"
 
       - name: Finalize GitHub release
         if: steps.publication.outputs.draft == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+        run: gh release edit "$RELEASE_TAG" --draft=false
 
       - name: Promote verified mirror version
         if: steps.publication.outputs.mirror == 'true'
-        run: python3 scripts/publish_release_mirror.py promote --version "$GITHUB_REF_NAME"
+        run: python3 scripts/publish_release_mirror.py promote --version "$RELEASE_TAG" --installer "$RELEASE_INSTALLER"

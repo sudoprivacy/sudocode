@@ -289,9 +289,14 @@ verified and skipped, differing objects fail without replacement, and an older
 retry cannot move the mirror pointer backward. A public stable release is never
 made draft or overwritten on retry. If GitHub finalization succeeds but pointer
 promotion fails, the previous mirror remains usable until that retry completes.
+If recovery needs a publisher fix from main, run
+`gh workflow run release.yml --ref main -f resume_tag=vX.Y.Z` after merging it.
+This skips every build and reuses the existing GitHub assets, original checksum
+manifest and tagged installer. It never moves the stable tag or replaces its
+binaries; the same immutable mirror verification and promotion rules apply.
 `python3 e2e/release-mirror/run.py` exercises interrupted uploads, retry, version
-pinning and checksum rejection with the real publisher and installer through a
-local HTTP mirror; it is also a CI gate.
+pinning, optional bundle delivery and checksum rejection with the real publisher
+and installer through a local HTTP mirror; it is also a CI gate.
 
 Sudo Code forbids `unsafe_code` workspace-wide (`unsafe_code = "forbid"`
 in `rust/Cargo.toml`). Relaxing this for a single crate goes through

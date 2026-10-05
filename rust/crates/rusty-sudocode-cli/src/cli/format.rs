@@ -881,6 +881,8 @@ pub(crate) fn split_hook_feedback(output: &str) -> (&str, Option<&str>) {
 /// [`render_tool_card`] and nothing else encodes "did this tool succeed."
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ToolStatus {
+    /// Requested, waiting for hooks, approval or an execution slot.
+    Queued,
     /// In flight — yellow frame. Rendered in the staging area.
     Running,
     /// Completed successfully — green frame.
@@ -935,15 +937,25 @@ impl ToolCardContent {
 /// ethos. The frame carries the status color; the tool name inside `header`
 /// keeps its own identity color. There is no response bullet — the frame is the cue.
 pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) -> String {
+    render_tool_card_with_width(content, status, crate::render::query_terminal_width())
+}
+
+/// The layout owner supplies its width, so all cards in one UI frame use the
+/// same terminal-size snapshot instead of racing independent ioctl queries.
+pub(crate) fn render_tool_card_with_width(
+    content: &ToolCardContent,
+    status: ToolStatus,
+    term_width: usize,
+) -> String {
     use crate::render::left_frame;
 
     let colors = theme().tool_borders();
     let color = match status {
+        ToolStatus::Queued => colors.queued,
         ToolStatus::Running => colors.running,
         ToolStatus::Ok => colors.success,
         ToolStatus::Error => colors.error,
     };
-    let term_width = crossterm::terminal::size().map_or(80, |(cols, _)| cols as usize);
     // Keep the full identity cached so a running card reveals more on resize.
     let header = content.header.replace(['\n', '\r', '\t'], " ");
     let is_truncated = display_width(&header) > left_frame::header_width(term_width);
@@ -951,7 +963,7 @@ pub(crate) fn render_tool_card(content: &ToolCardContent, status: ToolStatus) ->
         .command
         .as_ref()
         .filter(|command| is_truncated || command.contains(['\n', '\r', '\t']))
-        .map(|command| command_body_preamble(command));
+        .map(|command| command_body_preamble(command, term_width));
     left_frame::render(
         &header,
         command
@@ -1122,15 +1134,14 @@ pub(crate) fn bash_card(
 }
 
 /// Prefix an already highlighted script without reparsing it at paint time.
-fn command_body_preamble(highlighted: &str) -> String {
+fn command_body_preamble(highlighted: &str, term_width: usize) -> String {
     use std::fmt::Write as _;
     let mut preamble = String::new();
     for line in highlighted.split('\n') {
         let _ = writeln!(preamble, "{DIM}${RESET} {line}");
     }
     // Dim rule (structure, not status) dividing command from output.
-    let rule_width = crossterm::terminal::size()
-        .map_or(24, |(cols, _)| (cols as usize).saturating_sub(6).min(24));
+    let rule_width = term_width.saturating_sub(6).min(24);
     let _ = write!(
         preamble,
         "{DIM}{}{RESET}",

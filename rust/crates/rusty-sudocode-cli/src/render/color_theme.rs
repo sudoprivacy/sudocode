@@ -9,6 +9,7 @@ use super::{ansi_fg, code_theme, terminal_palette, ColorSupport};
 
 /// Tool frames carry execution status without competing with their content.
 pub struct ToolBorderColors {
+    pub queued: Color,
     pub running: Color,
     pub success: Color,
     pub error: Color,
@@ -215,6 +216,7 @@ impl ColorTheme {
     pub fn tool_borders(&self) -> ToolBorderColors {
         let support = ColorSupport::detect();
         ToolBorderColors {
+            queued: support.color(self.muted),
             running: support.color(self.primary),
             success: self.soft_green(support),
             error: support.color(self.error),

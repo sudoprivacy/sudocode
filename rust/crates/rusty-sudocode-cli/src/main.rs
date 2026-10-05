@@ -4314,12 +4314,12 @@ impl LiveCli {
                 EngineEvent::TextDelta { text } => outcome.final_text.push_str(text),
                 EngineEvent::ToolCall { id, name, input } => {
                     outcome.final_text.clear();
-                    // Staging overlay (iocraft REPL only): show a running
-                    // yellow card for this in-flight call. Pure overlay — the
+                    // Staging overlay (iocraft REPL only): the request is
+                    // queued until ToolStarted acquires a slot. The
                     // finished card is committed to scrollback by the renderer
                     // on the ordered output channel, not from here.
                     if let Some(ui) = ui {
-                        ui.tool_started(id, name, input);
+                        ui.tool_queued(id, name, input);
                     }
                     // Parity: `--output-format json` emits the tool input as the
                     // raw argument STRING exactly as the model produced it — the
@@ -4331,6 +4331,11 @@ impl LiveCli {
                         "name": name,
                         "input": input,
                     }));
+                }
+                EngineEvent::ToolStarted { id, name, input } => {
+                    if let Some(ui) = ui {
+                        ui.tool_started(id, name, input);
+                    }
                 }
                 EngineEvent::ToolResult {
                     id,

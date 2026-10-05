@@ -319,6 +319,11 @@ impl EngineEventRenderer {
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
+            EngineEvent::ToolStarted { id, input, .. } => {
+                self.tool_inputs.remember(&id, &input);
+                self.resume_spinner();
+                RenderOutcome::Continue
+            }
             EngineEvent::ToolResult {
                 id,
                 name,

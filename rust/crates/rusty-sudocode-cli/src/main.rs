@@ -3075,16 +3075,12 @@ impl Drop for ReplTurnCancelMonitor {
 fn echo_submit_to_scrollback(output: &repl_ui::OutputSender, display: &str) {
     let mut lines = display.split('\n');
     if let Some(first) = lines.next() {
-        output.println(&format!(
-            "{}{}{} {first}",
-            render::BOLD,
-            render::PROMPT_GLYPH,
-            RESET
-        ));
+        let mut rendered = format!("{}{}{} {first}", render::BOLD, render::PROMPT_GLYPH, RESET);
         for line in lines {
-            output.println(&format!("  {line}"));
+            rendered.push_str("\n  ");
+            rendered.push_str(line);
         }
-        output.println("");
+        output.print_block(rendered);
     }
 }
 
@@ -3096,8 +3092,7 @@ fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
         render::query_terminal_width(),
         &render::TerminalRenderer::new(),
     );
-    output.println(&rendered);
-    output.println("");
+    output.print_block(rendered);
 }
 
 fn run_repl_iocraft_dispatch(

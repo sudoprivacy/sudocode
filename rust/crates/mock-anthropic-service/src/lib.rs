@@ -181,6 +181,7 @@ enum Scenario {
     StreamingText,
     SpinnerActivity,
     BashRenderFixture,
+    TranscriptSpacing,
     /// A `thinking` block streamed as several `thinking_delta`s (one of them
     /// spanning a newline, one splitting mid-word) followed by a `signature_delta`
     /// and then a normal text block. The only scenario that exercises the
@@ -333,6 +334,7 @@ impl Scenario {
             "streaming_text" => Some(Self::StreamingText),
             "spinner_activity" => Some(Self::SpinnerActivity),
             "bash_render_fixture" => Some(Self::BashRenderFixture),
+            "transcript_spacing" => Some(Self::TranscriptSpacing),
             "thinking_then_text" => Some(Self::ThinkingThenText),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
             "skill_read_roundtrip" => Some(Self::SkillReadRoundtrip),
@@ -409,6 +411,7 @@ impl Scenario {
             Self::StreamingText => "streaming_text",
             Self::SpinnerActivity => "spinner_activity",
             Self::BashRenderFixture => "bash_render_fixture",
+            Self::TranscriptSpacing => "transcript_spacing",
             Self::ThinkingThenText => "thinking_then_text",
             Self::ReadFileRoundtrip => "read_file_roundtrip",
             Self::SkillReadRoundtrip => "skill_read_roundtrip",
@@ -1315,6 +1318,25 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             .into_iter()
             .map(|(_, chunk)| chunk)
             .collect(),
+        Scenario::TranscriptSpacing => match latest_tool_result(request) {
+            None => tool_uses_sse_with_prelude(
+                &[
+                    ToolUseSse {
+                        tool_id: "toolu_spacing_1",
+                        tool_name: "bash",
+                        partial_json_chunks: &[r#"{"command":"cat spacing-one.txt"}"#],
+                    },
+                    ToolUseSse {
+                        tool_id: "toolu_spacing_2",
+                        tool_name: "bash",
+                        partial_json_chunks: &[r#"{"command":"cat spacing-two.txt"}"#],
+                    },
+                ],
+                12,
+                Some("Spacing intro.\n\n"),
+            ),
+            Some(_) => final_text_sse(SPACING_FINAL),
+        },
         Scenario::BashRenderFixture => match latest_tool_result(request) {
             None => tool_use_sse(
                 "toolu_render_fixture",
@@ -1882,6 +1904,33 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             "msg_activity",
             "progress progress progress progress progress resumed",
         ),
+        Scenario::TranscriptSpacing => match latest_tool_result(request) {
+            None => {
+                let mut response = tool_message_response_many(
+                    "msg_spacing",
+                    &[
+                        ToolUseMessage {
+                            tool_id: "toolu_spacing_1",
+                            tool_name: "bash",
+                            input: json!({"command":"cat spacing-one.txt"}),
+                        },
+                        ToolUseMessage {
+                            tool_id: "toolu_spacing_2",
+                            tool_name: "bash",
+                            input: json!({"command":"cat spacing-two.txt"}),
+                        },
+                    ],
+                );
+                response.content.insert(
+                    0,
+                    OutputContentBlock::Text {
+                        text: "Spacing intro.\n\n".into(),
+                    },
+                );
+                response
+            }
+            Some(_) => text_message_response("msg_spacing_done", SPACING_FINAL),
+        },
         Scenario::BashRenderFixture => match latest_tool_result(request) {
             None => tool_message_response(
                 "msg_render_fixture",
@@ -2580,6 +2629,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::StreamingText => "req_streaming_text",
         Scenario::SpinnerActivity => "req_spinner_activity",
         Scenario::BashRenderFixture => "req_bash_render_fixture",
+        Scenario::TranscriptSpacing => "req_transcript_spacing",
         Scenario::ThinkingThenText => "req_thinking_then_text",
         Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
@@ -2763,6 +2813,10 @@ fn tool_message_response_many(id: &str, tool_uses: &[ToolUseMessage<'_>]) -> Mes
         gateway_request_id: None,
     }
 }
+
+/// Completed answer with intentional empty code rows for spacing acceptance.
+pub const SPACING_FINAL: &str =
+    "Spacing done.\n\n```text\nCODE_START\n\n\nCODE_END\n```\n\nSpacing end.";
 
 /// Markdown document exercising the terminal renderer's block-spacing and
 /// list-marker rules: an adjacent label+list (must bind), a heading (exactly
@@ -3147,6 +3201,14 @@ fn tool_uses_sse(tool_uses: &[ToolUseSse<'_>]) -> String {
 }
 
 fn tool_uses_sse_with_context(tool_uses: &[ToolUseSse<'_>], input_tokens: u32) -> String {
+    tool_uses_sse_with_prelude(tool_uses, input_tokens, None)
+}
+
+fn tool_uses_sse_with_prelude(
+    tool_uses: &[ToolUseSse<'_>],
+    input_tokens: u32,
+    prelude: Option<&str>,
+) -> String {
     let mut body = String::new();
     let message_id = tool_uses.first().map_or_else(
         || "msg_tool_use".to_string(),
@@ -3169,7 +3231,25 @@ fn tool_uses_sse_with_context(tool_uses: &[ToolUseSse<'_>], input_tokens: u32) -
             }
         }),
     );
+    if let Some(text) = prelude {
+        append_sse(
+            &mut body,
+            "content_block_start",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        );
+        append_sse(
+            &mut body,
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}),
+        );
+        append_sse(
+            &mut body,
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":0}),
+        );
+    }
     for (index, tool_use) in tool_uses.iter().enumerate() {
+        let index = index + usize::from(prelude.is_some());
         append_sse(
             &mut body,
             "content_block_start",

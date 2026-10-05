@@ -86,10 +86,9 @@ pub(crate) fn render_message(
                 match block {
                     runtime::ContentBlock::Text { text } if !text.is_empty() => {
                         let rendered = renderer.render_markdown_with_width(text, term_width);
-                        if !out.is_empty() {
-                            out.push('\n');
-                        }
-                        out.push_str(&rendered);
+                        crate::render::layout_policy::LayoutPolicy::append_block(
+                            &mut out, &rendered,
+                        );
                     }
                     runtime::ContentBlock::Thinking { thinking, .. }
                         if !thinking.trim().is_empty() =>
@@ -100,12 +99,11 @@ pub(crate) fn render_message(
                         // model wrote for itself, and letting a stray `#` or
                         // `*` in it become a heading or emphasis would make it
                         // louder than the answer it belongs under.
-                        if !out.is_empty() {
-                            out.push('\n');
-                        }
-                        out.push_str(&thinking_header());
-                        out.push_str(&dim_thinking(thinking.trim_end()));
-                        out.push('\n');
+                        let thinking =
+                            format!("{}{}", thinking_header(), dim_thinking(thinking.trim_end()));
+                        crate::render::layout_policy::LayoutPolicy::append_block(
+                            &mut out, &thinking,
+                        );
                     }
                     runtime::ContentBlock::ToolUse { id, input, .. } => {
                         // Mirror the live render engine exactly: a ToolUse only
@@ -135,14 +133,14 @@ pub(crate) fn render_message(
                     is_error,
                 } = block
                 {
-                    if !out.is_empty() {
-                        out.push('\n');
-                    }
                     // Pair this result with the input remembered from its call
                     // (`""` if the call is missing, e.g. a truncated session) —
                     // the same pairing the live render engine does.
                     let input = tool_inputs.take(tool_use_id);
-                    out.push_str(&format_tool_result(tool_name, &input, output, *is_error));
+                    crate::render::layout_policy::LayoutPolicy::append_block(
+                        &mut out,
+                        &format_tool_result(tool_name, &input, output, *is_error),
+                    );
                 }
             }
             if out.is_empty() {
@@ -165,14 +163,14 @@ pub(crate) fn render_messages(
     term_width: usize,
     renderer: &crate::render::TerminalRenderer,
 ) -> String {
-    let mut parts = Vec::new();
+    let mut output = String::new();
     let mut tool_inputs = ToolInputRegistry::default();
     for msg in messages {
         if let Some(rendered) = render_message(msg, term_width, renderer, &mut tool_inputs) {
-            parts.push(rendered);
+            crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
         }
     }
-    parts.join("\n\n")
+    output
 }
 
 /// `true` for Text blocks the runtime injected (date announcements,
@@ -1142,7 +1140,7 @@ fn command_body_preamble(highlighted: &str) -> String {
 }
 
 /// Shared stdout/stderr body builder used by [`bash_card`]. Combines the two
-/// streams, drops empty lines, and applies the per-tool line cap from
+/// streams, preserves internal blank lines, and applies the per-tool line cap from
 /// `TOOL_OUTPUT_DISPLAY_MAX_LINES`. Command input is kept separately so it
 /// can be laid out at the current terminal width, even for failed calls.
 /// Returns a [`ToolCardContent`]; the L-frame prefix is applied later by
@@ -1150,12 +1148,7 @@ fn command_body_preamble(highlighted: &str) -> String {
 fn stdout_stderr_card(header: String, stdout: &str, stderr: &str) -> ToolCardContent {
     use std::fmt::Write as _;
 
-    let all_output: Vec<&str> = stdout
-        .lines()
-        .chain(stderr.lines())
-        // A space-only row can be significant unified-diff context.
-        .filter(|line| !line.is_empty())
-        .collect();
+    let all_output: Vec<&str> = stdout.lines().chain(stderr.lines()).collect();
 
     if all_output.is_empty() {
         return ToolCardContent::header_only(header);

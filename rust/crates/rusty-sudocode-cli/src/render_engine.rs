@@ -18,8 +18,8 @@ use engine_events::{
 
 use crate::cli::format::format_tool_result;
 use crate::render::{
-    query_terminal_width, MarkdownStreamState, ResponseGlyphState, SpinnerRef, TerminalRenderer,
-    DIM, RESET,
+    layout_policy::LayoutPolicy, query_terminal_width, MarkdownStreamState, ResponseGlyphState,
+    SpinnerRef, TerminalRenderer, DIM, RESET,
 };
 use crate::repl_ui::OutputSender;
 
@@ -55,6 +55,8 @@ pub(crate) struct EngineEventRenderer {
     thinking_pending: String,
     renderer: TerminalRenderer,
     glyph: ResponseGlyphState,
+    layout: LayoutPolicy,
+    block: Option<OutputBlock>,
     spinner: Option<SpinnerRef>,
     output_writer: Option<OutputSender>,
     /// `true` while inside a thinking block, so the "Reasoning…" spinner cue is
@@ -71,6 +73,17 @@ pub(crate) struct EngineEventRenderer {
     tool_inputs: crate::cli::format::ToolInputRegistry,
 }
 
+/// Consecutive chunks of prose/reasoning/activity belong to the same block.
+/// Each completed tool result and notice starts an independent block.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputBlock {
+    Assistant,
+    Reasoning,
+    Activity,
+    Tool,
+    Notice,
+}
+
 impl EngineEventRenderer {
     pub(crate) fn new(spinner: Option<SpinnerRef>, output_writer: Option<OutputSender>) -> Self {
         Self {
@@ -78,6 +91,8 @@ impl EngineEventRenderer {
             thinking_pending: String::new(),
             renderer: TerminalRenderer::new(),
             glyph: ResponseGlyphState::new(query_terminal_width()),
+            layout: LayoutPolicy::default(),
+            block: None,
             spinner,
             output_writer,
             thinking_active: false,
@@ -92,12 +107,45 @@ impl EngineEventRenderer {
     }
 
     fn write_out(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.layout.observe(text);
         if let Some(writer) = self.output_writer.as_mut() {
             let _ = write!(writer, "{text}").and_then(|()| writer.flush());
         } else {
             let mut stdout = io::stdout();
             let _ = write!(stdout, "{text}").and_then(|()| stdout.flush());
         }
+    }
+
+    #[inline]
+    fn start_block(&mut self, block: OutputBlock) {
+        if self.block != Some(block) || matches!(block, OutputBlock::Tool | OutputBlock::Notice) {
+            self.write_out(self.layout.before_block());
+            self.glyph.visible_col = 0;
+        }
+        self.block = Some(block);
+    }
+
+    fn write_response(&mut self, text: &str, block: OutputBlock) {
+        if !text.is_empty() {
+            self.start_block(block);
+            let prefixed = self.apply_response(text);
+            self.write_out(&prefixed);
+        }
+    }
+
+    fn write_block(&mut self, text: &str, block: OutputBlock) {
+        let text = text.trim_matches('\n');
+        if !text.is_empty() {
+            self.start_block(block);
+            self.write_out(&format!("{text}\n"));
+        }
+    }
+
+    fn finish_turn(&mut self) {
+        self.write_out(self.layout.before_block());
     }
 
     fn pause_spinner(&self) {
@@ -129,9 +177,12 @@ impl EngineEventRenderer {
                 reason,
             } => {
                 self.pause_spinner();
-                self.write_out(&format!(
-                    "{DIM}  \u{27f3} retry {attempt}/{max_retries} \u{2014} {reason}{RESET}\n"
-                ));
+                self.write_block(
+                    &format!(
+                        "{DIM}  \u{27f3} retry {attempt}/{max_retries} \u{2014} {reason}{RESET}"
+                    ),
+                    OutputBlock::Activity,
+                );
                 self.resume_spinner();
                 if let Some(spinner) = &self.spinner {
                     spinner.set_retry(*attempt, *max_retries, reason.clone());
@@ -154,8 +205,7 @@ impl EngineEventRenderer {
         while let Some(newline) = self.thinking_pending.find('\n') {
             let line: String = self.thinking_pending.drain(..=newline).collect();
             let rendered = render_thinking_line(&line);
-            let prefixed = self.apply_response(&rendered);
-            self.write_out(&prefixed);
+            self.write_response(&rendered, OutputBlock::Reasoning);
         }
     }
 
@@ -177,20 +227,13 @@ impl EngineEventRenderer {
             if !self.thinking_pending.is_empty() {
                 let rendered = render_thinking_line(&self.thinking_pending);
                 self.thinking_pending.clear();
-                let prefixed = self.apply_response(&rendered);
-                self.write_out(&prefixed);
+                self.write_response(&rendered, OutputBlock::Reasoning);
             }
-            // Close the dim block with a blank line so the answer does not
-            // continue the last reasoning line. `visible_col` says whether that
-            // line was left open: mid-line needs one newline to end it and a
-            // second to make the gap, at column 0 the first is already spent.
-            let separator = if self.glyph.visible_col > 0 {
-                "\n\n"
-            } else {
-                "\n"
-            };
-            let closed = self.apply_response(separator);
-            self.write_out(&closed);
+            // Close partial lines before a legacy spinner pause clears its
+            // current row. The next block observes this gap instead of adding
+            // a second one.
+            self.write_out(self.layout.before_block());
+            self.glyph.visible_col = 0;
         }
     }
 
@@ -204,8 +247,7 @@ impl EngineEventRenderer {
                     }
                     if let Some(rendered) = self.markdown.push(&self.renderer, &text) {
                         self.pause_spinner();
-                        let prefixed = self.apply_response(&rendered);
-                        self.write_out(&prefixed);
+                        self.write_response(&rendered, OutputBlock::Assistant);
                     }
                 }
                 RenderOutcome::Continue
@@ -244,8 +286,7 @@ impl EngineEventRenderer {
                         // 0. Reasoning is written at line boundaries and has the
                         // same protection.
                         self.pause_spinner();
-                        let header = self.apply_response(&crate::cli::format::thinking_header());
-                        self.write_out(&header);
+                        self.write_response(&crate::cli::format::thinking_header(), OutputBlock::Reasoning);
                         self.thinking_printed = true;
                     }
                     self.thinking_pending.push_str(&text);
@@ -256,8 +297,7 @@ impl EngineEventRenderer {
             EngineEvent::ToolCall { id, name, input } => {
                 self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
-                    let prefixed = self.apply_response(&rendered);
-                    self.write_out(&prefixed);
+                    self.write_response(&rendered, OutputBlock::Assistant);
                 }
                 // Remember the arguments so the completed card can show what was
                 // requested — the ToolResult event/payload does not echo the
@@ -287,14 +327,13 @@ impl EngineEventRenderer {
             } => {
                 self.pause_spinner();
                 let input = self.tool_inputs.take(&id);
-                let line = format!("{}\n", format_tool_result(&name, &input, &output, is_error));
-                self.write_out(&line);
+                self.write_block(&format_tool_result(&name, &input, &output, is_error), OutputBlock::Tool);
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
             EngineEvent::ToolProgress(progress) => {
                 self.pause_spinner();
-                self.write_out(&format!("{}\n", format_tool_progress(&progress)));
+                self.write_block(&format_tool_progress(&progress), OutputBlock::Activity);
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
@@ -304,7 +343,7 @@ impl EngineEventRenderer {
                 // spinner uses, so a hook line can no longer be torn in half
                 // by a spinner frame.
                 self.pause_spinner();
-                self.write_out(&format!("{}\n", format_hook_progress(&ev)));
+                self.write_block(&format_hook_progress(&ev), OutputBlock::Activity);
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
@@ -314,7 +353,7 @@ impl EngineEventRenderer {
             }
             EngineEvent::Notice { text } => {
                 if !text.is_empty() {
-                    self.write_out(&format!("{text}\n"));
+                    self.write_block(&text, OutputBlock::Notice);
                 }
                 RenderOutcome::Continue
             }
@@ -325,11 +364,11 @@ impl EngineEventRenderer {
                 // line inherit the dim attribute.
                 self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
-                    let prefixed = self.apply_response(&rendered);
-                    self.write_out(&prefixed);
+                    self.write_response(&rendered, OutputBlock::Assistant);
                 }
                 self.pause_spinner();
-                self.write_out(&format!("\n{message}\n"));
+                self.write_block(&message, OutputBlock::Notice);
+                self.finish_turn();
                 RenderOutcome::Done
             }
             EngineEvent::TurnComplete(_) => {
@@ -338,9 +377,9 @@ impl EngineEventRenderer {
                 // the next prompt is not written into an open dim run.
                 self.end_thinking();
                 if let Some(rendered) = self.markdown.flush(&self.renderer) {
-                    let prefixed = self.apply_response(&rendered);
-                    self.write_out(&prefixed);
+                    self.write_response(&rendered, OutputBlock::Assistant);
                 }
+                self.finish_turn();
                 RenderOutcome::Done
             }
             EngineEvent::PermissionRequest { id, request } => {

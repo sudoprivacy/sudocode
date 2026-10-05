@@ -12,6 +12,7 @@ mod code_theme;
 mod color_math;
 mod color_theme;
 pub(crate) mod diff_colors;
+pub(crate) mod layout_policy;
 pub(crate) mod left_frame;
 pub(crate) mod spinner_progress;
 use spinner_progress::SpinnerProgress;

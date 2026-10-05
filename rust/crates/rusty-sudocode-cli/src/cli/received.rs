@@ -141,15 +141,15 @@ impl ReceivedMessage<'_> {
 
 /// Render a whole persisted or live prompt, preserving mixed-input order.
 pub(crate) fn render_prompt(text: &str, width: usize, renderer: &TerminalRenderer) -> String {
-    prompt_parts(text)
-        .into_iter()
-        .map(|part| match part {
+    let mut output = String::new();
+    for part in prompt_parts(text) {
+        let rendered = match part {
             PromptPart::Human(text) => super::format::format_input_echo(text, width).0,
             PromptPart::Peer(message) => message.render(width, renderer),
-        })
-        .map(|part| part.trim_end_matches('\n').to_string())
-        .collect::<Vec<_>>()
-        .join("\n\n")
+        };
+        crate::render::layout_policy::LayoutPolicy::append_block(&mut output, &rendered);
+    }
+    output
 }
 
 /// Prepare a bounded, one-line preview once on arrival, never parse Markdown

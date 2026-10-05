@@ -1082,6 +1082,16 @@ impl OutputSender {
         let _ = self.tx.send(OutputMsg::Line(text.to_string()));
     }
 
+    /// Commit a complete transcript echo through the existing output channel.
+    /// One payload avoids separately allocating/sending its separator rows.
+    #[inline]
+    pub(crate) fn print_block(&self, mut text: String) {
+        crate::render::layout_policy::LayoutPolicy::finish_block(&mut text);
+        if !text.is_empty() {
+            let _ = self.tx.send(OutputMsg::Raw(text));
+        }
+    }
+
     pub fn suspend(&self) -> io::Result<TerminalSuspension> {
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (resume_tx, resume_rx) = mpsc::sync_channel(1);

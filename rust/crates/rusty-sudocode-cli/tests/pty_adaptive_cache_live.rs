@@ -1,0 +1,242 @@
+//! Real Opus 5.5 acceptance; mock payload assertions live in pty_cache_prefix.
+//! SCODE_TEST_BACKEND=live SCODE_LIVE_MODEL=claude-opus-5-5
+//! SCODE_LIVE_AUTH_PROFILE=<account> cargo test --test pty_adaptive_cache_live -- --nocapture
+mod common;
+
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const WAIT: Duration = Duration::from_secs(180);
+
+/// Keep credential-free evidence even when a live assertion fails. The fixture
+/// itself contains copied credentials and must still be removed by TestEnv.
+struct Evidence {
+    log: PathBuf,
+    cache: PathBuf,
+}
+
+impl Drop for Evidence {
+    fn drop(&mut self) {
+        let Ok(destination) = std::env::var("SCODE_ADAPTIVE_REPORT") else {
+            return;
+        };
+        let raw = std::fs::read_to_string(&self.log).unwrap_or_default();
+        let events: Vec<Value> = raw
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let shape: Vec<_> = events.iter().filter(|r| r["event"] == "request_debug").map(|r| {
+            let body = &r["attributes"]["body"];
+            json!({"model":body["model"], "thinking":body["thinking"], "effort":body["output_config"]["effort"],
+                "max_tokens":body["max_tokens"], "messages":body["messages"].as_array().map(Vec::len),
+                "compaction":body.to_string().contains("Create a concise checkpoint")})
+        }).collect();
+        let mut usage = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.cache) {
+            for entry in entries.flatten() {
+                let rows = std::fs::read_to_string(entry.path().join("requests.jsonl"))
+                    .unwrap_or_default();
+                for row in rows
+                    .lines()
+                    .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                {
+                    usage.push(json!({"read":row["cache_read_input_tokens"], "write":row["cache_creation_input_tokens"], "input":row["input_tokens"]}));
+                }
+            }
+        }
+        let report = json!({"requests":shape, "usage":usage});
+        let _ = std::fs::write(destination, serde_json::to_vec_pretty(&report).unwrap());
+    }
+}
+
+fn transcript(dir: &Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.is_dir() {
+            if let Some(found) = transcript(&path) {
+                return Some(found);
+            }
+        } else if path
+            .file_name()
+            .is_some_and(|name| name == "transcript.jsonl")
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn requests(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let row: Value = serde_json::from_str(line).ok()?;
+            (row["event"] == "request_debug" && row["attributes"]["body"]["messages"].is_array())
+                .then(|| row["attributes"]["body"].clone())
+        })
+        .collect()
+}
+
+fn turn(cli: &mut pty_expect::PtySession, prompt: &str) {
+    let marker = common::turn_status_marker(cli);
+    cli.send(&format!("{prompt}\r")).unwrap();
+    common::expect_turn_complete_after(cli, &marker, WAIT, prompt);
+    common::expect_input_line_cleared(cli, WAIT, "live turn complete");
+}
+
+#[test]
+fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
+    let env = common::TestEnv::new("adaptive-cache-live");
+    if env.is_mock() || common::live_model() != "claude-opus-5-5" {
+        eprintln!("SKIP: requires live backend and SCODE_LIVE_MODEL=claude-opus-5-5");
+        return;
+    }
+    // Each next filename is available only in the preceding file. This forces
+    // real tool round trips rather than a response that happens to say 'OK'.
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let names: Vec<_> = (0..8)
+        .map(|index| format!("note-{nonce:x}-{index}.txt"))
+        .collect();
+    for (index, name) in names.iter().enumerate() {
+        let next = names.get(index + 1).map_or("END", String::as_str);
+        std::fs::write(
+            env.workspace_root().join(name),
+            format!(
+                "value={}\nnext={next}\n{}",
+                37 + index,
+                "Fixture note: preserve the numbered values and follow the next file.\n".repeat(64)
+            ),
+        )
+        .unwrap();
+    }
+    let log = env.workspace_root().join("requests.jsonl");
+    let _evidence = Evidence {
+        log: log.clone(),
+        cache: env.config_home().join("cache/prompt-cache"),
+    };
+    let extra_env = [("SCODE_LOG_PATH", log.to_str().unwrap())];
+    let mut cli = env.spawn_with_env(
+        &[
+            "--reasoning-effort",
+            "high",
+            "--permission-mode",
+            "read-only",
+        ],
+        &extra_env,
+    );
+    cli.set_default_timeout(WAIT);
+    common::expect_input_line_cleared(&cli, WAIT, "live adaptive ready");
+    turn(&mut cli, &format!("Read {} with read_file, follow each next filename using read_file until END, sum only the value fields. Do not use shell commands. Reply ADAPTIVE_CHAIN_OK:<sum>.", names[0]));
+    let path = transcript(&env.workspace_root().join(".scode")).expect("persisted transcript");
+    let session = runtime::Session::load_from_path(&path).unwrap();
+    assert!(session
+        .messages
+        .iter()
+        .flat_map(|m| &m.blocks)
+        .any(|b| matches!(b,
+        runtime::ContentBlock::Text { text } if text.contains("ADAPTIVE_CHAIN_OK:324"))));
+    assert!(
+        session
+            .messages
+            .iter()
+            .flat_map(|m| &m.blocks)
+            .any(|b| matches!(b,
+        runtime::ContentBlock::Thinking { thinking, signature: Some(signature) }
+        if !thinking.is_empty() && !signature.is_empty())),
+        "live route must return a readable signed thinking summary"
+    );
+    let ordinary = requests(&log);
+    assert!(ordinary.len() >= 9, "must exercise the actual tool chain");
+    cli.send("/compact\r").unwrap();
+    cli.expect("Messages removed").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "live compaction complete");
+    turn(
+        &mut cli,
+        "What was the sum of the value fields? Reply ADAPTIVE_RESUME_OK:<sum>.",
+    );
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let mut cli = env.spawn_with_env(
+        &[
+            "--resume",
+            path.to_str().unwrap(),
+            "--reasoning-effort",
+            "high",
+            "--permission-mode",
+            "read-only",
+        ],
+        &extra_env,
+    );
+    cli.set_default_timeout(WAIT);
+    common::expect_input_line_cleared(&cli, WAIT, "live adaptive resumed");
+    turn(
+        &mut cli,
+        "Confirm the earlier sum without tools. Reply ADAPTIVE_RESUME_OK:<sum>.",
+    );
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let resumed = runtime::Session::load_from_path(&path).unwrap();
+    assert!(resumed
+        .messages
+        .last()
+        .unwrap()
+        .blocks
+        .iter()
+        .any(|b| matches!(b,
+        runtime::ContentBlock::Text { text } if text.contains("ADAPTIVE_RESUME_OK:324"))));
+    let bodies = requests(&log);
+    let baseline = &bodies[0];
+    for body in &bodies {
+        assert_eq!(
+            body["thinking"],
+            json!({"type":"adaptive","display":"summarized"})
+        );
+        assert_eq!(body["output_config"]["effort"], "high");
+        for key in [
+            "model",
+            "thinking",
+            "output_config",
+            "system",
+            "tools",
+            "metadata",
+        ] {
+            assert_eq!(
+                body[key], baseline[key],
+                "cache-relevant field changed: {key}"
+            );
+        }
+    }
+    let ledger = env
+        .config_home()
+        .join("cache/prompt-cache")
+        .join(&session.session_id)
+        .join("requests.jsonl");
+    let rows: Vec<Value> = std::fs::read_to_string(ledger)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let report = json!({"model":baseline["model"], "request_count":bodies.len(), "usage":rows.iter().map(|r| json!({
+        "read":r["cache_read_input_tokens"], "write":r["cache_creation_input_tokens"], "input":r["input_tokens"]
+    })).collect::<Vec<_>>()});
+    eprintln!("{report}");
+    if let Ok(path) = std::env::var("SCODE_ADAPTIVE_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    assert_eq!(
+        rows.len(),
+        bodies.len(),
+        "every real request must have usage evidence"
+    );
+    for (index, row) in rows.iter().enumerate().skip(1) {
+        assert!(
+            row["cache_read_input_tokens"].as_u64().unwrap_or(0) > 0,
+            "request {index} did not read cache; investigate prefix/routing before accepting"
+        );
+    }
+}

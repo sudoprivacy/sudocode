@@ -271,6 +271,7 @@ impl ModelCatalog {
                         .or_else(|| curated.and_then(|c| c.image_max_dimension)),
                     endpoint_types: entry.supported_endpoint_types,
                     tool_calling_supported: entry.tool_calling_supported,
+                    anthropic_thinking_mode: curated.and_then(|c| c.anthropic_thinking_mode),
                 };
                 models.insert(entry.id, cap);
             }

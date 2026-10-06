@@ -605,6 +605,41 @@ impl Session {
         Ok(())
     }
 
+    /// Extend an in-flight assistant message without rewriting session history.
+    /// The append record is durable before a streamed tool can perform effects.
+    /// Completed-turn snapshots fold these updates back into normal messages.
+    pub(crate) fn update_assistant_message(
+        &mut self,
+        index: usize,
+        message: ConversationMessage,
+    ) -> Result<(), SessionError> {
+        let previous = self
+            .messages
+            .get(index)
+            .ok_or_else(|| SessionError::Format("assistant update index out of range".into()))?;
+        if previous.role != MessageRole::Assistant || message.role != MessageRole::Assistant {
+            return Err(SessionError::Format(
+                "stream update requires an assistant message".into(),
+            ));
+        }
+        if previous == &message {
+            return Ok(());
+        }
+        let record_index = i64::try_from(index)
+            .map_err(|_| SessionError::Format("assistant index overflow".into()))?;
+        let previous = std::mem::replace(&mut self.messages[index], message);
+        let mut record = BTreeMap::new();
+        record.insert("type".into(), JsonValue::String("assistant_update".into()));
+        record.insert("index".into(), JsonValue::Number(record_index));
+        record.insert("message".into(), self.messages[index].to_json());
+        if let Err(error) = self.append_persisted_record(&JsonValue::Object(record)) {
+            self.messages[index] = previous;
+            return Err(error);
+        }
+        self.touch();
+        Ok(())
+    }
+
     pub fn push_user_text(&mut self, text: impl Into<String>) -> Result<(), SessionError> {
         self.push_message(ConversationMessage::user_text(text))
     }
@@ -894,6 +929,25 @@ impl Session {
                     })?;
                     messages.push(ConversationMessage::from_json(message_value)?);
                 }
+                "assistant_update" => {
+                    let index = usize::try_from(required_u64(object, "index")?).map_err(|_| {
+                        SessionError::Format("assistant update index overflow".into())
+                    })?;
+                    let message =
+                        ConversationMessage::from_json(object.get("message").ok_or_else(
+                            || SessionError::Format("assistant update missing message".into()),
+                        )?)?;
+                    let slot = messages.get_mut(index).ok_or_else(|| {
+                        SessionError::Format("assistant update index out of range".into())
+                    })?;
+                    if slot.role != MessageRole::Assistant || message.role != MessageRole::Assistant
+                    {
+                        return Err(SessionError::Format(
+                            "assistant update target is not assistant".into(),
+                        ));
+                    }
+                    *slot = message;
+                }
                 "compaction" => {
                     compaction = Some(SessionCompaction::from_json(&JsonValue::Object(
                         object.clone(),
@@ -1016,19 +1070,6 @@ impl Session {
     }
 
     fn append_persisted_message(&self, message: &ConversationMessage) -> Result<(), SessionError> {
-        let Some(path) = self.persistence_path() else {
-            return Ok(());
-        };
-        let path_str = path.to_string_lossy();
-        let backend = self.backend();
-
-        let needs_bootstrap = !backend.exists(&path_str)?
-            || backend.stat(&path_str).map(|m| m.len == 0).unwrap_or(true);
-        if needs_bootstrap {
-            self.bootstrap_append_log(path)?;
-            return Ok(());
-        }
-
         let mut record = message_record(message);
         if self.prompt_snapshot_dirty {
             if let (JsonValue::Object(object), Some(snapshot)) =
@@ -1037,30 +1078,28 @@ impl Session {
                 object.insert("prompt_snapshot".into(), snapshot.to_json());
             }
         }
-        let line = format!("{}\n", record.render());
-        backend.append(&path_str, line.as_bytes())?;
-        Ok(())
+        self.append_persisted_record(&record)
     }
 
     fn append_persisted_prompt_entry(
         &self,
         entry: &SessionPromptEntry,
     ) -> Result<(), SessionError> {
+        self.append_persisted_record(&entry.to_jsonl_record())
+    }
+
+    fn append_persisted_record(&self, record: &JsonValue) -> Result<(), SessionError> {
         let Some(path) = self.persistence_path() else {
             return Ok(());
         };
         let path_str = path.to_string_lossy();
         let backend = self.backend();
-
         let needs_bootstrap = !backend.exists(&path_str)?
             || backend.stat(&path_str).map(|m| m.len == 0).unwrap_or(true);
         if needs_bootstrap {
-            self.bootstrap_append_log(path)?;
-            return Ok(());
+            return self.bootstrap_append_log(path);
         }
-
-        let line = format!("{}\n", entry.to_jsonl_record().render());
-        backend.append(&path_str, line.as_bytes())?;
+        backend.append(&path_str, format!("{}\n", record.render()).as_bytes())?;
         Ok(())
     }
 

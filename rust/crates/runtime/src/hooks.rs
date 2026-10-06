@@ -185,6 +185,13 @@ impl HookRunResult {
         }
     }
 
+    pub(crate) fn failed(message: String) -> Self {
+        Self {
+            failed: true,
+            ..Self::allow(vec![message])
+        }
+    }
+
     #[must_use]
     pub fn is_denied(&self) -> bool {
         self.denied
@@ -245,6 +252,15 @@ impl HookRunner {
     #[must_use]
     pub fn from_feature_config(feature_config: &RuntimeFeatureConfig) -> Self {
         Self::new(feature_config.hooks().clone())
+    }
+
+    pub(crate) fn has_tool_hooks(&self, event: HookEvent) -> bool {
+        !match event {
+            HookEvent::PreToolUse => self.config.pre_tool_use(),
+            HookEvent::PostToolUse => self.config.post_tool_use(),
+            HookEvent::PostToolUseFailure => self.config.post_tool_use_failure(),
+        }
+        .is_empty()
     }
 
     #[must_use]

@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::stream::Stream;
-use futures::StreamExt;
 use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
+mod response;
 mod tool_execution;
 
 use crate::compact::{
@@ -662,9 +662,7 @@ pub struct ToolDispatchContext {
     /// Where a spawned sub-agent reports what it is doing, if the renderer
     /// asked for that (see [`RuntimeObserver::subagent_sink`]).
     pub subagent_sink: Option<crate::subagent_events::SubagentSink>,
-    /// The `tool_use` id of the call being dispatched. Set for calls run one
-    /// at a time (which is how `agent_spawn` always runs); `None` inside a
-    /// concurrent batch.
+    /// The `tool_use` id of this invocation, including concurrent calls.
     pub tool_use_id: Option<String>,
     /// The parent session's active permission mode. A spawned sub-agent runs
     /// under this mode rather than an unconditional full-access policy, so a
@@ -1038,7 +1036,7 @@ pub struct ConversationRuntime<C, T> {
     /// `maybe_auto_compact` short-circuits for the rest of the session.
     consecutive_auto_compact_noops: u8,
     hook_abort_signal: HookAbortSignal,
-    hook_progress_reporter: Option<Box<dyn HookProgressReporter + Send>>,
+    hook_progress_reporter: Option<HookProgressSink>,
     session_tracer: Option<SessionTracer>,
     /// File operation tracker for the current turn.
     file_tracker: crate::file_tracker::TurnFileTracker,
@@ -1182,77 +1180,6 @@ where
     /// Set the trace ID in-place (non-builder pattern).
     pub fn set_trace_id(&mut self, trace_id: impl Into<String>) {
         self.trace_id = Some(trace_id.into());
-    }
-
-    fn run_pre_tool_use_hook(&mut self, tool_name: &str, input: &str) -> HookRunResult {
-        if let Some(reporter) = self.hook_progress_reporter.as_mut() {
-            self.hook_runner.run_pre_tool_use_with_context(
-                tool_name,
-                input,
-                Some(&self.hook_abort_signal),
-                Some(reporter.as_mut()),
-            )
-        } else {
-            self.hook_runner.run_pre_tool_use_with_context(
-                tool_name,
-                input,
-                Some(&self.hook_abort_signal),
-                None,
-            )
-        }
-    }
-
-    fn run_post_tool_use_hook(
-        &mut self,
-        tool_name: &str,
-        input: &str,
-        output: &str,
-        is_error: bool,
-    ) -> HookRunResult {
-        if let Some(reporter) = self.hook_progress_reporter.as_mut() {
-            self.hook_runner.run_post_tool_use_with_context(
-                tool_name,
-                input,
-                output,
-                is_error,
-                Some(&self.hook_abort_signal),
-                Some(reporter.as_mut()),
-            )
-        } else {
-            self.hook_runner.run_post_tool_use_with_context(
-                tool_name,
-                input,
-                output,
-                is_error,
-                Some(&self.hook_abort_signal),
-                None,
-            )
-        }
-    }
-
-    fn run_post_tool_use_failure_hook(
-        &mut self,
-        tool_name: &str,
-        input: &str,
-        output: &str,
-    ) -> HookRunResult {
-        if let Some(reporter) = self.hook_progress_reporter.as_mut() {
-            self.hook_runner.run_post_tool_use_failure_with_context(
-                tool_name,
-                input,
-                output,
-                Some(&self.hook_abort_signal),
-                Some(reporter.as_mut()),
-            )
-        } else {
-            self.hook_runner.run_post_tool_use_failure_with_context(
-                tool_name,
-                input,
-                output,
-                Some(&self.hook_abort_signal),
-                None,
-            )
-        }
     }
 
     /// Returns the date the runtime should treat as "today" for the
@@ -1591,22 +1518,6 @@ where
         self.user_request_intent = None;
     }
 
-    fn push_tool_result_message(
-        &mut self,
-        observer: &mut Option<&mut dyn RuntimeObserver>,
-        iterations: usize,
-        tool_results: &mut Vec<ConversationMessage>,
-        result_message: ConversationMessage,
-    ) -> Result<(), RuntimeError> {
-        notify_tool_result(runtime_observer_mut(observer), &result_message);
-        self.session
-            .push_message(result_message.clone())
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-        self.record_tool_finished(iterations, &result_message);
-        tool_results.push(result_message);
-        Ok(())
-    }
-
     /// If a tool output exceeds the offload threshold, spill the full bytes to
     /// `<session-dir>/tool-results/<tool_use_id>` (via the session `FsBackend`,
     /// backend-agnostic) and replace it in-transcript with a head preview + a
@@ -1835,20 +1746,13 @@ where
             .push_user_blocks(prepared_blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
 
-        // Route live plugin-hook progress through the seam: when the observer
-        // (the seam's `engine-core` adapter) supplies a hook-progress sink,
-        // install it as this turn's `hook_progress_reporter` so
-        // `run_pre_tool_use_hook` / `run_post_tool_use_hook` /
-        // `run_post_tool_use_failure_hook` forward each lifecycle event to the
-        // renderer. Rebuilt each turn (the ObserverAdapter carrying the live
-        // event channel changes per turn); this overwrites the build-time
-        // reporter, which is `None` on the seam path. Uses the same accessor
-        // (`observer.as_deref()`) the `tool_progress_sink` install below uses.
+        // Hook workers share the current observer's progress sink, so slow
+        // hooks never hold the event loop while reporting lifecycle changes.
         if let Some(sink) = observer
             .as_deref()
             .and_then(RuntimeObserver::hook_progress_sink)
         {
-            self.hook_progress_reporter = Some(Box::new(SinkHookReporter(sink)));
+            self.hook_progress_reporter = Some(sink);
         }
 
         // Retry reporting follows the observer, so it is set unconditionally —
@@ -1865,7 +1769,7 @@ where
         let mut turn_compactions = 0usize;
         let mut recorded_compaction_budget_exhausted = false;
         let mut overflow_compaction: Option<AutoCompactionEvent> = None;
-        let mut response_model: Option<String> = None;
+        let mut response_model: Option<String>;
 
         loop {
             if self.hook_abort_signal.is_aborted() {
@@ -1981,7 +1885,7 @@ where
                     result = self.api_client.stream(request) => result,
                 }
             };
-            let mut stream = match stream_result {
+            let stream = match stream_result {
                 Ok(stream) => stream,
                 Err(error) => {
                     // A context-window rejection is the one request failure
@@ -2026,101 +1930,10 @@ where
                 }
             };
 
-            // Consume the stream event-by-event, racing against the abort
-            // signal so cancellation drops the HTTP connection immediately.
-            let events = {
-                let abort = &self.hook_abort_signal;
-                let mut collected = Vec::new();
-                loop {
-                    tokio::select! {
-                        biased;
-                        () = abort.cancelled() => {
-                            // Drop the stream to close the HTTP connection
-                            // and stop token consumption.
-                            drop(stream);
-                            self.finalize_cancelled_turn(collected);
-                            let turn_usage = sum_assistant_message_usage(&assistant_messages);
-                            let session_usage = self.usage_tracker.cumulative_usage();
-                            return Ok(TurnSummary {
-                                assistant_messages,
-                                tool_results,
-                                prompt_cache_events,
-                                iterations,
-                                turn_usage,
-                                session_usage,
-                                auto_compaction: None,
-                                cancelled: true,
-                                response_model: None,
-                            });
-                        }
-                        next = stream.next() => {
-                            match next {
-                                Some(Ok(event)) => {
-                                    // Notify the observer in real time as events
-                                    // arrive from the API stream so ACP clients
-                                    // receive incremental updates.
-                                    if let Some(obs) = observer.as_mut() {
-                                        match &event {
-                                            AssistantEvent::Thinking { thinking, .. } => {
-                                                // A signature-only event carries
-                                                // no text; forwarding it would
-                                                // make renderers open a thinking
-                                                // section with nothing in it.
-                                                if !thinking.is_empty() {
-                                                    obs.on_thinking_delta(thinking);
-                                                }
-                                            }
-                                            // Ciphertext: there is no delta a
-                                            // renderer could show. Printing
-                                            // nothing, though, is
-                                            // indistinguishable from a turn that
-                                            // never thought — so say it once per
-                                            // block, through the same channel the
-                                            // thinking text uses so it lands in
-                                            // the same dim style, and with the
-                                            // wording the export already uses.
-                                            // Display only: the block itself is
-                                            // replayed from the message, not from
-                                            // anything the observer saw.
-                                            AssistantEvent::RedactedThinking { .. } => {
-                                                obs.on_thinking_delta(
-                                                    "[thinking: redacted by the provider]\n",
-                                                );
-                                            }
-                                            AssistantEvent::TextDelta(delta) => {
-                                                obs.on_text_delta(delta);
-                                            }
-                                            AssistantEvent::ToolUse { id, name, input, .. } => {
-                                                obs.on_tool_use(id, name, input);
-                                            }
-                                            AssistantEvent::Model(model) => {
-                                                obs.on_model(model);
-                                            }
-                                            AssistantEvent::Usage(usage) => {
-                                                obs.on_usage(usage);
-                                            }
-                                            AssistantEvent::PromptCache(cache_event) => {
-                                                obs.on_prompt_cache(cache_event);
-                                            }
-                                            AssistantEvent::MessageStop => {
-                                                obs.on_message_stop();
-                                            }
-                                        }
-                                    }
-                                    collected.push(event);
-                                }
-                                Some(Err(error)) => {
-                                    self.record_turn_failed(iterations, &error);
-                                    return Err(error);
-                                }
-                                None => break,
-                            }
-                        }
-                    }
-                }
-                collected
-            };
-
+            let response = self
+                .execute_response(stream, iterations, &mut observer, &mut prompter)
+                .await;
+            let events = response.events;
             let (mut assistant_message, usage, turn_prompt_cache_events, iter_response_model) =
                 match build_assistant_message(events) {
                     Ok(result) => result,
@@ -2215,70 +2028,41 @@ where
                 pending_tool_uses.len(),
             );
 
-            self.session
-                .push_message(assistant_message.clone())
-                .map_err(|error| RuntimeError::new(error.to_string()))?;
+            match response.assistant_index {
+                Some(index) => self
+                    .session
+                    .update_assistant_message(index, assistant_message.clone()),
+                None => self.session.push_message(assistant_message.clone()),
+            }
+            .map_err(|error| RuntimeError::new(error.to_string()))?;
             assistant_messages.push(assistant_message.clone());
 
-            if pending_tool_uses.is_empty() {
-                break;
+            for (index, message) in response.results.into_iter().enumerate() {
+                if index >= response.persisted_results {
+                    self.session
+                        .push_message(message.clone())
+                        .map_err(|error| RuntimeError::new(error.to_string()))?;
+                }
+                self.record_tool_finished(iterations, &message);
+                tool_results.push(message);
             }
-
-            // Build ToolDispatchContext once per assistant turn: the
-            // parent_assistant_message + session-history snapshot are
-            // identical across all tool_uses emitted in the same
-            // assistant message, so cloning once here (rather than per
-            // tool_use iteration) saves an O(n_tools) allocation.
-            let dispatch_context = ToolDispatchContext {
-                parent_assistant_message: Some(assistant_message),
-                parent_session_messages: self.session.messages.clone(),
-                tool_results_dir: self.session.tool_results_dir(),
-                // Live-progress sink for streaming tools, if the renderer wants
-                // it. Rebuilt each assistant turn (cheap Arc clone); `None` for
-                // observers that don't override `tool_progress_sink` (default).
-                progress_sink: observer
-                    .as_deref()
-                    .and_then(RuntimeObserver::tool_progress_sink),
-                parent_reasoning_effort: self.api_client.reasoning_effort().map(str::to_string),
-                parent_thinking_enabled: self.api_client.thinking_enabled(),
-                parent_routing_session_id: self.api_client.routing_session_id().map(str::to_string),
-                parent_requires_model_mount: self.api_client.requires_model_mount(),
-                subagent_sink: observer.as_deref().and_then(RuntimeObserver::subagent_sink),
-                tool_use_id: None,
-                parent_permission_mode: Some(self.permission_policy.active_mode()),
-            };
-
-            let tool_abort = self.hook_abort_signal.for_current_turn();
-            self.tool_executor_mut().set_abort_signal(tool_abort);
-            let executor = Arc::clone(&self.tool_executor);
-            // This single turn owns the executor lock; parallel calls share
-            // its &T, not separate per-call locks. No task waits for this lock.
-            #[allow(clippy::await_holding_lock)]
-            let dispatch = {
-                let executor = executor
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                self.execute_tool_calls(
-                    &*executor,
-                    tool_execution::ToolBatch {
-                        calls: &pending_tool_uses,
-                        context: &dispatch_context,
-                        iteration: iterations,
-                    },
-                    &mut observer,
-                    &mut prompter,
-                    &mut tool_results,
-                )
-                .await
-            };
-            drop(executor);
-            if dispatch? {
+            if let Some(error) = response.error {
+                if let Some(path) = self.session.persistence_path() {
+                    self.session.save_to_path(path).map_err(|failure| RuntimeError::new(format!("failed to persist interrupted tools: {failure}; provider error: {error}")))?;
+                }
+                self.record_turn_failed(iterations, &error);
+                return Err(error);
+            }
+            if response.cancelled {
                 return Ok(self.cancelled_summary(
                     assistant_messages,
                     tool_results,
                     prompt_cache_events,
                     iterations,
                 ));
+            }
+            if pending_tool_uses.is_empty() {
+                break;
             }
         }
 
@@ -5105,8 +4889,11 @@ mod tests {
 
     #[tokio::test]
     async fn abort_during_tool_execution_cancels_turn_and_synthesizes_remaining_results() {
+        use futures::StreamExt;
+
         struct TwoToolUseApiClient {
             calls: usize,
+            emitted: Arc<tokio::sync::Notify>,
         }
 
         #[async_trait]
@@ -5120,37 +4907,59 @@ mod tests {
                     self.calls, 1,
                     "cancelled turn must not make a follow-up API call"
                 );
-                Ok(events_to_stream(vec![
-                    AssistantEvent::ToolUse {
-                        id: "tool-1".to_string(),
-                        name: "slow".to_string(),
-                        input: "{}".to_string(),
-                        thought_signature: None,
-                    },
-                    AssistantEvent::ToolUse {
-                        id: "tool-2".to_string(),
-                        name: "later".to_string(),
-                        input: "{}".to_string(),
-                        thought_signature: None,
-                    },
-                    AssistantEvent::MessageStop,
-                ]))
+                let emitted = Arc::clone(&self.emitted);
+                Ok(Box::pin(
+                    events_to_stream(vec![
+                        AssistantEvent::ToolUse {
+                            id: "tool-1".to_string(),
+                            name: "slow".to_string(),
+                            input: "{}".to_string(),
+                            thought_signature: None,
+                        },
+                        AssistantEvent::ToolUse {
+                            id: "tool-2".to_string(),
+                            name: "later".to_string(),
+                            input: "{}".to_string(),
+                            thought_signature: None,
+                        },
+                        AssistantEvent::MessageStop,
+                    ])
+                    .map(move |event| {
+                        if matches!(event, Ok(AssistantEvent::MessageStop)) {
+                            emitted.notify_one();
+                        }
+                        event
+                    }),
+                ))
             }
         }
 
+        struct CancelExecutor {
+            abort: crate::HookAbortSignal,
+            emitted: Arc<tokio::sync::Notify>,
+        }
+        impl ToolExecutor for CancelExecutor {
+            async fn execute(&self, name: &str, _input: &str) -> Result<String, ToolError> {
+                assert_eq!(name, "slow", "remaining tool should be synthesized");
+                // Both ids have arrived before cancellation. With streaming,
+                // tool execution can otherwise predate the second block.
+                self.emitted.notified().await;
+                self.abort.abort();
+                Ok("partial output".into())
+            }
+        }
         let abort_signal = crate::HookAbortSignal::new();
-        let abort_from_tool = abort_signal.clone();
+        let emitted = Arc::new(tokio::sync::Notify::new());
         let mut runtime = ConversationRuntime::new(
             Session::new(),
-            TwoToolUseApiClient { calls: 0 },
-            StaticToolExecutor::new()
-                .register("slow", move |_input| {
-                    abort_from_tool.abort();
-                    Ok("partial output".to_string())
-                })
-                .register("later", |_input| {
-                    panic!("remaining tool should be synthesized")
-                }),
+            TwoToolUseApiClient {
+                calls: 0,
+                emitted: Arc::clone(&emitted),
+            },
+            CancelExecutor {
+                abort: abort_signal.clone(),
+                emitted,
+            },
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             SystemPrompt::default(),
         )

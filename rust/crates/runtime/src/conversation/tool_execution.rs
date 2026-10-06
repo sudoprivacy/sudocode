@@ -1,277 +1,445 @@
-//! One dispatch path for serial and concurrent calls. Execution completion is
-//! visible immediately; transcript results retain the provider's call order.
+//! A single incremental scheduler for streamed and already-collected calls.
+//! Hooks prepare independently. Admission stays ordered so a hook that changes
+//! a read into a write fences every later call, including already-prepared ones.
 
-use futures::{stream::FuturesUnordered, StreamExt};
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+use futures::{future::LocalBoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 
 use super::{
     format_hook_message, interrupted_tool_output, max_tool_use_concurrency, merge_hook_feedback,
-    notify_tool_result, runtime_observer_mut, ApiClient, ConversationMessage, ConversationRuntime,
-    HookRunResult, PermissionContext, PermissionOutcome, PermissionPrompter, RuntimeError,
-    RuntimeObserver, ToolDispatchContext, ToolError, ToolExecutor,
+    ConversationMessage, HookAbortSignal, HookProgressSink, HookRunResult, HookRunner,
+    PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter, RuntimeError,
+    SinkHookReporter, ToolDispatchContext, ToolError, ToolExecutor,
 };
+use crate::{hooks::HookEvent, image_input::ToolOutput};
 
-pub(super) struct ToolBatch<'a> {
-    pub calls: &'a [(String, String, String)],
-    pub context: &'a ToolDispatchContext,
-    pub iteration: usize,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Queued,
+    Preparing,
+    Prepared,
+    Authorizing,
+    Authorized,
+    Running,
+    Finishing,
+    Complete,
 }
 
-struct PreparedTool {
-    index: usize,
+struct Invocation {
     id: String,
     name: String,
     input: String,
+    parent: Option<ConversationMessage>,
+    parallel: bool,
+    phase: Phase,
     pre_hook: HookRunResult,
-    denial: Option<String>,
+    output: Option<ToolOutput>,
+    is_error: bool,
+    result: Option<ConversationMessage>,
 }
 
-impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
-    /// Returns true after cancellation, with every requested id answered.
-    pub(super) async fn execute_tool_calls(
-        &mut self,
-        executor: &T,
-        batch: ToolBatch<'_>,
-        observer: &mut Option<&mut dyn RuntimeObserver>,
-        prompter: &mut Option<&mut dyn PermissionPrompter>,
-        tool_results: &mut Vec<ConversationMessage>,
-    ) -> Result<bool, RuntimeError> {
-        let ToolBatch {
-            calls,
-            context,
-            iteration,
-        } = batch;
-        let mut next = 0;
-        let mut carry = None;
-        let mut results = vec![None; calls.len()];
-        let mut committed = 0;
-        while next < calls.len() || carry.is_some() {
-            if self.hook_abort_signal.is_aborted() {
-                break;
-            }
-            let first = carry.take().unwrap_or_else(|| {
-                let prepared = self.prepare_tool(next, &calls[next], observer, prompter);
-                next += 1;
-                prepared
-            });
-            let parallel = executor.is_concurrency_safe(&first.name, &first.input);
-            let mut batch = vec![first];
-            while parallel && next < calls.len() {
-                let (_, name, input) = &calls[next];
-                if !executor.is_concurrency_safe(name, input) || self.hook_abort_signal.is_aborted()
-                {
-                    break;
-                }
-                let prepared = self.prepare_tool(next, &calls[next], observer, prompter);
-                next += 1;
-                // A hook may turn a read into a writer. Keep that invocation as
-                // the next barrier; never execute its hook a second time.
-                if !executor.is_concurrency_safe(&prepared.name, &prepared.input) {
-                    carry = Some(prepared);
-                    break;
-                }
-                batch.push(prepared);
-            }
+enum Stage {
+    Prepared(HookRunResult),
+    Authorized(PermissionOutcome),
+    Executed(Result<ToolOutput, ToolError>),
+    Finished(HookRunResult),
+}
 
-            let limit = if parallel {
-                max_tool_use_concurrency()
-            } else {
-                1
-            };
-            let mut waiting = batch.into_iter();
-            let mut active = FuturesUnordered::new();
-            loop {
-                while active.len() < limit && !self.hook_abort_signal.is_aborted() {
-                    let Some(prepared) = waiting.next() else {
-                        break;
-                    };
-                    if prepared.denial.is_some() {
-                        let index = prepared.index;
-                        let message = self.finish_tool(prepared, None);
-                        notify_tool_result(runtime_observer_mut(observer), &message);
-                        results[index] = Some(message);
-                        continue;
-                    }
-                    self.record_tool_started(iteration, &prepared.name);
-                    if let Some(observer) = observer.as_deref_mut() {
-                        observer.on_tool_started(&prepared.id, &prepared.name, &prepared.input);
-                    }
-                    let mut context = context.clone();
-                    context.tool_use_id = Some(prepared.id.clone());
-                    active.push(async move {
-                        let result = executor
-                            .execute_with_attachments(&prepared.name, &prepared.input, &context)
-                            .await;
-                        (prepared, result)
-                    });
-                }
-                self.commit_tool_results(&mut results, &mut committed, iteration, tool_results)?;
-                if active.is_empty() || self.hook_abort_signal.is_aborted() {
-                    break;
-                }
-                let abort = self.hook_abort_signal.clone();
-                let completed = tokio::select! {
-                    biased;
-                    () = abort.cancelled() => None,
-                    result = active.next() => result,
-                };
-                let Some((prepared, result)) = completed else {
-                    break;
-                };
-                let index = prepared.index;
-                let message = self.finish_tool(prepared, Some(result));
-                // Display completed siblings now, not after the slowest one.
-                // Durable ordering is handled separately by the shared commit.
-                notify_tool_result(runtime_observer_mut(observer), &message);
-                results[index] = Some(message);
-            }
-            drop(active);
-            self.commit_tool_results(&mut results, &mut committed, iteration, tool_results)?;
-        }
-
-        let cancelled = self.hook_abort_signal.is_aborted();
-        if cancelled {
-            fill_interrupted_results(calls, &mut results, committed, observer);
-        }
-        self.commit_tool_results(&mut results, &mut committed, iteration, tool_results)?;
-        debug_assert_eq!(committed, calls.len(), "every requested id needs a result");
-        Ok(cancelled)
-    }
-
-    fn prepare_tool(
-        &mut self,
+pub(super) enum ToolUpdate {
+    Started {
+        id: String,
+        name: String,
+        input: String,
+    },
+    Completed {
         index: usize,
-        call: &(String, String, String),
-        observer: &mut Option<&mut dyn RuntimeObserver>,
-        prompter: &mut Option<&mut dyn PermissionPrompter>,
-    ) -> PreparedTool {
-        let (id, name, input) = call;
-        let pre_hook = self.run_pre_tool_use_hook(name, input);
-        let input = pre_hook.updated_input().unwrap_or(input).to_string();
-        let context = PermissionContext::new(
-            pre_hook.permission_override(),
-            pre_hook.permission_reason().map(ToOwned::to_owned),
-        );
-        let denied = pre_hook.is_cancelled() || pre_hook.is_failed() || pre_hook.is_denied();
-        let outcome = if denied {
-            let action = if pre_hook.is_cancelled() {
-                "cancelled"
-            } else if pre_hook.is_failed() {
-                "failed for"
-            } else {
-                "denied"
-            };
-            PermissionOutcome::Deny {
-                reason: format_hook_message(
-                    &pre_hook,
-                    &format!("PreToolUse hook {action} tool `{name}`"),
-                ),
-            }
-        } else if let Some(prompt) = prompter.as_mut() {
-            self.permission_policy
-                .authorize_with_context(name, &input, &context, Some(*prompt))
-        } else {
-            self.permission_policy
-                .authorize_with_context(name, &input, &context, None)
-        };
-        let denial = match outcome {
-            PermissionOutcome::Allow => None,
-            PermissionOutcome::Deny { reason } => {
-                if let Some(observer) = observer.as_deref_mut() {
-                    observer.on_permission_denied(id, name, &input, &reason);
-                }
-                Some(reason)
-            }
-        };
-        PreparedTool {
-            index,
-            id: id.clone(),
-            name: name.clone(),
-            input,
-            pre_hook,
-            denial,
+        message: ConversationMessage,
+        denial: Option<String>,
+        input: String,
+    },
+}
+
+/// Owns one assistant response's tool lifetimes. The runtime remains the only
+/// owner of transcript mutation; completion is observable before durable commit.
+pub(super) struct ToolScheduler<'a, T> {
+    executor: &'a T,
+    calls: Vec<Invocation>,
+    active: FuturesUnordered<LocalBoxFuture<'a, (usize, Stage)>>,
+    updates: VecDeque<ToolUpdate>,
+    hooks: Arc<HookRunner>,
+    policy: PermissionPolicy,
+    abort: HookAbortSignal,
+    progress: Option<HookProgressSink>,
+    limit: usize,
+    context: Option<ToolDispatchContext>,
+}
+
+impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
+    pub(super) fn new(
+        executor: &'a T,
+        hooks: HookRunner,
+        policy: PermissionPolicy,
+        abort: HookAbortSignal,
+        progress: Option<HookProgressSink>,
+    ) -> Self {
+        Self {
+            executor,
+            calls: Vec::new(),
+            active: FuturesUnordered::new(),
+            updates: VecDeque::new(),
+            hooks: Arc::new(hooks),
+            policy,
+            abort,
+            progress,
+            limit: max_tool_use_concurrency(),
+            context: None,
         }
     }
 
-    fn finish_tool(
+    /// Pure text responses never need a cloned tool history. Capture it once,
+    /// immediately before checkpointing the first streamed call.
+    pub(super) fn initialize_context(&mut self, context: ToolDispatchContext) {
+        debug_assert!(self.context.is_none());
+        self.context = Some(context);
+    }
+
+    pub(super) fn enqueue(
         &mut self,
-        prepared: PreparedTool,
-        result: Option<Result<crate::image_input::ToolOutput, ToolError>>,
-    ) -> ConversationMessage {
-        let PreparedTool {
+        id: String,
+        name: String,
+        input: String,
+        parent: ConversationMessage,
+    ) -> Result<(), RuntimeError> {
+        if self.calls.iter().any(|call| call.id == id) {
+            return Err(RuntimeError::new(format!(
+                "duplicate tool_use id in assistant response: {id}"
+            )));
+        }
+        self.calls.push(Invocation {
+            parallel: self.executor.is_concurrency_safe(&name, &input),
             id,
             name,
             input,
-            pre_hook,
-            denial,
-            ..
-        } = prepared;
-        if let Some(reason) = denial {
-            return ConversationMessage::tool_result(
-                id,
-                name,
-                merge_hook_feedback(pre_hook.messages(), reason, true),
-                true,
-            );
-        }
-        let (output, attachments, mut is_error) = match result.expect("authorized tool result") {
-            Ok(output) => (output.text, output.attachments, false),
-            Err(error) => (error.to_string(), Vec::new(), true),
-        };
-        let mut output = merge_hook_feedback(pre_hook.messages(), output, false);
-        if self.hook_abort_signal.is_aborted() {
-            is_error = true;
-        } else {
-            let post_hook = if is_error {
-                self.run_post_tool_use_failure_hook(&name, &input, &output)
-            } else {
-                self.run_post_tool_use_hook(&name, &input, &output, false)
-            };
-            let failed = post_hook.is_denied() || post_hook.is_failed() || post_hook.is_cancelled();
-            is_error |= failed;
-            output = merge_hook_feedback(post_hook.messages(), output, failed);
-        }
-        let output = self.maybe_offload_tool_output(&id, &name, output);
-        crate::image_input::ToolOutput {
-            text: output,
-            attachments,
-        }
-        .into_message(id, name, is_error)
+            parent: Some(parent),
+            phase: Phase::Queued,
+            pre_hook: HookRunResult::allow(Vec::new()),
+            output: None,
+            is_error: false,
+            result: None,
+        });
+        Ok(())
     }
 
-    fn commit_tool_results(
+    pub(super) fn is_finished(&self) -> bool {
+        self.calls.iter().all(|call| call.phase == Phase::Complete) && self.updates.is_empty()
+    }
+
+    /// Taking this future out of a select does not lose work: all stage futures
+    /// and state transitions live in the scheduler, never in the polling frame.
+    pub(super) async fn next(
         &mut self,
-        results: &mut [Option<ConversationMessage>],
-        committed: &mut usize,
-        iteration: usize,
-        tool_results: &mut Vec<ConversationMessage>,
-    ) -> Result<(), RuntimeError> {
-        while let Some(slot) = results.get_mut(*committed) {
-            let Some(message) = slot.take() else { break };
-            // The completion was already published. Only persistence/tracing
-            // happens here, once, in the original provider call order.
-            self.push_tool_result_message(&mut None, iteration, tool_results, message)?;
-            *committed += 1;
+        prompter: &mut Option<&mut dyn PermissionPrompter>,
+    ) -> ToolUpdate {
+        loop {
+            if !self.abort.is_aborted() {
+                self.admit(prompter);
+            }
+            if let Some(update) = self.updates.pop_front() {
+                return update;
+            }
+            if self.active.is_empty() {
+                std::future::pending::<()>().await;
+            }
+            if let Some((index, stage)) = self.active.next().await {
+                self.advance(index, stage);
+            }
         }
-        Ok(())
+    }
+
+    fn admit(&mut self, prompter: &mut Option<&mut dyn PermissionPrompter>) {
+        let mut inflight = self
+            .calls
+            .iter()
+            .filter(|call| !matches!(call.phase, Phase::Queued | Phase::Complete))
+            .count();
+        let mut earlier_pending = false;
+        let mut earlier_unclassified = false;
+        for index in 0..self.calls.len() {
+            let call = &mut self.calls[index];
+            if call.phase == Phase::Complete {
+                continue;
+            }
+            if !call.parallel && earlier_pending {
+                break;
+            }
+            if call.phase == Phase::Queued {
+                if inflight >= self.limit {
+                    break;
+                }
+                call.phase = Phase::Preparing;
+                inflight += 1;
+                let hook = run_hook(
+                    self.hooks.clone(),
+                    HookEvent::PreToolUse,
+                    call.name.clone(),
+                    call.input.clone(),
+                    None,
+                    self.abort.clone(),
+                    self.progress.clone(),
+                );
+                self.active
+                    .push(async move { (index, Stage::Prepared(hook.await)) }.boxed_local());
+            }
+            if matches!(call.phase, Phase::Queued | Phase::Preparing) {
+                earlier_unclassified = true;
+            } else if !earlier_unclassified {
+                if call.phase == Phase::Prepared {
+                    let context = PermissionContext::new(
+                        call.pre_hook.permission_override(),
+                        call.pre_hook.permission_reason().map(ToOwned::to_owned),
+                    );
+                    let reply = self.policy.begin_authorization(
+                        &call.name,
+                        &call.input,
+                        &context,
+                        prompter
+                            .as_mut()
+                            .map(|p| &mut **p as &mut dyn PermissionPrompter),
+                    );
+                    call.phase = Phase::Authorizing;
+                    self.active
+                        .push(async move { (index, Stage::Authorized(reply.await)) }.boxed_local());
+                } else if call.phase == Phase::Authorized {
+                    call.phase = Phase::Running;
+                    let executor = self.executor;
+                    let name = call.name.clone();
+                    let input = call.input.clone();
+                    // Only executing calls clone session history; queued calls
+                    // retain their assistant prefix, not another full session.
+                    let mut context = self
+                        .context
+                        .as_ref()
+                        .expect("context before first call")
+                        .clone();
+                    context.tool_use_id = Some(call.id.clone());
+                    let parent = call.parent.take().expect("undispatched parent");
+                    context.parent_session_messages.push(parent.clone());
+                    context.parent_assistant_message = Some(parent);
+                    self.updates.push_back(ToolUpdate::Started {
+                        id: call.id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    });
+                    self.active.push(
+                        async move {
+                            (
+                                index,
+                                Stage::Executed(
+                                    executor
+                                        .execute_with_attachments(&name, &input, &context)
+                                        .await,
+                                ),
+                            )
+                        }
+                        .boxed_local(),
+                    );
+                }
+            }
+            earlier_pending = true;
+            if !call.parallel {
+                break;
+            }
+        }
+    }
+
+    fn advance(&mut self, index: usize, stage: Stage) {
+        let call = &mut self.calls[index];
+        match stage {
+            Stage::Prepared(hook) => {
+                if let Some(input) = hook.updated_input() {
+                    call.input = input.into();
+                }
+                call.parallel = self.executor.is_concurrency_safe(&call.name, &call.input);
+                call.phase = Phase::Prepared;
+                let denial = if hook.is_cancelled() || hook.is_failed() || hook.is_denied() {
+                    let action = if hook.is_cancelled() {
+                        "cancelled"
+                    } else if hook.is_failed() {
+                        "failed for"
+                    } else {
+                        "denied"
+                    };
+                    Some(format_hook_message(
+                        &hook,
+                        &format!("PreToolUse hook {action} tool `{}`", call.name),
+                    ))
+                } else {
+                    None
+                };
+                call.pre_hook = hook;
+                if let Some(reason) = denial {
+                    self.complete(index, reason.clone(), Vec::new(), true, Some(reason));
+                }
+            }
+            Stage::Authorized(PermissionOutcome::Allow) => call.phase = Phase::Authorized,
+            Stage::Authorized(PermissionOutcome::Deny { reason }) => {
+                self.complete(index, reason.clone(), Vec::new(), true, Some(reason));
+            }
+            Stage::Executed(result) => {
+                let (mut output, is_error) = match result {
+                    Ok(output) => (output, false),
+                    Err(error) => (ToolOutput::text(error.to_string()), true),
+                };
+                output.text = merge_hook_feedback(call.pre_hook.messages(), output.text, false);
+                call.is_error = is_error || self.abort.is_aborted();
+                let event = if is_error {
+                    HookEvent::PostToolUseFailure
+                } else {
+                    HookEvent::PostToolUse
+                };
+                let hook = run_hook(
+                    self.hooks.clone(),
+                    event,
+                    call.name.clone(),
+                    call.input.clone(),
+                    self.hooks
+                        .has_tool_hooks(event)
+                        .then(|| output.text.clone()),
+                    self.abort.clone(),
+                    self.progress.clone(),
+                );
+                call.output = Some(output);
+                call.phase = Phase::Finishing;
+                self.active
+                    .push(async move { (index, Stage::Finished(hook.await)) }.boxed_local());
+            }
+            Stage::Finished(hook) => {
+                let output = call.output.take().expect("executed output");
+                let failed = hook.is_denied() || hook.is_failed() || hook.is_cancelled();
+                let text = merge_hook_feedback(hook.messages(), output.text, failed);
+                let is_error = call.is_error || failed;
+                self.complete(index, text, output.attachments, is_error, None);
+            }
+        }
+    }
+
+    fn complete(
+        &mut self,
+        index: usize,
+        text: String,
+        attachments: Vec<crate::session::ContentBlock>,
+        is_error: bool,
+        denial: Option<String>,
+    ) {
+        let call = &mut self.calls[index];
+        let text = if denial.is_some() {
+            merge_hook_feedback(call.pre_hook.messages(), text, true)
+        } else {
+            text
+        };
+        let message = ToolOutput { text, attachments }.into_message(
+            call.id.clone(),
+            call.name.clone(),
+            is_error,
+        );
+        call.phase = Phase::Complete;
+        call.parent = None;
+        self.updates.push_back(ToolUpdate::Completed {
+            index,
+            message,
+            denial,
+            input: call.input.clone(),
+        });
+    }
+
+    pub(super) fn result(&self, index: usize) -> Option<&ConversationMessage> {
+        self.calls.get(index).and_then(|call| call.result.as_ref())
+    }
+
+    pub(super) fn store_result(&mut self, index: usize, message: ConversationMessage) {
+        self.calls[index].result = Some(message);
+    }
+
+    /// Preserve completed outputs, and answer each unfinished id exactly once.
+    /// Dropping stage futures releases network and interaction waits; latched
+    /// cancellation also stops blocking hook/tool workers after stream failure.
+    pub(super) fn cancel(&mut self) {
+        self.active.clear();
+        for index in 0..self.calls.len() {
+            let call = &mut self.calls[index];
+            if call.phase != Phase::Complete {
+                // The command may have finished while its post hook was still
+                // pending. Retain its output when cancelling that hook.
+                let output = call
+                    .output
+                    .take()
+                    .unwrap_or_else(|| ToolOutput::text(interrupted_tool_output(&call.name)));
+                self.complete(index, output.text, output.attachments, true, None);
+            }
+        }
+    }
+
+    pub(super) fn take_update(&mut self) -> Option<ToolUpdate> {
+        self.updates.pop_front()
+    }
+    pub(super) fn into_results(mut self) -> Vec<ConversationMessage> {
+        std::mem::take(&mut self.calls)
+            .into_iter()
+            .map(|call| call.result.expect("every tool id has a result"))
+            .collect()
     }
 }
 
-fn fill_interrupted_results(
-    calls: &[(String, String, String)],
-    results: &mut [Option<ConversationMessage>],
-    committed: usize,
-    observer: &mut Option<&mut dyn RuntimeObserver>,
-) {
-    for ((id, name, _), slot) in calls[committed..].iter().zip(&mut results[committed..]) {
-        if slot.is_none() {
-            let message = ConversationMessage::tool_result(
-                id.clone(),
-                name.clone(),
-                interrupted_tool_output(name),
-                true,
-            );
-            notify_tool_result(runtime_observer_mut(observer), &message);
-            *slot = Some(message);
+impl<T> Drop for ToolScheduler<'_, T> {
+    fn drop(&mut self) {
+        if self.calls.iter().any(|call| call.phase != Phase::Complete) {
+            self.abort.abort();
         }
     }
+}
+
+async fn run_hook(
+    hooks: Arc<HookRunner>,
+    event: HookEvent,
+    name: String,
+    input: String,
+    output: Option<String>,
+    abort: HookAbortSignal,
+    progress: Option<HookProgressSink>,
+) -> HookRunResult {
+    if !hooks.has_tool_hooks(event) {
+        return HookRunResult::allow(Vec::new());
+    }
+    let workspace = crate::WorkspaceRootHandoff::capture();
+    tokio::task::spawn_blocking(move || {
+        let _workspace = workspace.enter();
+        let mut reporter = progress.map(SinkHookReporter);
+        let reporter = reporter
+            .as_mut()
+            .map(|r| r as &mut dyn super::HookProgressReporter);
+        match event {
+            HookEvent::PreToolUse => {
+                hooks.run_pre_tool_use_with_context(&name, &input, Some(&abort), reporter)
+            }
+            HookEvent::PostToolUse => hooks.run_post_tool_use_with_context(
+                &name,
+                &input,
+                output.as_deref().unwrap_or_default(),
+                false,
+                Some(&abort),
+                reporter,
+            ),
+            HookEvent::PostToolUseFailure => hooks.run_post_tool_use_failure_with_context(
+                &name,
+                &input,
+                output.as_deref().unwrap_or_default(),
+                Some(&abort),
+                reporter,
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|error| HookRunResult::failed(format!("hook worker failed: {error}")))
 }

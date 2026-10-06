@@ -30,6 +30,17 @@ use crate::fs_backend::FsBackend;
 /// model it curates; see [`load`] for why it outranks the on-disk file.
 const BUNDLED_CAPABILITIES: &str = include_str!("model-capabilities.bundled.json");
 
+/// Anthropic wire contract, independent of output caps or UI visibility.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicThinkingMode {
+    #[default]
+    Budgeted,
+    /// The model rejects manual budgets and disabled thinking. The setting can
+    /// request/omit readable summaries, but cannot turn off model reasoning.
+    AdaptiveAlways,
+}
+
 /// Token limit + image-cap metadata for a single model.
 ///
 /// All image-cap fields are optional + `serde(default)` so existing on-disk
@@ -76,6 +87,8 @@ pub struct ModelCapability {
     /// Deployment capability published by the current endpoint. None is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calling_supported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_thinking_mode: Option<AnthropicThinkingMode>,
 }
 
 impl ModelCapability {
@@ -90,6 +103,7 @@ impl ModelCapability {
             image_max_dimension: None,
             endpoint_types: None,
             tool_calling_supported: None,
+            anthropic_thinking_mode: None,
         }
     }
 }
@@ -120,6 +134,7 @@ impl DefaultLimits {
             image_max_dimension: None,
             endpoint_types: None,
             tool_calling_supported: None,
+            anthropic_thinking_mode: None,
         }
     }
 }
@@ -283,6 +298,23 @@ pub const MIN_THINKING_BUDGET_TOKENS: u32 = 1024;
 #[must_use]
 pub fn thinking_budget_tokens(model_id: &str) -> u32 {
     (request_max_output_tokens(model_id) / 2).max(MIN_THINKING_BUDGET_TOKENS)
+}
+
+/// Missing protocol metadata in an older route snapshot must not erase a
+/// bundled contract. Keep the fallback per-field, not a fabricated model entry.
+#[must_use]
+pub fn anthropic_thinking_mode(model_id: &str) -> AnthropicThinkingMode {
+    lookup(model_id)
+        .and_then(|cap| cap.anthropic_thinking_mode)
+        .or_else(|| {
+            let base = model_id.rsplit('/').next().unwrap_or(model_id);
+            ModelCapabilitiesFile::default()
+                .models
+                .into_iter()
+                .find(|(id, _)| id.eq_ignore_ascii_case(base))
+                .and_then(|(_, cap)| cap.anthropic_thinking_mode)
+        })
+        .unwrap_or_default()
 }
 
 /// Look up the configured override for a wire model ID, if any.

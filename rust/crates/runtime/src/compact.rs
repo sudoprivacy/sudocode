@@ -880,7 +880,12 @@ async fn compact_session_cache_safe_inner<C: ApiClient>(
     // 32000 and read nothing for it, at HTTP 200, with no symptom but the bill.
     let model_max_output = crate::model_capabilities::max_output_tokens_or_default(model);
     let summary_max_tokens = std::cmp::min(COMPACT_MAX_OUTPUT_TOKENS, model_max_output);
-    let max_tokens = if api_client.thinking_enabled() {
+    // Adaptive mode has no manual budget to clamp; changing only max_tokens
+    // must not change its thinking mode, display, or session effort.
+    let max_tokens = if api_client.thinking_enabled()
+        && crate::model_capabilities::anthropic_thinking_mode(model)
+            == crate::model_capabilities::AnthropicThinkingMode::Budgeted
+    {
         std::cmp::min(
             model_max_output,
             summary_max_tokens

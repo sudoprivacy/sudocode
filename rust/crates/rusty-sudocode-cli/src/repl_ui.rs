@@ -2164,7 +2164,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         should_exit.set(true);
                     }
                     KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
-                        input_value.set(String::new());
+                        // TextInput applies this edit before the next queued key.
+                        // The parent retains ownership of history metadata.
+                        if !matches!(current_slot, InputSlot::TextInput) {
+                            input_value.set(String::new());
+                        }
                         history_cursor.set(None);
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -2440,6 +2444,25 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                 }
             } else {
+                let on_edit: TextInputEditHandler = Box::new(move |event, current, cursor| {
+                    match event {
+                        TerminalEvent::Key(KeyEvent { code: KeyCode::Char('u'), modifiers, .. })
+                            if modifiers.contains(KeyModifiers::CONTROL) => Some(TextInputEdit {
+                                value: String::new(), cursor_offset: 0,
+                            }),
+                        TerminalEvent::Paste(pasted) => {
+                            let mut id = next_paste_id.get();
+                            let mut store = paste_store.write();
+                            let insertion = apply_paste_to_buffer("", pasted, &mut id, &mut store);
+                            next_paste_id.set(id);
+                            Some(TextInputEdit {
+                                value: format!("{}{}{}", &current[..cursor], insertion, &current[cursor..]),
+                                cursor_offset: cursor + insertion.len(),
+                            })
+                        }
+                        _ => None,
+                    }
+                });
                 element! {
                     View(flex_direction: FlexDirection::Row) {
                         Text(content: prompt_label)
@@ -2449,18 +2472,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             multiline: true,
                             auto_grow: true,
                             handle: Some(text_input_handle.clone()),
+                            on_edit: Some(on_edit),
                             on_change: move |new_val: String| {
-                                input_value.set(new_val);
-                            },
-                            on_paste: move |pasted: String| {
-                                // Normalize + literal-vs-placeholder handling is
-                                // shared with the DialPad custom-input row.
-                                let current = input_value.read().clone();
-                                let mut id = next_paste_id.get();
-                                let mut store = paste_store.write();
-                                let new_val =
-                                    apply_paste_to_buffer(&current, &pasted, &mut id, &mut store);
-                                next_paste_id.set(id);
                                 input_value.set(new_val);
                             },
                         )

@@ -2,6 +2,13 @@
 
 Day-to-day `scode` workflows.
 
+## Editing a prompt
+
+`Ctrl+U` clears the current draft. You can immediately continue typing or paste
+replacement text. Pasting inserts at the cursor and preserves text on either
+side. Long or multiline pastes appear as compact placeholders; submitting the
+prompt expands them back to the original content, including subsequent typing.
+
 ## Global and project directories
 
 All native config paths resolve through `runtime::config`. The same roots own

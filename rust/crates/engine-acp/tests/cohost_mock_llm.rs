@@ -627,6 +627,46 @@ fn await_new_reply(
     panic!("no new reply during {phase}; cursor={cursor}; session={state:?}");
 }
 
+/// Observe the replacement receiver's actual read before releasing the old
+/// lease. Content still goes through the same kernel and backing store.
+struct ReaderHandoffStore {
+    inner: runtime::test_support::MemObjectStore,
+    observed: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+}
+
+impl kernel::abc::object_store::ObjectStore for ReaderHandoffStore {
+    fn name(&self) -> &str {
+        "reader-handoff"
+    }
+
+    fn write_content(
+        &self,
+        content: &[u8],
+        content_id: &str,
+        ctx: &kernel::kernel::OperationContext,
+        offset: u64,
+    ) -> Result<kernel::abc::object_store::WriteResult, kernel::abc::object_store::StorageError>
+    {
+        self.inner.write_content(content, content_id, ctx, offset)
+    }
+
+    fn read_content(
+        &self,
+        content_id: &str,
+        ctx: &kernel::kernel::OperationContext,
+    ) -> Result<Vec<u8>, kernel::abc::object_store::StorageError> {
+        let bytes = self.inner.read_content(content_id, ctx)?;
+        if serde_json::from_slice::<runtime::mailbox::ReaderRegister>(&bytes)
+            .is_ok_and(|register| register.holder == "draining-test-receiver")
+        {
+            if let Some(observed) = self.observed.lock().unwrap().take() {
+                let _ = observed.send(());
+            }
+        }
+        Ok(bytes)
+    }
+}
+
 #[test]
 fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_session() {
     use serde_json::json;
@@ -634,6 +674,16 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     let harness = harness();
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
+    let (reader_observed_tx, reader_observed_rx) = std::sync::mpsc::channel();
+    kernel.vfs_router_arc().add_mount(
+        "/conversations",
+        "root",
+        Some(Arc::new(ReaderHandoffStore {
+            inner: runtime::test_support::MemObjectStore::default(),
+            observed: Mutex::new(Some(reader_observed_tx)),
+        })),
+        false,
+    );
     let _model_storage = common::mount_model(
         &kernel,
         "anthropic",
@@ -723,10 +773,49 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         );
         assert_eq!(fs.read_to_string(&path).unwrap(), before_bytes);
     }
+    // Model an old receiver finishing its cleanup just after the replacement
+    // first checks its lease. A read handshake, rather than a sleep, forces
+    // that ordering; the replacement must notice the explicit early release.
+    let reader_path = InboxConvention::new(String::new()).reader_path(USER, agent, agent);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let released = loop {
+        let register: runtime::mailbox::ReaderRegister =
+            serde_json::from_slice(&fs.read(&reader_path).unwrap()).unwrap();
+        if register.holder.is_empty() {
+            break register;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "old reader did not release"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut held = released.clone();
+    held.holder = "draining-test-receiver".into();
+    // Outlive the reply budget: only observing early release can pass this.
+    held.lease_expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    fs.write_atomic(&reader_path, &serde_json::to_vec(&held).unwrap())
+        .unwrap();
+    let release_fs = Arc::clone(&fs);
+    let release_reader = std::thread::spawn(move || {
+        reader_observed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("replacement must read the held reader lease");
+        release_fs
+            .write_atomic(&reader_path, &serde_json::to_vec(&released).unwrap())
+            .unwrap();
+    });
     let captured_before = harness.requests_seen();
     let second = managed_call(&kernel, "start_session_v1", request.clone()).unwrap();
     let second_controller =
         managed_harness::attach_controller(Arc::clone(&kernel), &second, true).unwrap();
+    release_reader
+        .join()
+        .expect("the previous reader releases its lease");
     assert_ne!(second["session_id"], first["session_id"]);
     assert_eq!(second["durable_session_id"], sid);
     (mb.sender())(

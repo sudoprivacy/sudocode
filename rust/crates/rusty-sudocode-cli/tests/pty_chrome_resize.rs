@@ -130,6 +130,100 @@ fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+#[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
+fn parallel_bash_cards_survive_narrow_and_wide_resize() {
+    use nix::{libc, sys::stat::Mode, unistd::mkfifo};
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let env = TestEnv::new("parallel-real-resize");
+    for name in ["one.fifo", "two.fifo"] {
+        mkfifo(
+            &env.workspace_root().join(name),
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )
+        .unwrap();
+    }
+    let calls = serde_json::json!([
+        {"id": "one", "name": "Bash", "input": {"command":
+            "cat one.fifo # 一起验证 long title keeps the complete command and resizes_END_ONE"}},
+        {"id": "two", "name": "Bash", "input": {"command":
+            "cat two.fifo # 一起验证 long title keeps the complete command and resizes_END_TWO"}},
+    ]);
+    let prompt = if env.is_mock() {
+        format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
+    } else {
+        format!("In one assistant message issue all these tool calls together, using their names and inputs exactly (ids are fixture labels). Do not run extra tools or wait for one result before requesting the next: {calls}. After all results, reply exactly: Concurrency batch done.")
+    };
+    let root = env.workspace_root().to_owned();
+    let done = Arc::new(AtomicBool::new(false));
+    let stopped = done.clone();
+    let producer = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut writers = Vec::new();
+        for name in ["one.fifo", "two.fifo"] {
+            loop {
+                if stopped.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                    return Err(format!("both FIFO readers did not start: {name}"));
+                }
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(root.join(name))
+                {
+                    Ok(file) => {
+                        writers.push(file);
+                        break;
+                    }
+                    Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(format!("open {name}: {error}")),
+                }
+            }
+        }
+        // A serial scheduler cannot reach this marker. Keep both readers
+        // blocked until the real terminal has checked every width and input.
+        std::fs::write(root.join("parallel-ready"), "both readers open").unwrap();
+        while !root.join("parallel-release").is_file()
+            && !stopped.load(Ordering::Relaxed)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let released = root.join("parallel-release").is_file();
+        for (mut writer, output) in writers.into_iter().zip(["FIRST_OK", "SECOND_OK"]) {
+            writeln!(writer, "{output}").map_err(|error| error.to_string())?;
+        }
+        if released {
+            Ok(())
+        } else {
+            Err("terminal did not finish resize assertions".into())
+        }
+    });
+    let output = run_terminal(
+        &env,
+        &["--permission-mode", "danger-full-access"],
+        "parallel",
+        serde_json::json!({"prompt": prompt}),
+    );
+    done.store(true, Ordering::Relaxed);
+    let released = producer.join().expect("FIFO producer");
+    assert_terminal_output(output);
+    released.expect("both tools released after terminal assertions");
+    if env.is_mock() {
+        assert!(
+            env.captured_message_count() >= 2,
+            "tool results must reach the provider"
+        );
+    }
+}
+
 fn run_terminal(
     env: &TestEnv,
     args: &[&str],

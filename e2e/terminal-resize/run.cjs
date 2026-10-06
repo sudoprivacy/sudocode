@@ -10,7 +10,8 @@ const { Terminal } = host('@xterm/headless');
 const { Unicode11Addon } = host('@xterm/addon-unicode11');
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 assert(['bundled', 'system'].includes(config.backend), 'unknown ConPTY backend');
-const initial = config.scenario === 'a2a' ? { cols: 100, rows: 50 } : { cols: 120, rows: 24 };
+const initial = config.scenario === 'parallel' ? { cols: 100, rows: 80 }
+  : config.scenario === 'a2a' ? { cols: 100, rows: 50 } : { cols: 120, rows: 24 };
 const terminal = new Terminal({
   ...initial, scrollback: 10000, allowProposedApi: true,
   reflowCursorLine: config.backend !== 'system',
@@ -25,7 +26,8 @@ console.log(JSON.stringify({ platform: process.platform, os: os.release(),
   xterm: host('@xterm/headless/package.json').version, backend: config.backend }));
 const env = { ...process.env, SUDO_CODE_CONFIG_HOME: config.configHome,
   HOME: path.join(config.root, 'home'), TERM: 'xterm-256color', COLORTERM: 'truecolor',
-  SUDOCODE_INTERRUPT_QUEUE_MODE: 'queue', SUDOCODE_TODO_STORE: config.todos };
+  SUDOCODE_INTERRUPT_QUEUE_MODE: 'queue', SUDOCODE_TODO_STORE: config.todos,
+  SUDOCODE_MAX_TOOL_USE_CONCURRENCY: '10' };
 for (const key of ['ELECTRON_RUN_AS_NODE', 'NO_COLOR', 'SCODE_GLOBAL_CONFIG_DIR', 'SCODE_PROJECT_CONFIG_DIR'])
   delete env[key];
 const child = pty.spawn(config.binary, config.args, { cwd: config.root, env,
@@ -113,10 +115,43 @@ async function queuedPeer() {
   assert(!text.includes('<mailbox-message'), text);
   console.log('SCODE_XTERM_QUEUED_PEER_PASS');
 }
+async function parallelTools() {
+  await settle(text => text.includes('❯'));
+  child.write('\x1b[200~' + config.prompt + '\x1b[201~');
+  await frame(text => text.includes('Pasted') || text.includes('TOOL_BATCH:')
+    || text.includes('In one assistant'));
+  child.write('\r');
+  // The Rust producer marks readiness only after both FIFO readers have
+  // opened. Neither gets a result until every resize assertion completes.
+  await frame(() => fs.existsSync(path.join(config.root, 'parallel-ready')));
+  for (const width of [52, 170, 66, 100]) {
+    const started = Date.now();
+    resize(width, 80);
+    await frame(text => {
+      const rows = text.split('\n');
+      const starts = rows.flatMap((row, i) => row.startsWith('╭─ Bash(') ? [i] : []);
+      return starts.length === 2 && rows.filter(row => row.trim() === '╰─').length === 2
+        && starts.every(i => rows[i + 1]?.trim() === '╰─'
+          && (width < 100 ? rows[i].endsWith('…') : rows[i].includes('resizes_END_')));
+    }, started);
+    child.write('x');
+    await frame(text => text.split('\n').some(row => row.trimEnd() === '❯ x'));
+    child.write('\x15');
+    await frame(text => !text.split('\n').some(row => row.trimEnd() === '❯ x'));
+    console.log(JSON.stringify({ scenario: 'parallel', width, pendingCards: 2, input: true }));
+  }
+  fs.writeFileSync(path.join(config.root, 'parallel-release'), 'release');
+  await settle(text => text.includes('FIRST_OK') && text.includes('SECOND_OK')
+    && text.split('\n').some(row => row.trim().replace(/^•\s*/, '') === 'Concurrency batch done.')
+    && text.includes('ctx '));
+  console.log('SCODE_XTERM_PARALLEL_TOOLS_PASS');
+}
 async function run() {
   try {
     if (config.scenario === 'a2a') {
       await queuedPeer();
+    } else if (config.scenario === 'parallel') {
+      await parallelTools();
     } else {
       await settle(text => text.includes('turn 1') && text.includes('❯'));
       child.write('DraftSurvivesResize');

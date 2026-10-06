@@ -11,6 +11,10 @@ draft, cancels the tool and checks that the full peer body appears exactly once
 with no queued preview left behind. It uses a real API in live mode and the
 protocol provider in ordinary CI; both execute the real CLI and terminal.
 
+On Unix, a third workflow opens two real FIFO readers before releasing either
+tool. It checks both complete pending cards at four widths and edits input at
+each width, then releases both tools and verifies their results and final reply.
+
 The vt100 parser used by other PTY tests does not reflow history on width
 changes. This test therefore uses the terminal model shipped with the pinned
 VS Code host. The dedicated CI job runs it explicitly on every PR; its ignore

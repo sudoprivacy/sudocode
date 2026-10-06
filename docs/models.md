@@ -317,6 +317,14 @@ HTTP 200, a stable client-side prefix, or the status-bar percentage alone
 does not establish a hit. Existing system/tool snapshots, routing metadata,
 breakpoints and the five-minute TTL policy are unchanged.
 
+The Anthropic adapter drains the actual `message_stop` after a logical
+`stop_reason` instead of closing the response at a network-packet boundary.
+If a gateway never finishes that terminal tail, a one-second absolute grace
+deadline preserves the confirmed completion and records usage exactly once.
+This is not an unconditional delay; normally the terminal event arrives
+immediately. Interrupted content before a logical end and explicit refusals
+still fail the turn.
+
 ## Adding a model
 
 To add a new model that requires special handling:

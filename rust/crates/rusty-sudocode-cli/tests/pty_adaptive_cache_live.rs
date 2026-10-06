@@ -183,6 +183,11 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
         if !signature.is_empty() && (display == "omitted" || !thinking.is_empty()))),
         "live route must preserve signed thinking, including hidden summaries"
     );
+    if display == "omitted" {
+        assert!(session.messages.iter().flat_map(|m| &m.blocks).all(|b| {
+            !matches!(b, runtime::ContentBlock::Thinking { thinking, .. } if !thinking.is_empty())
+        }), "hidden mode must omit readable summaries, not the signed blocks");
+    }
     let ordinary = requests(&log);
     assert!(ordinary.len() >= 9, "must exercise the actual tool chain");
     cli.send("/compact\r").unwrap();

@@ -444,7 +444,10 @@ impl AnthropicClient {
                 prompt_cache.record_usage(
                     &request,
                     &response.usage,
-                    response.gateway_request_id.as_deref(),
+                    crate::prompt_cache::ResponseTraceIds {
+                        gateway: response.gateway_request_id.clone(),
+                        provider: response.request_id.clone(),
+                    },
                 )
             } else {
                 prompt_cache.record_response(&request, &response)
@@ -1234,7 +1237,13 @@ impl MessageStream {
             let record = prompt_cache.record_usage(
                 &self.request,
                 &usage,
-                self.gateway_request_id.as_deref(),
+                crate::prompt_cache::ResponseTraceIds {
+                    gateway: self.gateway_request_id.clone(),
+                    // The stream has held this since the response headers
+                    // arrived; it used to be dropped because the row was built
+                    // from a `MessageResponse` the streaming path never has.
+                    provider: self.request_id.clone(),
+                },
             );
             *self
                 .last_prompt_cache_record

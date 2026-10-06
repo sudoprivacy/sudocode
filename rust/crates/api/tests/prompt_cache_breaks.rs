@@ -108,9 +108,13 @@ fn revealing_a_deferred_tool_is_attributed_to_tools() {
     let _ = cache.record_usage(
         &request_with_tools(vec![cron_list(true)]),
         &reads(300_000),
-        None,
+        Default::default(),
     );
-    let record = cache.record_usage(&request_with_tools(vec![cron_list(false)]), &reads(0), None);
+    let record = cache.record_usage(
+        &request_with_tools(vec![cron_list(false)]),
+        &reads(0),
+        Default::default(),
+    );
 
     let event = record
         .cache_break
@@ -157,7 +161,7 @@ fn a_prefix_discarded_before_it_was_read_is_still_a_break() {
             cache_read_input_tokens: 0,
             ..Usage::default()
         },
-        None,
+        Default::default(),
     );
     let record = cache.record_usage(
         &request_with_tools(vec![cron_list(false)]),
@@ -166,7 +170,7 @@ fn a_prefix_discarded_before_it_was_read_is_still_a_break() {
             cache_read_input_tokens: 0,
             ..Usage::default()
         },
-        None,
+        Default::default(),
     );
 
     let event = record
@@ -191,8 +195,8 @@ fn a_steady_fingerprint_with_no_drop_is_not_a_break() {
     let cache = PromptCache::new("steady-session");
 
     let request = request_with_tools(vec![cron_list(true)]);
-    let _ = cache.record_usage(&request, &reads(8_000), None);
-    let record = cache.record_usage(&request, &reads(8_000), None);
+    let _ = cache.record_usage(&request, &reads(8_000), Default::default());
+    let record = cache.record_usage(&request, &reads(8_000), Default::default());
 
     assert!(
         record.cache_break.is_none(),

@@ -15,6 +15,7 @@ on:
       # arrive already gated.
       - .github/workflows/**
       - .github/scripts/check_doc_source_of_truth.py
+      - .github/scripts/summarize_live_model_trace.cjs
       - .github/FUNDING.yml
       - README.md
       - sudo-code-roadmap.html
@@ -41,6 +42,7 @@ on:
       # arrive already gated.
       - .github/workflows/**
       - .github/scripts/check_doc_source_of_truth.py
+      - .github/scripts/summarize_live_model_trace.cjs
       - .github/FUNDING.yml
       - README.md
       - sudo-code-roadmap.html
@@ -518,6 +520,7 @@ jobs:
           SCODE_TEST_BACKEND: live
           SCODE_LIVE_MODEL: claude-sonnet-4-6
           SCODE_LIVE_AUTH_PROFILE: sudorouter
+          SCODE_LOG_PATH: ${{ runner.temp }}/scode-live-model-trace.jsonl
         run: |
           node - <<'NODE'
           const fs = require('fs');
@@ -533,6 +536,18 @@ jobs:
           NODE
           cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_block_spacing sync_renderer_uses_the_same_spacing -- --nocapture
+      - name: Summarize live model routing evidence
+        if: always()
+        working-directory: .
+        env:
+          PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+        run: node .github/scripts/summarize_live_model_trace.cjs "${{ runner.temp }}/scode-live-model-trace.jsonl" "${{ runner.temp }}/scode-live-model-evidence.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-model-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/scode-live-model-evidence.json
+          retention-days: 7
       - name: Remove process-tree test credentials
         if: always()
         env:

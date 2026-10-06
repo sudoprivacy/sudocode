@@ -288,22 +288,11 @@ fn markdown_showcase_renders_without_spacing_artifacts() {
     assert_eq!(exit, 0);
 }
 
-/// Chrome is findable on the SCREEN after the stream cursor has passed it — and
-/// is NOT findable with `expect()`.
-///
-/// This pins the MECHANISM behind the flake rather than its symptom. `expect()`
-/// holds a forward-only cursor into the PTY byte stream, so once a match has
-/// consumed past a chrome row, that row is reachable again only if something
-/// triggers another redraw. Nothing in the product guarantees one, so the wait
-/// is decided by redraw timing and no budget can rescue it — which is why
-/// `bash_turn_uses_crlf_and_does_not_staircase` timed out at 30s on a separator
-/// that was on screen throughout.
-///
-/// The test drains the stream deliberately to put the cursor past the chrome,
-/// then shows the two waits disagree. If `expect()` ever starts succeeding here,
-/// this test has stopped describing the bug and the assertion says so.
+/// Draining the byte stream must leave the footer visible and input usable.
+/// The renderer may repaint at any time, including after startup resize settles;
+/// a later copy in the byte stream is valid and cannot be a failure condition.
 #[test]
-fn chrome_is_on_the_screen_after_the_stream_cursor_has_passed_it() {
+fn chrome_remains_visible_and_interactive_after_the_stream_is_drained() {
     let env = TestEnv::new("chrome-after-cursor");
     let mut sess = spawn_iocraft_repl(&env, "workspace-write");
 
@@ -327,15 +316,14 @@ fn chrome_is_on_the_screen_after_the_stream_cursor_has_passed_it() {
         "the footer is still on screen after the stream was drained",
     );
 
-    // The stream does not, within a budget far larger than it would need if
-    // this were merely slow. That asymmetry is why chrome waits exist.
-    assert!(
-        sess.expect_within(footer, Duration::from_secs(3)).is_err(),
-        "expect() found chrome after the cursor passed it, so this test no \
-         longer demonstrates the bug the screen waits avoid"
+    sess.send("/exit").expect("type /exit");
+    common::expect_input_line(
+        &sess,
+        "/exit",
+        common::DEFAULT_TIMEOUT,
+        "input remains usable after draining the stream",
     );
-
-    sess.send("/exit\r").expect("send /exit");
+    sess.send("\r").expect("submit /exit");
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0);
 }

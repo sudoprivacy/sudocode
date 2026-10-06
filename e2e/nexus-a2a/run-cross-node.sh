@@ -94,6 +94,36 @@ FOUNDER_PID=$!
 
 wait_log "$DATA_DIR/founder.log" "Static topology applied" 45
 
+# Mint before admitting the second voter. An offline mint needs the founder
+# stopped; stopping it after the join leaves a two-voter zone without quorum
+# and races the test against leader recovery. No test write is retried. Both
+# agents are CA-signed off the founder's data dir before replication starts.
+echo "== stop the founder, mint client bundles, restart =="
+kill "$FOUNDER_PID" 2>/dev/null || true
+wait "$FOUNDER_PID" 2>/dev/null || true
+FOUNDER_PID=
+AUTHON_NO_CONV="$NO_CONV"
+AUTHON_NEXUSD_BIN="$NEXUSD_BIN"
+AUTHON_PORT="$FOUNDER_PORT"
+AUTHON_ZONE="$ZONE"
+AUTHON_DATA_DIR="$DATA_DIR/a"
+PROBE_BUNDLE="$(authon_mint "live-probe")" || { tail -40 "$DATA_DIR/founder.log" >&2; exit 1; }
+RECEIVER_BUNDLE="$(authon_mint "team-lead")" || exit 1
+SENDER_BUNDLE="$(authon_mint "xnode-sender")" || exit 1
+
+echo "== restart the founder =="
+mv "$DATA_DIR/founder.log" "$DATA_DIR/founder-bootstrap.log"
+env $NO_CONV \
+NEXUS_DATA_DIR="$(native_path "$DATA_DIR/a/data")" \
+NEXUS_IDENTITY_DIR="$(native_path "$DATA_DIR/a/id")" \
+NEXUS_API_KEY_SECRET="$SECRET" \
+NEXUS_ADVERTISE_ADDR="$FOUNDER" \
+RUST_LOG=info \
+  "$NEXUSD_BIN" --bind-addr "0.0.0.0:${FOUNDER_PORT}" --accept-enrollments \
+  >"$DATA_DIR/founder.log" 2>&1 &
+FOUNDER_PID=$!
+wait_log "$DATA_DIR/founder.log" "stream-wakeup" 45
+
 # The founder prints a join token (`K10<pw>::server:SHA256:<ca-fp>`) at boot when
 # started with --accept-enrollments. Grab it for the joiner's auto-enroll.
 echo "== reading the founder's join token =="
@@ -130,36 +160,6 @@ echo "== waiting for both nodes to arm their a2a stream-wakeup observers =="
 for node in founder joiner; do
   wait_log "$DATA_DIR/$node.log" "stream-wakeup" 30
 done
-
-# Mint client bundles offline. The mint opens a data dir the daemon locks, so
-# stop the founder for it; the joiner keeps quorum-of-one from failing the reads
-# because the tests below dial the joiner too. Both agents (the pty duet's
-# team-lead receiver + its sender) are CA-signed off the founder's data dir.
-echo "== stop the founder, mint client bundles, restart =="
-kill "$FOUNDER_PID" 2>/dev/null || true
-wait "$FOUNDER_PID" 2>/dev/null || true
-FOUNDER_PID=
-AUTHON_NO_CONV="$NO_CONV"
-AUTHON_NEXUSD_BIN="$NEXUSD_BIN"
-AUTHON_PORT="$FOUNDER_PORT"
-AUTHON_ZONE="$ZONE"
-AUTHON_DATA_DIR="$DATA_DIR/a"
-PROBE_BUNDLE="$(authon_mint "live-probe")" || { tail -40 "$DATA_DIR/founder.log" >&2; exit 1; }
-RECEIVER_BUNDLE="$(authon_mint "team-lead")" || exit 1
-SENDER_BUNDLE="$(authon_mint "xnode-sender")" || exit 1
-
-echo "== restart the founder =="
-mv "$DATA_DIR/founder.log" "$DATA_DIR/founder-bootstrap.log"
-env $NO_CONV \
-NEXUS_DATA_DIR="$(native_path "$DATA_DIR/a/data")" \
-NEXUS_IDENTITY_DIR="$(native_path "$DATA_DIR/a/id")" \
-NEXUS_API_KEY_SECRET="$SECRET" \
-NEXUS_ADVERTISE_ADDR="$FOUNDER" \
-RUST_LOG=info \
-  "$NEXUSD_BIN" --bind-addr "0.0.0.0:${FOUNDER_PORT}" --accept-enrollments \
-  >"$DATA_DIR/founder.log" 2>&1 &
-FOUNDER_PID=$!
-wait_log "$DATA_DIR/founder.log" "stream-wakeup" 45
 
 echo "== [cross-node] a peer node's write wakes a parked blocking tail =="
 NEXUS_A2A_TEST_ENDPOINT="$JOINER_ENDPOINT" NEXUS_A2A_TEST_PEER_ENDPOINT="$FOUNDER_ENDPOINT" \

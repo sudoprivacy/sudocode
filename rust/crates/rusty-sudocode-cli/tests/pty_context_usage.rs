@@ -170,8 +170,20 @@ fn context_lists_workspace_instruction_files_as_memory() {
     sess.expect("❯").expect("prompt after compact report");
 
     sess.send("/context all\r").expect("send /context all");
-    sess.expect("AGENTS.md:")
-        .expect("expanded form names the file");
+    // ConPTY may insert cursor/line-wrap sequences inside the long absolute
+    // path. The file name is intact on screen even when it is not contiguous
+    // in the raw byte stream, so assert the rendered report.
+    common::expect_screen(
+        &sess,
+        |screen| common::screen_contains(screen, "AGENTS.md:"),
+        common::DEFAULT_TIMEOUT,
+        "expanded form names the workspace instruction file",
+    );
+    common::expect_input_line_cleared(
+        &sess,
+        common::DEFAULT_TIMEOUT,
+        "expanded context report finished",
+    );
 
     exit_repl(&mut sess);
 }

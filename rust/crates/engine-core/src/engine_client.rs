@@ -689,10 +689,19 @@ fn process_provider_event(
         }
         StreamEvent::MessageDelta(delta) => {
             buffer.push_back(AssistantEvent::Usage(delta.usage.token_usage()));
+            // The provider codec completes on stop_reason without waiting for
+            // message_stop in another packet. Carry that explicit completion
+            // across the engine boundary; EOF alone must still fail below.
+            if delta.delta.stop_reason.is_some() && !*saw_stop {
+                *saw_stop = true;
+                buffer.push_back(AssistantEvent::MessageStop);
+            }
         }
         StreamEvent::MessageStop(_) => {
-            *saw_stop = true;
-            buffer.push_back(AssistantEvent::MessageStop);
+            if !*saw_stop {
+                *saw_stop = true;
+                buffer.push_back(AssistantEvent::MessageStop);
+            }
         }
     }
 }

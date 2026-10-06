@@ -1,44 +1,11 @@
 //! Resizing inline chrome must not commit old frames into terminal history.
 mod common;
 
-use std::time::Duration;
-
 use common::TestEnv;
-use pty_expect::PtySession;
 use runtime::{ContentBlock, ConversationMessage, Session, TokenUsage};
 
-/// The screen once the turn has finished AND stopped repainting.
-///
-/// Stillness alone was the bug: this waited for the whole screen to hold
-/// identical for 200ms, with no precondition that the turn was over. While a
-/// turn runs the chrome animates, so on a slow runner the screen never held
-/// still inside the budget and the test failed as "chrome did not settle" —
-/// about a product that was working, just still working. Gating on the turn
-/// status line first makes stillness a short tail instead of a race.
-///
-/// The count assertion in `assert_single_chrome` still does the real work: the
-/// gate only requires the marker to be PRESENT, so a duplicate that never
-/// resolves is caught there rather than hidden here.
-fn settled_screen(sess: &PtySession) -> String {
-    common::expect_screen_settled(
-        sess,
-        |screen| screen.contains('❯') && screen.contains("turn 1"),
-        common::DEFAULT_TIMEOUT,
-        "chrome did not settle",
-    )
-}
-
-fn assert_single_chrome(screen: &str) {
-    for marker in ["turn 1", "1 todos", "ResizeCompletedTask"] {
-        assert_eq!(
-            screen.matches(marker).count(),
-            1,
-            "{marker} must occur once after resize:\n{screen}"
-        );
-    }
-}
-
 #[test]
+#[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
 fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
     let env = TestEnv::new("chrome-resize");
     let store = env.workspace_root().join("todos.json");
@@ -64,88 +31,18 @@ fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
     saved.push_message(message).unwrap();
     let path = env.workspace_root().join("resize-session.jsonl");
     saved.save_to_path(&path).unwrap();
-    let mut sess = env.spawn_with_env(
+    let output = run_terminal(
+        &env,
         &[
             "--resume",
             path.to_str().unwrap(),
             "--permission-mode",
             "read-only",
         ],
-        &[
-            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-            ("SUDOCODE_TODO_STORE", store.to_str().unwrap()),
-            ("NO_COLOR", ""),
-            ("TERM", "xterm-256color"),
-            ("COLORFGBG", "15;0"),
-        ],
+        "history",
+        serde_json::json!({"todos": store}),
     );
-    sess.expect("❯").expect("input ready");
-    assert_single_chrome(&settled_screen(&sess));
-    sess.send("DraftSurvivesResize").unwrap();
-    common::expect_input_line(
-        &sess,
-        "DraftSurvivesResize",
-        common::DEFAULT_TIMEOUT,
-        "draft",
-    );
-
-    for (rows, cols) in [
-        (40, 240),
-        (40, 100),
-        (40, 240),
-        (40, 80),
-        (40, 240),
-        (40, 60),
-        (40, 240),
-    ] {
-        sess.resize(rows, cols).unwrap();
-        let screen = settled_screen(&sess);
-        assert_single_chrome(&screen);
-        assert!(
-            screen.contains("ResizeHistorySentinel"),
-            "resize to {rows}x{cols} erased the preceding conversation:\n{screen}"
-        );
-        common::expect_input_line(
-            &sess,
-            "DraftSurvivesResize",
-            common::DEFAULT_TIMEOUT,
-            "resized draft",
-        );
-    }
-    // A drag can deliver another resize before the preceding frame completes.
-    for width in [200, 90, 140, 70, 240] {
-        sess.resize(40, width).unwrap();
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_single_chrome(&settled_screen(&sess));
-    common::expect_input_line(
-        &sess,
-        "DraftSurvivesResize",
-        common::DEFAULT_TIMEOUT,
-        "dragged draft",
-    );
-    // Reducing the viewport height may move history into scrollback. This
-    // harness only retains the visible screen, so assert live chrome/input
-    // here; the framework's reflow test also checks retained scrollback.
-    for (rows, cols) in [(18, 60), (40, 240)] {
-        sess.resize(rows, cols).unwrap();
-        assert_single_chrome(&settled_screen(&sess));
-        common::expect_input_line(
-            &sess,
-            "DraftSurvivesResize",
-            common::DEFAULT_TIMEOUT,
-            "short viewport draft",
-        );
-    }
-    sess.send_ctrl('u').unwrap();
-    assert!(
-        !settled_screen(&sess).contains("DraftSurvivesResize"),
-        "Ctrl-U must clear the draft"
-    );
-    sess.send("/exit").unwrap();
-    common::expect_input_line(&sess, "/exit", common::DEFAULT_TIMEOUT, "exit");
-    sess.send("\r").unwrap();
-    assert_eq!(sess.expect_eof().unwrap(), 0);
+    assert_terminal_output(output);
     if env.is_mock() {
         assert_eq!(
             env.captured_message_count(),
@@ -153,4 +50,232 @@ fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
             "resize must not run a turn"
         );
     }
+}
+
+#[test]
+#[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
+fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
+    use runtime::agent_mailbox::{self, MailboxEnvelope};
+    use runtime::mailbox::{local_pair_root_in, Mailbox};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let env = TestEnv::new("a2a-real-resize");
+    let first = format!("A2A-BUSY-MARKER {}", "preview ".repeat(12));
+    let body = format!(
+        "{first}\n\nQUEUED-BODY-END\n\n{}",
+        env.prompt(
+            "Reply only with A2A-ACK. Do not call tools.",
+            "single_turn_text"
+        )
+    );
+    let prompt = env.prompt(
+        "Run exactly this bash command, nothing else: printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
+        "bash_interrupt_long_running",
+    );
+    let pair = local_pair_root_in(env.config_home());
+    let ready = env.workspace_root().join("cancel-ready");
+    let done = Arc::new(AtomicBool::new(false));
+    let stopped = done.clone();
+    let peer = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline && !stopped.load(Ordering::Relaxed) {
+            if ready.is_file() {
+                let receiver = std::fs::read_dir(pair.join("agents"))
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .find(|path| path.join("conversations").is_dir());
+                if let Some(receiver) = receiver {
+                    return Mailbox::workspace_local(&pair, "mac-ai".into()).send(
+                        MailboxEnvelope {
+                            from: "mac-ai".into(),
+                            to: receiver.file_name().unwrap().to_string_lossy().into_owned(),
+                            body,
+                            summary: Some("queued resize acceptance".into()),
+                            timestamp: 0,
+                            color: None,
+                            kind: agent_mailbox::kinds::MESSAGE.into(),
+                            request_id: None,
+                        },
+                    );
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err("real Bash readiness and mailbox receiver were not observed".into())
+    });
+    let output = run_terminal(
+        &env,
+        &["--permission-mode", "danger-full-access"],
+        "a2a",
+        serde_json::json!({
+            "prompt": prompt,
+            "firstLine": first.trim_end(),
+            "expectedReply": if env.is_live() { "A2A-ACK" } else { "The answer is 4" },
+        }),
+    );
+    done.store(true, Ordering::Relaxed);
+    let delivered = peer.join().expect("mailbox producer");
+    assert_terminal_output(output);
+    delivered.expect("real peer delivery");
+    if env.is_mock() {
+        assert!(
+            env.captured_message_count() >= 2,
+            "both turns must reach the provider"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
+fn parallel_bash_cards_survive_narrow_and_wide_resize() {
+    use nix::{libc, sys::stat::Mode, unistd::mkfifo};
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let env = TestEnv::new("parallel-real-resize");
+    for name in ["one.fifo", "two.fifo"] {
+        mkfifo(
+            &env.workspace_root().join(name),
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )
+        .unwrap();
+    }
+    let calls = serde_json::json!([
+        {"id": "one", "name": "Bash", "input": {"command":
+            "cat one.fifo # 一起验证 long title keeps the complete command and resizes_END_ONE"}},
+        {"id": "two", "name": "Bash", "input": {"command":
+            "cat two.fifo # 一起验证 long title keeps the complete command and resizes_END_TWO"}},
+    ]);
+    let prompt = if env.is_mock() {
+        format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
+    } else {
+        format!("In one assistant message issue all these tool calls together, using their names and inputs exactly (ids are fixture labels). Do not run extra tools or wait for one result before requesting the next: {calls}. After all results, reply exactly: Concurrency batch done.")
+    };
+    let root = env.workspace_root().to_owned();
+    let done = Arc::new(AtomicBool::new(false));
+    let stopped = done.clone();
+    let producer = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut writers = Vec::new();
+        for name in ["one.fifo", "two.fifo"] {
+            loop {
+                if stopped.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                    return Err(format!("both FIFO readers did not start: {name}"));
+                }
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(root.join(name))
+                {
+                    Ok(file) => {
+                        writers.push(file);
+                        break;
+                    }
+                    Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(format!("open {name}: {error}")),
+                }
+            }
+        }
+        // A serial scheduler cannot reach this marker. Keep both readers
+        // blocked until the real terminal has checked every width and input.
+        std::fs::write(root.join("parallel-ready"), "both readers open").unwrap();
+        while !root.join("parallel-release").is_file()
+            && !stopped.load(Ordering::Relaxed)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let released = root.join("parallel-release").is_file();
+        for (mut writer, output) in writers.into_iter().zip(["FIRST_OK", "SECOND_OK"]) {
+            writeln!(writer, "{output}").map_err(|error| error.to_string())?;
+        }
+        if released {
+            Ok(())
+        } else {
+            Err("terminal did not finish resize assertions".into())
+        }
+    });
+    let output = run_terminal(
+        &env,
+        &["--permission-mode", "danger-full-access"],
+        "parallel",
+        serde_json::json!({"prompt": prompt}),
+    );
+    done.store(true, Ordering::Relaxed);
+    let released = producer.join().expect("FIFO producer");
+    assert_terminal_output(output);
+    released.expect("both tools released after terminal assertions");
+    if env.is_mock() {
+        assert!(
+            env.captured_message_count() >= 2,
+            "tool results must reach the provider"
+        );
+    }
+}
+
+fn run_terminal(
+    env: &TestEnv,
+    args: &[&str],
+    scenario: &str,
+    extra: serde_json::Value,
+) -> std::process::Output {
+    let auth = if env.is_live() {
+        std::env::var("SCODE_LIVE_AUTH_MODE").unwrap_or_else(|_| "proxy".into())
+    } else {
+        "api-key".into()
+    };
+    let model = if env.is_live() {
+        common::live_model()
+    } else {
+        "sonnet".into()
+    };
+    let mut arguments = vec!["--auth", auth.as_str(), "--model", model.as_str()];
+    arguments.extend_from_slice(args);
+    let log_root = std::env::var_os("SCODE_TERMINAL_LOG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| env.workspace_root().join("terminal-logs"))
+        .join(scenario);
+    std::fs::create_dir_all(&log_root).unwrap();
+    let mut config = serde_json::json!({
+        "binary": common::scode_bin(), "args": arguments, "scenario": scenario,
+        "root": env.workspace_root(), "configHome": env.config_home(),
+        "todos": env.workspace_root().join("todos.json"), "logRoot": log_root,
+        "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
+    });
+    config
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let manifest = env.workspace_root().join("terminal.json");
+    std::fs::write(&manifest, serde_json::to_vec(&config).unwrap()).unwrap();
+    let host = std::env::var_os("SCODE_TERMINAL_HOST").unwrap_or_else(|| "node".into());
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../e2e/terminal-resize/run.cjs");
+    std::process::Command::new(host)
+        .arg(script)
+        .arg(manifest)
+        .env("ELECTRON_RUN_AS_NODE", "1")
+        .output()
+        .expect("start real terminal host; see e2e/terminal-resize/README.md")
+}
+
+fn assert_terminal_output(output: std::process::Output) {
+    assert!(
+        output.status.success(),
+        "real terminal resize failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
 }

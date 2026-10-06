@@ -209,6 +209,61 @@ jobs:
           RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: cargo test --workspace
 
+  terminal-resize:
+    name: Real terminal resize (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install the pinned Unix terminal model
+        if: runner.os != 'Windows'
+        working-directory: .
+        run: npm ci --prefix e2e/terminal-resize
+      - name: Cache the pinned Windows terminal host
+        if: runner.os == 'Windows'
+        id: terminal-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/scode-terminal-host
+          key: scode-terminal-windows-x64-07f806f999227108933c2e30515b26eecc1fda74
+      - name: Install the pinned Windows terminal host
+        if: runner.os == 'Windows' && steps.terminal-cache.outputs.cache-hit != 'true'
+        working-directory: .
+        shell: pwsh
+        run: python e2e/terminal-resize/setup_windows.py "$env:RUNNER_TEMP/scode-terminal-host"
+      - name: Select the Windows terminal runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "SCODE_TERMINAL_HOST=$env:RUNNER_TEMP/scode-terminal-host/Code.exe" >> $env:GITHUB_ENV
+          "SCODE_TERMINAL_MODULES=$env:RUNNER_TEMP/scode-terminal-host/07f806f999/resources/app/node_modules.asar" >> $env:GITHUB_ENV
+      - name: Preserve history and input through actual PTY resize
+        env:
+          SCODE_TEST_BACKEND: mock
+          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
+        run: cargo test -p rusty-sudocode-cli --test pty_chrome_resize -- --ignored --nocapture
+      - name: Retain terminal buffer and wire traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scode-terminal-resize-${{ matrix.os }}
+          path: ${{ runner.temp }}/scode-resize-logs/
+          if-no-files-found: warn
+
   a2a-live:
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
@@ -476,7 +531,8 @@ jobs:
             models: {}
           }), { mode: 0o600 });
           NODE
-          cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_block_spacing sync_renderer_uses_the_same_spacing -- --nocapture
       - name: Remove process-tree test credentials
         if: always()
         env:

@@ -130,69 +130,8 @@ fn finish(mut sess: PtySession) {
     assert_eq!(sess.expect_eof().unwrap(), 0);
 }
 
-#[test]
-fn parallel_bash_cards_survive_narrow_and_wide_resize() {
-    let env = TestEnv::new("parallel-resize");
-    fifo(&env, "one.fifo");
-    fifo(&env, "two.fifo");
-    let calls = [
-        bash(
-            "one",
-            "cat one.fifo # 一起验证 long title keeps the complete command and resizes_END_ONE",
-        ),
-        bash(
-            "two",
-            "cat two.fifo # 一起验证 long title keeps the complete command and resizes_END_TWO",
-        ),
-    ];
-    let mut sess = start(&env, &calls, "10");
-    // Both FIFO opens must succeed before either is released. A serial
-    // scheduler cannot pass this handshake.
-    let first = writer(&env, "one.fifo", &sess);
-    let second = writer(&env, "two.fifo", &sess);
-    for width in [52, 170, 66, 100] {
-        sess.resize(80, width).unwrap();
-        common::expect_screen(
-            &sess,
-            |s| {
-                let rows: Vec<_> = s.lines().collect();
-                let starts: Vec<_> = rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, row)| row.starts_with("╭─ Bash("))
-                    .map(|(i, _)| i)
-                    .collect();
-                starts.len() == 2
-                    && rows.iter().filter(|r| r.trim() == "╰─").count() == 2
-                    && starts.iter().all(|&row| rows.get(row + 1).is_some_and(|next| next.trim() == "╰─"))
-                    // A resized VT screen may briefly contain the old canvas
-                    // clipped at its new width. Wait for freshly laid-out
-                    // titles, not text in the echoed user prompt.
-                    && starts.iter().all(|&row| if width < 100 { rows[row].ends_with('…') } else { rows[row].contains("resizes_END_") })
-            },
-            common::DEFAULT_TIMEOUT,
-            "two whole pending frames laid out at the new width",
-        );
-        sess.send("x").unwrap();
-        common::expect_input_line(
-            &sess,
-            "x",
-            common::DEFAULT_TIMEOUT,
-            "input while two tools run",
-        );
-        sess.send("\x15").unwrap();
-        common::expect_screen(
-            &sess,
-            |s| common::input_line_of(s).is_empty(),
-            common::DEFAULT_TIMEOUT,
-            "draft cleared before next resize",
-        );
-    }
-    release(first, "FIRST_OK");
-    release(second, "SECOND_OK");
-    done(&sess);
-    finish(sess);
-}
+// Resize geometry and the simultaneous FIFO handshake live in
+// pty_chrome_resize, which uses the real terminal reflow model.
 
 #[test]
 fn fast_result_and_error_are_visible_before_slow_sibling_finishes() {

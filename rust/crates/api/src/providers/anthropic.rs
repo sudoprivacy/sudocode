@@ -1428,6 +1428,9 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
         // These fields are OpenAI-compatible only; Anthropic rejects them.
         object.remove("frequency_penalty");
         object.remove("presence_penalty");
+        // Anthropic effort belongs under output_config; this OpenAI field must
+        // never leak through whole-request serialization or extraBody.
+        object.remove("reasoning_effort");
         // Anthropic uses "stop_sequences" not "stop". Convert if present.
         if let Some(stop_val) = object.remove("stop") {
             if stop_val.as_array().is_some_and(|a| !a.is_empty()) {
@@ -1440,7 +1443,7 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
         // budget is large enough to host a thinking budget; otherwise fall back
         // to no thinking (a model whose max output is <= 1024 cannot think).
         //
-        // Do not "modernize" this to `thinking: {"type": "adaptive"}`.
+        // Do not migrate budgeted models wholesale to adaptive.
         // Anthropic's own guidance deprecates `budget_tokens` in favour of
         // adaptive on 4.6+ models, so this block reads like stale code — but
         // that guidance describes the first-party API, and we do not talk to
@@ -1453,7 +1456,29 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
         // swap cannot land silently; if you are here to make adaptive work,
         // verify end-to-end that non-empty text comes back on the proxy route
         // first, and change the test in the same commit as the code.
-        if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
+        if runtime::model_capabilities::anthropic_thinking_mode(&request.model)
+            == runtime::model_capabilities::AnthropicThinkingMode::AdaptiveAlways
+        {
+            // This model rejects budget_tokens and disabled thinking. Visibility
+            // is explicit because its default is omitted; signatures must still
+            // round-trip in either display mode. Neither mode nor effort depends
+            // on max_tokens: compaction must share the ordinary turn's prefix.
+            object.insert(
+                "thinking".into(),
+                serde_json::json!({
+                    "type": "adaptive",
+                    "display": if request.thinking_enabled { "summarized" } else { "omitted" },
+                }),
+            );
+            if let Some(effort) = &request.reasoning_effort {
+                let output = object
+                    .entry("output_config")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(output) = output.as_object_mut() {
+                    output.insert("effort".into(), Value::String(effort.clone()));
+                }
+            }
+        } else if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
             // The budget is a property of the *model*, not of this request's
             // output cap, because the value of the thinking parameter is part
             // of Anthropic's cache key. Deriving it here from

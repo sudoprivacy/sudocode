@@ -58,8 +58,9 @@ pub struct MessageRequest {
     pub presence_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
-    /// Reasoning effort level for OpenAI-compatible reasoning models (e.g. `o4-mini`).
-    /// Accepted values: `"low"`, `"medium"`, `"high"`. Omitted when `None`.
+    /// Reasoning effort level; adaptive Anthropic requests map this to
+    /// `output_config.effort`, OpenAI-compatible requests use their own format.
+    /// Accepted values are provider-specific. Omitted when `None`.
     /// Silently ignored by backends that do not support it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -70,9 +71,10 @@ pub struct MessageRequest {
     #[serde(skip)]
     pub cache_hints: Option<CacheHints>,
 
-    /// Enable extended thinking (Anthropic-specific). When true, the
-    /// Anthropic client injects `thinking: { type: "enabled", budget_tokens }`
-    /// into the request body. Other providers ignore this field.
+    /// Request thinking (Anthropic-specific). Budgeted models use an explicit
+    /// model-level budget. Always-adaptive models cannot disable reasoning:
+    /// this flag selects summarized versus omitted display, retaining signed
+    /// blocks in both cases. Other providers ignore this field.
     #[serde(skip)]
     pub thinking_enabled: bool,
 
@@ -151,7 +153,7 @@ impl RequestMetadata {
 pub struct SessionRequestFields {
     /// Routing key — see [`RequestMetadata`].
     pub metadata: Option<RequestMetadata>,
-    /// Reasoning effort for OpenAI-compatible reasoning models. Session-level
+    /// Reasoning effort for reasoning models. Session-level
     /// state (`--reasoning-effort`, or an agent definition), so a completion
     /// that replays a turn's prefix has to declare the same value the turns
     /// declare, and a summary generated at a different effort than the user

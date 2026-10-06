@@ -17,6 +17,7 @@ enum ResponseKind {
     Interrupted,
     Complete,
     SplitTerminal,
+    LogicalTerminalOnly,
     EmptyThenComplete,
     AlwaysEmpty,
     InvalidRequestWithStatusDigits,
@@ -97,9 +98,14 @@ impl StreamProvider {
                 }
                 let empty = matches!(kind, ResponseKind::AlwaysEmpty)
                     || (matches!(kind, ResponseKind::EmptyThenComplete) && index == 0);
-                let body = refusal_body(kind).unwrap_or_else(|| {
+                let mut body = refusal_body(kind).unwrap_or_else(|| {
                     response_body(!matches!(kind, ResponseKind::Interrupted), empty)
                 });
+                if matches!(kind, ResponseKind::LogicalTerminalOnly) {
+                    // The codec may finish at stop_reason without exposing a
+                    // final frame. Exercise that contract without a timing race.
+                    body.truncate(body.rfind("event: message_stop").unwrap());
+                }
                 // Promise bytes that never arrive: reqwest must raise a body
                 // read error, instead of accepting ordinary clean HTTP EOF.
                 let missing = if matches!(kind, ResponseKind::Interrupted | ResponseKind::Complete)
@@ -240,7 +246,10 @@ fn check_response(kind: ResponseKind) {
     );
     if matches!(
         kind,
-        ResponseKind::Complete | ResponseKind::SplitTerminal | ResponseKind::EmptyThenComplete
+        ResponseKind::Complete
+            | ResponseKind::SplitTerminal
+            | ResponseKind::LogicalTerminalOnly
+            | ResponseKind::EmptyThenComplete
     ) {
         assert_eq!(exit, 0, "{screen}");
         assert!(screen.contains("STREAM_BODY_VERIFIED"), "{screen}");
@@ -348,6 +357,11 @@ fn terminal_response_survives_a_broken_http_body() {
 #[test]
 fn logical_terminal_response_completes_before_a_delayed_stop_frame() {
     check_response(ResponseKind::SplitTerminal);
+}
+
+#[test]
+fn logical_terminal_response_completes_without_a_trailing_stop_frame() {
+    check_response(ResponseKind::LogicalTerminalOnly);
 }
 
 #[test]

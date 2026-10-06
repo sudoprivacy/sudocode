@@ -198,14 +198,25 @@ mod tests {
     use crate::mailbox::InboxConvention;
 
     fn temp_root(label: &str) -> std::path::PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("scode-dir-{label}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ROOT: AtomicU64 = AtomicU64::new(0);
+        // Wall-clock timestamps can repeat across parallel tests. Reserve the
+        // root exclusively so one test can never remove another one's mailbox.
+        loop {
+            let sequence = NEXT_ROOT.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "scode-dir-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!(
+                    "create isolated directory fixture {}: {error}",
+                    dir.display()
+                ),
+            }
+        }
     }
 
     /// A mailbox over a temp root with `peers` provisioned as addressable.

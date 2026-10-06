@@ -5,10 +5,27 @@
 mod common;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(180);
+
+fn fingerprint(value: &Value) -> String {
+    format!("{:x}", Sha256::digest(serde_json::to_vec(value).unwrap()))
+}
+
+fn message_shapes(body: &Value) -> Vec<Value> {
+    body["messages"].as_array().into_iter().flatten().map(|message| {
+        let blocks: Vec<_> = message["content"].as_array().into_iter().flatten().map(|block| {
+            json!({"type":block["type"], "hash":fingerprint(&without_cache_markers(block.clone())),
+                "cache_control":block["cache_control"],
+                "thinking_bytes":block["thinking"].as_str().map(str::len),
+                "signature_bytes":block["signature"].as_str().map(str::len)})
+        }).collect();
+        json!({"role":message["role"], "hash":fingerprint(&without_cache_markers(message.clone())), "blocks":blocks})
+    }).collect()
+}
 
 /// Keep credential-free evidence even when a live assertion fails. The fixture
 /// itself contains copied credentials and must still be removed by TestEnv.
@@ -31,7 +48,10 @@ impl Drop for Evidence {
             let body = &r["attributes"]["body"];
             json!({"model":body["model"], "thinking":body["thinking"], "effort":body["output_config"]["effort"],
                 "max_tokens":body["max_tokens"], "messages":body["messages"].as_array().map(Vec::len),
-                "compaction":body.to_string().contains("Create a concise checkpoint")})
+                "compaction":body.to_string().contains("Create a concise checkpoint"),
+                "metadata_hash":fingerprint(&body["metadata"]),
+                "system_hash":fingerprint(&body["system"]), "tools_hash":fingerprint(&body["tools"]),
+                "message_shapes":message_shapes(body)})
         }).collect();
         let mut usage = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&self.cache) {
@@ -42,7 +62,9 @@ impl Drop for Evidence {
                     .lines()
                     .filter_map(|l| serde_json::from_str::<Value>(l).ok())
                 {
-                    usage.push(json!({"read":row["cache_read_input_tokens"], "write":row["cache_creation_input_tokens"], "input":row["input_tokens"]}));
+                    usage.push(json!({"read":row["cache_read_input_tokens"], "write":row["cache_creation_input_tokens"], "input":row["input_tokens"],
+                        "at_unix_secs":row["at_unix_secs"], "gateway_request_id":row["gateway_request_id"],
+                        "provider_request_id":row["provider_request_id"], "break_reason":row["break_reason"]}));
                 }
             }
         }

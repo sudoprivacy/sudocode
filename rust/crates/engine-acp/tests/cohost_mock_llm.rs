@@ -603,7 +603,14 @@ fn stop_session(kernel: &Kernel, pid: &serde_json::Value, sid: &str) {
     }
 }
 
-fn await_new_reply(mailbox: &Mailbox, agent: &str, cursor: &mut u64) {
+fn await_new_reply(
+    mailbox: &Mailbox,
+    agent: &str,
+    cursor: &mut u64,
+    kernel: &Kernel,
+    pid: &serde_json::Value,
+    phase: &str,
+) {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
         let (messages, next) = mailbox.poll_conversation(agent, *cursor, 100).unwrap();
@@ -612,7 +619,12 @@ fn await_new_reply(mailbox: &Mailbox, agent: &str, cursor: &mut u64) {
             return;
         }
     }
-    panic!("no new reply from resumed agent");
+    let state = managed_call(
+        kernel,
+        "get_session_v1",
+        serde_json::json!({"session_id":pid}),
+    );
+    panic!("no new reply during {phase}; cursor={cursor}; session={state:?}");
 }
 
 #[test]
@@ -670,7 +682,14 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         "Remember BEFORE_RESTART_8317. PARITY_SCENARIO:cohost_reply",
     )
     .unwrap();
-    await_new_reply(&mb, agent, &mut cursor);
+    await_new_reply(
+        &mb,
+        agent,
+        &mut cursor,
+        &kernel,
+        &first["session_id"],
+        "first turn",
+    );
     wait_idle(&kernel, &first["session_id"]);
     stop_session(&kernel, &first["session_id"], sid);
     drop(first_controller);
@@ -715,7 +734,14 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         "Continue after restart. PARITY_SCENARIO:cohost_reply",
     )
     .unwrap();
-    await_new_reply(&mb, agent, &mut cursor);
+    await_new_reply(
+        &mb,
+        agent,
+        &mut cursor,
+        &kernel,
+        &second["session_id"],
+        "resumed turn",
+    );
     wait_idle(&kernel, &second["session_id"]);
     stop_session(&kernel, &second["session_id"], sid);
     drop(second_controller);

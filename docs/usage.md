@@ -161,12 +161,29 @@ list items keep their continuation lines aligned with the item text, including
 in session replay. Replayed message blocks have one blank separator.
 
 Independent reads, searches, sub-agent calls, and recognized read-only Bash
-commands can execute concurrently, with a default limit of ten. Writes,
-interactive tools, and unrecognized Bash commands run serially. MCP tools
+commands can execute concurrently, with a default limit of ten. Each complete
+tool input becomes eligible while the provider is still streaming. Pre/post
+tool hooks run asynchronously; a pre-hook rewrite is classified again before
+execution. Writes and unrecognized Bash commands fence later calls until they
+finish. Recognized Bash forms include read-only `git branch`, `fd`, `diff`,
+selected `gh` queries, literal globs, and file input redirects; unknown or
+mutating flags remain serial.
+
+`AskUserQuestion` can wait alongside independent reads. Questions and permission
+requests share one input queue, so only one prompt owns the editor at a time;
+other results continue to render while it waits. MCP tools
 can overlap when they declare `readOnlyHint` and use stdio or Streamable HTTP;
 other MCP transports and resource/prompt wrappers remain serial. A visible
 tool card may still be queued: the amber border marks actual execution.
 Completed results appear immediately, even while another call is still running.
+Cancellation or a broken provider stream stops unfinished calls and preserves
+finished outputs. An interrupted provider response is not automatically replayed
+once tools have started. Streamed calls are saved before dispatch; append-log
+`assistant_update` records extend the current assistant message without rewriting
+old history. Normal snapshots fold them into ordinary messages. Reading an
+append log that still contains these records requires a version that supports
+streamed tool execution; this includes native append streams retaining earlier
+snapshots. Ordinary rewritten transcript snapshots remain compatible.
 
 Incoming peer messages appear in a separate `Message from <peer>` frame with
 muted content and a blue peer name. This presentation does not alter the

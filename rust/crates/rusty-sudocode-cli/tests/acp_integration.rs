@@ -5526,3 +5526,53 @@ async fn acp_compaction_failure_is_terminal_and_preserves_history() {
     client.shutdown().await;
     workspace.cleanup();
 }
+
+/// An unanswered question must not stop tool notifications in the same turn.
+#[tokio::test]
+async fn acp_question_wait_keeps_same_turn_tool_results_streaming() {
+    let server = MockAnthropicService::spawn().await.expect("mock service");
+    let workspace = TestWorkspace::new("stdio-parallel-question");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    std::fs::write(
+        workspace.root.join("parallel-read.txt"),
+        "ACP_PARALLEL_READ_RESULT",
+    )
+    .unwrap();
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+    let session = scenario_session_new(&mut client, &workspace.root).await;
+    let calls = json!([
+        {"id":"question", "name":"AskUserQuestion", "input":{"question":"ACP_PARALLEL_QUESTION"}},
+        {"id":"read", "name":"Read", "input":{"path":"parallel-read.txt"}}
+    ]);
+    let prompt = client.send_request_no_wait("session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]})).await;
+    let (seen, question) = client
+        .recv_until(Duration::from_secs(30), |m| {
+            is_server_request(m, "_scode/ask_user_question")
+        })
+        .await
+        .unwrap_or_else(|seen| panic!("missing question: {seen:?}"));
+    if !serde_json::to_string(&seen)
+        .unwrap()
+        .contains("ACP_PARALLEL_READ_RESULT")
+    {
+        client
+            .recv_until(Duration::from_secs(15), |m| {
+                m["method"] == "session/update"
+                    && m.to_string().contains("ACP_PARALLEL_READ_RESULT")
+            })
+            .await
+            .unwrap_or_else(|seen| {
+                panic!("sibling output blocked by unanswered question: {seen:?}")
+            });
+    }
+    client.send_raw(&json!({"jsonrpc":"2.0","id":question["id"],"result":{"answers":[{"id":"q1","value":"ack","label":"ack"}]}})).await;
+    let (_, response) = client
+        .recv_until(Duration::from_secs(30), |m| is_response_to(m, prompt))
+        .await
+        .unwrap_or_else(|seen| panic!("turn did not finish: {seen:?}"));
+    assert!(response["result"].get("stopReason").is_some(), "{response}");
+    client.shutdown().await;
+    workspace.cleanup();
+}

@@ -15,6 +15,117 @@ use std::time::Duration;
 
 use common::TestEnv;
 
+/// Windows accepts all these spellings of the same absolute file. The real
+/// CLI must preserve that identity when its file tools cross into the VFS.
+#[cfg(windows)]
+#[test]
+fn windows_verbatim_paths_read_the_same_file() {
+    use runtime::{ContentBlock, SessionStore};
+
+    let env = TestEnv::new("verbatim-file-paths");
+    let nonce = format!(
+        "path-content-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let file = env.workspace_root().join("fixture.txt");
+    std::fs::write(&file, &nonce).unwrap();
+    let canonical = std::fs::canonicalize(&file).unwrap();
+    let native = canonical.to_str().unwrap();
+    let plain = native.strip_prefix(r"\\?\").unwrap();
+    let paths = [
+        plain.to_string(),
+        native.to_string(),
+        format!("//?/{}", plain.replace('\\', "/")),
+        format!("//?/{plain}"),
+    ];
+    for path in &paths {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), nonce);
+    }
+    let natural = format!(
+        "Use read_file once for each of these four JSON path strings, passing each path exactly as written. Then report the contents: {}",
+        serde_json::to_string(&paths).unwrap()
+    );
+    let mut prompt = env.prompt(&natural, "tool_concurrency");
+    if env.is_mock() {
+        let calls: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                serde_json::json!({
+                    "id": format!("path-{i}"), "name": "Read", "input": {"path": path}
+                })
+            })
+            .collect();
+        prompt.push_str(&format!(
+            " TOOL_BATCH:{}",
+            serde_json::to_string(&calls).unwrap()
+        ));
+    }
+    let mut sess = env.spawn_with_env(
+        &[
+            "--permission-mode",
+            "read-only",
+            "--allowedTools",
+            "read_file",
+        ],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    common::expect_input_line(&sess, "", common::DEFAULT_TIMEOUT, "initial prompt");
+    let marker = common::turn_status_marker(&sess);
+    sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains("Pasted") || s.contains("PARITY_SCENARIO:") || s.contains("Use read_file"),
+        common::DEFAULT_TIMEOUT,
+        "path instructions pasted",
+    );
+    sess.send("\r").unwrap();
+    common::expect_turn_complete_after(&sess, &marker, env.timeout(), "file reads");
+    sess.send("/exit").unwrap();
+    common::expect_input_line(&sess, "/exit", common::DEFAULT_TIMEOUT, "exit input");
+    sess.send("\r").unwrap();
+    assert_eq!(sess.expect_eof().unwrap(), 0);
+    let saved = SessionStore::from_cwd(env.workspace_root())
+        .unwrap()
+        .load_session("latest")
+        .unwrap()
+        .session;
+    let blocks: Vec<_> = saved.messages.iter().flat_map(|m| &m.blocks).collect();
+    for path in &paths {
+        let id = blocks
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolUse { id, input, .. } => {
+                    let input: serde_json::Value = serde_json::from_str(input).unwrap();
+                    (input["path"].as_str() == Some(path.as_str())).then_some(id)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("model did not request exact path {path:?}"));
+        let result = blocks
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    output,
+                    is_error,
+                    ..
+                } if tool_use_id == id => Some((output, is_error)),
+                _ => None,
+            })
+            .expect("every requested read must persist its result");
+        assert!(!result.1, "read failed for {path:?}: {}", result.0);
+        assert!(
+            result.0.contains(&nonce),
+            "file contents missing for {path:?}"
+        );
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // 1. write_file → read_file roundtrip
 // ──────────────────────────────────────────────────────────────────────

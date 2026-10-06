@@ -23,6 +23,7 @@ struct Capture {
     requests: Arc<Mutex<Vec<Value>>>,
     retry_next: Arc<AtomicBool>,
     pressure_next: Arc<AtomicBool>,
+    thinking_blocks: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -35,6 +36,8 @@ impl Capture {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let retry_next = Arc::new(AtomicBool::new(false));
         let pressure_next = Arc::new(AtomicBool::new(false));
+        let thinking_blocks = Arc::new(AtomicBool::new(false));
+        let thinking = Arc::clone(&thinking_blocks);
         let stop = Arc::new(AtomicBool::new(false));
         let (captured, retry, pressure, stopped) = (
             Arc::clone(&requests),
@@ -45,7 +48,7 @@ impl Capture {
         let worker = thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((socket, _)) => serve(socket, &captured, &retry, &pressure),
+                    Ok((socket, _)) => serve(socket, &captured, &retry, &pressure, &thinking),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -58,6 +61,7 @@ impl Capture {
             requests,
             retry_next,
             pressure_next,
+            thinking_blocks,
             stop,
             thread: Some(worker),
         }
@@ -106,6 +110,7 @@ fn serve(
     captured: &Mutex<Vec<Value>>,
     retry: &AtomicBool,
     pressure: &AtomicBool,
+    thinking: &AtomicBool,
 ) {
     socket.set_nonblocking(false).unwrap();
     socket
@@ -152,22 +157,27 @@ fn serve(
     } else {
         json!({"type":"text_delta","text":content["text"]})
     };
-    let events = [
+    let block_index = if thinking.load(Ordering::Relaxed) {
+        thinking_fixture(number).len()
+    } else {
+        0
+    };
+    let mut events = vec![
         (
             "message_start",
             json!({"type":"message_start","message":{"id":format!("reply_{number}"),"type":"message","role":"assistant","content":[],"model":request["model"],"stop_reason":null,"usage":usage}}),
         ),
         (
             "content_block_start",
-            json!({"type":"content_block_start","index":0,"content_block":start}),
+            json!({"type":"content_block_start","index":block_index,"content_block":start}),
         ),
         (
             "content_block_delta",
-            json!({"type":"content_block_delta","index":0,"delta":delta}),
+            json!({"type":"content_block_delta","index":block_index,"delta":delta}),
         ),
         (
             "content_block_stop",
-            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_stop","index":block_index}),
         ),
         (
             "message_delta",
@@ -175,11 +185,166 @@ fn serve(
         ),
         ("message_stop", json!({"type":"message_stop"})),
     ];
+    if block_index > 0 {
+        let mut prefix = Vec::new();
+        for (index, block) in thinking_fixture(number).into_iter().enumerate() {
+            if block["type"] == "thinking" {
+                prefix.push(("content_block_start", json!({"type":"content_block_start","index":index,"content_block":{"type":"thinking","thinking":""}})));
+                prefix.push(("content_block_delta", json!({"type":"content_block_delta","index":index,"delta":{"type":"thinking_delta","thinking":block["thinking"]}})));
+                // Signatures can span deltas, even with no readable text.
+                let signature = block["signature"].as_str().unwrap();
+                for chunk in [&signature[..4], &signature[4..]] {
+                    prefix.push(("content_block_delta", json!({"type":"content_block_delta","index":index,"delta":{"type":"signature_delta","signature":chunk}})));
+                }
+            } else {
+                prefix.push((
+                    "content_block_start",
+                    json!({"type":"content_block_start","index":index,"content_block":block}),
+                ));
+            }
+            prefix.push((
+                "content_block_stop",
+                json!({"type":"content_block_stop","index":index}),
+            ));
+        }
+        events.splice(1..1, prefix);
+    }
     let mut body = String::new();
     for (event, data) in events {
         write!(body, "event: {event}\ndata: {data}\n\n").unwrap();
     }
     respond(&mut socket, "200 OK", "text/event-stream", &body);
+}
+
+fn thinking_fixture(number: usize) -> Vec<Value> {
+    vec![
+        json!({"type":"thinking","thinking":"","signature":format!("empty-signature-{number}")}),
+        json!({"type":"thinking","thinking":"Visible reasoning summary.","signature":format!("visible-signature-{number}")}),
+        json!({"type":"thinking","thinking":"Another separate summary.","signature":format!("next-signature-{number}")}),
+        json!({"type":"redacted_thinking","data":format!("opaque-thinking-{number}")}),
+    ]
+}
+
+fn assert_thinking_replayed(request: &Value, number: usize) {
+    let messages = without_cache_markers(request["messages"].clone());
+    let blocks = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|message| {
+            let content = message["content"].as_array()?;
+            content
+                .iter()
+                .any(|b| b["text"] == format!("PREFIX_REPLY_{number}"))
+                .then_some(content)
+        })
+        .expect("the preceding assistant response must be replayed");
+    assert_eq!(&blocks[..blocks.len() - 1], thinking_fixture(number),
+        "thinking must preserve empty signed blocks, separate block boundaries, split signatures and ciphertext");
+}
+
+#[test]
+fn thinking_blocks_survive_turns_and_resume_without_merging_or_dropping() {
+    let env = TestEnv::new_mock("thinking-block-boundaries");
+    let capture = Capture::new();
+    capture.thinking_blocks.store(true, Ordering::Relaxed);
+    let path = fixture(&env, &capture);
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "First signed response.");
+    turn(&mut cli, "Replay the signed response.");
+    exit(&mut cli);
+    assert_thinking_replayed(&capture.bodies()[1], 1);
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "Replay after restart.");
+    exit(&mut cli);
+    let requests = capture.bodies();
+    assert_thinking_replayed(&requests[2], 1);
+    assert_thinking_replayed(&requests[2], 2);
+}
+
+#[test]
+fn adaptive_thinking_and_effort_stay_fixed_across_compaction_and_resume() {
+    for model in ["claude-opus-5-5", "vendor/claude-opus-5-5"] {
+        let env = TestEnv::new_mock("adaptive-cache-prefix");
+        let capture = Capture::new();
+        capture.thinking_blocks.store(true, Ordering::Relaxed);
+        let path = fixture(&env, &capture);
+        let config_path = env.config_home().join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        let start = || {
+            let cli = env.spawn(&[
+                "--resume",
+                path.to_str().unwrap(),
+                "--reasoning-effort",
+                "high",
+                "--permission-mode",
+                "read-only",
+            ]);
+            common::expect_input_line_cleared(&cli, WAIT, "adaptive resume ready");
+            cli
+        };
+        let mut cli = start();
+        turn(&mut cli, "Continue with adaptive thinking.");
+        let baseline = capture.bodies()[0].clone();
+        assert_eq!(baseline["model"], model);
+        assert_eq!(
+            baseline["thinking"],
+            json!({"type":"adaptive","display":"summarized"})
+        );
+        assert_eq!(baseline["output_config"]["effort"], "high");
+        assert!(baseline.get("reasoning_effort").is_none());
+        turn(&mut cli, "Continue the next step.");
+        assert_thinking_replayed(&capture.bodies()[1], 1);
+        cli.send("/compact\r").unwrap();
+        cli.expect("Messages removed").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "adaptive compaction finished");
+        turn(&mut cli, "Continue after compaction.");
+        exit(&mut cli);
+        let mut cli = start();
+        turn(&mut cli, "Continue after restart.");
+        exit(&mut cli);
+        let requests = capture.bodies();
+        assert!(requests.iter().any(|r| r.to_string().contains(COMPACT)));
+        for request in &requests[1..] {
+            fixed_prefix(&baseline, request);
+        }
+        assert_thinking_replayed(requests.last().unwrap(), requests.len() - 1);
+    }
+}
+
+#[test]
+fn adaptive_hidden_thinking_keeps_signed_history_and_uses_provider_default_effort() {
+    let env = TestEnv::new_mock("adaptive-hidden-thinking");
+    let capture = Capture::new();
+    capture.thinking_blocks.store(true, Ordering::Relaxed);
+    let path = fixture(&env, &capture);
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!("claude-opus-5-5");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    std::fs::write(
+        env.config_home().join("settings.json"),
+        r#"{"thinking":false}"#,
+    )
+    .unwrap();
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "Thinking display is hidden.");
+    turn(&mut cli, "Keep the hidden signed response.");
+    exit(&mut cli);
+    let requests = capture.bodies();
+    for request in &requests {
+        assert_eq!(
+            request["thinking"],
+            json!({"type":"adaptive","display":"omitted"})
+        );
+        assert!(request.get("output_config").is_none());
+        assert!(request.get("reasoning_effort").is_none());
+    }
+    assert_thinking_replayed(&requests[1], 1);
 }
 
 fn response_content(request: &Value, number: usize) -> Value {

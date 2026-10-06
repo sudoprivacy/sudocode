@@ -347,6 +347,7 @@ pub(crate) enum CliAction {
         model: String,
         permission_mode: PermissionMode,
         auth_mode: Option<AuthMode>,
+        reasoning_effort: Option<String>,
     },
     ListSessions {
         output_format: CliOutputFormat,
@@ -654,6 +655,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             model.clone(),
             permission_mode,
             auth_mode,
+            cli.reasoning_effort,
         );
     }
 
@@ -910,6 +912,7 @@ fn parse_resume_from_clap(
     model: String,
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
+    reasoning_effort: Option<String>,
 ) -> Result<CliAction, String> {
     let (session_path, command_tokens) = if trailing.is_empty()
         && matches!(
@@ -935,6 +938,7 @@ fn parse_resume_from_clap(
             model,
             permission_mode,
             auth_mode,
+            reasoning_effort,
         );
     } else {
         (PathBuf::from(session_str), trailing)
@@ -947,6 +951,7 @@ fn parse_resume_from_clap(
         model,
         permission_mode,
         auth_mode,
+        reasoning_effort,
     )
 }
 
@@ -957,6 +962,7 @@ fn parse_resume_commands(
     model: String,
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
+    reasoning_effort: Option<String>,
 ) -> Result<CliAction, String> {
     let mut commands = Vec::new();
     let mut current_command = String::new();
@@ -994,6 +1000,7 @@ fn parse_resume_commands(
         model,
         permission_mode,
         auth_mode,
+        reasoning_effort,
     })
 }
 

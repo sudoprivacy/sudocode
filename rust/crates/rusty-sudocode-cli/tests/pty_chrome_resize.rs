@@ -1,44 +1,11 @@
 //! Resizing inline chrome must not commit old frames into terminal history.
 mod common;
 
-use std::time::Duration;
-
 use common::TestEnv;
-use pty_expect::PtySession;
 use runtime::{ContentBlock, ConversationMessage, Session, TokenUsage};
 
-/// The screen once the turn has finished AND stopped repainting.
-///
-/// Stillness alone was the bug: this waited for the whole screen to hold
-/// identical for 200ms, with no precondition that the turn was over. While a
-/// turn runs the chrome animates, so on a slow runner the screen never held
-/// still inside the budget and the test failed as "chrome did not settle" —
-/// about a product that was working, just still working. Gating on the turn
-/// status line first makes stillness a short tail instead of a race.
-///
-/// The count assertion in `assert_single_chrome` still does the real work: the
-/// gate only requires the marker to be PRESENT, so a duplicate that never
-/// resolves is caught there rather than hidden here.
-fn settled_screen(sess: &PtySession) -> String {
-    common::expect_screen_settled(
-        sess,
-        |screen| screen.contains('❯') && screen.contains("turn 1"),
-        common::DEFAULT_TIMEOUT,
-        "chrome did not settle",
-    )
-}
-
-fn assert_single_chrome(screen: &str) {
-    for marker in ["turn 1", "1 todos", "ResizeCompletedTask"] {
-        assert_eq!(
-            screen.matches(marker).count(),
-            1,
-            "{marker} must occur once after resize:\n{screen}"
-        );
-    }
-}
-
 #[test]
+#[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
 fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
     let env = TestEnv::new("chrome-resize");
     let store = env.workspace_root().join("todos.json");
@@ -64,88 +31,52 @@ fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
     saved.push_message(message).unwrap();
     let path = env.workspace_root().join("resize-session.jsonl");
     saved.save_to_path(&path).unwrap();
-    let mut sess = env.spawn_with_env(
-        &[
-            "--resume",
-            path.to_str().unwrap(),
-            "--permission-mode",
-            "read-only",
-        ],
-        &[
-            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-            ("SUDOCODE_TODO_STORE", store.to_str().unwrap()),
-            ("NO_COLOR", ""),
-            ("TERM", "xterm-256color"),
-            ("COLORFGBG", "15;0"),
-        ],
-    );
-    sess.expect("❯").expect("input ready");
-    assert_single_chrome(&settled_screen(&sess));
-    sess.send("DraftSurvivesResize").unwrap();
-    common::expect_input_line(
-        &sess,
-        "DraftSurvivesResize",
-        common::DEFAULT_TIMEOUT,
-        "draft",
-    );
-
-    for (rows, cols) in [
-        (40, 240),
-        (40, 100),
-        (40, 240),
-        (40, 80),
-        (40, 240),
-        (40, 60),
-        (40, 240),
-    ] {
-        sess.resize(rows, cols).unwrap();
-        let screen = settled_screen(&sess);
-        assert_single_chrome(&screen);
-        assert!(
-            screen.contains("ResizeHistorySentinel"),
-            "resize to {rows}x{cols} erased the preceding conversation:\n{screen}"
-        );
-        common::expect_input_line(
-            &sess,
-            "DraftSurvivesResize",
-            common::DEFAULT_TIMEOUT,
-            "resized draft",
-        );
-    }
-    // A drag can deliver another resize before the preceding frame completes.
-    for width in [200, 90, 140, 70, 240] {
-        sess.resize(40, width).unwrap();
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_single_chrome(&settled_screen(&sess));
-    common::expect_input_line(
-        &sess,
-        "DraftSurvivesResize",
-        common::DEFAULT_TIMEOUT,
-        "dragged draft",
-    );
-    // Reducing the viewport height may move history into scrollback. This
-    // harness only retains the visible screen, so assert live chrome/input
-    // here; the framework's reflow test also checks retained scrollback.
-    for (rows, cols) in [(18, 60), (40, 240)] {
-        sess.resize(rows, cols).unwrap();
-        assert_single_chrome(&settled_screen(&sess));
-        common::expect_input_line(
-            &sess,
-            "DraftSurvivesResize",
-            common::DEFAULT_TIMEOUT,
-            "short viewport draft",
-        );
-    }
-    sess.send_ctrl('u').unwrap();
+    let auth = if env.is_live() {
+        std::env::var("SCODE_LIVE_AUTH_MODE").unwrap_or_else(|_| "proxy".into())
+    } else {
+        "api-key".into()
+    };
+    let model = if env.is_live() {
+        common::live_model()
+    } else {
+        "sonnet".into()
+    };
+    let log_root = std::env::var_os("SCODE_TERMINAL_LOG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| env.workspace_root().join("terminal-logs"));
+    std::fs::create_dir_all(&log_root).unwrap();
+    let manifest = env.workspace_root().join("terminal.json");
+    std::fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!({
+            "binary": common::scode_bin(),
+            "args": ["--auth", auth.as_str(), "--model", model.as_str(), "--resume",
+                path.to_str().unwrap(), "--permission-mode", "read-only"],
+            "root": env.workspace_root(),
+            "configHome": env.config_home(),
+            "todos": store,
+            "logRoot": log_root,
+            "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let host = std::env::var_os("SCODE_TERMINAL_HOST").unwrap_or_else(|| "node".into());
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../e2e/terminal-resize/run.cjs");
+    let output = std::process::Command::new(host)
+        .arg(script)
+        .arg(manifest)
+        .env("ELECTRON_RUN_AS_NODE", "1")
+        .output()
+        .expect("start real terminal host; see e2e/terminal-resize/README.md");
     assert!(
-        !settled_screen(&sess).contains("DraftSurvivesResize"),
-        "Ctrl-U must clear the draft"
+        output.status.success(),
+        "real terminal resize failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    sess.send("/exit").unwrap();
-    common::expect_input_line(&sess, "/exit", common::DEFAULT_TIMEOUT, "exit");
-    sess.send("\r").unwrap();
-    assert_eq!(sess.expect_eof().unwrap(), 0);
+    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
     if env.is_mock() {
         assert_eq!(
             env.captured_message_count(),

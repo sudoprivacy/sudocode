@@ -531,7 +531,8 @@ jobs:
             models: {}
           }), { mode: 0o600 });
           NODE
-          cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_block_spacing sync_renderer_uses_the_same_spacing -- --nocapture
       - name: Remove process-tree test credentials
         if: always()
         env:

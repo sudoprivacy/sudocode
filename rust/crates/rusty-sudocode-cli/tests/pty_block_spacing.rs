@@ -116,7 +116,7 @@ fn roundtrip(queue: bool, width: u16) {
     let env = if queue {
         TestEnv::new("block-spacing")
     } else {
-        TestEnv::new_mock("block-spacing-sync")
+        TestEnv::new("block-spacing-sync")
     };
     for (file, body) in [
         ("spacing-one.txt", "ONE_START\n\n\nONE_END\n"),
@@ -130,7 +130,7 @@ fn roundtrip(queue: bool, width: u16) {
     let mut sess = start(&env, false, queue, width);
     let prompt = env.prompt(&format!("First say exactly Spacing intro. Then run two separate Bash tool calls: `cat spacing-one.txt` and `cat spacing-two.txt`. Do not combine commands and do not repeat the file contents in your answer. After both tools finish reply with exactly this Markdown, without an outer code fence:\n{}", mock_anthropic_service::SPACING_FINAL), "transcript_spacing");
     // The sync editor also intercepts bracketed paste for OS clipboard images.
-    // A short mock marker avoids reading the developer's clipboard there.
+    // Type a short line there; live runs read the full instructions from a file.
     if queue {
         sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
         common::expect_screen(
@@ -140,17 +140,18 @@ fn roundtrip(queue: bool, width: u16) {
             "prompt pasted",
         );
     } else {
-        assert!(
-            env.is_mock(),
-            "the sync case uses a deterministic short input"
-        );
-        sess.send("PARITY_SCENARIO:transcript_spacing").unwrap();
-        common::expect_input_line(
-            &sess,
-            "PARITY_SCENARIO:transcript_spacing",
-            common::DEFAULT_TIMEOUT,
-            "sync input",
-        );
+        std::fs::write(
+            env.workspace_root().join("spacing-instructions.md"),
+            &prompt,
+        )
+        .unwrap();
+        let input = if env.is_mock() {
+            "PARITY_SCENARIO:transcript_spacing"
+        } else {
+            "Read spacing-instructions.md and follow its instructions."
+        };
+        sess.send(input).unwrap();
+        common::expect_input_line(&sess, input, common::DEFAULT_TIMEOUT, "sync input");
     }
     sess.send("\r").unwrap();
     common::expect_screen_settled(

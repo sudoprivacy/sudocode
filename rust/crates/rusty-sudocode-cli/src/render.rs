@@ -153,6 +153,7 @@ pub struct SpinnerRef {
     progress: Arc<SpinnerProgress>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    draw_lock: Arc<Mutex<()>>,
     phase: Option<Arc<Mutex<crate::repl_ui::TurnPhase>>>,
     /// When true, a TurnRenderer manages the spinner display — pause/resume
     /// only set the atomic flag without writing to stdout.
@@ -168,6 +169,7 @@ impl SpinnerRef {
             progress: Arc::clone(&state.progress),
             is_thinking: Arc::new(AtomicBool::new(false)),
             is_paused: Arc::new(AtomicBool::new(false)),
+            draw_lock: Arc::new(Mutex::new(())),
             phase: Some(state.phase_arc()),
             managed: true,
         }
@@ -194,9 +196,12 @@ impl SpinnerRef {
             // on its next tick (≤80ms). No direct stdout write needed.
             return;
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let _ = write!(io::stdout(), "\r\x1b[2K");
-        let _ = io::stdout().flush();
+        // A frame may already be drawing when the flag changes. Wait for
+        // that draw to finish before clearing; a timed sleep cannot fence a
+        // descheduled updater and lets its frame land in durable output.
+        let _draw = self.draw_lock.lock().unwrap();
+        let mut stdout = io::stdout().lock();
+        let _ = write!(stdout, "\r\x1b[2K").and_then(|()| stdout.flush());
     }
 
     /// Resume the spinner after a pause.
@@ -241,6 +246,7 @@ pub struct SpinnerHandle {
     progress: Arc<SpinnerProgress>,
     is_thinking: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    draw_lock: Arc<Mutex<()>>,
     token_budget: Option<u32>,
     label: String,
     model: Option<String>,
@@ -270,6 +276,7 @@ impl SpinnerHandle {
         let progress = Arc::new(SpinnerProgress::new());
         let is_thinking = Arc::new(AtomicBool::new(false));
         let is_paused = Arc::new(AtomicBool::new(false));
+        let draw_lock = Arc::new(Mutex::new(()));
         let stop = Arc::new(AtomicBool::new(false));
 
         let mut handle = Self {
@@ -277,6 +284,7 @@ impl SpinnerHandle {
             progress,
             is_thinking,
             is_paused,
+            draw_lock,
             token_budget,
             label: label.to_string(),
             model: model.map(ToString::to_string),
@@ -297,6 +305,7 @@ impl SpinnerHandle {
             progress: Arc::clone(&self.progress),
             is_thinking: Arc::clone(&self.is_thinking),
             is_paused: Arc::clone(&self.is_paused),
+            draw_lock: Arc::clone(&self.draw_lock),
             phase: None,
             managed: false,
         }
@@ -308,6 +317,7 @@ impl SpinnerHandle {
         let progress = Arc::clone(&self.progress);
         let is_thinking = Arc::clone(&self.is_thinking);
         let is_paused = Arc::clone(&self.is_paused);
+        let draw_lock = Arc::clone(&self.draw_lock);
         let label = self.label.clone();
         let model = self.model.clone();
         let start_time = self.start_time;
@@ -316,6 +326,7 @@ impl SpinnerHandle {
         self.updater = Some(std::thread::spawn(move || {
             let mut frame_index: usize = 0;
             while !stop.load(Ordering::SeqCst) {
+                let draw = draw_lock.lock().unwrap();
                 let paused = is_paused.load(Ordering::SeqCst);
                 if !paused {
                     let thinking = is_thinking.load(Ordering::SeqCst);
@@ -373,7 +384,7 @@ impl SpinnerHandle {
                     pb.set_message(colored);
                     pb.tick();
                 }
-
+                drop(draw);
                 std::thread::sleep(std::time::Duration::from_millis(80));
             }
         }));

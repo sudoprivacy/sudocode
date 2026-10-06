@@ -81,7 +81,7 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
     // that is about to run — the three things a user needs to identify a hook
     // that is taking too long. Asserted as one pattern so a line that dropped
     // any of them fails here rather than passing on a partial match.
-    sess.expect(r"\[hook PreToolUse\] bash: echo hook-observed")
+    sess.expect(r"\[hook PreToolUse\] [Bb]ash: echo hook-observed")
         .unwrap_or_else(|e| {
             let screen = sess.render(|s| s.contents());
             panic!("hook start should be announced: {e}\nPTY screen:\n{screen}");
@@ -89,7 +89,7 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
 
     // And the completion line, which is what tells the user the turn moved on
     // rather than stalled inside the hook.
-    sess.expect(r"\[hook done PreToolUse\] bash: echo hook-observed")
+    sess.expect(r"\[hook done PreToolUse\] [Bb]ash: echo hook-observed")
         .unwrap_or_else(|e| {
             let screen = sess.render(|s| s.contents());
             panic!("hook completion should be announced: {e}\nPTY screen:\n{screen}");

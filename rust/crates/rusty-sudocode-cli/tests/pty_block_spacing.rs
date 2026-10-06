@@ -3,6 +3,7 @@ mod common;
 
 use common::TestEnv;
 use pty_expect::PtySession;
+use runtime::{ContentBlock, SessionStore};
 
 fn start(env: &TestEnv, resume: bool, queue: bool, width: u16) -> PtySession {
     let mut args = vec!["--permission-mode", "danger-full-access"];
@@ -171,6 +172,27 @@ fn roundtrip(queue: bool, width: u16) {
     );
     assert_transcript(&resumed);
     finish(&mut resumed);
+
+    // The final frame can look correct after the model first reads an unrelated
+    // workspace and recovers. This fixture only asks for successful file reads
+    // and two successful commands; retain earlier tool failures in acceptance.
+    let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
+    let saved = store.load_session("latest").unwrap().session;
+    let results: Vec<_> = saved
+        .messages
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
+        .collect();
+    assert!(results.len() >= 2, "both real command results must persist");
+    let failures: Vec<_> = results
+        .into_iter()
+        .filter(|block| matches!(block, ContentBlock::ToolResult { is_error: true, .. }))
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "spacing workflow recovered after unexpected tool errors: {failures:#?}"
+    );
 }
 
 #[test]

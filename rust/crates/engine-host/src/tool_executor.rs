@@ -88,10 +88,8 @@ pub struct CliToolExecutor {
     allowed_tools: Option<AllowedToolSet>,
     tool_registry: GlobalToolRegistry,
     mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
-    // Single-threaded interior mutability: `execute` is `&self` (so a
-    // concurrency-safe batch can share the dispatcher), but the interactive
-    // AskUserQuestion prompts remain serial, but normal tools now run on the
-    // blocking pool, so the prompter must be protected across threads.
+    // Borrow the prompter only to create an owned reply future. The input
+    // queue, not this mutex, owns the subsequent wait for an answer.
     question_prompter: Mutex<Option<Box<dyn QuestionPrompter>>>,
     abort_signal: Option<runtime::HookAbortSignal>,
     /// This session's directory — the namespace set `send` delivers through and
@@ -351,7 +349,7 @@ impl ToolExecutor for CliToolExecutor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_some()
         {
-            return self.execute_ask_user_question(value);
+            return self.execute_ask_user_question(value).await;
         }
         // Intercept write_plan to ask the user (across the seam) how to
         // proceed. The confirmation crosses via `question_prompter` — the pump's
@@ -366,7 +364,7 @@ impl ToolExecutor for CliToolExecutor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_some()
         {
-            return self.handle_write_plan(&value, ctx);
+            return self.handle_write_plan(&value, ctx).await;
         }
 
         let is_mcp_tool = self.tool_registry.has_runtime_tool(&tool_name);
@@ -499,24 +497,10 @@ struct AskUserQuestionCliOption {
     recommended: Option<bool>,
 }
 
-impl CliToolExecutor {
-    fn execute_ask_user_question(&self, value: serde_json::Value) -> Result<String, ToolError> {
-        let input: AskUserQuestionCliInput = serde_json::from_value(value)
-            .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
-
-        let mut prompter_guard = self
-            .question_prompter
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(prompter) = prompter_guard.as_mut() else {
-            return Err(ToolError::new(
-                "AskUserQuestion requires an interactive question prompter",
-            ));
-        };
-
-        let fields = if !input.questions.is_empty() {
-            input
-                .questions
+impl AskUserQuestionCliInput {
+    fn into_request(self) -> Result<QuestionPromptRequest, ToolError> {
+        let fields = if !self.questions.is_empty() {
+            self.questions
                 .into_iter()
                 .map(|field| {
                     let options = field
@@ -552,12 +536,12 @@ impl CliToolExecutor {
                 })
                 .collect::<Vec<_>>()
         } else {
-            let prompt = input
+            let prompt = self
                 .question
                 .map(|question| question.trim().to_string())
                 .filter(|question| !question.is_empty())
                 .ok_or_else(|| ToolError::new("question or questions is required"))?;
-            let options = input
+            let options = self
                 .options
                 .unwrap_or_default()
                 .into_iter()
@@ -585,13 +569,43 @@ impl CliToolExecutor {
             }]
         };
 
-        let request = QuestionPromptRequest {
-            title: input.title,
-            description: input.description,
+        Ok(QuestionPromptRequest {
+            title: self.title,
+            description: self.description,
             fields,
-        };
+        })
+    }
+}
 
-        let answers = prompter.ask(&request).map_err(ToolError::new)?;
+impl CliToolExecutor {
+    fn begin_question(
+        &self,
+        request: &QuestionPromptRequest,
+    ) -> Result<runtime::PromptReply<Result<Vec<runtime::QuestionPromptAnswer>, String>>, ToolError>
+    {
+        let mut guard = self
+            .question_prompter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prompter = guard
+            .as_mut()
+            .ok_or_else(|| ToolError::new("question requires an interactive prompter"))?;
+        Ok(prompter.begin_question(request))
+    }
+
+    async fn execute_ask_user_question(
+        &self,
+        value: serde_json::Value,
+    ) -> Result<String, ToolError> {
+        let input: AskUserQuestionCliInput = serde_json::from_value(value)
+            .map_err(|error| ToolError::new(format!("invalid tool input JSON: {error}")))?;
+
+        let request = input.into_request()?;
+
+        let answers = self
+            .begin_question(&request)?
+            .await
+            .map_err(ToolError::new)?;
         serde_json::to_string_pretty(&serde_json::json!({
             "status": "answered",
             "title": request.title,
@@ -626,7 +640,7 @@ impl CliToolExecutor {
     ///   2. Keep context & execute
     ///   3. Comment (free text) — fed back so the model revises the plan
     ///   4. Exit plan — stop, do not execute
-    fn handle_write_plan(
+    async fn handle_write_plan(
         &self,
         value: &serde_json::Value,
         ctx: &runtime::ToolDispatchContext,
@@ -711,20 +725,13 @@ impl CliToolExecutor {
             }],
         };
 
-        // Compute the choice, dropping the prompter borrow before we act on it.
-        let choice = {
-            let mut guard = self
-                .question_prompter
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(prompter) = guard.as_mut() else {
-                return execute_normally();
-            };
-            let answers = prompter.ask(&request).map_err(ToolError::new)?;
-            answers
-                .first()
-                .map_or_else(|| "2".to_string(), |answer| answer.value.clone())
-        };
+        let answers = self
+            .begin_question(&request)?
+            .await
+            .map_err(ToolError::new)?;
+        let choice = answers
+            .first()
+            .map_or_else(|| "2".to_string(), |answer| answer.value.clone());
 
         match choice.as_str() {
             "1" => {

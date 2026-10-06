@@ -83,7 +83,7 @@ pub use runtime::{
 /// sent back by the renderer.
 ///
 /// The engine allocates ids; renderers echo them verbatim. Ids are unique
-/// within a single engine session (one in-flight request table).
+/// within a single engine session, including across cancelled turns.
 pub type RequestId = u64;
 
 /// The engine's lifecycle state, surfaced to renderers via
@@ -273,10 +273,10 @@ pub enum EngineCommand {
         decision: PermissionPromptDecision,
     },
     /// Answer to a prior [`EngineEvent::QuestionRequest`] with a matching
-    /// [`RequestId`].
+    /// [`RequestId`]. A dismissed prompt is an error, never an empty answer.
     QuestionAnswer {
         id: RequestId,
-        answers: Vec<QuestionPromptAnswer>,
+        answers: Result<Vec<QuestionPromptAnswer>, String>,
     },
     /// Run a slash command (`/model`, `/compact`, …); the engine replies with
     /// [`EngineEvent::Notice`] (or a more specific event).

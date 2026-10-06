@@ -82,9 +82,40 @@ pub enum PermissionPromptDecision {
     Deny { reason: String },
 }
 
+/// An owned reply future lets a prompt wait without borrowing the dispatcher.
+pub type PromptReply<T> = futures::future::BoxFuture<'static, T>;
+
+/// One input owner per turn, shared by permissions and questions across hosts.
+/// Queueing a prompt never holds a tool or provider polling thread.
+#[derive(Clone, Default)]
+pub struct PromptQueue(std::sync::Arc<tokio::sync::Mutex<()>>);
+
+impl PromptQueue {
+    pub fn enqueue<T, F, R>(&self, request: F) -> PromptReply<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> R + Send + 'static,
+        R: std::future::Future<Output = T> + Send + 'static,
+    {
+        let queue = self.0.clone();
+        Box::pin(async move {
+            let _input = queue.lock_owned().await;
+            request().await
+        })
+    }
+}
+
 /// Prompting interface used when policy requires interactive approval.
 pub trait PermissionPrompter {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision;
+
+    fn begin_decision(
+        &mut self,
+        request: &PermissionRequest,
+    ) -> PromptReply<PermissionPromptDecision> {
+        let decision = self.decide(request);
+        Box::pin(std::future::ready(decision))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,8 +181,17 @@ pub struct QuestionPromptAnswer {
 }
 
 pub trait QuestionPrompter: Send {
+    fn cancel_pending(&mut self) {}
     fn ask(&mut self, request: &QuestionPromptRequest)
         -> Result<Vec<QuestionPromptAnswer>, String>;
+
+    fn begin_question(
+        &mut self,
+        request: &QuestionPromptRequest,
+    ) -> PromptReply<Result<Vec<QuestionPromptAnswer>, String>> {
+        let answer = self.ask(request);
+        Box::pin(std::future::ready(answer))
+    }
 }
 
 /// Final authorization result after evaluating static rules and prompts.
@@ -159,6 +199,49 @@ pub trait QuestionPrompter: Send {
 pub enum PermissionOutcome {
     Allow,
     Deny { reason: String },
+}
+
+enum PermissionEvaluation {
+    Allow,
+    Deny { reason: String },
+    Prompt(PermissionRequest),
+}
+
+impl PermissionEvaluation {
+    fn prompt(
+        tool_name: &str,
+        input: &str,
+        current_mode: PermissionMode,
+        required_mode: PermissionMode,
+        reason: Option<String>,
+    ) -> Self {
+        Self::Prompt(PermissionRequest {
+            tool_name: tool_name.into(),
+            input: input.into(),
+            current_mode,
+            required_mode,
+            reason,
+        })
+    }
+}
+
+fn resolve_permission(
+    request: &PermissionRequest,
+    decision: Option<PermissionPromptDecision>,
+) -> PermissionOutcome {
+    match decision {
+        Some(PermissionPromptDecision::Allow) => PermissionOutcome::Allow,
+        Some(PermissionPromptDecision::Deny { reason }) => PermissionOutcome::Deny { reason },
+        None => PermissionOutcome::Deny {
+            reason: request.reason.clone().unwrap_or_else(|| {
+                format!(
+                    "tool '{}' requires approval to run while mode is {}",
+                    request.tool_name,
+                    request.current_mode.as_str()
+                )
+            }),
+        },
+    }
 }
 
 /// Evaluates permission mode requirements plus allow/deny/ask rules.
@@ -283,7 +366,6 @@ impl PermissionPolicy {
     }
 
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn authorize_with_context(
         &self,
         tool_name: &str,
@@ -291,8 +373,49 @@ impl PermissionPolicy {
         context: &PermissionContext,
         prompter: Option<&mut dyn PermissionPrompter>,
     ) -> PermissionOutcome {
+        match self.evaluate(tool_name, input, context) {
+            PermissionEvaluation::Allow => PermissionOutcome::Allow,
+            PermissionEvaluation::Deny { reason } => PermissionOutcome::Deny { reason },
+            PermissionEvaluation::Prompt(request) => {
+                resolve_permission(&request, prompter.map(|p| p.decide(&request)))
+            }
+        }
+    }
+
+    pub(crate) fn begin_authorization(
+        &self,
+        tool_name: &str,
+        input: &str,
+        context: &PermissionContext,
+        prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> PromptReply<PermissionOutcome> {
+        match self.evaluate(tool_name, input, context) {
+            PermissionEvaluation::Allow => Box::pin(std::future::ready(PermissionOutcome::Allow)),
+            PermissionEvaluation::Deny { reason } => {
+                Box::pin(std::future::ready(PermissionOutcome::Deny { reason }))
+            }
+            PermissionEvaluation::Prompt(request) => {
+                let reply = prompter.map(|p| p.begin_decision(&request));
+                Box::pin(async move {
+                    let decision = match reply {
+                        Some(reply) => Some(reply.await),
+                        None => None,
+                    };
+                    resolve_permission(&request, decision)
+                })
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn evaluate(
+        &self,
+        tool_name: &str,
+        input: &str,
+        context: &PermissionContext,
+    ) -> PermissionEvaluation {
         if let Some(rule) = Self::find_matching_rule(&self.deny_rules, tool_name, input) {
-            return PermissionOutcome::Deny {
+            return PermissionEvaluation::Deny {
                 reason: format!(
                     "Permission to use {tool_name} has been denied by rule '{}'",
                     rule.raw
@@ -316,7 +439,7 @@ impl PermissionPolicy {
 
         match context.override_decision() {
             Some(PermissionOverride::Deny) => {
-                return PermissionOutcome::Deny {
+                return PermissionEvaluation::Deny {
                     reason: context.override_reason().map_or_else(
                         || format!("tool '{tool_name}' denied by hook"),
                         ToOwned::to_owned,
@@ -328,13 +451,12 @@ impl PermissionPolicy {
                     || format!("tool '{tool_name}' requires approval due to hook guidance"),
                     ToOwned::to_owned,
                 );
-                return Self::prompt_or_deny(
+                return PermissionEvaluation::prompt(
                     tool_name,
                     input,
                     current_mode,
                     required_mode,
                     Some(reason),
-                    prompter,
                 );
             }
             Some(PermissionOverride::Allow) => {
@@ -343,20 +465,19 @@ impl PermissionPolicy {
                         "tool '{tool_name}' requires approval due to ask rule '{}'",
                         rule.raw
                     );
-                    return Self::prompt_or_deny(
+                    return PermissionEvaluation::prompt(
                         tool_name,
                         input,
                         current_mode,
                         required_mode,
                         Some(reason),
-                        prompter,
                     );
                 }
                 if allow_rule.is_some()
                     || current_mode == PermissionMode::Allow
                     || current_mode >= required_mode
                 {
-                    return PermissionOutcome::Allow;
+                    return PermissionEvaluation::Allow;
                 }
             }
             None => {}
@@ -367,13 +488,12 @@ impl PermissionPolicy {
                 "tool '{tool_name}' requires approval due to ask rule '{}'",
                 rule.raw
             );
-            return Self::prompt_or_deny(
+            return PermissionEvaluation::prompt(
                 tool_name,
                 input,
                 current_mode,
                 required_mode,
                 Some(reason),
-                prompter,
             );
         }
 
@@ -381,7 +501,7 @@ impl PermissionPolicy {
             || current_mode == PermissionMode::Allow
             || current_mode >= required_mode
         {
-            return PermissionOutcome::Allow;
+            return PermissionEvaluation::Allow;
         }
 
         if current_mode == PermissionMode::Prompt
@@ -393,54 +513,21 @@ impl PermissionPolicy {
                 current_mode.as_str(),
                 required_mode.as_str()
             ));
-            return Self::prompt_or_deny(
+            return PermissionEvaluation::prompt(
                 tool_name,
                 input,
                 current_mode,
                 required_mode,
                 reason,
-                prompter,
             );
         }
 
-        PermissionOutcome::Deny {
+        PermissionEvaluation::Deny {
             reason: format!(
                 "tool '{tool_name}' requires {} permission; current mode is {}",
                 required_mode.as_str(),
                 current_mode.as_str()
             ),
-        }
-    }
-
-    fn prompt_or_deny(
-        tool_name: &str,
-        input: &str,
-        current_mode: PermissionMode,
-        required_mode: PermissionMode,
-        reason: Option<String>,
-        mut prompter: Option<&mut dyn PermissionPrompter>,
-    ) -> PermissionOutcome {
-        let request = PermissionRequest {
-            tool_name: tool_name.to_string(),
-            input: input.to_string(),
-            current_mode,
-            required_mode,
-            reason: reason.clone(),
-        };
-
-        match prompter.as_mut() {
-            Some(prompter) => match prompter.decide(&request) {
-                PermissionPromptDecision::Allow => PermissionOutcome::Allow,
-                PermissionPromptDecision::Deny { reason } => PermissionOutcome::Deny { reason },
-            },
-            None => PermissionOutcome::Deny {
-                reason: reason.unwrap_or_else(|| {
-                    format!(
-                        "tool '{tool_name}' requires approval to run while mode is {}",
-                        current_mode.as_str()
-                    )
-                }),
-            },
         }
     }
 

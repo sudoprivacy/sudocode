@@ -1215,10 +1215,10 @@ impl Drop for CwdLeaseGuard {
 
 /// A permission prompter that bridges to the ACP client over channels.
 ///
-/// From inside the blocking `spawn_blocking` context, `decide()` sends
-/// the permission request to an async handler which forwards it to the
-/// ACP client, then blocks waiting for the response.
+/// The normal tool loop awaits an owned reply while notifications keep flowing.
+/// Synchronous callers use the same queue through `decide()`.
 struct AcpPermissionBridge {
+    queue: runtime::PromptQueue,
     tx: tokio::sync::mpsc::UnboundedSender<(
         PermissionRequest,
         tokio::sync::oneshot::Sender<PermissionPromptDecision>,
@@ -1227,31 +1227,23 @@ struct AcpPermissionBridge {
 
 impl PermissionPrompter for AcpPermissionBridge {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        if self.tx.send((request.clone(), response_tx)).is_err() {
-            return PermissionPromptDecision::Deny {
-                reason: "permission bridge closed".to_string(),
-            };
-        }
-        // `decide()` is reached from inside the conversation runtime's
-        // `tokio_runtime.block_on(run_turn)`, so this thread is driving
-        // asynchronous tasks. Plain `blocking_recv()` there triggers tokio's
-        // "Cannot block the current thread from within a runtime" panic,
-        // which aborts the prompt task and surfaces to the client as a
-        // generic "blocking task failed" Internal error. `block_in_place`
-        // tells the multi-thread scheduler this thread is about to block,
-        // allowing the recv to complete safely (same pattern as
-        // `AcpQuestionBridge::ask` below).
-        //
-        // While this thread is parked the turn holds nothing shared: its
-        // workspace root is a thread-scoped value (see
-        // `runtime::workspace_root`), so a parked session cannot hold up any
-        // other session.
-        tokio::task::block_in_place(|| {
+        let reply = self.begin_decision(request);
+        tokio::task::block_in_place(|| futures::executor::block_on(reply))
+    }
+
+    fn begin_decision(
+        &mut self,
+        request: &PermissionRequest,
+    ) -> runtime::PromptReply<PermissionPromptDecision> {
+        let tx = self.tx.clone();
+        let request = request.clone();
+        self.queue.enqueue(move || async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send((request, response_tx));
             response_rx
-                .blocking_recv()
-                .unwrap_or(PermissionPromptDecision::Deny {
-                    reason: "permission response channel closed".to_string(),
+                .await
+                .unwrap_or_else(|_| PermissionPromptDecision::Deny {
+                    reason: "permission bridge closed".into(),
                 })
         })
     }
@@ -1262,32 +1254,28 @@ impl QuestionPrompter for AcpQuestionBridge {
         &mut self,
         request: &QuestionPromptRequest,
     ) -> Result<Vec<QuestionPromptAnswer>, String> {
-        let tool_call_id = format!("ask-{}", uuid_v4());
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-        if self
-            .tx
-            .send((tool_call_id, request.clone(), response_tx))
-            .is_err()
-        {
-            return Err("question bridge closed".to_string());
-        }
-        // The LLM tool loop runs synchronously inside the conversation runtime's
-        // `tokio_runtime.block_on(run_turn)` (multi-thread runtime), so this
-        // `ask()` is reached from a tokio worker thread. Plain `blocking_recv()`
-        // there triggers tokio's "Cannot block the current thread from within a
-        // runtime" panic, which aborts the entire prompt task and surfaces to
-        // the client as a generic "blocking task failed" / Internal error.
-        // `block_in_place` informs the multi-thread scheduler that this worker
-        // is about to block, allowing the recv to complete safely.
-        tokio::task::block_in_place(|| {
+        let reply = self.begin_question(request);
+        tokio::task::block_in_place(|| futures::executor::block_on(reply))
+    }
+
+    fn begin_question(
+        &mut self,
+        request: &QuestionPromptRequest,
+    ) -> runtime::PromptReply<Result<Vec<QuestionPromptAnswer>, String>> {
+        let tx = self.tx.clone();
+        let request = request.clone();
+        self.queue.enqueue(move || async move {
+            let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send((format!("ask-{}", uuid_v4()), request, response_tx));
             response_rx
-                .blocking_recv()
-                .unwrap_or_else(|_| Err("question response channel closed".to_string()))
+                .await
+                .unwrap_or_else(|_| Err("question bridge closed".into()))
         })
     }
 }
 
 struct AcpQuestionBridge {
+    queue: runtime::PromptQueue,
     tx: tokio::sync::mpsc::UnboundedSender<(
         String,
         QuestionPromptRequest,
@@ -1723,7 +1711,9 @@ pub(crate) async fn run_acp_on_transport(
                                     &turn_cwd,
                                 )?;
                             }
+                            let queue = runtime::PromptQueue::default();
                             engine_blocking.set_question_prompter(Box::new(AcpQuestionBridge {
+                                queue: queue.clone(),
                                 tx: question_tx,
                             }));
                             // While this turn runs, sub-agent events ride its
@@ -1737,7 +1727,7 @@ pub(crate) async fn run_acp_on_transport(
                                     .with_subagent_relay(subagents.relay.clone()),
                                 None => ObserverAdapter::new(evt_tx),
                             };
-                            let mut bridge = AcpPermissionBridge { tx: bridge_tx };
+                            let mut bridge = AcpPermissionBridge { tx: bridge_tx, queue };
                             let blocks = vec![runtime::ContentBlock::Text {
                                 text: prompt_blocking,
                             }];
@@ -1761,6 +1751,8 @@ pub(crate) async fn run_acp_on_transport(
 
                         // Concurrently serve permission/question requests + stream
                         // notifications while the blocking turn runs.
+                        use futures::{FutureExt, StreamExt};
+                        let mut replies = futures::stream::FuturesUnordered::<futures::future::BoxFuture<'_, ()>>::new();
                         let mut blocking_handle = blocking_handle;
                         let mut notif_rx_open = true;
                         let result: Result<(StopReason, Option<PromptUsage>), AcpError> = loop {
@@ -1773,24 +1765,28 @@ pub(crate) async fn run_acp_on_transport(
                                         notif_rx_open = false;
                                     }
                                 }
+                                _ = replies.next(), if !replies.is_empty() => {}
                                 perm = bridge_rx.recv() => {
                                     if let Some((perm_req, response_tx)) = perm {
                                         let acp_req = build_acp_permission_request(
                                             sid.clone(),
                                             &perm_req,
                                         );
-                                        let decision = match cx_perm
-                                            .send_request(acp_req)
-                                            .block_task()
-                                            .await
-                                        {
-                                            Ok(resp) => map_permission_response(resp),
-                                            Err(_) => PermissionPromptDecision::Deny {
-                                                reason: "ACP permission request failed"
-                                                    .to_string(),
-                                            },
-                                        };
-                                        let _ = response_tx.send(decision);
+                                        let cx_reply = cx_perm.clone();
+                                        replies.push(async move {
+                                            let decision = match cx_reply
+                                                .send_request(acp_req)
+                                                .block_task()
+                                                .await
+                                            {
+                                                Ok(resp) => map_permission_response(resp),
+                                                Err(_) => PermissionPromptDecision::Deny {
+                                                    reason: "ACP permission request failed"
+                                                        .to_string(),
+                                                },
+                                            };
+                                            let _ = response_tx.send(decision);
+                                        }.boxed());
                                     } else {
                                         break blocking_handle.await
                                             .unwrap_or(Err(AcpError::internal("blocking task failed")));
@@ -1826,36 +1822,39 @@ pub(crate) async fn run_acp_on_transport(
                                                 })
                                                 .collect(),
                                         };
-                                        let outcome = match serde_json::value::to_raw_value(&payload) {
-                                            Ok(raw) => {
-                                                match cx_perm
-                                                    .send_request(ClientRequest::ExtMethodRequest(
-                                                        ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
-                                                    ))
-                                                    .block_task()
-                                                    .await
-                                                {
-                                                    Ok(resp) => {
-                                                        serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
-                                                            .map_err(|error| format!("deserialize: {}", error))
-                                                            .map(|payload| {
-                                                                payload
-                                                                    .answers
-                                                                    .into_iter()
-                                                                    .map(|answer| QuestionPromptAnswer {
-                                                                        id: answer.id,
-                                                                        value: answer.value,
-                                                                        label: answer.label,
-                                                                    })
-                                                                    .collect::<Vec<_>>()
-                                                            })
+                                        let cx_reply = cx_perm.clone();
+                                        replies.push(async move {
+                                            let outcome = match serde_json::value::to_raw_value(&payload) {
+                                                Ok(raw) => {
+                                                    match cx_reply
+                                                        .send_request(ClientRequest::ExtMethodRequest(
+                                                            ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
+                                                        ))
+                                                        .block_task()
+                                                        .await
+                                                    {
+                                                        Ok(resp) => {
+                                                            serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
+                                                                .map_err(|error| format!("deserialize: {}", error))
+                                                                .map(|payload| {
+                                                                    payload
+                                                                        .answers
+                                                                        .into_iter()
+                                                                        .map(|answer| QuestionPromptAnswer {
+                                                                            id: answer.id,
+                                                                            value: answer.value,
+                                                                            label: answer.label,
+                                                                        })
+                                                                        .collect::<Vec<_>>()
+                                                                })
+                                                        }
+                                                        Err(error) => Err(error.to_string()),
                                                     }
-                                                    Err(error) => Err(error.to_string()),
                                                 }
-                                            }
-                                            Err(error) => Err(error.to_string()),
-                                        };
-                                        let _ = response_tx.send(outcome);
+                                                Err(error) => Err(error.to_string()),
+                                            };
+                                            let _ = response_tx.send(outcome);
+                                        }.boxed());
                                     } else {
                                         break blocking_handle.await
                                             .unwrap_or(Err(AcpError::internal("blocking task failed")));
@@ -1866,6 +1865,8 @@ pub(crate) async fn run_acp_on_transport(
                                 }
                             }
                         };
+
+                        drop(replies);
 
                         // Flush the rest of the turn's notifications before the
                         // response, which the protocol requires: a client renders

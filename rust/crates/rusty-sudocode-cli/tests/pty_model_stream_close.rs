@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 enum ResponseKind {
     Interrupted,
     Complete,
+    StopReasonOnly,
     EmptyThenComplete,
     AlwaysEmpty,
     InvalidRequestWithStatusDigits,
@@ -96,9 +97,15 @@ impl StreamProvider {
                 }
                 let empty = matches!(kind, ResponseKind::AlwaysEmpty)
                     || (matches!(kind, ResponseKind::EmptyThenComplete) && index == 0);
-                let body = refusal_body(kind).unwrap_or_else(|| {
+                let mut body = refusal_body(kind).unwrap_or_else(|| {
                     response_body(!matches!(kind, ResponseKind::Interrupted), empty)
                 });
+                if matches!(kind, ResponseKind::StopReasonOnly) {
+                    // The provider adapter stops reading after stop_reason. A
+                    // message_stop in a later packet is therefore never seen.
+                    let end = body.find("event: message_stop").unwrap();
+                    body.truncate(end);
+                }
                 // Promise bytes that never arrive: reqwest must raise a body
                 // read error, instead of accepting ordinary clean HTTP EOF.
                 let missing = if matches!(kind, ResponseKind::Interrupted | ResponseKind::Complete)
@@ -228,7 +235,7 @@ fn check_response(kind: ResponseKind) {
     );
     if matches!(
         kind,
-        ResponseKind::Complete | ResponseKind::EmptyThenComplete
+        ResponseKind::Complete | ResponseKind::StopReasonOnly | ResponseKind::EmptyThenComplete
     ) {
         assert_eq!(exit, 0, "{screen}");
         assert!(screen.contains("STREAM_BODY_VERIFIED"), "{screen}");
@@ -331,6 +338,11 @@ fn assert_refusal_trace(log_path: &std::path::Path) {
 #[test]
 fn terminal_response_survives_a_broken_http_body() {
     check_response(ResponseKind::Complete);
+}
+
+#[test]
+fn logical_stop_completes_without_a_coalesced_message_stop() {
+    check_response(ResponseKind::StopReasonOnly);
 }
 
 #[test]

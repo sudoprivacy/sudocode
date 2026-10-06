@@ -22,7 +22,9 @@ use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use super::registry::{self, model_token_limit};
 use super::{anthropic_missing_credentials, Provider, ProviderFuture};
 use crate::sse::SseParser;
-use crate::types::{MessageDeltaEvent, MessageRequest, MessageResponse, StreamEvent, Usage};
+use crate::types::{
+    MessageDeltaEvent, MessageRequest, MessageResponse, MessageStopEvent, StreamEvent, Usage,
+};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const OAUTH_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -492,6 +494,7 @@ impl AnthropicClient {
             pending: VecDeque::new(),
             done: false,
             logically_complete: false,
+            terminal_emitted: false,
             request: request.clone(),
             prompt_cache: self.prompt_cache.clone(),
             latest_usage: None,
@@ -1043,6 +1046,9 @@ pub struct MessageStream {
     /// cutting the connection right after `message_stop`) is harmless noise
     /// and must not be surfaced as an `IncompleteStream` error.
     logically_complete: bool,
+    /// Consumers require one terminal event even when we finish on stop_reason
+    /// before the upstream's separate message_stop packet can be read.
+    terminal_emitted: bool,
     request: MessageRequest,
     prompt_cache: Option<PromptCache>,
     latest_usage: Option<Usage>,
@@ -1088,6 +1094,11 @@ impl MessageStream {
                     // Observe it like any other event: a frame recovered here
                     // is still a frame upstream sent, and skipping this is how
                     // a trailing `message_stop` used to go unaccounted for.
+                    self.observe_event(&event);
+                    return Ok(Some(event));
+                }
+                if self.logically_complete && !self.terminal_emitted {
+                    let event = StreamEvent::MessageStop(MessageStopEvent {});
                     self.observe_event(&event);
                     return Ok(Some(event));
                 }
@@ -1208,6 +1219,7 @@ impl MessageStream {
                 }
             }
             StreamEvent::MessageStop(_) => {
+                self.terminal_emitted = true;
                 self.done = true;
                 self.logically_complete = true;
                 self.record_usage_once();

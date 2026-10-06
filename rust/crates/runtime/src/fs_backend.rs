@@ -342,10 +342,16 @@ pub fn vfs_path_for_host_path(path: &std::path::Path) -> io::Result<String> {
 /// either would be joined onto the workspace root and silently read a
 /// different file than the caller named.
 fn host_absolute_as_vfs(path: &str) -> io::Result<Option<String>> {
-    if path.starts_with('/') {
+    // Windows accepts either separator spelling for the extended-length
+    // prefix. Recognize it before the POSIX-root branch, or //?/C:/file
+    // becomes /?/C:/file and misses the mounted /C drive.
+    let bare = path
+        .strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix("//?/"))
+        .unwrap_or(path);
+    if bare == path && path.starts_with('/') {
         return Ok(Some(path.to_string()));
     }
-    let bare = path.strip_prefix(r"\\?\").unwrap_or(path);
     let unsupported = |what: &str| {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -362,6 +368,9 @@ fn host_absolute_as_vfs(path: &str) -> io::Result<Option<String>> {
             return unsupported("a drive-relative path");
         }
         return Ok(Some(format!("/{}{rest}", bare[..1].to_ascii_uppercase())));
+    }
+    if bare != path {
+        return unsupported("a verbatim path without a drive");
     }
     if bare.starts_with('\\') {
         return unsupported("a drive-less rooted path");

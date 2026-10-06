@@ -495,6 +495,7 @@ impl AnthropicClient {
             done: false,
             logically_complete: false,
             terminal_emitted: false,
+            terminal_deadline: None,
             request: request.clone(),
             prompt_cache: self.prompt_cache.clone(),
             latest_usage: None,
@@ -1049,6 +1050,9 @@ pub struct MessageStream {
     /// Consumers require one terminal event even when we finish on stop_reason
     /// before the upstream's separate message_stop packet can be read.
     terminal_emitted: bool,
+    /// A logical stop is not permission to drop the HTTP stream immediately.
+    /// Drain its real terminal event, with a bound for proxies that never send it.
+    terminal_deadline: Option<tokio::time::Instant>,
     request: MessageRequest,
     prompt_cache: Option<PromptCache>,
     latest_usage: Option<Usage>,
@@ -1105,7 +1109,18 @@ impl MessageStream {
                 return Ok(None);
             }
 
-            match self.response.chunk().await {
+            let chunk = if let Some(deadline) = self.terminal_deadline {
+                match tokio::time::timeout_at(deadline, self.response.chunk()).await {
+                    Ok(chunk) => chunk,
+                    Err(_) => {
+                        self.done = true;
+                        continue;
+                    }
+                }
+            } else {
+                self.response.chunk().await
+            };
+            match chunk {
                 Ok(Some(chunk)) => {
                     self.scan_chunk_for_cache_diagnosis(&chunk);
                     let events = self
@@ -1120,7 +1135,10 @@ impl MessageStream {
                 // A body read error before the terminal event is a truncated
                 // stream, just like a partial SSE frame at clean HTTP EOF.
                 // Preserve that transport classification for recovery callers.
-                // Terminal events already set `done` before another read.
+                // A confirmed logical end may survive a broken terminal tail.
+                Err(_) if self.logically_complete => {
+                    self.done = true;
+                }
                 Err(error) => {
                     return Err(ApiError::incomplete_stream(
                         "Anthropic",
@@ -1198,23 +1216,20 @@ impl MessageStream {
         match event {
             StreamEvent::MessageDelta(MessageDeltaEvent { usage, delta, .. }) => {
                 self.latest_usage = Some(usage.clone());
-                // When stop_reason is present (e.g. "end_turn"), no more
-                // content will follow. Mark done so next_event doesn't
-                // block on chunk().await when the proxy keeps the
-                // connection alive after the logical stream has ended.
+                // Content is complete, but finish the protocol before releasing
+                // the response. Closing here made completion depend on packet
+                // boundaries; live probes also observed partial cache reuse
+                // when a freshly signed response was closed before message_stop.
+                // One absolute grace deadline prevents a keepalive-only proxy
+                // from holding up the next turn indefinitely.
                 if delta.stop_reason.is_some() {
-                    self.done = true;
                     self.logically_complete = true;
+                    self.terminal_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(1)
+                    });
                     // Record the usage *here*, not only on `message_stop`.
-                    // Setting `done` stops next_event from reading another
-                    // chunk, so a `message_stop` upstream sent in a later TCP
-                    // frame is never parsed and never observed — and whether it
-                    // shares a frame with this event is a packet-boundary
-                    // accident. A live 3-turn session recorded only its first
-                    // request for exactly this reason (the gateway framed turn 1
-                    // together and turns 2 and 3 apart), which silently dropped
-                    // two thirds of both the usage telemetry and the prompt-cache
-                    // ledger those numbers are diagnosed from.
+                    // A missing terminal tail must not drop usage or the cache
+                    // ledger. The eventual real/synthetic stop is idempotent.
                     self.record_usage_once();
                 }
             }

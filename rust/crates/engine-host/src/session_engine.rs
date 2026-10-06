@@ -25,7 +25,6 @@ use crate::config::{
     resolve_model_switch_auth_mode, resolve_repl_model, AllowedToolSet,
 };
 use crate::context_usage::{collect_context_usage, ContextUsage};
-use crate::prompt::build_acp_system_prompt;
 use crate::runtime_build::{build_engine_runtime, BuiltRuntime, RuntimeConfig};
 use crate::session::{
     canonical_session_cwd, context_overflow_user_message, create_managed_session_handle_for,
@@ -188,7 +187,7 @@ impl SessionEngine {
         };
         let host_prompt_sections = config.system_prompt.dynamic_sections().to_vec();
         let mut prompt =
-            build_acp_system_prompt(&host.config_root, &prompt_overrides, config.memory)?;
+            crate::prompt::build_acp_prompt_for_host(&host, &prompt_overrides, config.memory)?;
         prompt.extend_dynamic_sections(host_prompt_sections.clone());
         config.system_prompt = prompt;
         let permission_mode = config.permission_mode;
@@ -451,8 +450,8 @@ impl SessionEngine {
             .map_err(|e| format!("failed to resolve auth mode: {e}"))?;
         // Pass the caller's base prompt, never the assembled snapshot. The
         // shared runtime builder checks explicit overrides before reusing it.
-        let mut system_prompt = build_acp_system_prompt(
-            &session.host.config_root,
+        let mut system_prompt = crate::prompt::build_acp_prompt_for_host(
+            &session.host,
             &session.prompt_overrides,
             session.memory,
         )?;

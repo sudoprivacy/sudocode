@@ -88,3 +88,29 @@ pub fn build_acp_system_prompt(
     prompt_overrides.apply(&mut prompt);
     Ok(prompt)
 }
+
+/// A hosted session reads workspace instructions through the same backend as
+/// its tools. The daemon's config directory only supplies host configuration.
+pub(crate) fn build_acp_prompt_for_host(
+    host: &crate::HostContext,
+    overrides: &SystemPromptOverrides,
+    memory: MemoryMode,
+) -> Result<SystemPrompt, String> {
+    if !host.require_model_mount {
+        return build_acp_system_prompt(&host.config_root, overrides, memory);
+    }
+    let root = host.fs.working_root().map_err(|e| e.to_string())?;
+    let mut prompt = runtime::load_system_prompt_with_fs_and_memory(
+        root,
+        runtime::today_local(),
+        "Nexus virtual filesystem (POSIX paths)",
+        "unknown",
+        host.fs.as_ref(),
+        memory,
+    )
+    .map_err(|e| format!("failed to build hosted system prompt: {e}"))?;
+    runtime::coordinator_mode::apply_coordinator_prompt_if_enabled(&mut prompt);
+    apply_cli_prompt_overrides(&mut prompt);
+    overrides.apply(&mut prompt);
+    Ok(prompt)
+}

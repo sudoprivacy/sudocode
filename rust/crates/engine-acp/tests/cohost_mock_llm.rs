@@ -135,6 +135,11 @@ fn harness() -> &'static Harness {
             serde_json::to_vec_pretty(&config).expect("config serializes"),
         )
         .expect("write the scripted sudocode.json");
+        std::fs::write(
+            config_home.path().join("AGENTS.md"),
+            "HOST_CONFIG_INSTRUCTIONS_MUST_STAY_PRIVATE",
+        )
+        .unwrap();
         std::env::set_var("SUDO_CODE_CONFIG_HOME", config_home.path());
         Harness {
             runtime,
@@ -233,6 +238,13 @@ fn run_cohost_turn(
         .write(&format!("{workspace}/fixture.txt"), FIXTURE_BODY.as_bytes())
         .expect("plant the fixture the model will read");
 
+    user_fs
+        .write(
+            &format!("{workspace}/AGENTS.md"),
+            b"VFS_WORKSPACE_INSTRUCTIONS_8142",
+        )
+        .unwrap();
+
     let transcript = InboxConvention::new(String::new()).transcript_path(USER, agent_id);
     if transcript_is_stream {
         provision_stream_transcript(&kernel, &transcript);
@@ -295,6 +307,28 @@ fn run_cohost_turn(
         expected, asked,
         "every upstream model call must cross the session filesystem"
     );
+    let requests = harness
+        .runtime
+        .block_on(harness.service.captured_requests());
+    assert!(requests.len() > asked_before, "model received no request");
+    for request in &requests[asked_before..] {
+        let body: serde_json::Value = serde_json::from_str(&request.raw_body).unwrap();
+        let system = body["system"].to_string();
+        assert!(
+            system.contains("VFS_WORKSPACE_INSTRUCTIONS_8142"),
+            "workspace instructions missing"
+        );
+        assert!(
+            !system.contains("HOST_CONFIG_INSTRUCTIONS_MUST_STAY_PRIVATE"),
+            "host instructions leaked"
+        );
+        assert!(system.contains(&workspace), "workspace missing");
+        assert!(system.contains("Nexus virtual filesystem (POSIX paths)"));
+        assert!(
+            system.contains(&format!("/agents/{agent_id}/memory")),
+            "memory uses wrong namespace"
+        );
+    }
     let reply = reply.unwrap_or_else(|| {
         let raw = user_fs
             .read(&transcript)

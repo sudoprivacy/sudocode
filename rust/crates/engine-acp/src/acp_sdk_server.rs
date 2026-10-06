@@ -714,20 +714,20 @@ async fn drive_prompt(
                     let abort = registry.abort_signal(&sid).expect("registered session abort signal");
                     let cx_reply = cx_perm.clone();
                     replies.push(async move {
-                    let answer = tokio::select! {
-                        biased;
-                        () = abort.cancelled() => None,
-                        answer = cx_reply.send_request(acp_req).block_task() => Some(answer),
-                    };
-                    let decision = match answer {
-                        None => PermissionPromptDecision::Deny { reason: "turn cancelled".into() },
-                        Some(Ok(resp)) => map_permission_response(resp),
-                        Some(Err(_)) => PermissionPromptDecision::Deny {
-                            reason: "ACP permission request failed"
-                                .to_string(),
-                        },
-                    };
-                    let _ = response_tx.send(decision);
+                        let answer = tokio::select! {
+                            biased;
+                            () = abort.cancelled() => None,
+                            answer = cx_reply.send_request(acp_req).block_task() => Some(answer),
+                        };
+                        let decision = match answer {
+                            None => PermissionPromptDecision::Deny { reason: "turn cancelled".into() },
+                            Some(Ok(resp)) => map_permission_response(resp),
+                            Some(Err(_)) => PermissionPromptDecision::Deny {
+                                reason: "ACP permission request failed"
+                                    .to_string(),
+                            },
+                        };
+                        let _ = response_tx.send(decision);
                     }.boxed());
                 } else {
                     break blocking_handle.await
@@ -769,38 +769,38 @@ async fn drive_prompt(
                     let cx_reply = cx_perm.clone();
                     let abort = registry.abort_signal(&sid).expect("registered session abort signal");
                     replies.push(async move {
-                    let outcome = match serde_json::value::to_raw_value(&payload) {
-                        Ok(raw) => {
-                            let answer = tokio::select! {
-                                biased;
-                                () = abort.cancelled() => None,
-                                answer = cx_reply.send_request(ClientRequest::ExtMethodRequest(
-                                    ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
-                                )).block_task() => Some(answer),
-                            };
-                            match answer {
-                                None => Err("turn cancelled".into()),
-                                Some(Ok(resp)) => {
-                                    serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
-                                        .map_err(|error| format!("deserialize: {}", error))
-                                        .map(|payload| {
-                                            payload
-                                                .answers
-                                                .into_iter()
-                                                .map(|answer| QuestionPromptAnswer {
-                                                    id: answer.id,
-                                                    value: answer.value,
-                                                    label: answer.label,
-                                                })
-                                                .collect::<Vec<_>>()
-                                        })
+                        let outcome = match serde_json::value::to_raw_value(&payload) {
+                            Ok(raw) => {
+                                let answer = tokio::select! {
+                                    biased;
+                                    () = abort.cancelled() => None,
+                                    answer = cx_reply.send_request(ClientRequest::ExtMethodRequest(
+                                        ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
+                                    )).block_task() => Some(answer),
+                                };
+                                match answer {
+                                    None => Err("turn cancelled".into()),
+                                    Some(Ok(resp)) => {
+                                        serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
+                                            .map_err(|error| format!("deserialize: {}", error))
+                                            .map(|payload| {
+                                                payload
+                                                    .answers
+                                                    .into_iter()
+                                                    .map(|answer| QuestionPromptAnswer {
+                                                        id: answer.id,
+                                                        value: answer.value,
+                                                        label: answer.label,
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            })
+                                    }
+                                    Some(Err(error)) => Err(error.to_string()),
                                 }
-                                Some(Err(error)) => Err(error.to_string()),
                             }
-                        }
-                        Err(error) => Err(error.to_string()),
-                    };
-                    let _ = response_tx.send(outcome);
+                            Err(error) => Err(error.to_string()),
+                        };
+                        let _ = response_tx.send(outcome);
                     }.boxed());
                 } else {
                     break blocking_handle.await

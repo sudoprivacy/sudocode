@@ -17,7 +17,7 @@
 //! share `common` so a pass there is a statement about this one. Run with:
 //!   ANTHROPIC_API_KEY=<sudorouter sk-…> \
 //!   ANTHROPIC_BASE_URL=https://napi.sudorouter.ai \
-//!   cargo test -p engine-host --test cohost_live_llm -- --ignored --nocapture
+//!   cargo test -p engine-acp --features mailbox --test cohost_live_llm -- --ignored --nocapture
 
 #[path = "../../engine-host/tests/common/mod.rs"]
 mod common;

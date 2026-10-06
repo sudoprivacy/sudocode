@@ -495,6 +495,13 @@ jobs:
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           PROXY_BASE_URL: https://api.sudorouter.ai/v1
         run: cargo test -p rusty-sudocode-cli --test acp_live_smoke -- --test-threads=1
+      - name: Real model through the co-host controller mailbox
+        working-directory: rust
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+          ANTHROPIC_BASE_URL: https://api.sudorouter.ai
+          SUDOCODE_TEST_MODEL: claude-sonnet-4-6
+        run: cargo test --locked -p engine-acp --features mailbox --test session_mailbox_live -- --ignored --nocapture
 
   live-bash-process-tree:
     name: Live Bash process tree (${{ matrix.os }})

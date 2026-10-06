@@ -6612,7 +6612,11 @@ fn build_agent_system_prompt(
     let mut prompt = runtime::load_system_prompt_for_agent_with(
         &cwd,
         runtime::today_local(),
-        std::env::consts::OS,
+        if cohost {
+            "Nexus virtual filesystem (POSIX paths)"
+        } else {
+            std::env::consts::OS
+        },
         "unknown",
         subagent_type,
         if cohost {

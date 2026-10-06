@@ -285,6 +285,53 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             );
         }
     }
+    // Waiting for a reverse question must not block a sibling tool's updates.
+    // This exercises the same concurrent reply handling as the stdio ACP driver.
+    send(
+        &mailbox,
+        json!({"jsonrpc":"2.0","id":"mode","method":"session/setPermissionMode",
+        "params":{"sessionId":sid,"permissionMode":"danger-full-access"}}),
+    );
+    let (mode, _) = until(&mailbox, |m| m["id"] == "mode");
+    assert!(mode.get("error").is_none(), "{mode}");
+    fs.write("parallel-read.txt", b"MAILBOX_PARALLEL_READ_RESULT")
+        .unwrap();
+    let calls = json!([
+        {"id":"question", "name":"AskUserQuestion", "input":{"question":"MAILBOX_PARALLEL_QUESTION"}},
+        {"id":"read", "name":"Read", "input":{"path":"parallel-read.txt"}}
+    ]);
+    send(
+        &mailbox,
+        json!({"jsonrpc":"2.0","id":"parallel","method":"session/prompt",
+        "params":{"sessionId":sid,"prompt":[{"type":"text","text":format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")}]}}),
+    );
+    let (question, events) = until(&mailbox, |m| m["method"] == "_scode/ask_user_question");
+    if !events
+        .iter()
+        .any(|m| m.to_string().contains("MAILBOX_PARALLEL_READ_RESULT"))
+    {
+        until(&mailbox, |m| {
+            m["method"] == "session/update"
+                && m.to_string().contains("MAILBOX_PARALLEL_READ_RESULT")
+        });
+    }
+    let state = call(
+        &kernel,
+        "get_session_v1",
+        json!({"session_id":started["session_id"]}),
+    );
+    assert_eq!(
+        state["state"], "awaiting_input",
+        "question is still unanswered"
+    );
+    send(
+        &mailbox,
+        json!({"jsonrpc":"2.0","id":question["id"],
+        "result":{"answers":[{"id":"q1","value":"ack","label":"ack"}]}}),
+    );
+    let (terminal, _) = until(&mailbox, |m| m["id"] == "parallel");
+    assert_eq!(terminal["result"]["stopReason"], "end_turn", "{terminal}");
+
     mailbox
         .send(SessionPayload::Closed {
             reason: "controller disconnected".into(),

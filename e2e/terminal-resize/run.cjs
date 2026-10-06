@@ -10,8 +10,9 @@ const { Terminal } = host('@xterm/headless');
 const { Unicode11Addon } = host('@xterm/addon-unicode11');
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 assert(['bundled', 'system'].includes(config.backend), 'unknown ConPTY backend');
+const initial = config.scenario === 'a2a' ? { cols: 100, rows: 50 } : { cols: 120, rows: 24 };
 const terminal = new Terminal({
-  cols: 120, rows: 24, scrollback: 10000, allowProposedApi: true,
+  ...initial, scrollback: 10000, allowProposedApi: true,
   reflowCursorLine: config.backend !== 'system',
   windowsPty: process.platform === 'win32'
     ? { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } : undefined,
@@ -28,7 +29,7 @@ const env = { ...process.env, SUDO_CODE_CONFIG_HOME: config.configHome,
 for (const key of ['ELECTRON_RUN_AS_NODE', 'NO_COLOR', 'SCODE_GLOBAL_CONFIG_DIR', 'SCODE_PROJECT_CONFIG_DIR'])
   delete env[key];
 const child = pty.spawn(config.binary, config.args, { cwd: config.root, env,
-  cols: 120, rows: 24, useConpty: true, useConptyDll: config.backend === 'bundled' });
+  ...initial, useConpty: true, useConptyDll: config.backend === 'bundled' });
 const wire = [];
 let pending = 0, lastData = Date.now(), exited = false, exitCode;
 child.onData(data => {
@@ -59,6 +60,17 @@ async function settle(predicate, notBefore = 0) {
   }
   throw new Error(`terminal did not settle\n${snapshot()}`);
 }
+async function frame(predicate, notBefore = 0) {
+  // A running turn animates continuously. Wait for parsed output satisfying
+  // the complete frame condition without requiring that animation to stop.
+  const deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
+    await sleep(25);
+    if (!pending && lastData >= notBefore && predicate(snapshot())) return;
+    assert(!exited, `scode exited before the expected frame\n${snapshot()}`);
+  }
+  throw new Error(`expected terminal frame was not drawn\n${snapshot()}`);
+}
 function check(label) {
   const text = snapshot();
   for (const marker of ['turn 1', '1 todos', 'ResizeCompletedTask', 'ResizeHistorySentinel', 'DraftSurvivesResize'])
@@ -73,26 +85,58 @@ function resize(cols, rows) {
   wire.push({ resize: [cols, rows], time: Date.now() });
   terminal.resize(cols, rows); child.resize(cols, rows);
 }
+async function queuedPeer() {
+  await settle(text => text.includes('❯'));
+  child.write(config.prompt + '\r');
+  await frame(() => fs.existsSync(path.join(config.root, 'cancel-ready')));
+  // The Rust fixture now injects through the real Mailbox API.
+  await frame(text => text.includes('queued: Message from mac-ai'));
+  let started = Date.now();
+  resize(42, 60);
+  await frame(text => text.split('\n').some(line => line.includes('queued: Message from mac-ai')
+    && line.endsWith('…')) && !text.includes('QUEUED-BODY-END'), started);
+  child.write('draft-中文');
+  await frame(text => text.includes('❯ draft-中文'));
+  started = Date.now();
+  resize(180, 60);
+  await frame(text => text.split('\n').some(line => line.includes('queued: Message from mac-ai')
+    && line.includes(config.firstLine)) && text.includes('❯ draft-中文'), started);
+  child.write('\x15');
+  await frame(text => !text.includes('draft-中文'));
+  child.write('\x1b');
+  await settle(text => text.includes('│ QUEUED-BODY-END') && text.includes('turn 2')
+    && text.split('\n').some(line => line.trim().replace(/^•\s*/, '') === config.expectedReply)
+    && !text.includes('queued: Message from mac-ai'));
+  const text = snapshot();
+  assert.equal(text.split('\n').filter(line => line.trim() === '╭─ Message from mac-ai').length, 1, text);
+  assert.equal(text.split('│ QUEUED-BODY-END').length - 1, 1, text);
+  assert(!text.includes('<mailbox-message'), text);
+  console.log('SCODE_XTERM_QUEUED_PEER_PASS');
+}
 async function run() {
   try {
-    await settle(text => text.includes('turn 1') && text.includes('❯'));
-    child.write('DraftSurvivesResize');
-    await settle(text => text.includes('DraftSurvivesResize'));
-    check('initial');
-    for (const [cols, rows] of [[240,40], [100,40], [240,40], [80,40], [240,40],
-      [60,40], [240,40], [60,18], [240,40]]) {
-      const started = Date.now();
-      resize(cols, rows);
-      await settle(text => text.includes('DraftSurvivesResize')
-        && text.split('\n').some(line => line === '─'.repeat(cols)), started);
-      check(`${cols}x${rows}`);
+    if (config.scenario === 'a2a') {
+      await queuedPeer();
+    } else {
+      await settle(text => text.includes('turn 1') && text.includes('❯'));
+      child.write('DraftSurvivesResize');
+      await settle(text => text.includes('DraftSurvivesResize'));
+      check('initial');
+      for (const [cols, rows] of [[240,40], [100,40], [240,40], [80,40], [240,40],
+        [60,40], [240,40], [60,18], [240,40]]) {
+        const started = Date.now();
+        resize(cols, rows);
+        await settle(text => text.includes('DraftSurvivesResize')
+          && text.split('\n').some(line => line === '─'.repeat(cols)), started);
+        check(`${cols}x${rows}`);
+      }
+      const rapidStarted = Date.now();
+      for (const cols of [200, 90, 140, 70, 240]) { resize(cols, 40); await sleep(10); }
+      await settle(text => text.includes('DraftSurvivesResize') && text.includes('─'.repeat(240)), rapidStarted);
+      check('rapid');
+      child.write('\x15');
+      await settle(text => !text.includes('DraftSurvivesResize'));
     }
-    const rapidStarted = Date.now();
-    for (const cols of [200, 90, 140, 70, 240]) { resize(cols, 40); await sleep(10); }
-    await settle(text => text.includes('DraftSurvivesResize') && text.includes('─'.repeat(240)), rapidStarted);
-    check('rapid');
-    child.write('\x15');
-    await settle(text => !text.includes('DraftSurvivesResize'));
     child.write('/exit');
     await settle(text => text.includes('❯ /exit'));
     child.write('\r');

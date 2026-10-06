@@ -372,8 +372,9 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
     exit(&mut sess);
 }
 
-/// A queued preview resizes in one row, leaves editing responsive, then flushes
-/// the full body exactly once. The preview must never replace the queued body.
+/// A queued preview leaves editing responsive, then flushes the full body once.
+/// Width changes run in pty_chrome_resize with real xterm reflow; vt100 cannot
+/// model resized history and mistakes abandoned preview rows for live chips.
 #[test]
 fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     let (env, mut sess) = queued_session("a2a-busy", &[]);
@@ -388,19 +389,8 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     wait_for_screen(&sess, "peer preview queued", |s| {
         has_chip(s, "Message from mac-ai")
     });
-    sess.resize(60, 42).unwrap();
-    wait_for_screen(&sess, "narrow one-line preview", |s| {
-        s.lines()
-            .any(|l| l.contains("queued: Message from mac-ai") && l.ends_with('…'))
-            && !s.contains("QUEUED-BODY-END")
-    });
     sess.send("draft-中文").unwrap();
     common::expect_input_line(&sess, "draft-中文", BUDGET, "typing with peer queued");
-    sess.resize(60, 180).unwrap();
-    wait_for_screen(&sess, "widened preview recovers full first line", |s| {
-        s.lines()
-            .any(|l| l.contains("queued: Message from mac-ai") && l.contains(first.trim_end()))
-    });
     sess.send(&"\x7f".repeat(8)).unwrap(); // Clear the draft before checking readiness.
                                            // A running turn keeps the status animation moving. Observe the input,
                                            // rather than requiring the entire terminal to stop repainting.

@@ -31,6 +31,111 @@ fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
     saved.push_message(message).unwrap();
     let path = env.workspace_root().join("resize-session.jsonl");
     saved.save_to_path(&path).unwrap();
+    let output = run_terminal(
+        &env,
+        &[
+            "--resume",
+            path.to_str().unwrap(),
+            "--permission-mode",
+            "read-only",
+        ],
+        "history",
+        serde_json::json!({"todos": store}),
+    );
+    assert_terminal_output(output);
+    if env.is_mock() {
+        assert_eq!(
+            env.captured_message_count(),
+            0,
+            "resize must not run a turn"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
+fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
+    use runtime::agent_mailbox::{self, MailboxEnvelope};
+    use runtime::mailbox::{local_pair_root_in, Mailbox};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let env = TestEnv::new("a2a-real-resize");
+    let first = format!("A2A-BUSY-MARKER {}", "preview ".repeat(12));
+    let body = format!(
+        "{first}\n\nQUEUED-BODY-END\n\n{}",
+        env.prompt(
+            "Reply only with A2A-ACK. Do not call tools.",
+            "single_turn_text"
+        )
+    );
+    let prompt = env.prompt(
+        "Run exactly this bash command, nothing else: printf 'ready' > cancel-ready; printf 'interrupt-start'; sleep 30; printf 'interrupt-done'",
+        "bash_interrupt_long_running",
+    );
+    let pair = local_pair_root_in(env.config_home());
+    let ready = env.workspace_root().join("cancel-ready");
+    let done = Arc::new(AtomicBool::new(false));
+    let stopped = done.clone();
+    let peer = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline && !stopped.load(Ordering::Relaxed) {
+            if ready.is_file() {
+                let receiver = std::fs::read_dir(pair.join("agents"))
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .find(|path| path.join("conversations").is_dir());
+                if let Some(receiver) = receiver {
+                    return Mailbox::workspace_local(&pair, "mac-ai".into()).send(
+                        MailboxEnvelope {
+                            from: "mac-ai".into(),
+                            to: receiver.file_name().unwrap().to_string_lossy().into_owned(),
+                            body,
+                            summary: Some("queued resize acceptance".into()),
+                            timestamp: 0,
+                            color: None,
+                            kind: agent_mailbox::kinds::MESSAGE.into(),
+                            request_id: None,
+                        },
+                    );
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Err("real Bash readiness and mailbox receiver were not observed".into())
+    });
+    let output = run_terminal(
+        &env,
+        &["--permission-mode", "danger-full-access"],
+        "a2a",
+        serde_json::json!({
+            "prompt": prompt,
+            "firstLine": first.trim_end(),
+            "expectedReply": if env.is_live() { "A2A-ACK" } else { "The answer is 4" },
+        }),
+    );
+    done.store(true, Ordering::Relaxed);
+    let delivered = peer.join().expect("mailbox producer");
+    assert_terminal_output(output);
+    delivered.expect("real peer delivery");
+    if env.is_mock() {
+        assert!(
+            env.captured_message_count() >= 2,
+            "both turns must reach the provider"
+        );
+    }
+}
+
+fn run_terminal(
+    env: &TestEnv,
+    args: &[&str],
+    scenario: &str,
+    extra: serde_json::Value,
+) -> std::process::Output {
     let auth = if env.is_live() {
         std::env::var("SCODE_LIVE_AUTH_MODE").unwrap_or_else(|_| "proxy".into())
     } else {
@@ -41,35 +146,37 @@ fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
     } else {
         "sonnet".into()
     };
+    let mut arguments = vec!["--auth", auth.as_str(), "--model", model.as_str()];
+    arguments.extend_from_slice(args);
     let log_root = std::env::var_os("SCODE_TERMINAL_LOG_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| env.workspace_root().join("terminal-logs"));
+        .unwrap_or_else(|| env.workspace_root().join("terminal-logs"))
+        .join(scenario);
     std::fs::create_dir_all(&log_root).unwrap();
+    let mut config = serde_json::json!({
+        "binary": common::scode_bin(), "args": arguments, "scenario": scenario,
+        "root": env.workspace_root(), "configHome": env.config_home(),
+        "todos": env.workspace_root().join("todos.json"), "logRoot": log_root,
+        "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
+    });
+    config
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
     let manifest = env.workspace_root().join("terminal.json");
-    std::fs::write(
-        &manifest,
-        serde_json::to_vec(&serde_json::json!({
-            "binary": common::scode_bin(),
-            "args": ["--auth", auth.as_str(), "--model", model.as_str(), "--resume",
-                path.to_str().unwrap(), "--permission-mode", "read-only"],
-            "root": env.workspace_root(),
-            "configHome": env.config_home(),
-            "todos": store,
-            "logRoot": log_root,
-            "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&manifest, serde_json::to_vec(&config).unwrap()).unwrap();
     let host = std::env::var_os("SCODE_TERMINAL_HOST").unwrap_or_else(|| "node".into());
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../../e2e/terminal-resize/run.cjs");
-    let output = std::process::Command::new(host)
+    std::process::Command::new(host)
         .arg(script)
         .arg(manifest)
         .env("ELECTRON_RUN_AS_NODE", "1")
         .output()
-        .expect("start real terminal host; see e2e/terminal-resize/README.md");
+        .expect("start real terminal host; see e2e/terminal-resize/README.md")
+}
+
+fn assert_terminal_output(output: std::process::Output) {
     assert!(
         output.status.success(),
         "real terminal resize failed:\n{}\n{}",
@@ -77,11 +184,4 @@ fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
         String::from_utf8_lossy(&output.stderr)
     );
     eprintln!("{}", String::from_utf8_lossy(&output.stdout));
-    if env.is_mock() {
-        assert_eq!(
-            env.captured_message_count(),
-            0,
-            "resize must not run a turn"
-        );
-    }
 }

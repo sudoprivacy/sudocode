@@ -3,7 +3,13 @@
 `pty_chrome_resize` creates a persisted conversation and drives the real scode
 binary through node-pty and xterm. It checks the entire scrollback buffer,
 including all 70 history lines, one copy of the live chrome, the draft, Ctrl-U
-and normal exit. Resizing does not submit a model turn.
+and normal exit. The saved-history scenario does not submit a model turn.
+
+A second workflow starts a real Bash tool, injects a peer through the Rust
+Mailbox API, narrows and widens its queued preview while editing a Unicode
+draft, cancels the tool and checks that the full peer body appears exactly once
+with no queued preview left behind. It uses a real API in live mode and the
+protocol provider in ordinary CI; both execute the real CLI and terminal.
 
 The vt100 parser used by other PTY tests does not reflow history on width
 changes. This test therefore uses the terminal model shipped with the pinned

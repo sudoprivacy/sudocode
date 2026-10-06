@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 enum ResponseKind {
     Interrupted,
     Complete,
+    SplitTerminal,
     EmptyThenComplete,
     AlwaysEmpty,
     InvalidRequestWithStatusDigits,
@@ -108,7 +109,18 @@ impl StreamProvider {
                     0
                 };
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len() + missing);
-                let _ = socket.write_all(response.as_bytes());
+                if matches!(kind, ResponseKind::SplitTerminal) {
+                    // Real gateways can deliver the logical stop and its final
+                    // frame in separate reads. Keep the connection alive while
+                    // the CLI processes the first part, as observed live.
+                    let split = response.rfind("event: message_stop").unwrap();
+                    let _ = socket.write_all(&response.as_bytes()[..split]);
+                    let _ = socket.flush();
+                    thread::sleep(Duration::from_millis(250));
+                    let _ = socket.write_all(&response.as_bytes()[split..]);
+                } else {
+                    let _ = socket.write_all(response.as_bytes());
+                }
             }
         });
         Self {
@@ -228,7 +240,7 @@ fn check_response(kind: ResponseKind) {
     );
     if matches!(
         kind,
-        ResponseKind::Complete | ResponseKind::EmptyThenComplete
+        ResponseKind::Complete | ResponseKind::SplitTerminal | ResponseKind::EmptyThenComplete
     ) {
         assert_eq!(exit, 0, "{screen}");
         assert!(screen.contains("STREAM_BODY_VERIFIED"), "{screen}");
@@ -331,6 +343,11 @@ fn assert_refusal_trace(log_path: &std::path::Path) {
 #[test]
 fn terminal_response_survives_a_broken_http_body() {
     check_response(ResponseKind::Complete);
+}
+
+#[test]
+fn logical_terminal_response_completes_before_a_delayed_stop_frame() {
+    check_response(ResponseKind::SplitTerminal);
 }
 
 #[test]

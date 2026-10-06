@@ -1,6 +1,7 @@
 //! Real Opus 5.5 acceptance; mock payload assertions live in pty_cache_prefix.
 //! SCODE_TEST_BACKEND=live SCODE_LIVE_MODEL=claude-opus-5-5
 //! SCODE_LIVE_AUTH_PROFILE=<account> cargo test --test pty_adaptive_cache_live -- --nocapture
+//! Set SCODE_ADAPTIVE_DISPLAY=omitted for the hidden-summary acceptance arm.
 mod common;
 
 use serde_json::{json, Value};
@@ -86,6 +87,24 @@ fn turn(cli: &mut pty_expect::PtySession, prompt: &str) {
     common::expect_input_line_cleared(cli, WAIT, "live turn complete");
 }
 
+fn without_cache_markers(mut value: Value) -> Value {
+    match &mut value {
+        Value::Object(object) => {
+            object.remove("cache_control");
+            for child in object.values_mut() {
+                *child = without_cache_markers(std::mem::take(child));
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                *child = without_cache_markers(std::mem::take(child));
+            }
+        }
+        _ => {}
+    }
+    value
+}
+
 #[test]
 fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
     let env = common::TestEnv::new("adaptive-cache-live");
@@ -93,17 +112,31 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
         eprintln!("SKIP: requires live backend and SCODE_LIVE_MODEL=claude-opus-5-5");
         return;
     }
+    let display =
+        std::env::var("SCODE_ADAPTIVE_DISPLAY").unwrap_or_else(|_| "summarized".to_string());
+    assert!(matches!(display.as_str(), "summarized" | "omitted"));
+    let settings_path = env.config_home().join("settings.json");
+    let mut settings: Value = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_else(|| json!({}));
+    settings["thinking"] = json!(display == "summarized");
+    std::fs::write(&settings_path, serde_json::to_vec(&settings).unwrap()).unwrap();
     // Each next filename is available only in the preceding file. This forces
     // real tool round trips rather than a response that happens to say 'OK'.
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let names: Vec<_> = (0..8)
-        .map(|index| format!("note-{nonce:x}-{index}.txt"))
+    let files: Vec<_> = (0..8)
+        .map(|_| {
+            tempfile::NamedTempFile::new_in(env.workspace_root())
+                .unwrap()
+                .into_temp_path()
+        })
+        .collect();
+    let names: Vec<_> = files
+        .iter()
+        .map(|path| path.file_name().unwrap().to_str().unwrap())
         .collect();
     for (index, name) in names.iter().enumerate() {
-        let next = names.get(index + 1).map_or("END", String::as_str);
+        let next = names.get(index + 1).copied().unwrap_or("END");
         std::fs::write(
             env.workspace_root().join(name),
             format!(
@@ -147,8 +180,8 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
             .flat_map(|m| &m.blocks)
             .any(|b| matches!(b,
         runtime::ContentBlock::Thinking { thinking, signature: Some(signature) }
-        if !thinking.is_empty() && !signature.is_empty())),
-        "live route must return a readable signed thinking summary"
+        if !signature.is_empty() && (display == "omitted" || !thinking.is_empty()))),
+        "live route must preserve signed thinking, including hidden summaries"
     );
     let ordinary = requests(&log);
     assert!(ordinary.len() >= 9, "must exercise the actual tool chain");
@@ -194,7 +227,7 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
     for body in &bodies {
         assert_eq!(
             body["thinking"],
-            json!({"type":"adaptive","display":"summarized"})
+            json!({"type":"adaptive","display":display})
         );
         assert_eq!(body["output_config"]["effort"], "high");
         for key in [
@@ -234,9 +267,24 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
         "every real request must have usage evidence"
     );
     for (index, row) in rows.iter().enumerate().skip(1) {
+        let current = without_cache_markers(bodies[index]["messages"].clone());
+        let current = current.as_array().unwrap();
+        let expected_read = bodies[..index]
+            .iter()
+            .zip(&rows[..index])
+            .filter_map(|(body, usage)| {
+                let previous = without_cache_markers(body["messages"].clone());
+                let previous = previous.as_array().unwrap();
+                current.starts_with(previous).then(|| {
+                    usage["cache_read_input_tokens"].as_u64().unwrap_or(0)
+                        + usage["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+                })
+            })
+            .max()
+            .unwrap_or(0);
         assert!(
-            row["cache_read_input_tokens"].as_u64().unwrap_or(0) > 0,
-            "request {index} did not read cache; investigate prefix/routing before accepting"
+            row["cache_read_input_tokens"].as_u64().unwrap_or(0) >= expected_read.max(1),
+            "request {index} did not reuse the previously cached prefix (expected at least {expected_read}); a tools-only partial hit is not acceptance"
         );
     }
 }

@@ -3,6 +3,9 @@
 //! Concurrency is independent of permission: an approved writer still needs a
 //! serial barrier. Unknown commands and syntax remain executable, but serial.
 
+mod commands;
+mod flags;
+
 use serde_json::Value;
 use tree_sitter::{Node, Parser};
 
@@ -20,7 +23,7 @@ pub fn builtin_is_concurrency_safe(name: &str, input: &str) -> bool {
             .is_some_and(bash_is_read_only),
         "read_file" | "read_tool_output" | "glob_search" | "grep_search" | "ToolSearch"
         | "WebFetch" | "WebSearch" | "pid_status" | "pid_output" | "agent_list" | "agent_spawn"
-        | "pid_fork" | "CronList" => true,
+        | "pid_fork" | "CronList" | "AskUserQuestion" => true,
         _ => false,
     }
 }
@@ -91,6 +94,9 @@ fn collect_commands(node: Node<'_>, source: &str, commands: &mut Vec<Vec<String>
             if args.is_empty() {
                 return false;
             }
+            if has_glob(node, source) && !commands::accepts_globs(&args[0]) {
+                return false;
+            }
             commands.push(args);
             true
         }
@@ -122,9 +128,7 @@ fn literal_syntax(node: Node<'_>, source: &str) -> bool {
             }
         }
         "word" | "string_content" | "number" => {
-            if node.kind() == "word"
-                && source[node.byte_range()].contains(['*', '?', '[', ']', '{', '}', '~'])
-            {
+            if node.kind() == "word" && source[node.byte_range()].contains(['{', '}', '~']) {
                 return false;
             }
         }
@@ -133,7 +137,40 @@ fn literal_syntax(node: Node<'_>, source: &str) -> bool {
     true
 }
 
+fn has_glob(node: Node<'_>, source: &str) -> bool {
+    if matches!(node.kind(), "raw_string" | "string") {
+        return false;
+    }
+    if node.kind() == "word" && source[node.byte_range()].contains(['*', '?', '[', ']']) {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node
+        .named_children(&mut cursor)
+        .any(|child| has_glob(child, source));
+    found
+}
+
 fn read_only_redirect(node: Node<'_>, source: &str) -> bool {
+    let raw = source[node.byte_range()].trim();
+    if let Some(path) = raw
+        .strip_prefix('<')
+        .filter(|p| !p.starts_with(['<', '>', '&']))
+    {
+        let Ok(words) = shell_words::split(path.trim()) else {
+            return false;
+        };
+        if words.len() != 1
+            || words[0].starts_with("/dev/tcp/")
+            || words[0].starts_with("/dev/udp/")
+        {
+            return false;
+        }
+        let mut cursor = node.walk();
+        return node
+            .named_children(&mut cursor)
+            .all(|child| literal_syntax(child, source));
+    }
     let text: String = source[node.byte_range()]
         .chars()
         .filter(|c| !c.is_whitespace())
@@ -191,6 +228,9 @@ fn command_is_read_only(args: &[String]) -> bool {
                 && args.iter().skip(2).all(|arg| !arg.starts_with('-'))
         }
         "git" => git_is_read_only(args),
+        "fd" | "fdfind" => commands::fd(args),
+        "diff" => commands::diff(args),
+        "gh" => commands::gh(args),
         _ => false,
     }
 }
@@ -199,6 +239,9 @@ fn git_is_read_only(args: &[String]) -> bool {
     let Some((subcommand, args)) = args.split_first() else {
         return false;
     };
+    if subcommand == "branch" {
+        return commands::branch(args);
+    }
     // No -c/-C, external helpers, arbitrary aliases, output files or mutation
     // subcommands. A permission grant does not change this scheduling rule.
     matches!(

@@ -48,12 +48,14 @@ session and independent across sessions:
   session that is waiting on the user — a pending `session/request_permission`
   or `_scode/ask_user_question` — does not hold up `session/new` or prompts
   on any other session.
+- Within one model turn, independent tools and their notifications continue
+  while a question or permission request awaits its reply. Those interactions
+  share one input queue; they do not serialize independent tool execution.
 - `session/cancel` is never queued; it reaches a session mid-turn.
-- Sessions in the same working directory run fully in parallel. Because tool
-  execution is anchored to the *process* working directory, turns of sessions
-  in **different** directories share that directory cooperatively: a turn
-  waits for turns in another directory to finish or to pause on user input
-  before it starts, and a paused turn gives the directory back while it waits.
+- Model turns resolve paths within their session's workspace scope, including
+  on hook workers, so sessions in different directories can run concurrently.
+  Setup and legacy slash operations that use the process working directory
+  acquire a directory lease while they run.
 
 ### Cancelling a foreground shell tool
 

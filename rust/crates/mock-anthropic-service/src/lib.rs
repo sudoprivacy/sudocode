@@ -551,6 +551,37 @@ async fn handle_connection(
         raw_body,
     });
 
+    if scenario == Scenario::ToolConcurrency
+        && request.stream
+        && !concurrency_batch_complete(&request)
+    {
+        let calls = concurrency_calls(&request);
+        if calls.iter().any(|call| call.stream_wait_for.is_some()) {
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
+            let body = build_stream_body(&request, scenario);
+            let mut call_index = 0;
+            for chunk in body.split_inclusive("\n\n") {
+                socket.write_all(chunk.as_bytes()).await?;
+                if chunk.starts_with("event: content_block_stop\n") {
+                    if let Some(call) = calls.get(call_index) {
+                        if let Some(path) = &call.stream_wait_for {
+                            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                            while !std::path::Path::new(path).exists()
+                                && tokio::time::Instant::now() < deadline
+                            {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            if call.stream_fail_after {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    call_index += 1;
+                }
+            }
+            return Ok(());
+        }
+    }
     if scenario == Scenario::SpinnerActivity && request.stream {
         socket
             .write_all(
@@ -685,6 +716,8 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
 }
 
 struct ConcurrencyCall {
+    stream_wait_for: Option<String>,
+    stream_fail_after: bool,
     id: String,
     name: String,
     input: Value,
@@ -711,6 +744,8 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
         .expect("tool_concurrency requires TOOL_BATCH JSON")
         .into_iter()
         .map(|call| ConcurrencyCall {
+            stream_wait_for: call["stream_wait_for"].as_str().map(str::to_string),
+            stream_fail_after: call["stream_fail_after"].as_bool().unwrap_or(false),
             id: call["id"].as_str().expect("call id").to_string(),
             name: call["name"].as_str().expect("call name").to_string(),
             input: call["input"].clone(),

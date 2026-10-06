@@ -2534,7 +2534,7 @@ impl Drop for SignalCancelGuard {
 /// The coordinator reads `InputEvent`s from the iocraft UI and dispatches
 /// turns on runner threads, identical to the rustyline-based coordinator
 /// but with iocraft owning stdin+stdout.
-type PendingQuestionAnswer = Arc<Mutex<Option<mpsc::SyncSender<String>>>>;
+type PendingQuestionAnswer = Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>;
 
 fn consume_pending_question_answer(pending: &PendingQuestionAnswer, text: String) -> bool {
     let Some(tx) = pending
@@ -2648,14 +2648,32 @@ fn show_slash_selection(
     }))
 }
 
+/// Keep the event pump draining while the existing input owner awaits a reply.
+/// The engine serializes interactions, so at most one reply worker is parked.
+fn relay_prompt_reply<T: Send + 'static>(
+    commands: mpsc::Sender<EngineCommand>,
+    reply: runtime::PromptReply<T>,
+    answer: impl FnOnce(T) -> EngineCommand + Send + 'static,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let _ = commands.send(answer(futures::executor::block_on(reply)));
+    })
+}
+
+#[derive(Clone)]
 struct IocraftQuestionPrompter {
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
     ui: repl_ui::UiCommandSender,
     pending_answer: PendingQuestionAnswer,
 }
 
 impl IocraftQuestionPrompter {
     fn new(ui: repl_ui::UiCommandSender, pending_answer: PendingQuestionAnswer) -> Self {
-        Self { ui, pending_answer }
+        Self {
+            ui,
+            pending_answer,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
     fn show_field(&self, request: &runtime::QuestionPromptRequest, index: usize) {
@@ -2684,25 +2702,22 @@ impl IocraftQuestionPrompter {
         });
     }
 
-    fn prepare_answer_receiver(&self) -> Result<mpsc::Receiver<String>, String> {
-        let (tx, rx) = mpsc::sync_channel(1);
+    fn prepare_answer_receiver(&self) -> Result<tokio::sync::oneshot::Receiver<String>, String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
         {
             let mut pending = self
                 .pending_answer
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("question prompt cancelled".into());
+            }
             if pending.is_some() {
                 return Err("question prompt already pending".to_string());
             }
             *pending = Some(tx);
         }
         Ok(rx)
-    }
-
-    fn wait_for_answer(rx: mpsc::Receiver<String>) -> Result<String, String> {
-        rx.recv()
-            .map(|answer| answer.trim().to_string())
-            .map_err(|_| "question prompt cancelled".to_string())
     }
 
     fn answer_for_field(
@@ -2735,25 +2750,99 @@ impl IocraftQuestionPrompter {
 }
 
 impl runtime::QuestionPrompter for IocraftQuestionPrompter {
+    fn cancel_pending(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        cancel_pending_question_answer(&self.pending_answer);
+        self.ui.clear_question();
+    }
+
     fn ask(
         &mut self,
         request: &runtime::QuestionPromptRequest,
     ) -> Result<Vec<runtime::QuestionPromptAnswer>, String> {
-        let mut answers = Vec::with_capacity(request.fields.len());
-        for index in 0..request.fields.len() {
-            let rx = self.prepare_answer_receiver()?;
-            self.show_field(request, index);
-            let raw_answer = match Self::wait_for_answer(rx) {
-                Ok(answer) => answer,
-                Err(error) => {
-                    self.ui.clear_question();
-                    return Err(error);
+        futures::executor::block_on(self.begin_question(request))
+    }
+
+    fn begin_question(
+        &mut self,
+        request: &runtime::QuestionPromptRequest,
+    ) -> runtime::PromptReply<Result<Vec<runtime::QuestionPromptAnswer>, String>> {
+        let this = self.clone();
+        let request = request.clone();
+        Box::pin(async move {
+            let mut answers = Vec::with_capacity(request.fields.len());
+            for index in 0..request.fields.len() {
+                let rx = this.prepare_answer_receiver()?;
+                this.show_field(&request, index);
+                let raw = match rx.await {
+                    Ok(answer) => answer.trim().to_string(),
+                    Err(_) => {
+                        this.ui.clear_question();
+                        return Err("question prompt cancelled".into());
+                    }
+                };
+                answers.push(Self::answer_for_field(&request.fields[index], raw));
+            }
+            this.ui.clear_question();
+            Ok(answers)
+        })
+    }
+}
+
+impl runtime::PermissionPrompter for IocraftQuestionPrompter {
+    fn decide(
+        &mut self,
+        request: &runtime::PermissionRequest,
+    ) -> runtime::PermissionPromptDecision {
+        futures::executor::block_on(self.begin_decision(request))
+    }
+
+    fn begin_decision(
+        &mut self,
+        request: &runtime::PermissionRequest,
+    ) -> runtime::PromptReply<runtime::PermissionPromptDecision> {
+        let question = runtime::QuestionPromptRequest {
+            title: Some(format!("Approve {}?", request.tool_name)),
+            description: Some(format!(
+                "{}\n{}",
+                request.input,
+                request.reason.as_deref().unwrap_or_default()
+            )),
+            fields: vec![runtime::QuestionField {
+                id: "permission".into(),
+                prompt: "Allow this tool call?".into(),
+                kind: runtime::QuestionKind::SingleSelect,
+                required: true,
+                allow_custom_input: false,
+                custom_input_hint: None,
+                options: vec![
+                    runtime::QuestionOption {
+                        label: "Allow once".into(),
+                        value: "allow".into(),
+                        description: None,
+                        recommended: false,
+                    },
+                    runtime::QuestionOption {
+                        label: "Deny".into(),
+                        value: "deny".into(),
+                        description: None,
+                        recommended: false,
+                    },
+                ],
+            }],
+        };
+        let reply = runtime::QuestionPrompter::begin_question(self, &question);
+        Box::pin(async move {
+            match reply.await {
+                Ok(answers) if answers.first().is_some_and(|a| a.value == "allow") => {
+                    runtime::PermissionPromptDecision::Allow
                 }
-            };
-            answers.push(Self::answer_for_field(&request.fields[index], raw_answer));
-        }
-        self.ui.clear_question();
-        Ok(answers)
+                _ => runtime::PermissionPromptDecision::Deny {
+                    reason: "tool permission denied or cancelled".into(),
+                },
+            }
+        })
     }
 }
 
@@ -4299,6 +4388,7 @@ impl LiveCli {
             .send(EngineCommand::Prompt { blocks })?;
 
         let mut outcome = TurnOutcome::default();
+        let mut prompt_replies = Vec::new();
         loop {
             let Ok(ev) = self.engine_handle.events.recv() else {
                 break;
@@ -4404,6 +4494,14 @@ impl LiveCli {
             match action {
                 RenderOutcome::Continue => {}
                 RenderOutcome::NeedPermission { id, request } => {
+                    if ui.is_some() {
+                        let reply = permission_prompter.begin_decision(&request);
+                        let commands = self.engine_handle.commands.clone();
+                        prompt_replies.push(relay_prompt_reply(commands, reply, move |decision| {
+                            EngineCommand::PermissionAnswer { id, decision }
+                        }));
+                        continue;
+                    }
                     // The prompter reads stdin (cooked mode); pause the sync-REPL
                     // key monitor so it doesn't steal the approval keystrokes.
                     if let Some(monitor) = cancel_monitor {
@@ -4424,10 +4522,18 @@ impl LiveCli {
                         .send(EngineCommand::PermissionAnswer { id, decision })?;
                 }
                 RenderOutcome::NeedQuestion { id, request } => {
+                    if ui.is_some() {
+                        let reply = question_prompter.begin_question(&request);
+                        let commands = self.engine_handle.commands.clone();
+                        prompt_replies.push(relay_prompt_reply(commands, reply, move |answers| {
+                            EngineCommand::QuestionAnswer { id, answers }
+                        }));
+                        continue;
+                    }
                     if let Some(monitor) = cancel_monitor {
                         monitor.suspend();
                     }
-                    let mut ask = || question_prompter.ask(&request).unwrap_or_default();
+                    let mut ask = || question_prompter.ask(&request);
                     let answers = match spinner_ref {
                         Some(spinner) => spinner.suspend(ask),
                         None => ask(),
@@ -4441,6 +4547,12 @@ impl LiveCli {
                 }
                 RenderOutcome::Done => break,
             }
+        }
+        // Release cancelled receivers and drain their UI cleanup before the
+        // next turn can install a new question in the same input slot.
+        question_prompter.cancel_pending();
+        for reply in prompt_replies {
+            let _ = reply.join();
         }
         Ok(outcome)
     }
@@ -4655,10 +4767,10 @@ impl LiveCli {
         spinner_state.start_turn("\u{1f980} Thinking...", Some(model.as_str()), token_budget);
         let spinner_ref = render::SpinnerRef::from_spinner_state(spinner_state);
 
-        let mut permission_prompter =
-            CliPermissionPrompter::new(self.lifecycle.current_permission_mode());
         let mut question_prompter =
             IocraftQuestionPrompter::new(ui.clone(), pending_question_answer);
+
+        let mut permission_prompter = question_prompter.clone();
 
         let outcome = self.drive_turn(
             input,
@@ -6840,7 +6952,7 @@ mod auth_mode_tests {
 
     #[test]
     fn pending_question_consumes_next_iocraft_question_answer() {
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (tx, rx) = tokio::sync::oneshot::channel();
         let pending = Arc::new(Mutex::new(Some(tx)));
 
         assert!(consume_pending_question_answer(
@@ -6848,7 +6960,7 @@ mod auth_mode_tests {
             "answer from ui".to_string()
         ));
         assert_eq!(
-            rx.recv().expect("answer should be routed"),
+            rx.blocking_recv().expect("answer should be routed"),
             "answer from ui"
         );
         assert!(pending.lock().expect("pending lock").is_none());

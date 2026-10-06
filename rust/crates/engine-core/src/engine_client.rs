@@ -344,7 +344,10 @@ impl EngineApiClient {
                             }
                         }
                         if !state.saw_stop && state.has_content {
-                            state.buffer.push_back(AssistantEvent::MessageStop);
+                            // Tools may already have run while streaming. EOF
+                            // cannot certify that the response finished, and a
+                            // retry could repeat their side effects.
+                            return Err(RuntimeError::new("provider stream ended without message_stop; partial progress preserved"));
                         }
                         // A terminal frame and cache/usage metadata do not make
                         // an empty response useful. Retry it once regardless of

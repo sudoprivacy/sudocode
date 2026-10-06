@@ -395,7 +395,9 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                             .commands
                             .send(EngineCommand::QuestionAnswer {
                                 id,
-                                answers: vec![],
+                                answers: Err(
+                                    "headless mode cannot answer an interactive question".into()
+                                ),
                             })?;
                     }
                     EngineEvent::Usage(_) => usage_observed = true,

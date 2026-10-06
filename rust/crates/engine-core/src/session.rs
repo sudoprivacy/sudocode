@@ -30,22 +30,13 @@
 //! server's `run_acp_on_transport`, with the ACP wire swapped for the
 //! [`EngineEvent`] channel.
 //!
-//! # The one subtlety: synchronous prompts on an async pump
+//! # Interactive requests
 //!
-//! A turn's permission / question prompts are **synchronous** callbacks
-//! (`PermissionPrompter::decide` must return a decision inline so the tool loop
-//! can proceed), but the *answer* arrives asynchronously as an
-//! [`EngineCommand::PermissionAnswer`] on the command channel. The bridge — a
-//! monotonic [`RequestId`], a `HashMap<RequestId, oneshot::Sender>` awaiting
-//! table, and `block_in_place(|| rx.blocking_recv())` — is entirely internal to
-//! this module (the proven mechanism copied from the ACP `AcpPermissionBridge`).
-//! Renderers and delegates never see it.
-//!
-//! Because `block_in_place` requires a multi-threaded Tokio worker, the
-//! **contract on [`EngineDelegate::run_turn`]** is: run the turn on a
-//! multi-threaded Tokio runtime (i.e. `your_runtime.block_on(conversation
-//! .run_turn(...))` where `your_runtime` is multi-thread). The existing CLI /
-//! ACP delegate already does exactly this.
+//! Permissions and questions return owned reply futures. A turn-scoped input
+//! queue serializes their presentation, while the engine keeps polling other
+//! tools and the provider stream. A request lease removes the pending answer
+//! on completion or cancellation. Synchronous compatibility callers use the
+//! same bridge with `block_in_place`; the normal tool loop awaits replies.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -187,7 +178,7 @@ impl EngineSession {
 /// the blocked prompter.
 enum PendingAnswer {
     Permission(oneshot::Sender<PermissionPromptDecision>),
-    Question(oneshot::Sender<Vec<QuestionPromptAnswer>>),
+    Question(oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>),
 }
 
 /// Shared awaiting table + id allocator, threaded through the prompt adapters
@@ -197,6 +188,7 @@ struct RequestTable {
     pending: Arc<Mutex<HashMap<RequestId, PendingAnswer>>>,
     next_id: Arc<AtomicU64>,
     cancelled: Arc<AtomicBool>,
+    interaction: runtime::PromptQueue,
 }
 
 impl RequestTable {
@@ -239,6 +231,9 @@ async fn drive(
     evt_tx: std_mpsc::Sender<EngineEvent>,
 ) {
     let subagents = SubagentRelay::to_session(evt_tx.clone());
+    // A cancelled prompt can reply after the next turn starts. Never reuse
+    // its id for a new question or permission request in this engine session.
+    let next_request_id = Arc::new(AtomicU64::new(0));
     // Bridge the std command receiver into a Tokio channel so the per-turn pump
     // can `select!` on it. A tiny forwarder thread does the blocking `recv`.
     let (tcmd_tx, mut tcmd_rx) = tokio_mpsc::unbounded_channel::<EngineCommand>();
@@ -258,7 +253,16 @@ async fn drive(
     while let Some(cmd) = tcmd_rx.recv().await {
         match cmd {
             EngineCommand::Prompt { blocks } => {
-                if run_one_turn(&delegate, blocks, &evt_tx, &mut tcmd_rx, &subagents).await {
+                if run_one_turn(
+                    &delegate,
+                    blocks,
+                    &evt_tx,
+                    &mut tcmd_rx,
+                    &subagents,
+                    &next_request_id,
+                )
+                .await
+                {
                     delegate.close();
                     break;
                 }
@@ -312,8 +316,12 @@ async fn run_one_turn(
     evt_tx: &std_mpsc::Sender<EngineEvent>,
     tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
     subagents: &SubagentRelay,
+    next_request_id: &Arc<AtomicU64>,
 ) -> bool {
-    let table = RequestTable::default();
+    let table = RequestTable {
+        next_id: Arc::clone(next_request_id),
+        ..RequestTable::default()
+    };
     let label = turn_label(&blocks);
 
     // The question prompter is installed on the tool executor (via the delegate)
@@ -646,8 +654,7 @@ impl RuntimeObserver for ObserverAdapter {
     }
 }
 
-/// `PermissionPrompter::decide` → emit [`EngineEvent::PermissionRequest`], park
-/// on a oneshot until the pump routes the matching
+/// Emit [`EngineEvent::PermissionRequest`] and await a oneshot until the pump routes the matching
 /// [`EngineCommand::PermissionAnswer`] back.
 struct PrompterAdapter {
     tx: std_mpsc::Sender<EngineEvent>,
@@ -656,32 +663,34 @@ struct PrompterAdapter {
 
 impl PermissionPrompter for PrompterAdapter {
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
-        let id = self.table.alloc();
-        let (answer_tx, answer_rx) = oneshot::channel();
-        self.table.insert(id, PendingAnswer::Permission(answer_tx));
+        let reply = self.begin_decision(request);
+        tokio::task::block_in_place(|| futures::executor::block_on(reply))
+    }
 
-        let _ = self.tx.send(EngineEvent::State(EngineState::AwaitingInput));
-        let _ = self.tx.send(EngineEvent::PermissionRequest {
-            id,
-            request: request.clone(),
-        });
-
-        // Park this tool-loop worker until the renderer answers. `block_in_place`
-        // hands the worker back to Tokio so the rest of the runtime keeps making
-        // progress; the answer arrives from the pump's separate runtime.
-        let decision = tokio::task::block_in_place(|| answer_rx.blocking_recv()).unwrap_or(
-            PermissionPromptDecision::Deny {
-                reason: "engine session closed before the permission prompt was answered".into(),
-            },
-        );
-
-        let _ = self.tx.send(EngineEvent::State(EngineState::Running));
-        decision
+    fn begin_decision(
+        &mut self,
+        request: &PermissionRequest,
+    ) -> runtime::PromptReply<PermissionPromptDecision> {
+        let table = self.table.clone();
+        let tx = self.tx.clone();
+        let request = request.clone();
+        self.table.interaction.enqueue(move || async move {
+            let (answer_tx, answer_rx) = oneshot::channel();
+            let _lease = table.show_prompt(&tx, PendingAnswer::Permission(answer_tx), |id| {
+                EngineEvent::PermissionRequest { id, request }
+            });
+            answer_rx
+                .await
+                .unwrap_or_else(|_| PermissionPromptDecision::Deny {
+                    reason: "engine session closed before the permission prompt was answered"
+                        .into(),
+                })
+        })
     }
 }
 
-/// `QuestionPrompter::ask` → emit [`EngineEvent::QuestionRequest`], park on a
-/// oneshot until the pump routes the matching [`EngineCommand::QuestionAnswer`].
+/// Questions and permissions share one interaction queue. Waiting for a reply
+/// yields to other tools; only ownership of the input surface is exclusive.
 struct QuestionAdapter {
     tx: std_mpsc::Sender<EngineEvent>,
     table: RequestTable,
@@ -692,20 +701,61 @@ impl QuestionPrompter for QuestionAdapter {
         &mut self,
         request: &QuestionPromptRequest,
     ) -> Result<Vec<QuestionPromptAnswer>, String> {
-        let id = self.table.alloc();
-        let (answer_tx, answer_rx) = oneshot::channel();
-        self.table.insert(id, PendingAnswer::Question(answer_tx));
+        let reply = self.begin_question(request);
+        tokio::task::block_in_place(|| futures::executor::block_on(reply))
+    }
 
-        let _ = self.tx.send(EngineEvent::State(EngineState::AwaitingInput));
-        let _ = self.tx.send(EngineEvent::QuestionRequest {
-            id,
-            request: request.clone(),
-        });
+    fn begin_question(
+        &mut self,
+        request: &QuestionPromptRequest,
+    ) -> runtime::PromptReply<Result<Vec<QuestionPromptAnswer>, String>> {
+        let table = self.table.clone();
+        let tx = self.tx.clone();
+        let request = request.clone();
+        self.table.interaction.enqueue(move || async move {
+            let (answer_tx, answer_rx) = oneshot::channel();
+            let _lease = table.show_prompt(&tx, PendingAnswer::Question(answer_tx), |id| {
+                EngineEvent::QuestionRequest { id, request }
+            });
+            answer_rx.await.unwrap_or_else(|_| {
+                Err("engine session closed before the question was answered".to_string())
+            })
+        })
+    }
+}
 
-        let answers = tokio::task::block_in_place(|| answer_rx.blocking_recv())
-            .map_err(|_| "engine session closed before the question was answered".to_string())?;
+/// Releases input ownership and removes an unanswered request even if its
+/// future is dropped on cancellation or a provider stream failure.
+struct PromptLease {
+    table: RequestTable,
+    tx: std_mpsc::Sender<EngineEvent>,
+    id: RequestId,
+}
 
+impl Drop for PromptLease {
+    fn drop(&mut self) {
+        self.table.take(self.id);
         let _ = self.tx.send(EngineEvent::State(EngineState::Running));
-        Ok(answers)
+    }
+}
+
+impl RequestTable {
+    fn show_prompt(
+        &self,
+        tx: &std_mpsc::Sender<EngineEvent>,
+        answer: PendingAnswer,
+        event: impl FnOnce(RequestId) -> EngineEvent,
+    ) -> PromptLease {
+        let id = self.alloc();
+        if !self.cancelled.load(Ordering::SeqCst) {
+            self.insert(id, answer);
+            let _ = tx.send(EngineEvent::State(EngineState::AwaitingInput));
+            let _ = tx.send(event(id));
+        }
+        PromptLease {
+            table: self.clone(),
+            tx: tx.clone(),
+            id,
+        }
     }
 }

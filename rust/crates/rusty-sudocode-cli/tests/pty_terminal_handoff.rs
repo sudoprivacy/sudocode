@@ -10,7 +10,7 @@ fn helper_command(root: &Path, name: &str, script: &str) -> String {
     // the quoted editor/pager argv syntax.
     let python = common::resolve_python().replace('\\', "/");
     let path = path.to_string_lossy().replace('\\', "/");
-    format!("\"{python}\" \"{path}\"")
+    format!("\"{python}\" -X utf8 \"{path}\"")
 }
 
 fn assert_prompt_recovers(child: &mut pty_expect::PtySession) {
@@ -31,6 +31,7 @@ fn memory_editor_owns_input_and_stderr_then_restores_the_repl() {
         r#"
 import pathlib, sys
 assert sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()
+assert pathlib.Path(sys.argv[1]).resolve().is_relative_to(pathlib.Path.cwd().resolve())
 if sys.platform != 'win32':
     import termios
     assert termios.tcgetattr(sys.stdin)[3] & termios.ICANON
@@ -114,6 +115,7 @@ fn memory_picker_cancels_and_selects_without_a_second_input_reader() {
         "select editor",
         r#"
 import pathlib, sys
+assert pathlib.Path(sys.argv[1]).resolve().is_relative_to(pathlib.Path.cwd().resolve())
 pathlib.Path(sys.argv[1]).write_bytes(b'selected memory\n')
 "#,
     );
@@ -160,7 +162,7 @@ fn status_pager_receives_eof_and_exclusive_terminal_input() {
 import pathlib, sys
 text = sys.stdin.read()
 assert text.strip(), 'pager must receive the report and EOF'
-pathlib.Path('pager-report.txt').write_text(text)
+pathlib.Path('pager-report.txt').write_text(text, encoding='utf-8')
 if sys.platform == 'win32':
     import msvcrt
     print('PAGER_READY', file=sys.stderr, flush=True)

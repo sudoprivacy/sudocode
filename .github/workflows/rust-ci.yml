@@ -455,7 +455,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
-      - name: Run live PTY process-tree cancellation and timeout tests
+      - name: Run live PTY input editing and process-tree tests
         shell: bash
         env:
           SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-process-tree-config
@@ -476,7 +476,7 @@ jobs:
             models: {}
           }), { mode: 0o600 });
           NODE
-          cargo test -p rusty-sudocode-cli --test pty_bash_process_tree -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch -- --test-threads=1 --nocapture
       - name: Remove process-tree test credentials
         if: always()
         env:

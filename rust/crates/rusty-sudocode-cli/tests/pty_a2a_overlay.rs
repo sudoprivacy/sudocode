@@ -143,6 +143,24 @@ fn inject(env: &TestEnv, receiver: &str, from: &str, body: &str) {
         .expect("inject a2a envelope");
 }
 
+fn complete_received_block(screen: &str) -> bool {
+    let mut rows = screen
+        .lines()
+        .map(|row| row.trim_end_matches(' '))
+        .skip_while(|row| *row != "╭─ Message from mac-ai");
+    if rows.next().is_none() {
+        return false;
+    }
+    let mut body_complete = false;
+    for row in rows {
+        if row == "╰─" {
+            return body_complete;
+        }
+        body_complete |= row == "│ A2A-BODY-END";
+    }
+    false
+}
+
 fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     let env = TestEnv::new("a2a-received-style");
     let vars = [
@@ -166,9 +184,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
         env.prompt("Reply only with A2A-ACK.", "single_turn_text")
     );
     inject(&env, &receiver, "mac-ai", &body);
-    wait_for_screen(&sess, "complete received block", |s| {
-        s.contains("│ A2A-BODY-END") && s.contains("╰─")
-    });
+    wait_for_screen(&sess, "complete received block", complete_received_block);
     let live = received_block(&sess, sender_color, no_color);
     common::expect_turn_complete_after(
         &sess,
@@ -183,9 +199,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
         &vars,
     );
     resumed.resize(80, 52).unwrap();
-    wait_for_screen(&resumed, "restored received block", |s| {
-        s.contains("│ A2A-BODY-END") && s.contains("╰─")
-    });
+    wait_for_screen(&resumed, "restored received block", complete_received_block);
     assert_eq!(
         received_block(&resumed, sender_color, no_color),
         live,
@@ -196,7 +210,13 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
 
 fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<String> {
     sess.render(|screen| {
-        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        // Normalize ConPTY's literal trailing blanks before locating the
+        // borders as well as when comparing the live and replayed frames.
+        let rows: Vec<_> = screen
+            .raw()
+            .rows(0, screen.raw().size().1)
+            .map(|row| row.trim_end_matches(' ').to_owned())
+            .collect();
         let start = rows
             .iter()
             .position(|r| r == "╭─ Message from mac-ai")

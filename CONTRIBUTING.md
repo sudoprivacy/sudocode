@@ -97,6 +97,13 @@ that section before opening the PR.
 
 ## Test policy
 
+PTY workspaces must not inherit instruction files from outside the fixture.
+The harness checks temporary-directory ancestors for `AGENTS.md`, including
+`.nexus/sudocode/AGENTS.md`. On Windows it can fall back to a directory under
+`PUBLIC`; set `SCODE_TEST_TEMP_DIR` to an absolute, instruction-free directory
+to choose another location. If no safe location is available, setup fails
+before starting scode or an external editor.
+
 sudocode is deliberately opinionated about what to test and how.
 
 | Layer | Status | When to write |

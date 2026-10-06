@@ -1126,7 +1126,27 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         .expect("clock should be after epoch")
         .as_millis();
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
+    // Instruction discovery walks physical ancestors, independently of HOME.
+    // Windows' default temp directory is inside the real user profile, so an
+    // editor test could otherwise open and overwrite the user's AGENTS.md.
+    let requested = std::env::var_os("SCODE_TEST_TEMP_DIR").map(PathBuf::from);
+    let candidates = std::iter::once(requested.clone().unwrap_or_else(std::env::temp_dir));
+    #[cfg(windows)]
+    let candidates = candidates.chain(
+        requested
+            .is_none()
+            .then(|| std::env::var_os("PUBLIC"))
+            .flatten()
+            .map(|public| PathBuf::from(public).join("scode-pty")),
+    );
+    let mut candidates = candidates;
+    let base = candidates.find(|base| {
+        base.is_absolute() && base.ancestors().all(|ancestor| {
+            !ancestor.join("AGENTS.md").exists()
+                && !ancestor.join(".nexus/sudocode/AGENTS.md").exists()
+        })
+    }).expect("PTY workspace would inherit external AGENTS.md; set SCODE_TEST_TEMP_DIR to an instruction-free directory");
+    base.join(format!(
         "scode-pty-{label}-{}-{millis}-{counter}",
         std::process::id()
     ))

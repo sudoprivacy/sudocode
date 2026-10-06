@@ -3358,8 +3358,7 @@ fn has_dangerous_paths(command: &str) -> bool {
         // Check for absolute paths
         if token.starts_with('/') || token.starts_with("~/") {
             // Check if it's within CWD
-            let path =
-                PathBuf::from(token.replace('~', &std::env::var("HOME").unwrap_or_default()));
+            let path = runtime::user_paths::expand_tilde(token);
             if let Ok(cwd) = current_workspace_root() {
                 if !path.starts_with(&cwd) {
                     return true; // Path outside workspace

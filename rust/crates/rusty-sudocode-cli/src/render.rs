@@ -47,29 +47,57 @@ impl ColorSupport {
     /// Detect the color tier from the process environment.
     ///
     /// Detection precedence:
-    /// 1. `NO_COLOR` set to any non-empty value → `NoColor` (https://no-color.org).
-    /// 2. `TERM=dumb` or unset → `NoColor`.
+    /// 1. `NO_COLOR` set to any non-empty value → `NoColor` (<https://no-color.org>).
+    /// 2. `TERM=dumb` → `NoColor` (an explicit "no capabilities" declaration).
     /// 3. `COLORTERM=truecolor` / `24bit`, or `TERM` ending in `-direct` → `TrueColor`.
     /// 4. `TERM` ending in `-256color` → `Ansi256`.
-    /// 5. Default → `Ansi256` (assumed by virtually every modern emulator even
+    /// 5. `TERM` unset: Windows consoles do not set it — it is a POSIX
+    ///    convention, not a capability signal — so the console's own VT state
+    ///    decides: virtual-terminal processing enabled → `TrueColor` (Windows
+    ///    Terminal and ConPTY render 24-bit), otherwise `Ansi256`. On every
+    ///    other platform an unset `TERM` really does mean "no terminal here"
+    ///    → `NoColor`.
+    /// 6. Default → `Ansi256` (assumed by virtually every modern emulator even
     ///    when `TERM=xterm` lacks the suffix; emitting 256-color escapes on a
     ///    16-color terminal degrades gracefully whereas truecolor does not).
+    ///
+    /// Treating an unset `TERM` as "no color" is what made every Windows
+    /// session render white: the variable is absent by design there, so the
+    /// check fired before `COLORTERM` — which the same terminals *do* set —
+    /// could ever be read.
     #[must_use]
     pub fn detect() -> Self {
-        Self::detect_from_env(|key| std::env::var(key).ok())
+        Self::detect_from_env(
+            |key| std::env::var(key).ok(),
+            crate::windows_console::vt_processing_enabled(),
+        )
     }
 
-    fn detect_from_env(get: impl Fn(&str) -> Option<String>) -> Self {
+    /// `vt_enabled` is the host console's virtual-terminal state, injected so
+    /// this stays a pure function and the Windows branch is testable from any
+    /// platform.
+    fn detect_from_env(get: impl Fn(&str) -> Option<String>, vt_enabled: bool) -> Self {
         if get("NO_COLOR").is_some_and(|v| !v.is_empty()) {
             return Self::NoColor;
         }
         let term = get("TERM").unwrap_or_default();
-        if term.is_empty() || term == "dumb" {
+        if term == "dumb" {
             return Self::NoColor;
         }
         let colorterm = get("COLORTERM").unwrap_or_default();
         if matches!(colorterm.as_str(), "truecolor" | "24bit") || term.ends_with("-direct") {
             return Self::TrueColor;
+        }
+        if term.is_empty() {
+            return if cfg!(windows) {
+                if vt_enabled {
+                    Self::TrueColor
+                } else {
+                    Self::Ansi256
+                }
+            } else {
+                Self::NoColor
+            };
         }
         if term.ends_with("-256color") {
             return Self::Ansi256;
@@ -1537,10 +1565,26 @@ mod tests {
         move |key| map.get(key).cloned()
     }
 
+    /// Detect with virtual-terminal processing enabled — the state every
+    /// supported terminal is in once `windows_console::enable_vt_processing`
+    /// has run at startup, and vacuously true off Windows.
+    fn detect(pairs: &[(&str, &str)]) -> ColorSupport {
+        ColorSupport::detect_from_env(env(pairs), true)
+    }
+
     #[test]
     fn detects_no_color_when_no_color_env_set() {
         assert_eq!(
-            ColorSupport::detect_from_env(env(&[("NO_COLOR", "1"), ("TERM", "xterm-256color")])),
+            detect(&[("NO_COLOR", "1"), ("TERM", "xterm-256color")]),
+            ColorSupport::NoColor
+        );
+    }
+
+    /// `NO_COLOR` outranks a positive capability declaration, not just `TERM`.
+    #[test]
+    fn no_color_outranks_colorterm() {
+        assert_eq!(
+            detect(&[("NO_COLOR", "1"), ("COLORTERM", "truecolor")]),
             ColorSupport::NoColor
         );
     }
@@ -1549,71 +1593,91 @@ mod tests {
     fn empty_no_color_does_not_disable() {
         // The NO_COLOR convention treats an empty value as "not set".
         assert_eq!(
-            ColorSupport::detect_from_env(env(&[("NO_COLOR", ""), ("TERM", "xterm-256color")])),
+            detect(&[("NO_COLOR", ""), ("TERM", "xterm-256color")]),
             ColorSupport::Ansi256
         );
     }
 
     #[test]
-    fn detects_no_color_when_term_dumb_or_unset() {
-        assert_eq!(
-            ColorSupport::detect_from_env(env(&[("TERM", "dumb")])),
+    fn detects_no_color_when_term_dumb() {
+        assert_eq!(detect(&[("TERM", "dumb")]), ColorSupport::NoColor);
+    }
+
+    /// An unset `TERM` is a POSIX "no terminal" signal — but on Windows it is
+    /// simply the platform convention, so the console's VT state decides.
+    /// Reading it as "no color" everywhere is what rendered Windows white.
+    #[test]
+    fn an_unset_term_follows_the_platform() {
+        let expected = if cfg!(windows) {
+            ColorSupport::TrueColor
+        } else {
             ColorSupport::NoColor
-        );
-        assert_eq!(
-            ColorSupport::detect_from_env(env(&[])),
+        };
+        assert_eq!(detect(&[]), expected);
+    }
+
+    /// A Windows console that never got virtual-terminal processing (legacy
+    /// conhost) still gets 256-color escapes rather than nothing.
+    #[test]
+    fn windows_without_vt_falls_back_to_256() {
+        let expected = if cfg!(windows) {
+            ColorSupport::Ansi256
+        } else {
             ColorSupport::NoColor
+        };
+        assert_eq!(ColorSupport::detect_from_env(env(&[]), false), expected);
+    }
+
+    /// `COLORTERM` is a positive capability declaration, so it must be read
+    /// before any `TERM`-shaped guess — Windows terminals set it while leaving
+    /// `TERM` unset.
+    #[test]
+    fn colorterm_is_honoured_without_term() {
+        assert_eq!(
+            detect(&[("COLORTERM", "truecolor")]),
+            ColorSupport::TrueColor
         );
     }
 
     #[test]
     fn detects_truecolor_from_colorterm() {
         assert_eq!(
-            ColorSupport::detect_from_env(env(&[("TERM", "xterm"), ("COLORTERM", "truecolor")])),
+            detect(&[("TERM", "xterm"), ("COLORTERM", "truecolor")]),
             ColorSupport::TrueColor
         );
         assert_eq!(
-            ColorSupport::detect_from_env(env(&[("TERM", "xterm"), ("COLORTERM", "24bit")])),
+            detect(&[("TERM", "xterm"), ("COLORTERM", "24bit")]),
             ColorSupport::TrueColor
         );
     }
 
     #[test]
     fn detects_truecolor_from_direct_term_suffix() {
-        assert_eq!(
-            ColorSupport::detect_from_env(env(&[("TERM", "xterm-direct")])),
-            ColorSupport::TrueColor
-        );
+        assert_eq!(detect(&[("TERM", "xterm-direct")]), ColorSupport::TrueColor);
     }
 
     #[test]
     fn detects_256_from_term_suffix() {
+        assert_eq!(detect(&[("TERM", "xterm-256color")]), ColorSupport::Ansi256);
         assert_eq!(
-            ColorSupport::detect_from_env(env(&[("TERM", "xterm-256color")])),
-            ColorSupport::Ansi256
-        );
-        assert_eq!(
-            ColorSupport::detect_from_env(env(&[("TERM", "screen-256color")])),
+            detect(&[("TERM", "screen-256color")]),
             ColorSupport::Ansi256
         );
     }
 
     #[test]
     fn defaults_to_256_for_unspecified_modern_term() {
-        assert_eq!(
-            ColorSupport::detect_from_env(env(&[("TERM", "xterm")])),
-            ColorSupport::Ansi256
-        );
+        assert_eq!(detect(&[("TERM", "xterm")]), ColorSupport::Ansi256);
     }
 
     #[test]
     fn no_color_overrides_truecolor_hint() {
         assert_eq!(
-            ColorSupport::detect_from_env(env(&[
+            detect(&[
                 ("NO_COLOR", "1"),
                 ("COLORTERM", "truecolor"),
                 ("TERM", "xterm-256color"),
-            ])),
+            ]),
             ColorSupport::NoColor
         );
     }

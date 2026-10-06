@@ -61,12 +61,14 @@ impl CodexAuthFile {
 }
 
 fn read_auth_file() -> Result<(String, String), ApiError> {
-    let home = std::env::var("HOME").map_err(|_| {
+    let home = runtime::user_paths::home_dir().ok_or_else(|| {
         ApiError::Auth(
-            "cannot determine home directory (HOME not set) for ~/.codex/auth.json".to_string(),
+            "cannot determine home directory (neither HOME nor USERPROFILE is set) for \
+             ~/.codex/auth.json"
+                .to_string(),
         )
     })?;
-    let path = std::path::Path::new(&home).join(AUTH_FILE_REL);
+    let path = home.join(AUTH_FILE_REL);
     let content = std::fs::read_to_string(&path).map_err(|e| {
         ApiError::Auth(format!(
             "failed to read {}: {e}; run `codex` first to authenticate",

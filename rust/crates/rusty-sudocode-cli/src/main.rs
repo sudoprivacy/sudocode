@@ -24,6 +24,7 @@ mod render_engine;
 mod repl_ui;
 mod startup;
 mod subagent_completion;
+mod windows_console;
 
 use engine_acp::AcpError;
 use engine_core::{
@@ -245,26 +246,6 @@ pub(crate) fn build_info() -> commands::reports::BuildInfo<'static> {
 
 /// Enable ANSI/VT escape-sequence processing on the Windows console.
 ///
-/// Much of the CLI emits raw ANSI escapes via `println!`/`write!` (banner,
-/// status bar, tool output, separators, etc.) instead of routing every byte
-/// through crossterm. On Windows the console has virtual-terminal processing
-/// disabled by default, so those escapes render as literal garbage (e.g.
-/// `[2m`, `[38;5;245m`, `[0m`). crossterm only flips the VT flag on its first
-/// command execution — which, via `SpinnerHandle::new()`, happens deep inside
-/// `run_turn`, long after the banner and other early output have already been
-/// written with raw escapes. Calling this at the very top of `main` triggers
-/// crossterm's `enable_vt_processing()` up front so all subsequent raw escapes
-/// are interpreted correctly. No-op on non-Windows platforms.
-#[cfg(windows)]
-fn enable_windows_ansi_support() {
-    // Side effect: on first call this enables ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    // on the current stdout console handle. We ignore the returned support flag.
-    let _ = crossterm::ansi_support::supports_ansi();
-}
-
-#[cfg(not(windows))]
-fn enable_windows_ansi_support() {}
-
 /// Environment variable that suppresses the startup config migration.
 const SKIP_CONFIG_MIGRATION_ENV: &str = "SCODE_SKIP_CONFIG_MIGRATION";
 
@@ -610,8 +591,9 @@ fn run_config_account(
 fn main() {
     startup::initialize();
     // Must run before any output so early raw ANSI escapes render correctly on
-    // the Windows console (see `enable_windows_ansi_support`).
-    startup::measure("console", enable_windows_ansi_support);
+    // the Windows console, and so the color-tier detection that reads the same
+    // VT state sees it already enabled (see `windows_console`).
+    startup::measure("console", windows_console::enable_vt_processing);
 
     if let Err(error) = run() {
         // (error handling below — success path returns from main normally)

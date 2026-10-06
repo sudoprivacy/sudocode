@@ -84,6 +84,7 @@ pub mod tool_names;
 #[cfg(test)]
 mod trust_resolver;
 mod usage;
+pub mod user_paths;
 pub mod worker_boot;
 pub mod workspace_root;
 

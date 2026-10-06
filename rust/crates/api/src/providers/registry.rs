@@ -859,7 +859,7 @@ fn resolve_credential(
             }
             // 4. Auth file (legacy fallback).
             if let Some(path) = &connection.auth_file {
-                let expanded = expand_tilde(path);
+                let expanded = runtime::user_paths::expand_tilde(path);
                 if expanded.exists() {
                     return Ok(Credential::AuthFile(expanded));
                 }
@@ -901,15 +901,6 @@ fn infer_provider_kind(provider_name: &str, api_format: ApiFormat) -> ProviderKi
 }
 
 /// Expand `~` prefix to the user's home directory.
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
-    }
-    PathBuf::from(path)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1775,13 +1766,18 @@ mod tests {
         );
     }
 
+    /// The registry resolves `~` through the shared cross-platform helper, so a
+    /// Windows session (where `HOME` is unset and `USERPROFILE` carries the
+    /// home) finds credential files instead of looking for a literal `~`.
+    /// The expansion rules themselves are covered in `runtime::user_paths`.
     #[test]
     fn expand_tilde_works() {
-        let path = expand_tilde("~/.nexus/sudocode/credentials.json");
-        if let Some(home) = std::env::var_os("HOME") {
-            let expected = std::path::PathBuf::from(home).join(".nexus/sudocode/credentials.json");
-            assert_eq!(path, expected);
-        }
+        let path = runtime::user_paths::expand_tilde("~/.nexus/sudocode/credentials.json");
+        let expected = runtime::user_paths::home_dir().map_or_else(
+            || std::path::PathBuf::from("~/.nexus/sudocode/credentials.json"),
+            |home| home.join(".nexus/sudocode/credentials.json"),
+        );
+        assert_eq!(path, expected);
     }
 
     #[test]

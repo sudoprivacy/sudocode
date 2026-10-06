@@ -161,8 +161,12 @@ fn context_lists_workspace_instruction_files_as_memory() {
     sess.expect("Memory files:").expect("memory files category");
     sess.expect("Memory files · /memory")
         .expect("memory files footer");
-    sess.expect("└ 1 file ·")
-        .expect("one instruction file counted");
+    sess.expect("└ 1 file ·").unwrap_or_else(|error| {
+        panic!(
+            "one instruction file counted: {error}\n{}",
+            screen_tail(&sess, 10000)
+        );
+    });
     sess.expect("❯").expect("prompt after compact report");
 
     sess.send("/context all\r").expect("send /context all");

@@ -14,6 +14,7 @@ mod color_theme;
 pub(crate) mod diff_colors;
 pub(crate) mod layout_policy;
 pub(crate) mod left_frame;
+pub(crate) mod output;
 pub(crate) mod spinner_progress;
 use spinner_progress::SpinnerProgress;
 pub(crate) mod terminal_palette;

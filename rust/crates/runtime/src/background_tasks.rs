@@ -68,11 +68,20 @@ pub struct Completion {
     pub output_path: PathBuf,
     pub state: TaskState,
     pub exit_code: Option<i32>,
+    /// One `Monitor` stdout line. `None` for an end-of-task completion.
+    ///
+    /// A monitor reports many times (one notification per line) and then once
+    /// more when the watch ends, so "a thing to tell the model" cannot be
+    /// modelled as terminal-only. Carrying the line here keeps ONE delivery
+    /// pipe and one XML shape instead of a second parallel channel.
+    pub event_line: Option<String>,
 }
 
 #[derive(Default)]
 struct Registry {
     tasks: BTreeMap<String, BackgroundTask>,
+    /// OS pids, so a stop can signal a task it did not spawn itself.
+    pids: BTreeMap<String, u32>,
     /// Finished tasks not yet delivered to the model.
     pending: Vec<Completion>,
 }
@@ -138,6 +147,34 @@ pub fn finish(task_id: &str, state: TaskState, exit_code: Option<i32>) {
         output_path: task.output_path.clone(),
         state,
         exit_code,
+        event_line: None,
+    };
+    reg.pending.push(completion);
+}
+
+/// Queue one `Monitor` stdout line as its own notification.
+///
+/// Each line is an event the model should hear about while the watch is still
+/// running, so this does NOT change the task's state — only `finish` ends a
+/// task. A line for an already-finished task is dropped: the watch is over and
+/// a late line would read as if it were still live.
+pub fn record_event_line(task_id: &str, line: &str) {
+    let mut reg = lock();
+    let Some(task) = reg.tasks.get(task_id) else {
+        return;
+    };
+    if task.state != TaskState::Running {
+        return;
+    }
+    let completion = Completion {
+        task_id: task.task_id.clone(),
+        kind: task.kind,
+        command: task.command.clone(),
+        description: task.description.clone(),
+        output_path: task.output_path.clone(),
+        state: TaskState::Running,
+        exit_code: None,
+        event_line: Some(line.to_string()),
     };
     reg.pending.push(completion);
 }
@@ -154,6 +191,21 @@ pub fn drain_completions() -> Vec<Completion> {
 /// format for "a background thing you started has news".
 #[must_use]
 pub fn render_notification(completion: &Completion) -> String {
+    let label_for_event = completion
+        .description
+        .as_deref()
+        .unwrap_or(&completion.command)
+        .to_string();
+    if let Some(line) = &completion.event_line {
+        return format!(
+            "<task-notification>\n\
+             Monitor event from {label_for_event}: {line}\n\
+             task-id: {id}\n\
+             The watch is still running; you will be notified again on the next event.\n\
+             </task-notification>",
+            id = completion.task_id,
+        );
+    }
     let label = completion
         .description
         .as_deref()
@@ -182,6 +234,13 @@ pub fn render_notification(completion: &Completion) -> String {
 /// A one-line summary for the terminal, shown where a queued chip or echo goes.
 #[must_use]
 pub fn render_display(completion: &Completion) -> String {
+    if let Some(line) = &completion.event_line {
+        let label = completion
+            .description
+            .as_deref()
+            .unwrap_or(&completion.command);
+        return format!("Monitor: {label} — {line}");
+    }
     let label = completion
         .description
         .as_deref()
@@ -266,6 +325,7 @@ mod registry_docs {
             output_path: PathBuf::from("/tmp/t-1.log"),
             state: TaskState::Exited,
             exit_code: Some(1),
+            event_line: None,
         };
         let xml = render_notification(&completion);
         assert!(xml.contains("<task-notification>"));
@@ -274,4 +334,144 @@ mod registry_docs {
         assert!(xml.contains("exited with code 1"));
         assert!(xml.contains("/tmp/t-1.log"));
     }
+}
+
+/// Default and maximum watch lifetime for `Monitor`, mirroring CC's bounds:
+/// a watch that outlives the thing it watches is a leak, so there is always a
+/// ceiling even when the caller asks for none.
+pub const MONITOR_DEFAULT_TIMEOUT_MS: u64 = 600_000;
+/// Hard ceiling for a non-persistent watch.
+pub const MONITOR_MAX_TIMEOUT_MS: u64 = 3_600_000;
+
+/// Start a `Monitor` watch over `command`.
+///
+/// Streams the child's stdout line by line: each line is queued as its own
+/// notification (`record_event_line`) so the model hears about it while the
+/// watch is live. Exit, the timeout, or an explicit [`stop`] ends the watch and
+/// queues one terminal completion. `persistent` drops the timeout so the watch
+/// lives as long as the session.
+///
+/// Returns the task id. The spawn itself is synchronous; everything after is
+/// on a dedicated thread, so the tool call returns immediately — the point of
+/// a monitor is that the turn ends and notifications arrive later.
+///
+/// # Errors
+/// When the output file cannot be created or the child cannot be spawned.
+pub fn start_monitor(
+    workspace_root: &Path,
+    command: &str,
+    description: &str,
+    timeout_ms: Option<u64>,
+    persistent: bool,
+) -> std::io::Result<String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+
+    let task_id = format!("mon-{}", next_task_seq());
+    let output_path = output_path_for(workspace_root, &task_id)?;
+    let mut log = std::fs::File::create(&output_path)?;
+
+    let mut child = Command::new("bash")
+        .arg("-lc")
+        .arg(command)
+        .current_dir(workspace_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout = child.stdout.take();
+    register(BackgroundTask {
+        task_id: task_id.clone(),
+        kind: TaskKind::Monitor,
+        command: command.to_string(),
+        description: Some(description.to_string()),
+        output_path: output_path.clone(),
+        state: TaskState::Running,
+        exit_code: None,
+    });
+    register_pid(&task_id, child.id());
+
+    // Deadline, unless the caller asked for a session-lifetime watch.
+    let deadline = if persistent {
+        None
+    } else {
+        let ms = timeout_ms
+            .unwrap_or(MONITOR_DEFAULT_TIMEOUT_MS)
+            .min(MONITOR_MAX_TIMEOUT_MS);
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(ms))
+    };
+
+    let watch_id = task_id.clone();
+    std::thread::Builder::new()
+        .name(format!("monitor-{task_id}"))
+        .spawn(move || {
+            // One line read = one event. Reading line-wise (not chunked) is
+            // what makes "each stdout line is a notification" true rather than
+            // approximately true.
+            if let Some(stdout) = stdout {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    let _ = writeln!(log, "{line}");
+                    record_event_line(&watch_id, &line);
+                    if is_finished(&watch_id) {
+                        // Stopped while we were reading: stop emitting events.
+                        return;
+                    }
+                    if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                        let _ = child.kill();
+                        finish(&watch_id, TaskState::Stopped, None);
+                        return;
+                    }
+                }
+            }
+            let code = child.wait().ok().and_then(|status| status.code());
+            finish(&watch_id, TaskState::Exited, code);
+        })
+        .map_err(|e| std::io::Error::other(format!("spawn monitor thread: {e}")))?;
+
+    Ok(task_id)
+}
+
+/// `true` once a task has left the running state.
+#[must_use]
+pub fn is_finished(task_id: &str) -> bool {
+    lock()
+        .tasks
+        .get(task_id)
+        .is_some_and(|t| t.state != TaskState::Running)
+}
+
+/// Remember a task's OS pid so [`stop`] can signal it.
+pub fn register_pid(task_id: &str, pid: u32) {
+    lock().pids.insert(task_id.to_string(), pid);
+}
+
+/// Stop a running background task (monitor or background command).
+///
+/// Kills the process and records the stop as the task's terminal state, so the
+/// model is told the watch ended rather than silently losing it. Returns
+/// `false` when the task is unknown or already finished.
+pub fn stop(task_id: &str) -> bool {
+    let pid = lock().pids.get(task_id).copied();
+    if is_finished(task_id) || get(task_id).is_none() {
+        return false;
+    }
+    if let Some(pid) = pid {
+        // SIGTERM via `kill`: the child may be a process group leader (bash
+        // -lc), and we want its tree to go, not just the shell.
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(format!("-{pid}"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .or_else(|_| {
+                std::process::Command::new("kill")
+                    .arg(pid.to_string())
+                    .status()
+            });
+    }
+    finish(task_id, TaskState::Stopped, None);
+    true
 }

@@ -1057,6 +1057,33 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::DangerFullAccess,
         },
         ToolSpec {
+            name: "Monitor",
+            description: concat!(
+                "Watch, monitor, or keep an eye on a process, log, or command — each stdout ",
+                "line is streamed back to you as a live notification.\n\n",
+                "The call returns immediately with a task id; the watch keeps running across ",
+                "turns. End your turn after starting it: you will be notified on each event. ",
+                "Keep working — do not poll or sleep. Events may arrive while you are waiting ",
+                "for the user; an event is not their reply.\n\n",
+                "Use it to wait for a condition with an until-loop that exits when the ",
+                "condition is met (e.g. `until grep -q \"Ready\" dev.log; do sleep 2; done`) — ",
+                "you get a notification when the loop exits. For a one-shot \"wait until this ",
+                "command is done\", use bash with `run_in_background` instead."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command to watch. Each line it prints on stdout becomes one notification; the watch ends when it exits." },
+                    "description": { "type": "string", "description": "Short label for this watch, shown in notifications." },
+                    "timeout_ms": { "type": "integer", "minimum": 1, "description": "How long the watch may run before it is stopped (default 600000, max 3600000). Ignored when `persistent` is true." },
+                    "persistent": { "type": "boolean", "description": "When true the watch runs for the rest of the session until stopped, with no timeout. Default false." }
+                },
+                "required": ["command", "description"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
             name: "read_file",
             description: "Read a text file or a PNG/JPEG/GIF/WebP image from the workspace. Images are attached for visual inspection; a vision-capable model is required. After a screenshot command, call Read on its saved image path. Text reads up to 2000 lines by default; a page that would exceed the size cap is shrunk automatically and ends with a [Truncated: PARTIAL view …] banner telling you the offset/limit for the next page. When you already know which part of the file you need, only read that part.",
             input_schema: json!({
@@ -1817,6 +1844,12 @@ fn execute_tool_with_enforcer(
             let classified_mode = classify_bash_permission(&bash_input.command);
             maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
             run_bash(bash_input, abort_signal)
+        }
+        "Monitor" => {
+            let monitor_input: MonitorInput = from_value(input)?;
+            // A watch runs arbitrary shell, so it is gated exactly like bash.
+            maybe_enforce_permission_check(enforcer, name, input)?;
+            run_monitor(monitor_input)
         }
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
@@ -3312,6 +3345,34 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
 /// Classify bash command permission based on command type and path.
 /// ROADMAP #50: Read-only commands targeting CWD paths get `WorkspaceWrite`,
 /// all others remain `DangerFullAccess`.
+/// Input for the `Monitor` tool.
+#[derive(Debug, Deserialize)]
+struct MonitorInput {
+    command: String,
+    description: String,
+    timeout_ms: Option<u64>,
+    persistent: Option<bool>,
+}
+
+/// Start a watch and return immediately: the turn is meant to end here, with
+/// notifications arriving later.
+fn run_monitor(input: MonitorInput) -> Result<String, String> {
+    let workspace_root = runtime::current_workspace_root_or_default();
+    let task_id = runtime::background_tasks::start_monitor(
+        &workspace_root,
+        &input.command,
+        &input.description,
+        input.timeout_ms,
+        input.persistent.unwrap_or(false),
+    )
+    .map_err(|e| format!("failed to start monitor: {e}"))?;
+    Ok(format!(
+        "Monitor started (task {task_id}). You will be notified on each event. \
+         Keep working — do not poll or sleep. Events may arrive while you are \
+         waiting for the user — an event is not their reply."
+    ))
+}
+
 fn classify_bash_permission(command: &str) -> PermissionMode {
     // Read-only commands that are safe when targeting workspace paths
     const READ_ONLY_COMMANDS: &[&str] = &[

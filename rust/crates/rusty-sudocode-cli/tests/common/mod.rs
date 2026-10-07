@@ -279,6 +279,28 @@ pub fn input_line_of(screen: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Current InputSlot and FooterSlot, excluding obsolete UI that an extreme
+/// resize may have pushed into retained scrollback. Unlike `input_line_of`,
+/// this also locates question, picker and size-warning bodies without a prompt.
+/// Do not use it for duplicate-free resize assertions: those must inspect the
+/// entire terminal buffer, including any stale rows.
+#[must_use]
+pub fn input_and_footer_of(screen: &str) -> Option<String> {
+    let rows: Vec<_> = screen.lines().collect();
+    // The vt100 test parser can retain the next slot on the same physical row
+    // as a full-width rule. Recognize the rule prefix without discarding it.
+    let is_separator = |row: &&str| row.starts_with("──");
+    let end = rows.iter().rposition(is_separator)?;
+    let start = rows[..end].iter().rposition(is_separator)?;
+    let mut area = Vec::with_capacity(rows.len() - start);
+    let first = rows[start].trim_start_matches('─');
+    if !first.is_empty() {
+        area.push(first);
+    }
+    area.extend_from_slice(&rows[start + 1..]);
+    Some(area.join("\n"))
+}
+
 /// The model live mode grades its assertions against.
 ///
 /// See the `Backend::Live` arm of [`TestEnv::spawn_with_env`] for why it is

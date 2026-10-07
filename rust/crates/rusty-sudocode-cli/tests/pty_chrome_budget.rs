@@ -88,12 +88,18 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
     sess.resize(40, 80).unwrap();
     let restored = common::expect_screen_settled(
         &sess,
-        |s| s.contains("BudgetTask2") && s.contains("DraftHead") && s.contains("draft.txt"),
+        |s| {
+            s.contains("BudgetTask2")
+                && common::input_and_footer_of(s)
+                    .is_some_and(|area| area.contains("DraftHead") && area.contains("draft.txt"))
+        },
         common::DEFAULT_TIMEOUT,
         "expanded draft",
     );
     assert!(
-        !restored.contains("compact ·"),
+        !common::input_and_footer_of(&restored)
+            .expect("current InputSlot and FooterSlot")
+            .contains("compact ·"),
         "summary must expand:\n{restored}"
     );
     sess.send("\r").unwrap();
@@ -136,14 +142,21 @@ fn undersized_picker_cannot_confirm_an_unseen_selection() {
     sess.resize(40, 80).unwrap();
     common::expect_screen_settled(
         &sess,
-        |s| s.contains("Select model") && !s.contains("Enlarge terminal to review"),
+        |s| {
+            common::input_and_footer_of(s).is_some_and(|area| {
+                area.contains("Select model") && !area.contains("Enlarge terminal to review")
+            })
+        },
         common::DEFAULT_TIMEOUT,
         "unconfirmed picker restored",
     );
     sess.send("\x1b").unwrap();
     common::expect_screen_settled(
         &sess,
-        |s| s.contains('❯') && !s.contains("Select model"),
+        |s| {
+            common::input_and_footer_of(s)
+                .is_some_and(|area| area.contains('❯') && !area.contains("Select model"))
+        },
         common::DEFAULT_TIMEOUT,
         "cancel picker",
     );

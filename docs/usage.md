@@ -243,6 +243,19 @@ REPL preserve headings, lists, code, tables, and links. Plain configuration and
 permission descriptions keep their literal text. The live prompt caches its
 formatted document until the source or terminal width changes.
 
+Live slots share one row budget. InputSlot has priority: when a long draft or
+small window leaves insufficient space, PendingSlot, StatusSlot, TodoSlot and
+FooterSlot fold into explicit summaries rather than silently disappearing.
+Growing the window restores their full contents. Long drafts scroll within the
+same editor, preserving the complete text and cursor.
+
+Long question and plan descriptions scroll independently of their choices:
+PgUp/PgDn pages the body and Ctrl+Home/End jumps to its start/end. The choice
+controls stay visible. If the terminal is too small to show those controls
+safely, an enlargement warning replaces the panel; confirmation and hidden
+edits are disabled, but Esc/Ctrl-C can still cancel. Resizing does not answer a
+question, alter the saved plan, or clear conversation history.
+
 `write_plan` saves the complete Markdown document, including Context,
 Constraints, and Acceptance Criteria, before presenting it for review. The
 saved document is the source for both the preview and the approved tool result.

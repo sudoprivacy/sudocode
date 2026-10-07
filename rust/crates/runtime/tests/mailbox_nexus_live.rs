@@ -1170,6 +1170,63 @@ fn live_directory_unions_local_and_nexus_peers() {
     let _ = std::fs::remove_dir_all(&pair_root);
 }
 
+/// `/agents` and `/sessions` are DIFFERENT namespaces, not two names for one.
+///
+/// Both are mounted from the same zone, so a router that drops the mount prefix
+/// hands both the same key and the two alias (nexus-vfs#361). The damage lands on
+/// discovery: `readdir /agents` then returns session ids, and `agent_list`
+/// becomes unusable - a name that only ever existed as a session answers as an
+/// addressable agent.
+///
+/// Probed in the direction that fails loudly: write under `/sessions/<name>`
+/// only, then ask whether `/agents/<name>` exists. Aliased, it answers yes.
+/// Pinned here because the daemon version is resolved from the nexus-vfs lock -
+/// a bump or a rollback past the fix must fail this rather than quietly degrade
+/// every `agent_list` on the cluster.
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_CERT_DIR"]
+fn live_agents_and_sessions_are_not_the_same_namespace() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let client = dial(&endpoint);
+    let name = format!("alias-probe-{}", fresh());
+
+    // Exists in /sessions and NOWHERE else.
+    let session_path = format!("/sessions/{name}/transcript.jsonl");
+    client
+        .ensure_stream(
+            &session_path,
+            "wal,memory",
+            runtime::agent_mailbox::DEFAULT_STREAM_CAPACITY,
+            "",
+        )
+        .unwrap_or_else(|e| panic!("provision {session_path}: {e}"));
+
+    // The same leaf under /agents must not exist. If it does, the two prefixes
+    // resolve to one namespace and discovery is reading session ids.
+    let agent_path = format!("/agents/{name}");
+    let found = client.stat(&agent_path, "").is_ok();
+
+    // Positive control: the probe must be able to SEE an agent that does exist,
+    // or the assertion below would hold for a stat that always fails and the
+    // test would pass while proving nothing.
+    let real_agent = format!("alias-control-{}", fresh());
+    mailbox(&client, &real_agent, "")
+        .ensure_presence()
+        .expect("announce a real agent");
+    assert!(
+        client.stat(&format!("/agents/{real_agent}"), "").is_ok(),
+        "the probe cannot see a real agent under /agents, so it proves nothing"
+    );
+
+    assert!(
+        !found,
+        "/agents/{name} resolved although {name} was only ever written under /sessions - \
+         the two prefixes alias (nexus-vfs#361), so `readdir /agents` is returning sessions \
+         and agent_list cannot be trusted on this daemon"
+    );
+}
+
 /// Provision the operator's model route over the same authenticated gRPC bind.
 #[test]
 #[ignore = "requires the co-host daemon and model mount environment"]

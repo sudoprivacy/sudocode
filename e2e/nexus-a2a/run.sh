@@ -114,6 +114,14 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
 # peer from both in ONE listing, each tagged with where it was found. The union
 # the Directory exists for, proven against a real daemon rather than a temp dir -
 # so a regression that silently drops a namespace from `agent_list` fails here.
+# /agents and /sessions are mounted from one zone; a router that drops the mount
+# prefix aliases them, and `readdir /agents` then returns session ids. The daemon
+# version comes from the nexus-vfs lock, so pin the invariant here: a bump or
+# rollback past the fix must fail loudly instead of degrading every agent_list.
+echo "== [deterministic] /agents and /sessions are distinct namespaces =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_agents_and_sessions_are_not_the_same_namespace -- --ignored --nocapture
+
 echo "== [deterministic] agent_list unions local + nexus peers =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_directory_unions_local_and_nexus_peers -- --ignored --nocapture

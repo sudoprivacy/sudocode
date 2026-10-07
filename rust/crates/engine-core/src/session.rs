@@ -229,6 +229,12 @@ impl RequestTable {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ShutdownReason {
+    ExplicitClose,
+    Disconnected,
+}
+
 /// The command loop. Runs on the engine thread's Tokio runtime.
 async fn drive(
     delegate: Arc<dyn EngineDelegate>,
@@ -256,10 +262,11 @@ async fn drive(
 
     let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
 
+    let mut shutdown = ShutdownReason::Disconnected;
     while let Some(cmd) = tcmd_rx.recv().await {
         match cmd {
             EngineCommand::Prompt { blocks } => {
-                if run_one_turn(
+                if let Some(reason) = run_one_turn(
                     &delegate,
                     blocks,
                     &evt_tx,
@@ -270,6 +277,7 @@ async fn drive(
                 )
                 .await
                 {
+                    shutdown = reason;
                     break;
                 }
             }
@@ -308,12 +316,18 @@ async fn drive(
             | EngineCommand::PermissionAnswer { .. }
             | EngineCommand::QuestionAnswer { .. } => {}
             EngineCommand::Close => {
+                shutdown = ShutdownReason::ExplicitClose;
                 break;
             }
         }
     }
     tasks.shutdown();
-    delegate.close();
+    // Always reap owned work, but preserve the existing persistence contract:
+    // dropping the handle after a read-only command or failed compaction must
+    // not save a newly assembled prompt snapshot into its resumed transcript.
+    if matches!(shutdown, ShutdownReason::ExplicitClose) {
+        delegate.close();
+    }
 }
 
 fn handle_background_task(
@@ -338,8 +352,8 @@ fn handle_background_task(
 
 /// Drive a single [`EngineCommand::Prompt`]: install the adapters, run the turn
 /// on a blocking task, and concurrently service answer/cancel commands until it
-/// finishes. Returns `true` if a [`EngineCommand::Close`] arrived mid-turn, so
-/// the caller tears the session down after the (now aborted) turn drains.
+/// finishes. Returns the shutdown reason if a close or disconnection arrived
+/// mid-turn, so the caller tears the session down after the aborted turn drains.
 async fn run_one_turn(
     delegate: &Arc<dyn EngineDelegate>,
     blocks: Vec<ContentBlock>,
@@ -348,7 +362,7 @@ async fn run_one_turn(
     subagents: &SubagentRelay,
     next_request_id: &Arc<AtomicU64>,
     tasks: &runtime::background_tasks::BackgroundTasks,
-) -> bool {
+) -> Option<ShutdownReason> {
     let table = RequestTable {
         next_id: Arc::clone(next_request_id),
         ..RequestTable::default()
@@ -383,11 +397,11 @@ async fn run_one_turn(
         delegate.run_turn(blocks, &mut observer, &mut prompter)
     });
 
-    let mut closing = false;
+    let mut shutdown = None;
     loop {
         tokio::select! {
             biased;
-            cmd = tcmd_rx.recv(), if !closing => match cmd {
+            cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
                 Some(EngineCommand::PermissionAnswer { id, decision }) => {
                     if let Some(PendingAnswer::Permission(tx)) = table.take(id) {
                         let _ = tx.send(decision);
@@ -399,9 +413,13 @@ async fn run_one_turn(
                     }
                 }
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
-                // Close aborts the turn AND ends the session once it drains.
-                Some(EngineCommand::Close) | None => {
-                    closing = true;
+                // Both paths abort and reap; only explicit Close persists.
+                command @ (Some(EngineCommand::Close) | None) => {
+                    shutdown = Some(if command.is_some() {
+                        ShutdownReason::ExplicitClose
+                    } else {
+                        ShutdownReason::Disconnected
+                    });
                     tasks.begin_shutdown();
                     abort.abort();
                     table.cancel_all();
@@ -440,7 +458,7 @@ async fn run_one_turn(
             }
         }
     }
-    closing
+    shutdown
 }
 
 /// Short human label for a turn (first non-empty line of the first text block).

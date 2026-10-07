@@ -26,6 +26,7 @@ plugins = { path = "../plugins" }
 # No subprocess-host (that is the raw-ACP path, not the in-process co-host) —
 # see the workspace manifest for the pin and why it is one pin.
 managed-agent = { workspace = true }
+a2a = { workspace = true }
 tools = { path = "../tools" }
 # The standalone session's own kernel (`local_kernel`): a CLI session's file
 # tools reach a VFS, like the co-hosted agent's do, so neither host has hooks or

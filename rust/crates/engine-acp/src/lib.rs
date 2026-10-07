@@ -7,6 +7,7 @@
 //! only consumer is the CLI's ACP wiring, which names it through this crate).
 
 pub mod acp_sdk_server;
+pub mod acp_session_mailbox;
 pub mod acp_stdio_server;
 pub mod acp_ws_server;
 /// ACP-side session lifecycle + turn glue on top of the `engine_core` seam

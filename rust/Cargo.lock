@@ -1502,6 +1502,7 @@ checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 name = "engine-acp"
 version = "0.2.23"
 dependencies = [
+ "a2a",
  "agent-client-protocol",
  "agent-client-protocol-schema",
  "agent-client-protocol-tokio",
@@ -1511,6 +1512,7 @@ dependencies = [
  "engine-core",
  "engine-host",
  "futures",
+ "kernel",
  "nix 0.29.0",
  "reqwest 0.12.28",
  "runtime",
@@ -1547,6 +1549,7 @@ dependencies = [
 name = "engine-host"
 version = "0.2.23"
 dependencies = [
+ "a2a",
  "backends",
  "commands",
  "engine-core",

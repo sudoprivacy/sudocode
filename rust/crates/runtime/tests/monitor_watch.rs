@@ -89,3 +89,37 @@ fn monitor_streams_each_line_then_reports_the_exit() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+/// Stopping a watch must also notify: a monitor that vanishes silently leaves
+/// the model waiting for events that will never arrive.
+#[test]
+fn stopping_a_monitor_reports_it_as_stopped() {
+    let ws = std::env::temp_dir().join(format!("scode-monitor-stop-{}", std::process::id()));
+    std::fs::create_dir_all(&ws).expect("workspace");
+
+    // A watch that would otherwise run far longer than the test.
+    let task_id =
+        background_tasks::start_monitor(&ws, "sleep 60", "stop probe", Some(60_000), false)
+            .expect("monitor should start");
+
+    assert!(
+        background_tasks::stop(&task_id),
+        "stopping a running watch should report that it acted"
+    );
+    assert!(
+        !background_tasks::stop(&task_id),
+        "stopping an already-stopped watch is not a second stop"
+    );
+
+    let terminal = collect(&task_id, Duration::from_secs(20))
+        .into_iter()
+        .next_back()
+        .expect("a terminal notification");
+    assert_eq!(terminal.state, TaskState::Stopped);
+    assert!(
+        background_tasks::render_notification(&terminal).contains("stopped"),
+        "the notification must say the watch was stopped"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}

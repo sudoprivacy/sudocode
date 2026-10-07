@@ -883,6 +883,28 @@ fn compact_bash_step(request: &MessageRequest) -> Option<(String, &'static str, 
         .map(|input| (format!("compact_bash_{completed}"), "bash", input))
 }
 
+// A resumed session must run the new task rather than reuse an earlier result.
+fn current_turn_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
+    for message in request.messages.iter().rev() {
+        for block in message.content.iter().rev() {
+            match block {
+                InputContentBlock::ToolResult {
+                    content, is_error, ..
+                } => {
+                    return Some((flatten_tool_result_content(content), *is_error));
+                }
+                InputContentBlock::Text { text, .. }
+                    if message.role == "user" && text.contains("PARITY_SCENARIO:") =>
+                {
+                    return None
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
     request.messages.iter().rev().find_map(|message| {
         message.content.iter().rev().find_map(|block| match block {
@@ -1618,7 +1640,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             ]),
         },
         Scenario::ReadFileRoundtrip | Scenario::SkillReadRoundtrip => {
-            match latest_tool_result(request) {
+            match current_turn_tool_result(request) {
                 Some((tool_output, _)) => final_text_sse(&format!(
                     "read_file roundtrip complete: {}",
                     extract_read_content(&tool_output)
@@ -2271,7 +2293,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             ),
         },
         Scenario::ReadFileRoundtrip | Scenario::SkillReadRoundtrip => {
-            match latest_tool_result(request) {
+            match current_turn_tool_result(request) {
                 Some((tool_output, _)) => text_message_response(
                     "msg_read_file_final",
                     &format!(

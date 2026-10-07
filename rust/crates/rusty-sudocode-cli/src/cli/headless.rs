@@ -274,7 +274,7 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
         crate::run_stale_base_preflight(options.base_commit.as_deref());
         tools::declare_finite_task_mode();
         let cli = LiveCli::new(
-            crate::resolve_repl_model(options.model),
+            options.model,
             true,
             options.allowed_tools,
             options.permission_mode,

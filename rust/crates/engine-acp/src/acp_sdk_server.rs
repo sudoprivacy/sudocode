@@ -1706,6 +1706,7 @@ impl Drop for CwdLeaseGuard {
 ///
 /// The normal tool loop awaits an owned reply while notifications keep flowing.
 /// Synchronous callers use the same queue through `decide()`.
+#[derive(Clone)]
 struct AcpPermissionBridge {
     queue: runtime::PromptQueue,
     tx: tokio::sync::mpsc::UnboundedSender<(
@@ -1715,6 +1716,13 @@ struct AcpPermissionBridge {
 }
 
 impl PermissionPrompter for AcpPermissionBridge {
+    fn delegation_sink(&self) -> Option<runtime::PermissionPromptSink> {
+        let bridge = self.clone();
+        Some(runtime::PermissionPromptSink::new(move |request| {
+            bridge.clone().begin_decision(&request)
+        }))
+    }
+
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
         let reply = self.begin_decision(request);
         tokio::task::block_in_place(|| futures::executor::block_on(reply))

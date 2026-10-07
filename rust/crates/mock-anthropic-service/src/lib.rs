@@ -1189,7 +1189,7 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
             )])
         };
     }
-    let done = latest_tool_result(request);
+    let done = current_turn_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
     match (scenario, done) {
         (Scenario::SubagentEventsSync | Scenario::SubagentEventsSyncSlow, None) => {

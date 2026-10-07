@@ -679,6 +679,9 @@ pub struct ToolDispatchContext {
     /// inside a parent tool loop (test harnesses, direct executor calls); the
     /// spawn path then falls back to a conservative default.
     pub parent_permission_mode: Option<crate::permissions::PermissionMode>,
+    /// The parent's approval route. Workers keep their inherited policy and
+    /// send only approval requests through this shared input queue.
+    pub permission_sink: Option<crate::permissions::PermissionPromptSink>,
 }
 
 impl ToolDispatchContext {

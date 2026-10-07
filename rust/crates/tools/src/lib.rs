@@ -4620,6 +4620,7 @@ struct AgentJob {
     /// it; when the parent mode is unknown (no dispatch context, e.g. a test
     /// harness), this defaults to the conservative [`PermissionMode::WorkspaceWrite`].
     permission_mode: PermissionMode,
+    permission_sink: Option<runtime::PermissionPromptSink>,
 }
 
 /// A spawned agent's connection to the renderer's sub-agent sink.
@@ -5822,6 +5823,7 @@ fn prepare_agent_job(
         workspace: WorkspaceRootHandoff::capture(),
         subagent,
         permission_mode,
+        permission_sink: ctx.and_then(|ctx| ctx.permission_sink.clone()),
     };
     if let Some(link) = &job.subagent {
         link.emit_started(&manifest, job.abort_signal.clone());
@@ -6112,6 +6114,7 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
     // `<total_tokens>` / `<tool_uses>` count in the task-notification.
     let mut cumulative_telemetry = AgentRunTelemetry::default();
     let mut forwarder = job.subagent.as_ref().map(SubagentLink::observer);
+    let mut permission_sink = job.permission_sink.clone();
     let final_text = run_multi_turn_loop(
         &job.manifest.agent_id,
         &workspace_root,
@@ -6122,7 +6125,12 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
             let observer = forwarder
                 .as_mut()
                 .map(|forwarder| forwarder as &mut (dyn RuntimeObserver + Send));
-            let summary = run_single_turn(&mut conv_runtime, prompt, observer)?;
+            let summary = run_single_turn(
+                &mut conv_runtime,
+                prompt,
+                observer,
+                permission_sink.as_mut(),
+            )?;
             let (turn_tokens, turn_tool_uses) = telemetry_from_turn(&summary);
             cumulative_telemetry.total_tokens = cumulative_telemetry
                 .total_tokens
@@ -6360,7 +6368,7 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
     let prompt = format!(
         "Summarize this agent's output for the parent coordinator in \u{2264}500 words:\n\n{final_text}"
     );
-    let summary = run_single_turn(&mut summarizer, prompt, None)?;
+    let summary = run_single_turn(&mut summarizer, prompt, None, None)?;
     Ok(final_assistant_text(&summary))
 }
 
@@ -6467,13 +6475,16 @@ fn run_single_turn(
     conv_runtime: &mut ConversationRuntime<ProviderRuntimeClient, SubagentToolExecutor>,
     prompt: String,
     observer: Option<&mut (dyn RuntimeObserver + Send)>,
+    permission_sink: Option<&mut runtime::PermissionPromptSink>,
 ) -> Result<runtime::TurnSummary, String> {
     if tokio::runtime::Handle::try_current().is_ok() {
         std::thread::scope(|s| {
             s.spawn(|| {
                 let observer = observer.map(|observer| observer as &mut dyn RuntimeObserver);
                 let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-                rt.block_on(conv_runtime.run_turn(prompt, None, observer))
+                let prompter =
+                    permission_sink.map(|sink| sink as &mut dyn runtime::PermissionPrompter);
+                rt.block_on(conv_runtime.run_turn(prompt, prompter, observer))
                     .map_err(|e| e.to_string())
             })
             .join()
@@ -6482,7 +6493,8 @@ fn run_single_turn(
     } else {
         let observer = observer.map(|observer| observer as &mut dyn RuntimeObserver);
         let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-        rt.block_on(conv_runtime.run_turn(prompt, None, observer))
+        let prompter = permission_sink.map(|sink| sink as &mut dyn runtime::PermissionPrompter);
+        rt.block_on(conv_runtime.run_turn(prompt, prompter, observer))
             .map_err(|e| e.to_string())
     }
 }

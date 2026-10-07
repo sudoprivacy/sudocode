@@ -63,7 +63,10 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     let config_home = tempfile::tempdir().unwrap();
     std::fs::write(config_home.path().join("sudocode.json"), json!({
         "auth_modes":{"api-key":{"anthropic":{"baseUrl":"nexus:///model","apiKey":"test-cohost-key"}}},
-        "models":{"scripted":{"alias":"scripted","name":"Scripted", "input":["text"],"providers":{"api-key":{"provider":"anthropic","model":"claude-sonnet-4-6"}}}}
+        "models":{
+            "scripted":{"alias":"scripted","name":"Scripted", "input":["text"],"providers":{"api-key":{"provider":"anthropic","model":"claude-sonnet-4-6"}}},
+            "claude-sonnet":{"alias":"claude-sonnet","name":"Scripted child", "input":["text"],"providers":{"api-key":{"provider":"anthropic","model":"claude-sonnet-4-6"}}}
+        }
     }).to_string()).unwrap();
     std::env::set_var("SUDO_CODE_CONFIG_HOME", config_home.path());
     let kernel = Arc::new(Kernel::new());
@@ -331,6 +334,120 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     );
     let (terminal, _) = until(&mailbox, |m| m["id"] == "parallel");
     assert_eq!(terminal["result"]["stopReason"], "end_turn", "{terminal}");
+
+    // A spawned worker retains Prompt mode and uses this controller for its
+    // own file approval. Exercise a denial before an approval, using fresh
+    // file contents and the actual child request rather than its canned reply.
+    send(
+        &mailbox,
+        json!({"jsonrpc":"2.0","id":"child-mode","method":"session/setPermissionMode",
+        "params":{"sessionId":sid,"permissionMode":"prompt"}}),
+    );
+    let (mode, _) = until(&mailbox, |m| m["id"] == "child-mode");
+    assert!(mode.get("error").is_none(), "{mode}");
+    let child_path = mock_anthropic_service::SUBAGENT_CHILD_READ_PATH;
+    for (turn, denied) in [("child-denied", true), ("child-approved", false)] {
+        let nonce = format!(
+            "CHILD_PERMISSION_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        fs.write(child_path, nonce.as_bytes()).unwrap();
+        let first_request = rt.block_on(service.captured_requests()).len();
+        send(
+            &mailbox,
+            json!({"jsonrpc":"2.0","id":turn,"method":"session/prompt",
+            "params":{"sessionId":sid,"prompt":[{"type":"text","text":
+            "Delegate reading the child's notes. PARITY_SCENARIO:subagent_events_sync"}]}}),
+        );
+        let mut child_approvals = 0;
+        loop {
+            let (message, _) = until(&mailbox, |message| {
+                message["method"] == "session/request_permission" || message["id"] == turn
+            });
+            if message["id"] == turn {
+                assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
+                break;
+            }
+            let input: Value =
+                serde_json::from_str(message["params"]["toolCall"]["rawInput"].as_str().unwrap())
+                    .unwrap();
+            let child_read = input["path"] == child_path;
+            assert!(
+                child_read || input["prompt"].is_string(),
+                "unexpected approval: {message}"
+            );
+            if child_read {
+                child_approvals += 1;
+                let state = call(
+                    &kernel,
+                    "get_session_v1",
+                    json!({"session_id":started["session_id"]}),
+                );
+                assert_eq!(state["state"], "awaiting_input", "{state}");
+                let requests = rt.block_on(service.captured_requests());
+                assert!(
+                    requests[first_request..]
+                        .iter()
+                        .all(|request| !request.raw_body.contains(&nonce)),
+                    "the child read its file before approval"
+                );
+            }
+            send(
+                &mailbox,
+                json!({"jsonrpc":"2.0","id":message["id"],
+                "result":{"outcome":{"outcome":"selected","optionId":
+                if child_read && denied { "reject_once" } else { "allow_once" }}}}),
+            );
+        }
+        assert_eq!(
+            child_approvals, 1,
+            "child approval never reached the controller; turn={turn}"
+        );
+        let requests = rt.block_on(service.captured_requests());
+        let results: Vec<Value> = requests[first_request..]
+            .iter()
+            .map(|request| serde_json::from_str::<Value>(&request.raw_body).unwrap())
+            .filter(|request| {
+                request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|message| {
+                        message["role"] == "user"
+                            && message["content"].as_array().unwrap().iter().any(|block| {
+                                block["type"] == "text"
+                                    && block["text"]
+                                        .as_str()
+                                        .unwrap()
+                                        .contains("PARITY_SCENARIO:subagent_tool_child")
+                            })
+                    })
+            })
+            .flat_map(|request| request["messages"].as_array().unwrap().clone())
+            .flat_map(|message| message["content"].as_array().cloned().unwrap_or_default())
+            .filter(|block| block["type"] == "tool_result")
+            .collect();
+        assert!(
+            !results.is_empty(),
+            "no child tool result reached the model"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|result| result["is_error"].as_bool().unwrap_or(false) == denied),
+            "child approval was not honored: {results:?}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .any(|result| result.to_string().contains(&nonce)),
+            !denied,
+            "child result did not reflect the actual approval and fresh file"
+        );
+    }
 
     mailbox
         .send(SessionPayload::Closed {

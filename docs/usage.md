@@ -293,7 +293,7 @@ Model-invoked `bash` returns compact JSON: `stdout` and the actual
 `exit_code` for a completed process, with nonempty `stderr` when present.
 Failures retain `returnCodeInterpretation`; interrupted runs include
 `interrupted: true`. Background launches retain `backgroundTaskId` and
-`noOutputExpected`, but do not claim a completed exit code. Signal termination
+`rawOutputPath`, but do not claim a completed exit code. Signal termination
 also has no numeric exit code and is described in `returnCodeInterpretation`.
 
 Empty optional fields and routine sandbox capability flags are omitted. The
@@ -304,6 +304,40 @@ The full execution struct remains available internally; the compact text is
 persisted before it reaches the provider, so resume sends identical results.
 Large results still use the existing persisted-output marker and
 `read_tool_output` pagination.
+
+## Background tasks in the REPL
+
+Background Bash/PowerShell terminals and this session's background sub-agents
+share a compact entry on the existing footer row. Explicit background launches
+and agents automatically moved to the background use the same view. It shows
+running terminal/agent counts and unread completion results. When neither
+exists, the entry is hidden; no additional permanent row is reserved.
+
+With an empty prompt, press **↓**, then **Enter** to open the task list.
+**↑/↓** selects a task, **Enter** opens its details, and **k** stops the selected
+running task. In details, **↑/↓** or **PageUp/PageDown** scrolls the output tail;
+**Esc** returns to the list, then **Esc** returns to your preserved prompt.
+`/tasks` (or `/ps`) also opens the browser, including completed history after
+the footer entry disappears. Existing `/tasks list|get|stop` commands remain
+available for persisted agent manifests.
+
+Shell details update while the parent is idle and include stdout/stderr,
+elapsed time, status, and the actual exit code. The preview retains at most
+24 KiB per task; complete shell output is stored in the private temporary log
+shown by **Full output** and `rawOutputPath`. Logs remain in the OS temporary
+directory after completion. The session retains at most 50 completed tasks
+in memory. Agent details show current activity and recent output, then their
+final result. These are tasks owned by this session, not a view of other agents
+on the machine.
+
+Reading a completed task acknowledges its result and removes its unread
+indicator. Inspecting a running task does not acknowledge a future result;
+completion while its details are open is already visible. Closing the browser
+does not cancel work. Questions and permission prompts retain keyboard
+priority. Stopping a task cancels its process group and owned child tasks;
+exiting the session stops and reaps background processes. Background work
+survives cancellation of an unrelated parent turn. Sub-agent completion keeps
+using the existing automatic notification/queued follow-up path.
 
 ## One-shot prompt
 

@@ -565,11 +565,42 @@ coverage starts fresh and is tracked here as the single source.</p>
 
 <h4>7. Tool usage — background &amp; parallel</h4>
 <div class="callout">
+  <strong>CCB validation — background task UX (2026-10-07):</strong>
+  Read <code>components/tasks/BackgroundTaskStatus.tsx</code>,
+  <code>BackgroundTasksDialog.tsx</code>, <code>ShellDetailDialog.tsx</code>,
+  <code>AsyncAgentDetailDialog.tsx</code>, <code>PromptInputFooterLeftSide.tsx</code>
+  and <code>hooks/useBackgroundTaskNavigation.ts</code> at CCB
+  <code>236d99ed</code>. They confirm one grouped shell/child-agent footer entry,
+  list-to-detail navigation, bounded tail previews, and view dismissal separate
+  from stopping work. The actual installed CC <code>2.1.263</code> native source
+  independently confirms the empty footer returns null and advertises ↓ to view.
+  Latest local Codex <code>18e28fe1b9</code>
+  (<code>bottom_pane/unified_exec_footer.rs</code> and task command lifecycle)
+  confirms a canonical, dim summary that disappears with no background terminals.
+  scode keeps its inline iocraft/input architecture: one session task registry
+  publishes through EngineCommand/EngineEvent; terminals and explicit/auto-background
+  agents share the existing footer row and an inline task browser. No cross-session
+  multi-agent dashboard. The entry hides with no active work or unread results;
+  /tasks can still inspect bounded completed history. Shell output writes directly
+  to a full temporary file, with a 24 KiB memory tail and event-driven rendering.
+  Lifecycle and cancellation cover real process groups and owned descendants,
+  while question/permission input remains the sole keyboard owner. The engine
+  session owns the registry across CLI and ACP turns; stopping a child persists
+  its cancelled outcome through the same completion handler used by every
+  agent execution path.
+  PTY acceptance: <code>pty_background_tasks</code> and
+  <code>pty_subagent_workflow</code> (same workflows support mock and live providers).
+  <code>acp_background_terminal_is_queryable_across_prompts</code> also checks
+  cross-turn retrieval and the actual nonzero exit result through the ACP seam.
+</div>
+
+<div class="callout">
   <strong>Intentionally off-roadmap:</strong> <code>TeamCreate</code>/<code>TeamGet</code>/<code>TeamList</code>/<code>TeamDelete</code> (the CC <code>AgentSwarm</code> family), <code>SendMessage</code>, and <code>isolation: 'remote'</code> are not tracked here. They exist in CC's fork behind Anthropic-internal gates (<code>USER_TYPE=ant</code> + the <code>tengu_amber_flint</code> GrowthBook killswitch for swarm; hard-<code>USER_TYPE=ant</code> for Remote) and never reach external users. Their design is still shifting upstream, so porting them without a fresh design decision would just track a moving target. <code>SendMessage</code> and <code>fork</code>'s parent-context inheritance <em>will</em> come back when the coordinator's hard tool gate + subagent inbox receiver land in the same PR — see the Coordinator Mode row's notes.
 </div>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
+    <tr><td>Session background task footer and browser</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_background_tasks</code></td><td>Background terminals and explicit/auto-background child agents share an optional footer entry. ↓ → Enter opens the list; Enter inspects bounded recent output/status/exit code; k stops one task. Read results hide the entry; /tasks preserves history. Background producers report while the parent is idle, and session exit reaps owned shell processes.</td></tr>
     <tr><td><code>Agent</code> (sub-agents, 6 presets + auto-background + custom <code>.md</code> agents + auto-summarize + permission_mode=bubble + agent color + backgrounded-agents view)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap — partial</td><td><code>pty_task_family</code>, <code>tools::tests::auto_bg_*</code>, <code>tools::tests::{lookup_custom_agent_*,allowed_tools_for_custom_agent_*,build_system_prompt_embeds_custom_agent_body}</code>, <code>runtime::custom_agents::tests</code>, <code>tools::agent_summary_threshold</code> (4 integration tests), <code>pty_presets_e2e</code> + <code>pty_custom_agents</code> + <code>pty_agent_summary</code> (live-only per plan §6.4)</td><td>LLM tool with 6 presets. <code>fork</code> preset rebuilt with real parent-context inheritance. Sync <code>Agent(run_in_background=false)</code> auto-backgrounds after <code>SUDOCODE_AGENT_AUTO_BG_SECS</code>. Custom <code>.md</code>-with-YAML-frontmatter sub-agents parsed from <code>~/.nexus/sudocode/agents/</code> and <code>&lt;cwd&gt;/.sudocode/agents/</code>. Built-in preset names are NOT shadowable. **AgentSummary auto-summarize**: when a sub-agent's final text exceeds <code>SUDOCODE_AGENT_SUMMARY_THRESHOLD_CHARS</code> (default 8000 chars, <code>0</code> disables), the tools crate writes the FULL text to a <code>&lt;agent_id&gt;.full.md</code> sibling next to the normal output, updates the manifest's <code>resultFullPath</code> field, and spawns a summarizer sub-turn against the same provider config (empty tools, ≤500-word system prompt). Parent's <code>TaskOutput</code> returns the SHORT summary; the parent can still <code>read_file(resultFullPath)</code> for the raw output. Summarizer errors fall back to the full text so a flaky provider never blocks the parent.</td></tr>
     <tr><td><code>TaskCreate</code> / <code>TaskGet</code> / <code>TaskList</code></td><td data-priority="must-have">must-have</td><td data-status="covered" data-live-verified="live-verified"><strong>Covered</strong></td><td><code>pty_task_family::task_list_on_empty_registry_returns_zero_count</code> (mock) · <code>pty_task_family::task_create_then_list_shows_task_e2e</code> (live) · <code>runtime::task_registry::tests</code></td><td>LLM tool. Background task management. Mock test covers TaskList empty-registry path. Live e2e covers full journey: TaskCreate → TaskList (verify task appears) → clean exit. Unit-covered in <code>runtime::task_registry::tests</code> (create/get/list/stop status transitions).</td></tr>
     <tr><td>Workers (boot, trust, prompt)</td><td data-priority="must-have">must-have</td><td data-status="gap">Gap — partial</td><td><code>pty_task_family::task_list_on_empty_registry_returns_zero_count</code></td><td>Worker lifecycle via <code>runtime::spawn_task</code> mailbox loop + <code>global_agent_registry</code> completion tracking. Covered indirectly through TaskList PTY test; end-to-end <code>Agent</code>-spawn PTY live e2e scheduled with the fork rebuild.</td></tr>

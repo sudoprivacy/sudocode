@@ -1151,3 +1151,6 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ))
 }
+
+#[allow(dead_code)]
+pub mod render_measurement;

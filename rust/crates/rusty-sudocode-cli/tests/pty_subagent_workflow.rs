@@ -119,6 +119,29 @@ fn run_background_verification(workflow: Workflow) {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+        // Inspect the child during a foreground tool, then dismiss the view.
+        // Escape belongs to the browser and must not cancel that tool/turn.
+        parent.send("\x1b[B").unwrap();
+        common::expect_screen(
+            &parent,
+            |s| s.contains("Enter to view"),
+            Duration::from_secs(30),
+            "background footer selected",
+        );
+        parent.send("\r").unwrap();
+        common::expect_screen(
+            &parent,
+            |s| s.contains("Enter details"),
+            Duration::from_secs(30),
+            "task browser during parent tool",
+        );
+        parent.send("\x1b").unwrap();
+        common::expect_input_line_cleared(
+            &parent,
+            Duration::from_secs(30),
+            "back to running parent input",
+        );
+        assert!(!parent.render(|s| s.contents()).contains("[Interrupted"));
     } else {
         parent
             .send("While CI runs, what is 17 + 25? Answer the number only.\r")
@@ -159,6 +182,15 @@ fn run_background_verification(workflow: Workflow) {
             "background completion must not interrupt the parent"
         );
         fs::write(env.workspace_root().join("parent-release"), "ready").unwrap();
+        common::expect_screen(
+            &parent,
+            |s| {
+                s.lines()
+                    .any(|line| line.trim() == "│ PARENT_WORK_FINISHED")
+            },
+            Duration::from_secs(180),
+            "foreground tool finishes normally after task view dismissal",
+        );
         parent.set_default_timeout(Duration::from_secs(180));
         parent
             .expect(&evidence)

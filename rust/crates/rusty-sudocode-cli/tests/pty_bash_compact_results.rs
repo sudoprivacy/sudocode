@@ -64,7 +64,8 @@ fn assert_shell_statuses(sent: &BTreeMap<String, String>) {
     assert_eq!(parsed[2]["interrupted"], true);
     assert!(parsed[2].get("exit_code").is_none());
     assert!(parsed[3]["backgroundTaskId"].as_str().is_some());
-    assert_eq!(parsed[3]["noOutputExpected"], true);
+    assert!(parsed[3].get("noOutputExpected").is_none());
+    assert!(parsed[3]["rawOutputPath"].as_str().is_some());
     assert!(parsed[3].get("exit_code").is_none());
     if cfg!(unix) {
         assert!(parsed[4]["returnCodeInterpretation"]

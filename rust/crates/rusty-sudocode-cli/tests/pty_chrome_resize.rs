@@ -224,6 +224,43 @@ fn parallel_bash_cards_survive_narrow_and_wide_resize() {
     }
 }
 
+#[test]
+#[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
+fn shared_budget_preserves_history_draft_and_cursor_in_the_real_terminal() {
+    let env = TestEnv::new("chrome-real-budget");
+    let store = env.workspace_root().join("todos.json");
+    let todos: Vec<_> = (0..3).map(|i| serde_json::json!({
+        "content": format!("BudgetTask{i}"), "activeForm": format!("WorkingBudgetTask{i}"), "status": "pending",
+    })).collect();
+    std::fs::write(&store, serde_json::to_vec(&todos).unwrap()).unwrap();
+    let mut saved = Session::new().with_workspace_root(env.workspace_root());
+    saved.push_user_text("Saved budget conversation").unwrap();
+    let mut body = (0..70)
+        .map(|i| format!("Budget history line {i}\n"))
+        .collect::<String>();
+    body.push_str("BudgetHistorySentinel");
+    saved
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: body,
+        }]))
+        .unwrap();
+    let path = env.workspace_root().join("budget-session.jsonl");
+    saved.save_to_path(&path).unwrap();
+    assert_terminal_output(run_terminal(
+        &env,
+        &["--resume", path.to_str().unwrap()],
+        "budget",
+        serde_json::json!({"todos": store}),
+    ));
+    if env.is_mock() {
+        assert_eq!(
+            env.captured_message_count(),
+            0,
+            "layout must not run a model turn"
+        );
+    }
+}
+
 fn run_terminal(
     env: &TestEnv,
     args: &[&str],

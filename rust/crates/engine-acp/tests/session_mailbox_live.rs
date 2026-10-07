@@ -12,8 +12,39 @@ use a2a::session_io::SessionMailbox;
 use kernel::kernel::{Kernel, OperationContext};
 use runtime::{FsBackend, KernelFsBackend};
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+// These workflows change the process cwd and provider capture/config variables.
+// Keep their complete lifetimes separate even with the default parallel runner.
+static PROCESS_ENVIRONMENT: Mutex<()> = Mutex::new(());
+
+struct RestoreEnvironment {
+    cwd: std::path::PathBuf,
+    variables: [(&'static str, Option<std::ffi::OsString>); 2],
+}
+
+impl RestoreEnvironment {
+    fn capture() -> Self {
+        Self {
+            cwd: std::env::current_dir().unwrap(),
+            variables: ["SUDOCODE_DUMP_REQUESTS", "SUDO_CODE_CONFIG_HOME"]
+                .map(|name| (name, std::env::var_os(name))),
+        }
+    }
+}
+
+impl Drop for RestoreEnvironment {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.cwd).unwrap();
+        for (name, value) in &self.variables {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+}
 
 fn call(kernel: &Kernel, method: &str, payload: Value) -> Value {
     let ctx = OperationContext::new("test-owner", "root", false, Some("operator"), false);
@@ -245,6 +276,9 @@ fn compaction_crosses_the_nexus_model_mount_and_preserves_live_order_data() {
 }
 
 fn controller_workflow(compact: bool) {
+    let _serial = PROCESS_ENVIRONMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let key = std::env::var("ANTHROPIC_API_KEY").expect("live API key");
     let base_url = std::env::var("ANTHROPIC_BASE_URL").expect("live API base URL");
     let model = std::env::var("SUDOCODE_TEST_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".into());
@@ -263,19 +297,13 @@ fn controller_workflow(compact: bool) {
         }
         None => request_bodies.path().to_owned(),
     };
+    let _environment = RestoreEnvironment::capture();
     std::env::set_var("SUDOCODE_DUMP_REQUESTS", &capture_dir);
     std::fs::write(
         config_home.path().join("AGENTS.md"),
         "HOST_DIRECTORY_MUST_NOT_ENTER_AGENT_PROMPT\n",
     )
     .unwrap();
-    struct RestoreCwd(std::path::PathBuf);
-    impl Drop for RestoreCwd {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.0).unwrap();
-        }
-    }
-    let _cwd = RestoreCwd(std::env::current_dir().unwrap());
     std::env::set_current_dir(config_home.path()).unwrap();
     std::fs::write(
         config_home.path().join("sudocode.json"),

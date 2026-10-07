@@ -2732,8 +2732,9 @@ async fn acp_stdio_session_parked_on_ask_user_question_does_not_block_other_sess
 
 /// The flip side of cross-session concurrency: prompts on the SAME session
 /// must stay strictly serial. A second `session/prompt` sent while the first
-/// is parked on a permission prompt must not start (no response, no
-/// `session/update`) until the first turn has finished.
+/// is parked on a permission prompt must not reach the model or complete
+/// until the first turn has finished. Tool progress from the parked turn
+/// may still arrive after its permission request.
 #[tokio::test]
 async fn acp_stdio_same_session_prompts_stay_serial() {
     let server = MockAnthropicService::spawn()
@@ -2748,6 +2749,7 @@ async fn acp_stdio_same_session_prompts_stay_serial() {
     let session_a = scenario_session_new(&mut client, &workspace.root).await;
 
     let (prompt_1, perm_req_id) = park_session_on_permission_prompt(&mut client, &session_a).await;
+    let requests_before = server.captured_requests().await.len();
 
     let prompt_2 = client
         .send_request_no_wait(
@@ -2759,17 +2761,23 @@ async fn acp_stdio_same_session_prompts_stay_serial() {
         )
         .await;
 
-    // While turn 1 is parked, turn 2 must produce nothing at all.
+    // A queued tool_call notification belongs to turn 1; it does not prove
+    // that turn 2 started. Observe both prompt responses and actual upstream
+    // requests instead of rejecting any session/update on the shared stream.
     let leaked = client
         .recv_until(Duration::from_secs(3), |m| {
-            is_response_to(m, prompt_2)
-                || m.get("method").and_then(Value::as_str) == Some("session/update")
+            is_response_to(m, prompt_1) || is_response_to(m, prompt_2)
         })
         .await;
     assert!(
         leaked.is_err(),
         "second prompt on the same session must not run while the first is parked; got: {:?}",
         leaked.ok().map(|(_, m)| m)
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        requests_before,
+        "a second prompt must not reach the model while turn 1 awaits permission"
     );
 
     allow_permission(&mut client, &perm_req_id).await;
@@ -2783,6 +2791,15 @@ async fn acp_stdio_same_session_prompts_stay_serial() {
         .await
         .unwrap_or_else(|seen| panic!("second turn never completed; saw: {seen:?}"));
     assert!(resp_2["result"].get("stopReason").is_some(), "{resp_2}");
+    assert_eq!(
+        server
+            .captured_requests()
+            .await
+            .last()
+            .map(|r| r.scenario.as_str()),
+        Some("streaming_text"),
+        "the queued second prompt must run after the first turn completes"
+    );
 
     client.shutdown().await;
     workspace.cleanup();

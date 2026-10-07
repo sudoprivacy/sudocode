@@ -2886,7 +2886,17 @@ fn write_plan_fixture(scenario: Scenario) -> serde_json::Value {
     } else {
         "# Plan\n1. First step\n2. Second step".to_string()
     };
-    json!({"content": content, "context": "mock context", "constraints": "mock constraints", "acceptance": "mock acceptance"})
+    let context = if matches!(scenario, Scenario::WritePlanReview) {
+        "Review all labelled steps from ReviewStep00 through ReviewStep63."
+    } else {
+        "mock context"
+    };
+    let acceptance = if matches!(scenario, Scenario::WritePlanReview) {
+        "The saved plan displays all 64 bullets (ReviewStep00 through ReviewStep63) verbatim in order, and the plan-review UI pages and resizes correctly across the terminal sizes."
+    } else {
+        "mock acceptance"
+    };
+    json!({"content": content, "context": context, "constraints": "mock constraints", "acceptance": acceptance})
 }
 
 fn request_id_for(scenario: Scenario) -> &'static str {

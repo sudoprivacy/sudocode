@@ -429,6 +429,6 @@ keys under the update's own `_meta.sudocode` tell them apart:
   `SendMessage(shutdown_request)` fires; it does not cascade to agents it
   spawned) and answers `{cancelled}`; its `finished` then says `cancelled`.
   Any other agent id, or a session without the opt-in, is `invalid_params`.
-- Sub-agents never ask for permission: they run with a fixed
-  `DangerFullAccess` policy and no prompter, so no `session/request_permission`
-  comes from them.
+- Sub-agents inherit the parent's permission mode. A child tool that requires
+  approval sends `session/request_permission` through the parent's controller
+  connection and waits for its answer. A missing approver denies the call.

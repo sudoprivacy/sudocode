@@ -6582,9 +6582,11 @@ fn build_agent_runtime(
     )?
     .with_parent_execution(job.execution.clone());
     let permission_policy = agent_permission_policy(job.permission_mode);
-    let tool_executor = SubagentToolExecutor::new(allowed_tools)
-        .with_fs(Arc::clone(&job.fs))
-        .with_enforcer(PermissionEnforcer::new(permission_policy.clone()));
+    // ConversationRuntime authorizes every child call against the inherited
+    // policy before dispatch, including the parent's one-call approval. A
+    // second mode-only check here would discard that approval and deny shell
+    // commands even after the parent explicitly allowed them.
+    let tool_executor = SubagentToolExecutor::new(allowed_tools).with_fs(Arc::clone(&job.fs));
     Ok(ConversationRuntime::new(
         // The parent's filesystem, so the transcript `persist_agent_session`
         // writes lands in the store it was told about rather than on the host at
@@ -8099,6 +8101,7 @@ impl SubagentToolExecutor {
         self
     }
 
+    #[cfg(test)]
     fn with_enforcer(mut self, enforcer: PermissionEnforcer) -> Self {
         self.enforcer = Some(enforcer);
         self

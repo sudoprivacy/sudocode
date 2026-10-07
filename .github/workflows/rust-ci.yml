@@ -532,6 +532,7 @@ jobs:
           SCODE_LIVE_MODEL: claude-sonnet-4-6
           SCODE_LIVE_AUTH_PROFILE: sudorouter
           SCODE_LOG_PATH: ${{ runner.temp }}/scode-live-model-trace.jsonl
+          SCODE_LIVE_ARTIFACTS: ${{ runner.temp }}/scode-live-requests
         run: |
           node - <<'NODE'
           const fs = require('fs');
@@ -546,6 +547,7 @@ jobs:
           }), { mode: 0o600 });
           NODE
           cargo test -p rusty-sudocode-cli --test pty_model_flag_priority -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_agent_permission_bubble -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress --test pty_arrow_keys -- --test-threads=1 --nocapture
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cargo test -p rusty-sudocode-cli --test pty_file_operations windows_verbatim_paths_read_the_same_file -- --nocapture
@@ -561,7 +563,9 @@ jobs:
         if: always()
         with:
           name: live-model-evidence-${{ matrix.os }}
-          path: ${{ runner.temp }}/scode-live-model-evidence.json
+          path: |
+            ${{ runner.temp }}/scode-live-model-evidence.json
+            ${{ runner.temp }}/scode-live-requests/**/*.json
           retention-days: 7
       - name: Remove process-tree test credentials
         if: always()

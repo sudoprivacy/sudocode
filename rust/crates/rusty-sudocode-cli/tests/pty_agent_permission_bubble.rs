@@ -1,101 +1,177 @@
-//! PTY live e2e — sub-agent permission prompts bubble up to the
-//! parent process.
-//!
-//! Roadmap coverage: sub-agent CC-fork parity §4.4 Commit 12.
-//!
-//! ## What this exercises (long-workflow, data-flow chained)
-//!
-//! 1. Parent runs in `--permission-mode danger-full-access` (needed
-//!    so the Agent tool itself can dispatch; sudocode's Agent tool
-//!    requires `DangerFullAccess`).
-//! 2. Parent spawns a sub-agent with
-//!    `permission_mode: "bubble"` — the parity-target param that
-//!    documents (and requests) the default sudocode behavior:
-//!    permission escalation prompts from within the sub-agent land
-//!    on the parent process's terminal, not on some (non-existent)
-//!    inner prompter.
-//! 3. The sub-agent performs a small write + emits the sentinel
-//!    marker `BUBBLE_TEST_DONE`.
-//! 4. Success = sentinel surfaces in the parent's report + scode
-//!    exits cleanly, proving the `permission_mode="bubble"` param
-//!    plumbs through end-to-end without breaking the chain.
-//!
-//! The stricter "read-only parent -> sub-agent write triggers a
-//! visible bubble prompt" scenario isn't currently reachable via
-//! sudocode's tool-loop (sub-agent tool restriction happens at
-//! executor-level "tool X not enabled for this sub-agent" errors,
-//! not via a permission prompt). Left as a separate parity target
-//! if sudocode ever grows a permission-gated prompt path for
-//! sub-agents specifically.
-//!
-//! ## Local-only per plan §6.4
-
+//! Child Bash approval on the parent terminal -> fresh invoice -> follow-up.
+//! Run with SCODE_TEST_BACKEND=live and the normal live provider configuration.
 mod common;
 
-use common::{TestEnv, LIVE_TIMEOUT};
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-fn require_live(env: &TestEnv, test_name: &str) -> bool {
-    if env.is_live() {
-        return true;
-    }
-    eprintln!(
-        "SKIP {test_name}: SCODE_TEST_BACKEND=mock — subagent chain \
-         blocked by mock scenario-inheritance gap (plan §6.4)."
-    );
-    false
+use common::TestEnv;
+use serde_json::Value;
+
+const BUDGET: Duration = Duration::from_secs(120);
+
+fn requests(directory: &Path) -> Vec<Value> {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("-messages.json")
+        })
+        .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+        .collect()
 }
 
 #[test]
 fn permission_prompt_from_subagent_bubbles_to_parent_terminal() {
     let env = TestEnv::new("pty-agent-perm-bubble");
-    if !require_live(
-        &env,
-        "permission_prompt_from_subagent_bubbles_to_parent_terminal",
-    ) {
+    if env.is_mock() {
+        eprintln!("SKIP: this workflow requires real parent and child model requests");
         return;
     }
-
-    // Parent in danger-full-access so the Agent tool dispatches
-    // freely; the sub-agent then does a small write and emits the
-    // sentinel. `permission_mode="bubble"` is the parity-target
-    // param we're exercising — its presence in the tool call MUST
-    // NOT break the chain (the schema tests already lock in the
-    // parse; here we prove end-to-end plumb-through under a live
-    // LLM).
-    let prompt = "Follow this workflow: \
-        (1) Use Agent(subagent_type=\"general-purpose\", description=\"tiny write\", \
-            prompt=\"Write the file test-bubble.txt containing exactly the text 'hello'. \
-             Then reply with exactly the marker BUBBLE_TEST_DONE and stop.\", \
-            permission_mode=\"bubble\", \
-            run_in_background=false). \
-        (2) Report the sub-agent's final reply verbatim so the user sees the marker.";
-
-    let mut sess = env.spawn(&["--permission-mode", "danger-full-access", prompt]);
-    let long = LIVE_TIMEOUT.saturating_mul(3);
-    sess.set_default_timeout(long);
-
-    // The BUBBLE_TEST_DONE marker MUST surface. Everything before
-    // that is a chain of: sub-agent tried write -> enforcer
-    // engaged -> parent-side path resolved -> sub-agent finished.
-    sess.expect("BUBBLE_TEST_DONE").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!(
-            "sub-agent chain never completed under permission_mode=bubble: {e}\n\
-             tail (last 800 chars):\n{tail}",
-            tail = screen
-                .chars()
-                .rev()
-                .take(800)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect::<String>(),
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let nonce = format!("BUBBLE_{stamp}");
+    let units = 9 + stamp % 17;
+    let subtotal = units * 29 + 47;
+    std::fs::write(
+        env.workspace_root().join("order.csv"),
+        format!("batch,units,unit_price,delivery\n{nonce},{units},29,47\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        env.workspace_root().join("invoice.py"),
+        r#"import csv
+from pathlib import Path
+root = Path(__file__).resolve().parent
+with (root / 'order.csv').open() as f:
+    order = next(csv.DictReader(f))
+subtotal = int(order['units']) * int(order['unit_price']) + int(order['delivery'])
+result = order['batch'] + ' ' + str(subtotal)
+(root / 'result.txt').write_text(result)
+print(result)
+"#,
+    )
+    .unwrap();
+    let captured = std::env::var_os("SCODE_LIVE_ARTIFACTS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| env.workspace_root().join("requests"))
+        .join(format!("bubble-{stamp}"));
+    std::fs::create_dir_all(&captured).unwrap();
+    let model = common::live_model();
+    let mut cli = env.spawn_with_env(
+        &[
+            "--permission-mode",
+            "workspace-write",
+            "--allowedTools",
+            "Agent",
+        ],
+        &[
+            ("SUDOCODE_INTERRUPT_QUEUE_MODE", "on"),
+            ("SUDOCODE_DUMP_REQUESTS", captured.to_str().unwrap()),
+        ],
+    );
+    cli.resize(48, 260).unwrap();
+    common::expect_screen(&cli, |s| s.contains("❯"), BUDGET, "interactive prompt");
+    let script = env
+        .workspace_root()
+        .join("invoice.py")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let command = format!("python '{script}'");
+    let prompt = format!("Call one Bash Agent with model={model}, run_in_background=false, and this prompt: Run exactly this Bash command once, with no other commands or retries: {command}. Report its actual output. Wait for the child and report its output.");
+    let marker = common::turn_status_marker(&cli);
+    cli.send(&prompt).unwrap();
+    common::expect_screen(
+        &cli,
+        |s| s.contains("report its output."),
+        BUDGET,
+        "agent task input",
+    );
+    cli.send("\r").unwrap();
+    common::expect_screen(
+        &cli,
+        |s| {
+            (s.contains("Approve Bash?") || s.contains("Approve bash?"))
+                && s.contains("invoice.py")
+                && s.contains("Allow this tool call?")
+        },
+        BUDGET,
+        "child Bash approval on the parent terminal",
+    );
+    assert!(
+        !env.workspace_root().join("result.txt").exists(),
+        "child wrote the result before approval"
+    );
+    cli.send("1\r").unwrap();
+    common::expect_turn_complete_after(&cli, &marker, BUDGET, "approved child completed");
+    common::expect_screen(
+        &cli,
+        |s| s.contains(&nonce) && s.contains(&subtotal.to_string()),
+        BUDGET,
+        "actual child data in the parent reply",
+    );
+    let saved = std::fs::read_to_string(env.workspace_root().join("result.txt")).unwrap();
+    assert!(
+        saved.contains(&nonce) && saved.contains(&subtotal.to_string()),
+        "approved child did not persist the actual result: {saved}"
+    );
+    let marker = common::turn_status_marker(&cli);
+    cli.send("Add 13 to that subtotal and reply with the batch code and final total. Use this conversation without tools.\r").unwrap();
+    common::expect_turn_complete_after(&cli, &marker, BUDGET, "follow-up completed");
+    common::expect_screen(
+        &cli,
+        |s| s.contains(&nonce) && s.contains(&(subtotal + 13).to_string()),
+        BUDGET,
+        "child result used in the next turn",
+    );
+    let mut agents = BTreeSet::new();
+    let mut child_commands = BTreeSet::new();
+    for request in requests(&captured) {
+        assert_eq!(
+            request["model"], model,
+            "parent or child used a different model"
         );
-    });
-
-    sess.set_default_timeout(long);
-    let exit = sess.expect_eof().unwrap_or_else(|e| {
-        panic!("scode did not exit cleanly: {e}");
-    });
-    assert_eq!(exit, 0);
+        for message in request["messages"].as_array().unwrap() {
+            let Some(blocks) = message["content"].as_array() else {
+                continue;
+            };
+            for block in blocks {
+                if block["type"] == "tool_use" {
+                    match block["name"].as_str() {
+                        Some("Agent" | "agent_spawn") => {
+                            agents.insert(block["id"].to_string());
+                        }
+                        Some("Bash" | "bash") => {
+                            assert_eq!(block["input"]["command"], command);
+                            child_commands.insert(block["id"].to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                if block["type"] == "tool_result" {
+                    assert_ne!(
+                        block["is_error"], true,
+                        "workflow recovered from a failed tool"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(agents.len(), 1, "the parent retried or omitted its child");
+    assert_eq!(
+        child_commands.len(),
+        1,
+        "the child retried or omitted the invoice command"
+    );
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    eprintln!(
+        "LIVE CHILD APPROVAL PASS: fresh file, terminal Bash approval and follow-up total verified"
+    );
 }

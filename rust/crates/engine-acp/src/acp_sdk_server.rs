@@ -626,7 +626,8 @@ async fn drive_prompt(
         }
 
         if is_slash_command {
-            let mut observer = ObserverAdapter::for_delegate(evt_tx.clone(), engine_blocking.as_ref());
+            let mut observer =
+                ObserverAdapter::for_delegate(evt_tx.clone(), engine_blocking.as_ref());
             let (text, stop) = session_ops::handle_slash_command(
                 &engine_blocking,
                 &config_blocking,
@@ -656,9 +657,8 @@ async fn drive_prompt(
             .as_ref()
             .map(|subagents| subagents.relay.attach_turn(evt_tx.clone()));
         let mut observer = match &subagents {
-            Some(subagents) => {
-                ObserverAdapter::for_delegate(evt_tx, engine_blocking.as_ref()).with_subagent_relay(subagents.relay.clone())
-            }
+            Some(subagents) => ObserverAdapter::for_delegate(evt_tx, engine_blocking.as_ref())
+                .with_subagent_relay(subagents.relay.clone()),
             None => ObserverAdapter::for_delegate(evt_tx, engine_blocking.as_ref()),
         };
         let mut bridge = AcpPermissionBridge {

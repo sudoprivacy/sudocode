@@ -1,6 +1,6 @@
-use std::io::{self, IsTerminal};
 use std::sync::{Arc, Mutex};
 
+use runtime::image_input::{ToolContextAction, ToolOutput};
 use runtime::{
     PermissionMode, PermissionPolicy, QuestionField, QuestionKind, QuestionOption,
     QuestionPromptRequest, QuestionPrompter, ToolError, ToolExecutor, WorkspaceRootHandoff,
@@ -10,42 +10,6 @@ use tools::GlobalToolRegistry;
 
 use crate::config::AllowedToolSet;
 use crate::mcp::RuntimeMcpState;
-
-// ---------------------------------------------------------------------------
-// Global side-channel for the "clear context & execute plan" flow.
-//
-// When the user chooses option 1 ("Clear context & execute") in the
-// write_plan confirmation dialog, the tool executor (running on the ENGINE
-// thread, deep in tool dispatch) stores the plan text here. After the turn,
-// `LiveCli::run_turn()` (the RENDERER thread) reads it and, if set, clears the
-// session and re-runs with the plan as the new prompt. It is a *global* Mutex
-// (not a thread-local) precisely because it must cross the engine↔renderer
-// thread boundary of the seam — and survive tools that dispatch on a worker
-// thread (parallel read-only tools). scode runs one turn at a time, so there is
-// no cross-turn race.
-// ---------------------------------------------------------------------------
-static PENDING_PLAN_EXECUTION: Mutex<Option<String>> = Mutex::new(None);
-
-fn plan_execution_slot() -> std::sync::MutexGuard<'static, Option<String>> {
-    PENDING_PLAN_EXECUTION
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Store a plan for `LiveCli::run_turn` to pick up after the turn.
-fn set_pending_plan_execution(plan: String) {
-    *plan_execution_slot() = Some(plan);
-}
-
-/// Take the pending plan (if any), clearing the slot.
-pub fn take_pending_plan_execution() -> Option<String> {
-    plan_execution_slot().take()
-}
-
-/// Clear the pending plan without returning it.
-pub fn clear_pending_plan_execution() {
-    *plan_execution_slot() = None;
-}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ToolSearchRequest {
@@ -313,6 +277,17 @@ impl ToolExecutor for CliToolExecutor {
         input: &str,
         ctx: &runtime::ToolDispatchContext,
     ) -> Result<String, ToolError> {
+        self.execute_with_attachments(tool_name, input, ctx)
+            .await
+            .map(|output| output.text)
+    }
+
+    async fn execute_with_attachments(
+        &self,
+        tool_name: &str,
+        input: &str,
+        ctx: &runtime::ToolDispatchContext,
+    ) -> Result<ToolOutput, ToolError> {
         // Accept the call under either spelling. A model names tools its own
         // way — `Bash`, `Edit`, `Grep` for `bash`, `edit_file`, `grep_search` —
         // and dispatch canonicalises before matching, so comparing only the raw
@@ -349,14 +324,17 @@ impl ToolExecutor for CliToolExecutor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_some()
         {
-            return self.execute_ask_user_question(value).await;
+            return self
+                .execute_ask_user_question(value)
+                .await
+                .map(ToolOutput::text);
         }
         // Intercept write_plan to ask the user (across the seam) how to
         // proceed. The confirmation crosses via `question_prompter` — the pump's
         // QuestionAdapter emits a QuestionRequest the renderer answers — so it
         // works on every renderer (REPL dialog, iocraft, ACP client) and on
-        // Windows (no raw stdin read_line). `handle_write_plan` itself falls
-        // back to "execute normally" for non-interactive / no-prompter contexts.
+        // Windows without raw stdin access. A renderer without interactive
+        // input answers with no selection; that saves the draft without approval.
         if tool_name == "write_plan"
             && self
                 .question_prompter
@@ -368,7 +346,8 @@ impl ToolExecutor for CliToolExecutor {
         }
 
         let is_mcp_tool = self.tool_registry.has_runtime_tool(&tool_name);
-        if tool_name == "ToolSearch" {
+        let output_name = tool_name.clone();
+        let output = if tool_name == "ToolSearch" {
             self.execute_search_tool(value)
         } else {
             // Core filesystem tools and MCP clients perform blocking work. Keep
@@ -450,7 +429,13 @@ impl ToolExecutor for CliToolExecutor {
             })
             .await
             .map_err(|error| ToolError::new(format!("tool task join error: {error}")))?
-        }
+        }?;
+        let model = ctx
+            .parent_assistant_message
+            .as_ref()
+            .and_then(|message| message.model.as_deref())
+            .unwrap_or("");
+        ToolOutput::from_dispatch(&output_name, output, model)
     }
 
     fn set_abort_signal(&mut self, abort_signal: runtime::HookAbortSignal) {
@@ -571,7 +556,9 @@ impl AskUserQuestionCliInput {
 
         Ok(QuestionPromptRequest {
             title: self.title,
-            description: self.description,
+            description: self
+                .description
+                .map(|text| runtime::PromptText::Markdown(text.into())),
             fields,
         })
     }
@@ -609,7 +596,7 @@ impl CliToolExecutor {
         serde_json::to_string_pretty(&serde_json::json!({
             "status": "answered",
             "title": request.title,
-            "description": request.description,
+            "description": request.description.as_ref().map(runtime::PromptText::as_str),
             "questions": request.fields.iter().map(|field| serde_json::json!({
               "id": field.id,
               "prompt": field.prompt,
@@ -633,54 +620,24 @@ impl CliToolExecutor {
         .map_err(|error| ToolError::new(error.to_string()))
     }
 
-    /// Intercept `write_plan` to present a confirmation dialog after the plan
-    /// is written to the plan file. The plan text comes from the tool `content`
-    /// (the file is the SSOT), never scraped from chat. The user chooses:
-    ///   1. Clear context & execute the plan as a fresh prompt (default)
-    ///   2. Keep context & execute
-    ///   3. Comment (free text) — fed back so the model revises the plan
-    ///   4. Exit plan — stop, do not execute
+    /// Persist the complete document first, then approve the exact stored
+    /// source. The renderer receives Markdown, never a separately composed plan.
     async fn handle_write_plan(
         &self,
         value: &serde_json::Value,
         ctx: &runtime::ToolDispatchContext,
-    ) -> Result<String, ToolError> {
-        // The plan is the `content` argument of this write_plan call — the file
-        // is the source of truth, not the surrounding chat message.
-        let plan_text = value
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-
-        let plan_display = if plan_text.trim().is_empty() {
-            "(no plan text available)".to_string()
-        } else {
-            plan_text.clone()
-        };
-
-        // Run write_plan normally (writes the plan file, returns confirmation).
-        let execute_normally = || {
-            self.tool_registry
-                .execute_with_abort_and_context(
-                    "write_plan",
-                    value,
-                    self.abort_signal.as_ref(),
-                    Some(ctx),
-                )
-                .map_err(ToolError::new)
-        };
-
-        // Non-interactive: no user to ask — keep context & execute.
-        if !io::stdin().is_terminal() {
-            return execute_normally();
-        }
-
-        // Show the FULL plan in the approval dialog — the user reviews the whole
-        // thing before approving. (The plan is also in scrollback + the plan
-        // file; the dialog must not hide any of it behind a "... N more lines"
-        // summary.)
-        let plan_summary = plan_display.clone();
+    ) -> Result<ToolOutput, ToolError> {
+        let saved = self
+            .tool_registry
+            .execute_with_abort_and_context(
+                "write_plan",
+                value,
+                self.abort_signal.as_ref(),
+                Some(ctx),
+            )
+            .map_err(ToolError::new)?;
+        let plan = runtime::plan_store::read_plan(&self.tool_registry.fs_handle())
+            .ok_or_else(|| ToolError::new("saved plan could not be read for approval"))?;
 
         // Ask the user how to proceed — ACROSS THE SEAM. The pump's
         // QuestionAdapter turns this into a QuestionRequest the renderer answers
@@ -688,7 +645,7 @@ impl CliToolExecutor {
         // own way), so it works on Windows too (no raw stdin read_line here).
         let request = QuestionPromptRequest {
             title: Some("Choose an action".to_string()),
-            description: Some(plan_summary),
+            description: Some(runtime::PromptText::Markdown(plan.clone().into())),
             fields: vec![QuestionField {
                 id: "action".to_string(),
                 prompt: "Choose an action".to_string(),
@@ -729,46 +686,32 @@ impl CliToolExecutor {
             .begin_question(&request)?
             .await
             .map_err(ToolError::new)?;
-        let choice = answers
-            .first()
-            .map_or_else(|| "2".to_string(), |answer| answer.value.clone());
-
-        match choice.as_str() {
-            "1" => {
-                let _ = execute_normally()?;
-                // Store the plan for LiveCli::run_turn to pick up: it clears the
-                // session and re-runs with the plan (the file's content) as the
-                // new prompt. The approval + cleared-context indication is added
-                // to that fresh prompt by the renderer.
-                let plan_for_execution = if plan_text.trim().is_empty() {
-                    plan_display
-                } else {
-                    plan_text
-                };
-                set_pending_plan_execution(plan_for_execution);
-                Ok(
-                    "The user APPROVED the plan and chose to clear context and execute it. \
-                     The conversation is being reset; you will receive the approved plan as a \
-                     fresh prompt to implement now."
-                        .to_string(),
-                )
+        // No interactive answer is not approval. One-shot/pipe callers can
+        // save a draft without inventing a human decision or blocking forever.
+        let Some(answer) = answers.first() else {
+            return Ok(ToolOutput::text(saved));
+        };
+        match answer.value.as_str() {
+            "1" | "2" => {
+                if runtime::plan_store::read_plan(&self.tool_registry.fs_handle()).as_deref()
+                    != Some(plan.as_str())
+                {
+                    return Err(ToolError::new(
+                        "The saved plan changed while approval was pending. Present the current plan with write_plan for review before executing.",
+                    ));
+                }
+                let mut output = ToolOutput::text(format!(
+                    "The user APPROVED the plan. Implement it now; do not wait for another \
+                     prompt or request approval of this plan again.\n\n{plan}"
+                ));
+                if answer.value == "1" {
+                    output.context_action = Some(ToolContextAction::RestartFromCurrentExchange);
+                }
+                Ok(output)
             }
-            // Keep context & execute: the plan file is written, the model proceeds.
-            "2" => {
-                let _ = execute_normally()?;
-                Ok(
-                    "The user APPROVED the plan and chose to keep the current context and execute \
-                     it now. Proceed to implement the approved plan (in the plan file / above)."
-                        .to_string(),
-                )
-            }
-            // Exit plan: the plan file is written for reference, but nothing runs.
-            "4" => {
-                let _ = execute_normally()?;
-                Err(ToolError::new(
-                    "User chose to exit plan mode without executing. The plan is saved; do not implement it now — wait for further instructions.",
-                ))
-            }
+            "4" => Err(ToolError::new(
+                "User chose to exit plan mode without executing. The plan is saved; do not implement it now — wait for further instructions.",
+            )),
             // "3" (Keep planning) or any free-text answer is treated as a comment:
             // feed it back so the model revises the plan and calls write_plan again.
             other => {
@@ -779,8 +722,6 @@ impl CliToolExecutor {
                         "User feedback on the plan: {other}\nRevise the plan accordingly and call write_plan again."
                     )
                 };
-                // Persist the plan draft so the revision builds on it.
-                let _ = execute_normally();
                 Err(ToolError::new(feedback))
             }
         }

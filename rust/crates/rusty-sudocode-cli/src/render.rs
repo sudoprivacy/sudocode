@@ -690,6 +690,23 @@ impl TerminalRenderer {
         self.render_markdown_with_width(markdown, query_terminal_width())
     }
 
+    /// Adapt prompt content through the same Markdown engine as answers,
+    /// transcript replay and peer messages. Decode styles once for UI reuse.
+    #[must_use]
+    pub(crate) fn render_prompt_text(
+        &self,
+        content: &runtime::PromptText,
+        width: usize,
+    ) -> styled_text::StyledText {
+        match content {
+            runtime::PromptText::Plain(text) => styled_text::StyledText::from_ansi(text),
+            runtime::PromptText::Markdown(text) => styled_text::StyledText::from_ansi(
+                self.render_markdown_with_width(text, width)
+                    .trim_end_matches('\n'),
+            ),
+        }
+    }
+
     #[must_use]
     pub(crate) fn render_markdown_with_width(&self, markdown: &str, width: usize) -> String {
         let normalized = normalize_nested_fences(markdown);

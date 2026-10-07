@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use telemetry::SessionTracer;
 
 mod response;
+mod tool_context;
 mod tool_execution;
 
 use crate::compact::{
@@ -2028,6 +2029,9 @@ where
                 pending_tool_uses.len(),
             );
 
+            let exchange_start = response
+                .assistant_index
+                .unwrap_or(self.session.messages.len());
             match response.assistant_index {
                 Some(index) => self
                     .session
@@ -2053,13 +2057,16 @@ where
                 self.record_turn_failed(iterations, &error);
                 return Err(error);
             }
-            if response.cancelled {
+            if response.cancelled || self.hook_abort_signal.is_aborted() {
                 return Ok(self.cancelled_summary(
                     assistant_messages,
                     tool_results,
                     prompt_cache_events,
                     iterations,
                 ));
+            }
+            if let Some(action) = response.context_action {
+                self.apply_tool_context_action(action, exchange_start, &mut observer)?;
             }
             if pending_tool_uses.is_empty() {
                 break;

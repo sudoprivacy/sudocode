@@ -219,6 +219,24 @@ terminal foreground, inline code and file links use the syntax theme's green,
 and web links are blue and underlined. Inline code omits literal backticks;
 fenced code has no extra frame or background. Amber remains the UI brand accent.
 
+Plan approval and model question descriptions use the same Markdown renderer
+as assistant answers and transcript replay. Both choice widgets and the legacy
+REPL preserve headings, lists, code, tables, and links. Plain configuration and
+permission descriptions keep their literal text. The live prompt caches its
+formatted document until the source or terminal width changes.
+
+`write_plan` saves the complete Markdown document, including Context,
+Constraints, and Acceptance Criteria, before presenting it for review. The
+saved document is the source for both the preview and the approved tool result.
+If it changes while review is pending, it must be presented again for approval.
+“Clear context & execute” discards exploration messages after the current tool
+exchange completes, then continues execution in the same turn without another
+user prompt. “Keep context & execute” continues with the existing history.
+Clearing preserves the session identity, todos, model, and frozen system/tool
+prefix; the previous history is archived through the normal compaction path.
+Comments and rejection retain the draft. A noninteractive caller saves a draft
+without manufacturing user approval.
+
 Resizing the terminal reflows the live UI in place: status, Todo, and queued
 message panels remain transient rather than leaving duplicate frames in the
 conversation. The current input draft is retained. For UI that fits within

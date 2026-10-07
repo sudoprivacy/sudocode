@@ -125,9 +125,7 @@ use engine_host::session::{
     new_cli_session, new_cli_session_for, resolve_session_reference, write_session_clear_backup,
     SessionHandle,
 };
-use engine_host::tool_executor::{
-    clear_pending_plan_execution, permission_policy, take_pending_plan_execution, CliToolExecutor,
-};
+use engine_host::tool_executor::{permission_policy, CliToolExecutor};
 // The engine CORE cluster now lives below the seam in `engine-host`
 // (`runtime_build` + `session_engine`, re-exported at the crate root). The
 // renderer names these to build a session (`SessionEngine`), drive its non-turn
@@ -2786,11 +2784,14 @@ impl runtime::PermissionPrompter for IocraftQuestionPrompter {
     ) -> runtime::PromptReply<runtime::PermissionPromptDecision> {
         let question = runtime::QuestionPromptRequest {
             title: Some(format!("Approve {}?", request.tool_name)),
-            description: Some(format!(
-                "{}\n{}",
-                request.input,
-                request.reason.as_deref().unwrap_or_default()
-            )),
+            description: Some(
+                format!(
+                    "{}\n{}",
+                    request.input,
+                    request.reason.as_deref().unwrap_or_default()
+                )
+                .into(),
+            ),
             fields: vec![runtime::QuestionField {
                 id: "permission".into(),
                 prompt: "Allow this tool call?".into(),
@@ -3555,7 +3556,7 @@ fn run_repl_iocraft_dispatch(
                                 &repl_ui_cmd,
                                 repl_ui::QuestionPromptView {
                                     title: Some("Model".to_string()),
-                                    description: Some(format!("Current: {current}")),
+                                    description: Some(format!("Current: {current}").into()),
                                     index: 0,
                                     total: 1,
                                     prompt: "Select model".to_string(),
@@ -3994,7 +3995,13 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
             println!("{title}");
         }
         if let Some(description) = &request.description {
-            for line in description.lines() {
+            let rendered = TerminalRenderer::new().render_prompt_text(
+                description,
+                render::query_terminal_width().saturating_sub(2),
+            );
+            let mut text = String::new();
+            rendered.write_ansi(0..rendered.text.len(), &mut text);
+            for line in text.lines() {
                 println!("  {line}");
             }
         }
@@ -4613,7 +4620,6 @@ impl LiveCli {
                 self.print_turn_status_line(&model, turn_start.elapsed(), None, None);
             }
             None => {
-                clear_pending_plan_execution();
                 spinner.fail("❌ Request failed");
                 // The text one-shot path shares this renderer with the REPL.
                 // Report its failure to main so scripts receive a nonzero
@@ -4627,37 +4633,6 @@ impl LiveCli {
             }
         }
 
-        // If the plan confirmation dialog chose "clear context & execute", pick
-        // up the plan and re-run in a fresh session (the engine preserves the
-        // current model across the reset).
-        // "Clear context & execute" = human-in-the-loop compaction: reset the
-        // session, then re-run with the APPROVED plan (the plan file is the SSOT)
-        // plus the todo-continuity block — the same light action auto-compaction
-        // uses — so todos survive the clear. No LLM summarization call needed:
-        // the reviewed plan IS the continuity, which makes this faster than an
-        // automatic compaction. `pending` is just the "user chose clear+execute"
-        // signal; read the plan text from the file, not the in-memory string.
-        if take_pending_plan_execution().is_some() {
-            self.lifecycle.reset_session()?;
-            // The session's filesystem, like the todo list below: the plan the
-            // user approved was written by this session's `write_plan`.
-            let fs = self.lifecycle.session_snapshot().fs_handle();
-            let plan = runtime::plan_store::read_plan(&fs).unwrap_or_default();
-            let mut prompt = String::from(
-                "You are resuming after the user APPROVED your plan and chose to clear the \
-                 conversation. The prior exploration context is gone on purpose; the approved \
-                 plan below is the source of truth. Implement it now.\n\n",
-            );
-            prompt.push_str(&plan);
-            // Through the session's filesystem, like the automatic compaction
-            // this mirrors: the list is the session's, not the process's.
-            let fs = self.lifecycle.session_snapshot().fs_handle();
-            if let Some(todo_block) = runtime::render_todo_continuity_block(fs) {
-                prompt.push_str("\n\n");
-                prompt.push_str(&todo_block);
-            }
-            return self.run_turn_impl(&prompt, interactive_cancel);
-        }
         Ok(())
     }
 

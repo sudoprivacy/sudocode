@@ -5576,3 +5576,54 @@ async fn acp_question_wait_keeps_same_turn_tool_results_streaming() {
     client.shutdown().await;
     workspace.cleanup();
 }
+
+/// Plan approval must work without a TTY and continue inside the same engine
+/// turn. The client supplies only its answer, never a replacement prompt.
+#[tokio::test]
+async fn acp_plan_approval_carries_markdown_and_executes_without_a_new_prompt() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = TestWorkspace::new("stdio-plan-approval");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let session = scenario_session_new(&mut client, &workspace.root).await;
+    set_permission_mode(&mut client, &session, "allow").await;
+    let prompt = client.send_request_no_wait("session/prompt", json!({
+        "sessionId": session,
+        "prompt": [{"type":"text","text":format!("{SCENARIO_PREFIX}plan_execution_roundtrip")}]
+    })).await;
+    let (_, question) = client
+        .recv_until(Duration::from_secs(30), |message| {
+            is_server_request(message, "_scode/ask_user_question")
+        })
+        .await
+        .unwrap_or_else(|seen| panic!("missing plan review: {seen:?}"));
+    assert_eq!(question["params"]["descriptionFormat"], "markdown");
+    let document = question["params"]["description"].as_str().unwrap();
+    assert!(document.contains(mock_anthropic_service::PLAN_REVIEW_MARKDOWN));
+    for section in ["## Context", "## Constraints", "## Acceptance Criteria"] {
+        assert!(document.contains(section));
+    }
+    assert!(!workspace.root.join("plan-executed.txt").exists());
+    client
+        .send_raw(&json!({"jsonrpc":"2.0","id":question["id"],"result":{
+            "answers":[{"id":"action","value":"1","label":"Clear context & execute plan"}]
+        }}))
+        .await;
+    let (_, response) = client
+        .recv_until(Duration::from_secs(30), |message| {
+            is_response_to(message, prompt)
+        })
+        .await
+        .unwrap_or_else(|seen| {
+            panic!("approved plan did not finish its original prompt: {seen:?}")
+        });
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        fs::read_to_string(workspace.root.join("plan-executed.txt")).unwrap(),
+        "completed from approved plan\n"
+    );
+    client.shutdown().await;
+    workspace.cleanup();
+}

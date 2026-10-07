@@ -214,6 +214,8 @@ enum Scenario {
     EditFileRoundtrip,
     GlobSearchRoundtrip,
     WritePlanRoundtrip,
+    PlanExecutionRoundtrip,
+    QuestionMarkdownMany,
     TodoWriteRoundtrip,
     TodoWriteEmptyRoundtrip,
     TodoWriteLifecycleRoundtrip,
@@ -361,6 +363,8 @@ impl Scenario {
             "edit_file_roundtrip" => Some(Self::EditFileRoundtrip),
             "glob_search_roundtrip" => Some(Self::GlobSearchRoundtrip),
             "write_plan_roundtrip" => Some(Self::WritePlanRoundtrip),
+            "plan_execution_roundtrip" => Some(Self::PlanExecutionRoundtrip),
+            "question_markdown_many" => Some(Self::QuestionMarkdownMany),
             "todo_write_roundtrip" => Some(Self::TodoWriteRoundtrip),
             "todo_write_empty_roundtrip" => Some(Self::TodoWriteEmptyRoundtrip),
             "todo_write_lifecycle_roundtrip" => Some(Self::TodoWriteLifecycleRoundtrip),
@@ -439,6 +443,8 @@ impl Scenario {
             Self::EditFileRoundtrip => "edit_file_roundtrip",
             Self::GlobSearchRoundtrip => "glob_search_roundtrip",
             Self::WritePlanRoundtrip => "write_plan_roundtrip",
+            Self::PlanExecutionRoundtrip => "plan_execution_roundtrip",
+            Self::QuestionMarkdownMany => "question_markdown_many",
             Self::TodoWriteRoundtrip => "todo_write_roundtrip",
             Self::TodoWriteEmptyRoundtrip => "todo_write_empty_roundtrip",
             Self::TodoWriteLifecycleRoundtrip => "todo_write_lifecycle_roundtrip",
@@ -782,6 +788,13 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
     }
     if from_marker.is_some() {
         return from_marker;
+    }
+    // A context reset deliberately drops the original user scenario marker.
+    // Continue this fixture from its retained tool exchange, like a provider.
+    if request.messages.iter().flat_map(|message| &message.content).any(|block| {
+        matches!(block, InputContentBlock::ToolUse { id, .. } if id.starts_with("toolu_plan_execution_"))
+    }) {
+        return Some(Scenario::PlanExecutionRoundtrip);
     }
 
     None
@@ -1390,8 +1403,64 @@ fn read_roundtrip_input(scenario: Scenario) -> Value {
     json!({"path": path})
 }
 
+/// A complete document shared by rendering and approval-continuation PTYs.
+pub const PLAN_REVIEW_MARKDOWN: &str = "# Review plan\n\n**Verify bold** and `src/main.rs`.\n\n1. Create `plan-executed.txt` containing `completed from approved plan`.\n2. Preserve 中文 and e\u{301}.\n\n```rust\nlet verified = true;\n```\n\n| Step | Result |\n| --- | --- |\n| Review | Ready |\n\n[Reference](https://example.com)";
+
+fn plan_fixture_response(request: &MessageRequest, scenario: Scenario) -> MessageResponse {
+    let results = tool_results_by_name(request);
+    if scenario == Scenario::QuestionMarkdownMany {
+        if results.contains_key("AskUserQuestion") {
+            return text_message_response("msg_question_markdown_done", "Question answered.");
+        }
+        return tool_message_response(
+            "msg_question_markdown",
+            "toolu_question_markdown",
+            "AskUserQuestion",
+            json!({
+                "title": "Markdown question", "description": PLAN_REVIEW_MARKDOWN,
+                "questions": [{"id": "choice", "prompt": "Select an option", "kind": "single_select",
+                    "options": (1..=12).map(|n| json!({"label": format!("Option {n}"), "value": n.to_string()})).collect::<Vec<_>>() }]
+            }),
+        );
+    }
+    if results.contains_key("write_file") {
+        return text_message_response("msg_plan_execution_done", "Plan execution finished.");
+    }
+    if let Some((result, failed)) = results.get("write_plan") {
+        if !failed && result.contains("The user APPROVED the plan") {
+            return tool_message_response(
+                "msg_plan_execution_write",
+                "toolu_plan_execution_write",
+                "write_file",
+                json!({"path":"plan-executed.txt", "content":"completed from approved plan\n"}),
+            );
+        }
+        return text_message_response("msg_plan_execution_draft", "Plan remains a draft.");
+    }
+    tool_message_response(
+        "msg_plan_execution_review",
+        "toolu_plan_execution_review",
+        "write_plan",
+        json!({
+            "content": PLAN_REVIEW_MARKDOWN, "context":"Review context marker", "constraints":"Only write the approved artifact.",
+            "acceptance":"The artifact contains the approved text."
+        }),
+    )
+}
+
 fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
     match scenario {
+        Scenario::PlanExecutionRoundtrip | Scenario::QuestionMarkdownMany => {
+            let response = plan_fixture_response(request, scenario);
+            match &response.content[0] {
+                OutputContentBlock::ToolUse {
+                    id, name, input, ..
+                } => tool_use_sse(id, name, &[&input.to_string()]),
+                OutputContentBlock::Text { text } => final_text_sse(text),
+                _ => unreachable!("plan fixture only emits text or a tool"),
+            }
+        }
+
         Scenario::SpinnerActivity => spinner_activity_stream()
             .into_iter()
             .map(|(_, chunk)| chunk)
@@ -1996,6 +2065,10 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
 #[allow(clippy::too_many_lines)]
 fn build_message_response(request: &MessageRequest, scenario: Scenario) -> MessageResponse {
     match scenario {
+        Scenario::PlanExecutionRoundtrip | Scenario::QuestionMarkdownMany => {
+            plan_fixture_response(request, scenario)
+        }
+
         Scenario::SpinnerActivity => text_message_response(
             "msg_activity",
             "progress progress progress progress progress resumed",
@@ -2774,6 +2847,8 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::EditFileRoundtrip => "req_edit_file_roundtrip",
         Scenario::GlobSearchRoundtrip => "req_glob_search_roundtrip",
         Scenario::WritePlanRoundtrip => "req_write_plan_roundtrip",
+        Scenario::PlanExecutionRoundtrip => "req_plan_execution_roundtrip",
+        Scenario::QuestionMarkdownMany => "req_question_markdown_many",
         Scenario::TodoWriteRoundtrip => "req_todo_write_roundtrip",
         Scenario::TodoWriteEmptyRoundtrip => "req_todo_write_empty_roundtrip",
         Scenario::TodoWriteLifecycleRoundtrip => "req_todo_write_lifecycle_roundtrip",

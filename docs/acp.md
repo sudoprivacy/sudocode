@@ -57,6 +57,18 @@ session and independent across sessions:
   Setup and legacy slash operations that use the process working directory
   acquire a directory lease while they run.
 
+### Question descriptions and plan approval
+
+`_scode/ask_user_question` keeps `description` as a string and supplies optional
+`descriptionFormat` (`"plain"` or `"markdown"`) when a description is present.
+Clients can render model questions and plan reviews as Markdown while keeping
+configuration and permission text literal.
+
+Plan approval runs through this same question exchange even when the engine
+has no terminal. Selecting “Clear context & execute” continues inside the
+engine's current turn after clearing exploration history; the client does not
+need to submit a replacement prompt. No answer does not approve execution.
+
 ### Cancelling a foreground shell tool
 
 Cancelling a turn terminates the running Bash command's process group, including

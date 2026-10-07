@@ -166,10 +166,59 @@ impl QuestionKind {
     }
 }
 
+/// Human-facing prompt content. Formatting is explicit; shell commands and
+/// paths must never be guessed to be Markdown. Clones share the immutable source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptText {
+    Plain(std::sync::Arc<str>),
+    Markdown(std::sync::Arc<str>),
+}
+
+impl PromptText {
+    #[must_use]
+    pub fn format_name(&self) -> &'static str {
+        match self {
+            Self::Plain(_) => "plain",
+            Self::Markdown(_) => "markdown",
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Plain(text) | Self::Markdown(text) => text,
+        }
+    }
+
+    /// Constant-time identity for derived presentation caches. An edited source
+    /// gets a new allocation; rendering never mutates the source itself.
+    #[must_use]
+    pub fn same_source(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Plain(a), Self::Plain(b)) | (Self::Markdown(a), Self::Markdown(b)) => {
+                std::sync::Arc::ptr_eq(a, b)
+            }
+            _ => false,
+        }
+    }
+}
+
+impl From<String> for PromptText {
+    fn from(text: String) -> Self {
+        Self::Plain(text.into())
+    }
+}
+
+impl From<&str> for PromptText {
+    fn from(text: &str) -> Self {
+        Self::Plain(text.into())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestionPromptRequest {
     pub title: Option<String>,
-    pub description: Option<String>,
+    pub description: Option<PromptText>,
     pub fields: Vec<QuestionField>,
 }
 

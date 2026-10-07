@@ -34,6 +34,9 @@
 // field of an `EngineEvent` / `EngineCommand` without ever naming `runtime`
 // (or the lower `api`) directly. These are plain data — no behaviour crosses
 // the seam.
+pub use runtime::background_tasks::{
+    BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
+};
 pub use runtime::{
     // Prompt-cache + auto-compaction telemetry (AssistantEvent::PromptCache,
     // TurnSummary::auto_compaction).
@@ -76,6 +79,15 @@ pub use runtime::{
     // progress notifications). The renderer formats it — no ANSI crosses.
     ToolProgressEvent,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackgroundTaskAction {
+    /// Subscribe to the current session tasks and subsequent changes.
+    Watch,
+    Stop {
+        id: String,
+    },
+}
 
 /// Monotonic identifier correlating a [`EngineEvent::PermissionRequest`] /
 /// [`EngineEvent::QuestionRequest`] emitted by the engine with the matching
@@ -142,17 +154,25 @@ pub struct TurnComplete {
 pub enum EngineEvent {
     /// A new turn has begun. `label` is a short human description (e.g. the
     /// first line of the prompt) for progress display.
-    TurnStarted { label: String },
+    TurnStarted {
+        label: String,
+    },
     /// Lifecycle transition. See [`EngineState`].
     State(EngineState),
     /// Wire model id resolved from the API response's `message_start`
     /// (was `AssistantEvent::Model`, previously only reaching `TurnSummary`).
-    ModelResolved { wire_model: String },
+    ModelResolved {
+        wire_model: String,
+    },
     /// Incremental thinking/reasoning text (was
     /// `RuntimeObserver::on_thinking_delta`).
-    ThinkingDelta { text: String },
+    ThinkingDelta {
+        text: String,
+    },
     /// Incremental assistant text (was `RuntimeObserver::on_text_delta`).
-    TextDelta { text: String },
+    TextDelta {
+        text: String,
+    },
     /// End of one provider assistant message, before tool execution.
     MessageComplete,
     /// The model requested a tool call (was `RuntimeObserver::on_tool_use`).
@@ -233,19 +253,31 @@ pub enum EngineEvent {
     },
     /// The active permission mode changed (in response to
     /// [`EngineCommand::SetPermissionMode`]).
-    PermissionModeChanged { mode: PermissionMode },
+    PermissionModeChanged {
+        mode: PermissionMode,
+    },
     /// What a spawned sub-agent is doing (was invisible: the child runtime
     /// had no observer). Only emitted when the renderer attached a
     /// `SubagentRelay` to its observer; may arrive after the spawning turn
     /// ended when the agent runs in the background.
     Subagent(SubagentEvent),
+    /// Session-owned shells and child tasks, including updates while idle.
+    BackgroundTask(BackgroundTaskEvent),
+    BackgroundTaskError {
+        id: String,
+        message: String,
+    },
     /// The turn finished (or was cancelled). Absorbs `runtime::TurnSummary`.
     TurnComplete(TurnComplete),
     /// A turn or command failed. `message` is renderer-facing text.
-    Error { message: String },
+    Error {
+        message: String,
+    },
     /// Free-form informational text: slash-command output, a compaction
     /// notice, or a friendly (non-fatal) message.
-    Notice { text: String },
+    Notice {
+        text: String,
+    },
 }
 
 /// Renderer → engine. The sole inward type crossing the seam.
@@ -260,6 +292,8 @@ pub enum EngineCommand {
     Prompt { blocks: Vec<ContentBlock> },
     /// Cancel the in-flight turn (was `abort_signal.abort()`).
     Cancel,
+    /// Inspect or stop session-owned background work without interrupting a turn.
+    BackgroundTask { action: BackgroundTaskAction },
     /// Switch the active model; the engine replies with
     /// [`EngineEvent::ModelChanged`].
     SetModel { model: String },

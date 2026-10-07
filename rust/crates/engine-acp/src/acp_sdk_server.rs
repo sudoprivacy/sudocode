@@ -1691,7 +1691,7 @@ pub(crate) async fn run_acp_on_transport(
                             }
 
                             if is_slash_command {
-                                let mut observer = ObserverAdapter::new(evt_tx.clone());
+                                let mut observer = ObserverAdapter::for_delegate(evt_tx.clone(), engine_blocking.as_ref());
                                 let (text, stop) = session_ops::handle_slash_command(
                                     &engine_blocking,
                                     &config_blocking,
@@ -1725,9 +1725,9 @@ pub(crate) async fn run_acp_on_transport(
                                 .as_ref()
                                 .map(|subagents| subagents.relay.attach_turn(evt_tx.clone()));
                             let mut observer = match &subagents {
-                                Some(subagents) => ObserverAdapter::new(evt_tx)
+                                Some(subagents) => ObserverAdapter::for_delegate(evt_tx, engine_blocking.as_ref())
                                     .with_subagent_relay(subagents.relay.clone()),
-                                None => ObserverAdapter::new(evt_tx),
+                                None => ObserverAdapter::for_delegate(evt_tx, engine_blocking.as_ref()),
                             };
                             let mut bridge = AcpPermissionBridge { tx: bridge_tx, queue };
                             let blocks = vec![runtime::ContentBlock::Text {

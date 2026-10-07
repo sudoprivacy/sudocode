@@ -143,6 +143,7 @@ pub struct CompactionOutcome {
 }
 
 pub struct SessionEngine {
+    background_tasks: runtime::background_tasks::BackgroundTasks,
     session: std::sync::Mutex<AcpCliSession>,
     /// The session's blocking runtime for turn work. `Option` so `Drop` can take
     /// it and `shutdown_background()` it: the seam pump owns this delegate and
@@ -236,6 +237,7 @@ impl SessionEngine {
             memory,
         };
         Ok(Self {
+            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
             session: std::sync::Mutex::new(session),
             tokio_runtime: Some(
                 tokio::runtime::Runtime::new()
@@ -318,6 +320,7 @@ impl SessionEngine {
             memory,
         };
         Ok(Self {
+            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
             session: std::sync::Mutex::new(session),
             tokio_runtime: Some(
                 tokio::runtime::Runtime::new()
@@ -677,6 +680,7 @@ async fn wait_for_abort(signal: &runtime::HookAbortSignal) {
 
 impl Drop for SessionEngine {
     fn drop(&mut self) {
+        self.background_tasks.shutdown();
         // The seam pump (`EngineSession::spawn`) owns this delegate and, on a
         // one-shot exit, drops the last `Arc` from inside its own async context
         // (`rt.block_on(drive)`). Dropping a `tokio::runtime::Runtime` there
@@ -856,7 +860,12 @@ impl engine_core::EngineDelegate for SessionEngine {
         Ok(String::new())
     }
 
+    fn background_tasks(&self) -> Option<runtime::background_tasks::BackgroundTasks> {
+        Some(self.background_tasks.clone())
+    }
+
     fn close(&self) {
+        self.background_tasks.shutdown();
         let session = self.lock_session();
         let path = session.handle.path.clone();
         let _ = session.runtime.session().save_to_path(&path);

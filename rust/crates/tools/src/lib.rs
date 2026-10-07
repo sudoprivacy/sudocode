@@ -265,8 +265,7 @@ use runtime::{
     agent_mailbox::{kinds as mailbox_kinds, MailboxEnvelope},
     check_freshness,
     cron_registry::CronRegistry,
-    current_workspace_root, dedupe_superseded_commit_events, edit_file, execute_bash_with_abort,
-    glob_search,
+    current_workspace_root, dedupe_superseded_commit_events, edit_file, glob_search,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     read_file,
     summary_compression::compress_summary_text,
@@ -1458,7 +1457,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         // as a field alias for `pid` so older prompts still work.
         ToolSpec {
             name: "pid_kill",
-            description: "Terminate a running agent by pid.",
+            description: "Terminate a running agent or background terminal by pid.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1473,7 +1472,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "pid_status",
             description: concat!(
                 "Query the status of one or all agent pids. ",
-                "With `pid`: returns that agent's status. ",
+                "With `pid`: returns that agent or background terminal's status. ",
                 "Without `pid`: lists every spawned agent and its status."
             ),
             input_schema: json!({
@@ -1493,7 +1492,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "pid_output",
             description: concat!(
                 "Retrieve output from a pid (background agent or task). ",
-                "Set `block: true` to wait until the agent finishes (max 60s per call); ",
+                "Set `block: true` to wait until the agent or terminal finishes (max 60s per call); ",
                 "if it is still running the response has retrieval_status=\"timeout\" — ",
                 "call again to keep waiting. ",
                 "`merge: true` merges the agent's result into the caller's context."
@@ -1822,7 +1821,11 @@ fn execute_tool_with_enforcer(
             let bash_input: BashCommandInput = from_value(input)?;
             let classified_mode = classify_bash_permission(&bash_input.command);
             maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
-            run_bash(bash_input, abort_signal)
+            run_bash(
+                bash_input,
+                abort_signal,
+                ctx.and_then(|ctx| ctx.background_tasks.as_ref()),
+            )
         }
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
@@ -1882,7 +1885,11 @@ fn execute_tool_with_enforcer(
             let ps_input: PowerShellInput = from_value(input)?;
             let classified_mode = classify_powershell_permission(&ps_input.command);
             maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
-            run_powershell(ps_input, abort_signal)
+            run_powershell(
+                ps_input,
+                abort_signal,
+                ctx.and_then(|ctx| ctx.background_tasks.as_ref()),
+            )
         }
         "AskUserQuestion" => {
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
@@ -1893,16 +1900,59 @@ fn execute_tool_with_enforcer(
         // The pid.* family — agent process control.
         "pid_kill" => {
             let input = normalize_pid_input(input);
+            if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
+                if let Some(id) = input
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| tasks.get(id).is_some())
+                {
+                    tasks.stop(id)?;
+                    let status = tasks
+                        .get(id)
+                        .map_or("unavailable", |task| task.status.label());
+                    return to_pretty_json(json!({"pid": id, "status": status}));
+                }
+            }
             from_value::<TaskIdInput>(&input).and_then(|input| run_pid_kill(input, fs.as_ref()))
         }
         "pid_status" => {
             let input = normalize_pid_input(input);
+            if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
+                if let Some(task) = input
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| tasks.get(id))
+                {
+                    if task.kind == runtime::background_tasks::BackgroundTaskKind::Terminal {
+                        return background_shell_result(&task, false);
+                    }
+                }
+            }
             run_pid_status(input, fs.as_ref())
         }
         "pid_output" => {
             let input = normalize_pid_output_input(input);
-            from_value::<TaskOutputInput>(&input)
-                .and_then(|input| run_pid_output(input, fs.as_ref()))
+            let parsed: TaskOutputInput = from_value(&input)?;
+            if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
+                if let Some(id) = parsed.agent_id.as_deref().or(parsed.task_id.as_deref()) {
+                    if tasks.get(id).is_some_and(|t| {
+                        t.kind == runtime::background_tasks::BackgroundTaskKind::Terminal
+                    }) {
+                        let timeout = if parsed.block {
+                            Duration::from_millis(
+                                parsed.timeout_ms.min(agent_await_timeout_cap_ms()),
+                            )
+                        } else {
+                            Duration::ZERO
+                        };
+                        let task = tasks
+                            .wait(id, timeout, abort_signal)
+                            .ok_or_else(|| format!("pid not found: {id}"))?;
+                        return background_shell_result(&task, parsed.block);
+                    }
+                }
+            }
+            run_pid_output(parsed, fs.as_ref())
         }
         "agent_list" => run_agent_list(input, fs.as_ref()),
         // Defense in depth: the specs are already hidden when the host owns
@@ -2392,6 +2442,16 @@ fn run_pid_output(input: TaskOutputInput, fs: &dyn FsBackend) -> Result<String, 
         }
     }
     Ok(result)
+}
+
+fn background_shell_result(
+    task: &runtime::background_tasks::BackgroundTask,
+    waited: bool,
+) -> Result<String, String> {
+    to_pretty_json(
+        json!({"pid": task.id, "status": task.status.label(), "stdout": task.output, "exit_code": task.exit_code, "rawOutputPath": task.output_path,
+        "retrieval_status": if task.status.is_active() { if waited { "timeout" } else { "not_ready" } } else { "success" }}),
+    )
 }
 
 const DEFAULT_AGENT_AWAIT_TIMEOUT_MS: u64 = 30_000;
@@ -3384,13 +3444,14 @@ fn has_dangerous_paths(command: &str) -> bool {
 fn run_bash(
     input: BashCommandInput,
     abort_signal: Option<&HookAbortSignal>,
+    tasks: Option<&runtime::background_tasks::BackgroundTasks>,
 ) -> Result<String, String> {
     if let Some(output) = workspace_test_branch_preflight(&input.command) {
         return serde_json::to_string_pretty(&output.model_output())
             .map_err(|error| error.to_string());
     }
     serde_json::to_string_pretty(
-        &execute_bash_with_abort(input, abort_signal)
+        &runtime::execute_bash_with_tasks(input, abort_signal, tasks)
             .map_err(|error| error.to_string())?
             .model_output(),
     )
@@ -4009,8 +4070,12 @@ fn is_within_workspace(path: &str) -> bool {
 fn run_powershell(
     input: PowerShellInput,
     abort_signal: Option<&HookAbortSignal>,
+    tasks: Option<&runtime::background_tasks::BackgroundTasks>,
 ) -> Result<String, String> {
-    to_pretty_json(execute_powershell(input, abort_signal).map_err(|error| error.to_string())?)
+    to_pretty_json(
+        execute_powershell_in_session(&input, abort_signal, tasks)
+            .map_err(|error| error.to_string())?,
+    )
 }
 
 fn to_pretty_json<T: serde::Serialize>(value: T) -> Result<String, String> {
@@ -4562,10 +4627,11 @@ struct AgentJob {
 struct SubagentLink {
     /// The spawning side: the parent session, or the stream of the agent
     /// that spawned this one.
-    spawner: SubagentSink,
+    spawner: Option<SubagentSink>,
     /// This agent's own stream.
     scope: Arc<SubagentScope>,
     identity: SubagentIdentity,
+    tasks: Option<runtime::background_tasks::BackgroundTasks>,
 }
 
 impl SubagentLink {
@@ -4575,9 +4641,17 @@ impl SubagentLink {
         background: bool,
     ) -> Option<Self> {
         let ctx = ctx?;
-        let spawner = ctx.subagent_sink.clone()?;
-        let spawn_call_id = spawner.visible_tool_call_id(ctx.tool_use_id.as_deref()?);
+        let spawner = ctx.subagent_sink.clone();
+        if spawner.is_none() && ctx.background_tasks.is_none() {
+            return None;
+        }
+        let tool_id = ctx.tool_use_id.as_deref()?;
+        let spawn_call_id = spawner.as_ref().map_or_else(
+            || tool_id.to_string(),
+            |sink| sink.visible_tool_call_id(tool_id),
+        );
         Some(Self {
+            tasks: ctx.background_tasks.clone(),
             scope: Arc::new(SubagentScope::new(manifest.agent_id.clone(), spawn_call_id)),
             spawner,
             identity: SubagentIdentity {
@@ -4595,12 +4669,37 @@ impl SubagentLink {
     /// The observer the child runtime reports through.
     fn observer(&self) -> SubagentForwarder {
         SubagentForwarder {
-            sink: self.spawner.scoped(Arc::clone(&self.scope)),
+            sink: self
+                .spawner
+                .as_ref()
+                .map(|sink| sink.scoped(Arc::clone(&self.scope))),
+            tasks: self
+                .tasks
+                .as_ref()
+                .map(|tasks| tasks.for_agent(&self.identity.agent_id)),
+            agent_id: self.identity.agent_id.clone(),
         }
     }
 
-    fn emit_started(&self, manifest: &AgentOutput) {
-        self.spawner.emit_lifecycle(
+    fn emit_started(&self, manifest: &AgentOutput, abort: HookAbortSignal) {
+        if let Some(tasks) = &self.tasks {
+            let mut task = runtime::background_tasks::BackgroundTask::new(
+                self.identity.agent_id.clone(),
+                runtime::background_tasks::BackgroundTaskKind::Agent,
+                self.identity.description.clone(),
+            );
+            task.background = self.identity.background;
+            task.activity = self
+                .identity
+                .subagent_type
+                .clone()
+                .unwrap_or_else(|| "working".into());
+            tasks.register(task, abort);
+        }
+        let Some(spawner) = &self.spawner else {
+            return;
+        };
+        spawner.emit_lifecycle(
             &self.scope,
             SubagentLifecycle {
                 tool_call_id: self.scope.parent_tool_call_id().to_string(),
@@ -4618,29 +4717,50 @@ impl SubagentLink {
 
     /// Report the end of the run from the manifest it persisted. `aborted`
     /// means the agent was stopped from outside (cancel / shutdown request),
-    /// which the manifest itself does not record.
+    /// used only if no terminal manifest could be read.
     fn emit_finished(&self, fallback: &AgentOutput, aborted: bool, fs: &dyn FsBackend) {
         // The manifest is in the store, so it is read on the store's filesystem —
         // a co-hosted agent's lifecycle event would otherwise report the fallback
         // status forever, having looked for the manifest on the daemon's disk.
-        let manifest = fs
+        let mut manifest = fs
             .read_to_string(&fallback.manifest_file)
             .ok()
             .and_then(|text| serde_json::from_str::<AgentOutput>(&text).ok())
             .unwrap_or_else(|| fallback.clone());
-        let status = if aborted {
-            String::from("cancelled")
-        } else {
-            manifest.status.clone()
+        // A stop that races an already-persisted completion cannot change it.
+        if aborted && !is_terminal_agent_status(&manifest.status) {
+            manifest.status = "cancelled".into();
+        }
+        let status = manifest.status.clone();
+        if let Some(tasks) = &self.tasks {
+            if matches!(status.as_str(), "cancelled" | "stopped" | "killed") {
+                let _ = tasks.stop(&self.identity.agent_id);
+            }
+            tasks.update(&self.identity.agent_id, |task| {
+                task.status = if matches!(status.as_str(), "cancelled" | "stopped" | "killed") {
+                    runtime::background_tasks::BackgroundTaskStatus::Cancelled
+                } else if status == "completed" {
+                    runtime::background_tasks::BackgroundTaskStatus::Completed
+                } else {
+                    runtime::background_tasks::BackgroundTaskStatus::Failed
+                };
+                if let Some(result) = &manifest.result {
+                    task.output.clone_from(result);
+                }
+                task.activity = manifest.error.clone().unwrap_or_default();
+                task.output_path = Some(
+                    manifest
+                        .result_full_path
+                        .clone()
+                        .unwrap_or_else(|| manifest.output_file.clone()),
+                );
+            });
+        }
+        let Some(spawner) = &self.spawner else {
+            return;
         };
-        let completion_notification = if aborted {
-            let mut cancelled = manifest.clone();
-            cancelled.status.clone_from(&status);
-            render_manifest_task_notification(&cancelled)
-        } else {
-            render_manifest_task_notification(&manifest)
-        };
-        self.spawner.emit_lifecycle(
+        let completion_notification = render_manifest_task_notification(&manifest);
+        spawner.emit_lifecycle(
             &self.scope,
             SubagentLifecycle {
                 tool_call_id: self.scope.parent_tool_call_id().to_string(),
@@ -4661,33 +4781,68 @@ impl SubagentLink {
 /// Tool call ids are namespaced with the agent id, and the agent's own sink is
 /// handed to its tool dispatch so agents it spawns report under it.
 struct SubagentForwarder {
-    sink: SubagentSink,
+    sink: Option<SubagentSink>,
+    tasks: Option<runtime::background_tasks::BackgroundTasks>,
+    agent_id: String,
 }
 
 impl RuntimeObserver for SubagentForwarder {
     fn on_text_delta(&mut self, delta: &str) {
-        self.sink.emit_in_scope(SubagentUpdate::TextDelta {
+        if let Some(tasks) = &self.tasks {
+            tasks.update(&self.agent_id, |task| {
+                task.activity = "responding".into();
+                task.output.push_str(delta);
+            });
+        }
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        sink.emit_in_scope(SubagentUpdate::TextDelta {
             text: delta.to_string(),
         });
     }
 
     fn on_thinking_delta(&mut self, delta: &str) {
-        self.sink.emit_in_scope(SubagentUpdate::ThinkingDelta {
+        if let Some(tasks) = &self.tasks {
+            tasks.update(&self.agent_id, |task| task.activity = "thinking".into());
+        }
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        sink.emit_in_scope(SubagentUpdate::ThinkingDelta {
             text: delta.to_string(),
         });
     }
 
     fn on_tool_use(&mut self, id: &str, name: &str, input: &str) {
-        self.sink.emit_in_scope(SubagentUpdate::ToolCall {
-            id: self.sink.visible_tool_call_id(id),
+        if let Some(tasks) = &self.tasks {
+            tasks.update(&self.agent_id, |task| {
+                task.activity = format!("{name}: {}", input.chars().take(120).collect::<String>());
+            });
+        }
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        sink.emit_in_scope(SubagentUpdate::ToolCall {
+            id: sink.visible_tool_call_id(id),
             name: name.to_string(),
             input: input.to_string(),
         });
     }
 
     fn on_tool_result(&mut self, tool_use_id: &str, tool_name: &str, output: &str, is_error: bool) {
-        self.sink.emit_in_scope(SubagentUpdate::ToolResult {
-            id: self.sink.visible_tool_call_id(tool_use_id),
+        if let Some(tasks) = &self.tasks {
+            tasks.update(&self.agent_id, |task| {
+                use std::fmt::Write as _;
+                let _ = write!(task.output, "\n{tool_name}:\n{output}\n");
+                task.activity = "working".into();
+            });
+        }
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        sink.emit_in_scope(SubagentUpdate::ToolResult {
+            id: sink.visible_tool_call_id(tool_use_id),
             name: tool_name.to_string(),
             output: output.to_string(),
             is_error,
@@ -4695,7 +4850,10 @@ impl RuntimeObserver for SubagentForwarder {
     }
 
     fn subagent_sink(&self) -> Option<SubagentSink> {
-        Some(self.sink.clone())
+        self.sink.clone()
+    }
+    fn background_tasks(&self) -> Option<runtime::background_tasks::BackgroundTasks> {
+        self.tasks.clone()
     }
 }
 
@@ -5666,7 +5824,7 @@ fn prepare_agent_job(
         permission_mode,
     };
     if let Some(link) = &job.subagent {
-        link.emit_started(&manifest);
+        link.emit_started(&manifest, job.abort_signal.clone());
     }
     Ok(PreparedAgent { manifest, job })
 }
@@ -5794,25 +5952,7 @@ where
     let Some(threshold) = auto_background_threshold() else {
         // Auto-bg disabled — original fully-sync path.
         let abort_signal = job.abort_signal.clone();
-        let outcome = match work_fn(job) {
-            Ok(final_text) => persist_agent_terminal_state(
-                &manifest,
-                "completed",
-                Some(final_text.as_str()),
-                None,
-                fs.as_ref(),
-            ),
-            Err(error) => {
-                let _ = persist_agent_terminal_state(
-                    &manifest,
-                    "failed",
-                    None,
-                    Some(error.clone()),
-                    fs.as_ref(),
-                );
-                Err(format!("sub-agent failed: {error}"))
-            }
-        };
+        let outcome = persist_agent_outcome(&manifest, work_fn(job), &abort_signal, fs.as_ref());
         if let Some(link) = &subagent {
             link.emit_finished(&manifest, abort_signal.is_aborted(), fs.as_ref());
         }
@@ -5836,35 +5976,8 @@ where
         // Worker threads carry the parent turn's workspace root with them.
         let _workspace = workspace.enter();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work_fn(job)));
-        match result {
-            Ok(Ok(final_text)) => {
-                let _ = persist_agent_terminal_state(
-                    &bg_manifest,
-                    "completed",
-                    Some(final_text.as_str()),
-                    None,
-                    bg_fs.as_ref(),
-                );
-            }
-            Ok(Err(err)) => {
-                let _ = persist_agent_terminal_state(
-                    &bg_manifest,
-                    "failed",
-                    None,
-                    Some(err),
-                    bg_fs.as_ref(),
-                );
-            }
-            Err(_) => {
-                let _ = persist_agent_terminal_state(
-                    &bg_manifest,
-                    "failed",
-                    None,
-                    Some(String::from("sub-agent thread panicked")),
-                    bg_fs.as_ref(),
-                );
-            }
-        }
+        let outcome = result.unwrap_or_else(|_| Err("sub-agent thread panicked".into()));
+        let _ = persist_agent_outcome(&bg_manifest, outcome, &bg_abort_signal, bg_fs.as_ref());
         // Before the completion notice: that is what releases the waiting
         // parent, whose own tool result must come after this agent's end.
         if let Some(link) = &subagent {
@@ -5876,7 +5989,12 @@ where
 
     match global_agent_registry().await_agent(&agent_id, threshold) {
         Ok(final_manifest) => Ok(final_manifest),
-        Err(e) if e.contains("timed out") => Ok(mark_manifest_backgrounded(&manifest, fs.as_ref())),
+        Err(e) if e.contains("timed out") => {
+            if let Some(tasks) = ctx.and_then(|ctx| ctx.background_tasks.as_ref()) {
+                tasks.update(&manifest.agent_id, |task| task.background = true);
+            }
+            Ok(mark_manifest_backgrounded(&manifest, fs.as_ref()))
+        }
         Err(e) => Err(e),
     }
 }
@@ -5926,38 +6044,11 @@ fn run_spawned_agent_job(job: AgentJob) {
     // Worker threads carry the parent turn's workspace root with them.
     let _workspace = job.workspace.enter();
     let agent_id = job.manifest.agent_id.clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_agent_job_returning_text(&job).and_then(|text| {
-            persist_agent_terminal_state(
-                &job.manifest,
-                "completed",
-                Some(text.as_str()),
-                None,
-                job.fs.as_ref(),
-            )
-        })
-    }));
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            let _ = persist_agent_terminal_state(
-                &job.manifest,
-                "failed",
-                None,
-                Some(error),
-                job.fs.as_ref(),
-            );
-        }
-        Err(_) => {
-            let _ = persist_agent_terminal_state(
-                &job.manifest,
-                "failed",
-                None,
-                Some(String::from("sub-agent thread panicked")),
-                job.fs.as_ref(),
-            );
-        }
-    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_agent_job_returning_text(&job)
+    }))
+    .unwrap_or_else(|_| Err("sub-agent thread panicked".into()));
+    let _ = persist_agent_outcome(&job.manifest, outcome, &job.abort_signal, job.fs.as_ref());
     if let Some(link) = &job.subagent {
         link.emit_finished(
             &job.manifest,
@@ -6651,6 +6742,35 @@ fn write_agent_manifest(manifest: &AgentOutput, fs: &dyn FsBackend) -> Result<()
         .map_err(|e| e.to_string())
 }
 
+/// Every worker path persists the same completion/cancellation contract.
+fn persist_agent_outcome(
+    manifest: &AgentOutput,
+    outcome: Result<String, String>,
+    abort: &HookAbortSignal,
+    fs: &dyn FsBackend,
+) -> Result<(), String> {
+    let cancelled = abort.is_aborted();
+    match outcome {
+        Ok(text) => persist_agent_terminal_state(
+            manifest,
+            if cancelled { "cancelled" } else { "completed" },
+            Some(&text),
+            None,
+            fs,
+        ),
+        Err(error) => {
+            persist_agent_terminal_state(
+                manifest,
+                if cancelled { "cancelled" } else { "failed" },
+                None,
+                Some(error.clone()),
+                fs,
+            )?;
+            Err(format!("sub-agent failed: {error}"))
+        }
+    }
+}
+
 fn persist_agent_terminal_state(
     manifest: &AgentOutput,
     status: &str,
@@ -6706,7 +6826,14 @@ fn persist_agent_terminal_state_with_telemetry(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     next_manifest.error = error;
-    if let Some(blocker) = blocker {
+    if matches!(status, "cancelled" | "stopped" | "killed") {
+        next_manifest.current_blocker = None;
+        next_manifest.lane_events.push(LaneEvent::new(
+            runtime::LaneEventName::Closed,
+            runtime::LaneEventStatus::Closed,
+            iso8601_now(),
+        ));
+    } else if let Some(blocker) = blocker {
         next_manifest
             .lane_events
             .push(LaneEvent::blocked(iso8601_now(), &blocker));
@@ -7336,6 +7463,12 @@ fn derive_agent_state(
 
     if normalized_status == "running" {
         return "working";
+    }
+    if matches!(
+        normalized_status.as_str(),
+        "cancelled" | "stopped" | "killed"
+    ) {
+        return "closed";
     }
     if normalized_status == "completed" {
         return if result.is_some_and(|value| !value.trim().is_empty()) {
@@ -9101,16 +9234,34 @@ fn set_nested_value(root: &mut serde_json::Map<String, Value>, path: &[&str], ne
     set_nested_value(map, rest, new_value);
 }
 
+#[cfg(test)]
 #[allow(clippy::needless_pass_by_value)]
 fn execute_powershell(
     input: PowerShellInput,
     abort_signal: Option<&HookAbortSignal>,
+) -> std::io::Result<runtime::BashCommandOutput> {
+    execute_powershell_in_session(&input, abort_signal, None)
+}
+
+fn execute_powershell_in_session(
+    input: &PowerShellInput,
+    abort_signal: Option<&HookAbortSignal>,
+    tasks: Option<&runtime::background_tasks::BackgroundTasks>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     let _ = &input.description;
     if let Some(output) = workspace_test_branch_preflight(&input.command) {
         return Ok(output);
     }
     let shell = detect_powershell_shell()?;
+    if input.run_in_background.unwrap_or(false) {
+        return launch_background_powershell(
+            shell,
+            &input.command,
+            input.description.as_deref().unwrap_or(&input.command),
+            tasks,
+        );
+    }
+
     execute_shell_command(
         shell,
         &input.command,
@@ -9145,6 +9296,32 @@ fn command_exists(command: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn powershell_command(shell: &str, command: &str) -> std::process::Command {
+    let mut process = std::process::Command::new(shell);
+    process.args(["-NoProfile", "-NonInteractive", "-Command", command]);
+    if let Ok(root) = current_workspace_root() {
+        process.current_dir(root);
+    }
+    process
+}
+
+fn launch_background_powershell(
+    shell: &str,
+    command: &str,
+    title: &str,
+    tasks: Option<&runtime::background_tasks::BackgroundTasks>,
+) -> std::io::Result<runtime::BashCommandOutput> {
+    let (id, path) = runtime::launch_background_command(
+        powershell_command(shell, command),
+        command,
+        title,
+        tasks,
+    )?;
+    let mut output = runtime::BashCommandOutput::background(id, path);
+    output.backgrounded_by_user = Some(true);
+    Ok(output)
+}
+
 fn execute_shell_command(
     shell: &str,
     command: &str,
@@ -9153,50 +9330,9 @@ fn execute_shell_command(
     abort_signal: Option<&HookAbortSignal>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
     if run_in_background.unwrap_or(false) {
-        // Spawn detached but still inside a fresh process group / Job so anyone signalling
-        // the leader later reaps the entire descendant tree together.
-        let mut process = std::process::Command::new(shell);
-        process
-            .arg("-NoProfile")
-            .arg("-NonInteractive")
-            .arg("-Command")
-            .arg(command)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        if let Ok(root) = current_workspace_root() {
-            process.current_dir(root);
-        }
-        let child = process.group_spawn()?;
-        let pid = child.id();
-        drop(child);
-        return Ok(runtime::BashCommandOutput {
-            exit_code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            raw_output_path: None,
-            interrupted: false,
-            is_image: None,
-            background_task_id: Some(pid.to_string()),
-            backgrounded_by_user: Some(true),
-            assistant_auto_backgrounded: Some(false),
-            dangerously_disable_sandbox: None,
-            return_code_interpretation: None,
-            no_output_expected: Some(true),
-            structured_content: None,
-            sandbox_status: None,
-        });
+        return launch_background_powershell(shell, command, command, None);
     }
-
-    let mut process = std::process::Command::new(shell);
-    process
-        .arg("-NoProfile")
-        .arg("-NonInteractive")
-        .arg("-Command")
-        .arg(command);
-    if let Ok(root) = current_workspace_root() {
-        process.current_dir(root);
-    }
+    let mut process = powershell_command(shell, command);
 
     let timeout_ms = timeout.unwrap_or(runtime::DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
     let result = run_in_process_group(&mut process, timeout_ms, abort_signal)?;
@@ -13331,7 +13467,8 @@ mod tests {
         .expect("bash background should succeed");
         let background_output: serde_json::Value = serde_json::from_str(&background).expect("json");
         assert!(background_output["backgroundTaskId"].as_str().is_some());
-        assert_eq!(background_output["noOutputExpected"], true);
+        assert!(background_output.get("noOutputExpected").is_none());
+        assert!(background_output["rawOutputPath"].as_str().is_some());
     }
 
     #[test]

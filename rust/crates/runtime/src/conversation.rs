@@ -460,6 +460,11 @@ pub trait RuntimeObserver {
     fn subagent_sink(&self) -> Option<crate::subagent_events::SubagentSink> {
         None
     }
+
+    /// Session-owned background task lifecycle and cancellation.
+    fn background_tasks(&self) -> Option<crate::background_tasks::BackgroundTasks> {
+        None
+    }
 }
 
 /// A live progress report from a running tool. Structured, not rendered — the
@@ -663,6 +668,8 @@ pub struct ToolDispatchContext {
     /// Where a spawned sub-agent reports what it is doing, if the renderer
     /// asked for that (see [`RuntimeObserver::subagent_sink`]).
     pub subagent_sink: Option<crate::subagent_events::SubagentSink>,
+    /// Shared by this session and its children, independent of a single turn.
+    pub background_tasks: Option<crate::background_tasks::BackgroundTasks>,
     /// The `tool_use` id of this invocation, including concurrent calls.
     pub tool_use_id: Option<String>,
     /// The parent session's active permission mode. A spawned sub-agent runs

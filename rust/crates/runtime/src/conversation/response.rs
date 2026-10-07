@@ -22,6 +22,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             parent_routing_session_id: self.api_client.routing_session_id().map(str::to_string),
             parent_requires_model_mount: self.api_client.requires_model_mount(),
             subagent_sink: observer.as_deref().and_then(RuntimeObserver::subagent_sink),
+            background_tasks: observer
+                .as_deref()
+                .and_then(RuntimeObserver::background_tasks),
             tool_use_id: None,
             parent_permission_mode: Some(self.permission_policy.active_mode()),
         }

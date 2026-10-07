@@ -3,7 +3,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use command_group::AsyncCommandGroup;
+use command_group::{AsyncCommandGroup, CommandGroup};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
@@ -115,6 +115,27 @@ pub struct BashCommandOutput {
 }
 
 impl BashCommandOutput {
+    /// Common background launch result for every supported terminal shell.
+    #[must_use]
+    pub fn background(id: String, output_path: String) -> Self {
+        Self {
+            stdout: String::new(),
+            exit_code: None,
+            stderr: String::new(),
+            raw_output_path: Some(output_path),
+            interrupted: false,
+            is_image: None,
+            background_task_id: Some(id),
+            backgrounded_by_user: Some(false),
+            assistant_auto_backgrounded: Some(false),
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: None,
+            no_output_expected: Some(false),
+            structured_content: None,
+            sandbox_status: None,
+        }
+    }
+
     /// Model-facing projection, applied before transcript persistence and output offload.
     /// The full execution result remains available to internal callers via `Serialize`.
     #[must_use]
@@ -193,6 +214,16 @@ pub fn execute_bash_with_abort(
     execute_bash_with_progress(input, abort_signal, on_progress)
 }
 
+/// Execute in a live session, retaining background output and its task lifecycle.
+pub fn execute_bash_with_tasks(
+    input: BashCommandInput,
+    abort_signal: Option<&HookAbortSignal>,
+    tasks: Option<&crate::background_tasks::BackgroundTasks>,
+) -> io::Result<BashCommandOutput> {
+    let on_progress = BASH_PROGRESS_CALLBACK.with(|cell| cell.borrow_mut().take());
+    execute_bash_in_session(input, abort_signal, on_progress, tasks)
+}
+
 /// Executes a shell command with an optional streaming progress callback.
 ///
 /// When `on_progress` is `Some`, stdout is read line-by-line and the
@@ -203,6 +234,15 @@ pub fn execute_bash_with_progress(
     abort_signal: Option<&HookAbortSignal>,
     on_progress: Option<BashProgressCallback>,
 ) -> io::Result<BashCommandOutput> {
+    execute_bash_in_session(input, abort_signal, on_progress, None)
+}
+
+fn execute_bash_in_session(
+    input: BashCommandInput,
+    abort_signal: Option<&HookAbortSignal>,
+    on_progress: Option<BashProgressCallback>,
+    tasks: Option<&crate::background_tasks::BackgroundTasks>,
+) -> io::Result<BashCommandOutput> {
     // The session's workspace root, not the process cwd: concurrent turns of
     // sessions in different directories each spawn their shell in their own
     // root (see `crate::workspace_root`).
@@ -210,29 +250,12 @@ pub fn execute_bash_with_progress(
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
 
     if input.run_in_background.unwrap_or(false) {
-        let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
-        let child = child
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let (id, output_path) = launch_background_shell(&input, &cwd, &sandbox_status, tasks)?;
 
-        return Ok(BashCommandOutput {
-            exit_code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-            raw_output_path: None,
-            interrupted: false,
-            is_image: None,
-            background_task_id: Some(child.id().to_string()),
-            backgrounded_by_user: Some(false),
-            assistant_auto_backgrounded: Some(false),
-            dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-            return_code_interpretation: None,
-            no_output_expected: Some(true),
-            structured_content: None,
-            sandbox_status: Some(sandbox_status),
-        });
+        let mut output = BashCommandOutput::background(id, output_path);
+        output.dangerously_disable_sandbox = input.dangerously_disable_sandbox;
+        output.sandbox_status = Some(sandbox_status);
+        return Ok(output);
     }
 
     // Run the command's async implementation to completion, correct for ANY
@@ -690,6 +713,151 @@ fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> 
         input.allowed_mounts.clone(),
     );
     resolve_sandbox_status_for_request(&request, cwd)
+}
+
+/// Background shells write directly to one file: output cannot deadlock on a
+/// full pipe and neither the registry nor the renderer retains an unbounded log.
+fn launch_background_shell(
+    input: &BashCommandInput,
+    cwd: &std::path::Path,
+    sandbox: &SandboxStatus,
+    tasks: Option<&crate::background_tasks::BackgroundTasks>,
+) -> io::Result<(String, String)> {
+    launch_background_command(
+        prepare_command(&input.command, cwd, sandbox, false),
+        &input.command,
+        input.description.as_deref().unwrap_or(&input.command),
+        tasks,
+    )
+}
+
+/// Spawn any terminal command under one output and cancellation owner.
+pub fn launch_background_command(
+    mut command: Command,
+    command_text: &str,
+    title: &str,
+    tasks: Option<&crate::background_tasks::BackgroundTasks>,
+) -> io::Result<(String, String)> {
+    use crate::background_tasks::{BackgroundTask, BackgroundTaskKind};
+    use std::fmt::Write as _;
+    let tasks = tasks.cloned().unwrap_or_default();
+    let directory = std::env::temp_dir().join("sudocode-background-shells");
+    std::fs::create_dir_all(&directory)?;
+    let mut random = [0u8; 16];
+    getrandom::getrandom(&mut random).map_err(|error| io::Error::other(error.to_string()))?;
+    let mut nonce = String::with_capacity(random.len() * 2);
+    for byte in random {
+        write!(&mut nonce, "{byte:02x}").expect("write to string");
+    }
+    let path = directory.join(format!("{nonce}.log"));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).read(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let output = options.open(&path)?;
+    let reader = std::fs::File::open(&path)?;
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(output.try_clone()?))
+        .stderr(Stdio::from(output))
+        .group_spawn()?;
+    let id = format!("shell-{}-{nonce}", child.id());
+    let mut task = BackgroundTask::new(id.clone(), BackgroundTaskKind::Terminal, title.to_string());
+    task.command = Some(command_text.to_string());
+    task.output_path = Some(path.to_string_lossy().into_owned());
+    let abort = HookAbortSignal::default();
+    tasks.register(task, abort.clone());
+    let process = BackgroundShell {
+        child: Some(child),
+        tasks,
+        id: id.clone(),
+    };
+    std::thread::Builder::new()
+        .name(format!("background-{id}"))
+        .spawn(move || process.monitor(reader, &abort))?;
+    Ok((id, path.to_string_lossy().into_owned()))
+}
+
+struct BackgroundShell {
+    child: Option<command_group::GroupChild>,
+    tasks: crate::background_tasks::BackgroundTasks,
+    id: String,
+}
+
+impl BackgroundShell {
+    fn monitor(mut self, mut output: std::fs::File, abort: &HookAbortSignal) {
+        use crate::background_tasks::{BackgroundTaskStatus, TASK_OUTPUT_TAIL_BYTES};
+        use std::io::{Read, Seek, SeekFrom};
+        let mut last_size = 0;
+        loop {
+            let child = self.child.as_mut().expect("live child");
+            let result = if abort.is_aborted() {
+                let _ = child.kill();
+                child.wait().map(Some)
+            } else {
+                child.try_wait()
+            };
+            let size = output.metadata().map_or(last_size, |m| m.len());
+            if size != last_size {
+                let mut bytes = Vec::with_capacity(TASK_OUTPUT_TAIL_BYTES);
+                let start = size.saturating_sub(TASK_OUTPUT_TAIL_BYTES as u64);
+                let read = output.seek(SeekFrom::Start(start)).and_then(|_| {
+                    (&mut output)
+                        .take(TASK_OUTPUT_TAIL_BYTES as u64)
+                        .read_to_end(&mut bytes)
+                });
+                if read.is_ok() {
+                    self.tasks.update(&self.id, |task| {
+                        task.output = String::from_utf8_lossy(&bytes).into_owned();
+                    });
+                    last_size = size;
+                }
+            }
+            match result {
+                Ok(Some(status)) => {
+                    self.tasks.update(&self.id, |task| {
+                        task.status = if abort.is_aborted() {
+                            BackgroundTaskStatus::Cancelled
+                        } else if status.success() {
+                            BackgroundTaskStatus::Completed
+                        } else {
+                            BackgroundTaskStatus::Failed
+                        };
+                        task.exit_code = status.code();
+                        task.activity = describe_exit_status(status).unwrap_or_default();
+                    });
+                    self.child = None;
+                    return;
+                }
+                Err(error) => {
+                    self.tasks.update(&self.id, |task| {
+                        task.status = BackgroundTaskStatus::Failed;
+                        task.activity = error.to_string();
+                    });
+                    return;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            }
+        }
+    }
+}
+
+impl Drop for BackgroundShell {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+            self.tasks.update(&self.id, |task| {
+                if task.status.is_active() {
+                    task.status = crate::background_tasks::BackgroundTaskStatus::Failed;
+                    task.activity = "Background monitor stopped unexpectedly".into();
+                }
+            });
+        }
+    }
 }
 
 fn prepare_command(

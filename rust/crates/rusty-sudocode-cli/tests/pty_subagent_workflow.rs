@@ -119,6 +119,32 @@ fn run_background_verification(workflow: Workflow) {
             );
             std::thread::sleep(Duration::from_millis(100));
         }
+        // Inspect the child during a foreground tool, then dismiss the view.
+        // Escape belongs to the browser and must not cancel that tool/turn.
+        parent.send("\x1b[B").unwrap();
+        common::expect_screen(
+            &parent,
+            |s| s.contains("Enter to view"),
+            Duration::from_secs(30),
+            "background footer selected",
+        );
+        parent.send("\r").unwrap();
+        common::expect_screen(
+            &parent,
+            |s| s.contains("Enter details"),
+            Duration::from_secs(30),
+            "task browser during parent tool",
+        );
+        parent.send("\x1b").unwrap();
+        // The foreground spinner intentionally keeps animating: wait for
+        // browser dismissal and the empty input, not a stationary whole screen.
+        common::expect_screen(
+            &parent,
+            |screen| !screen.contains("Enter details") && common::input_line_of(screen).is_empty(),
+            Duration::from_secs(30),
+            "back to running parent input",
+        );
+        assert!(!parent.render(|s| s.contents()).contains("[Interrupted"));
     } else {
         parent
             .send("While CI runs, what is 17 + 25? Answer the number only.\r")
@@ -186,6 +212,31 @@ fn run_background_verification(workflow: Workflow) {
     );
     parent.send("/exit\r").unwrap();
     assert_eq!(parent.expect_eof().unwrap(), 0);
+    if busy_parent {
+        // A fast queued follow-up can scroll the foreground card out of the
+        // viewport between polls. Verify its actual persisted result instead.
+        let path = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
+            .expect("saved parent transcript");
+        let saved = runtime::Session::load_from_path(&path).unwrap();
+        assert!(
+            saved.messages.iter().flat_map(|m| &m.blocks).any(|block| {
+                let runtime::ContentBlock::ToolResult {
+                    tool_name, output, ..
+                } = block
+                else {
+                    return false;
+                };
+                tool_name.eq_ignore_ascii_case("bash")
+                    && serde_json::from_str::<Value>(output).is_ok_and(|result| {
+                        result["exit_code"] == 0
+                            && result["stdout"]
+                                .as_str()
+                                .is_some_and(|text| text.trim() == "PARENT_WORK_FINISHED")
+                    })
+            }),
+            "foreground tool must finish normally after task view dismissal"
+        );
+    }
     assert_parent_prefix_stable(&env);
 }
 

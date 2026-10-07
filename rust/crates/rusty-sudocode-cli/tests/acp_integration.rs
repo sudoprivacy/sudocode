@@ -4124,13 +4124,43 @@ async fn acp_subagent_cancel_needs_the_opt_in() {
     let mut client = spawn_stdio_client_danger(&workspace);
     scenario_initialize(&mut client).await;
     let session_id = scenario_session_new(&mut client, &workspace.root).await;
+    let (updates, _) = prompt_scenario(&mut client, &session_id, "subagent_events_cancel").await;
+    let spawned =
+        &tool_result_named(&updates, "toolu_events_cancel")["params"]["update"]["rawOutput"];
+    let agent_id = spawned["agentId"].as_str().expect("background agent id");
+    assert!(
+        updates
+            .iter()
+            .all(|update| update["params"]["update"].get("_meta").is_none()),
+        "events still require opt-in"
+    );
     let (_, resp) = client
         .send_request(
             "_sudocode/agent/cancel",
-            json!({ "sessionId": session_id, "agentId": "agent-0" }),
+            json!({ "sessionId": session_id, "agentId": agent_id }),
         )
         .await;
     assert_eq!(resp["error"]["code"], -32602, "{resp}");
+
+    // Closing owns the child even though no rendering events were subscribed.
+    let (_, closed) = client
+        .send_request("session/close", json!({"sessionId":session_id}))
+        .await;
+    assert!(closed.get("error").is_none(), "{closed}");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(
+            workspace
+                .root
+                .join(".sudocode-agents")
+                .join(format!("{agent_id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest["status"], "cancelled",
+        "closing an unsubscribed session must stop its child: {manifest}"
+    );
 
     client.shutdown().await;
     workspace.cleanup();
@@ -5623,6 +5653,78 @@ async fn acp_plan_approval_carries_markdown_and_executes_without_a_new_prompt() 
     assert_eq!(
         fs::read_to_string(workspace.root.join("plan-executed.txt")).unwrap(),
         "completed from approved plan\n"
+    );
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Background terminals belong to the session, rather than its turn observer.
+#[cfg(unix)]
+#[tokio::test]
+async fn acp_background_terminal_is_queryable_across_prompts() {
+    let server = MockAnthropicService::spawn().await.expect("mock service");
+    let workspace = TestWorkspace::new("background-terminal-turns");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    scenario_initialize(&mut client).await;
+    let session = scenario_session_new(&mut client, &workspace.root).await;
+
+    async fn call(client: &mut AcpTestClient, session: &str, name: &str, input: Value) -> Value {
+        let call_id = format!("background-operation-{}", client.next_id);
+        let calls = json!([{"id":call_id, "name":name, "input":input}]);
+        let (updates, response) = client.send_request("session/prompt", json!({
+            "sessionId":session,
+            "prompt":[{"type":"text", "text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]
+        })).await;
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        updates
+            .into_iter()
+            .find_map(|update| {
+                let update = &update["params"]["update"];
+                (update["toolCallId"].as_str() == Some(call_id.as_str())
+                    && update["status"] == "completed"
+                    && update.get("rawOutput").is_some())
+                .then(|| update["rawOutput"].clone())
+            })
+            .expect("completed tool output")
+    }
+
+    let launched = call(&mut client, &session, "Bash", json!({
+        "command":"echo ACP_BACKGROUND_STARTED; while [ ! -f release-background ]; do sleep 0.1; done; echo ACP_BACKGROUND_FINISHED; exit 7",
+        "run_in_background":true,
+        "description":"Cross-prompt background terminal"
+    })).await;
+    let id = launched["backgroundTaskId"]
+        .as_str()
+        .expect("background task id");
+    let running = call(
+        &mut client,
+        &session,
+        "pid_output",
+        json!({"pid":id,"block":true,"timeout_ms":100}),
+    )
+    .await;
+    assert_eq!(running["status"], "running", "{running}");
+    assert_eq!(running["retrieval_status"], "timeout", "{running}");
+    fs::write(workspace.root.join("release-background"), "released").unwrap();
+    let finished = call(
+        &mut client,
+        &session,
+        "pid_output",
+        json!({"pid":id,"block":true,"timeout_ms":5000}),
+    )
+    .await;
+    assert_eq!(finished["status"], "failed", "{finished}");
+    assert_eq!(finished["exit_code"], 7, "{finished}");
+    assert_eq!(finished["retrieval_status"], "success", "{finished}");
+    assert!(finished["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("ACP_BACKGROUND_FINISHED"));
+    assert_eq!(
+        fs::read_to_string(finished["rawOutputPath"].as_str().unwrap()).unwrap(),
+        "ACP_BACKGROUND_STARTED\nACP_BACKGROUND_FINISHED\n"
     );
     client.shutdown().await;
     workspace.cleanup();

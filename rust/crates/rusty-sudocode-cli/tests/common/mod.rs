@@ -46,6 +46,24 @@ use runtime::config::default_config_home;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Find a persisted session transcript below a fixture's session store.
+pub fn find_session_transcript(dir: &std::path::Path) -> Option<PathBuf> {
+    for entry in fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
+        if path.is_dir() {
+            if let Some(found) = find_session_transcript(&path) {
+                return Some(found);
+            }
+        } else if path
+            .file_name()
+            .is_some_and(|name| name == "transcript.jsonl")
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// Prefix for every `sh -c` line the harness builds, so `scode` receives its
 /// argv verbatim.
 ///
@@ -1151,3 +1169,6 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ))
 }
+
+#[allow(dead_code)]
+pub mod render_measurement;

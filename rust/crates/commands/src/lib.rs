@@ -429,7 +429,7 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "tasks",
-        aliases: &[],
+        aliases: &["ps"],
         summary: "List and manage background tasks",
         argument_hint: Some("[list|get <id>|stop <id>]"),
         resume_supported: true,
@@ -1681,7 +1681,7 @@ pub fn validate_slash_command_input(
         }
         "plan" => SlashCommand::Plan { mode: remainder },
         "review" => SlashCommand::Review { scope: remainder },
-        "tasks" => SlashCommand::Tasks { args: remainder },
+        "tasks" | "ps" => SlashCommand::Tasks { args: remainder },
         "theme" => SlashCommand::Theme { name: remainder },
         "voice" => SlashCommand::Voice { mode: remainder },
         "usage" => SlashCommand::Usage { scope: remainder },

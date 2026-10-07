@@ -1189,7 +1189,7 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
             )])
         };
     }
-    let done = latest_tool_result(request);
+    let done = current_turn_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
     match (scenario, done) {
         (Scenario::SubagentEventsSync | Scenario::SubagentEventsSyncSlow, None) => {
@@ -1667,7 +1667,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 ],
             ),
         },
-        Scenario::WriteFileAllowed => match latest_tool_result(request) {
+        Scenario::WriteFileAllowed => match current_turn_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!(
                 "write_file succeeded: {}",
                 extract_file_path(&tool_output)
@@ -1678,7 +1678,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"path":"generated/output.txt","content":"created by mock service\n"}"#],
             ),
         },
-        Scenario::WriteFileDenied => match latest_tool_result(request) {
+        Scenario::WriteFileDenied => match current_turn_tool_result(request) {
             Some((tool_output, _)) => {
                 final_text_sse(&format!("write_file denied as expected: {tool_output}"))
             }
@@ -1905,7 +1905,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             }
             None => tool_use_sse("toolu_sleep_short", "Sleep", &[r#"{"duration_ms":600}"#]),
         },
-        Scenario::AskUserQuestionRoundtrip => match latest_tool_result(request) {
+        Scenario::AskUserQuestionRoundtrip => match current_turn_tool_result(request) {
             Some((tool_output, _)) => {
                 final_text_sse(&format!("ask_user_question answered: {tool_output}"))
             }
@@ -2324,7 +2324,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"pattern": "parity", "path": "fixture.txt", "output_mode": "count"}),
             ),
         },
-        Scenario::WriteFileAllowed => match latest_tool_result(request) {
+        Scenario::WriteFileAllowed => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_write_allowed_final",
                 &format!("write_file succeeded: {}", extract_file_path(&tool_output)),
@@ -2336,7 +2336,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"path": "generated/output.txt", "content": "created by mock service\n"}),
             ),
         },
-        Scenario::WriteFileDenied => match latest_tool_result(request) {
+        Scenario::WriteFileDenied => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_write_denied_final",
                 &format!("write_file denied as expected: {tool_output}"),
@@ -2637,7 +2637,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"duration_ms": 600}),
             ),
         },
-        Scenario::AskUserQuestionRoundtrip => match latest_tool_result(request) {
+        Scenario::AskUserQuestionRoundtrip => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_ask_user_question_final",
                 &format!("ask_user_question answered: {tool_output}"),

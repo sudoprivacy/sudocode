@@ -732,12 +732,20 @@ impl RuntimeObserver for ObserverAdapter {
 
 /// Emit [`EngineEvent::PermissionRequest`] and await a oneshot until the pump routes the matching
 /// [`EngineCommand::PermissionAnswer`] back.
+#[derive(Clone)]
 struct PrompterAdapter {
     tx: std_mpsc::Sender<EngineEvent>,
     table: RequestTable,
 }
 
 impl PermissionPrompter for PrompterAdapter {
+    fn delegation_sink(&self) -> Option<runtime::PermissionPromptSink> {
+        let bridge = self.clone();
+        Some(runtime::PermissionPromptSink::new(move |request| {
+            bridge.clone().begin_decision(&request)
+        }))
+    }
+
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
         let reply = self.begin_decision(request);
         tokio::task::block_in_place(|| futures::executor::block_on(reply))

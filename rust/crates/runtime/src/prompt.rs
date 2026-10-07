@@ -809,15 +809,26 @@ pub fn load_system_prompt_with_memory(
     os_version: impl Into<String>,
     memory: crate::memory::MemoryMode,
 ) -> Result<SystemPrompt, PromptBuildError> {
-    load_system_prompt_impl(
+    load_system_prompt_with_fs_and_memory(
         cwd,
         current_date,
         os_name,
         os_version,
         &StdFsBackend,
-        None,
         memory,
     )
+}
+
+/// Load the main session's instructions and memory from its file-tool backend.
+pub fn load_system_prompt_with_fs_and_memory(
+    cwd: impl Into<PathBuf>,
+    current_date: impl Into<String>,
+    os_name: impl Into<String>,
+    os_version: impl Into<String>,
+    fs: &dyn FsBackend,
+    memory: crate::memory::MemoryMode,
+) -> Result<SystemPrompt, PromptBuildError> {
+    load_system_prompt_impl(cwd, current_date, os_name, os_version, fs, None, memory)
 }
 
 /// Same as [`load_system_prompt`] but injects the per-agent-type

@@ -157,7 +157,8 @@ export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 3. co-host daemon on :${AUTHON_PORT}, TLS on =="
 authon_boot
-authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
+# Offline minting also needs the control zone initialized and committed.
+authon_wait_log "Static topology applied" 45
 
 # The mint opens the same data dir the daemon locks, so it must be down for it.
 echo "== 3b. stop, mint the client bundle, restart =="
@@ -219,19 +220,14 @@ if [ "${NEXUS_A2A_MODEL_LIVE:-0}" = 1 ]; then
   exit 0
 fi
 
-echo "== 5. spawn the co-host agent =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  NEXUS_A2A_TEST_SPAWN="$AGENT" NEXUS_A2A_TEST_MODEL="$MODEL" \
-  "${CARGO_TEST[@]}" live_spawn_cohost -- --ignored --nocapture
-
-echo "== 6. send it a message, and wait for the agent's own reply =="
+echo "== 6. attach a controller, send a peer message, and approve its tools =="
 # The agent runs inside the daemon, so when it does not answer, the daemon's log
 # is the only place that says why. Dumping it on failure is the difference
 # between a diagnosis and a guess.
 if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_A2A_TEST_INBOX="$AGENT" \
   NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
-  NEXUS_A2A_TEST_REPLY_BODY="$REPLY" \
+  NEXUS_A2A_TEST_REPLY_BODY="$REPLY" NEXUS_A2A_TEST_MODEL="$MODEL" \
   "${CARGO_TEST[@]}" live_cohost_reads_its_inbox_and_replies -- --ignored --nocapture; then
   echo "!! the co-host did not reply." >&2
   echo "---- co-host daemon log ----" >&2

@@ -35,7 +35,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use engine_host::managed_agent::SudoCodeSpawnAdapter;
+use engine_acp::managed_agent::SudoCodeSpawnAdapter;
 
 /// What this binary calls itself — in `--version`, in `--help`, and in the usage line
 /// a bad flag prints.

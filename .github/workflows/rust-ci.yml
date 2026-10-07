@@ -213,7 +213,7 @@ jobs:
         # can print its captured failure output.
         env:
           RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
-        run: cargo test --workspace
+        run: cargo test --workspace --features engine-acp/mailbox
 
   terminal-resize:
     name: Real terminal resize (${{ matrix.os }})
@@ -370,7 +370,7 @@ jobs:
       # cheap enough to answer before anything compiles.
       #
       # A co-hosted agent takes the daemon's `Arc<Kernel>` and hands back a
-      # `SpawnTask<Kernel>`. Two nexus-vfs revs in one graph are two `Kernel`
+      # `SpawnTask<Kernel>` adapter. Two nexus-vfs revs in one graph are two `Kernel`
       # types, and the seam stops unifying — but NOT reliably at compile time: a
       # probe with `kernel` at one tag and the daemon crate at another compiled
       # fine, because the type system only objects where a type actually crosses
@@ -495,6 +495,13 @@ jobs:
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           PROXY_BASE_URL: https://api.sudorouter.ai/v1
         run: cargo test -p rusty-sudocode-cli --test acp_live_smoke -- --test-threads=1
+      - name: Real model through the co-host controller mailbox
+        working-directory: rust
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+          ANTHROPIC_BASE_URL: https://api.sudorouter.ai
+          SUDOCODE_TEST_MODEL: claude-sonnet-4-6
+        run: cargo test --locked -p engine-acp --features mailbox --test session_mailbox_live -- --ignored --nocapture
 
   live-bash-process-tree:
     name: Live Bash process tree (${{ matrix.os }})
@@ -525,6 +532,7 @@ jobs:
           SCODE_LIVE_MODEL: claude-sonnet-4-6
           SCODE_LIVE_AUTH_PROFILE: sudorouter
           SCODE_LOG_PATH: ${{ runner.temp }}/scode-live-model-trace.jsonl
+          SCODE_LIVE_ARTIFACTS: ${{ runner.temp }}/scode-live-requests
         run: |
           node - <<'NODE'
           const fs = require('fs');
@@ -539,7 +547,10 @@ jobs:
           }), { mode: 0o600 });
           NODE
           cargo test -p rusty-sudocode-cli --test pty_model_flag_priority -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_agent_permission_bubble -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress --test pty_arrow_keys -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_background_tasks inspecting_running_task_does_not_acknowledge_its_future_result -- --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_background_tasks exiting_during_a_foreground_tool_reaps_both_process_groups -- --nocapture
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cargo test -p rusty-sudocode-cli --test pty_file_operations windows_verbatim_paths_read_the_same_file -- --nocapture
           fi
@@ -554,7 +565,9 @@ jobs:
         if: always()
         with:
           name: live-model-evidence-${{ matrix.os }}
-          path: ${{ runner.temp }}/scode-live-model-evidence.json
+          path: |
+            ${{ runner.temp }}/scode-live-model-evidence.json
+            ${{ runner.temp }}/scode-live-requests/**/*.json
           retention-days: 7
       - name: Remove process-tree test credentials
         if: always()

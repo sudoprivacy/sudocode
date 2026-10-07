@@ -35,8 +35,15 @@ fn setup(label: &str) -> TestEnv {
     env
 }
 
+fn request_directory(env: &TestEnv) -> std::path::PathBuf {
+    std::env::var_os("SCODE_LIVE_ARTIFACTS").map_or_else(
+        || env.workspace_root().join("requests"),
+        |root| std::path::PathBuf::from(root).join(env.workspace_root().file_name().unwrap()),
+    )
+}
+
 fn spawn(env: &TestEnv, args: &[&str]) -> PtySession {
-    let requests = env.workspace_root().join("requests");
+    let requests = request_directory(env);
     let home = env.workspace_root().join("home");
     common::spawn_scode_in_dir_with_env(
         env.workspace_root(),
@@ -72,7 +79,7 @@ fn task(env: &TestEnv) -> (String, String) {
 }
 
 fn assert_requests(env: &TestEnv, minimum: usize) {
-    let requests: Vec<Value> = fs::read_dir(env.workspace_root().join("requests"))
+    let requests: Vec<Value> = fs::read_dir(request_directory(env))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| {

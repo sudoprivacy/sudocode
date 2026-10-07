@@ -4164,16 +4164,28 @@ async fn acp_subagent_cancel_needs_the_opt_in() {
         .send_request("session/close", json!({"sessionId":session_id}))
         .await;
     assert!(closed.get("error").is_none(), "{closed}");
-    let manifest: Value = serde_json::from_slice(
-        &fs::read(
-            workspace
-                .root
-                .join(".sudocode-agents")
-                .join(format!("{agent_id}.json")),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    // Close signals every owned task immediately, but its drain is bounded.
+    // A child still starting under load can persist cancellation after the
+    // close response. Require that terminal fact within the cancellation budget.
+    let manifest_path = workspace
+        .root
+        .join(".sudocode-agents")
+        .join(format!("{agent_id}.json"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let manifest: Value = loop {
+        let manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        if !matches!(
+            manifest["status"].as_str(),
+            Some("running" | "backgrounded")
+        ) {
+            break manifest;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "closing an unsubscribed session did not stop its child: {manifest}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert_eq!(
         manifest["status"], "cancelled",
         "closing an unsubscribed session must stop its child: {manifest}"

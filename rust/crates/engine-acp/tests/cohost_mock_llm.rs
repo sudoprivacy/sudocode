@@ -1,3 +1,5 @@
+#![cfg(feature = "mailbox")]
+
 //! The co-host, proven on a scripted model — no secrets, no network.
 //!
 //! `cohost_live_llm` is the real thing and is `#[ignore]`d for it, so until now
@@ -16,7 +18,9 @@
 //! kernel of its own and one on the daemon's — so a behaviour proven on either
 //! side is a statement about the engine rather than about a host.
 
+#[path = "../../engine-host/tests/common/mod.rs"]
 mod common;
+mod managed_harness;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,8 +30,8 @@ use common::{
     agent_workspace, make_desc, mount_agent_world, provision_stream_transcript, send_prompt,
     user_ctx, wait_for_agent_reply,
 };
-use engine_host::managed_agent::spawn_managed_agent;
 use kernel::kernel::Kernel;
+use managed_harness::spawn_managed_agent;
 use runtime::mailbox::{InboxConvention, Mailbox};
 use runtime::{FsBackend, KernelFsBackend};
 
@@ -131,6 +135,11 @@ fn harness() -> &'static Harness {
             serde_json::to_vec_pretty(&config).expect("config serializes"),
         )
         .expect("write the scripted sudocode.json");
+        std::fs::write(
+            config_home.path().join("AGENTS.md"),
+            "HOST_CONFIG_INSTRUCTIONS_MUST_STAY_PRIVATE",
+        )
+        .unwrap();
         std::env::set_var("SUDO_CODE_CONFIG_HOME", config_home.path());
         Harness {
             runtime,
@@ -229,6 +238,13 @@ fn run_cohost_turn(
         .write(&format!("{workspace}/fixture.txt"), FIXTURE_BODY.as_bytes())
         .expect("plant the fixture the model will read");
 
+    user_fs
+        .write(
+            &format!("{workspace}/AGENTS.md"),
+            b"VFS_WORKSPACE_INSTRUCTIONS_8142",
+        )
+        .unwrap();
+
     let transcript = InboxConvention::new(String::new()).transcript_path(USER, agent_id);
     if transcript_is_stream {
         provision_stream_transcript(&kernel, &transcript);
@@ -256,6 +272,23 @@ fn run_cohost_turn(
         agent_id,
         Duration::from_secs(60),
     );
+    // A send tool can deliver the reply before its turn finishes. Wait for the
+    // durable receive acknowledgement before terminating the host.
+    if reply.is_some() {
+        let receiver = Mailbox::daemon_absolute(Arc::clone(&user_fs), agent_id.into());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !receiver
+            .read_position(USER)
+            .unwrap()
+            .is_some_and(|offset| offset > 0)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "turn did not acknowledge peer input"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     handle.abort_signal.abort();
     let _ = handle.join.join();
 
@@ -274,6 +307,28 @@ fn run_cohost_turn(
         expected, asked,
         "every upstream model call must cross the session filesystem"
     );
+    let requests = harness
+        .runtime
+        .block_on(harness.service.captured_requests());
+    assert!(requests.len() > asked_before, "model received no request");
+    for request in &requests[asked_before..] {
+        let body: serde_json::Value = serde_json::from_str(&request.raw_body).unwrap();
+        let system = body["system"].to_string();
+        assert!(
+            system.contains("VFS_WORKSPACE_INSTRUCTIONS_8142"),
+            "workspace instructions missing"
+        );
+        assert!(
+            !system.contains("HOST_CONFIG_INSTRUCTIONS_MUST_STAY_PRIVATE"),
+            "host instructions leaked"
+        );
+        assert!(system.contains(&workspace), "workspace missing");
+        assert!(system.contains("Nexus virtual filesystem (POSIX paths)"));
+        assert!(
+            system.contains(&format!("/agents/{agent_id}/memory")),
+            "memory uses wrong namespace"
+        );
+    }
     let reply = reply.unwrap_or_else(|| {
         let raw = user_fs
             .read(&transcript)
@@ -548,7 +603,14 @@ fn stop_session(kernel: &Kernel, pid: &serde_json::Value, sid: &str) {
     }
 }
 
-fn await_new_reply(mailbox: &Mailbox, agent: &str, cursor: &mut u64) {
+fn await_new_reply(
+    mailbox: &Mailbox,
+    agent: &str,
+    cursor: &mut u64,
+    kernel: &Kernel,
+    pid: &serde_json::Value,
+    phase: &str,
+) {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
         let (messages, next) = mailbox.poll_conversation(agent, *cursor, 100).unwrap();
@@ -557,7 +619,52 @@ fn await_new_reply(mailbox: &Mailbox, agent: &str, cursor: &mut u64) {
             return;
         }
     }
-    panic!("no new reply from resumed agent");
+    let state = managed_call(
+        kernel,
+        "get_session_v1",
+        serde_json::json!({"session_id":pid}),
+    );
+    panic!("no new reply during {phase}; cursor={cursor}; session={state:?}");
+}
+
+/// Observe the replacement receiver's actual read before releasing the old
+/// lease. Content still goes through the same kernel and backing store.
+struct ReaderHandoffStore {
+    inner: runtime::test_support::MemObjectStore,
+    observed: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+}
+
+impl kernel::abc::object_store::ObjectStore for ReaderHandoffStore {
+    fn name(&self) -> &str {
+        "reader-handoff"
+    }
+
+    fn write_content(
+        &self,
+        content: &[u8],
+        content_id: &str,
+        ctx: &kernel::kernel::OperationContext,
+        offset: u64,
+    ) -> Result<kernel::abc::object_store::WriteResult, kernel::abc::object_store::StorageError>
+    {
+        self.inner.write_content(content, content_id, ctx, offset)
+    }
+
+    fn read_content(
+        &self,
+        content_id: &str,
+        ctx: &kernel::kernel::OperationContext,
+    ) -> Result<Vec<u8>, kernel::abc::object_store::StorageError> {
+        let bytes = self.inner.read_content(content_id, ctx)?;
+        if serde_json::from_slice::<runtime::mailbox::ReaderRegister>(&bytes)
+            .is_ok_and(|register| register.holder == "draining-test-receiver")
+        {
+            if let Some(observed) = self.observed.lock().unwrap().take() {
+                let _ = observed.send(());
+            }
+        }
+        Ok(bytes)
+    }
 }
 
 #[test]
@@ -567,6 +674,16 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     let harness = harness();
     let kernel = Arc::new(Kernel::new());
     mount_agent_world(&kernel);
+    let (reader_observed_tx, reader_observed_rx) = std::sync::mpsc::channel();
+    kernel.vfs_router_arc().add_mount(
+        "/conversations",
+        "root",
+        Some(Arc::new(ReaderHandoffStore {
+            inner: runtime::test_support::MemObjectStore::default(),
+            observed: Mutex::new(Some(reader_observed_tx)),
+        })),
+        false,
+    );
     let _model_storage = common::mount_model(
         &kernel,
         "anthropic",
@@ -575,7 +692,7 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     );
     managed_agent::install_managed_agent_with_spawn(
         &kernel,
-        Arc::new(engine_host::managed_agent::SudoCodeSpawnAdapter),
+        Arc::new(engine_acp::managed_agent::SudoCodeSpawnAdapter),
     )
     .unwrap();
     let agent = "resume-agent";
@@ -592,7 +709,13 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     mb.ensure_conversation(agent).unwrap();
     let mut request =
         json!({"agent_id":agent,"owner_id":"test-owner","zone_id":"root","model":MODEL});
+    provision_stream_transcript(
+        &kernel,
+        &a2a::conversation_transcript_path(&a2a::conversation_id(agent, "test-owner")),
+    );
     let first = managed_call(&kernel, "start_session_v1", request.clone()).unwrap();
+    let first_controller =
+        managed_harness::attach_controller(Arc::clone(&kernel), &first, false).unwrap();
     let sid = first["durable_session_id"].as_str().unwrap();
     assert_ne!(first["session_id"], sid);
     let path = format!("/sessions/{sid}/transcript.jsonl");
@@ -609,9 +732,17 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         "Remember BEFORE_RESTART_8317. PARITY_SCENARIO:cohost_reply",
     )
     .unwrap();
-    await_new_reply(&mb, agent, &mut cursor);
+    await_new_reply(
+        &mb,
+        agent,
+        &mut cursor,
+        &kernel,
+        &first["session_id"],
+        "first turn",
+    );
     wait_idle(&kernel, &first["session_id"]);
     stop_session(&kernel, &first["session_id"], sid);
+    drop(first_controller);
     let before = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
     assert!(!before.messages.is_empty());
     let before_bytes = fs.read_to_string(&path).unwrap();
@@ -642,8 +773,49 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         );
         assert_eq!(fs.read_to_string(&path).unwrap(), before_bytes);
     }
+    // Model an old receiver finishing its cleanup just after the replacement
+    // first checks its lease. A read handshake, rather than a sleep, forces
+    // that ordering; the replacement must notice the explicit early release.
+    let reader_path = InboxConvention::new(String::new()).reader_path(USER, agent, agent);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let released = loop {
+        let register: runtime::mailbox::ReaderRegister =
+            serde_json::from_slice(&fs.read(&reader_path).unwrap()).unwrap();
+        if register.holder.is_empty() {
+            break register;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "old reader did not release"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut held = released.clone();
+    held.holder = "draining-test-receiver".into();
+    // Outlive the reply budget: only observing early release can pass this.
+    held.lease_expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    fs.write_atomic(&reader_path, &serde_json::to_vec(&held).unwrap())
+        .unwrap();
+    let release_fs = Arc::clone(&fs);
+    let release_reader = std::thread::spawn(move || {
+        reader_observed_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("replacement must read the held reader lease");
+        release_fs
+            .write_atomic(&reader_path, &serde_json::to_vec(&released).unwrap())
+            .unwrap();
+    });
     let captured_before = harness.requests_seen();
     let second = managed_call(&kernel, "start_session_v1", request.clone()).unwrap();
+    let second_controller =
+        managed_harness::attach_controller(Arc::clone(&kernel), &second, true).unwrap();
+    release_reader
+        .join()
+        .expect("the previous reader releases its lease");
     assert_ne!(second["session_id"], first["session_id"]);
     assert_eq!(second["durable_session_id"], sid);
     (mb.sender())(
@@ -651,9 +823,17 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         "Continue after restart. PARITY_SCENARIO:cohost_reply",
     )
     .unwrap();
-    await_new_reply(&mb, agent, &mut cursor);
+    await_new_reply(
+        &mb,
+        agent,
+        &mut cursor,
+        &kernel,
+        &second["session_id"],
+        "resumed turn",
+    );
     wait_idle(&kernel, &second["session_id"]);
     stop_session(&kernel, &second["session_id"], sid);
+    drop(second_controller);
     let after = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
     assert_eq!(after.session_id, before.session_id);
     assert!(after.messages.len() > before.messages.len());

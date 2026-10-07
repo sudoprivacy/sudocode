@@ -8,7 +8,10 @@
 
 pub mod acp_sdk_server;
 pub mod acp_stdio_server;
+#[cfg(feature = "websocket")]
 pub mod acp_ws_server;
+#[cfg(feature = "mailbox")]
+pub mod managed_agent;
 /// ACP-side session lifecycle + turn glue on top of the `engine_core` seam
 /// (build/load/fork a `SessionEngine` per session, drive one `run_turn` per
 /// `session/prompt`, translate `EngineEvent`/`TurnComplete` onto the ACP wire).

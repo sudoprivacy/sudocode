@@ -1207,7 +1207,15 @@ fn spawn_conversation_tail(
                 let mut cursor = match reader.acquire() {
                     Ok(Seat::Taken(at)) => at,
                     Ok(Seat::HeldBy(until)) => {
-                        sleep_unless_aborted(&abort, until.saturating_sub(now_ms()).max(1));
+                        // A clean shutdown can release before this deadline.
+                        // Re-read the durable register so a replacement does
+                        // not sleep through that handoff for the whole lease.
+                        sleep_unless_aborted(
+                            &abort,
+                            until
+                                .saturating_sub(now_ms())
+                                .clamp(1, CONVERSATION_DISCOVERY_MS),
+                        );
                         continue;
                     }
                     Err(e) => {

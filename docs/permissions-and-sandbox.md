@@ -7,15 +7,17 @@ mode and, on Linux, optionally through a user-namespace sandbox.
 
 | Mode | Behavior |
 |---|---|
-| `read-only` | Read tools and web tools execute. Filesystem and shell mutations are gated to no-op. |
-| `workspace-write` | Writes execute inside the current workspace. Ambient shell mutations are gated. |
-| `prompt` | Each privileged tool call surfaces an interactive approval. |
-| `allow` | Tool calls execute as approved by the runner — for non-interactive automation. |
+| `read-only` | Read tools and web tools execute. Filesystem and shell mutations are denied. |
+| `workspace-write` | Writes execute inside the current workspace. Ambient shell mutations request approval. |
 | `danger-full-access` | All tool calls execute. |
 
 Select a mode with `--permission-mode <MODE>` or set
 `permissions.defaultMode` in `.scode.json`. The runtime default is
 `danger-full-access`.
+
+Co-host controllers can also assign the runtime modes `prompt` (each privileged
+call requires approval) and `allow` (the runner has approved tool execution).
+The standalone `--permission-mode` flag accepts the three modes in the table.
 
 ```bash
 scode --permission-mode workspace-write

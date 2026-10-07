@@ -506,68 +506,495 @@ fn available_command_from_spec(spec: &AcpSlashCommandSpec) -> AvailableCommand {
     )
 }
 
-/// Deliver nexus-A2A peer messages to ACP clients, once per process.
-///
-/// The receive half of standalone A2A was only ever wired into the interactive
-/// REPL, which printed `📨 A2A from <peer>` to the terminal. An ACP client —
-/// including an agent driving `scode acp` programmatically — saw nothing, so
-/// the send half worked and the reply never arrived anywhere it could be read.
-///
-/// Delivered as a `user_message_chunk` because that is what it is: from this
-/// session's point of view the peer is the party talking *to* the agent. Using
-/// a standard variant means every existing client renders it with no change;
-/// `_meta.sudocode.a2a.from` carries the sender for clients that want to tell
-/// peer mail apart from a human's typing.
-///
-/// Broadcast to every registered session, because the inbox belongs to the
-/// PROCESS: the agent this server is comes from `NEXUS_A2A_CREDENTIAL` — one
-/// bundle, one name — and every session it hosts is that agent. There is no
-/// per-session mailbox to route to.
-///
-/// Started on the first `session/new` rather than at boot — before a session
-/// exists there is nobody to notify — and only once, since the poller parks on
-/// a blocking tail read of a single inbox.
-fn ensure_a2a_receiver(registry: &SharedSessionRegistry, cx: &ConnectionTo<Client>) {
-    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return;
-    }
-    let Ok(Some(a2a)) = engine_host::nexus_a2a::session() else {
-        return;
+/// One turn driver for controller requests and A2A messages. All notifications,
+/// permission requests, questions and cancellation use the bound ACP connection.
+async fn drive_prompt(
+    req: PromptRequest,
+    registry: SharedSessionRegistry,
+    config: SdkAcpConfig,
+    cx: ConnectionTo<Client>,
+) -> Result<(PromptResponse, String), AcpError> {
+    let (prompt_text, images) = extract_content_from_blocks(&req.prompt)?;
+    let trace_id = req
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("traceId").and_then(|v| v.as_str().map(String::from)));
+    let sid = req.session_id.to_string();
+    let cx_inner = cx.clone();
+    let cx_perm = cx;
+    // Same-session ordering: wait (asynchronously) for this
+    // session's lane; other sessions are unaffected.
+    let _lane = registry.enter_lane(&sid).await;
+    let Some(engine) = registry.engine(&sid) else {
+        return Err(AcpError::invalid_params(format!(
+            "unknown sessionId: {sid}"
+        )));
     };
+    registry.report_state(engine_core::EngineState::Running, None);
+    let _turn_state = HostedTurnState(Arc::clone(&registry));
+    let session_cwd = registry.cwd(&sid);
+    let cwd_lease = registry.cwd_lease();
+    let subagents = registry.subagents(&sid);
+    if let Some(subagents) = &subagents {
+        subagents.set_connection(cx_inner.clone());
+    }
+    let is_slash_command = prompt_text.starts_with('/');
+    let holds_cwd_lease =
+        is_slash_command && session_ops::slash_command_holds_cwd_lease(&prompt_text);
+    // `!<cmd>` bash mode: runs in the session workspace, no
+    // model turn — same contract as the REPL. Hosts may
+    // prepend `<system-reminder>` notes to the user's text;
+    // those are skipped before looking for the `!`.
+    let bang_command = commands::bash_mode::parse_bang_prompt(&prompt_text).map(str::to_string);
 
-    // The poller is a blocking thread with a sync callback; the ACP connection
-    // is async. One channel bridges them, the same shape the turn path uses.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
-    let _poller = engine_host::nexus_a2a::spawn_poller(a2a, HookAbortSignal::new(), move |msg| {
-        // Hand-off only, and weaker than the REPL's ack: this channel is
-        // unbounded and the ACP client's receipt is not observable from here,
-        // so the cursor advances once the notification is queued for the
-        // client. A send error means the forwarding task is gone, which is a
-        // refusal and re-delivers.
-        tx.send((msg.from.clone(), msg.body.clone())).is_ok()
+    // Permission-prompt + question bridge channels (ACP
+    // round-trips) and the engine event → notification bridge.
+    let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel::<(
+        PermissionRequest,
+        tokio::sync::oneshot::Sender<PermissionPromptDecision>,
+    )>();
+    let (question_tx, mut question_rx) = tokio::sync::mpsc::unbounded_channel::<(
+        String,
+        QuestionPromptRequest,
+        tokio::sync::oneshot::Sender<Result<Vec<QuestionPromptAnswer>, String>>,
+    )>();
+    let (notif_tx, mut notif_rx) = tokio::sync::mpsc::unbounded_channel::<SessionNotification>();
+
+    // The seam speaks `EngineEvent` over a std mpsc (the pump's
+    // shape); a small forwarder thread maps each event onto the
+    // ACP wire and feeds the async `select!` below — the same
+    // pattern the in-process pump uses for its command channel.
+    let (evt_tx, evt_rx) = std_mpsc::channel::<EngineEvent>();
+    let assistant_text = Arc::new(Mutex::new(String::new()));
+    let text_forward = Arc::clone(&assistant_text);
+    let sid_forward = sid.clone();
+    let subagents_forward = subagents.clone();
+    std::thread::Builder::new()
+        .name("acp-engine-events".into())
+        .spawn(move || {
+            while let Ok(event) = evt_rx.recv() {
+                if let EngineEvent::TextDelta { text } = &event {
+                    text_forward
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push_str(text);
+                }
+                if let Some(subagents) = &subagents_forward {
+                    subagents.observe(&event);
+                }
+                if let Some(notification) = session_ops::engine_event_to_session_update(
+                    &sid_forward,
+                    event,
+                    subagents_forward.is_some(),
+                ) {
+                    if notif_tx.send(notification).is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+        .expect("spawn acp-engine-events thread");
+
+    let engine_blocking = Arc::clone(&engine);
+    let config_blocking = config.clone();
+    let session_cwd_blocking = session_cwd.clone();
+    let images_blocking = images.clone();
+    let prompt_blocking = prompt_text.clone();
+    let trace_blocking = trace_id.clone();
+    let blocking_handle = tokio::task::spawn_blocking(move || {
+        // The turn resolves paths against the session's
+        // workspace-root scope (thread-scoped), never the
+        // process cwd, so turns of sessions in other dirs run
+        // concurrently. `/model` (holds_cwd_lease) rebuilds the
+        // runtime, so it runs under the process-cwd lease.
+        let _scope = session_cwd_blocking.clone().map(WorkspaceRootScope::enter);
+        let _cwd_guard =
+            match (holds_cwd_lease, &session_cwd_blocking) {
+                (true, Some(cwd)) => Some(cwd_lease.acquire(cwd).map_err(|e| {
+                    AcpError::internal(format!("failed to enter session cwd: {e}"))
+                })?),
+                _ => None,
+            };
+        let turn_cwd = session_cwd_blocking
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+
+        if let Some(command) = bang_command {
+            let text = session_ops::run_bang_command(&engine_blocking, &command)?;
+            let _ = evt_tx.send(EngineEvent::TextDelta { text });
+            return Ok::<_, AcpError>((AcpStopReason::EndTurn, None));
+        }
+
+        if is_slash_command {
+            let mut observer =
+                ObserverAdapter::for_delegate(evt_tx.clone(), engine_blocking.as_ref());
+            let (text, stop) = session_ops::handle_slash_command(
+                &engine_blocking,
+                &config_blocking,
+                &turn_cwd,
+                &prompt_blocking,
+                &mut observer,
+            )?;
+            let _ = evt_tx.send(EngineEvent::TextDelta { text });
+            return Ok::<_, AcpError>((stop, None));
+        }
+
+        if let Some(tid) = &trace_blocking {
+            engine_blocking.set_trace_id(tid);
+        }
+        if !images_blocking.is_empty() {
+            session_ops::prepare_and_push_images(&engine_blocking, &images_blocking, &turn_cwd)?;
+        }
+        let queue = runtime::PromptQueue::default();
+        engine_blocking.set_question_prompter(Box::new(AcpQuestionBridge {
+            queue: queue.clone(),
+            tx: question_tx,
+        }));
+        // While this turn runs, sub-agent events ride its
+        // channel; the guard hands them back to the session
+        // route when the turn ends.
+        let _subagent_turn = subagents
+            .as_ref()
+            .map(|subagents| subagents.relay.attach_turn(evt_tx.clone()));
+        let mut observer = match &subagents {
+            Some(subagents) => ObserverAdapter::for_delegate(evt_tx, engine_blocking.as_ref())
+                .with_subagent_relay(subagents.relay.clone()),
+            None => ObserverAdapter::for_delegate(evt_tx, engine_blocking.as_ref()),
+        };
+        let mut bridge = AcpPermissionBridge {
+            tx: bridge_tx,
+            queue,
+        };
+        let blocks = vec![runtime::ContentBlock::Text {
+            text: prompt_blocking,
+        }];
+        let complete = engine_blocking
+            .run_turn(blocks, &mut observer, &mut bridge)
+            .map_err(|error| AcpError::from_turn_error(&error))?;
+        let auto_compacted = complete.auto_compaction.is_some();
+        session_ops::record_turn_usage(&engine_blocking, &complete);
+        let usage = session_ops::build_prompt_usage(&engine_blocking, &complete, auto_compacted);
+        let stop = if complete.cancelled {
+            StopReason::Cancelled
+        } else {
+            StopReason::EndTurn
+        };
+        Ok((stop, usage))
     });
 
-    let registry = Arc::clone(registry);
-    let cx = cx.clone();
-    tokio::spawn(async move {
-        while let Some((from, body)) = rx.recv().await {
-            let mut meta = Map::new();
-            meta.insert(
-                "sudocode".to_string(),
-                serde_json::json!({ "a2a": { "from": from } }),
-            );
-            for (session_id, _cwd) in registry.list() {
-                let notification = SessionNotification::new(
-                    session_id,
-                    SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
-                        TextContent::new(&format!("[message from {from}] {body}")),
-                    ))),
-                )
-                .meta(meta.clone());
-                let _ = cx.send_notification(notification);
+    // Concurrently serve permission/question requests + stream
+    // notifications while the blocking turn runs.
+    use futures::{FutureExt, StreamExt};
+    let mut replies =
+        futures::stream::FuturesUnordered::<futures::future::BoxFuture<'_, ()>>::new();
+    let mut blocking_handle = blocking_handle;
+    let mut notif_rx_open = true;
+    let result: Result<(StopReason, Option<PromptUsage>), AcpError> = loop {
+        tokio::select! {
+            biased;
+            notif = notif_rx.recv(), if notif_rx_open => {
+                if let Some(n) = notif {
+                    let _ = cx_inner.send_notification(n);
+                } else {
+                    notif_rx_open = false;
+                }
+            }
+            _ = replies.next(), if !replies.is_empty() => {
+                if replies.is_empty() {
+                    registry.report_state(engine_core::EngineState::Running, None);
+                }
+            }
+            perm = bridge_rx.recv() => {
+                if let Some((perm_req, response_tx)) = perm {
+                    registry.report_state(engine_core::EngineState::AwaitingInput, Some("permission".into()));
+                    let acp_req = build_acp_permission_request(
+                        sid.clone(),
+                        &perm_req,
+                    );
+                    let abort = registry.abort_signal(&sid).expect("registered session abort signal");
+                    let cx_reply = cx_perm.clone();
+                    replies.push(async move {
+                        let answer = tokio::select! {
+                            biased;
+                            () = abort.cancelled() => None,
+                            answer = cx_reply.send_request(acp_req).block_task() => Some(answer),
+                        };
+                        let decision = match answer {
+                            None => PermissionPromptDecision::Deny { reason: "turn cancelled".into() },
+                            Some(Ok(resp)) => map_permission_response(resp),
+                            Some(Err(_)) => PermissionPromptDecision::Deny {
+                                reason: "ACP permission request failed"
+                                    .to_string(),
+                            },
+                        };
+                        let _ = response_tx.send(decision);
+                    }.boxed());
+                } else {
+                    break blocking_handle.await
+                        .unwrap_or(Err(AcpError::internal("blocking task failed")));
+                }
+            }
+            question = question_rx.recv() => {
+                if let Some((tool_call_id, question_req, response_tx)) = question {
+                    registry.report_state(engine_core::EngineState::AwaitingInput, Some("question".into()));
+                    let payload = AcpAskUserQuestionRequestPayload {
+                        session_id: sid.clone(),
+                        tool_call_id,
+                        title: question_req.title.clone(),
+                        description: question_req.description.as_ref().map(|text| text.as_str().to_owned()),
+                                            description_format: question_req.description.as_ref().map(|text| text.format_name().to_owned()),
+                        questions: question_req
+                            .fields
+                            .iter()
+                            .map(|field| AcpQuestionFieldPayload {
+                                id: field.id.clone(),
+                                prompt: field.prompt.clone(),
+                                kind: field.kind.as_str().to_string(),
+                                required: field.required,
+                                allow_custom_input: field.allow_custom_input,
+                                custom_input_hint: field.custom_input_hint.clone(),
+                                options: field
+                                    .options
+                                    .iter()
+                                    .map(|option| AcpQuestionOptionPayload {
+                                        label: option.label.clone(),
+                                        value: option.value.clone(),
+                                        description: option.description.clone(),
+                                        recommended: option.recommended,
+                                    })
+                                    .collect(),
+                            })
+                            .collect(),
+                    };
+                    let cx_reply = cx_perm.clone();
+                    let abort = registry.abort_signal(&sid).expect("registered session abort signal");
+                    replies.push(async move {
+                        let outcome = match serde_json::value::to_raw_value(&payload) {
+                            Ok(raw) => {
+                                let answer = tokio::select! {
+                                    biased;
+                                    () = abort.cancelled() => None,
+                                    answer = cx_reply.send_request(ClientRequest::ExtMethodRequest(
+                                        ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
+                                    )).block_task() => Some(answer),
+                                };
+                                match answer {
+                                    None => Err("turn cancelled".into()),
+                                    Some(Ok(resp)) => {
+                                        serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
+                                            .map_err(|error| format!("deserialize: {}", error))
+                                            .map(|payload| {
+                                                payload
+                                                    .answers
+                                                    .into_iter()
+                                                    .map(|answer| QuestionPromptAnswer {
+                                                        id: answer.id,
+                                                        value: answer.value,
+                                                        label: answer.label,
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            })
+                                    }
+                                    Some(Err(error)) => Err(error.to_string()),
+                                }
+                            }
+                            Err(error) => Err(error.to_string()),
+                        };
+                        let _ = response_tx.send(outcome);
+                    }.boxed());
+                } else {
+                    break blocking_handle.await
+                        .unwrap_or(Err(AcpError::internal("blocking task failed")));
+                }
+            }
+            done = &mut blocking_handle => {
+                break done.unwrap_or(Err(AcpError::internal("blocking task join failed")));
             }
         }
+    };
+
+    drop(replies);
+
+    // Flush the rest of the turn's notifications before the
+    // response, which the protocol requires: a client renders
+    // `session/update`s as they arrive and finalises on the
+    // `session/prompt` response, so an update that lands after
+    // it is an update the client has already stopped listening
+    // for.
+    //
+    // Draining with `try_recv` did not guarantee that. The turn
+    // hands events to the forwarder thread, which maps them onto
+    // the wire; when the turn returned with the forwarder still
+    // mid-map, `try_recv` saw an empty channel and the response
+    // overtook them. A slash command — one `TextDelta` sent
+    // immediately before returning — lost that race routinely on
+    // Windows over WebSocket, and the client saw a bare
+    // `end_turn` with no text at all.
+    //
+    // The forwarder owns the only sender, so the channel closes
+    // exactly when it has finished; recv until then and the
+    // ordering is guaranteed rather than raced.
+    while let Some(n) = notif_rx.recv().await {
+        let _ = cx_inner.send_notification(n);
+    }
+
+    match result {
+        Ok((stop_reason, prompt_usage)) => {
+            let mut response = PromptResponse::new(stop_reason);
+            if let Some(u) = prompt_usage {
+                let sudocode_meta = sudocode_meta_from_prompt_usage(&u);
+                let mut meta = Map::new();
+                meta.insert("sudocode".to_string(), json!(sudocode_meta));
+                response = response
+                    .usage(
+                        Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
+                            .cached_read_tokens(u.cache_read_tokens)
+                            .cached_write_tokens(u.cache_write_tokens),
+                    )
+                    .meta(Some(meta));
+            }
+            let text = assistant_text
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            Ok((response, text))
+        }
+        Err(error) => {
+            let user_message = error.user_friendly_message();
+            let error_notification = SessionNotification::new(
+                sid.clone(),
+                SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new(&user_message),
+                ))),
+            );
+            let _ = cx_inner.send_notification(error_notification);
+            Err(error)
+        }
+    }
+}
+
+/// Normalize peer text into the same driver used by `session/prompt`.
+/// The durable conversation cursor advances after the turn returns. The bound
+/// controller receives streaming output, approval requests and questions.
+fn ensure_a2a_receiver(
+    registry: &SharedSessionRegistry,
+    cx: &ConnectionTo<Client>,
+    config: &SdkAcpConfig,
+    session_id: &str,
+) {
+    let mailbox = match &registry.hosted_factory {
+        Some(factory) => factory.mailbox(),
+        None => engine_host::nexus_a2a::session()
+            .ok()
+            .flatten()
+            .map(|session| session.mailbox()),
+    };
+    let Some(mailbox) = mailbox else {
+        return;
+    };
+    if registry.peer_receiver_started.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
+        runtime::agent_mailbox::MailboxEnvelope,
+        std::sync::mpsc::SyncSender<bool>,
+    )>();
+    let stop = registry.peer_receiver_stop.clone();
+    let callback_stop = stop.clone();
+    let receiver = runtime::mailbox::spawn_inbox_poller(
+        Arc::clone(&mailbox),
+        200,
+        "acp-peer",
+        stop.clone(),
+        move |message| {
+            // Structured session envelopes have their own authenticated codec.
+            if message.kind == "session" || message.body.trim().is_empty() {
+                return true;
+            }
+            let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+            if tx.send((message.clone(), ack_tx)).is_err() {
+                return false;
+            }
+            while !callback_stop.is_aborted() {
+                match ack_rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                    Ok(handled) => return handled,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+                }
+            }
+            false
+        },
+    );
+    let registry = Arc::clone(registry);
+    let cx = cx.clone();
+    let config = config.clone();
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        loop {
+            let inbound = tokio::select! {
+                () = stop.cancelled() => break,
+                inbound = rx.recv() => inbound,
+            };
+            let Some((message, ack)) = inbound else {
+                break;
+            };
+            let body = runtime::agent_mailbox::neutralize_untrusted_markup(&message.body);
+            let text = format!("[message from {}]\n\n{body}", message.from);
+            let mut meta = Map::new();
+            meta.insert(
+                "sudocode".into(),
+                json!({"a2a":{"from":message.from,"kind":message.kind}}),
+            );
+            let notification = SessionNotification::new(
+                session_id.clone(),
+                SessionUpdate::UserMessageChunk(ContentChunk::new(ContentBlock::Text(
+                    TextContent::new(&text),
+                ))),
+            )
+            .meta(meta);
+            if cx.send_notification(notification).is_err() {
+                break;
+            }
+            let sends_before = mailbox.sends_so_far();
+            let request = PromptRequest::new(
+                session_id.clone(),
+                vec![ContentBlock::Text(TextContent::new(text))],
+            );
+            let result =
+                drive_prompt(request, Arc::clone(&registry), config.clone(), cx.clone()).await;
+            if let Ok((response, text)) = &result {
+                if response.stop_reason != StopReason::Cancelled {
+                    if let Some(body) = runtime::spawn_task::auto_reply_body(
+                        &message.kind,
+                        text,
+                        sends_before,
+                        mailbox.sends_so_far(),
+                    ) {
+                        let reply = runtime::agent_mailbox::MailboxEnvelope {
+                            from: mailbox.self_id().to_string(),
+                            to: message.from.clone(),
+                            body,
+                            summary: None,
+                            timestamp: 0,
+                            color: None,
+                            kind: runtime::agent_mailbox::kinds::AUTO_REPLY.to_string(),
+                            request_id: message.request_id.clone(),
+                        };
+                        let sender = Arc::clone(&mailbox);
+                        if let Ok(Err(error)) =
+                            tokio::task::spawn_blocking(move || sender.send(reply)).await
+                        {
+                            eprintln!("[acp-peer] deliver reply: {error}");
+                        }
+                    }
+                }
+            }
+            // Explicit cancellation and turn errors are terminal. Restarting the
+            // host does not claim a turn it did not finish.
+            let _ = ack.send(!stop.is_aborted());
+        }
+        stop.abort();
+        let _ = tokio::task::spawn_blocking(move || receiver.join()).await;
     });
 }
 
@@ -993,6 +1420,26 @@ pub fn new_session_registry() -> SharedSessionRegistry {
 pub struct SessionRegistry {
     sessions: Mutex<HashMap<String, SessionEntry>>,
     cwd_lease: Arc<WorkspaceCwdLease>,
+    hosted_factory: Option<Arc<dyn HostedSessionFactory>>,
+    peer_receiver_started: AtomicBool,
+    peer_receiver_stop: HookAbortSignal,
+}
+
+/// The host chooses where a session lives; the ACP handlers and turn driver are
+/// shared with stdio and WebSocket. A hosted run owns one durable transcript.
+pub trait HostedSessionFactory: Send + Sync {
+    fn mailbox(&self) -> Option<Arc<runtime::mailbox::Mailbox>> {
+        None
+    }
+    fn close(&self) {}
+    fn state_changed(&self, _state: engine_core::EngineState, _reason: Option<String>) {}
+    fn open(
+        &self,
+        requested_id: Option<&str>,
+        mcp_servers: BTreeMap<String, runtime::ScopedMcpServerConfig>,
+        prompt_overrides: runtime::SystemPromptOverrides,
+        memory: runtime::memory::MemoryMode,
+    ) -> Result<(Arc<SessionEngine>, PathBuf), AcpError>;
 }
 
 struct SessionEntry {
@@ -1010,11 +1457,53 @@ struct SessionEntry {
     subagents: Option<Arc<SessionSubagents>>,
 }
 
+struct HostedTurnState(SharedSessionRegistry);
+impl Drop for HostedTurnState {
+    fn drop(&mut self) {
+        self.0.report_state(engine_core::EngineState::Idle, None);
+    }
+}
+
 /// Async guard for a session lane; drop it to let the next request on the
 /// same session proceed.
 pub type SessionLaneGuard = tokio::sync::OwnedMutexGuard<()>;
 
 impl SessionRegistry {
+    pub fn with_hosted_factory(factory: Arc<dyn HostedSessionFactory>) -> Self {
+        Self {
+            hosted_factory: Some(factory),
+            ..Self::default()
+        }
+    }
+
+    pub fn cancel_all(&self) {
+        self.peer_receiver_stop.abort();
+        for entry in self.lock_sessions().values() {
+            entry.abort.abort();
+        }
+    }
+
+    pub fn close_all(&self) {
+        self.peer_receiver_stop.abort();
+        let entries: Vec<_> = self
+            .lock_sessions()
+            .drain()
+            .map(|(_, entry)| entry)
+            .collect();
+        for entry in entries {
+            entry.abort.abort();
+            entry.engine.close();
+        }
+        if let Some(factory) = &self.hosted_factory {
+            factory.close();
+        }
+    }
+
+    fn report_state(&self, state: engine_core::EngineState, reason: Option<String>) {
+        if let Some(factory) = &self.hosted_factory {
+            factory.state_changed(state, reason);
+        }
+    }
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionEntry>> {
         self.sessions
             .lock()
@@ -1217,6 +1706,7 @@ impl Drop for CwdLeaseGuard {
 ///
 /// The normal tool loop awaits an owned reply while notifications keep flowing.
 /// Synchronous callers use the same queue through `decide()`.
+#[derive(Clone)]
 struct AcpPermissionBridge {
     queue: runtime::PromptQueue,
     tx: tokio::sync::mpsc::UnboundedSender<(
@@ -1226,6 +1716,13 @@ struct AcpPermissionBridge {
 }
 
 impl PermissionPrompter for AcpPermissionBridge {
+    fn delegation_sink(&self) -> Option<runtime::PermissionPromptSink> {
+        let bridge = self.clone();
+        Some(runtime::PermissionPromptSink::new(move |request| {
+            bridge.clone().begin_decision(&request)
+        }))
+    }
+
     fn decide(&mut self, request: &PermissionRequest) -> PermissionPromptDecision {
         let reply = self.begin_decision(request);
         tokio::task::block_in_place(|| futures::executor::block_on(reply))
@@ -1419,6 +1916,7 @@ pub(crate) async fn run_acp_on_transport(
     transport: impl ConnectTo<Agent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let agent_version = config.agent_version.clone();
+    let hosted = registry.hosted_factory.is_some();
     // Per connection: whether this client opted into sub-agent events at
     // `initialize`. Sessions it creates or loads get a sub-agent route.
     let subagent_events = Arc::new(AtomicBool::new(false));
@@ -1437,6 +1935,10 @@ pub(crate) async fn run_acp_on_transport(
                     let subagent_version =
                         subagent_events_version(req.client_capabilities.meta.as_ref());
                     subagent_events.store(subagent_version.is_some(), Ordering::SeqCst);
+                    let mut meta = initialize_meta(subagent_version);
+                    if hosted {
+                        meta.get_mut("sudocode").unwrap()["sessionFork"] = json!(false);
+                    }
                     let resp = InitializeResponse::new(req.protocol_version)
                         .agent_info(Implementation::new("scode", &version))
                         .agent_capabilities(
@@ -1449,7 +1951,7 @@ pub(crate) async fn run_acp_on_transport(
                                         .list(SessionListCapabilities::new()),
                                 ),
                         )
-                        .meta(initialize_meta(subagent_version));
+                        .meta(meta);
                     responder.respond(resp)?;
                     Ok(())
                 }
@@ -1490,12 +1992,26 @@ pub(crate) async fn run_acp_on_transport(
                     let registry = Arc::clone(&registry);
                     let config = config.clone();
                     let commands = session_ops::available_commands();
+                    let peer_config = config.clone();
                     let cx_notify = cx.clone();
                     let subagent_events = subagent_events.load(Ordering::SeqCst);
                     cx.spawn(async move {
                         let lease = registry.cwd_lease();
                         let build_registry = Arc::clone(&registry);
                         let result = tokio::task::spawn_blocking(move || {
+                            if let Some(factory) = &build_registry.hosted_factory {
+                                if fork_source.is_some() {
+                                    return Err(AcpError::invalid_params(
+                                        "fork requires a separate managed session",
+                                    ));
+                                }
+                                let mcp_servers =
+                                    acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
+                                let (engine, cwd) =
+                                    factory.open(None, mcp_servers, prompt_overrides, memory)?;
+                                let session_id = engine.session_handle().id;
+                                return Ok((engine, session_id, cwd));
+                            }
                             // Runtime construction: the engine resolves config /
                             // model / permission mode against the workspace-root
                             // scope, but the MCP servers + plugins it spawns
@@ -1505,8 +2021,7 @@ pub(crate) async fn run_acp_on_transport(
                                 AcpError::internal(format!("failed to enter cwd: {e}"))
                             })?;
                             let _scope = WorkspaceRootScope::enter(lease_cwd);
-                            let mcp_servers =
-                                acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
+                            let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &req.cwd);
                             let (engine, cwd) = match fork_source {
                                 Some(source) => session_ops::open_forked_session(
                                     &config,
@@ -1541,7 +2056,12 @@ pub(crate) async fn run_acp_on_transport(
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
                                 );
-                                ensure_a2a_receiver(&registry, &cx_notify);
+                                ensure_a2a_receiver(
+                                    &registry,
+                                    &cx_notify,
+                                    &peer_config,
+                                    &session_id,
+                                );
                             }
                             Err(e) => {
                                 responder.respond_with_error(acp_error_to_sdk(&e))?;
@@ -1562,366 +2082,13 @@ pub(crate) async fn run_acp_on_transport(
                 async move |req: PromptRequest,
                             responder: Responder<PromptResponse>,
                             cx: ConnectionTo<Client>| {
-                    let (prompt_text, images) = match extract_content_from_blocks(&req.prompt) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            responder.respond_with_error(acp_error_to_sdk(&e))?;
-                            return Ok(());
-                        }
-                    };
-                    if prompt_text.is_empty() {
-                        responder.respond_with_error(acp_error_to_sdk(
-                            &AcpError::invalid_params(
-                                "prompt must include at least one non-empty text content block",
-                            ),
-                        ))?;
-                        return Ok(());
-                    }
-                    let trace_id = req.meta.as_ref().and_then(|m| {
-                        m.get("traceId").and_then(|v| v.as_str().map(String::from))
-                    });
-
                     let registry = Arc::clone(&registry);
                     let config = config.clone();
-                    let sid = req.session_id.to_string();
-                    let cx_inner = cx.clone();
-                    let cx_perm = cx.clone();
+                    let connection = cx.clone();
                     cx.spawn(async move {
-                        // Same-session ordering: wait (asynchronously) for this
-                        // session's lane; other sessions are unaffected.
-                        let _lane = registry.enter_lane(&sid).await;
-                        let Some(engine) = registry.engine(&sid) else {
-                            responder.respond_with_error(acp_error_to_sdk(
-                                &AcpError::invalid_params(format!("unknown sessionId: {sid}")),
-                            ))?;
-                            return Ok(());
-                        };
-                        let session_cwd = registry.cwd(&sid);
-                        let cwd_lease = registry.cwd_lease();
-                        let subagents = registry.subagents(&sid);
-                        if let Some(subagents) = &subagents {
-                            subagents.set_connection(cx_inner.clone());
-                        }
-                        let is_slash_command = prompt_text.starts_with('/');
-                        let holds_cwd_lease = is_slash_command
-                            && session_ops::slash_command_holds_cwd_lease(&prompt_text);
-                        // `!<cmd>` bash mode: runs in the session workspace, no
-                        // model turn — same contract as the REPL. Hosts may
-                        // prepend `<system-reminder>` notes to the user's text;
-                        // those are skipped before looking for the `!`.
-                        let bang_command =
-                            commands::bash_mode::parse_bang_prompt(&prompt_text).map(str::to_string);
-
-                        // Permission-prompt + question bridge channels (ACP
-                        // round-trips) and the engine event → notification bridge.
-                        let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel::<(
-                            PermissionRequest,
-                            tokio::sync::oneshot::Sender<PermissionPromptDecision>,
-                        )>();
-                        let (question_tx, mut question_rx) =
-                            tokio::sync::mpsc::unbounded_channel::<(
-                                String,
-                                QuestionPromptRequest,
-                                tokio::sync::oneshot::Sender<
-                                    Result<Vec<QuestionPromptAnswer>, String>,
-                                >,
-                            )>();
-                        let (notif_tx, mut notif_rx) =
-                            tokio::sync::mpsc::unbounded_channel::<SessionNotification>();
-
-                        // The seam speaks `EngineEvent` over a std mpsc (the pump's
-                        // shape); a small forwarder thread maps each event onto the
-                        // ACP wire and feeds the async `select!` below — the same
-                        // pattern the in-process pump uses for its command channel.
-                        let (evt_tx, evt_rx) = std_mpsc::channel::<EngineEvent>();
-                        let sid_forward = sid.clone();
-                        let subagents_forward = subagents.clone();
-                        std::thread::Builder::new()
-                            .name("acp-engine-events".into())
-                            .spawn(move || {
-                                while let Ok(event) = evt_rx.recv() {
-                                    if let Some(subagents) = &subagents_forward {
-                                        subagents.observe(&event);
-                                    }
-                                    if let Some(notification) =
-                                        session_ops::engine_event_to_session_update(
-                                            &sid_forward,
-                                            event,
-                                            subagents_forward.is_some(),
-                                        )
-                                    {
-                                        if notif_tx.send(notification).is_err() {
-                                            break;
-                                        }
-                                    }
-                                }
-                            })
-                            .expect("spawn acp-engine-events thread");
-
-                        let engine_blocking = Arc::clone(&engine);
-                        let config_blocking = config.clone();
-                        let session_cwd_blocking = session_cwd.clone();
-                        let images_blocking = images.clone();
-                        let prompt_blocking = prompt_text.clone();
-                        let trace_blocking = trace_id.clone();
-                        let blocking_handle = tokio::task::spawn_blocking(move || {
-                            // The turn resolves paths against the session's
-                            // workspace-root scope (thread-scoped), never the
-                            // process cwd, so turns of sessions in other dirs run
-                            // concurrently. `/model` (holds_cwd_lease) rebuilds the
-                            // runtime, so it runs under the process-cwd lease.
-                            let _scope = session_cwd_blocking
-                                .clone()
-                                .map(WorkspaceRootScope::enter);
-                            let _cwd_guard = match (holds_cwd_lease, &session_cwd_blocking) {
-                                (true, Some(cwd)) => Some(cwd_lease.acquire(cwd).map_err(|e| {
-                                    AcpError::internal(format!("failed to enter session cwd: {e}"))
-                                })?),
-                                _ => None,
-                            };
-                            let turn_cwd = session_cwd_blocking
-                                .clone()
-                                .unwrap_or_else(|| std::path::PathBuf::from("."));
-
-                            if let Some(command) = bang_command {
-                                let text =
-                                    session_ops::run_bang_command(&engine_blocking, &command)?;
-                                let _ = evt_tx.send(EngineEvent::TextDelta { text });
-                                return Ok::<_, AcpError>((AcpStopReason::EndTurn, None));
-                            }
-
-                            if is_slash_command {
-                                let mut observer = ObserverAdapter::for_delegate(evt_tx.clone(), engine_blocking.as_ref());
-                                let (text, stop) = session_ops::handle_slash_command(
-                                    &engine_blocking,
-                                    &config_blocking,
-                                    &turn_cwd,
-                                    &prompt_blocking,
-                                    &mut observer,
-                                )?;
-                                let _ = evt_tx.send(EngineEvent::TextDelta { text });
-                                return Ok::<_, AcpError>((stop, None));
-                            }
-
-                            if let Some(tid) = &trace_blocking {
-                                engine_blocking.set_trace_id(tid);
-                            }
-                            if !images_blocking.is_empty() {
-                                session_ops::prepare_and_push_images(
-                                    &engine_blocking,
-                                    &images_blocking,
-                                    &turn_cwd,
-                                )?;
-                            }
-                            let queue = runtime::PromptQueue::default();
-                            engine_blocking.set_question_prompter(Box::new(AcpQuestionBridge {
-                                queue: queue.clone(),
-                                tx: question_tx,
-                            }));
-                            // While this turn runs, sub-agent events ride its
-                            // channel; the guard hands them back to the session
-                            // route when the turn ends.
-                            let _subagent_turn = subagents
-                                .as_ref()
-                                .map(|subagents| subagents.relay.attach_turn(evt_tx.clone()));
-                            let mut observer = match &subagents {
-                                Some(subagents) => ObserverAdapter::for_delegate(evt_tx, engine_blocking.as_ref())
-                                    .with_subagent_relay(subagents.relay.clone()),
-                                None => ObserverAdapter::for_delegate(evt_tx, engine_blocking.as_ref()),
-                            };
-                            let mut bridge = AcpPermissionBridge { tx: bridge_tx, queue };
-                            let blocks = vec![runtime::ContentBlock::Text {
-                                text: prompt_blocking,
-                            }];
-                            let complete = engine_blocking
-                                .run_turn(blocks, &mut observer, &mut bridge)
-                                .map_err(|error| AcpError::from_turn_error(&error))?;
-                            let auto_compacted = complete.auto_compaction.is_some();
-                            session_ops::record_turn_usage(&engine_blocking, &complete);
-                            let usage = session_ops::build_prompt_usage(
-                                &engine_blocking,
-                                &complete,
-                                auto_compacted,
-                            );
-                            let stop = if complete.cancelled {
-                                StopReason::Cancelled
-                            } else {
-                                StopReason::EndTurn
-                            };
-                            Ok((stop, usage))
-                        });
-
-                        // Concurrently serve permission/question requests + stream
-                        // notifications while the blocking turn runs.
-                        use futures::{FutureExt, StreamExt};
-                        let mut replies = futures::stream::FuturesUnordered::<futures::future::BoxFuture<'_, ()>>::new();
-                        let mut blocking_handle = blocking_handle;
-                        let mut notif_rx_open = true;
-                        let result: Result<(StopReason, Option<PromptUsage>), AcpError> = loop {
-                            tokio::select! {
-                                biased;
-                                notif = notif_rx.recv(), if notif_rx_open => {
-                                    if let Some(n) = notif {
-                                        let _ = cx_inner.send_notification(n);
-                                    } else {
-                                        notif_rx_open = false;
-                                    }
-                                }
-                                _ = replies.next(), if !replies.is_empty() => {}
-                                perm = bridge_rx.recv() => {
-                                    if let Some((perm_req, response_tx)) = perm {
-                                        let acp_req = build_acp_permission_request(
-                                            sid.clone(),
-                                            &perm_req,
-                                        );
-                                        let cx_reply = cx_perm.clone();
-                                        replies.push(async move {
-                                            let decision = match cx_reply
-                                                .send_request(acp_req)
-                                                .block_task()
-                                                .await
-                                            {
-                                                Ok(resp) => map_permission_response(resp),
-                                                Err(_) => PermissionPromptDecision::Deny {
-                                                    reason: "ACP permission request failed"
-                                                        .to_string(),
-                                                },
-                                            };
-                                            let _ = response_tx.send(decision);
-                                        }.boxed());
-                                    } else {
-                                        break blocking_handle.await
-                                            .unwrap_or(Err(AcpError::internal("blocking task failed")));
-                                    }
-                                }
-                                question = question_rx.recv() => {
-                                    if let Some((tool_call_id, question_req, response_tx)) = question {
-                                        let payload = AcpAskUserQuestionRequestPayload {
-                                            session_id: sid.clone(),
-                                            tool_call_id,
-                                            title: question_req.title.clone(),
-                                            description: question_req.description.as_ref().map(|text| text.as_str().to_owned()),
-                                            description_format: question_req.description.as_ref().map(|text| text.format_name().to_owned()),
-                                            questions: question_req
-                                                .fields
-                                                .iter()
-                                                .map(|field| AcpQuestionFieldPayload {
-                                                    id: field.id.clone(),
-                                                    prompt: field.prompt.clone(),
-                                                    kind: field.kind.as_str().to_string(),
-                                                    required: field.required,
-                                                    allow_custom_input: field.allow_custom_input,
-                                                    custom_input_hint: field.custom_input_hint.clone(),
-                                                    options: field
-                                                        .options
-                                                        .iter()
-                                                        .map(|option| AcpQuestionOptionPayload {
-                                                            label: option.label.clone(),
-                                                            value: option.value.clone(),
-                                                            description: option.description.clone(),
-                                                            recommended: option.recommended,
-                                                        })
-                                                        .collect(),
-                                                })
-                                                .collect(),
-                                        };
-                                        let cx_reply = cx_perm.clone();
-                                        replies.push(async move {
-                                            let outcome = match serde_json::value::to_raw_value(&payload) {
-                                                Ok(raw) => {
-                                                    match cx_reply
-                                                        .send_request(ClientRequest::ExtMethodRequest(
-                                                            ExtRequest::new(ACP_ASK_USER_QUESTION_METHOD, StdArc::from(raw)),
-                                                        ))
-                                                        .block_task()
-                                                        .await
-                                                    {
-                                                        Ok(resp) => {
-                                                            serde_json::from_value::<AcpAskUserQuestionResponsePayload>(resp)
-                                                                .map_err(|error| format!("deserialize: {}", error))
-                                                                .map(|payload| {
-                                                                    payload
-                                                                        .answers
-                                                                        .into_iter()
-                                                                        .map(|answer| QuestionPromptAnswer {
-                                                                            id: answer.id,
-                                                                            value: answer.value,
-                                                                            label: answer.label,
-                                                                        })
-                                                                        .collect::<Vec<_>>()
-                                                                })
-                                                        }
-                                                        Err(error) => Err(error.to_string()),
-                                                    }
-                                                }
-                                                Err(error) => Err(error.to_string()),
-                                            };
-                                            let _ = response_tx.send(outcome);
-                                        }.boxed());
-                                    } else {
-                                        break blocking_handle.await
-                                            .unwrap_or(Err(AcpError::internal("blocking task failed")));
-                                    }
-                                }
-                                done = &mut blocking_handle => {
-                                    break done.unwrap_or(Err(AcpError::internal("blocking task join failed")));
-                                }
-                            }
-                        };
-
-                        drop(replies);
-
-                        // Flush the rest of the turn's notifications before the
-                        // response, which the protocol requires: a client renders
-                        // `session/update`s as they arrive and finalises on the
-                        // `session/prompt` response, so an update that lands after
-                        // it is an update the client has already stopped listening
-                        // for.
-                        //
-                        // Draining with `try_recv` did not guarantee that. The turn
-                        // hands events to the forwarder thread, which maps them onto
-                        // the wire; when the turn returned with the forwarder still
-                        // mid-map, `try_recv` saw an empty channel and the response
-                        // overtook them. A slash command — one `TextDelta` sent
-                        // immediately before returning — lost that race routinely on
-                        // Windows over WebSocket, and the client saw a bare
-                        // `end_turn` with no text at all.
-                        //
-                        // The forwarder owns the only sender, so the channel closes
-                        // exactly when it has finished; recv until then and the
-                        // ordering is guaranteed rather than raced.
-                        while let Some(n) = notif_rx.recv().await {
-                            let _ = cx_inner.send_notification(n);
-                        }
-
-                        match result {
-                            Ok((stop_reason, prompt_usage)) => {
-                                let mut response = PromptResponse::new(stop_reason);
-                                if let Some(u) = prompt_usage {
-                                    let sudocode_meta = sudocode_meta_from_prompt_usage(&u);
-                                    let mut meta = Map::new();
-                                    meta.insert("sudocode".to_string(), json!(sudocode_meta));
-                                    response = response
-                                        .usage(
-                                            Usage::new(u.total_tokens, u.input_tokens, u.output_tokens)
-                                                .cached_read_tokens(u.cache_read_tokens)
-                                                .cached_write_tokens(u.cache_write_tokens),
-                                        )
-                                        .meta(Some(meta));
-                                }
-                                responder.respond(response)?;
-                            }
-                            Err(error) => {
-                                let user_message = error.user_friendly_message();
-                                let error_notification = SessionNotification::new(
-                                    sid.clone(),
-                                    SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                        ContentBlock::Text(TextContent::new(&user_message)),
-                                    )),
-                                );
-                                let _ = cx_inner.send_notification(error_notification);
-                                responder.respond_with_error(acp_error_to_sdk(&error))?;
-                            }
+                        match drive_prompt(req, registry, config, connection).await {
+                            Ok((response, _)) => responder.respond(response)?,
+                            Err(error) => responder.respond_with_error(acp_error_to_sdk(&error))?,
                         }
                         Ok(())
                     })?;
@@ -2081,6 +2248,7 @@ pub(crate) async fn run_acp_on_transport(
                     let registry = Arc::clone(&registry);
                     let config = config.clone();
                     let commands = session_ops::available_commands();
+                    let peer_config = config.clone();
                     let cx_notify = cx.clone();
                     let sid = req.session_id.to_string();
                     let cwd = req.cwd;
@@ -2088,7 +2256,19 @@ pub(crate) async fn run_acp_on_transport(
                     cx.spawn(async move {
                         let _lane = registry.enter_lane(&sid).await;
                         let lease = registry.cwd_lease();
+                        let factory = registry.hosted_factory.clone();
                         let result = tokio::task::spawn_blocking(move || {
+                            if let Some(factory) = factory {
+                                let mcp_servers = acp_mcp_servers_to_scoped(&req.mcp_servers, &cwd);
+                                let (engine, cwd) = factory.open(
+                                    Some(&sid),
+                                    mcp_servers,
+                                    prompt_overrides,
+                                    memory,
+                                )?;
+                                let session_id = engine.session_handle().id;
+                                return Ok((engine, session_id, cwd));
+                            }
                             let lease_cwd = session_lease_cwd(&cwd);
                             let _cwd = lease.acquire(&lease_cwd).map_err(|e| {
                                 AcpError::internal(format!("failed to enter cwd: {e}"))
@@ -2126,6 +2306,12 @@ pub(crate) async fn run_acp_on_transport(
                                 responder.respond(LoadSessionResponse::new())?;
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
+                                );
+                                ensure_a2a_receiver(
+                                    &registry,
+                                    &cx_notify,
+                                    &peer_config,
+                                    &session_id,
                                 );
                             }
                             Err(e) => {
@@ -2196,21 +2382,21 @@ pub(crate) async fn run_acp_on_transport(
                             responder: Responder<CancelSubagentResponse>,
                             _cx: ConnectionTo<Client>| {
                     let Some(subagents) = registry.subagents(&req.session_id) else {
-                        responder.respond_with_error(acp_error_to_sdk(&AcpError::invalid_params(
-                            format!(
+                        responder.respond_with_error(acp_error_to_sdk(
+                            &AcpError::invalid_params(format!(
                                 "session {} is unknown or did not opt into sub-agent events",
                                 req.session_id
-                            ),
-                        )))?;
+                            )),
+                        ))?;
                         return Ok(());
                     };
                     if !subagents.knows(&req.agent_id) {
-                        responder.respond_with_error(acp_error_to_sdk(&AcpError::invalid_params(
-                            format!(
+                        responder.respond_with_error(acp_error_to_sdk(
+                            &AcpError::invalid_params(format!(
                                 "agent {} was not spawned in session {}",
                                 req.agent_id, req.session_id
-                            ),
-                        )))?;
+                            )),
+                        ))?;
                         return Ok(());
                     }
                     let cancelled = engine_host::abort_subagent(&req.agent_id);
@@ -2222,17 +2408,15 @@ pub(crate) async fn run_acp_on_transport(
         )
         // --- catch-all for unhandled methods ---
         .on_receive_dispatch(
-            async move |dispatch: Dispatch, cx: ConnectionTo<Client>| {
-                match &dispatch {
-                    Dispatch::Request(_, _) | Dispatch::Notification(_) => {
-                        dispatch.respond_with_error(Error::method_not_found(), cx)?;
-                        Ok(Handled::Yes)
-                    }
-                    Dispatch::Response(_, _) => Ok(Handled::No {
-                        message: dispatch,
-                        retry: false,
-                    }),
+            async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match &dispatch {
+                Dispatch::Request(_, _) | Dispatch::Notification(_) => {
+                    dispatch.respond_with_error(Error::method_not_found(), cx)?;
+                    Ok(Handled::Yes)
                 }
+                Dispatch::Response(_, _) => Ok(Handled::No {
+                    message: dispatch,
+                    retry: false,
+                }),
             },
             on_receive_dispatch!(),
         )

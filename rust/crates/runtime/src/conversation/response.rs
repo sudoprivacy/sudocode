@@ -9,7 +9,11 @@ use futures::StreamExt;
 use std::sync::Arc;
 
 impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
-    fn dispatch_context(&self, observer: &Option<&mut dyn RuntimeObserver>) -> ToolDispatchContext {
+    fn dispatch_context(
+        &self,
+        observer: &Option<&mut dyn RuntimeObserver>,
+        prompter: &Option<&mut dyn PermissionPrompter>,
+    ) -> ToolDispatchContext {
         ToolDispatchContext {
             parent_assistant_message: None,
             parent_session_messages: self.session.messages.clone(),
@@ -27,6 +31,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 .and_then(RuntimeObserver::background_tasks),
             tool_use_id: None,
             parent_permission_mode: Some(self.permission_policy.active_mode()),
+            permission_sink: prompter
+                .as_deref()
+                .and_then(PermissionPrompter::delegation_sink),
         }
     }
 
@@ -156,7 +163,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                     Some(Ok(event)) => {
                         if let AssistantEvent::ToolUse { id, name, input, .. } = &event {
                             if assistant_index.is_none() {
-                                scheduler.initialize_context(self.dispatch_context(observer));
+                                scheduler.initialize_context(self.dispatch_context(observer, prompter));
                             }
                             let mut prefix = events.clone();
                             prefix.push(event.clone());

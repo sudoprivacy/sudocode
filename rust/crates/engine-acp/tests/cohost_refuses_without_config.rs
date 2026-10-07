@@ -1,3 +1,5 @@
+#![cfg(feature = "mailbox")]
+
 //! A co-host with no sudocode configuration REFUSES, and says what is missing.
 //!
 //! This is the first thing a fresh daemon hits: an agent resolves its model and
@@ -10,13 +12,15 @@
 //! test that needs it EMPTY cannot share a process with the ones that need it
 //! populated.
 
+#[path = "../../engine-host/tests/common/mod.rs"]
 mod common;
+mod managed_harness;
 
 use std::sync::Arc;
 
 use common::{make_desc, mount_agent_world};
-use engine_host::managed_agent::spawn_managed_agent;
 use kernel::kernel::Kernel;
+use managed_harness::spawn_managed_agent;
 
 #[test]
 fn a_cohost_without_sudocode_configuration_refuses_and_names_what_is_missing() {

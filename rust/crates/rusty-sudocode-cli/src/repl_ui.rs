@@ -1324,17 +1324,17 @@ fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
 
     // Header summary line
     let mut header = crate::render::StyledLine::muted();
-    header.push_bold(todos.len().to_string());
+    header.push_count(todos.len());
     header.push(" todos (");
-    header.push_bold(completed_count.to_string());
+    header.push_count(completed_count);
     header.push(" done");
     if in_progress_count > 0 {
         header.push(", ");
-        header.push_bold(in_progress_count.to_string());
+        header.push_count(in_progress_count);
         header.push(" in progress");
     }
     header.push(", ");
-    header.push_bold(open_count.to_string());
+    header.push_count(open_count);
     header.push(" open)");
 
     let mut lines = Vec::with_capacity(todos.len() + 2);
@@ -2450,7 +2450,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(row_text("pending", layout.pending.content, layout.pending.rows, None))
             #(row_text("status", layout.status.content, layout.status.rows,
                 if matches!(status_slot, StatusSlot::Tips) { Some(Color::DarkGrey) } else { None }))
-            #(row_text("todo", layout.todo.content, layout.todo.rows, Some(Color::DarkGrey)))
+            // Semantic styles belong to the projection; no slot-wide grey
+            // may override quantities or task descriptions' normal emphasis.
+            #(row_text("todo", layout.todo.content, layout.todo.rows, None))
             #((layout.separators > 0).then(|| element! {
                 View(height: row_height(layout.separators), flex_shrink: 0.0) {
                     Text(content: sep.clone(), color: Color::DarkGrey)

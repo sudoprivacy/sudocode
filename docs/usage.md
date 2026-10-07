@@ -213,7 +213,11 @@ Queued messages are dimmed, and Todo
 items distinguish active and completed states. This uses the same palette as
 the transcript; it does not introduce a new color theme. Completed Todo labels
 retain their dim strikethrough. Todo summaries use one muted foreground for all
-labels and punctuation, with every count bold. Per-turn status uses the same
+labels and punctuation, with every count in bold terminal foreground, including
+zero. Ordinary task descriptions also retain the terminal foreground instead
+of a slot-wide grey; active labels remain bold and completed labels retain dim
+strikethrough. Amber is reserved for accent/activity, not neutral quantities.
+Per-turn status uses the same
 theme-selected muted foreground without an additional dim attribute; cache
 health indicators keep their semantic colors. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.

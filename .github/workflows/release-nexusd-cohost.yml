@@ -21,6 +21,17 @@ on:
   push:
     tags:
       - 'nexusd-cohost-v*'
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/release-nexusd-cohost.yml
+      - rust/Cargo.toml
+      - rust/Cargo.lock
+      - rust/crates/nexusd-cohost/**
+      - rust/crates/engine-acp/**
+      - rust/crates/engine-host/**
+      - rust/crates/runtime/**
+      - rust/crates/api/**
   workflow_dispatch:
 
 permissions:
@@ -91,6 +102,8 @@ jobs:
         working-directory: rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       # raft-proto 0.7.0 / protobuf-build 0.14.1 rejects protoc >= 4.x with a
       # faulty version check, so the pinned 3.20.2 is deliberate. Linux runners
@@ -163,7 +176,7 @@ jobs:
       # nothing else. That is the same discipline the pin serves — the daemon and the
       # agent runtime inside it have to agree on one nexus-vfs.
       - name: Build release binary
-        run: cargo build --locked --release -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost
+        run: cargo build --locked --profile cohost-release -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost
 
       # Asserted here because this is the only job where the stamp exists at all. The
       # co-host gate already checks the NAME (`e2e/nexus-a2a/run-cohost.sh`), which
@@ -180,7 +193,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          out="$("target/release/${{ matrix.bin }}" --version)"
+          out="$("target/cohost-release/${{ matrix.bin }}" --version)"
           echo "$out"
           case "$out" in
             *"$NEXUSD_BUILD_VERSION"*) ;;
@@ -192,7 +205,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "dist/${{ matrix.package_dir }}"
-          cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+          cp "target/cohost-release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
           # The archive carries the executable and nothing else. Provenance belongs in
           # the binary, where `--version` keeps it: a text file answers "which revs is
           # this?" only while it stays beside what it describes, and what gets copied

@@ -58,3 +58,10 @@ pedantic = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_panics_doc = "allow"
 missing_errors_doc = "allow"
+
+# The daemon links the kernel and hosted session engine. Optimize across crate
+# boundaries and remove release symbols so it fits the existing artifact limits.
+[profile.cohost-release]
+inherits = "release"
+lto = "thin"
+strip = "symbols"

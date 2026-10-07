@@ -14,7 +14,13 @@ use std::{
 struct ReleaseOnDrop(std::path::PathBuf);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
-        for file in ["release", "release-one", "release-two", "ci-ready"] {
+        for file in [
+            "release",
+            "release-one",
+            "release-two",
+            "ci-ready",
+            "foreground-release",
+        ] {
             let _ = fs::write(self.0.join(file), "released");
         }
     }
@@ -48,7 +54,12 @@ fn send_calls(env: &TestEnv, session: &mut PtySession, calls: &[Value]) {
         .unwrap();
     common::expect_screen(
         session,
-        |s| s.contains("Pasted") || s.contains("TOOL_BATCH:") || s.contains("I am testing"),
+        |s| {
+            let input = common::input_line_of(s);
+            input.contains("Pasted")
+                || input.contains("TOOL_BATCH:")
+                || input.contains("I am testing")
+        },
         common::DEFAULT_TIMEOUT,
         "input",
     );
@@ -369,6 +380,50 @@ fn leaving_the_session_reaps_background_processes() {
             !env.workspace_root().join("leaked.txt").exists(),
             "background process survived session close"
         );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn exiting_during_a_foreground_tool_reaps_both_process_groups() {
+    let (env, _release) = task_env("background-close-during-turn");
+    let mut session = start(
+        &env,
+        &[shell(
+            "background",
+            "while [ ! -f release ]; do sleep 0.1; done; echo leaked > background-leaked.txt",
+            "Background cleanup fixture",
+        )],
+    );
+    screen(&session, "1 terminal · ↓ to view");
+    send_calls(
+        &env,
+        &mut session,
+        &[
+            json!({"id":"foreground","name":"Bash","input":{"command":"touch foreground-ready; while [ ! -f foreground-release ]; do sleep 0.1; done; echo leaked > foreground-leaked.txt","description":"Foreground cleanup fixture"}}),
+        ],
+    );
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while !env.workspace_root().join("foreground-ready").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "foreground fixture never started"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+    for file in ["release", "foreground-release"] {
+        fs::write(env.workspace_root().join(file), "go").unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        for file in ["background-leaked.txt", "foreground-leaked.txt"] {
+            assert!(
+                !env.workspace_root().join(file).exists(),
+                "process survived session close: {file}"
+            );
+        }
         std::thread::sleep(Duration::from_millis(25));
     }
 }

@@ -3348,16 +3348,26 @@ fn run_repl_iocraft_dispatch(
         let event = match coord_rx.recv() {
             Ok(evt) => evt,
             Err(_) => {
+                let _ = commands.send(EngineCommand::Close);
                 cancel_pending_question_answer(&pending_question_answer);
                 repl_ui_cmd.clear_question();
                 if let Some(h) = runner_handle.take() {
-                    let _ = commands.send(EngineCommand::Cancel);
                     let _ = h.join();
                 }
                 break;
             }
         };
 
+        // Expanded prompts can still contain an exit command. Give both input
+        // forms one teardown path, including background ownership.
+        let event = match event {
+            CoordinatorEvent::Human(repl_ui::InputEvent::Submit { text, .. })
+                if matches!(text.trim(), "/exit" | "/quit") =>
+            {
+                CoordinatorEvent::Human(repl_ui::InputEvent::Exit)
+            }
+            event => event,
+        };
         match event {
             CoordinatorEvent::TurnComplete => {
                 turn_active = false;
@@ -3460,10 +3470,10 @@ fn run_repl_iocraft_dispatch(
             }
             CoordinatorEvent::Human(input_event) => match input_event {
                 repl_ui::InputEvent::Exit => {
+                    let _ = commands.send(EngineCommand::Close);
                     cancel_pending_question_answer(&pending_question_answer);
                     repl_ui_cmd.clear_question();
                     if let Some(h) = runner_handle.take() {
-                        let _ = commands.send(EngineCommand::Cancel);
                         let _ = h.join();
                     }
                     let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
@@ -3486,22 +3496,6 @@ fn run_repl_iocraft_dispatch(
                     });
                 }
                 repl_ui::InputEvent::Submit { text, display } => {
-                    if text.trim() == "/exit" || text.trim() == "/quit" {
-                        cancel_pending_question_answer(&pending_question_answer);
-                        repl_ui_cmd.clear_question();
-                        if runner_handle.is_some() {
-                            let _ = commands.send(EngineCommand::Cancel);
-                        }
-                        if let Some(h) = runner_handle.take() {
-                            let _ = h.join();
-                        }
-                        let cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
-                        if let Err(e) = cli_lock.persist_session() {
-                            repl_output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
-                        }
-                        break;
-                    }
-
                     // `!<cmd>` bash mode: run it here, no model turn. The
                     // runner thread holds the `LiveCli` mutex for the whole
                     // turn, so during a turn the line is declined rather than

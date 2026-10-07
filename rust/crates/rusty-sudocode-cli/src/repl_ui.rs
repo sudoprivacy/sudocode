@@ -1335,17 +1335,17 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
 
     // Header summary line
     let mut header = crate::render::StyledLine::muted();
-    header.push_bold(todos.len().to_string());
+    header.push_count(todos.len());
     header.push(" todos (");
-    header.push_bold(completed_count.to_string());
+    header.push_count(completed_count);
     header.push(" done");
     if in_progress_count > 0 {
         header.push(", ");
-        header.push_bold(in_progress_count.to_string());
+        header.push_count(in_progress_count);
         header.push(" in progress");
     }
     header.push(", ");
-    header.push_bold(open_count.to_string());
+    header.push_count(open_count);
     header.push(" open)");
 
     let mut lines = Vec::with_capacity(todos.len() + 2);
@@ -2420,11 +2420,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .map(|items| render_todo_panel(&items, term_height as usize))
             .unwrap_or_default()
     };
-    let upper_sep = if todo_line.is_empty() {
-        sep.clone()
-    } else {
-        format!("{todo_line}\n{sep}")
-    };
 
     // PendingSlot: queued/running tool cards and queued messages
     // (human `❯` / inbound `Message from …`) in one ordered overlay, in arrival order.
@@ -2462,8 +2457,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 StatusSlot::Tips => Some(AnyElement::from(element! { AnsiText(content: tips_text.clone(), color: Color::DarkGrey) })),
                 StatusSlot::Empty => None,
             })
-            // Upper chrome: TodoSlot (when non-empty), then separator
-            AnsiText(content: upper_sep, color: Color::DarkGrey)
+            // Each slot owns its semantic styles. The separator's grey must
+            // not become a fallback for neutral Todo quantities or labels.
+            #(if todo_line.is_empty() {
+                None
+            } else {
+                Some(element! { AnsiText(content: todo_line) })
+            })
+            Text(content: sep.clone(), color: Color::DarkGrey)
             // InputSlot
             #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
                 AnsiText(content: format!("[{title}]"), color: Color::Cyan)

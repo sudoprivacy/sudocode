@@ -49,6 +49,8 @@ jobs:
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      COHOST_BUILD_PROFILE: ${{ startsWith(matrix.os, 'windows-') && 'cohost-release-windows' || 'cohost-release' }}
     strategy:
       fail-fast: false
       matrix:
@@ -176,7 +178,7 @@ jobs:
       # nothing else. That is the same discipline the pin serves — the daemon and the
       # agent runtime inside it have to agree on one nexus-vfs.
       - name: Build release binary
-        run: cargo build --locked --profile cohost-release -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost
+        run: cargo build --locked --profile ${{ env.COHOST_BUILD_PROFILE }} -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost
 
       # Asserted here because this is the only job where the stamp exists at all. The
       # co-host gate already checks the NAME (`e2e/nexus-a2a/run-cohost.sh`), which
@@ -193,7 +195,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          out="$("target/cohost-release/${{ matrix.bin }}" --version)"
+          out="$("target/${{ env.COHOST_BUILD_PROFILE }}/${{ matrix.bin }}" --version)"
           echo "$out"
           case "$out" in
             *"$NEXUSD_BUILD_VERSION"*) ;;
@@ -205,7 +207,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "dist/${{ matrix.package_dir }}"
-          cp "target/cohost-release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
+          cp "target/${{ env.COHOST_BUILD_PROFILE }}/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
           # The archive carries the executable and nothing else. Provenance belongs in
           # the binary, where `--version` keeps it: a text file answers "which revs is
           # this?" only while it stays beside what it describes, and what gets copied

@@ -65,3 +65,9 @@ missing_errors_doc = "allow"
 inherits = "release"
 lto = "thin"
 strip = "symbols"
+
+# ThinLTO with full speed optimization increases the Windows PE image. Size
+# optimization keeps that artifact within the same cap as the Unix builds.
+[profile.cohost-release-windows]
+inherits = "cohost-release"
+opt-level = "s"

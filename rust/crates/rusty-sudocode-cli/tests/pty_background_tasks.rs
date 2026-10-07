@@ -31,14 +31,56 @@ fn task_env(label: &str) -> (TestEnv, ReleaseOnDrop) {
     (env, release)
 }
 
+fn expect_input_ready(session: &PtySession, budget: Duration, context: &str) {
+    common::expect_screen_settled(
+        session,
+        |_| {
+            session.render(|screen| {
+                // contents() joins soft-wrapped rows. At 80 columns the input
+                // can otherwise appear to contain the following rule/footer.
+                let rows = screen
+                    .raw()
+                    .rows(0, screen.raw().size().1)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                rows.contains('\u{276f}') && common::input_line_of(&rows).is_empty()
+            })
+        },
+        budget,
+        context,
+    );
+}
+
+fn expect_parent_complete(session: &PtySession, before: &str) {
+    common::expect_screen(
+        session,
+        |_| {
+            let after = common::turn_status_marker(session);
+            !after.is_empty() && after != before
+        },
+        Duration::from_secs(180),
+        "background launch turn completed",
+    );
+    expect_input_ready(session, common::DEFAULT_TIMEOUT, "parent returned to input");
+}
+
 fn start(env: &TestEnv, calls: &[Value]) -> PtySession {
     let mut session = env.spawn_with_env(
         &["--permission-mode", "danger-full-access"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
     session.resize(40, 100).unwrap();
-    common::expect_input_line_cleared(&session, Duration::from_secs(30), "ready");
+    expect_input_ready(&session, Duration::from_secs(30), "ready");
+    let before = common::turn_status_marker(&session);
     send_calls(env, &mut session, calls);
+    if calls
+        .iter()
+        .all(|call| call["name"] == "Bash" && call["input"]["run_in_background"] == true)
+    {
+        // A footer proves a task exists, not that the launch turn has finished.
+        // Keep question workflows interactive while their parent is pending.
+        expect_parent_complete(&session, &before);
+    }
     session
 }
 
@@ -96,7 +138,7 @@ fn close(mut session: PtySession) {
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");
     session.send("\x1b").unwrap();
-    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "back at input");
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "back at input");
     session.send("/exit\r").unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
 }
@@ -141,7 +183,7 @@ fn failed_background_shell_exposes_unread_result_and_exit_code() {
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");
     session.send("\x1b").unwrap();
-    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "result read");
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "result read");
     let view = session.render(|s| s.contents());
     assert!(
         !view.contains("new result"),
@@ -161,8 +203,9 @@ fn inspecting_running_task_does_not_acknowledge_its_future_result() {
         &["--permission-mode", "danger-full-access"],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
-    common::expect_input_line_cleared(&session, Duration::from_secs(30), "ready");
+    expect_input_ready(&session, Duration::from_secs(30), "ready");
     assert!(!session.render(|s| s.contents()).contains("↓ to view"));
+    let before = common::turn_status_marker(&session);
     send_calls(
         &env,
         &mut session,
@@ -173,12 +216,13 @@ fn inspecting_running_task_does_not_acknowledge_its_future_result() {
         )],
     );
     screen(&session, "1 terminal · ↓ to view");
+    expect_parent_complete(&session, &before);
     open(&mut session);
     screen(&session, "  PEEK_RUNNING");
     session.send("\x1b").unwrap();
     screen(&session, "Enter details");
     session.send("\x1b").unwrap();
-    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "back at input");
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "back at input");
     fs::write(env.workspace_root().join("release"), "go").unwrap();
     screen(&session, "1 new result · ↓ to view");
     open(&mut session);

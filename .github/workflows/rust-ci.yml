@@ -549,6 +549,8 @@ jobs:
           cargo test -p rusty-sudocode-cli --test pty_model_flag_priority -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_agent_permission_bubble -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress --test pty_arrow_keys -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_background_tasks inspecting_running_task_does_not_acknowledge_its_future_result -- --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_background_tasks exiting_during_a_foreground_tool_reaps_both_process_groups -- --nocapture
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cargo test -p rusty-sudocode-cli --test pty_file_operations windows_verbatim_paths_read_the_same_file -- --nocapture
           fi

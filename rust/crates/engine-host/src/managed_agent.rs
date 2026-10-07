@@ -248,6 +248,19 @@ where
         options: SpawnOptions,
         state_observer: Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>,
     ) -> Result<Box<dyn ManagedSpawnHandle>, String> {
+        // Overriding this method is what makes the refusal OUR job: the trait's
+        // default body carries it, and an override silently inherits nothing.
+        // Without it the service still refuses, but one layer later and in its
+        // own words - the handle reports no endpoint, the equality check against
+        // the one it supplied fails, and the operator reads "runtime did not
+        // attach the session mailbox", which names a symptom rather than the
+        // unimplemented protocol. Attaching for real means driving ACP frames
+        // through `a2a::session::SessionCodec` over this agent's conversation
+        // (`managed_agent::raw_spawn` is the worked example); until this runtime
+        // does that, say so.
+        if options.session_endpoint.is_some() {
+            return Err("this runtime does not support acp-mailbox/1".into());
+        }
         let (handle, durable_session_id) =
             spawn_with_options(&kernel, &desc, &options, move |state, reason| {
                 state_observer(state, reason);

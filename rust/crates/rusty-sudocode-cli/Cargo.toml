@@ -25,7 +25,7 @@ engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
-iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "05d94ceb9ef13e24c606bd207cd27af5a6d79639" }
+iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "60d1178252ec3a7af331201cd91ef8278b740be1" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"

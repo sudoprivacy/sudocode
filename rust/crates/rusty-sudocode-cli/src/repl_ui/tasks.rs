@@ -243,13 +243,14 @@ impl TaskBrowser {
         )
     }
 
-    pub fn panel(&mut self, width: usize, height: usize) -> String {
-        let rows = height.saturating_sub(12).clamp(1, 18);
+    /// Project inside InputSlot's allocation, not an independent terminal budget.
+    pub fn panel(&mut self, width: usize, max_rows: usize) -> String {
         let mut lines = vec![format!(
             "{}Background tasks{RESET}",
             ansi_fg(theme().primary)
         )];
         if self.focus == TaskFocus::List {
+            let rows = max_rows.saturating_sub(2).clamp(1, 18);
             if self.rows.is_empty() {
                 lines.push("  No background tasks in this session".into());
             }
@@ -346,6 +347,11 @@ impl TaskBrowser {
                 entry.wrapped_width = content_width;
             }
             let output_lines = &entry.wrapped;
+            // Fixed task metadata, optional full-output link and navigation
+            // remain outside the output viewport, just like question choices.
+            let rows = max_rows
+                .saturating_sub(lines.len() + usize::from(task.output_path.is_some()) + 1)
+                .clamp(1, 18);
             let end = output_lines
                 .len()
                 .saturating_sub(self.scroll.min(output_lines.len().saturating_sub(1)));

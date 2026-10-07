@@ -155,6 +155,17 @@ function viewport() {
   return Array.from({ length: terminal.rows }, (_, i) =>
     buffer.getLine(buffer.baseY + i)?.translateToString(true) || '').join('\n');
 }
+function inputSlot() {
+  // Tiny resizes can move an obsolete live frame into retained scrollback.
+  // Locate the current editor between the last two input separators rather
+  // than treating every old prompt visible after growth as an active editor.
+  const rows = viewport().split('\n');
+  const separator = '─'.repeat(terminal.cols);
+  const end = rows.findLastIndex(row => row === separator);
+  const start = rows.slice(0, end).findLastIndex(row => row === separator);
+  if (start < 0 || end < 0 || !rows[start + 1]?.startsWith('❯')) return null;
+  return rows.slice(start + 1, end).join('\n');
+}
 async function sharedBudget() {
   const payload = `DraftHead${'_keep_'.repeat(120)}DraftTail`;
   const command = `! echo ${payload} > draft.txt`;
@@ -167,25 +178,25 @@ async function sharedBudget() {
   };
   await settle(() => viewport().includes('BudgetTask2') && viewport().includes('❯'));
   child.write(`\x1b[200~${command}\x1b[201~`);
-  await settle(() => viewport().includes('compact') && viewport().includes('draft.txt'));
+  await settle(() => viewport().includes('compact') && inputSlot()?.includes('draft.txt'));
   assert(viewport().includes('3 todos'), viewport());
   assert(!viewport().includes('BudgetTask'), viewport());
   assert.equal(viewport().split('❯').length - 1, 1, viewport());
   history('folded');
   let started = Date.now();
   resize(80, 40);
-  await settle(() => viewport().includes('BudgetTask2') && viewport().includes('DraftHead')
-    && viewport().includes('draft.txt') && !viewport().includes('compact'), started);
+  await settle(() => viewport().includes('BudgetTask2') && inputSlot()?.includes('DraftHead')
+    && inputSlot()?.includes('draft.txt') && !viewport().includes('compact'), started);
   history('grown');
   // Move and edit in one burst before hiding the same editor.
   // Existing Up navigation reaches the start of this single logical line.
   // Then probe same-batch Home/middle insertion with the normal editor.
   child.write('\x1b[A');
-  await settle(() => viewport().includes('❯ ! echo') && viewport().includes('DraftHead'));
+  await settle(() => inputSlot()?.includes('❯ ! echo') && inputSlot()?.includes('DraftHead'));
   child.write('\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[CX');
-  await settle(() => viewport().includes('! echXo'));
+  await settle(() => inputSlot()?.includes('! echXo'));
   child.write('\x7f');
-  await settle(() => viewport().includes('❯ ! echo') && viewport().includes('DraftHead') && !viewport().includes('! echXo'));
+  await settle(() => inputSlot()?.includes('❯ ! echo') && inputSlot()?.includes('DraftHead') && !inputSlot()?.includes('! echXo'));
   started = Date.now();
   resize(12, 8);
   await settle(() => viewport().includes('Enlarge') && viewport().includes('terminal'), started);
@@ -193,15 +204,16 @@ async function sharedBudget() {
   await sleep(150);
   started = Date.now();
   resize(80, 40);
-  await settle(() => viewport().includes('❯ ! echo') && viewport().includes('DraftHead') && viewport().includes('BudgetTask2'), started);
+  await settle(() => inputSlot()?.includes('❯ ! echo') && inputSlot()?.includes('DraftHead') && viewport().includes('BudgetTask2'), started);
   assert(!snapshot().includes('MustNotAppear'), snapshot());
   child.write('Z');
-  await settle(() => viewport().includes('! echZo'));
+  await settle(() => inputSlot()?.includes('! echZo'));
   child.write('\x7f');
-  await settle(() => viewport().includes('❯ ! echo') && viewport().includes('DraftHead') && !viewport().includes('! echZo'));
+  await settle(() => inputSlot()?.includes('❯ ! echo') && inputSlot()?.includes('DraftHead') && !inputSlot()?.includes('! echZo'));
   child.write('\r');
   const file = path.join(config.root, 'draft.txt');
-  await settle(() => fs.existsSync(file) && !viewport().includes('❯ ! echo'));
+  await settle(() => fs.existsSync(file) && snapshot().includes('(no output)')
+    && inputSlot()?.trimEnd() === '❯');
   assert.equal(fs.readFileSync(file, 'utf8').trim(), payload, 'all draft bytes must survive');
   history('submitted');
   console.log('SCODE_XTERM_SHARED_BUDGET_PASS');

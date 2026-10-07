@@ -32,6 +32,7 @@ use commands::suggest_slash_commands;
 use iocraft::prelude::*;
 
 mod ansi_text;
+mod input_history;
 mod layout;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
@@ -1457,7 +1458,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let todo_items_for_future = Arc::clone(&ctx.todo_items);
     let pending = Arc::clone(&ctx.pending);
     let pending_for_future = Arc::clone(&ctx.pending);
-    let pending_for_dequeue = Arc::clone(&ctx.pending);
     let dequeue_hook = ctx.dequeue_hook.clone();
     let tasks = Arc::clone(&ctx.tasks);
     let tasks_for_future = Arc::clone(&ctx.tasks);
@@ -1496,21 +1496,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Never persisted — the real content goes into the submitted message.
     let mut paste_store = hooks.use_state(|| std::collections::HashMap::<u32, String>::new());
     let mut next_paste_id = hooks.use_state(|| 1u32);
-    let mut text_input_handle = hooks.use_ref_default::<TextInputHandle>();
-    // Where the cursor was when the user pressed the key, which is not where
-    // `text_input_handle` reads during a key handler: `TextInput` is a child
-    // component, and children drain their terminal events before this one
-    // does, so by the time Up/Down is handled here the cursor has already
-    // been moved a line. Deciding against the moved position collapses the
-    // first tier away (an Up from the second line would land on the first
-    // line and immediately jump to offset 0). Recorded once per render,
-    // below, which is the state the next keypress starts from.
-    let mut cursor_at_last_render = hooks.use_state(|| 0usize);
-    // Whether a `TextInput` was mounted by the *previous* render. The
-    // handle outlives the component it points at, so on the frame the slot
-    // flips back from a question panel it still refers to the states of the
-    // `TextInput` that was torn down — reading those panics inside iocraft.
-    let mut text_input_was_mounted = hooks.use_state(|| false);
     let mut input_reviewable = hooks.use_state(|| true);
     let mut measurements = hooks.use_ref_default::<Measurements>();
     let prompt_renderer = hooks.use_ref(crate::render::TerminalRenderer::new);
@@ -2022,110 +2007,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             input_value.set(String::new());
                         }
                     }
-                    // ── Up/Down — TextInput: CC-parity two-step arrow keys ──
-                    //
-                    // Behavior mirrors rustyline's UpArrowHandler / DownArrowHandler
-                    // (src/input.rs).  Three tiers per direction:
-                    //
-                    //   Up:  1) cursor NOT on first logical line  → pass-through
-                    //            (TextInput moves to previous line)
-                    //        2) cursor on first line, not at pos 0 → move to 0
-                    //        3) cursor at pos 0 (or empty)         → history prev
-                    //
-                    //   Down: 1) cursor NOT on last logical line   → pass-through
-                    //            (TextInput moves to next line)
-                    //         2) cursor on last line, not at end   → move to end
-                    //         3) cursor at end (or empty)          → history next
-                    //
-                    // "Logical line" = delimited by '\n'.  TextInput normalises
-                    // platform newlines, so this is cross-platform safe.
-                    KeyCode::Up if matches!(current_slot, InputSlot::TextInput) => {
-                        if history_cursor.get().is_some() {
-                            let h = history.read();
-                            let c = history_cursor.get().unwrap_or(0);
-                            let nc = c.saturating_sub(1);
-                            if !h.is_empty() {
-                                input_value.set(h[nc].clone());
-                                history_cursor.set(Some(nc));
-                            }
-                        } else {
-                            let val = input_value.read().clone();
-                            let cursor_pos = cursor_at_last_render.get().min(val.len());
-                            let on_first_line = !val.get(..cursor_pos)
-                                .unwrap_or(&val)
-                                .contains('\n');
-                            if val.is_empty() {
-                                // Empty buffer: `↑` first tries to recall queued
-                                // HUMAN messages. One press pulls back ALL of
-                                // them at once (joined in submit order,
-                                // oldest-at-top), skipping any a2a/peer items
-                                // which stay queued — mirroring Claude Code's
-                                // `popAllEditable`. If nothing human is queued,
-                                // fall through to walking prompt history.
-                                if let Some(recalled) =
-                                    dequeue_hook.as_ref().and_then(|hook| hook())
-                                {
-                                    let cursor_offset = recalled.len();
-                                    input_value.set(recalled);
-                                    text_input_handle.write().set_cursor_offset(cursor_offset);
-                                    // Remove ALL human chips from the overlay to
-                                    // match the items just popped; peer chips
-                                    // stay.
-                                    if let Ok(mut pending) = pending_for_dequeue.lock() {
-                                        pending.retain(|p| {
-                                            !matches!(
-                                                p,
-                                                PendingItem::QueuedMessage { is_human: true, .. }
-                                            )
-                                        });
-                                    }
-                                } else {
-                                    let h = history.read();
-                                    if !h.is_empty() {
-                                        saved_input.set(val);
-                                        input_value.set(h[h.len() - 1].clone());
-                                        history_cursor.set(Some(h.len() - 1));
-                                    }
-                                }
-                            } else if on_first_line && cursor_pos == 0 {
-                                let h = history.read();
-                                if !h.is_empty() {
-                                    saved_input.set(val);
-                                    input_value.set(h[h.len() - 1].clone());
-                                    history_cursor.set(Some(h.len() - 1));
-                                }
-                            } else if on_first_line {
-                                text_input_handle.write().set_cursor_offset(0);
-                            }
-                            // else: not on first line — TextInput handles
-                            // cursor movement to the line above.
-                        }
-                    }
-                    KeyCode::Down if matches!(current_slot, InputSlot::TextInput) => {
-                        if let Some(c) = history_cursor.get() {
-                            let h = history.read();
-                            if c + 1 < h.len() {
-                                input_value.set(h[c + 1].clone());
-                                history_cursor.set(Some(c + 1));
-                            } else {
-                                input_value.set(saved_input.read().clone());
-                                history_cursor.set(None);
-                            }
-                        } else {
-                            let val = input_value.read().clone();
-                            let cursor_pos = cursor_at_last_render.get().min(val.len());
-                            let on_last_line = !val.get(cursor_pos..)
-                                .unwrap_or_default()
-                                .contains('\n');
-                            if on_last_line && cursor_pos < val.len() {
-                                text_input_handle.write().set_cursor_offset(val.len());
-                            }
-                            // else if on_last_line && at end: nothing to do
-                            // (no "forward history" in CC).
-                            // else: not on last line — TextInput handles
-                            // cursor movement to the line below.
-                        }
-                    }
                     // ── Digit shortcut — DialPad only ─────────────────
                     // Only when NOT composing free text: an empty custom-input
                     // buffer AND the cursor not parked on the `[+]` row. Once you
@@ -2206,11 +2087,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
                         // TextInput applies this edit before the next queued key.
-                        // The parent retains ownership of history metadata.
                         if !matches!(current_slot, InputSlot::TextInput) {
                             input_value.set(String::new());
+                            history_cursor.set(None);
                         }
-                        history_cursor.set(None);
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         let now = Instant::now();
@@ -2309,35 +2189,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             _ => {}
         }
     });
-
-    // Snapshot the cursor for the next keypress to decide against. Guarded:
-    // an unconditional `State::set` — even to the same value — resolves
-    // `component.wait()` and can starve `term.wait()`, dropping keystrokes
-    // (the failure mode `iocraft_repl_keyboard_input_not_frozen` guards).
-    // Only while the text input is the live slot: in the question slots no
-    // `TextInput` is mounted, so the handle still reports the offset it had
-    // when one last was, and snapshotting that would set state on renders it
-    // has no business touching.
-    // Snapshot the cursor for the next keypress to decide against. Guarded
-    // twice: only while a `TextInput` is the live slot *and* one was already
-    // mounted a frame ago (see `text_input_was_mounted`), and only set when
-    // the value actually changed — an unconditional `State::set` resolves
-    // `component.wait()` and can starve `term.wait()`, dropping keystrokes
-    // (the failure mode `iocraft_repl_keyboard_input_not_frozen` guards).
-    let text_input_is_live = matches!(*input_slot.read(), InputSlot::TextInput)
-        && !tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_panel();
-    if text_input_is_live && text_input_was_mounted.get() {
-        let live_cursor = text_input_handle.read().cursor_offset();
-        if cursor_at_last_render.get() != live_cursor {
-            cursor_at_last_render.set(live_cursor);
-        }
-    }
-    if text_input_was_mounted.get() != text_input_is_live {
-        text_input_was_mounted.set(text_input_is_live);
-    }
 
     // Exit check: `system` was obtained before the event handler and is
     // NOT captured by the Send closure. The exit flag is set inside the
@@ -2660,6 +2511,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             } else {
                 let tasks_for_edit = Arc::clone(&tasks);
+                let mut input_history = input_history::InputHistory {
+                    history,
+                    selected: history_cursor,
+                    saved_input,
+                    dequeue: dequeue_hook.clone(),
+                    pending: Arc::clone(&pending),
+                };
                 let on_edit: TextInputEditHandler = Box::new(move |event, current, cursor| {
                     // Read focus at event time: several keys can arrive before
                     // the next render. TextInput remains the only draft editor.
@@ -2673,10 +2531,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if browser.focus == TaskFocus::Footer && edits_draft {
                         browser.close();
                     }
-                    if !reviewable || browser.focus != TaskFocus::Input {
+                    if !reviewable || browser.focus != TaskFocus::Input
+                        || !matches!(*input_slot.read(), InputSlot::TextInput) {
                         return Some(TextInputEdit { value: input_value.read().clone(), cursor_offset: cursor });
                     }
                     drop(browser);
+                    if let Some(edit) = input_history.edit(event, current, cursor) {
+                        return Some(edit);
+                    }
                     match event {
                         // The parent owns submission. TextInput must not
                         // insert a newline at a middle cursor before Enter is
@@ -2684,10 +2546,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         TerminalEvent::Key(KeyEvent { code: KeyCode::Enter, modifiers, .. })
                             if !modifiers.contains(KeyModifiers::SHIFT) => Some(TextInputEdit {
                                 value: current.to_owned(), cursor_offset: cursor,
-                            }),
-                        TerminalEvent::Key(KeyEvent { code: KeyCode::Char('u'), modifiers, .. })
-                            if modifiers.contains(KeyModifiers::CONTROL) => Some(TextInputEdit {
-                                value: String::new(), cursor_offset: 0,
                             }),
                         TerminalEvent::Paste(pasted) => {
                             let mut id = next_paste_id.get();
@@ -2710,7 +2568,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             has_focus: reviewable && matches!(task_focus, TaskFocus::Input | TaskFocus::Footer),
                             multiline: true,
                             auto_grow: false,
-                            handle: Some(text_input_handle.clone()),
                             on_edit: Some(on_edit),
                             on_change: move |new_val: String| {
                                 input_value.set(new_val);

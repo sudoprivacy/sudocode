@@ -206,6 +206,7 @@ impl SessionEngine {
         .map_err(|e| format!("build hosted session engine: {e}"))?;
         let cwd = host.shell_root.clone();
         Ok(Self {
+            background_tasks: runtime::background_tasks::BackgroundTasks::default(),
             session: std::sync::Mutex::new(AcpCliSession {
                 cwd,
                 host,

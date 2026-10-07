@@ -136,8 +136,11 @@ fn run_background_verification(workflow: Workflow) {
             "task browser during parent tool",
         );
         parent.send("\x1b").unwrap();
-        common::expect_input_line_cleared(
+        // The foreground spinner intentionally keeps animating: wait for
+        // browser dismissal and the empty input, not a stationary whole screen.
+        common::expect_screen(
             &parent,
+            |screen| !screen.contains("Enter details") && common::input_line_of(screen).is_empty(),
             Duration::from_secs(30),
             "back to running parent input",
         );

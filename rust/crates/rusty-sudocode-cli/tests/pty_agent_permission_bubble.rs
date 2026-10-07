@@ -32,6 +32,9 @@ fn permission_prompt_from_subagent_bubbles_to_parent_terminal() {
         eprintln!("SKIP: this workflow requires real parent and child model requests");
         return;
     }
+    let python = common::resolve_python()
+        .replace('\\', "/")
+        .replace('\'', "'\\''");
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -83,7 +86,8 @@ print(result)
         .join("invoice.py")
         .to_string_lossy()
         .replace('\\', "/");
-    let command = format!("python '{script}'");
+    let command = format!("'{python}' '{script}'");
+    let command_words = shell_words::split(&command).unwrap();
     let prompt = format!("Call one Bash Agent with model={model}, run_in_background=false, and this prompt: Run exactly this Bash command once, with no other commands or retries: {command}. Report its actual output. Wait for the child and report its output.");
     let marker = common::turn_status_marker(&cli);
     cli.send(&prompt).unwrap();
@@ -148,7 +152,14 @@ print(result)
                             agents.insert(block["id"].to_string());
                         }
                         Some("Bash" | "bash") => {
-                            assert_eq!(block["input"]["command"], command);
+                            let actual = block["input"]["command"]
+                                .as_str()
+                                .expect("child Bash command must be a string");
+                            assert_eq!(
+                                shell_words::split(actual).expect("valid child shell command"),
+                                command_words,
+                                "child ran a different invoice command"
+                            );
                             child_commands.insert(block["id"].to_string());
                         }
                         _ => {}

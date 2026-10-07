@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// What a background task is doing, as far as this session knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,8 +80,15 @@ pub struct Completion {
 #[derive(Default)]
 struct Registry {
     tasks: BTreeMap<String, BackgroundTask>,
-    /// OS pids, so a stop can signal a task it did not spawn itself.
+    /// OS pids, kept for diagnostics only.
     pids: BTreeMap<String, u32>,
+    /// The live child for each running task, shared with its watch thread.
+    ///
+    /// `stop` must not wait for the reader to return from a blocking read — a
+    /// quiet watch (`sleep 60`) would never notice — so it kills through this
+    /// handle. Killing via the `GroupChild` keeps the signal inside the watch's
+    /// own process group, which is the part that must never be hand-rolled.
+    children: BTreeMap<String, Arc<Mutex<command_group::GroupChild>>>,
     /// Finished tasks not yet delivered to the model.
     pending: Vec<Completion>,
 }
@@ -364,23 +371,32 @@ pub fn start_monitor(
     timeout_ms: Option<u64>,
     persistent: bool,
 ) -> std::io::Result<String> {
+    use command_group::CommandGroup;
     use std::io::{BufRead, BufReader, Write};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let task_id = format!("mon-{}", next_task_seq());
     let output_path = output_path_for(workspace_root, &task_id)?;
     let mut log = std::fs::File::create(&output_path)?;
 
-    let mut child = Command::new("bash")
-        .arg("-lc")
-        .arg(command)
-        .current_dir(workspace_root)
-        .stdin(Stdio::null())
+    // Built by the one function that knows how to make a shell command on this
+    // platform (and how the sandbox applies). Hardcoding `bash -lc` here meant
+    // Windows resolved `bash` to the WSL stub, which answered "Windows
+    // Subsystem for Linux has no installed distributions" in UTF-16 instead of
+    // running the watch.
+    let sandbox_status = crate::bash::default_sandbox_status(workspace_root);
+    let mut cmd = crate::bash::prepare_command(command, workspace_root, &sandbox_status, false);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    // `group()` puts the watch in its own process group and owns the killing,
+    // which is the same primitive `bash.rs` uses for foreground commands.
+    // Hand-rolling it (`kill -TERM -<pid>`) is how a group kill ends up aimed
+    // at OUR group when the child is not actually a group leader — in CI that
+    // took out the test harness and the runner (SIGTERM, exit 143).
+    let mut child = cmd.group().spawn()?;
 
-    let stdout = child.stdout.take();
+    let stdout = child.inner().stdout.take();
     register(BackgroundTask {
         task_id: task_id.clone(),
         kind: TaskKind::Monitor,
@@ -391,6 +407,8 @@ pub fn start_monitor(
         exit_code: None,
     });
     register_pid(&task_id, child.id());
+    let child = Arc::new(Mutex::new(child));
+    lock().children.insert(task_id.clone(), Arc::clone(&child));
 
     // Deadline, unless the caller asked for a session-lifetime watch.
     let deadline = if persistent {
@@ -409,23 +427,41 @@ pub fn start_monitor(
             // One line read = one event. Reading line-wise (not chunked) is
             // what makes "each stdout line is a notification" true rather than
             // approximately true.
+            // One exit path, so the watch always ends with exactly one terminal
+            // notification. `finish` is idempotent, which is what lets a stop
+            // claim the reason first (see `stop`) and this call become the
+            // no-op, instead of the two racing to label the same ending.
+            let mut timed_out = false;
             if let Some(stdout) = stdout {
                 for line in BufReader::new(stdout).lines() {
                     let Ok(line) = line else { break };
                     let _ = writeln!(log, "{line}");
-                    record_event_line(&watch_id, &line);
+                    // A stop already ended the watch (it killed the tree
+                    // itself): drop the rest of the stream rather than
+                    // reporting events for a dead watch.
                     if is_finished(&watch_id) {
-                        // Stopped while we were reading: stop emitting events.
-                        return;
+                        break;
                     }
+                    record_event_line(&watch_id, &line);
                     if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
-                        let _ = child.kill();
-                        finish(&watch_id, TaskState::Stopped, None);
-                        return;
+                        timed_out = true;
+                        break;
                     }
                 }
             }
-            let code = child.wait().ok().and_then(|status| status.code());
+            if timed_out {
+                if let Ok(mut c) = child.lock() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                finish(&watch_id, TaskState::Stopped, None);
+                return;
+            }
+            let code = child
+                .lock()
+                .ok()
+                .and_then(|mut c| c.wait().ok())
+                .and_then(|status| status.code());
             finish(&watch_id, TaskState::Exited, code);
         })
         .map_err(|e| std::io::Error::other(format!("spawn monitor thread: {e}")))?;
@@ -457,21 +493,24 @@ pub fn stop(task_id: &str) -> bool {
     if is_finished(task_id) || get(task_id).is_none() {
         return false;
     }
-    if let Some(pid) = pid {
-        // SIGTERM via `kill`: the child may be a process group leader (bash
-        // -lc), and we want its tree to go, not just the shell.
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(format!("-{pid}"))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .or_else(|_| {
-                std::process::Command::new("kill")
-                    .arg(pid.to_string())
-                    .status()
-            });
-    }
+    // Claim the terminal state BEFORE signalling. The watch thread is parked on
+    // `child.wait()`, which returns as soon as the signal lands and would
+    // otherwise report a deliberate stop as an ordinary exit — whichever call
+    // reached `finish` first would decide, and the notification would lie about
+    // why the watch ended. `finish` is idempotent, so claiming it here makes the
+    // reaper's later call the no-op.
     finish(task_id, TaskState::Stopped, None);
+    // Kill through the watch's own `GroupChild`: the library confines the
+    // signal to that watch's process group, and doing it here (rather than
+    // asking the reader thread) means a quiet watch dies too instead of
+    // surviving until its next line of output. `pid` is diagnostics only — it
+    // is deliberately NOT used to build a signal target by hand.
+    let _ = pid;
+    let child = lock().children.remove(task_id);
+    if let Some(child) = child {
+        if let Ok(mut c) = child.lock() {
+            let _ = c.kill();
+        }
+    }
     true
 }

@@ -714,6 +714,18 @@ pub(crate) fn interrupted_bash_output(
     }
 }
 
+/// Sandbox status for a caller that has no `BashCommandInput` of its own —
+/// background watches and detached commands resolve it from config exactly
+/// like a foreground command, instead of inventing their own defaults.
+pub(crate) fn default_sandbox_status(cwd: &std::path::Path) -> SandboxStatus {
+    let config = ConfigLoader::default_for(cwd).load().map_or_else(
+        |_| SandboxConfig::default(),
+        |runtime_config| runtime_config.sandbox().clone(),
+    );
+    let request = config.resolve_request(None, None, None, None, None);
+    resolve_sandbox_status_for_request(&request, cwd)
+}
+
 fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> SandboxStatus {
     let config = ConfigLoader::default_for(cwd).load().map_or_else(
         |_| SandboxConfig::default(),
@@ -729,7 +741,7 @@ fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> 
     resolve_sandbox_status_for_request(&request, cwd)
 }
 
-fn prepare_command(
+pub(crate) fn prepare_command(
     command: &str,
     cwd: &std::path::Path,
     sandbox_status: &SandboxStatus,

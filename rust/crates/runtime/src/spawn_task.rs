@@ -384,6 +384,15 @@ fn run_loop<C, T, F>(
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             };
 
+        // A session frame belongs to the ACP driver attached to this same
+        // conversation, not to a turn. Acked rather than merely skipped: the
+        // cursor only advances on an ack, so dropping it would re-deliver the
+        // same frame forever and the loop would never reach the next message.
+        if crate::agent_mailbox::is_control_plane(&env.kind) {
+            let _ = ack.send(true);
+            continue;
+        }
+
         state_cb(AgentState::Busy, None);
 
         // The agent replies by calling `send` during the turn; prose it writes instead

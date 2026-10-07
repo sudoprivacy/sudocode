@@ -545,6 +545,14 @@ fn ensure_a2a_receiver(registry: &SharedSessionRegistry, cx: &ConnectionTo<Clien
         // so the cursor advances once the notification is queued for the
         // client. A send error means the forwarding task is gone, which is a
         // refusal and re-delivers.
+        // Filtered HERE, where the kind still exists: downstream this is only
+        // `(from, body)`, so a control frame forwarded past this point arrives
+        // at the client as a user message chunk with JSON-RPC in it. Accepted
+        // (`true`) rather than refused, or the cursor would re-deliver the same
+        // frame forever.
+        if runtime::agent_mailbox::is_control_plane(&msg.kind) {
+            return true;
+        }
         tx.send((msg.from.clone(), msg.body.clone())).is_ok()
     });
 

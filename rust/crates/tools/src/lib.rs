@@ -6411,6 +6411,13 @@ pub fn compose_next_turn_from_envelopes(
 ) -> String {
     let mut blocks = Vec::with_capacity(envelopes.len());
     for env in envelopes {
+        // Machine traffic for a driver is not a message for the model. The
+        // fallthrough below shows anything it does not recognise, which is the
+        // right default for peer mail and the wrong one for a control frame, so
+        // the question is asked first and in one place.
+        if runtime::agent_mailbox::is_control_plane(&env.kind) {
+            continue;
+        }
         let tag = match env.kind.as_str() {
             runtime::agent_mailbox::kinds::SHUTDOWN_REQUEST => "shutdown-request",
             runtime::agent_mailbox::kinds::SHUTDOWN_RESPONSE => "shutdown-response",
@@ -10015,6 +10022,46 @@ mod tests {
         assert!(names.contains(&"write_plan"));
         assert!(names.contains(&"StructuredOutput"));
         assert!(names.contains(&"PowerShell"));
+    }
+
+    /// A control frame is never shown to the model, whichever kind it carries.
+    ///
+    /// The renderer's fallthrough shows anything it does not recognise, which is
+    /// what peer mail needs and what makes a leak the default for machine
+    /// traffic. Asserted on the composed string rather than on the predicate, so
+    /// this fails if a future kind is added to the vocabulary without being
+    /// excluded here.
+    #[test]
+    fn a_session_frame_never_reaches_the_model() {
+        use runtime::agent_mailbox::{kinds, MailboxEnvelope};
+        let frame = r#"{"jsonrpc":"2.0","id":0,"method":"initialize"}"#;
+        let envelope = |from: &str, body: &str, kind: &str| MailboxEnvelope {
+            from: from.to_string(),
+            to: "agent".to_string(),
+            body: body.to_string(),
+            summary: None,
+            timestamp: 1,
+            color: None,
+            kind: kind.to_string(),
+            request_id: None,
+        };
+        let envelopes = vec![
+            envelope("controller", frame, kinds::SESSION),
+            envelope("peer", "a real message", kinds::MESSAGE),
+        ];
+        let composed = super::compose_next_turn_from_envelopes(&envelopes);
+        assert!(
+            !composed.contains("jsonrpc"),
+            "a session frame was rendered into the turn: {composed}"
+        );
+        assert!(
+            !composed.contains("controller"),
+            "the controller appeared as a peer: {composed}"
+        );
+        assert!(
+            composed.contains("a real message"),
+            "ordinary peer mail must still be delivered: {composed}"
+        );
     }
 
     #[test]

@@ -255,6 +255,29 @@ pub mod kinds {
     /// schema — the a2a stamp hook parses the JSON, rewrites `from`, and
     /// re-serialises everything else untouched.
     pub const AUTO_REPLY: &str = "auto_reply";
+
+    /// One side of an `acp-mailbox/1` attachment: a JSON-RPC frame the session
+    /// driver owns. Named here with the rest of the vocabulary; the value is
+    /// `a2a::session::SESSION_KIND`, which is where the wire format is defined.
+    pub const SESSION: &str = "session";
+}
+
+/// Whether `kind` names machine traffic for a driver rather than a message for
+/// the model.
+///
+/// The one predicate every receive path asks, because the answer must not be
+/// decided per path. A session frame is JSON-RPC between a controller and this
+/// runtime: rendered as peer text it becomes a prompt the model tries to
+/// answer, and the three places that turn envelopes into turns
+/// (`spawn_task`'s co-host loop, `compose_next_turn_from_envelopes` for the
+/// REPL, and the ACP bridge) each had their own idea of what to show. A kind
+/// added without touching those three would leak through the one that falls
+/// through to "show it"; asking here means a new control kind is excluded by
+/// construction.
+#[inline]
+#[must_use]
+pub fn is_control_plane(kind: &str) -> bool {
+    kind == kinds::SESSION
 }
 
 pub(crate) fn now_secs() -> u64 {

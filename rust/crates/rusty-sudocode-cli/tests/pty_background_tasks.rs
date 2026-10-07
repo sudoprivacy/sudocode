@@ -510,8 +510,11 @@ fn large_background_output_has_a_bounded_preview_and_a_complete_log() {
         .unwrap();
     let path = std::path::Path::new(path);
     assert_eq!(
-        path.parent().unwrap(),
-        std::env::temp_dir().join("sudocode-background-shells")
+        path.parent().unwrap().canonicalize().unwrap(),
+        std::env::temp_dir()
+            .join("sudocode-background-shells")
+            .canonicalize()
+            .unwrap()
     );
     let full = fs::read_to_string(path).unwrap();
     assert!(full.len() > 24 * 1024);

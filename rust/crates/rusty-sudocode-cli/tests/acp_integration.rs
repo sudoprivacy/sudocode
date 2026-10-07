@@ -4127,7 +4127,7 @@ async fn acp_subagent_cancel_needs_the_opt_in() {
     let (updates, _) = prompt_scenario(&mut client, &session_id, "subagent_events_cancel").await;
     let spawned =
         &tool_result_named(&updates, "toolu_events_cancel")["params"]["update"]["rawOutput"];
-    let agent_id = spawned["agent_id"].as_str().expect("background agent id");
+    let agent_id = spawned["agentId"].as_str().expect("background agent id");
     assert!(
         updates
             .iter()

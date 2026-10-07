@@ -32,6 +32,7 @@ use commands::suggest_slash_commands;
 use iocraft::prelude::*;
 
 mod ansi_text;
+use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
 use ansi_text::{AnsiText, PromptTextView, RichText};
 
@@ -45,7 +46,7 @@ mod stderr_redirect {
         pub fn activate() -> Option<Self> {
             None
         }
-        pub fn drain(&self) -> Option<String> {
+        pub fn drain(&self) -> Option<Vec<u8>> {
             None
         }
         pub fn suspend(&self) -> std::io::Result<()> {
@@ -109,14 +110,14 @@ mod stderr_redirect {
         }
 
         /// Non-blocking drain: returns captured text or `None`.
-        pub fn drain(&self) -> Option<String> {
+        pub fn drain(&self) -> Option<Vec<u8>> {
             let mut buf = [0u8; 4096];
-            let mut collected = String::new();
+            let mut collected = Vec::new();
             let mut file = &self.read_file;
             loop {
                 match file.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => collected.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    Ok(n) => collected.extend_from_slice(&buf[..n]),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(_) => break,
                 }
@@ -944,6 +945,8 @@ enum OutputMsg {
     Line(String),
     /// Raw chunk — `StdoutHandle::print`, no extra newline.
     Raw(String),
+    /// Replace the transient tool summary without committing it to history.
+    ToolProgress(Option<String>),
     /// A barrier: flush preceding output before releasing terminal ownership.
     Suspend(TerminalHandoff),
 }
@@ -979,68 +982,6 @@ impl Drop for TerminalSuspension {
     }
 }
 
-/// A single call to iocraft's stdout handle. Borrows from the message being
-/// split — the only allocation on this per-delta path is the one iocraft's
-/// own `ToString` bound makes when the op is issued.
-#[derive(Debug, PartialEq, Eq)]
-enum OutputOp<'a> {
-    /// `StdoutHandle::println` — iocraft appends the line terminator itself,
-    /// choosing `\r\n` in raw mode and `\n` otherwise.
-    Println(&'a str),
-    /// `StdoutHandle::print` — written verbatim, no terminator.
-    Print(&'a str),
-}
-
-/// Split one output message into the sequence of iocraft stdout calls that
-/// renders it with correct line endings.
-///
-/// **Why this exists.** The iocraft render loop holds the terminal in raw
-/// mode, where `OPOST`/`ONLCR` are off and a bare `\n` moves the cursor down
-/// *without* returning it to column 0. iocraft handles that for its own
-/// canvas, and `StdoutHandle::println` terminates the message it is given —
-/// but only the *end* of it: interior `\n` are passed through untouched, and
-/// `StdoutHandle::print` writes its argument completely verbatim. Since
-/// streaming markdown arrives as `Raw` chunks full of interior newlines,
-/// every line after the first started where the previous one ended and the
-/// response walked off the right edge of the screen as a staircase.
-///
-/// Splitting on `\n` and handing iocraft one line at a time makes iocraft
-/// terminate each of them. That deliberately keeps raw-mode detection inside
-/// iocraft — this crate links crossterm 0.28 while iocraft links 0.29, so the
-/// two hold separate raw-mode statics and a local
-/// `is_raw_mode_enabled()` query would never observe iocraft's state.
-///
-/// `terminated` distinguishes `Line` (the whole message is a line, so every
-/// segment is `println`) from `Raw` (the tail is a partial line still being
-/// streamed, so it is `print`).
-///
-/// Splitting is per-message and stateless: a literal `\r\n` straddling two
-/// `Raw` chunks would come out as `…\r` + `\r\n`. That renders identically
-/// (carriage returns are idempotent) and no current writer emits `\r\n` at
-/// all — the markdown renderer and the tool formatters produce bare `\n`,
-/// and `str::lines()` strips the `\r` from embedded tool output — so the
-/// cost of carrying cross-message state isn't paid.
-fn split_for_iocraft(text: &str, terminated: bool, mut issue: impl FnMut(OutputOp<'_>)) {
-    let mut segments = text.split('\n').peekable();
-    while let Some(segment) = segments.next() {
-        let is_last = segments.peek().is_none();
-        if is_last && !terminated {
-            // Partial trailing line — no terminator yet.
-            if !segment.is_empty() {
-                issue(OutputOp::Print(segment));
-            }
-        } else {
-            // `strip_suffix`, not `trim_end_matches`: this drops the `\r` of an
-            // existing `\r\n` so iocraft's terminator does not produce `\r\r\n`,
-            // while leaving any other carriage returns (e.g. the `\r\x1b[2K`
-            // that rewrites the spinner line) intact.
-            issue(OutputOp::Println(
-                segment.strip_suffix('\r').unwrap_or(segment),
-            ));
-        }
-    }
-}
-
 /// Default lifetime of the "Press Ctrl-C again to exit" footer hint.
 const CTRLC_HINT_TTL: Duration = Duration::from_secs(3);
 
@@ -1073,6 +1014,10 @@ pub struct OutputSender {
 }
 
 impl OutputSender {
+    pub(crate) fn tool_progress(&self, text: Option<String>) {
+        let _ = self.tx.send(OutputMsg::ToolProgress(text));
+    }
+
     pub fn println(&self, text: &str) {
         let _ = self.tx.send(OutputMsg::Line(text.to_string()));
     }
@@ -1520,6 +1465,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut input_value = hooks.use_state(String::new);
     let mut frame = hooks.use_state(|| 0usize);
     let mut spinner_text = hooks.use_state(String::new);
+    let mut tool_progress = hooks.use_state(|| None::<String>);
     let mut turn_result = hooks.use_state(|| None::<Arc<StyledText>>);
     let mut has_submitted = hooks.use_state(|| false);
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
@@ -1568,6 +1514,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 80ms tick loop: drain output/control channels, update spinner text.
     hooks.use_future(async move {
         let mut todo_hide_deadline: Option<Instant> = None;
+        let mut stderr_text = Utf8Stream::default();
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
 
@@ -1577,9 +1524,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(guard) = stderr_redir_for_future.lock() {
                 if let Some(ref redir) = *guard {
                     if let Some(captured) = redir.drain() {
-                        for line in captured.lines() {
-                            stdout_for_future.println(line);
-                        }
+                        write_iocraft_output(
+                            &stdout_for_future,
+                            &stderr_text.push(&captured),
+                            false,
+                        );
                     }
                 }
             }
@@ -1590,6 +1539,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let (text, terminated) = match rx.try_recv() {
                         Ok(OutputMsg::Line(text)) => (text, true),
                         Ok(OutputMsg::Raw(text)) => (text, false),
+                        Ok(OutputMsg::ToolProgress(text)) => {
+                            if *tool_progress.read() != text {
+                                tool_progress.set(text);
+                            }
+                            continue;
+                        }
                         Ok(OutputMsg::Suspend(request)) => {
                             *terminal_handoff_for_future
                                 .lock()
@@ -1599,10 +1554,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
                     };
-                    split_for_iocraft(&text, terminated, |op| match op {
-                        OutputOp::Println(line) => stdout_for_future.println(line),
-                        OutputOp::Print(chunk) => stdout_for_future.print(chunk),
-                    });
+                    write_iocraft_output(&stdout_for_future, &text, terminated);
                 }
             }
 
@@ -2306,7 +2258,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // StatusSlot: Spinner > TurnResult > Tips > Empty
     let status_slot = if !st.is_empty() {
-        StatusSlot::Spinner(st)
+        // Reuse the existing status row and shared column layout. No additional
+        // live rows can spill into scrollback as tool output grows.
+        let text = tool_progress.read().as_ref().map_or(st, |text| {
+            crate::render::text_layout::truncate_to_width(text, term_width as usize)
+        });
+        StatusSlot::Spinner(text)
     } else if let Some(ref tr) = *turn_result.read() {
         StatusSlot::TurnResult(tr.clone())
     } else if !submitted {
@@ -2478,6 +2435,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             AnsiText(content: footer_text, color: Color::DarkGrey)
         }
     }
+}
+
+/// Adapt the shared line framing to iocraft for every captured/output stream.
+fn write_iocraft_output(stdout: &StdoutHandle, text: &str, terminated: bool) {
+    split_lines(text, terminated, |op| match op {
+        OutputOp::Println(line) => stdout.println(line),
+        OutputOp::Print(chunk) => stdout.print(chunk),
+    });
 }
 
 /// Spawn the iocraft REPL UI on a dedicated thread and return a handle

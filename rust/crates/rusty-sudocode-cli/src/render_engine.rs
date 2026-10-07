@@ -9,7 +9,7 @@
 //! is blocked on a permission / question answer (which the loop collects and
 //! sends back as an `EngineCommand`) and when the turn is finished.
 
-use std::io::{self, Write};
+use std::io::Write;
 
 use engine_events::{
     EngineEvent, HookProgressEvent, PermissionRequest, QuestionPromptRequest, RequestId,
@@ -71,6 +71,8 @@ pub(crate) struct EngineEventRenderer {
     /// — the result payload does not echo command/path/strings. Shared type
     /// with session replay ([`crate::cli::format::ToolInputRegistry`]).
     tool_inputs: crate::cli::format::ToolInputRegistry,
+    /// Whether the latest progress summary occupies the live status row.
+    activity_visible: bool,
 }
 
 /// Consecutive chunks of prose/reasoning/activity belong to the same block.
@@ -98,6 +100,7 @@ impl EngineEventRenderer {
             thinking_active: false,
             thinking_printed: false,
             tool_inputs: crate::cli::format::ToolInputRegistry::default(),
+            activity_visible: false,
         }
     }
 
@@ -107,6 +110,7 @@ impl EngineEventRenderer {
     }
 
     fn write_out(&mut self, text: &str) {
+        self.clear_activity();
         if text.is_empty() {
             return;
         }
@@ -114,8 +118,7 @@ impl EngineEventRenderer {
         if let Some(writer) = self.output_writer.as_mut() {
             let _ = write!(writer, "{text}").and_then(|()| writer.flush());
         } else {
-            let mut stdout = io::stdout();
-            let _ = write!(stdout, "{text}").and_then(|()| stdout.flush());
+            let _ = crate::render::output::write_stdout(text);
         }
     }
 
@@ -139,13 +142,53 @@ impl EngineEventRenderer {
     fn write_block(&mut self, text: &str, block: OutputBlock) {
         let text = text.trim_matches('\n');
         if !text.is_empty() {
+            // Asynchronous tool/hook/notice events can arrive inside a text
+            // block. They do not end the provider's Markdown or reasoning.
+            self.pause_spinner();
             self.start_block(block);
             self.write_out(&format!("{text}\n"));
         }
     }
 
     fn finish_turn(&mut self) {
+        self.finish_response();
         self.write_out(self.layout.before_block());
+    }
+
+    /// Close buffered content at a provider content boundary or turn end.
+    /// Asynchronous UI events leave the stream's parser context intact.
+    fn finish_response(&mut self) {
+        self.end_thinking();
+        self.flush_markdown();
+    }
+
+    fn flush_markdown(&mut self) {
+        if let Some(rendered) = self.markdown.flush(&self.renderer) {
+            self.pause_spinner();
+            self.write_response(&rendered, OutputBlock::Assistant);
+        }
+    }
+
+    fn clear_activity(&mut self) {
+        if self.activity_visible {
+            if let Some(writer) = &self.output_writer {
+                writer.tool_progress(None);
+            }
+            self.activity_visible = false;
+        }
+    }
+
+    fn render_tool_progress(&mut self, progress: &ToolProgressEvent) {
+        let text = format_tool_progress(progress);
+        if let Some(writer) = &self.output_writer {
+            writer.tool_progress(Some(text));
+            self.activity_visible = true;
+        } else {
+            // Without an interactive live region, retain a bounded log line.
+            let text = crate::render::text_layout::truncate_to_width(&text, query_terminal_width());
+            self.write_block(&text, OutputBlock::Activity);
+        }
+        self.resume_spinner();
     }
 
     fn pause_spinner(&self) {
@@ -176,7 +219,6 @@ impl EngineEventRenderer {
                 max_retries,
                 reason,
             } => {
-                self.pause_spinner();
                 self.write_block(
                     &format!(
                         "{DIM}  \u{27f3} retry {attempt}/{max_retries} \u{2014} {reason}{RESET}"
@@ -257,6 +299,7 @@ impl EngineEventRenderer {
                     s.add_response_bytes(text.len() as u32);
                 }
                 if !self.thinking_active {
+                    self.flush_markdown();
                     self.thinking_active = true;
                     if let Some(s) = &self.spinner {
                         s.set_thinking(true);
@@ -295,10 +338,7 @@ impl EngineEventRenderer {
                 RenderOutcome::Continue
             }
             EngineEvent::ToolCall { id, name, input } => {
-                self.end_thinking();
-                if let Some(rendered) = self.markdown.flush(&self.renderer) {
-                    self.write_response(&rendered, OutputBlock::Assistant);
-                }
+                self.finish_response();
                 // Remember the arguments so the completed card can show what was
                 // requested — the ToolResult event/payload does not echo the
                 // command (bash) or the path/strings (edit), they live only in
@@ -311,7 +351,7 @@ impl EngineEventRenderer {
                 // per call — the terminal-status (green/red) card committed on
                 // `ToolResult` below. Committing a `Running` header here froze an
                 // amber "in-flight" card permanently above the real result. The
-                // in-flight cue is the spinner + the tool's own streamed stdout.
+                // in-flight cue is the spinner and the live progress summary.
                 //
                 // The glyph reset still runs: the tool line reset column 0, so
                 // the next assistant text starts a fresh •-margined block.
@@ -330,16 +370,13 @@ impl EngineEventRenderer {
                 output,
                 is_error,
             } => {
-                self.pause_spinner();
                 let input = self.tool_inputs.take(&id);
                 self.write_block(&format_tool_result(&name, &input, &output, is_error), OutputBlock::Tool);
                 self.resume_spinner();
                 RenderOutcome::Continue
             }
             EngineEvent::ToolProgress(progress) => {
-                self.pause_spinner();
-                self.write_block(&format_tool_progress(&progress), OutputBlock::Activity);
-                self.resume_spinner();
+                self.render_tool_progress(&progress);
                 RenderOutcome::Continue
             }
             EngineEvent::HookProgress(ev) => {
@@ -347,7 +384,6 @@ impl EngineEventRenderer {
                 // `write_out` keeps this on stdout, behind the same lock the
                 // spinner uses, so a hook line can no longer be torn in half
                 // by a spinner frame.
-                self.pause_spinner();
                 self.write_block(&format_hook_progress(&ev), OutputBlock::Activity);
                 self.resume_spinner();
                 RenderOutcome::Continue
@@ -359,6 +395,7 @@ impl EngineEventRenderer {
             EngineEvent::Notice { text } => {
                 if !text.is_empty() {
                     self.write_block(&text, OutputBlock::Notice);
+                    self.resume_spinner();
                 }
                 RenderOutcome::Continue
             }
@@ -367,11 +404,7 @@ impl EngineEventRenderer {
                 // `end_thinking` first so a turn that failed while still
                 // reasoning closes its dim block rather than letting the error
                 // line inherit the dim attribute.
-                self.end_thinking();
-                if let Some(rendered) = self.markdown.flush(&self.renderer) {
-                    self.write_response(&rendered, OutputBlock::Assistant);
-                }
-                self.pause_spinner();
+                self.finish_response();
                 self.write_block(&message, OutputBlock::Notice);
                 self.finish_turn();
                 RenderOutcome::Done
@@ -380,23 +413,19 @@ impl EngineEventRenderer {
                 // A turn can end on a thinking block (the model reasoned and
                 // then produced no text, e.g. it was interrupted): close it so
                 // the next prompt is not written into an open dim run.
-                self.end_thinking();
-                if let Some(rendered) = self.markdown.flush(&self.renderer) {
-                    self.write_response(&rendered, OutputBlock::Assistant);
-                }
                 self.finish_turn();
                 RenderOutcome::Done
             }
-            EngineEvent::PermissionRequest { id, request } => {
-                RenderOutcome::NeedPermission { id, request }
+            EngineEvent::MessageComplete => {
+                self.finish_response();
+                self.block = None;
+                RenderOutcome::Continue
             }
-            EngineEvent::QuestionRequest { id, request } => {
-                RenderOutcome::NeedQuestion { id, request }
-            }
+            EngineEvent::PermissionRequest { id, request } => RenderOutcome::NeedPermission { id, request },
+            EngineEvent::QuestionRequest { id, request } => RenderOutcome::NeedQuestion { id, request },
             // No direct terminal effect: lifecycle/state/telemetry events. The
             // spinner already tracks progress from the deltas above.
             EngineEvent::PermissionDenied { .. }
-            | EngineEvent::MessageComplete
             | EngineEvent::TurnStarted { .. }
             | EngineEvent::State(_)
             | EngineEvent::ModelResolved { .. }
@@ -416,8 +445,13 @@ impl EngineEventRenderer {
 /// of the CLI `ToolExecutor`'s old `make_bash_progress_callback` /
 /// `make_mcp_progress_callback`: the executor now reports structured data
 /// (`ToolProgressEvent`) and the ANSI/glyph formatting lives here, above the
-/// seam. Kept byte-identical to the pre-seam output for PTY parity.
+/// seam. External output is text, never terminal cursor or screen control.
 fn format_tool_progress(progress: &ToolProgressEvent) -> String {
+    let summary = |text: &str| {
+        crate::render::styled_text::StyledText::from_ansi(text)
+            .text
+            .replace(['\r', '\n', '\t'], " ")
+    };
     match progress {
         ToolProgressEvent::Bash {
             last_line,
@@ -429,7 +463,10 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
             } else {
                 format!("{total_bytes} B")
             };
-            format!("  {DIM}\u{27f3} {last_line}  ({total_lines} lines, {bytes_display}){RESET}")
+            format!(
+                "  {DIM}\u{27f3} {}  ({total_lines} lines, {bytes_display}){RESET}",
+                summary(last_line)
+            )
         }
         ToolProgressEvent::Mcp {
             message,
@@ -444,7 +481,7 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
                 _ => String::new(),
             };
             if let Some(msg) = message {
-                format!("  {DIM}\u{27f3} {msg}{status}{RESET}")
+                format!("  {DIM}\u{27f3} {}{status}{RESET}", summary(msg))
             } else {
                 format!("  {DIM}\u{27f3} progress: {progress:.0}{status}{RESET}")
             }

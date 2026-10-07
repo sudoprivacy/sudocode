@@ -191,6 +191,7 @@ enum Scenario {
     /// drops the margin between deltas only shows up when they do not align
     /// with line boundaries.
     ThinkingThenText,
+    TextThinkingTransitions,
     ReadFileRoundtrip,
     SkillReadRoundtrip,
     ImageReadRoundtrip,
@@ -340,6 +341,7 @@ impl Scenario {
             "tool_concurrency" => Some(Self::ToolConcurrency),
             "transcript_spacing" => Some(Self::TranscriptSpacing),
             "thinking_then_text" => Some(Self::ThinkingThenText),
+            "text_thinking_transitions" => Some(Self::TextThinkingTransitions),
             "read_file_roundtrip" => Some(Self::ReadFileRoundtrip),
             "skill_read_roundtrip" => Some(Self::SkillReadRoundtrip),
             "image_read_roundtrip" => Some(Self::ImageReadRoundtrip),
@@ -420,6 +422,7 @@ impl Scenario {
             Self::ToolConcurrency => "tool_concurrency",
             Self::TranscriptSpacing => "transcript_spacing",
             Self::ThinkingThenText => "thinking_then_text",
+            Self::TextThinkingTransitions => "text_thinking_transitions",
             Self::ReadFileRoundtrip => "read_file_roundtrip",
             Self::SkillReadRoundtrip => "skill_read_roundtrip",
             Self::ImageReadRoundtrip => "image_read_roundtrip",
@@ -566,23 +569,41 @@ async fn handle_connection(
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
             let body = build_stream_body(&request, scenario);
             let mut call_index = 0;
+            let mut text_waited = false;
             for chunk in body.split_inclusive("\n\n") {
                 socket.write_all(chunk.as_bytes()).await?;
-                if chunk.starts_with("event: content_block_stop\n") {
-                    if let Some(call) = calls.get(call_index) {
-                        if let Some(path) = &call.stream_wait_for {
-                            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                            while !std::path::Path::new(path).exists()
-                                && tokio::time::Instant::now() < deadline
-                            {
-                                tokio::time::sleep(Duration::from_millis(10)).await;
-                            }
-                            if call.stream_fail_after {
-                                return Ok(());
-                            }
+                let is_postlude_delta = chunk
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .and_then(|data| serde_json::from_str::<Value>(data).ok())
+                    .is_some_and(|event| {
+                        event["type"] == "content_block_delta"
+                            && event["delta"]["type"] == "text_delta"
+                    });
+                let waiting_call = if is_postlude_delta && !text_waited {
+                    text_waited = true;
+                    calls
+                        .iter()
+                        .find(|call| !call.stream_text_chunks.is_empty())
+                } else if chunk.starts_with("event: content_block_stop\n") {
+                    let call = calls.get(call_index);
+                    call_index += 1;
+                    call.filter(|call| call.stream_text_chunks.is_empty())
+                } else {
+                    None
+                };
+                if let Some(call) = waiting_call {
+                    if let Some(path) = &call.stream_wait_for {
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                        while !std::path::Path::new(path).exists()
+                            && tokio::time::Instant::now() < deadline
+                        {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        if call.stream_fail_after {
+                            return Ok(());
                         }
                     }
-                    call_index += 1;
                 }
             }
             return Ok(());
@@ -724,6 +745,7 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
 struct ConcurrencyCall {
     stream_wait_for: Option<String>,
     stream_fail_after: bool,
+    stream_text_chunks: Vec<String>,
     id: String,
     name: String,
     input: Value,
@@ -752,6 +774,12 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
         .map(|call| ConcurrencyCall {
             stream_wait_for: call["stream_wait_for"].as_str().map(str::to_string),
             stream_fail_after: call["stream_fail_after"].as_bool().unwrap_or(false),
+            stream_text_chunks: call["stream_text_chunks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|text| text.as_str().expect("stream text chunk").to_string())
+                .collect(),
             id: call["id"].as_str().expect("call id").to_string(),
             name: call["name"].as_str().expect("call name").to_string(),
             input: call["input"].clone(),
@@ -1479,7 +1507,12 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                         partial_json_chunks: chunks,
                     })
                     .collect();
-                tool_uses_sse(&uses)
+                let text_chunks: Vec<_> = calls
+                    .iter()
+                    .flat_map(|call| &call.stream_text_chunks)
+                    .map(String::as_str)
+                    .collect();
+                tool_uses_sse_with_text(&uses, 12, None, &text_chunks)
             }
             true => final_text_sse("Concurrency batch done."),
         },
@@ -1535,7 +1568,8 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             ),
         },
         Scenario::SyntaxHighlightLimits => markdown_showcase_sse(&syntax_limits_doc()),
-        Scenario::ThinkingThenText => thinking_then_text_sse(),
+        Scenario::ThinkingThenText => thinking_then_text_sse(None),
+        Scenario::TextThinkingTransitions => thinking_then_text_sse(Some("Boundary before.\ncard")),
         Scenario::WebSearchRoundtrip => match latest_tool_result(request) {
             Some((output, is_error)) => {
                 final_text_sse(&format!("search roundtrip error={is_error}: {output}"))
@@ -2124,7 +2158,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             ),
             Some(_) => text_message_response("msg_render_done", "Render fixture done."),
         },
-        Scenario::ThinkingThenText => {
+        Scenario::ThinkingThenText | Scenario::TextThinkingTransitions => {
             // The non-streaming twin of `thinking_then_text_sse`, so the
             // mock-parity harness sees the same two blocks on both paths.
             let mut response = text_message_response(
@@ -2139,6 +2173,14 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                     signature: Some("sig_mock_thinking".to_string()),
                 },
             );
+            if scenario == Scenario::TextThinkingTransitions {
+                response.content.insert(
+                    0,
+                    OutputContentBlock::Text {
+                        text: "Boundary before.\ncard".into(),
+                    },
+                );
+            }
             response
         }
         Scenario::MarkdownRenderingShowcase => {
@@ -2816,6 +2858,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::ToolConcurrency => "req_tool_concurrency",
         Scenario::TranscriptSpacing => "req_transcript_spacing",
         Scenario::ThinkingThenText => "req_thinking_then_text",
+        Scenario::TextThinkingTransitions => "req_text_thinking_transitions",
         Scenario::DelayedText => "req_delayed_text",
         Scenario::MarkdownRenderingShowcase => "req_markdown_showcase",
         Scenario::UnicodeRenderingShowcase => "req_unicode_showcase",
@@ -3251,7 +3294,7 @@ fn streaming_text_sse() -> String {
 /// catching (a spinner clear landing mid-line, a lost margin, a dim run left
 /// open) only appear at those boundaries. A `signature_delta` closes the block,
 /// matching what the real API sends.
-fn thinking_then_text_sse() -> String {
+fn thinking_then_text_sse(intro: Option<&str>) -> String {
     let mut body = String::new();
     append_sse(
         &mut body,
@@ -3270,12 +3313,30 @@ fn thinking_then_text_sse() -> String {
             }
         }),
     );
+    let index = usize::from(intro.is_some());
+    if let Some(text) = intro {
+        append_sse(
+            &mut body,
+            "content_block_start",
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+        );
+        append_sse(
+            &mut body,
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}),
+        );
+        append_sse(
+            &mut body,
+            "content_block_stop",
+            json!({"type":"content_block_stop","index":0}),
+        );
+    }
     append_sse(
         &mut body,
         "content_block_start",
         json!({
             "type": "content_block_start",
-            "index": 0,
+            "index": index,
             "content_block": {"type": "thinking", "thinking": "", "signature": null}
         }),
     );
@@ -3288,7 +3349,7 @@ fn thinking_then_text_sse() -> String {
             "content_block_delta",
             json!({
                 "type": "content_block_delta",
-                "index": 0,
+                "index": index,
                 "delta": {"type": "thinking_delta", "thinking": chunk}
             }),
         );
@@ -3298,21 +3359,21 @@ fn thinking_then_text_sse() -> String {
         "content_block_delta",
         json!({
             "type": "content_block_delta",
-            "index": 0,
+            "index": index,
             "delta": {"type": "signature_delta", "signature": "sig_mock_thinking"}
         }),
     );
     append_sse(
         &mut body,
         "content_block_stop",
-        json!({"type": "content_block_stop", "index": 0}),
+        json!({"type": "content_block_stop", "index": index}),
     );
     append_sse(
         &mut body,
         "content_block_start",
         json!({
             "type": "content_block_start",
-            "index": 1,
+            "index": index + 1,
             "content_block": {"type": "text", "text": ""}
         }),
     );
@@ -3321,14 +3382,14 @@ fn thinking_then_text_sse() -> String {
         "content_block_delta",
         json!({
             "type": "content_block_delta",
-            "index": 1,
+            "index": index + 1,
             "delta": {"type": "text_delta", "text": "The answer follows the reasoning."}
         }),
     );
     append_sse(
         &mut body,
         "content_block_stop",
-        json!({"type": "content_block_stop", "index": 1}),
+        json!({"type": "content_block_stop", "index": index + 1}),
     );
     append_sse(
         &mut body,
@@ -3396,6 +3457,15 @@ fn tool_uses_sse_with_prelude(
     input_tokens: u32,
     prelude: Option<&str>,
 ) -> String {
+    tool_uses_sse_with_text(tool_uses, input_tokens, prelude, &[])
+}
+
+fn tool_uses_sse_with_text(
+    tool_uses: &[ToolUseSse<'_>],
+    input_tokens: u32,
+    prelude: Option<&str>,
+    postlude: &[&str],
+) -> String {
     let mut body = String::new();
     let message_id = tool_uses.first().map_or_else(
         || "msg_tool_use".to_string(),
@@ -3419,21 +3489,7 @@ fn tool_uses_sse_with_prelude(
         }),
     );
     if let Some(text) = prelude {
-        append_sse(
-            &mut body,
-            "content_block_start",
-            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
-        );
-        append_sse(
-            &mut body,
-            "content_block_delta",
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}),
-        );
-        append_sse(
-            &mut body,
-            "content_block_stop",
-            json!({"type":"content_block_stop","index":0}),
-        );
+        append_text_sse(&mut body, 0, &[text]);
     }
     for (index, tool_use) in tool_uses.iter().enumerate() {
         let index = index + usize::from(prelude.is_some());
@@ -3471,6 +3527,13 @@ fn tool_uses_sse_with_prelude(
             }),
         );
     }
+    if !postlude.is_empty() {
+        append_text_sse(
+            &mut body,
+            tool_uses.len() + usize::from(prelude.is_some()),
+            postlude,
+        );
+    }
     append_sse(
         &mut body,
         "message_delta",
@@ -3482,6 +3545,26 @@ fn tool_uses_sse_with_prelude(
     );
     append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));
     body
+}
+
+fn append_text_sse(body: &mut String, index: usize, chunks: &[&str]) {
+    append_sse(
+        body,
+        "content_block_start",
+        json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}}),
+    );
+    for text in chunks {
+        append_sse(
+            body,
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":text}}),
+        );
+    }
+    append_sse(
+        body,
+        "content_block_stop",
+        json!({"type":"content_block_stop","index":index}),
+    );
 }
 
 /// Exercise a real HTTP stream: initial wait, steady progress beyond three

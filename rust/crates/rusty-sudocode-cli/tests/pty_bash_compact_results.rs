@@ -4,7 +4,6 @@ mod common;
 use common::TestEnv;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
 fn results(request: &Value) -> BTreeMap<String, String> {
     request["messages"]
@@ -28,20 +27,6 @@ fn results(request: &Value) -> BTreeMap<String, String> {
             (b["tool_use_id"].as_str().unwrap().to_owned(), text)
         })
         .collect()
-}
-
-fn transcript(dir: &Path) -> Option<PathBuf> {
-    for entry in std::fs::read_dir(dir).ok()? {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            if let Some(found) = transcript(&path) {
-                return Some(found);
-            }
-        } else if path.file_name().unwrap() == "transcript.jsonl" {
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn assert_shell_statuses(sent: &BTreeMap<String, String>) {
@@ -112,7 +97,8 @@ fn compact_bash_results_reach_model_and_survive_resume() {
         .collect();
     let sent = results(requests.last().unwrap());
     assert_shell_statuses(&sent);
-    let path = transcript(&env.workspace_root().join(".scode/sessions")).expect("saved transcript");
+    let path = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
+        .expect("saved transcript");
     let saved = runtime::Session::load_from_path(&path).unwrap();
     let saved_results: BTreeMap<_, _> = saved
         .messages
@@ -187,7 +173,8 @@ fn cancelled_bash_persists_a_compact_interruption() {
     cli.send("/exit\r").unwrap();
     cli.set_default_timeout(std::time::Duration::from_secs(15));
     cli.expect_eof().expect("cancel exits promptly");
-    let path = transcript(&env.workspace_root().join(".scode/sessions")).expect("saved transcript");
+    let path = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
+        .expect("saved transcript");
     let saved = runtime::Session::load_from_path(&path).unwrap();
     let output = saved
         .messages

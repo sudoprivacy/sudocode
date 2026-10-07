@@ -492,11 +492,12 @@ fn stopping_a_background_agent_cancels_its_running_child_tool() {
 #[test]
 fn large_background_output_has_a_bounded_preview_and_a_complete_log() {
     let (env, _release) = task_env("background-bounded-output");
-    let mut session = start(&env, &[shell("large", "echo FIRST_LOG_EVIDENCE; i=0; while [ $i -lt 2000 ]; do echo OUTPUT_FILLER_01234567890123456789; i=$((i+1)); done; echo LAST_LOG_EVIDENCE", "Large background output")]);
+    let mut session = start(&env, &[shell("large", "echo LOG_PREAMBLE_STDOUT; echo LOG_PREAMBLE_STDERR >&2; echo FIRST_LOG_EVIDENCE; i=0; while [ $i -lt 2000 ]; do echo OUTPUT_FILLER_01234567890123456789; i=$((i+1)); done; echo LAST_LOG_EVIDENCE", "Large background output")]);
     screen(&session, "1 new result · ↓ to view");
     session.resize(45, 240).unwrap();
     open(&mut session);
     let view = screen(&session, "  LAST_LOG_EVIDENCE");
+    screen(&session, "exit 0");
     let panel = view.rsplit_once("Background tasks").unwrap().1;
     assert!(
         !panel
@@ -518,7 +519,26 @@ fn large_background_output_has_a_bounded_preview_and_a_complete_log() {
     );
     let full = fs::read_to_string(path).unwrap();
     assert!(full.len() > 24 * 1024);
-    assert!(full.starts_with("FIRST_LOG_EVIDENCE\n"));
-    assert!(full.ends_with("LAST_LOG_EVIDENCE\n"));
+    // Login profiles may emit startup diagnostics before the fixture (MSYS2
+    // does on first use). Keep that external output and verify the fixture's
+    // complete ordered payload with either platform's line endings.
+    let mut lines = full.lines();
+    assert_eq!(
+        lines.find(|line| *line == "LOG_PREAMBLE_STDOUT"),
+        Some("LOG_PREAMBLE_STDOUT"),
+        "full log prefix: {:?}",
+        full.chars().take(200).collect::<String>()
+    );
+    assert_eq!(lines.next(), Some("LOG_PREAMBLE_STDERR"));
+    assert_eq!(lines.next(), Some("FIRST_LOG_EVIDENCE"));
+    for index in 0..2000 {
+        assert_eq!(
+            lines.next(),
+            Some("OUTPUT_FILLER_01234567890123456789"),
+            "full log filler record {index}"
+        );
+    }
+    assert_eq!(lines.next(), Some("LAST_LOG_EVIDENCE"));
+    assert!(lines.next().is_none(), "unexpected records after log end");
     close(session);
 }

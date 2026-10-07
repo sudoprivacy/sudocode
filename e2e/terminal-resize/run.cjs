@@ -106,7 +106,10 @@ async function queuedPeer() {
   child.write('\x15');
   await frame(text => !text.includes('draft-中文'));
   child.write('\x1b');
-  await settle(text => text.includes('│ QUEUED-BODY-END') && text.includes('turn 2')
+  // The status counts assistant responses, including tool continuations. A
+  // live peer acknowledgment may legitimately use send before its final reply.
+  await settle(text => text.includes('│ QUEUED-BODY-END')
+    && Number(text.match(/· turn (\d+) ·/)?.[1]) >= 2
     && text.split('\n').some(line => line.trim().replace(/^•\s*/, '') === config.expectedReply)
     && !text.includes('queued: Message from mac-ai'));
   const text = snapshot();

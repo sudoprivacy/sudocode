@@ -20,20 +20,15 @@ pub(super) fn AnsiText(props: &AnsiTextProps) -> impl Into<AnyElement<'static>> 
 #[derive(Default, Props)]
 pub(super) struct RichTextProps {
     pub content: std::sync::Arc<StyledText>,
+    pub color: Option<Color>,
 }
 
 #[component]
 pub(super) fn RichText(props: &RichTextProps) -> impl Into<AnyElement<'static>> {
-    element! { MixedText(contents: contents(&props.content, None)) }
+    element! { MixedText(contents: contents(&props.content, props.color)) }
 }
 
-#[derive(Default, Props)]
-pub(super) struct PromptTextViewProps {
-    pub content: Option<runtime::PromptText>,
-    pub width: usize,
-}
-
-struct PromptTextCache {
+struct CachedPromptText {
     source: runtime::PromptText,
     width: usize,
     rendered: std::sync::Arc<StyledText>,
@@ -42,33 +37,33 @@ struct PromptTextCache {
 /// One derived document per mounted prompt, invalidated only by source or width.
 /// Ref updates do not schedule a repaint (unlike State), so spinner ticks and
 /// typing cannot reparse the plan or starve the terminal event loop.
-#[component]
-pub(super) fn PromptTextView(
-    props: &PromptTextViewProps,
-    mut hooks: Hooks,
-) -> impl Into<AnyElement<'static>> {
-    let renderer = hooks.use_ref(crate::render::TerminalRenderer::new);
-    let mut cache = hooks.use_ref_default::<Option<PromptTextCache>>();
-    let content = props.content.as_ref().map(|source| {
-        let mut cache = cache.write();
-        if !cache
+#[derive(Default)]
+pub(super) struct PromptTextCache(Option<CachedPromptText>);
+
+impl PromptTextCache {
+    /// Share the exact styled document between measurement and painting.
+    pub fn render(
+        &mut self,
+        renderer: &crate::render::TerminalRenderer,
+        source: Option<&runtime::PromptText>,
+        width: usize,
+    ) -> std::sync::Arc<StyledText> {
+        let Some(source) = source else {
+            self.0 = None;
+            return Default::default();
+        };
+        if !self
+            .0
             .as_ref()
-            .is_some_and(|cached| cached.width == props.width && cached.source.same_source(source))
+            .is_some_and(|cached| cached.width == width && cached.source.same_source(source))
         {
-            *cache = Some(PromptTextCache {
+            self.0 = Some(CachedPromptText {
                 source: source.clone(),
-                width: props.width,
-                rendered: std::sync::Arc::new(
-                    renderer.read().render_prompt_text(source, props.width),
-                ),
+                width,
+                rendered: std::sync::Arc::new(renderer.render_prompt_text(source, width)),
             });
         }
-        cache.as_ref().unwrap().rendered.clone()
-    });
-    element! {
-        View(flex_direction: FlexDirection::Column) {
-            #(content.map(|content| element! { RichText(content) }))
-        }
+        self.0.as_ref().unwrap().rendered.clone()
     }
 }
 

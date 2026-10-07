@@ -3190,6 +3190,9 @@ fn run_repl_iocraft_dispatch(
     // those `InputEvent::Abort`s cancel the in-flight turn by sending Cancel
     // across the seam (no separate raw-mode HookAbortMonitor).
     let commands = cli.engine_handle.commands.clone();
+    let _ = commands.send(EngineCommand::BackgroundTask {
+        action: engine_events::BackgroundTaskAction::Watch,
+    });
 
     let shared_mode = input_queue::shared_queue_mode(mode);
     cli.shared_queue_mode = Some(Arc::clone(&shared_mode));
@@ -3236,11 +3239,25 @@ fn run_repl_iocraft_dispatch(
     let (turn_tx, turn_rx) = mpsc::channel();
     let engine_events = std::mem::replace(&mut cli.engine_handle.events, turn_rx);
     let completion_tx = coord_tx.clone();
+    let task_ui = repl_ui_cmd.clone();
     thread::Builder::new()
         .name("repl-engine-events".into())
         .spawn(move || {
             let mut completions = subagent_completion::Completions::default();
             while let Ok(event) = engine_events.recv() {
+                // Background work keeps publishing while the parent is idle.
+                // Its UI uses the same seam as every other engine consumer.
+                match &event {
+                    EngineEvent::BackgroundTask(event) => {
+                        task_ui.background_task(event.clone());
+                        continue;
+                    }
+                    EngineEvent::BackgroundTaskError { message, .. } => {
+                        task_ui.background_task_error(message.clone());
+                        continue;
+                    }
+                    _ => {}
+                }
                 for finished in completions.observe(&event) {
                     if let Some(prompt) = finished.completion_notification {
                         let display = format!(
@@ -3462,6 +3479,11 @@ fn run_repl_iocraft_dispatch(
                     if runner_handle.is_some() {
                         let _ = commands.send(EngineCommand::Cancel);
                     }
+                }
+                repl_ui::InputEvent::StopBackgroundTask(id) => {
+                    let _ = commands.send(EngineCommand::BackgroundTask {
+                        action: engine_events::BackgroundTaskAction::Stop { id },
+                    });
                 }
                 repl_ui::InputEvent::Submit { text, display } => {
                     if text.trim() == "/exit" || text.trim() == "/quit" {
@@ -3745,9 +3767,18 @@ fn run_repl_iocraft_dispatch(
         );
     }
 
+    // Close through the engine seam before process exit so session-owned
+    // background processes are killed and reaped, not left running.
+    let LiveCli {
+        engine_handle,
+        lifecycle,
+        ..
+    } = cli;
+    drop(lifecycle);
+    let _ = engine_handle.shutdown(Duration::from_secs(5));
+
     // The iocraft render loop thread may still be alive (it blocks on
-    // terminal events). Force process exit — all persistent state has
-    // already been flushed above.
+    // terminal events). Persistent state and engine teardown are complete.
     std::process::exit(0);
 }
 

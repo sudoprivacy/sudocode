@@ -436,7 +436,9 @@ impl EngineEventRenderer {
             | EngineEvent::ModelChanged { .. }
             | EngineEvent::PermissionModeChanged { .. }
             // Background completions are scheduled by the REPL event bridge.
-            | EngineEvent::Subagent(_) => RenderOutcome::Continue,
+            | EngineEvent::Subagent(_)
+            | EngineEvent::BackgroundTask(_)
+            | EngineEvent::BackgroundTaskError { .. } => RenderOutcome::Continue,
         }
     }
 }

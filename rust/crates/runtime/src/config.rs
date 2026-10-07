@@ -1386,11 +1386,7 @@ fn nonempty_env_path(name: &str) -> Option<PathBuf> {
 #[must_use]
 pub fn default_config_home() -> PathBuf {
     global_config_dir_override()
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(|home| PathBuf::from(home).join(".nexus").join("sudocode"))
-        })
+        .or_else(|| crate::user_paths::home_dir().map(|home| home.join(".nexus").join("sudocode")))
         .unwrap_or_else(|| PathBuf::from(".nexus/sudocode"))
 }
 

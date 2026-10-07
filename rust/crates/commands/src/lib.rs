@@ -3415,8 +3415,7 @@ fn discover_definition_roots(cwd: &Path, leaf: &str) -> Vec<(DefinitionSource, P
         );
     }
 
-    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
-        let home = PathBuf::from(home);
+    if let Some(home) = runtime::user_paths::home_dir() {
         if runtime::config::global_config_dir_override().is_none() {
             push_unique_root(
                 &mut roots,
@@ -3492,8 +3491,7 @@ fn discover_skill_roots_with_plugins(
         );
     }
 
-    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
-        let home = PathBuf::from(home);
+    if let Some(home) = runtime::user_paths::home_dir() {
         if runtime::config::global_config_dir_override().is_none() {
             push_unique_skill_root(
                 &mut roots,
@@ -3604,10 +3602,7 @@ fn default_skill_install_root() -> std::io::Result<PathBuf> {
     if let Ok(codex_home) = env::var("CODEX_HOME") {
         return Ok(PathBuf::from(codex_home).join("skills"));
     }
-    if env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .is_some()
-    {
+    if runtime::user_paths::home_dir().is_some() {
         return Ok(runtime::config::default_config_home().join("skills"));
     }
     Err(std::io::Error::new(

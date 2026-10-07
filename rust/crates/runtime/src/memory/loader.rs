@@ -25,8 +25,8 @@ pub fn default_memory_dir_for(cwd: &Path) -> PathBuf {
 
 /// Read-only compatibility root. Avoid a git subprocess for new installations.
 pub(super) fn legacy_memory_base_dir(cwd: &Path) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    let projects = PathBuf::from(home).join(".scode").join("projects");
+    let home = crate::user_paths::home_dir()?;
+    let projects = home.join(".scode").join("projects");
     if !projects.is_dir() {
         return None;
     }

@@ -33,6 +33,16 @@ fn send(mailbox: &SessionMailbox<Kernel>, message: Value) {
     mailbox.send(SessionPayload::Rpc { message }).unwrap();
 }
 
+struct CloseSession<'a>(&'a SessionMailbox<Kernel>);
+
+impl Drop for CloseSession<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.send(SessionPayload::Closed {
+            reason: "live acceptance complete".into(),
+        });
+    }
+}
+
 fn response(mailbox: &SessionMailbox<Kernel>, id: &str) -> Value {
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -64,6 +74,10 @@ fn assert_request_context(directory: &std::path::Path, process_id: &str) {
         let body: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         let system = body["system"].to_string();
         assert!(!system.contains("HOST_DIRECTORY_MUST_NOT_ENTER_AGENT_PROMPT"));
+        if system.contains("tasked with summarizing conversations") {
+            assert!(body["tools"].as_array().is_none_or(Vec::is_empty));
+            continue;
+        }
         assert!(system.contains(&format!("/proc/{}/workspace", process_id)));
         assert!(system.contains("Nexus virtual filesystem (POSIX paths)"));
         assert!(
@@ -74,9 +88,163 @@ fn assert_request_context(directory: &std::path::Path, process_id: &str) {
     assert!(requests > 0, "no real provider request was captured");
 }
 
+fn live_text_turn(mailbox: &SessionMailbox<Kernel>, sid: &str, id: &str, prompt: &str) -> String {
+    send(
+        mailbox,
+        json!({"jsonrpc":"2.0","id":id,"method":"session/prompt",
+        "params":{"sessionId":sid,"prompt":[{"type":"text","text":prompt}]}}),
+    );
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut text = String::new();
+    while Instant::now() < deadline {
+        match mailbox.receive(100).unwrap() {
+            Some(SessionPayload::Rpc { message }) => {
+                assert_ne!(
+                    message["method"], "session/request_permission",
+                    "context-only workflow unexpectedly requested a tool: {message}"
+                );
+                if message["id"] == id {
+                    assert!(message.get("error").is_none(), "{message}");
+                    assert_eq!(message["result"]["stopReason"], "end_turn", "{message}");
+                    return text;
+                }
+                if message["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+                    text.push_str(
+                        message["params"]["update"]["content"]["text"]
+                            .as_str()
+                            .unwrap_or_default(),
+                    );
+                }
+            }
+            Some(SessionPayload::Closed { reason }) => panic!("closed: {reason}"),
+            None => {}
+        }
+    }
+    panic!("live text turn {id} timed out: {text}");
+}
+
+fn run_live_compaction(
+    mailbox: &SessionMailbox<Kernel>,
+    fs: &dyn FsBackend,
+    sid: &str,
+    model: &str,
+) {
+    let nonce = format!(
+        "COMPACT_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let units = 9 + std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos()
+        % 17;
+    let subtotal = units * 29 + 47;
+    let total = subtotal + 13;
+    // A real review packet must be larger than its continuation checkpoint.
+    // Compacting just one short question should correctly preserve history
+    // when the generated checkpoint would make it bigger.
+    let ledger = (1..=80)
+        .map(|index| {
+            format!("Archived shipment {index}: warehouse aisle {}, parcel count {}, tracking ARCHIVE-{index:04}, carrier standard freight, dispatch scan verified, packaging inspected, delivery receipt reconciled. This completed shipment has no charge on the current order.\n", index % 12, index % 9 + 1)
+        })
+        .collect::<String>();
+    let reviewed = live_text_turn(mailbox, sid, "order",
+        &format!("Review this order using only this conversation: batch {nonce}, units {units}, unit price 29, delivery 47. Calculate units times price plus delivery and reply with the batch and subtotal. Use the supplied data without tools, files or persistent memory. The supporting shipment ledger below is archived and contributes no charges to this order.\n{ledger}"));
+    assert!(
+        reviewed.contains(&nonce) && reviewed.contains(&subtotal.to_string()),
+        "{reviewed}"
+    );
+    let fee = live_text_turn(mailbox, sid, "fee",
+        "Add a fee of 13 to the order subtotal for our final total. Reply with only the final numeric total; no tools are needed.");
+    assert!(fee.contains(&total.to_string()), "{fee}");
+    // The current review packet also gives token-based tail retention enough
+    // recent context to leave the archived ledger in the compactable prefix.
+    let checklist = (1..=48)
+        .map(|index| {
+            format!("Review check {index}: verify the carrier receipt and packaging inspection, reconcile archived shipment records, confirm the current order calculation uses its own prices and delivery charge, and mark the supporting paperwork ready for approval.\n")
+        })
+        .collect::<String>();
+    let ready = live_text_turn(mailbox, sid, "review",
+        &format!("Confirm the order is ready for review in one sentence using this review checklist. Do not repeat its identifier or amounts. No tools are needed.\n{checklist}"));
+    assert!(!ready.trim().is_empty(), "no review confirmation");
+    let compacted = live_text_turn(mailbox, sid, "compact", "/compact");
+    eprintln!("[compaction] {compacted}");
+    let requests: Vec<Value> = fs
+        .readdir("/model")
+        .unwrap()
+        .into_iter()
+        .filter(|entry| entry.name.ends_with(".prompt"))
+        .map(|entry| {
+            let path = if entry.name.starts_with('/') {
+                entry.name
+            } else {
+                format!("/model/{}", entry.name)
+            };
+            serde_json::from_str(&fs.read_to_string(&path).unwrap()).unwrap()
+        })
+        .collect();
+    let summary = requests
+        .iter()
+        .find(|request| {
+            let body = &request["body"];
+            body["system"]
+                .to_string()
+                .contains("tasked with summarizing conversations")
+                || body["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .is_some_and(|last| {
+                        last["role"] == "user"
+                            && last["content"].to_string().contains(
+                                "Create a concise checkpoint for continuing this coding task.",
+                            )
+                    })
+        })
+        .expect("LLM compaction never crossed the actual Nexus model mount");
+    assert_eq!(summary["nexus_http"]["path"], "v1/messages");
+    assert_eq!(summary["body"]["model"], model);
+    assert!(compacted.contains("llm summary"), "{compacted}");
+    // Cache-preserving compaction keeps the original system and tool catalog.
+    // The fallback instead uses a dedicated summary system without tools.
+    if summary["body"]["system"]
+        .to_string()
+        .contains("tasked with summarizing conversations")
+    {
+        assert!(summary["body"]["tools"]
+            .as_array()
+            .is_none_or(Vec::is_empty));
+    }
+    assert!(
+        summary["body"]["messages"].to_string().contains(&nonce),
+        "summary input lost actual order data"
+    );
+    let recalled = live_text_turn(mailbox, sid, "recall",
+        "State our reviewed order's batch code and final total, including the fee. Use the conversation history; no tools are needed.");
+    assert!(
+        recalled.contains(&nonce) && recalled.contains(&total.to_string()),
+        "compaction lost actual order data: {recalled}"
+    );
+    eprintln!(
+        "LIVE COMPACTION PASS: Nexus native summary and post-compaction batch/total verified"
+    );
+}
+
 #[test]
 #[ignore = "funded live integration: ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL required"]
 fn controller_approves_real_model_work_and_reads_the_persisted_result() {
+    controller_workflow(false);
+}
+
+#[test]
+#[ignore = "funded live integration: ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL required"]
+fn compaction_crosses_the_nexus_model_mount_and_preserves_live_order_data() {
+    controller_workflow(true);
+}
+
+fn controller_workflow(compact: bool) {
     let key = std::env::var("ANTHROPIC_API_KEY").expect("live API key");
     let base_url = std::env::var("ANTHROPIC_BASE_URL").expect("live API base URL");
     let model = std::env::var("SUDOCODE_TEST_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".into());
@@ -146,6 +314,7 @@ fn controller_approves_real_model_work_and_reads_the_persisted_result() {
         SessionSide::Controller,
     )
     .unwrap();
+    let _close = CloseSession(&mailbox);
     send(
         &mailbox,
         json!({"jsonrpc":"2.0","id":"init","method":"initialize",
@@ -170,6 +339,11 @@ fn controller_approves_real_model_work_and_reads_the_persisted_result() {
             started["session_id"].as_str().unwrap()
         ),
     );
+    if compact {
+        run_live_compaction(&mailbox, &fs, sid, &model);
+        assert_request_context(&capture_dir, started["session_id"].as_str().unwrap());
+        return;
+    }
     let nonce = format!(
         "inventory-{}",
         std::time::SystemTime::now()

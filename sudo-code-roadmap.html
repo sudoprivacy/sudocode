@@ -1617,6 +1617,22 @@ impact, lowest implementation cost first:</p>
 
 <h4>Inline rendering design principles</h4>
 
+<p><strong>Shared live-slot row budget.</strong> PendingSlot, StatusSlot,
+TodoSlot, InputSlot and FooterSlot use one layout allocation while the terminal
+owner alone manages history, resize recovery and drawing. InputSlot has
+priority; other slots fold into explicit summaries and expand when space
+returns. The same structured document and iocraft primitive measure and paint
+each slot, with only current-frame measurements retained. Long drafts use the
+same bounded editor; long question/plan bodies page independently with
+PgUp/PgDn and Ctrl+Home/End. Choices remain visible; undersized controls disable
+confirmation and hidden editing, retaining cancellation. This layout does not
+change slot order, force bottom docking, replay history or replace the framework
+resize fix. Acceptance: <code>pty_chrome_budget</code>,
+<code>pty_plan_review</code>, the existing Markdown/continuation and background
+task PTYs, and <code>pty_chrome_resize</code>'s real terminal budget workflow.
+Todo count emphasis, broader UI semantic colors and the streaming-preview
+position remain separate design discussions.</p>
+
 <p><strong>External terminal ownership (#584).</strong> CCB validation:
 <code>src/commands/memory/memory.tsx</code> and
 <code>src/utils/promptEditor.ts</code> (CCB <code>236d99ed</code>) confirm a

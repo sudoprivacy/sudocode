@@ -1037,14 +1037,35 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     let mut specs = vec![
         ToolSpec {
             name: "bash",
-            description: "Execute a shell command in the current workspace.",
+            description: concat!(
+                "Executes a bash command and returns its output.\n\n",
+                "- `timeout` is in milliseconds (default 120000 for a foreground command).\n",
+                "- `run_in_background` runs the command detached: it keeps running across ",
+                "turns and re-invokes you with a notification when it exits. No `&` needed. ",
+                "Use it when you don't need the result immediately and are fine being told ",
+                "later — you do not need to check the output right away.\n",
+                "- Avoid unnecessary `sleep` commands:\n",
+                "  - Do not sleep between commands that can run immediately — just run them.\n",
+                "  - If your command is long running and you would like to be notified when ",
+                "it finishes — use `run_in_background`. No sleep needed.\n",
+                "  - If waiting for a background task you started with `run_in_background`, ",
+                "you will be notified when it completes — do not poll.\n",
+                "  - Do not retry failing commands in a sleep loop — diagnose the root cause.\n",
+                "  - Long leading `sleep` commands are blocked. To poll until a condition is ",
+                "met, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`) ",
+                "— you get a notification when the loop exits. Do not chain shorter sleeps to ",
+                "work around the block.\n",
+                "- Use the Monitor tool to stream events from a background process (each ",
+                "stdout line is a notification). For one-shot \"wait until done,\" use bash ",
+                "with `run_in_background` instead."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
                     "timeout": { "type": "integer", "minimum": 1, "description": "Maximum milliseconds to wait before interrupting the command (default 120000)." },
                     "description": { "type": "string" },
-                    "run_in_background": { "type": "boolean" },
+                    "run_in_background": { "type": "boolean", "description": "Run the command detached: it keeps running across turns and re-invokes you with a notification when it exits. No `&` needed. Use it instead of sleeping or polling for long-running work." },
                     "dangerouslyDisableSandbox": { "type": "boolean" },
                     "namespaceRestrictions": { "type": "boolean" },
                     "isolateNetwork": { "type": "boolean" },
@@ -1052,6 +1073,33 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "allowedMounts": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["command"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "Monitor",
+            description: concat!(
+                "Watch, monitor, or keep an eye on a process, log, or command — each stdout ",
+                "line is streamed back to you as a live notification.\n\n",
+                "The call returns immediately with a task id; the watch keeps running across ",
+                "turns. End your turn after starting it: you will be notified on each event. ",
+                "Keep working — do not poll or sleep. Events may arrive while you are waiting ",
+                "for the user; an event is not their reply.\n\n",
+                "Use it to wait for a condition with an until-loop that exits when the ",
+                "condition is met (e.g. `until grep -q \"Ready\" dev.log; do sleep 2; done`) — ",
+                "you get a notification when the loop exits. For a one-shot \"wait until this ",
+                "command is done\", use bash with `run_in_background` instead."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command to watch. Each line it prints on stdout becomes one notification; the watch ends when it exits." },
+                    "description": { "type": "string", "description": "Short label for this watch, shown in notifications." },
+                    "timeout_ms": { "type": "integer", "minimum": 1, "description": "How long the watch may run before it is stopped (default 600000, max 3600000). Ignored when `persistent` is true." },
+                    "persistent": { "type": "boolean", "description": "When true the watch runs for the rest of the session until stopped, with no timeout. Default false." }
+                },
+                "required": ["command", "description"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
@@ -1817,6 +1865,12 @@ fn execute_tool_with_enforcer(
             let classified_mode = classify_bash_permission(&bash_input.command);
             maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
             run_bash(bash_input, abort_signal)
+        }
+        "Monitor" => {
+            let monitor_input: MonitorInput = from_value(input)?;
+            // A watch runs arbitrary shell, so it is gated exactly like bash.
+            maybe_enforce_permission_check(enforcer, name, input)?;
+            run_monitor(monitor_input)
         }
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
@@ -3312,6 +3366,34 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
 /// Classify bash command permission based on command type and path.
 /// ROADMAP #50: Read-only commands targeting CWD paths get `WorkspaceWrite`,
 /// all others remain `DangerFullAccess`.
+/// Input for the `Monitor` tool.
+#[derive(Debug, Deserialize)]
+struct MonitorInput {
+    command: String,
+    description: String,
+    timeout_ms: Option<u64>,
+    persistent: Option<bool>,
+}
+
+/// Start a watch and return immediately: the turn is meant to end here, with
+/// notifications arriving later.
+fn run_monitor(input: MonitorInput) -> Result<String, String> {
+    let workspace_root = runtime::current_workspace_root_or_default();
+    let task_id = runtime::background_tasks::start_monitor(
+        &workspace_root,
+        &input.command,
+        &input.description,
+        input.timeout_ms,
+        input.persistent.unwrap_or(false),
+    )
+    .map_err(|e| format!("failed to start monitor: {e}"))?;
+    Ok(format!(
+        "Monitor started (task {task_id}). You will be notified on each event. \
+         Keep working — do not poll or sleep. Events may arrive while you are \
+         waiting for the user — an event is not their reply."
+    ))
+}
+
 fn classify_bash_permission(command: &str) -> PermissionMode {
     // Read-only commands that are safe when targeting workspace paths
     const READ_ONLY_COMMANDS: &[&str] = &[

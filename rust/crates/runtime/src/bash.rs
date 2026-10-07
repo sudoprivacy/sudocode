@@ -210,21 +210,58 @@ pub fn execute_bash_with_progress(
     let sandbox_status = sandbox_status_for_input(&input, &cwd);
 
     if input.run_in_background.unwrap_or(false) {
+        // A detached child still owes the model two things: what it printed and
+        // the fact that it ended. Send both somewhere durable instead of
+        // `/dev/null` — the tool description promises "you will be notified
+        // when it completes", and a discarded child cannot keep that promise.
+        let task_id = format!("bg-{}", crate::background_tasks::next_task_seq());
+        let output_path = crate::background_tasks::output_path_for(&cwd, &task_id)?;
+        let log = std::fs::File::create(&output_path)?;
+        let errlog = log.try_clone()?;
+
         let mut child = prepare_command(&input.command, &cwd, &sandbox_status, false);
-        let child = child
+        let mut child = child
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(errlog))
             .spawn()?;
+
+        let pid = child.id().to_string();
+        crate::background_tasks::register(crate::background_tasks::BackgroundTask {
+            task_id: task_id.clone(),
+            kind: crate::background_tasks::TaskKind::BackgroundCommand,
+            command: input.command.clone(),
+            description: input.description.clone(),
+            output_path: output_path.clone(),
+            state: crate::background_tasks::TaskState::Running,
+            exit_code: None,
+        });
+
+        // Reaper: one thread per background command, parked on `wait`. The exit
+        // is what turns into the next turn's `<task-notification>`, so the wait
+        // has to belong to someone — nobody reaping is how a finished command
+        // stays invisible forever.
+        let reaped_id = task_id.clone();
+        std::thread::Builder::new()
+            .name(format!("bg-reaper-{task_id}"))
+            .spawn(move || {
+                let code = child.wait().ok().and_then(|status| status.code());
+                crate::background_tasks::finish(
+                    &reaped_id,
+                    crate::background_tasks::TaskState::Exited,
+                    code,
+                );
+            })
+            .map_err(|e| io::Error::other(format!("spawn background reaper: {e}")))?;
 
         return Ok(BashCommandOutput {
             exit_code: None,
             stdout: String::new(),
             stderr: String::new(),
-            raw_output_path: None,
+            raw_output_path: Some(output_path.display().to_string()),
             interrupted: false,
             is_image: None,
-            background_task_id: Some(child.id().to_string()),
+            background_task_id: Some(task_id),
             backgrounded_by_user: Some(false),
             assistant_auto_backgrounded: Some(false),
             dangerously_disable_sandbox: input.dangerously_disable_sandbox,

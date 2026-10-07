@@ -7,6 +7,7 @@
 pub mod agent_color;
 pub mod agent_mailbox;
 pub mod agent_types;
+pub mod background_tasks;
 mod bash;
 pub mod bash_validation;
 mod bootstrap;

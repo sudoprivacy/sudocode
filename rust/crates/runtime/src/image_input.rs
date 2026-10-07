@@ -71,10 +71,20 @@ pub fn read_image(fs: &dyn FsBackend, path: &str) -> io::Result<ImageReadResult>
 }
 
 /// Structured runtime output; attachments never pass through text truncation.
+/// Trusted dispatchers can also request a context transition. Ordinary tool
+/// text, including JSON returned by plugins, cannot manufacture that action.
 #[derive(Clone, Debug)]
 pub struct ToolOutput {
     pub text: String,
     pub attachments: Vec<ContentBlock>,
+    pub context_action: Option<ToolContextAction>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ToolContextAction {
+    /// Drop exploration history, retain this complete assistant/tool exchange,
+    /// and continue the same turn. Used after explicit plan approval.
+    RestartFromCurrentExchange,
 }
 
 impl ToolOutput {
@@ -83,6 +93,7 @@ impl ToolOutput {
         Self {
             text,
             attachments: Vec::new(),
+            context_action: None,
         }
     }
 
@@ -112,6 +123,7 @@ impl ToolOutput {
                 image.path, image.mime_type
             ),
             attachments: vec![attachment],
+            context_action: None,
         })
     }
 

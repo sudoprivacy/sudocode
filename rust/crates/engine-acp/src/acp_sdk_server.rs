@@ -1315,6 +1315,8 @@ struct AcpAskUserQuestionRequestPayload {
     tool_call_id: String,
     title: Option<String>,
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description_format: Option<String>,
     questions: Vec<AcpQuestionFieldPayload>,
 }
 
@@ -1798,7 +1800,8 @@ pub(crate) async fn run_acp_on_transport(
                                             session_id: sid.clone(),
                                             tool_call_id,
                                             title: question_req.title.clone(),
-                                            description: question_req.description.clone(),
+                                            description: question_req.description.as_ref().map(|text| text.as_str().to_owned()),
+                                            description_format: question_req.description.as_ref().map(|text| text.format_name().to_owned()),
                                             questions: question_req
                                                 .fields
                                                 .iter()

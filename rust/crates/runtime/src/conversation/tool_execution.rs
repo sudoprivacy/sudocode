@@ -13,7 +13,10 @@ use super::{
     PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter, RuntimeError,
     SinkHookReporter, ToolDispatchContext, ToolError, ToolExecutor,
 };
-use crate::{hooks::HookEvent, image_input::ToolOutput};
+use crate::{
+    hooks::HookEvent,
+    image_input::{ToolContextAction, ToolOutput},
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -58,6 +61,7 @@ pub(super) enum ToolUpdate {
         message: ConversationMessage,
         denial: Option<String>,
         input: String,
+        context_action: Option<ToolContextAction>,
     },
 }
 
@@ -74,6 +78,7 @@ pub(super) struct ToolScheduler<'a, T> {
     progress: Option<HookProgressSink>,
     limit: usize,
     context: Option<ToolDispatchContext>,
+    context_action: Option<ToolContextAction>,
 }
 
 impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
@@ -95,6 +100,7 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
             progress,
             limit: max_tool_use_concurrency(),
             context: None,
+            context_action: None,
         }
     }
 
@@ -280,12 +286,12 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
                 };
                 call.pre_hook = hook;
                 if let Some(reason) = denial {
-                    self.complete(index, reason.clone(), Vec::new(), true, Some(reason));
+                    self.complete(index, ToolOutput::text(reason.clone()), true, Some(reason));
                 }
             }
             Stage::Authorized(PermissionOutcome::Allow) => call.phase = Phase::Authorized,
             Stage::Authorized(PermissionOutcome::Deny { reason }) => {
-                self.complete(index, reason.clone(), Vec::new(), true, Some(reason));
+                self.complete(index, ToolOutput::text(reason.clone()), true, Some(reason));
             }
             Stage::Executed(result) => {
                 let (mut output, is_error) = match result {
@@ -316,11 +322,11 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
                     .push(async move { (index, Stage::Finished(hook.await)) }.boxed_local());
             }
             Stage::Finished(hook) => {
-                let output = call.output.take().expect("executed output");
+                let mut output = call.output.take().expect("executed output");
                 let failed = hook.is_denied() || hook.is_failed() || hook.is_cancelled();
-                let text = merge_hook_feedback(hook.messages(), output.text, failed);
+                output.text = merge_hook_feedback(hook.messages(), output.text, failed);
                 let is_error = call.is_error || failed;
-                self.complete(index, text, output.attachments, is_error, None);
+                self.complete(index, output, is_error, None);
             }
         }
     }
@@ -328,22 +334,25 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
     fn complete(
         &mut self,
         index: usize,
-        text: String,
-        attachments: Vec<crate::session::ContentBlock>,
+        mut output: ToolOutput,
         is_error: bool,
         denial: Option<String>,
     ) {
         let call = &mut self.calls[index];
-        let text = if denial.is_some() {
-            merge_hook_feedback(call.pre_hook.messages(), text, true)
+        output.text = if denial.is_some() {
+            merge_hook_feedback(call.pre_hook.messages(), output.text, true)
         } else {
-            text
+            output.text
         };
-        let message = ToolOutput { text, attachments }.into_message(
-            call.id.clone(),
-            call.name.clone(),
-            is_error,
-        );
+        let context_action = if is_error {
+            None
+        } else {
+            output.context_action.take()
+        };
+        if context_action.is_some() {
+            self.context_action = context_action;
+        }
+        let message = output.into_message(call.id.clone(), call.name.clone(), is_error);
         call.phase = Phase::Complete;
         call.parent = None;
         self.updates.push_back(ToolUpdate::Completed {
@@ -351,6 +360,7 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
             message,
             denial,
             input: call.input.clone(),
+            context_action,
         });
     }
 
@@ -376,13 +386,16 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
                     .output
                     .take()
                     .unwrap_or_else(|| ToolOutput::text(interrupted_tool_output(&call.name)));
-                self.complete(index, output.text, output.attachments, true, None);
+                self.complete(index, output, true, None);
             }
         }
     }
 
     pub(super) fn take_update(&mut self) -> Option<ToolUpdate> {
         self.updates.pop_front()
+    }
+    pub(super) fn context_action(&self) -> Option<ToolContextAction> {
+        self.context_action
     }
     pub(super) fn into_results(mut self) -> Vec<ConversationMessage> {
         std::mem::take(&mut self.calls)

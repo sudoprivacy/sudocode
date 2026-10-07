@@ -573,6 +573,12 @@ impl GlobalToolRegistry {
         self
     }
 
+    /// The same filesystem used by tool writes and their approval reads.
+    #[must_use]
+    pub fn fs_handle(&self) -> Arc<dyn FsBackend> {
+        Arc::clone(&self.fs)
+    }
+
     pub fn with_plugin_tools(plugin_tools: Vec<PluginTool>) -> Result<Self, String> {
         let builtin_names = mvp_tool_specs()
             .into_iter()
@@ -3920,7 +3926,7 @@ fn run_write_plan(input: WritePlanInput, fs: &Arc<dyn FsBackend>) -> Result<Stri
     to_pretty_json(json!({
         "ok": true,
         "planFile": path.display().to_string(),
-        "message": "Plan written and presented to the user for approval.",
+        "message": "Plan saved.",
     }))
 }
 

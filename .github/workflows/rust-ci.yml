@@ -204,6 +204,10 @@ jobs:
         env:
           SCODE_TEST_BACKEND: mock
         run: cargo test --workspace --test pty_codex_colors --test pty_text_layout -- --nocapture
+      - name: PTY Markdown plan review and automatic execution
+        env:
+          SCODE_TEST_BACKEND: mock
+        run: cargo test --workspace --test pty_plan_markdown -- --nocapture
       - name: Run workspace tests
         # Keep panic diagnostics visible if a Windows PTY aborts before libtest
         # can print its captured failure output.

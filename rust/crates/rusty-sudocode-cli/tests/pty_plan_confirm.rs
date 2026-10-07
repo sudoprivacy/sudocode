@@ -6,9 +6,9 @@
 //! 2. Choice 2 (keep context & execute) completes the turn normally
 //! 3. Choice 4 (exit plan) rejects execution
 //!
-//! Choice 1 (clear context & execute) triggers a recursive `run_turn` needing a
-//! second mock response, so it's covered end-to-end in live mode. Choice 3 and
-//! free-text comments feed the plan back for revision (also live-covered).
+//! `pty_plan_markdown` covers clear/keep execution, Markdown presentation and
+//! the provider prefix in both REPLs. Choice 3 and free-text comments feed the
+//! plan back for revision (live-covered here).
 //!
 //! ```bash
 //! cargo test --test pty_plan_confirm                          # mock (CI)
@@ -133,65 +133,6 @@ fn saved_plan_decision(dir: &std::path::Path, expected: &str, expected_error: bo
             false
         }
     })
-}
-
-/// Choice 1 (clear context & execute) is the default: it resets the session
-/// and re-runs with the plan file as the fresh prompt. Live-only — clearing the
-/// context drops the mock scenario marker, so only a real model can carry the
-/// recursive execute turn.
-#[test]
-fn write_plan_choice_clear_context_executes_plan() {
-    let env = TestEnv::new("plan-clear");
-    if env.is_mock() {
-        // Clearing context strips the PARITY_SCENARIO marker from the injected
-        // plan prompt, so the mock can't answer the recursive turn. The path is
-        // exercised live below.
-        return;
-    }
-
-    let mut sess = env.spawn(&[
-        "--permission-mode",
-        "workspace-write",
-        "--allowedTools",
-        "write_plan,read_file,glob_search",
-    ]);
-    sess.expect("❯").expect("should see REPL prompt");
-
-    let prompt = env.prompt(
-        "Call the write_plan tool right now with a short markdown plan as `content`. Do not explain anything.",
-        "write_plan_roundtrip",
-    );
-    sess.send(&format!("{prompt}\r")).expect("send prompt");
-
-    sess.set_default_timeout(common::at_least(Duration::from_secs(30)));
-    if sess.expect("Choose an action").is_err() {
-        eprintln!("SKIP: live model did not call write_plan");
-        return;
-    }
-
-    // Choose option 1: clear context & execute. The session clears and re-runs
-    // with the plan as the new prompt — a fresh (recursive) turn starts.
-    let marker = turn_status_marker(&sess);
-    sess.send("1\r").expect("send choice 1");
-
-    // The clear-context path runs TWO turns: the write_plan turn completes, then
-    // the session clears and re-executes the plan as a new turn. Wait for the
-    // second turn's status line (a new marker) so `/exit` isn't sent while a
-    // turn is still running (it would queue, not exit).
-    expect_turn_complete_after(
-        &sess,
-        &marker,
-        LIVE_TURN_BUDGET,
-        "clear-context recursive execute turn should complete",
-    );
-
-    // Best-effort teardown: the behavior under test (recursive execute ran) is
-    // already asserted above. The final `/exit` sync after a multi-turn flow is
-    // non-deterministic over a PTY, so don't gate the test on the exit code —
-    // the suite uses this same tolerant teardown elsewhere.
-    sess.send("/exit\r").expect("send /exit");
-    sess.set_default_timeout(EXIT_BUDGET);
-    let _ = sess.expect_eof();
 }
 
 /// The `[+]` free-text row (comment / keep-planning) must be reachable by arrow

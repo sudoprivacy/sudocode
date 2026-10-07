@@ -28,7 +28,7 @@ pub(crate) fn build_config_tree_handler(
     let items = vec!["settings.json".to_string(), "sudocode.json".to_string()];
     let question = QuestionPromptView {
         title: Some("Config".to_string()),
-        description: Some("Select config file to browse".to_string()),
+        description: Some("Select config file to browse".into()),
         index: 0,
         total: 1,
         prompt: "Config file".to_string(),
@@ -139,7 +139,7 @@ fn show_schema_level(
 
     let question = QuestionPromptView {
         title: Some("Config".to_string()),
-        description: Some(title_path),
+        description: Some(title_path.into()),
         index: 0,
         total: 1,
         prompt: "Select field".to_string(),
@@ -272,11 +272,14 @@ fn handle_leaf_edit(
                 .collect();
             let question = QuestionPromptView {
                 title: Some("Config".to_string()),
-                description: Some(format!(
-                    "{file_label} > {}{}",
-                    breadcrumb_display(breadcrumb),
-                    field.key
-                )),
+                description: Some(
+                    format!(
+                        "{file_label} > {}{}",
+                        breadcrumb_display(breadcrumb),
+                        field.key
+                    )
+                    .into(),
+                ),
                 index: 0,
                 total: 1,
                 prompt: format!("Select value for {}", field.key),
@@ -332,11 +335,14 @@ fn handle_leaf_edit(
                 .collect();
             let question = QuestionPromptView {
                 title: Some("Config".to_string()),
-                description: Some(format!(
-                    "{file_label} > {}{} (current: {current_str})",
-                    breadcrumb_display(breadcrumb),
-                    field.key
-                )),
+                description: Some(
+                    format!(
+                        "{file_label} > {}{} (current: {current_str})",
+                        breadcrumb_display(breadcrumb),
+                        field.key
+                    )
+                    .into(),
+                ),
                 index: 0,
                 total: 1,
                 prompt: format!("Select {}", field.key),

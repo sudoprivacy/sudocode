@@ -46,6 +46,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 mut message,
                 denial,
                 input,
+                context_action,
             } => {
                 for block in &mut message.blocks {
                     if let ContentBlock::ToolResult {
@@ -60,11 +61,15 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                         {
                             observer.on_permission_denied(tool_use_id, tool_name, &input, reason);
                         }
-                        *output = self.maybe_offload_tool_output(
-                            tool_use_id,
-                            tool_name,
-                            std::mem::take(output),
-                        );
+                        // A restart's tool result is the continuation itself;
+                        // offloading it would discard the approved document.
+                        if context_action.is_none() {
+                            *output = self.maybe_offload_tool_output(
+                                tool_use_id,
+                                tool_name,
+                                std::mem::take(output),
+                            );
+                        }
                     }
                 }
                 notify_tool_result(runtime_observer_mut(observer), &message);
@@ -202,6 +207,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         }
         ExecutedResponse {
             events,
+            context_action: scheduler.context_action(),
             results: scheduler.into_results(),
             assistant_index,
             persisted_results,
@@ -218,6 +224,7 @@ pub(super) struct ExecutedResponse {
     pub(super) results: Vec<ConversationMessage>,
     pub(super) error: Option<RuntimeError>,
     pub(super) cancelled: bool,
+    pub(super) context_action: Option<crate::image_input::ToolContextAction>,
 }
 
 fn observe_assistant_event(

@@ -1090,7 +1090,7 @@ fn find_safe_compaction_boundary(
     }
 }
 
-fn aggregate_compaction_usage(
+pub(crate) fn aggregate_compaction_usage(
     existing_usage: Option<TokenUsage>,
     removed_messages: &[ConversationMessage],
 ) -> Option<TokenUsage> {
@@ -1357,7 +1357,7 @@ fn extract_summary_timeline(summary: &str) -> Vec<String> {
 /// session's messages. Scans ToolSearch result blocks for the `matches`
 /// array and collects the tool names. Also merges any names carried
 /// forward from prior compactions (`pre_compact_discovered_tools`).
-fn extract_pre_compact_discovered_tools(session: &Session) -> BTreeSet<String> {
+pub(crate) fn extract_pre_compact_discovered_tools(session: &Session) -> BTreeSet<String> {
     let mut discovered: BTreeSet<String> = session
         .compaction
         .as_ref()

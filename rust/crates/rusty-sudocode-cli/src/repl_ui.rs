@@ -33,7 +33,7 @@ use iocraft::prelude::*;
 
 mod ansi_text;
 use crate::render::styled_text::StyledText;
-use ansi_text::{AnsiText, RichText};
+use ansi_text::{AnsiText, PromptTextView, RichText};
 
 // ── stderr redirect ───────────────────────────────────────────────────
 
@@ -382,7 +382,7 @@ pub struct QuestionOptionView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuestionPromptView {
     pub title: Option<String>,
-    pub description: Option<String>,
+    pub description: Option<runtime::PromptText>,
     pub index: usize,
     pub total: usize,
     pub prompt: String,
@@ -485,17 +485,6 @@ impl FuzzySelectState {
 
     fn format_panel(&self) -> String {
         let mut lines = Vec::new();
-        if let Some(title) = self.question.title.as_deref().filter(|t| !t.is_empty()) {
-            lines.push(format!("[{title}]"));
-        }
-        if let Some(desc) = self
-            .question
-            .description
-            .as_deref()
-            .filter(|d| !d.is_empty())
-        {
-            lines.push(desc.to_string());
-        }
         let total = self.filtered.len();
         if self.filter.is_empty() {
             lines.push(format!("{} items  {}", total, self.question.prompt));
@@ -872,16 +861,6 @@ fn format_question_panel(
     custom_input: &str,
 ) -> String {
     let mut lines = Vec::new();
-    if let Some(title) = question.title.as_deref().filter(|title| !title.is_empty()) {
-        lines.push(format!("[{title}]"));
-    }
-    if let Some(description) = question
-        .description
-        .as_deref()
-        .filter(|description| !description.is_empty())
-    {
-        lines.push(description.to_string());
-    }
     lines.push(format!(
         "{}/{}  {}",
         question.index + 1,
@@ -2347,6 +2326,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         FooterSlot::Full
     };
 
+    // Both choice widgets share the same document presentation. Only the
+    // controls below it differ; neither picker interprets Markdown itself.
+    let question = match &current_input_slot {
+        InputSlot::DialPad(question) => Some(question),
+        InputSlot::FuzzySelect(state) => Some(&state.question),
+        InputSlot::Hint(_) | InputSlot::TextInput => None,
+    };
     // InputSlot rendering
     let (panel_text, prompt_label) = match &current_input_slot {
         InputSlot::Hint(_) | InputSlot::TextInput => (None, crate::render::PROMPT_PREFIX),
@@ -2415,6 +2401,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Upper chrome: TodoSlot (when non-empty), then separator
             AnsiText(content: upper_sep, color: Color::DarkGrey)
             // InputSlot
+            #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
+                AnsiText(content: format!("[{title}]"), color: Color::Cyan)
+            }))
+            #(question.and_then(|question| question.description.as_ref()).map(|description| element! {
+                PromptTextView(content: Some(description.clone()), width: w)
+            }))
             #(panel_text.map(|panel| element! {
                 AnsiText(content: panel, color: Color::Cyan)
             }))
@@ -2737,7 +2729,6 @@ mod tests {
     fn question_panel_marks_selected_option() {
         let panel = format_question_panel(&question_with_options(), 1, "");
 
-        assert!(panel.contains("[Setup]"));
         assert!(panel.contains(" [1] Project (recommended)"));
         assert!(panel.contains("> [2] User"));
     }

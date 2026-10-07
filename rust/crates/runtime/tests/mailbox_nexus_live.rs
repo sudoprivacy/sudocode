@@ -1178,53 +1178,79 @@ fn live_directory_unions_local_and_nexus_peers() {
 /// becomes unusable - a name that only ever existed as a session answers as an
 /// addressable agent.
 ///
-/// Probed in the direction that fails loudly: write under `/sessions/<name>`
-/// only, then ask whether `/agents/<name>` exists. Aliased, it answers yes.
-/// Pinned here because the daemon version is resolved from the nexus-vfs lock -
-/// a bump or a rollback past the fix must fail this rather than quietly degrade
-/// every `agent_list` on the cluster.
+/// The fix is two halves and a daemon can ship one without the other: #368
+/// separates the metastore KEYS, #382 separates the backend PATH (and makes a
+/// never-written subtree root list empty instead of erroring). A probe that
+/// only compares metadata therefore passes on a build whose content side still
+/// aliases - a guarantee the test does not actually hold, which is worse than
+/// no test because a bump past the fix stays quiet.
+///
+/// So both halves are asserted, each by the discriminant of the half it covers:
+/// the same LEAF under two prefixes (the backend collides per leaf, so a
+/// directory stat cannot see it), gated on the write having landed; and a
+/// never-written prefix listing empty rather than not-found, which is the path
+/// a first-run `agent_list` takes.
 #[test]
 #[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_CERT_DIR"]
 fn live_agents_and_sessions_are_not_the_same_namespace() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let client = dial(&endpoint);
-    let name = format!("alias-probe-{}", fresh());
+    let leaf = format!("alias-probe-{}", fresh());
 
-    // Exists in /sessions and NOWHERE else.
-    let session_path = format!("/sessions/{name}/transcript.jsonl");
+    // ── (a) the SAME leaf path under two prefixes ──────────────────────────
+    //
+    // Deliberately one leaf, not a leaf under one prefix and a directory under
+    // the other: the backend collision happens per leaf, so a `stat` of a
+    // DIRECTORY never asks the backend about that leaf and cannot see the
+    // content-side alias at all.
+    let session_leaf = format!("/sessions/{leaf}");
     client
         .ensure_stream(
-            &session_path,
+            &session_leaf,
             "wal,memory",
             runtime::agent_mailbox::DEFAULT_STREAM_CAPACITY,
             "",
         )
-        .unwrap_or_else(|e| panic!("provision {session_path}: {e}"));
+        .unwrap_or_else(|e| panic!("provision {session_leaf}: {e}"));
 
-    // The same leaf under /agents must not exist. If it does, the two prefixes
-    // resolve to one namespace and discovery is reading session ids.
-    let agent_path = format!("/agents/{name}");
-    let found = client.stat(&agent_path, "").is_ok();
-
-    // Positive control: the probe must be able to SEE an agent that does exist,
-    // or the assertion below would hold for a stat that always fails and the
-    // test would pass while proving nothing.
-    let real_agent = format!("alias-control-{}", fresh());
-    mailbox(&client, &real_agent, "")
-        .ensure_presence()
-        .expect("announce a real agent");
+    // State gate first. Without it, a write that silently went nowhere would
+    // make both negative assertions below pass for the wrong reason.
     assert!(
-        client.stat(&format!("/agents/{real_agent}"), "").is_ok(),
-        "the probe cannot see a real agent under /agents, so it proves nothing"
+        client.stat(&session_leaf, "").is_ok(),
+        "{session_leaf} is missing right after it was provisioned, so the two \
+         assertions below would pass because nothing was written, not because \
+         the prefixes are isolated"
     );
+    for other in [format!("/agents/{leaf}"), format!("/conversations/{leaf}")] {
+        assert!(
+            client.stat(&other, "").is_err(),
+            "{other} resolved although {leaf} was only ever written under /sessions - \
+             the prefixes share a backend path (nexus-vfs#361; the router half is #382, \
+             which #368 alone does not fix), so discovery is reading another \
+             namespace's entries and agent_list cannot be trusted on this daemon"
+        );
+    }
 
-    assert!(
-        !found,
-        "/agents/{name} resolved although {name} was only ever written under /sessions - \
-         the two prefixes alias (nexus-vfs#361), so `readdir /agents` is returning sessions \
-         and agent_list cannot be trusted on this daemon"
-    );
+    // ── (b) a prefix nothing has written to lists EMPTY, not not-found ─────
+    //
+    // On a fresh cluster `agent_list` enumerates `/agents` before any agent has
+    // announced. Without the subtree-root half of the fix that readdir is an
+    // error rather than an empty listing, so discovery fails on exactly the
+    // path a first-run session takes.
+    // The SUBTREE ROOT, not an arbitrary child: a child that was never created
+    // is legitimately not-found on every version. What the fix changed is that
+    // the mounted root itself enumerates as empty instead of erroring.
+    for root in ["/conversations", "/sessions", "/agents"] {
+        if let Err(e) = client.readdir(root, "") {
+            panic!(
+                "readdir of the mounted subtree root {root} failed with {e} instead of \
+                 returning a listing - on a fresh cluster the first `agent_list` enumerates \
+                 this root before anyone has announced, so discovery errors on exactly the \
+                 path a first-run session takes"
+            );
+        }
+    }
 }
 
 /// Provision the operator's model route over the same authenticated gRPC bind.

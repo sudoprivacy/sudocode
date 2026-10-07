@@ -9,6 +9,13 @@ replacement text. Pasting inserts at the cursor and preserves text on either
 side. Long or multiline pastes appear as compact placeholders; submitting the
 prompt expands them back to the original content, including subsequent typing.
 
+`Up` first moves to the start of the logical line, then walks prompt history;
+`Down` moves to its end or restores the saved draft from history. Real newlines,
+not terminal wrapping, define these boundaries. Navigation and subsequent
+typing share the editor's current buffer and cursor, even in one key burst;
+no redraw is required between them. On an empty draft, `Up` recalls queued
+human messages before history, leaving inbound peer messages queued.
+
 ## Global and project directories
 
 All native config paths resolve through `runtime::config`. The same roots own

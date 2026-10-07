@@ -153,6 +153,9 @@ pub struct TextCompletion {
 pub enum AssistantEvent {
     /// Wire model ID from the API response (emitted on message_start).
     Model(String),
+    /// A distinct provider thinking block, including an empty signed block.
+    /// Deltas append within this boundary; adjacent blocks must never merge.
+    ThinkingStart,
     Thinking {
         thinking: String,
         signature: Option<String>,
@@ -1447,6 +1450,7 @@ where
         let mut blocks = Vec::new();
         for event in events {
             match event {
+                AssistantEvent::ThinkingStart => start_thinking_block(&mut text, &mut blocks),
                 AssistantEvent::Thinking {
                     thinking,
                     signature,
@@ -2847,6 +2851,7 @@ fn build_assistant_message(
 
     for event in events {
         match event {
+            AssistantEvent::ThinkingStart => start_thinking_block(&mut text, &mut blocks),
             AssistantEvent::Model(model) => {
                 response_model = Some(model);
             }
@@ -3057,8 +3062,8 @@ fn push_thinking_block(
         return;
     }
 
-    // A signature with no thinking block to attach to is not a block of its own:
-    // an empty-but-signed thinking block is not something the API will take back.
+    // Ignore orphan deltas, not valid empty blocks. ThinkingStart establishes
+    // those blocks explicitly, including display: omitted and progress updates.
     if thinking.is_empty() {
         return;
     }
@@ -3066,6 +3071,14 @@ fn push_thinking_block(
     blocks.push(ContentBlock::Thinking {
         thinking,
         signature,
+    });
+}
+
+fn start_thinking_block(text: &mut String, blocks: &mut Vec<ContentBlock>) {
+    flush_text_block(text, blocks);
+    blocks.push(ContentBlock::Thinking {
+        thinking: String::new(),
+        signature: None,
     });
 }
 

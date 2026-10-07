@@ -741,6 +741,7 @@ fn push_output_block(
             thinking,
             signature,
         } => {
+            buffer.push_back(AssistantEvent::ThinkingStart);
             buffer.push_back(AssistantEvent::Thinking {
                 thinking,
                 signature,

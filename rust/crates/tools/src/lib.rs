@@ -4073,7 +4073,7 @@ fn run_powershell(
     tasks: Option<&runtime::background_tasks::BackgroundTasks>,
 ) -> Result<String, String> {
     to_pretty_json(
-        execute_powershell_in_session(input, abort_signal, tasks)
+        execute_powershell_in_session(&input, abort_signal, tasks)
             .map_err(|error| error.to_string())?,
     )
 }
@@ -9240,11 +9240,11 @@ fn execute_powershell(
     input: PowerShellInput,
     abort_signal: Option<&HookAbortSignal>,
 ) -> std::io::Result<runtime::BashCommandOutput> {
-    execute_powershell_in_session(input, abort_signal, None)
+    execute_powershell_in_session(&input, abort_signal, None)
 }
 
 fn execute_powershell_in_session(
-    input: PowerShellInput,
+    input: &PowerShellInput,
     abort_signal: Option<&HookAbortSignal>,
     tasks: Option<&runtime::background_tasks::BackgroundTasks>,
 ) -> std::io::Result<runtime::BashCommandOutput> {

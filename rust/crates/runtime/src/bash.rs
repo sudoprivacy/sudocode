@@ -739,12 +739,12 @@ pub fn launch_background_command(
     tasks: Option<&crate::background_tasks::BackgroundTasks>,
 ) -> io::Result<(String, String)> {
     use crate::background_tasks::{BackgroundTask, BackgroundTaskKind};
+    use std::fmt::Write as _;
     let tasks = tasks.cloned().unwrap_or_default();
     let directory = std::env::temp_dir().join("sudocode-background-shells");
     std::fs::create_dir_all(&directory)?;
     let mut random = [0u8; 16];
     getrandom::getrandom(&mut random).map_err(|error| io::Error::other(error.to_string()))?;
-    use std::fmt::Write as _;
     let mut nonce = String::with_capacity(random.len() * 2);
     for byte in random {
         write!(&mut nonce, "{byte:02x}").expect("write to string");

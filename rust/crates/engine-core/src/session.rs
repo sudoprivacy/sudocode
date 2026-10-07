@@ -300,7 +300,7 @@ async fn drive(
                 }
             },
             EngineCommand::BackgroundTask { action } => {
-                handle_background_task(action, &tasks, &evt_tx)
+                handle_background_task(action, &tasks, &evt_tx);
             }
             // No turn is in flight here, so these are stale/no-ops. During a turn
             // they are consumed by the `select!` inside `run_one_turn`.

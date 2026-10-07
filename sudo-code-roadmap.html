@@ -1644,6 +1644,15 @@ Full and folded Todo projections share the count-span formatter above;
 broader UI semantic colors and the streaming-preview position remain
 separate design discussions.</p>
 
+<p><strong>Event-time draft navigation.</strong> TextInput owns one working
+value/cursor for a key batch. Logical-line Up/Down jumps, prompt history and
+queued-human recall apply through its edit policy before the next key, not
+through a parent render snapshot or deferred cursor request. The parent retains
+submission and panel actions; real newlines retain vertical navigation and
+peer messages remain queued. Acceptance: <code>pty_input_batch</code>'s
+single-burst Up/Home/right/edit and Down/left/edit workflow, existing history,
+queue recall and paste PTYs, and the real terminal shared-budget workflow.</p>
+
 <p><strong>External terminal ownership (#584).</strong> CCB validation:
 <code>src/commands/memory/memory.tsx</code> and
 <code>src/utils/promptEditor.ts</code> (CCB <code>236d99ed</code>) confirm a

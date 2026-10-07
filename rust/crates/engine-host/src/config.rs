@@ -15,7 +15,7 @@ use std::path::Path;
 use engine_core::AuthMode;
 use runtime::{ConfigLoader, PermissionMode, ResolvedPermissionMode};
 
-pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
+pub const DEFAULT_MODEL: &str = "claude-opus-5";
 
 /// #148: Model provenance for `scode status` JSON/text output. Records where
 /// the resolved model string came from so consumers don't have to re-read argv
@@ -84,7 +84,11 @@ pub fn resolve_model_alias(model: &str) -> &str {
         // `auto`.
         "auto" => DEFAULT_MODEL,
         "claude-sonnet" | "sonnet" => "claude-sonnet-4-6",
-        "claude-opus" | "opus" => "claude-opus-4-6",
+        // `opus` follows the compiled-in default rather than pinning a family of
+        // its own. Two constants both meaning "the opus to use" drifted apart:
+        // the default said one generation while this alias said an older one, so
+        // `scode` and `scode --model opus` reached different models. One source.
+        "claude-opus" | "opus" => DEFAULT_MODEL,
         "claude-haiku" | "haiku" => "claude-haiku-4-5-20251213",
         _ => model,
     }
@@ -369,8 +373,8 @@ mod tests {
 
     #[test]
     fn auto_alias_resolves_to_the_default_model_not_sonnet() {
-        // uto means "use the default", so it must resolve to the compiled-in
-        // default (currently claude-opus-4-8), NOT hardcode a specific family.
+        // `auto` means "use the default", so it must resolve to the compiled-in
+        // default, NOT hardcode a specific family.
         assert_eq!(resolve_model_alias("auto"), DEFAULT_MODEL);
         assert_ne!(resolve_model_alias("auto"), "claude-sonnet-4-6");
     }
@@ -378,8 +382,17 @@ mod tests {
     #[test]
     fn family_aliases_still_resolve_to_their_family() {
         assert_eq!(resolve_model_alias("sonnet"), "claude-sonnet-4-6");
-        assert_eq!(resolve_model_alias("opus"), "claude-opus-4-6");
         assert_eq!(resolve_model_alias("haiku"), "claude-haiku-4-5-20251213");
+    }
+
+    #[test]
+    fn opus_alias_follows_the_default_model() {
+        // The regression this pins: `opus` used to name its own generation while
+        // DEFAULT_MODEL named another, so `scode` and `scode --model opus`
+        // reached different models. Asserting against the constant (not a
+        // literal) keeps them one source as the default moves.
+        assert_eq!(resolve_model_alias("opus"), DEFAULT_MODEL);
+        assert_eq!(resolve_model_alias("claude-opus"), DEFAULT_MODEL);
     }
 
     #[test]

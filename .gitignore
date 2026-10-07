@@ -7,6 +7,7 @@ archive/
 .claude/sessions/
 # Sudo Code local artifacts
 .nexus/sudocode/settings.local.json
+.nexus/sudocode/settings.json
 .nexus/sudocode/sessions/
 .scode/sessions/
 .sudocodehip/

@@ -3269,6 +3269,34 @@ fn run_repl_iocraft_dispatch(
             }
         })
         .expect("spawn REPL engine event bridge");
+    // Background tasks (`bash run_in_background`, `Monitor`) report through the
+    // same seam a finished sub-agent uses: a notification prompt plus a display
+    // line, delivered as `SubagentCompleted` so the coordinator's existing
+    // idle-vs-busy routing applies unchanged — start a turn when idle, queue a
+    // machine-origin chip when a turn is running.
+    //
+    // A poll loop rather than a channel from the spawner: the registry is a
+    // process-global that several threads write (one reaper per command, one
+    // thread per monitor), and a 200 ms sweep keeps that fan-in in one place
+    // instead of handing every spawner a sender it has to keep alive.
+    let bg_tx = coord_tx.clone();
+    let _bg_notifier = thread::Builder::new()
+        .name("bg-task-notifier".into())
+        .spawn(move || loop {
+            for completion in runtime::background_tasks::drain_completions() {
+                let prompt = runtime::background_tasks::render_notification(&completion);
+                let display = runtime::background_tasks::render_display(&completion);
+                if bg_tx
+                    .send(CoordinatorEvent::SubagentCompleted { prompt, display })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(200));
+        })
+        .expect("spawn background task notifier");
+
     let cli_shared = Arc::new(Mutex::new(cli));
     let session_start = Instant::now();
 

@@ -3,13 +3,20 @@
 `scode` is model-agnostic. This page describes the model aliases that
 ship with `scode` and the provider-specific request handling.
 
+## Model selection
+
+An explicit `--model` wins over `ANTHROPIC_MODEL` and the configured `model`,
+including when it names the compiled-in default model. Without the flag,
+the environment wins over configuration, followed by the compiled-in default.
+The same selection applies to interactive sessions, resumed sessions and `-p`.
+
 ## Aliases
 
 Short names resolve to the current pinned versions:
 
 | Alias | Resolves to | Provider |
 |---|---|---|
-| `opus` | `claude-opus-4-6` | Anthropic |
+| `opus` | The compiled-in default (`claude-opus-5`) | Anthropic |
 | `sonnet` | `claude-sonnet-4-6` | Anthropic |
 | `haiku` | `claude-haiku-4-5` | Anthropic |
 | `grok` | `grok-3` | xAI |

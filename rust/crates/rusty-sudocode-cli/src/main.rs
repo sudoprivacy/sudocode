@@ -56,9 +56,9 @@ use cli::args::{
     config_model_for_current_dir, default_permission_mode, format_unknown_slash_command,
     load_sudocode_config_for_current_dir, load_sudocode_config_for_cwd,
     parse_args_with_prompt_overrides, permission_mode_from_label, require_sudocode_config_for_cwd,
-    resolve_model_alias, resolve_model_alias_with_config, resolve_repl_model,
-    try_resolve_bare_skill_prompt, try_resolve_bare_skill_prompt_with_plugins, AllowedToolSet,
-    CliAction, CliOutputFormat, LocalHelpTopic,
+    resolve_model_alias, resolve_model_alias_with_config, try_resolve_bare_skill_prompt,
+    try_resolve_bare_skill_prompt_with_plugins, AllowedToolSet, CliAction, CliOutputFormat,
+    LocalHelpTopic,
 };
 use cli::export::{
     collect_session_prompt_history, parse_history_count, render_export_text,
@@ -933,12 +933,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             let effective_prompt = merge_prompt_with_stdin(&prompt, stdin_context.as_deref());
             let session_start = Instant::now();
-            // Share the splash's env/config resolution so the one-shot prompt
-            // can't disagree with the REPL banner.
-            let resolved_model = resolve_repl_model(model);
-            let wait_model = resolved_model.clone();
+            let wait_model = model.clone();
             let mut cli = LiveCli::new(
-                resolved_model,
+                model,
                 true,
                 allowed_tools,
                 permission_mode,
@@ -1589,15 +1586,13 @@ fn run_resume(
             return;
         }
         // No commands — enter the interactive REPL with the restored session.
-        let resolved_model = resolve_repl_model(model);
-        let mut cli =
-            match LiveCli::new(resolved_model, true, None, permission_mode, None, auth_mode) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("failed to initialize: {e}");
-                    std::process::exit(1);
-                }
-            };
+        let mut cli = match LiveCli::new(model, true, None, permission_mode, None, auth_mode) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("failed to initialize: {e}");
+                std::process::exit(1);
+            }
+        };
         // Load the restored session into the running CLI.
         let session_ref = resolved_path.display().to_string();
         if let Err(e) = cli.load_session(Some(session_ref)) {
@@ -1740,7 +1735,7 @@ fn run_resumed_compaction(
     auth_mode: Option<AuthMode>,
 ) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
     let cli = LiveCli::new(
-        resolve_repl_model(model.to_string()),
+        model.to_string(),
         true,
         None,
         permission_mode,
@@ -2187,9 +2182,8 @@ fn run_repl(
 ) -> Result<(), Box<dyn std::error::Error>> {
     enforce_broad_cwd_policy(allow_broad_cwd, CliOutputFormat::Text)?;
     run_stale_base_preflight(base_commit.as_deref());
-    let resolved_model = resolve_repl_model(model);
     let cli = LiveCli::new(
-        resolved_model,
+        model,
         true,
         allowed_tools,
         permission_mode,

@@ -577,6 +577,16 @@ fn non_empty(value: Option<String>, flag: &str) -> Result<Option<String>, String
     }
 }
 
+// A model ID equal to DEFAULT_MODEL remains an explicit choice when supplied
+// with --model. ACP keeps its deferred lookup for each session's own cwd.
+fn standalone_model(model: &str, flag: Option<&str>) -> String {
+    if flag.is_some() {
+        model.to_string()
+    } else {
+        resolve_repl_model(model.to_string())
+    }
+}
+
 /// Convert the parsed `Cli` struct into the application's `CliAction`.
 #[allow(clippy::too_many_lines)]
 fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
@@ -622,7 +632,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
         }
         return Ok(CliAction::Headless(super::headless::HeadlessOptions {
             prompt: cli.prompt_words.join(" "),
-            model,
+            model: standalone_model(&model, model_flag_raw.as_deref()),
             allowed_tools,
             permission_mode,
             reasoning_effort: cli.reasoning_effort,
@@ -651,7 +661,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             &resume_value,
             &cli.prompt_words,
             output_format,
-            model.clone(),
+            standalone_model(&model, model_flag_raw.as_deref()),
             permission_mode,
             auth_mode,
         );
@@ -663,7 +673,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             Cmd::Help => Ok(CliAction::Help { output_format }),
             Cmd::Version => Ok(CliAction::Version { output_format }),
             Cmd::Status => Ok(CliAction::Status {
-                model: model.clone(),
+                model: standalone_model(&model, model_flag_raw.as_deref()),
                 model_flag_raw,
                 permission_mode,
                 output_format,
@@ -720,7 +730,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 match classify_skills_slash_command(joined.as_deref()) {
                     SkillSlashDispatch::Invoke(prompt) => Ok(CliAction::Prompt {
                         prompt,
-                        model,
+                        model: standalone_model(&model, model_flag_raw.as_deref()),
                         output_format,
                         allowed_tools,
                         permission_mode,
@@ -774,7 +784,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 let prompt = text.join(" ");
                 Ok(CliAction::Prompt {
                     prompt,
-                    model,
+                    model: standalone_model(&model, model_flag_raw.as_deref()),
                     output_format,
                     allowed_tools,
                     permission_mode,
@@ -799,7 +809,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
         }
         return Ok(CliAction::Prompt {
             prompt: joined,
-            model,
+            model: standalone_model(&model, model_flag_raw.as_deref()),
             output_format,
             allowed_tools,
             permission_mode,
@@ -818,7 +828,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
         let piped = buf.trim().to_string();
         if !piped.is_empty() {
             return Ok(CliAction::Prompt {
-                model,
+                model: standalone_model(&model, model_flag_raw.as_deref()),
                 prompt: piped,
                 allowed_tools,
                 permission_mode,
@@ -833,7 +843,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
     }
 
     Ok(CliAction::Repl {
-        model,
+        model: standalone_model(&model, model_flag_raw.as_deref()),
         allowed_tools,
         permission_mode,
         base_commit: cli.base_commit,
@@ -870,7 +880,7 @@ fn parse_slash_command_invocation(args: &[String]) -> Result<CliAction, String> 
             match classify_skills_slash_command(args.as_deref()) {
                 SkillSlashDispatch::Invoke(prompt) => Ok(CliAction::Prompt {
                     prompt,
-                    model: DEFAULT_MODEL.to_string(),
+                    model: resolve_repl_model(DEFAULT_MODEL.to_string()),
                     output_format,
                     allowed_tools: None,
                     permission_mode: default_permission_mode(),

@@ -1323,17 +1323,17 @@ fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
 
     // Header summary line
     let mut header = crate::render::StyledLine::muted();
-    header.push_bold(todos.len().to_string());
+    header.push_count(todos.len());
     header.push(" todos (");
-    header.push_bold(completed_count.to_string());
+    header.push_count(completed_count);
     header.push(" done");
     if in_progress_count > 0 {
         header.push(", ");
-        header.push_bold(in_progress_count.to_string());
+        header.push_count(in_progress_count);
         header.push(" in progress");
     }
     header.push(", ");
-    header.push_bold(open_count.to_string());
+    header.push_count(open_count);
     header.push(" open)");
 
     let mut lines = Vec::with_capacity(todos.len() + 2);
@@ -2603,7 +2603,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 RichText(content: layout.status.content, color: if matches!(status_slot, StatusSlot::Tips) { Some(Color::DarkGrey) } else { None })
             }
             View(height: row_height(layout.todo.rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                RichText(content: layout.todo.content, color: Color::DarkGrey)
+                // The projection owns semantic styles. Uncolored quantities
+                // and task descriptions retain the terminal foreground;
+                // a slot-wide grey would override their normal emphasis.
+                RichText(content: layout.todo.content)
             }
             View(height: row_height(layout.separators), flex_shrink: 0.0, overflow: Overflow::Hidden) {
                 Text(content: sep.clone(), color: Color::DarkGrey)

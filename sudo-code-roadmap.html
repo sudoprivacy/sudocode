@@ -1630,8 +1630,18 @@ change slot order, force bottom docking, replay history or replace the framework
 resize fix. Acceptance: <code>pty_chrome_budget</code>,
 <code>pty_plan_review</code>, the existing Markdown/continuation and background
 task PTYs, and <code>pty_chrome_resize</code>'s real terminal budget workflow.
-Todo count emphasis, broader UI semantic colors and the streaming-preview
-position remain separate design discussions.</p>
+Broader UI semantic colors and the streaming-preview position remain separate
+design discussions.</p>
+
+<p><strong>Todo semantic emphasis.</strong> All summary quantities, including
+zero, use bold terminal foreground; labels and punctuation use readable muted
+color without an extra dim attribute. A shared count-span role applies to full
+and folded summaries. Ordinary task descriptions retain terminal foreground
+rather than a slot-wide grey override; in-progress labels stay bold, completed
+labels stay dim and struck through, and semantic icons keep their existing
+colors. Amber remains the identity/activity accent, not a neutral-number
+highlight. Acceptance: the existing <code>pty_chrome_styles</code> real REPL
+style checks in dark/light themes and after resize.</p>
 
 <p><strong>External terminal ownership (#584).</strong> CCB validation:
 <code>src/commands/memory/memory.tsx</code> and

@@ -160,6 +160,19 @@ Bash commands that cannot fit the title are preserved in the card body. Long
 list items keep their continuation lines aligned with the item text, including
 in session replay. Replayed message blocks have one blank separator.
 
+In the live REPL UI, Bash and MCP progress replaces the existing live
+status row; it does not append partial output or spinner summaries to terminal
+history. The completed tool card retains its normal output preview. Progress
+is laid out with the same column and grapheme rules as other terminal text;
+external cursor/screen commands cannot take ownership of the live region.
+Paths without a live UI retain bounded progress log lines. Buffered answer and
+reasoning text closes at model content transitions and message/turn boundaries,
+without filtering literal words from the model's response. Asynchronous tool
+results, notices and interactive prompts do not terminate an unfinished Markdown
+block; completed results remain visible while the provider is still streaming.
+Captured diagnostics use the same line framing and preserve UTF-8 characters
+split across reads.
+
 Independent reads, searches, sub-agent calls, and recognized read-only Bash
 commands can execute concurrently, with a default limit of ten. Each complete
 tool input becomes eligible while the provider is still streaming. Pre/post

@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use crate::fs_backend::{FsBackend, StdFsBackend};
-use crate::session::{ContentBlock, HostedSessionIdentity, MessageRole, Session, SessionError};
+use crate::session::{
+    ContentBlock, HostedSessionIdentity, MessageRole, Session, SessionError, SessionMode,
+};
 use crate::workspace_root::current_workspace_root;
 
 /// Per-worktree session store that namespaces on-disk session files by
@@ -387,6 +389,7 @@ impl SessionStore {
                             .fork
                             .as_ref()
                             .and_then(|fork| fork.branch_name.clone()),
+                        interactive: session.mode == SessionMode::Interactive,
                     }
                 }
                 Err(_) => ManagedSessionSummary {
@@ -402,6 +405,7 @@ impl SessionStore {
                     summary: None,
                     parent_session_id: None,
                     branch_name: None,
+                    interactive: false,
                 },
             };
             sessions.push(summary);
@@ -474,6 +478,7 @@ pub struct ManagedSessionSummary {
     pub summary: Option<String>,
     pub parent_session_id: Option<String>,
     pub branch_name: Option<String>,
+    interactive: bool,
 }
 
 fn sort_managed_sessions(sessions: &mut [ManagedSessionSummary]) {
@@ -485,8 +490,13 @@ fn sort_managed_sessions(sessions: &mut [ManagedSessionSummary]) {
         // returns the session they last worked in. Rotation snapshots and
         // backups are excluded from listing (see `is_managed_session_file`), so
         // file mtime reflects real activity (messages, compaction, resume).
-        (left.message_count == 0)
-            .cmp(&(right.message_count == 0))
+        // A one-shot prompt remains resumable by id, but must not displace an
+        // interactive session from the `latest` alias. If no interactive
+        // session exists, one-shot sessions remain the fallback.
+        right
+            .interactive
+            .cmp(&left.interactive)
+            .then_with(|| (left.message_count == 0).cmp(&(right.message_count == 0)))
             .then_with(|| right.modified_epoch_millis.cmp(&left.modified_epoch_millis))
             .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
             .then_with(|| right.id.cmp(&left.id))
@@ -919,6 +929,7 @@ mod tests {
                 summary: None,
                 parent_session_id: None,
                 branch_name: None,
+                interactive: true,
             },
             ManagedSessionSummary {
                 id: "newer-file-older-session".to_string(),
@@ -929,6 +940,7 @@ mod tests {
                 summary: None,
                 parent_session_id: None,
                 branch_name: None,
+                interactive: true,
             },
         ];
 
@@ -938,6 +950,39 @@ mod tests {
         // is latest, even though its last-message timestamp is older.
         assert_eq!(sessions[0].id, "newer-file-older-session");
         assert_eq!(sessions[1].id, "older-file-newer-session");
+    }
+
+    #[test]
+    fn interactive_session_remains_latest_over_newer_one_shot() {
+        let mut sessions = vec![
+            ManagedSessionSummary {
+                id: "interactive".to_string(),
+                path: PathBuf::from("/tmp/interactive"),
+                updated_at_ms: 100,
+                modified_epoch_millis: 100,
+                message_count: 1,
+                summary: None,
+                parent_session_id: None,
+                branch_name: None,
+                interactive: true,
+            },
+            ManagedSessionSummary {
+                id: "one-shot".to_string(),
+                path: PathBuf::from("/tmp/one-shot"),
+                updated_at_ms: 200,
+                modified_epoch_millis: 200,
+                message_count: 1,
+                summary: None,
+                parent_session_id: None,
+                branch_name: None,
+                interactive: false,
+            },
+        ];
+
+        crate::session_control::sort_managed_sessions(&mut sessions);
+
+        assert_eq!(sessions[0].id, "interactive");
+        assert_eq!(sessions[1].id, "one-shot");
     }
 
     #[test]

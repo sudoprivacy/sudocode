@@ -285,6 +285,14 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
             if let Some(reference) = options.resume {
                 cli.lifecycle.resume_session(&reference)?;
             }
+            // Keep one-shot transcripts resumable by id, while preventing a
+            // `--print` run from displacing the interactive `latest` session.
+            // This is deliberately after an optional resume: the headless
+            // invocation is the last interface that touched the transcript.
+            cli.lifecycle.with_session_mut(&mut |session| {
+                session.mode = runtime::SessionMode::NonInteractive;
+            });
+            cli.persist_session()?;
             let session = cli.lifecycle.session_handle().id;
             result["session_id"] = json!(session);
             if options.format == OutputFormat::StreamJson {

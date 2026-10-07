@@ -1318,6 +1318,9 @@ impl SessionLifecycle for SessionEngine {
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         let (handle, mut loaded) = load_session_reference(reference).map_err(|e| e.to_string())?;
         let message_count = loaded.messages.len();
+        // Loading a one-shot transcript into the REPL promotes it to the
+        // interactive `latest` lane once the resumed session is persisted.
+        loaded.mode = runtime::SessionMode::Interactive;
         // Keep the current effective model (REPL parity: the runtime model is
         // config-driven, not adopted from the resumed session).
         loaded.model = session.runtime.session().model.clone();

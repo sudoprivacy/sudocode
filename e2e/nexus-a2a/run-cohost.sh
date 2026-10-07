@@ -157,7 +157,8 @@ export RUST_LOG="${RUST_LOG:-info}"
 
 echo "== 3. co-host daemon on :${AUTHON_PORT}, TLS on =="
 authon_boot
-authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
+# Offline minting also needs the control zone initialized and committed.
+authon_wait_log "Static topology applied" 45
 
 # The mint opens the same data dir the daemon locks, so it must be down for it.
 echo "== 3b. stop, mint the client bundle, restart =="

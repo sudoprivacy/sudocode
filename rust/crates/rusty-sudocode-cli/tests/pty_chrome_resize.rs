@@ -66,7 +66,7 @@ fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
     let body = format!(
         "{first}\n\nQUEUED-BODY-END\n\n{}",
         env.prompt(
-            "Reply only with A2A-ACK. Do not call tools.",
+            "Acknowledge this message once with send to mac-ai, using message A2A-ACK and summary resize acknowledgment. Then reply with only A2A-ACK. Do not call shell or file tools.",
             "single_turn_text"
         )
     );

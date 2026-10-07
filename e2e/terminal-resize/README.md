@@ -10,6 +10,8 @@ Mailbox API, narrows and widens its queued preview while editing a Unicode
 draft, cancels the tool and checks that the full peer body appears exactly once
 with no queued preview left behind. It uses a real API in live mode and the
 protocol provider in ordinary CI; both execute the real CLI and terminal.
+The live peer asks for a mailbox acknowledgment and a final ACK. Its completion
+check allows the extra assistant response required by the acknowledgment tool.
 
 On Unix, a third workflow opens two real FIFO readers before releasing either
 tool. It checks both complete pending cards at four widths and edits input at

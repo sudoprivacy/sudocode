@@ -263,22 +263,25 @@ fn press_arrow(sess: &mut PtySession, keys: &str, label: &str) {
 /// Submit one prompt so the history has an entry, and leave the session at a
 /// fresh empty prompt.
 fn seed_history(env: &common::TestEnv, sess: &mut PtySession, text: &str) {
-    if env.is_live() {
-        return;
-    }
-    let prompt = env.prompt(text, "single_turn_text");
-    sess.send(&format!("{prompt}\r")).expect("send seed prompt");
-    // Mock replies are deterministic; a live response need only prove the
-    // submitted turn completed before history navigation begins.
-    if env.is_mock() {
-        sess.expect("The answer is 4")
+    let prompt = if env.is_mock() {
+        env.prompt(text, "single_turn_text")
     } else {
-        sess.expect("turn 1")
-    }
-    .unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("seed turn should complete: {e}\nPTY screen:\n{screen}");
-    });
+        format!("Say READY without tools. Label: {text}")
+    };
+    let marker = common::turn_status_marker(sess);
+    sess.send(&prompt).expect("type seed prompt");
+    wait_for_input_line(sess, &prompt, "seed prompt should render");
+    sess.send("\r").expect("submit seed prompt");
+    // The answer can arrive before the turn clears and re-arms the editor.
+    // Typing into that gap briefly renders the text, then loses it when the
+    // turn finishes; Up consequently recalls history from an empty buffer.
+    common::expect_turn_complete_after(
+        sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "history seed completed",
+    );
+    common::expect_input_line_cleared(sess, common::DEFAULT_TIMEOUT, "history input ready");
 }
 
 /// Up on a non-empty buffer must move to the start *before* it recalls, and
@@ -291,10 +294,6 @@ fn seed_history(env: &common::TestEnv, sess: &mut PtySession, text: &str) {
 #[test]
 fn up_arrow_moves_to_start_before_recalling_history() {
     let env = common::TestEnv::new("arrow-up-then-recall");
-    if env.is_live() {
-        eprintln!("SKIP history navigation: deterministic history seeding is covered by the mock-backed PTY test.");
-        return;
-    }
     let root = env.workspace_root().to_path_buf();
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
@@ -402,10 +401,6 @@ fn up_arrow_moves_between_logical_lines_before_jumping_to_start() {
 #[test]
 fn down_arrow_at_end_does_not_navigate_forward_history() {
     let env = common::TestEnv::new("arrow-down-noop");
-    if env.is_live() {
-        eprintln!("SKIP history navigation: deterministic history seeding is covered by the mock-backed PTY test.");
-        return;
-    }
     let root = env.workspace_root().to_path_buf();
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 

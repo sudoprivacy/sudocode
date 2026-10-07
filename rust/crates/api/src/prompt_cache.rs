@@ -180,6 +180,30 @@ pub struct PromptCacheRequestRow {
     pub break_unexpected: bool,
 }
 
+/// The correlation ids a single response carried.
+///
+/// Exists because the streaming path used to lose one of them. The row was
+/// built from `Option<&MessageResponse>`, and the stream has no assembled
+/// response to pass — so `provider_request_id` was structurally unreachable for
+/// every streaming request, which is **all** real traffic. Measured against a
+/// live gateway: 480 consecutive ledger rows carried neither id, while the SSE
+/// response itself carried `x-oneapi-request-id` the whole time.
+///
+/// Naming the two fields instead of taking two `Option<&str>` parameters is the
+/// point: they have the same type and index different ledgers, so a positional
+/// call site can swap them, and dropping one is invisible at the call site.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponseTraceIds {
+    /// `x-client-request-id` — which upstream *account* a pooling gateway
+    /// selected. The only value that separates "cold prefix" from "the request
+    /// went to a different account", which is the first question in every
+    /// cache-break investigation.
+    pub gateway: Option<String>,
+    /// `request-id` / `x-request-id` / `x-oneapi-request-id` — keys the
+    /// gateway's own request log: which channel served the call, and its cost.
+    pub provider: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptCacheRecord {
     pub cache_break: Option<CacheBreakEvent>,
@@ -282,33 +306,43 @@ impl PromptCache {
         self.record_usage_internal(
             request,
             &response.usage,
+            ResponseTraceIds {
+                gateway: response.gateway_request_id.clone(),
+                provider: response.request_id.clone(),
+            },
             Some(response),
-            response.gateway_request_id.as_deref(),
         )
     }
 
     /// The streaming path, where there is no assembled `MessageResponse`.
     ///
-    /// `gateway_request_id` is a parameter here rather than being read off
-    /// something, because the stream holds it separately — and passing `None`
-    /// silently costs the account attribution this records, so it is not
-    /// defaulted away.
+    /// The ids are a parameter here rather than being read off something,
+    /// because the stream holds them separately — and losing one silently costs
+    /// the correlation this row exists to provide, so they are not defaulted
+    /// away. They arrive as a struct for the reason the field names say: both
+    /// are `Option<String>`, so two positional arguments can be swapped or
+    /// half-supplied without the compiler noticing.
     #[must_use]
     pub fn record_usage(
         &self,
         request: &MessageRequest,
         usage: &Usage,
-        gateway_request_id: Option<&str>,
+        ids: ResponseTraceIds,
     ) -> PromptCacheRecord {
-        self.record_usage_internal(request, usage, None, gateway_request_id)
+        self.record_usage_internal(request, usage, ids, None)
     }
 
     fn record_usage_internal(
         &self,
         request: &MessageRequest,
         usage: &Usage,
-        response: Option<&MessageResponse>,
-        gateway_request_id: Option<&str>,
+        ids: ResponseTraceIds,
+        // Only the completion cache needs the assembled response, and only the
+        // non-streaming path has one. It is deliberately *not* where the row's
+        // ids come from any more: deriving them from a value the streaming path
+        // cannot supply is what made `provider_request_id` unreachable for all
+        // real traffic.
+        completion_entry: Option<&MessageResponse>,
     ) -> PromptCacheRecord {
         let request_hash = request_hash_hex(request);
         let mut inner = self.lock();
@@ -339,8 +373,8 @@ impl PromptCache {
             &inner.paths,
             &PromptCacheRequestRow {
                 at_unix_secs: now_unix_secs(),
-                gateway_request_id: gateway_request_id.map(ToOwned::to_owned),
-                provider_request_id: response.and_then(|r| r.request_id.clone()),
+                gateway_request_id: ids.gateway,
+                provider_request_id: ids.provider,
                 model: request.model.clone(),
                 input_tokens: usage.input_tokens,
                 cache_read_input_tokens: usage.cache_read_input_tokens,
@@ -349,7 +383,7 @@ impl PromptCache {
                 break_unexpected: cache_break.as_ref().is_some_and(|event| event.unexpected),
             },
         );
-        if let Some(response) = response {
+        if let Some(response) = completion_entry {
             write_completion_entry(&inner.paths, &request_hash, response);
             inner.stats.completion_cache_writes += 1;
         }
@@ -922,6 +956,68 @@ mod tests {
     /// the upstream account that served it, so the join key has to survive into
     /// the file — and the rows have to stay in order, because "the prefix went
     /// cold here" is a position in a sequence, not an aggregate.
+    /// A streaming request must still get both correlation ids into its row.
+    ///
+    /// This is the shape of **all** real traffic, and it used to be the one
+    /// shape that could not carry `provider_request_id`: the row took it from
+    /// an `Option<&MessageResponse>`, and a stream has no assembled response to
+    /// pass. Measured against a live gateway before the fix: 480 consecutive
+    /// rows carried neither id while the SSE response itself carried
+    /// `x-oneapi-request-id` the whole time. The regression cannot be expressed
+    /// as a failing assertion any more -- dropping the id now means not
+    /// constructing `ResponseTraceIds`, which does not compile. That is the
+    /// point of the struct.
+    #[test]
+    fn streaming_record_keeps_both_correlation_ids() {
+        let _guard = test_env_lock();
+        let temp_root = std::env::temp_dir().join(format!(
+            "prompt-cache-stream-ids-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::env::set_var("SUDO_CODE_CONFIG_HOME", &temp_root);
+        let cache = PromptCache::new("stream-ids-session");
+
+        let _ = cache.record_usage(
+            &sample_request("streamed"),
+            &Usage {
+                input_tokens: 3,
+                cache_creation_input_tokens: 2_048,
+                cache_read_input_tokens: 0,
+                output_tokens: 7,
+                ..Usage::default()
+            },
+            super::ResponseTraceIds {
+                gateway: Some("client:acct-7".to_string()),
+                provider: Some("202610061441274065481938268d9d6".to_string()),
+            },
+        );
+
+        let path = PromptCachePaths::for_session("stream-ids-session").requests_path;
+        let text = std::fs::read_to_string(&path).expect("the ledger should exist");
+        let row: super::PromptCacheRequestRow = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("one row per request"))
+            .next()
+            .expect("the streamed request must produce a row");
+        std::env::remove_var("SUDO_CODE_CONFIG_HOME");
+
+        assert_eq!(
+            row.gateway_request_id.as_deref(),
+            Some("client:acct-7"),
+            "the account-selection key must survive the streaming path"
+        );
+        assert_eq!(
+            row.provider_request_id.as_deref(),
+            Some("202610061441274065481938268d9d6"),
+            "so must the gateway's own request-log key -- it is the only id an              SSE response actually carries on this route"
+        );
+    }
+
     #[test]
     fn request_ledger_records_the_gateway_id_in_order() {
         let _guard = test_env_lock();

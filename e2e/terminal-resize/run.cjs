@@ -191,9 +191,7 @@ async function sharedBudget() {
   // Move and edit in one burst before hiding the same editor.
   // Existing Up navigation reaches the start of this single logical line.
   // Then probe same-batch Home/middle insertion with the normal editor.
-  child.write('\x1b[A');
-  await settle(() => inputSlot()?.includes('❯ ! echo') && inputSlot()?.includes('DraftHead'));
-  child.write('\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[CX');
+  child.write('\x1b[A\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[CX');
   await settle(() => inputSlot()?.includes('! echXo'));
   child.write('\x7f');
   await settle(() => inputSlot()?.includes('❯ ! echo') && inputSlot()?.includes('DraftHead') && !inputSlot()?.includes('! echXo'));

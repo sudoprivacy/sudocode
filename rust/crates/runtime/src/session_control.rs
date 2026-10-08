@@ -953,39 +953,6 @@ mod tests {
     }
 
     #[test]
-    fn interactive_session_remains_latest_over_newer_one_shot() {
-        let mut sessions = vec![
-            ManagedSessionSummary {
-                id: "interactive".to_string(),
-                path: PathBuf::from("/tmp/interactive"),
-                updated_at_ms: 100,
-                modified_epoch_millis: 100,
-                message_count: 1,
-                summary: None,
-                parent_session_id: None,
-                branch_name: None,
-                interactive: true,
-            },
-            ManagedSessionSummary {
-                id: "one-shot".to_string(),
-                path: PathBuf::from("/tmp/one-shot"),
-                updated_at_ms: 200,
-                modified_epoch_millis: 200,
-                message_count: 1,
-                summary: None,
-                parent_session_id: None,
-                branch_name: None,
-                interactive: false,
-            },
-        ];
-
-        crate::session_control::sort_managed_sessions(&mut sessions);
-
-        assert_eq!(sessions[0].id, "interactive");
-        assert_eq!(sessions[1].id, "one-shot");
-    }
-
-    #[test]
     fn creates_and_lists_managed_sessions() {
         // given
         let root = temp_dir();

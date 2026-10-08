@@ -9,7 +9,109 @@
 mod common;
 
 use std::fs;
+use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
+
+fn transcript_meta(path: &Path) -> serde_json::Value {
+    fs::read_to_string(path)
+        .expect("read transcript")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid transcript JSON"))
+        .find(|row| row["type"] == "session_meta")
+        .expect("session metadata")
+}
+
+/// A print run must survive by ID while `latest` continues the user's REPL.
+/// Exercise actual CLI processes, persisted transcripts, exports and promotion.
+#[test]
+fn print_preserves_interactive_latest_and_remains_resumable_by_id() {
+    let env = common::TestEnv::new("print-latest");
+    let mut interactive = env.spawn(&["--permission-mode", "read-only"]);
+    common::expect_input_line_cleared(&interactive, Duration::from_secs(15), "initial REPL");
+    interactive.send("/exit\r").expect("exit initial REPL");
+    assert_eq!(interactive.expect_eof().unwrap(), 0);
+
+    let store = env.workspace_root().join(".scode/sessions");
+    let interactive_path = common::find_session_transcript(&store).expect("REPL transcript");
+    // An older transcript with no mode field must remain interactive. Seed
+    // distinct history so export proves which conversation `latest` selected.
+    assert!(transcript_meta(&interactive_path)["mode"].is_null());
+    let mut transcript = fs::OpenOptions::new()
+        .append(true)
+        .open(&interactive_path)
+        .unwrap();
+    for (role, text) in [
+        ("user", "INTERACTIVE_SESSION_SENTINEL"),
+        ("assistant", "Saved interactive history."),
+    ] {
+        writeln!(
+            transcript,
+            "{}",
+            serde_json::json!({
+                "type": "message",
+                "message": {"role": role, "blocks": [{"type": "text", "text": text}]}
+            })
+        )
+        .unwrap();
+    }
+    drop(transcript);
+
+    let prompt = env.prompt(
+        "Reply with exactly PRINT_SESSION_SENTINEL.",
+        "single_turn_text",
+    );
+    let mut print = env.spawn(&["-p", &prompt, "--permission-mode", "read-only"]);
+    assert_eq!(print.expect_eof().unwrap(), 0);
+    let namespace = interactive_path.parent().unwrap().parent().unwrap();
+    let print_path = fs::read_dir(namespace)
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("transcript.jsonl"))
+        .find(|path| path.exists() && path != &interactive_path)
+        .expect("separate print transcript");
+    let print_meta = transcript_meta(&print_path);
+    assert_eq!(print_meta["mode"], "non_interactive");
+    let print_id = print_meta["session_id"].as_str().unwrap();
+
+    let latest_export = env.workspace_root().join("interactive-export.txt");
+    let mut latest = env.spawn(&[
+        "--resume",
+        "latest",
+        "/export",
+        latest_export.to_str().unwrap(),
+    ]);
+    assert_eq!(latest.expect_eof().unwrap(), 0);
+    let exported = fs::read_to_string(&latest_export).unwrap();
+    assert!(
+        exported.contains("INTERACTIVE_SESSION_SENTINEL"),
+        "{exported}"
+    );
+    assert!(!exported.contains("PRINT_SESSION_SENTINEL"), "{exported}");
+
+    let mut resumed = env.spawn(&["--resume", print_id, "--permission-mode", "read-only"]);
+    common::expect_input_line_cleared(&resumed, Duration::from_secs(15), "explicit print resume");
+    resumed.send("/exit\r").expect("exit resumed REPL");
+    assert_eq!(resumed.expect_eof().unwrap(), 0);
+    assert!(
+        transcript_meta(&print_path)["mode"].is_null(),
+        "REPL must promote the print session"
+    );
+
+    let promoted_export = env.workspace_root().join("promoted-export.txt");
+    let mut promoted = env.spawn(&[
+        "--resume",
+        "latest",
+        "/export",
+        promoted_export.to_str().unwrap(),
+    ]);
+    assert_eq!(promoted.expect_eof().unwrap(), 0);
+    let exported = fs::read_to_string(&promoted_export).unwrap();
+    assert!(exported.contains("PRINT_SESSION_SENTINEL"), "{exported}");
+    assert!(
+        !exported.contains("INTERACTIVE_SESSION_SENTINEL"),
+        "{exported}"
+    );
+}
 
 /// `--resume list` should list sessions and exit.
 #[test]

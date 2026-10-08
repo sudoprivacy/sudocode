@@ -367,6 +367,13 @@ scode --resume path/to/session.jsonl
 
 `--resume` replays the named session into the REPL with full context.
 
+`latest` prefers your most recently used interactive session. A newer
+`--print`/`-p` run keeps its own transcript without displacing that session.
+One-shot transcripts remain resumable by ID or path, and are the fallback
+when no interactive session exists. Resuming one in the REPL makes it an
+interactive session for subsequent `latest` selection. Older transcripts
+without a session-mode field remain interactive for compatibility.
+
 The shared engine reconciles interrupted tool exchanges before continuing. It
 accepts results stored in either `tool` or `user` messages and leaves complete
 exchanges unchanged. A call that never returned receives a cancellation result.

@@ -2057,7 +2057,7 @@ fn cleanup_rotated_logs_with(backend: &dyn FsBackend, path: &Path) -> Result<(),
 mod tests {
     use super::{
         cleanup_rotated_logs, current_time_millis, rotate_session_file_if_needed, ContentBlock,
-        ConversationMessage, MessageRole, Session, SessionFork, SessionMode,
+        ConversationMessage, MessageRole, Session, SessionFork,
     };
     use crate::json::JsonValue;
     use crate::usage::{TokenUsage, UsageCostCurrency, UsageTracker};
@@ -2220,19 +2220,6 @@ mod tests {
             Some(43_700)
         );
         assert_eq!(restored.session_id, session.session_id);
-    }
-
-    #[test]
-    fn persists_and_restores_noninteractive_mode() {
-        let session = Session::new().with_mode(SessionMode::NonInteractive);
-        let path = temp_session_path("noninteractive-mode");
-
-        session.save_to_path(&path).expect("session should save");
-        let restored = Session::load_from_path(&path).expect("session should load");
-        fs::remove_file(&path).expect("temp file should be removable");
-
-        assert_eq!(restored.mode, SessionMode::NonInteractive);
-        assert_eq!(restored, session);
     }
 
     #[test]

@@ -248,12 +248,13 @@ fn shared_budget_preserves_history_draft_and_cursor_in_the_real_terminal() {
         .unwrap();
     let path = env.workspace_root().join("budget-session.jsonl");
     saved.save_to_path(&path).unwrap();
-    assert_terminal_output(run_terminal(
+    let output = run_terminal(
         &env,
         &["--resume", path.to_str().unwrap()],
         "budget",
         serde_json::json!({"todos": store}),
-    ));
+    );
+    common::terminal_host::assert_success(&output);
     if env.is_mock() {
         assert_eq!(
             env.captured_message_count(),

@@ -28,6 +28,26 @@ pub(super) fn RichText(props: &RichTextProps) -> impl Into<AnyElement<'static>> 
     element! { MixedText(contents: contents(&props.content, props.color)) }
 }
 
+/// Paint allocated text only when it has rows. An overflow-hidden, zero-height
+/// View still updates, measures and draws its children in iocraft, so clipping
+/// empty slots is not a substitute for leaving their text subtree unmounted.
+/// Explicit slot keys keep adjacent stateful widgets independent of visibility.
+pub(super) fn row_text(
+    key: &'static str,
+    content: std::sync::Arc<StyledText>,
+    rows: usize,
+    color: Option<Color>,
+) -> Option<Element<'static, View>> {
+    (rows > 0).then(|| {
+        element! {
+            View(key, height: u32::try_from(rows).expect("allocated rows fit terminal geometry"),
+                flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                RichText(content, color)
+            }
+        }
+    })
+}
+
 struct CachedPromptText {
     source: runtime::PromptText,
     width: usize,

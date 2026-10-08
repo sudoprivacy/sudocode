@@ -16,9 +16,11 @@ fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
     .unwrap();
     let mut saved = Session::new().with_workspace_root(env.workspace_root());
     saved.push_user_text("Saved resize conversation").unwrap();
-    let mut body = (0..70)
-        .map(|i| format!("Earlier history line {i}\n"))
-        .collect::<String>();
+    let mut body = String::new();
+    for i in 0..70 {
+        use std::fmt::Write as _;
+        writeln!(body, "Earlier history line {i}").unwrap();
+    }
     body.push_str("ResizeHistorySentinel");
     let mut message = ConversationMessage::assistant(vec![ContentBlock::Text { text: body }]);
     message.usage = Some(TokenUsage {
@@ -42,7 +44,7 @@ fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
         "history",
         serde_json::json!({"todos": store}),
     );
-    assert_terminal_output(output);
+    common::terminal_host::assert_success(&output);
     if env.is_mock() {
         assert_eq!(
             env.captured_message_count(),
@@ -79,7 +81,7 @@ fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
     let done = Arc::new(AtomicBool::new(false));
     let stopped = done.clone();
     let peer = std::thread::spawn(move || -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         while Instant::now() < deadline && !stopped.load(Ordering::Relaxed) {
             if ready.is_file() {
                 let receiver = std::fs::read_dir(pair.join("agents"))
@@ -120,7 +122,7 @@ fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
     );
     done.store(true, Ordering::Relaxed);
     let delivered = peer.join().expect("mailbox producer");
-    assert_terminal_output(output);
+    common::terminal_host::assert_success(&output);
     delivered.expect("real peer delivery");
     if env.is_mock() {
         assert!(
@@ -164,7 +166,7 @@ fn parallel_bash_cards_survive_narrow_and_wide_resize() {
     let done = Arc::new(AtomicBool::new(false));
     let stopped = done.clone();
     let producer = std::thread::spawn(move || -> Result<(), String> {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         let mut writers = Vec::new();
         for name in ["one.fifo", "two.fifo"] {
             loop {
@@ -214,7 +216,7 @@ fn parallel_bash_cards_survive_narrow_and_wide_resize() {
     );
     done.store(true, Ordering::Relaxed);
     let released = producer.join().expect("FIFO producer");
-    assert_terminal_output(output);
+    common::terminal_host::assert_success(&output);
     released.expect("both tools released after terminal assertions");
     if env.is_mock() {
         assert!(
@@ -242,40 +244,5 @@ fn run_terminal(
     };
     let mut arguments = vec!["--auth", auth.as_str(), "--model", model.as_str()];
     arguments.extend_from_slice(args);
-    let log_root = std::env::var_os("SCODE_TERMINAL_LOG_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| env.workspace_root().join("terminal-logs"))
-        .join(scenario);
-    std::fs::create_dir_all(&log_root).unwrap();
-    let mut config = serde_json::json!({
-        "binary": common::scode_bin(), "args": arguments, "scenario": scenario,
-        "root": env.workspace_root(), "configHome": env.config_home(),
-        "todos": env.workspace_root().join("todos.json"), "logRoot": log_root,
-        "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
-    });
-    config
-        .as_object_mut()
-        .unwrap()
-        .extend(extra.as_object().unwrap().clone());
-    let manifest = env.workspace_root().join("terminal.json");
-    std::fs::write(&manifest, serde_json::to_vec(&config).unwrap()).unwrap();
-    let host = std::env::var_os("SCODE_TERMINAL_HOST").unwrap_or_else(|| "node".into());
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../e2e/terminal-resize/run.cjs");
-    std::process::Command::new(host)
-        .arg(script)
-        .arg(manifest)
-        .env("ELECTRON_RUN_AS_NODE", "1")
-        .output()
-        .expect("start real terminal host; see e2e/terminal-resize/README.md")
-}
-
-fn assert_terminal_output(output: std::process::Output) {
-    assert!(
-        output.status.success(),
-        "real terminal resize failed:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    common::terminal_host::run(env, &arguments, scenario, extra)
 }

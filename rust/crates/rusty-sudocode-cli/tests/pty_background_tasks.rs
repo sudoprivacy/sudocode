@@ -478,7 +478,14 @@ fn exiting_during_a_foreground_tool_reaps_both_process_groups() {
 fn release_background_task_input_measurement() {
     use common::render_measurement::{measure_keys, report_resources};
     let (env, _release) = task_env("background-input-measurement");
-    let mut session = start(&env, &[shell("background", "while [ ! -f release ]; do i=0; while [ $i -lt 200 ]; do echo PERFORMANCE_OUTPUT_LINE_0123456789; i=$((i+1)); done; sleep 0.2; done", "Background output workload")]);
+    let mut session = start(
+        &env,
+        &[shell(
+            "background",
+            &common::render_measurement::background_output_command(None),
+            "Background output workload",
+        )],
+    );
     common::expect_screen(
         &session,
         |s| s.contains("Concurrency batch done.") && s.contains("ctx "),

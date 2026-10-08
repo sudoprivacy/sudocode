@@ -2,7 +2,7 @@
 //! subprocess (the mock MCP servers `pty_mcp_tool` and `acp_integration` spawn).
 //!
 //! The reason this isn't simply `"python3"`: on Windows that name almost always
-//! resolves to the WindowsApps *App Execution Alias* — a zero-byte reparse
+//! resolves to the `WindowsApps` *App Execution Alias* — a zero-byte reparse
 //! point that opens the Microsoft Store rather than running anything. An MCP
 //! server spawned through it never writes a byte, so the handshake just hangs
 //! until the test times out. `python` may be the real interpreter or may be

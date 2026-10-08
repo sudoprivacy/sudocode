@@ -5,11 +5,11 @@
 //! can `#[path = "common/shell.rs"] mod shell;` and still go through this one
 //! SSOT instead of hand-rolling a second `sh` lookup.
 
-/// Resolve the `sh` binary to the full path portable_pty needs.
+/// Resolve the `sh` binary to the full path `portable_pty` needs.
 ///
 /// On Unix this is trivially `"sh"` — the CreateProcess-equivalent
-/// (posix_spawn) does PATH resolution. On Windows, portable_pty's
-/// `CommandBuilder::new("sh")` hands the raw name to CreateProcessW,
+/// (`posix_spawn`) does PATH resolution. On Windows, `portable_pty`'s
+/// `CommandBuilder::new("sh")` hands the raw name to `CreateProcessW`,
 /// which does NOT look up PATH; the child spawn then fails with
 /// `os error 2` ("system cannot find the specified file"). Resolve
 /// against Git for Windows' bundled `sh.exe` first, then fall back to
@@ -18,7 +18,7 @@
 ///
 /// Public so test files with their own bespoke spawn helpers (e.g.
 /// `pty_mcp_manage`) resolve `sh` through this one SSOT rather than
-/// handing a bare `"sh"` to `CreateProcessW` (which fails `os error 2`
+/// handing a bare `"sh"` to ``CreateProcessW`` (which fails `os error 2`
 /// on Windows).
 pub fn resolve_sh() -> String {
     #[cfg(unix)]

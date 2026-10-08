@@ -58,6 +58,11 @@ on:
       - install.sh
       - scripts/publish_release_mirror.py
   workflow_dispatch:
+    inputs:
+      render_performance:
+        description: 'Run release rendering calibration before enabling the required gate'
+        type: boolean
+        default: false
 
 concurrency:
   group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -71,6 +76,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  rendering-calibration:
+    if: github.event_name == 'workflow_dispatch' && inputs.render_performance
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    uses: ./.github/workflows/render-performance.yml
+    with:
+      profile: core
+
   release-mirror:
     name: release mirror recovery
     runs-on: ubuntu-latest

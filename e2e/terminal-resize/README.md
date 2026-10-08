@@ -39,3 +39,37 @@ retains the complete terminal buffer and wire trace outside the disposable
 workspace. `SCODE_CONPTY_BACKEND=system` runs the strict system-host diagnostic;
 it currently exposes history loss on Windows build 26300 even in static controls
 without application redraw. CI uses VS Code's bundled ConPTY.
+
+## Release performance gate
+
+`pty_render_performance` reuses TestEnv, the protocol fixture and this terminal
+host. `performance-policy.json` is the source of truth for the fixed baseline,
+workloads, repetition counts and budgets. Run after compiling the release CLI
+and `cargo test --release -p rusty-sudocode-cli --test pty_render_performance --no-run`
+from `rust/`:
+
+```sh
+python3 e2e/terminal-resize/benchmark.py --driver rust/target/release/deps/pty_render_performance-<hash> \
+  --base /absolute/path/scode-base --candidate /absolute/path/scode-candidate --output /tmp/render-results
+```
+
+Run from the repository root. `--profile stress` adds 30 turns; `--preview 1`
+measures the local experiment. Ordinary CI measures default behavior on Linux;
+the cross-platform resize job retains the visual and history contracts. Reports
+include raw input samples, per-turn process resources, terminal traces, binary
+hashes, A/A noise and paired A/B results. A noisy or incomplete run fails.
+Linux reports the kernel RSS high-water mark; local macOS peaks are phase samples.
+
+The performance workflow and evaluator come from the PR base. Changes to its
+policy or shared measurement fixtures require a maintainer's approval of the
+current commit, then a gate rerun. Approved budgets may be selected for that PR;
+the evaluator still comes from the base. Baselines never update automatically.
+Candidate compilation has read permissions and no persisted checkout token;
+the separate status publisher executes trusted code only.
+
+Initial rollout: run Rust CI's optional `render_performance` dispatch on the
+candidate branch to validate hosted A/A calibration, merge the harness, then require
+the published `render performance` status in main's branch protection. The
+initial budgets are local regression limits and need hosted calibration before
+claiming reliable CI protection. A failed run is investigated; reruns do not
+replace its original evidence.

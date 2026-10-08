@@ -31,6 +31,7 @@
 
 #![allow(dead_code)] // each test file uses a subset
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,6 +46,11 @@ use pty_expect::{PtySession, Result};
 use runtime::config::default_config_home;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+// A free function keeps both Screen lifetimes late-bound for PtySession::render.
+fn screen_contents(screen: &pty_expect::Screen<'_>) -> String {
+    screen.contents()
+}
 
 /// Find a persisted session transcript below a fixture's session store.
 pub fn find_session_transcript(dir: &std::path::Path) -> Option<PathBuf> {
@@ -153,15 +159,14 @@ where
 {
     let deadline = Instant::now() + at_least(budget);
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(screen_contents);
         if pred(&screen) {
             return screen;
         }
-        if Instant::now() >= deadline {
-            panic!(
-                "{context}: the screen never satisfied the wait within {budget:?}\nPTY:\n{screen}"
-            );
-        }
+        assert!(
+            Instant::now() < deadline,
+            "{context}: the screen never satisfied the wait within {budget:?}\nPTY:\n{screen}"
+        );
         std::thread::sleep(SCREEN_POLL);
     }
 }
@@ -190,7 +195,7 @@ where
     let mut stable = 0u32;
     let mut satisfied = false;
     loop {
-        let screen = sess.render(|s| s.contents());
+        let screen = sess.render(screen_contents);
         if pred(&screen) {
             satisfied = true;
             if previous.as_deref() == Some(screen.as_str()) {
@@ -292,7 +297,7 @@ pub fn live_model() -> String {
 /// than bytes so a box-drawing glyph cannot be split mid-codepoint.
 #[must_use]
 pub fn screen_tail(sess: &PtySession, chars: usize) -> String {
-    let screen = sess.render(|s| s.contents());
+    let screen = sess.render(screen_contents);
     let tail: String = screen.chars().rev().take(chars).collect();
     tail.chars().rev().collect()
 }
@@ -357,7 +362,7 @@ pub fn screen_contains(screen: &str, text: &str) -> bool {
 /// Generous on purpose: a live turn that writes a file is a model call plus
 /// tool use. Slowness is answered with a bigger budget, never with a looser
 /// condition — a permissive gate turns a real miss into a green run.
-pub const LIVE_TURN_BUDGET: Duration = Duration::from_secs(180);
+pub const LIVE_TURN_BUDGET: Duration = Duration::from_mins(3);
 
 /// The per-turn result line as `screen` currently reads it, or `""` when no
 /// turn has completed yet.
@@ -381,7 +386,7 @@ pub fn turn_status_line(screen: &str) -> String {
 /// [`expect_turn_complete_after`].
 #[must_use]
 pub fn turn_status_marker(sess: &PtySession) -> String {
-    turn_status_line(&sess.render(|screen| screen.contents()))
+    turn_status_line(&sess.render(screen_contents))
 }
 
 /// Block until the turn submitted after `marker` was taken has finished AND the
@@ -422,7 +427,7 @@ pub fn expect_turn_complete_after(
 ) {
     let deadline = Instant::now() + budget;
     loop {
-        let screen = sess.render(|screen| screen.contents());
+        let screen = sess.render(screen_contents);
         let status = turn_status_line(&screen);
         let fresh = !status.is_empty() && status != marker;
         if fresh && screen.contains(PROMPT_MARKER) && input_line_of(&screen).is_empty() {
@@ -571,7 +576,9 @@ impl TestEnv {
 
     fn new_live(label: &str) -> Self {
         // Serialise live tests — rate-limit protection.
-        let guard = LIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = LIVE_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let real_config_home = default_config_home();
         assert!(
@@ -685,17 +692,19 @@ impl TestEnv {
     /// Configure discovery for mock mode; live mode reads the real endpoint.
     pub fn set_model_catalog(&self, catalog: serde_json::Value) {
         if let Backend::Mock {
-            _runtime, server, ..
+            _runtime: runtime,
+            server,
+            ..
         } = &self.backend
         {
-            _runtime.block_on(server.set_model_catalog(catalog));
+            runtime.block_on(server.set_model_catalog(catalog));
         }
     }
 
     /// Fetch mock discovery before a one-shot command can consume capabilities.
     pub fn prime_model_catalog(&self) {
         if let Backend::Mock {
-            _runtime,
+            _runtime: runtime,
             server,
             workspace,
         } = &self.backend
@@ -713,7 +722,7 @@ impl TestEnv {
                     .collect(),
                 },
             );
-            _runtime
+            runtime
                 .block_on(catalog.refresh(true))
                 .expect("prime mock catalog");
         }
@@ -724,8 +733,10 @@ impl TestEnv {
     pub fn captured_message_count(&self) -> usize {
         match &self.backend {
             Backend::Mock {
-                _runtime, server, ..
-            } => _runtime
+                _runtime: runtime,
+                server,
+                ..
+            } => runtime
                 .block_on(server.captured_requests())
                 .iter()
                 .filter(|r| r.path == "/v1/messages")
@@ -739,8 +750,10 @@ impl TestEnv {
     pub fn captured_message_bodies(&self) -> Vec<String> {
         match &self.backend {
             Backend::Mock {
-                _runtime, server, ..
-            } => _runtime
+                _runtime: runtime,
+                server,
+                ..
+            } => runtime
                 .block_on(server.captured_requests())
                 .iter()
                 .filter(|r| r.path == "/v1/messages")
@@ -844,9 +857,10 @@ fn spawn_with_workspace(
     let home_str = workspace.home.display().to_string();
 
     // Determine the config home to use.
-    let effective_config_home = config_home_override
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| workspace.config_home.display().to_string());
+    let effective_config_home = config_home_override.map_or_else(
+        || workspace.config_home.display().to_string(),
+        |p| p.display().to_string(),
+    );
 
     // Build a shell command that cd's into the workspace root before
     // exec'ing scode.  This is necessary because `PtySession::spawn`
@@ -864,17 +878,19 @@ fn spawn_with_workspace(
         "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR",
         shell_quote(&workspace_root)
     );
-    cmd.push_str(&format!(
+    write!(
+        cmd,
         " SUDO_CODE_CONFIG_HOME={}",
         shell_quote(&effective_config_home)
-    ));
-    cmd.push_str(&format!(" HOME={}", shell_quote(&home_str)));
+    )
+    .unwrap();
+    write!(cmd, " HOME={}", shell_quote(&home_str)).unwrap();
     cmd.push_str(" NO_COLOR=1");
     // Git Bash already translated its inherited PATH for MSYS. Replacing it
     // with the native Windows string here makes MSYS parse drive-letter colons
     // as separators when launching scode, corrupting paths and hiding sh.exe.
     #[cfg(not(windows))]
-    cmd.push_str(&format!(" PATH={}", shell_quote(&path)));
+    write!(cmd, " PATH={}", shell_quote(&path)).unwrap();
     // ConPTY starts with the Windows system environment, which may contain
     // Git's cmd/ but not its POSIX tools. Supply the shell's own tool directory
     // in MSYS spelling; MSYS converts it once when launching the native scode.
@@ -887,19 +903,20 @@ fn spawn_with_workspace(
     // "git has no author identity configured" — the isolated HOME carries no
     // global gitconfig, and on Windows git does not resolve it to the workspace
     // HOME. GIT_*_NAME/EMAIL are inherited by the model's bash subprocess.
-    cmd.push_str(&format!(" GIT_AUTHOR_NAME={}", shell_quote("Scode Test")));
-    cmd.push_str(&format!(
+    write!(cmd, " GIT_AUTHOR_NAME={}", shell_quote("Scode Test")).unwrap();
+    write!(
+        cmd,
         " GIT_AUTHOR_EMAIL={}",
         shell_quote("scode-test@example.com")
-    ));
-    cmd.push_str(&format!(
-        " GIT_COMMITTER_NAME={}",
-        shell_quote("Scode Test")
-    ));
-    cmd.push_str(&format!(
+    )
+    .unwrap();
+    write!(cmd, " GIT_COMMITTER_NAME={}", shell_quote("Scode Test")).unwrap();
+    write!(
+        cmd,
         " GIT_COMMITTER_EMAIL={}",
         shell_quote("scode-test@example.com")
-    ));
+    )
+    .unwrap();
     // Default to sync REPL for tests — the async REPL doesn't reprint `❯`
     // after each turn (the prompt is persistent from the input thread), which
     // breaks tests that `expect("❯")` to detect turn completion. Tests that
@@ -907,14 +924,14 @@ fn spawn_with_workspace(
     // `env_vars`, which appears later and overrides this default.
     cmd.push_str(" SUDOCODE_INTERRUPT_QUEUE_MODE=off");
     for (k, v) in env_vars {
-        cmd.push_str(&format!(" {}={}", k, shell_quote(v)));
+        write!(cmd, " {}={}", k, shell_quote(v)).unwrap();
     }
-    cmd.push_str(&format!(" {}", shell_quote(&bin_str)));
+    write!(cmd, " {}", shell_quote(&bin_str)).unwrap();
     for arg in base_args {
-        cmd.push_str(&format!(" {}", shell_quote(arg)));
+        write!(cmd, " {}", shell_quote(arg)).unwrap();
     }
     for arg in extra_args {
-        cmd.push_str(&format!(" {}", shell_quote(arg)));
+        write!(cmd, " {}", shell_quote(arg)).unwrap();
     }
 
     let sh = resolve_sh();
@@ -1067,7 +1084,7 @@ pub use shell::resolve_sh;
 /// Wraps in single quotes and escapes any embedded single quotes.
 /// Spawn `scode <args>` under a PTY with CWD set to the given
 /// directory. Useful for session management tests where scode
-/// requires CWD to match the session's workspace_root.
+/// requires CWD to match the session's `workspace_root`.
 pub fn spawn_scode_in_dir(
     dir: &std::path::Path,
     args: &[&str],
@@ -1118,15 +1135,17 @@ pub fn spawn_scode_in_dir_with_env(
         shell_quote(&dir_str)
     );
     for (key, value) in env {
-        cmd.push_str(&format!(
+        write!(
+            cmd,
             " {}={}",
             key,
             shell_quote(&value.display().to_string())
-        ));
+        )
+        .unwrap();
     }
-    cmd.push_str(&format!(" {}", shell_quote(&bin_str)));
+    write!(cmd, " {}", shell_quote(&bin_str)).unwrap();
     for arg in args {
-        cmd.push_str(&format!(" {}", shell_quote(arg)));
+        write!(cmd, " {}", shell_quote(arg)).unwrap();
     }
     let sh = resolve_sh();
     let mut sess = PtySession::spawn(&sh, &["-c", &cmd])?;
@@ -1172,3 +1191,4 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 
 #[allow(dead_code)]
 pub mod render_measurement;
+pub mod terminal_host;

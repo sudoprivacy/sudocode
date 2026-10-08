@@ -2467,15 +2467,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }))
             #(row_text("heading", heading, visible.heading, Some(Color::Cyan)))
-            // Keep a real prompt body mounted through clipping: its scroll
-            // handle must retain state. Ordinary input has no body at all.
-            #((body_rows > 0).then(|| element! {
-                View(height: row_height(visible.body), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                    ScrollView(handle: Some(review_handle), auto_scroll: false, scrollbar: Some(false), keyboard_scroll: Some(false)) {
-                        RichText(content: body)
-                    }
+            // Stateful owners stay mounted for their handle's entire lifetime,
+            // including between questions. Only their stateless text can be
+            // omitted; a handle outliving its ScrollView references dead State.
+            View(height: row_height(visible.body), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                ScrollView(handle: Some(review_handle), auto_scroll: false, scrollbar: Some(false), keyboard_scroll: Some(false)) {
+                    #((body_rows > 0).then(|| element! { RichText(content: body) }))
                 }
-            }))
+            }
             #(row_text("review-hint", ansi(review_hint), visible.hint, Some(Color::DarkGrey)))
             #(row_text("controls", controls, visible.controls,
                 if task_panel.is_some() { None } else { Some(Color::Cyan) }))

@@ -13,6 +13,7 @@ const clean = (value, limit = 2048) => {
 };
 const report = { traceFiles: 0, malformedLines: 0, requests: [] };
 const responses = new Map();
+const refusals = new Map();
 for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
   if (!fs.existsSync(file)) continue;
   report.traceFiles++;
@@ -29,6 +30,11 @@ for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
         }
       }
       responses.set(data.request_id, { status: data.status, ids });
+    } else if (event.event === 'provider_refusal') {
+      refusals.set(data.request_id, {
+        model: clean(data.model, 256), category: clean(data.category, 256),
+        explanation: clean(data.explanation),
+      });
     } else if (event.event === 'request_debug') {
       const body = data.body ?? {};
       const system = typeof body.system === 'string' ? body.system
@@ -54,7 +60,10 @@ for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
     }
   }
 }
-for (const request of report.requests) request.response = responses.get(request.requestId);
+for (const request of report.requests) {
+  request.response = responses.get(request.requestId);
+  request.refusal = refusals.get(request.requestId);
+}
 fs.mkdirSync(path.dirname(output), { recursive: true });
 fs.writeFileSync(output, JSON.stringify(report, null, 2) + '\n');
 console.log(`Live model evidence: ${report.requests.length} requests, ${report.malformedLines} malformed lines`);

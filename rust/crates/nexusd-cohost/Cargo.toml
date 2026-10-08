@@ -48,6 +48,17 @@ daemon = [
 # the binary the daemon feature builds.
 driver-ai = ["daemon", "nexus-cluster/driver-ai"]
 
+# The egress content gate, forwarded for the same reason `driver-ai` is: a
+# co-host has to be a superset of the daemon it replaces, and sessions run
+# HERE, so a gate that only `nexusd-cluster` can carry gates nothing a
+# session writes. Built in, it claims nothing until a deployment names the
+# mounts that leave the node (`NEXUS_EGRESS_GATE_MODEL_MOUNTS`,
+# `NEXUS_EGRESS_GATE_A2A_MOUNTS`) — a session's own turns ride a transcript
+# and are never gated by default. `-presidio` adds the loopback contextual
+# detector; its HTTP client is a few hundred lines over std.
+egress-gate = ["daemon", "nexus-cluster/egress-gate"]
+egress-gate-presidio = ["egress-gate", "nexus-cluster/egress-gate-presidio"]
+
 [dependencies]
 # The daemon itself — every flag, every service, every boot path of
 # `nexusd-cluster`, entered through `run_with_services` so this binary chooses

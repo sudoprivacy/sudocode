@@ -384,7 +384,7 @@ jobs:
       # and a release builds `--locked`, so that gap only shows up in a release.
       - name: The driver-ai co-host still resolves
         working-directory: rust
-        run: cargo check -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost --locked
+        run: cargo check -p nexusd-cohost --features daemon,driver-ai,egress-gate-presidio --bin nexusd-cohost --locked
 
   one-nexus-vfs-pin:
     if: *standard_ci

@@ -136,6 +136,12 @@ Commit the live tests after actually running them, or add the end-to-end tests
 to CI. Record the command, result and any remaining coverage limits in the PR;
 mock passes or skipped live tests alone do not complete acceptance.
 
+CLI configuration checks such as `--model` precedence use a deterministic
+transport and verify the launched CLI's actual request bodies on all three
+platforms. They do not measure provider compatibility. Live headless file-tool
+and resume workflows use `SCODE_LIVE_MODEL`; the model compatibility workflow
+reports availability and protocol refusals for individual provider models.
+
 Set `SCODE_TEST_BIN` to the absolute path of a downloaded release binary to run
 the same PTY workflows against that artifact. Without it, the harness uses the
 CLI built by Cargo. This also lets release acceptance leave build outputs intact.

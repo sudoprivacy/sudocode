@@ -490,13 +490,12 @@ fn sort_managed_sessions(sessions: &mut [ManagedSessionSummary]) {
         // returns the session they last worked in. Rotation snapshots and
         // backups are excluded from listing (see `is_managed_session_file`), so
         // file mtime reflects real activity (messages, compaction, resume).
-        // A one-shot prompt remains resumable by id, but must not displace an
-        // interactive session from the `latest` alias. If no interactive
-        // session exists, one-shot sessions remain the fallback.
-        right
-            .interactive
-            .cmp(&left.interactive)
-            .then_with(|| (left.message_count == 0).cmp(&(right.message_count == 0)))
+        // Empty startup shells stay behind saved conversations. Among sessions
+        // with history, a one-shot prompt must not displace an interactive
+        // session from `latest`; it remains the fallback if none exists.
+        (left.message_count == 0)
+            .cmp(&(right.message_count == 0))
+            .then_with(|| right.interactive.cmp(&left.interactive))
             .then_with(|| right.modified_epoch_millis.cmp(&left.modified_epoch_millis))
             .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
             .then_with(|| right.id.cmp(&left.id))

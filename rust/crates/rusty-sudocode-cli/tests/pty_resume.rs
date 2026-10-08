@@ -22,6 +22,29 @@ fn transcript_meta(path: &Path) -> serde_json::Value {
         .expect("session metadata")
 }
 
+/// Opening and closing an empty REPL must not hide the only saved conversation.
+#[test]
+fn print_is_latest_without_interactive_history() {
+    let env = common::TestEnv::new("print-latest-fallback");
+    let mut empty = env.spawn(&["--permission-mode", "read-only"]);
+    common::expect_input_line_cleared(&empty, Duration::from_secs(15), "empty REPL");
+    empty.send("/exit\r").unwrap();
+    assert_eq!(empty.expect_eof().unwrap(), 0);
+
+    let prompt = env.prompt(
+        "Reply with exactly PRINT_FALLBACK_SENTINEL.",
+        "single_turn_text",
+    );
+    let mut print = env.spawn(&["-p", &prompt, "--permission-mode", "read-only"]);
+    assert_eq!(print.expect_eof().unwrap(), 0);
+
+    let export = env.workspace_root().join("fallback-export.txt");
+    let mut resumed = env.spawn(&["--resume", "latest", "/export", export.to_str().unwrap()]);
+    assert_eq!(resumed.expect_eof().unwrap(), 0);
+    let exported = fs::read_to_string(&export).unwrap();
+    assert!(exported.contains("PRINT_FALLBACK_SENTINEL"), "{exported}");
+}
+
 /// A print run must survive by ID while `latest` continues the user's REPL.
 /// Exercise actual CLI processes, persisted transcripts, exports and promotion.
 #[test]

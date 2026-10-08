@@ -39,7 +39,7 @@ mod queued_message;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
-use ansi_text::{AnsiText, PromptTextCache, RichText};
+use ansi_text::{row_text, AnsiText, PromptTextCache, RichText};
 use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
 use tasks::{TaskBrowser, TaskFocus};
 
@@ -2472,37 +2472,35 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     element! {
         View(width: u32::from(term_width), flex_direction: FlexDirection::Column,
             max_height: u32::from(term_height.saturating_sub(1)), overflow: Overflow::Hidden) {
-            View(height: row_height(layout.pending.rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                RichText(content: layout.pending.content)
-            }
-            View(height: row_height(layout.status.rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                RichText(content: layout.status.content)
-            }
-            View(height: row_height(layout.todo.rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                // TodoSlot owns semantic spans; separator grey is not its
-                // fallback for terminal-foreground counts or descriptions.
-                RichText(content: layout.todo.content)
-            }
-            View(height: row_height(layout.separators), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                Text(content: sep.clone(), color: chrome_border)
-            }
-            View(height: if reviewable { 0 } else { row_height(layout.input_rows) }, flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(Color::Yellow))
-            }
-            View(height: row_height(visible.heading), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                RichText(content: heading)
-            }
-            View(height: row_height(visible.body), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                ScrollView(handle: Some(review_handle), auto_scroll: false, scrollbar: Some(false), keyboard_scroll: Some(false)) {
-                    RichText(content: body)
+            #(row_text("pending", layout.pending.content, layout.pending.rows))
+            #(row_text("status", layout.status.content, layout.status.rows))
+            // TodoSlot owns semantic spans; separator grey is not its
+            // fallback for terminal-foreground counts or descriptions.
+            #(row_text("todo", layout.todo.content, layout.todo.rows))
+            #((layout.separators > 0).then(|| element! {
+                View(height: row_height(layout.separators), flex_shrink: 0.0) {
+                    Text(content: sep.clone(), color: chrome_border)
                 }
-            }
-            View(height: row_height(visible.hint), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                AnsiText(content: review_hint, initial_style: chrome_muted)
-            }
-            View(height: row_height(visible.controls), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                RichText(content: controls)
-            }
+            }))
+            #((!reviewable && layout.input_rows > 0).then(|| element! {
+                View(height: row_height(layout.input_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                    Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(Color::Yellow))
+                }
+            }))
+            #(row_text("heading", heading, visible.heading))
+            // Keep a real prompt body mounted through clipping: its scroll
+            // handle must retain state. Ordinary input has no body at all.
+            #((body_rows > 0).then(|| element! {
+                View(height: row_height(visible.body), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                    ScrollView(handle: Some(review_handle), auto_scroll: false, scrollbar: Some(false), keyboard_scroll: Some(false)) {
+                        RichText(content: body)
+                    }
+                }
+            }))
+            #(row_text("review-hint", ansi_with_style(review_hint, chrome_muted), visible.hint))
+            #(row_text("controls", controls, visible.controls))
+            // The editor stays mounted even with zero allocated rows so a
+            // shrink/grow cannot discard its cursor, draft or edit ownership.
             View(height: row_height(visible.editor), flex_shrink: 0.0, overflow: Overflow::Hidden) {
             #(if task_panel.is_some() {
                 element! { View(flex_direction: FlexDirection::Row) {} }
@@ -2600,13 +2598,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             })
             }
             // Separator
-            View(height: row_height(layout.separators), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                Text(content: sep, color: chrome_border)
-            }
+            #((layout.separators > 0).then(|| element! {
+                View(height: row_height(layout.separators), flex_shrink: 0.0) {
+                    Text(content: sep, color: chrome_border)
+                }
+            }))
             // FooterSlot
-            View(height: row_height(layout.footer.rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                RichText(content: layout.footer.content)
-            }
+            #(row_text("footer", layout.footer.content, layout.footer.rows))
         }
     }
 }

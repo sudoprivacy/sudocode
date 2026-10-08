@@ -1170,6 +1170,89 @@ fn live_directory_unions_local_and_nexus_peers() {
     let _ = std::fs::remove_dir_all(&pair_root);
 }
 
+/// `/agents` and `/sessions` are DIFFERENT namespaces, not two names for one.
+///
+/// Both are mounted from the same zone, so a router that drops the mount prefix
+/// hands both the same key and the two alias (nexus-vfs#361). The damage lands on
+/// discovery: `readdir /agents` then returns session ids, and `agent_list`
+/// becomes unusable - a name that only ever existed as a session answers as an
+/// addressable agent.
+///
+/// The fix is two halves and a daemon can ship one without the other: #368
+/// separates the metastore KEYS, #382 separates the backend PATH (and makes a
+/// never-written subtree root list empty instead of erroring). A probe that
+/// only compares metadata therefore passes on a build whose content side still
+/// aliases - a guarantee the test does not actually hold, which is worse than
+/// no test because a bump past the fix stays quiet.
+///
+/// So both halves are asserted, each by the discriminant of the half it covers:
+/// the same LEAF under two prefixes (the backend collides per leaf, so a
+/// directory stat cannot see it), gated on the write having landed; and a
+/// never-written prefix listing empty rather than not-found, which is the path
+/// a first-run `agent_list` takes.
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_CERT_DIR"]
+fn live_agents_and_sessions_are_not_the_same_namespace() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let client = dial(&endpoint);
+    let leaf = format!("alias-probe-{}", fresh());
+
+    // ── (a) the SAME leaf path under two prefixes ──────────────────────────
+    //
+    // Deliberately one leaf, not a leaf under one prefix and a directory under
+    // the other: the backend collision happens per leaf, so a `stat` of a
+    // DIRECTORY never asks the backend about that leaf and cannot see the
+    // content-side alias at all.
+    let session_leaf = format!("/sessions/{leaf}");
+    client
+        .ensure_stream(
+            &session_leaf,
+            "wal,memory",
+            runtime::agent_mailbox::DEFAULT_STREAM_CAPACITY,
+            "",
+        )
+        .unwrap_or_else(|e| panic!("provision {session_leaf}: {e}"));
+
+    // State gate first. Without it, a write that silently went nowhere would
+    // make both negative assertions below pass for the wrong reason.
+    assert!(
+        client.stat(&session_leaf, "").is_ok(),
+        "{session_leaf} is missing right after it was provisioned, so the two \
+         assertions below would pass because nothing was written, not because \
+         the prefixes are isolated"
+    );
+    for other in [format!("/agents/{leaf}"), format!("/conversations/{leaf}")] {
+        assert!(
+            client.stat(&other, "").is_err(),
+            "{other} resolved although {leaf} was only ever written under /sessions - \
+             the prefixes share a backend path (nexus-vfs#361; the router half is #382, \
+             which #368 alone does not fix), so discovery is reading another \
+             namespace's entries and agent_list cannot be trusted on this daemon"
+        );
+    }
+
+    // ── (b) a prefix nothing has written to lists EMPTY, not not-found ─────
+    //
+    // On a fresh cluster `agent_list` enumerates `/agents` before any agent has
+    // announced. Without the subtree-root half of the fix that readdir is an
+    // error rather than an empty listing, so discovery fails on exactly the
+    // path a first-run session takes.
+    // The SUBTREE ROOT, not an arbitrary child: a child that was never created
+    // is legitimately not-found on every version. What the fix changed is that
+    // the mounted root itself enumerates as empty instead of erroring.
+    for root in ["/conversations", "/sessions", "/agents"] {
+        if let Err(e) = client.readdir(root, "") {
+            panic!(
+                "readdir of the mounted subtree root {root} failed with {e} instead of \
+                 returning a listing - on a fresh cluster the first `agent_list` enumerates \
+                 this root before anyone has announced, so discovery errors on exactly the \
+                 path a first-run session takes"
+            );
+        }
+    }
+}
+
 /// Provision the operator's model route over the same authenticated gRPC bind.
 #[test]
 #[ignore = "requires the co-host daemon and model mount environment"]

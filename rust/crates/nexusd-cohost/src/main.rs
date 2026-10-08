@@ -54,8 +54,30 @@ fn main() -> Result<()> {
         // business, and an index would silently pick the wrong service the first
         // time that order changed.
         services.retain(|decl| decl.name != managed_agent::SERVICE_NAME);
+        // `acp-mailbox/1` is served by the ACP server in `engine-acp`, which
+        // depends on `engine-host` — so the adapter cannot reach it and this
+        // binary, the only place that sees both, installs it. Without a driver
+        // the adapter names the protocol it does not speak; with one it attaches
+        // the channel the controller asked for.
+        //
+        // Per-agent model and auth are resolved by the spawn itself, from the
+        // daemon's own config root, exactly as the CLI resolves them; what the
+        // driver carries is this binary's identity.
+        let session_driver = Arc::new(engine_acp::acp_session_mailbox::AcpSessionDriver::new(
+            engine_acp::acp_sdk_server::SdkAcpConfig {
+                agent_version: env!("CARGO_PKG_VERSION").to_string(),
+                model: String::new(),
+                model_flag_raw: None,
+                permission_mode_override: None,
+                reasoning_effort: None,
+                allowed_tools: None,
+                auth_mode: None,
+                git_sha: None,
+                build_target: None,
+            },
+        ));
         services.push(managed_agent::service_decl_with_spawn(Arc::new(
-            SudoCodeSpawnAdapter,
+            SudoCodeSpawnAdapter::with_session_driver(session_driver),
         )));
         services
     })

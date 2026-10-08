@@ -28,6 +28,7 @@ daemon = [
   "dep:managed-agent",
   "dep:kernel",
   "dep:engine-host",
+  "dep:engine-acp",
   "dep:anyhow",
 ]
 
@@ -67,6 +68,9 @@ kernel = { workspace = true, optional = true }
 # named once for the workspace, and the runtime cannot be a rev older than the
 # kernel it is handed.
 engine-host = { path = "../engine-host", optional = true }
+# The ACP server that serves `acp-mailbox/1`. Only the binary edge sees both it
+# and `engine-host`, which is why the session driver is installed from here.
+engine-acp = { path = "../engine-acp", optional = true }
 anyhow = { version = "1", optional = true }
 
 # The raw ACP-subprocess tunnel (sudowork / hydra `spawn_spec`) is unix-only at

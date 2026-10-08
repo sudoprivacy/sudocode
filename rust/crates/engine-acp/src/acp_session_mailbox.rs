@@ -143,3 +143,51 @@ where
         }
     }
 }
+
+/// The session driver a co-host binary installs so `acp-mailbox/1` is served by
+/// this ACP server.
+///
+/// Lives here because the serving half is ACP and `engine-acp` already depends
+/// on `engine-host`; the composition root sees both crates and is the one place
+/// that can hand this across without either reaching over the boundary.
+pub struct AcpSessionDriver {
+    config: SdkAcpConfig,
+}
+
+impl AcpSessionDriver {
+    /// Serve sessions with the model and auth configuration a co-hosted agent
+    /// resolves exactly as the CLI does.
+    #[must_use]
+    pub fn new(config: SdkAcpConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl engine_host::managed_agent::SessionDriver for AcpSessionDriver {
+    fn serve(
+        &self,
+        kernel: Arc<kernel::kernel::Kernel>,
+        agent: &str,
+        owner_id: &str,
+        zone_id: &str,
+        endpoint: a2a::session::SessionEndpoint,
+    ) -> Result<(), String> {
+        // The identity the mailbox authenticates as is not ours to choose:
+        // `open` refuses an actor that does not match the endpoint's agent.
+        let ctx = OperationContext::new(owner_id, zone_id, false, Some(agent), true);
+        // Its own runtime, on the thread the spawn gave this driver: borrowing
+        // whichever executor happened to be current would tie a session's life
+        // to it.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("acp-mailbox/1 runtime: {e}"))?;
+        rt.block_on(run_acp_session_mailbox(
+            self.config.clone(),
+            kernel,
+            ctx,
+            endpoint,
+        ))
+        .map_err(|e| e.to_string())
+    }
+}

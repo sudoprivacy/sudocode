@@ -16,6 +16,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 // `::` because this module shares its name with that crate.
+use ::a2a::session::SessionEndpoint;
+use ::kernel::kernel::Kernel;
 use ::managed_agent::{SpawnHandle as ManagedSpawnHandle, SpawnOptions, SpawnTask};
 use runtime::mailbox::Mailbox;
 use runtime::spawn_task::{
@@ -226,15 +228,70 @@ where
 /// `managed_agent::install_managed_agent_with_spawn`; there is no enum map,
 /// because both this callback and `SpawnTask`'s observer speak
 /// `kernel::AgentState` directly.
-pub struct SudoCodeSpawnAdapter;
+pub struct SudoCodeSpawnAdapter {
+    session_driver: Option<Arc<dyn SessionDriver>>,
+}
 
-impl<K> SpawnTask<K> for SudoCodeSpawnAdapter
-where
-    K: KernelConvenience + Send + Sync + 'static,
-{
+/// Serves `acp-mailbox/1` for one attachment, for the lifetime of the session.
+///
+/// Declared here and implemented at the binary edge, because the implementation
+/// is an ACP server and `engine-acp` already depends on this crate — a call in
+/// the other direction is a cycle. The composition root sees both, so it is the
+/// one place that can hand this crate the driver without either crate reaching
+/// across the boundary.
+pub trait SessionDriver: Send + Sync + 'static {
+    /// Attach to `endpoint` as the agent side and serve until the channel ends.
+    ///
+    /// Called on a thread of the driver's choosing: upstream requires the
+    /// session loop to stay independent of the engine's turn worker, because a
+    /// reverse permission request has to be answerable while a turn is running.
+    ///
+    /// # Errors
+    /// When the channel cannot be attached or the handler chain fails.
+    fn serve(
+        &self,
+        kernel: Arc<Kernel>,
+        agent: &str,
+        owner_id: &str,
+        zone_id: &str,
+        endpoint: SessionEndpoint,
+    ) -> Result<(), String>;
+}
+
+impl SudoCodeSpawnAdapter {
+    /// A spawn provider that refuses `acp-mailbox/1`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            session_driver: None,
+        }
+    }
+
+    /// A spawn provider that serves `acp-mailbox/1` through `driver`.
+    #[must_use]
+    pub fn with_session_driver(driver: Arc<dyn SessionDriver>) -> Self {
+        Self {
+            session_driver: Some(driver),
+        }
+    }
+}
+
+impl Default for SudoCodeSpawnAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The service installs on a concrete kernel (`Arc<dyn SpawnTask<Kernel>>`), and
+/// every caller in this workspace - the co-host binary and the four co-host
+/// tests - hands it a real `Kernel`. A type parameter with one inhabitant is not
+/// flexibility: it only stopped the session driver from being a plain trait
+/// object, since `KernelSyscall` is monomorphised-only upstream and has no `dyn`
+/// form to pass instead.
+impl SpawnTask<Kernel> for SudoCodeSpawnAdapter {
     fn spawn(
         &self,
-        kernel: Arc<K>,
+        kernel: Arc<Kernel>,
         desc: AgentDescriptor,
         state_observer: Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>,
     ) -> Result<Box<dyn ManagedSpawnHandle>, String> {
@@ -243,7 +300,7 @@ where
 
     fn spawn_with_options(
         &self,
-        kernel: Arc<K>,
+        kernel: Arc<Kernel>,
         desc: AgentDescriptor,
         options: SpawnOptions,
         state_observer: Arc<dyn Fn(AgentState, Option<String>) + Send + Sync>,
@@ -258,16 +315,59 @@ where
         // through `a2a::session::SessionCodec` over this agent's conversation
         // (`managed_agent::raw_spawn` is the worked example); until this runtime
         // does that, say so.
-        if options.session_endpoint.is_some() {
-            return Err("this runtime does not support acp-mailbox/1".into());
-        }
+        // Overriding this method is what makes the refusal ours: the trait's
+        // default body carries it, and an override inherits nothing. Without a
+        // driver the honest answer is to name the protocol we do not speak,
+        // rather than return a handle with no endpoint and let the service
+        // report "did not attach the session mailbox" - a symptom, one layer
+        // later, for the same cause.
+        let session = match (options.session_endpoint.clone(), &self.session_driver) {
+            (Some(endpoint), Some(driver)) => Some((endpoint, Arc::clone(driver))),
+            (Some(_), None) => return Err("this runtime does not support acp-mailbox/1".into()),
+            (None, _) => None,
+        };
         let (handle, durable_session_id) =
             spawn_with_options(&kernel, &desc, &options, move |state, reason| {
                 state_observer(state, reason);
             })?;
+
+        // Attach before reporting. The service compares the endpoint this handle
+        // returns against the one it supplied precisely to catch a runtime that
+        // claims an attachment it never made, so the endpoint is only reported
+        // once the driver owns the channel. Its own thread: a reverse permission
+        // request must be answerable while a turn is still running.
+        let session_endpoint = match session {
+            Some((endpoint, driver)) => {
+                let served = endpoint.clone();
+                let agent = desc.name.clone();
+                let owner_id = desc.owner_id.clone();
+                let zone_id = desc.zone_id.clone();
+                // The kernel this spawn was handed, not one captured at boot:
+                // the service installs on a concrete `Kernel`, and a driver that
+                // held its own would be a second answer to "which kernel".
+                let session_kernel = Arc::clone(&kernel);
+                std::thread::Builder::new()
+                    .name(format!("acp-session-{}", desc.pid))
+                    .spawn(move || {
+                        if let Err(error) =
+                            driver.serve(session_kernel, &agent, &owner_id, &zone_id, served)
+                        {
+                            // The daemon log is where a co-host failure is read
+                            // from (`run-cohost.sh` tails it), and a session that
+                            // ends without saying why is the thing that sends an
+                            // operator to the source.
+                            eprintln!("co-host {agent}: acp-mailbox/1 session ended: {error}");
+                        }
+                    })
+                    .map_err(|e| format!("co-host: spawn the acp-mailbox/1 session: {e}"))?;
+                Some(endpoint)
+            }
+            None => None,
+        };
         Ok(Box::new(SudoCodeSpawnHandle {
             inner: handle,
             durable_session_id,
+            session_endpoint,
         }))
     }
 }
@@ -279,11 +379,19 @@ where
 struct SudoCodeSpawnHandle {
     inner: SpawnHandle,
     durable_session_id: String,
+    /// The channel this spawn attached to, or `None` when the controller asked
+    /// for no session. Reported rather than echoed: the service checks it
+    /// against what it handed us to catch an attachment that never happened.
+    session_endpoint: Option<SessionEndpoint>,
 }
 
 impl ManagedSpawnHandle for SudoCodeSpawnHandle {
     fn durable_session_id(&self) -> Option<&str> {
         Some(&self.durable_session_id)
+    }
+
+    fn session_endpoint(&self) -> Option<&SessionEndpoint> {
+        self.session_endpoint.as_ref()
     }
 
     fn abort(&self) {

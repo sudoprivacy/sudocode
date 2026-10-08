@@ -1191,4 +1191,5 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 
 #[allow(dead_code)]
 pub mod render_measurement;
+pub mod request_evidence;
 pub mod terminal_host;

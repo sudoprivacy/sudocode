@@ -229,7 +229,7 @@ pub use sandbox::{
 };
 pub use session::{
     model_tool_history, ContentBlock, ConversationMessage, HostedSessionIdentity, MessageRole,
-    Session, SessionCompaction, SessionError, SessionFork, SessionPromptEntry,
+    Session, SessionCompaction, SessionError, SessionFork, SessionMode, SessionPromptEntry,
 };
 pub use sse::{IncrementalSseParser, SseEvent};
 pub use stale_base::{

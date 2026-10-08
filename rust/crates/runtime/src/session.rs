@@ -122,6 +122,38 @@ pub struct SessionPromptEntry {
     pub text: String,
 }
 
+/// The interface that created a managed session. One-shot prompts remain
+/// resumable by id, but must not displace the user's interactive `latest`
+/// session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMode {
+    Interactive,
+    NonInteractive,
+}
+
+impl Default for SessionMode {
+    fn default() -> Self {
+        Self::Interactive
+    }
+}
+
+impl SessionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::NonInteractive => "non_interactive",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "interactive" => Some(Self::Interactive),
+            "non_interactive" => Some(Self::NonInteractive),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SessionPersistence {
     path: PathBuf,
@@ -220,6 +252,10 @@ pub struct Session {
     /// Timestamp of last successful health check (ROADMAP #38)
     pub last_health_check_ms: Option<u64>,
     pub model: Option<String>,
+    /// Whether this session was last created by the interactive REPL or by a
+    /// one-shot prompt. Older transcripts omit the field and remain
+    /// interactive for backwards compatibility.
+    pub mode: SessionMode,
     prompt_snapshot: Option<SessionPromptSnapshot>,
     prompt_snapshot_dirty: bool,
     persistence: Option<SessionPersistence>,
@@ -239,6 +275,7 @@ impl PartialEq for Session {
             && self.workspace_root == other.workspace_root
             && self.prompt_history == other.prompt_history
             && self.last_health_check_ms == other.last_health_check_ms
+            && self.mode == other.mode
     }
 }
 
@@ -293,6 +330,7 @@ impl Session {
             prompt_history: Vec::new(),
             last_health_check_ms: None,
             model: None,
+            mode: SessionMode::Interactive,
             prompt_snapshot: None,
             prompt_snapshot_dirty: false,
             persistence: None,
@@ -326,6 +364,12 @@ impl Session {
             path: path.into(),
             fs: Arc::new(StdFsBackend),
         });
+        self
+    }
+
+    #[must_use]
+    pub fn with_mode(mut self, mode: SessionMode) -> Self {
+        self.mode = mode;
         self
     }
 
@@ -696,6 +740,7 @@ impl Session {
             prompt_history: self.prompt_history.clone(),
             last_health_check_ms: self.last_health_check_ms,
             model: self.model.clone(),
+            mode: self.mode,
             prompt_snapshot: self.prompt_snapshot.clone(),
             prompt_snapshot_dirty: false,
             persistence: None,
@@ -731,6 +776,12 @@ impl Session {
         );
         if let Some(compaction) = &self.compaction {
             object.insert("compaction".to_string(), compaction.to_json()?);
+        }
+        if self.mode != SessionMode::Interactive {
+            object.insert(
+                "mode".to_string(),
+                JsonValue::String(self.mode.as_str().to_string()),
+            );
         }
         if let Some(fork) = &self.fork {
             object.insert("fork".to_string(), fork.to_json());
@@ -824,6 +875,11 @@ impl Session {
             .get("model")
             .and_then(JsonValue::as_str)
             .map(String::from);
+        let mode = object
+            .get("mode")
+            .and_then(JsonValue::as_str)
+            .and_then(SessionMode::from_str)
+            .unwrap_or_default();
         Ok(Self {
             version,
             session_id,
@@ -837,6 +893,7 @@ impl Session {
             prompt_history,
             last_health_check_ms: None,
             model,
+            mode,
             prompt_snapshot,
             prompt_snapshot_dirty: false,
             persistence: None,
@@ -858,6 +915,7 @@ impl Session {
         let mut workspace_root = None;
         let mut identity = None;
         let mut model = None;
+        let mut mode = SessionMode::Interactive;
         let mut prompt_snapshot = None;
         let mut prompt_history = Vec::new();
 
@@ -916,6 +974,11 @@ impl Session {
                         .get("model")
                         .and_then(JsonValue::as_str)
                         .map(String::from);
+                    mode = object
+                        .get("mode")
+                        .and_then(JsonValue::as_str)
+                        .and_then(SessionMode::from_str)
+                        .unwrap_or_default();
                 }
                 "message" => {
                     if let Some(snapshot) = object.get("prompt_snapshot") {
@@ -983,6 +1046,7 @@ impl Session {
             prompt_history,
             last_health_check_ms: None,
             model,
+            mode,
             prompt_snapshot,
             prompt_snapshot_dirty: false,
             persistence: None,
@@ -1142,6 +1206,12 @@ impl Session {
         }
         if let Some(model) = &self.model {
             object.insert("model".to_string(), JsonValue::String(model.clone()));
+        }
+        if self.mode != SessionMode::Interactive {
+            object.insert(
+                "mode".to_string(),
+                JsonValue::String(self.mode.as_str().to_string()),
+            );
         }
         Ok(JsonValue::Object(object))
     }

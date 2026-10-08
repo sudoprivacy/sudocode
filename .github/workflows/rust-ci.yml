@@ -87,6 +87,7 @@ jobs:
       profile: core
 
   release-mirror:
+    if: &standard_ci ${{ !inputs.render_performance }}
     name: release mirror recovery
     runs-on: ubuntu-latest
     defaults:
@@ -101,6 +102,7 @@ jobs:
         run: python3 e2e/release-mirror/run.py
 
   doc-source-of-truth:
+    if: *standard_ci
     name: docs source-of-truth
     runs-on: ubuntu-latest
     defaults:
@@ -115,6 +117,7 @@ jobs:
         run: python .github/scripts/check_doc_source_of_truth.py
 
   fmt:
+    if: *standard_ci
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
@@ -129,6 +132,7 @@ jobs:
         run: cargo fmt --all --check
 
   boundary-gate:
+    if: *standard_ci
     name: engine/renderer boundary gate
     runs-on: ubuntu-latest
     defaults:
@@ -193,6 +197,7 @@ jobs:
           echo "vendored vfs.proto matches upstream"
 
   test-workspace:
+    if: *standard_ci
     name: cargo test --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -231,6 +236,7 @@ jobs:
         run: cargo test --workspace --features engine-acp/mailbox
 
   terminal-resize:
+    if: *standard_ci
     name: Real terminal resize (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
@@ -286,6 +292,7 @@ jobs:
           if-no-files-found: warn
 
   a2a-live:
+    if: *standard_ci
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
     # The workflow default is `rust`; the harness lives at the repo root.
@@ -374,6 +381,7 @@ jobs:
         run: cargo check -p nexusd-cohost --features daemon,driver-ai --bin nexusd-cohost --locked
 
   one-nexus-vfs-pin:
+    if: *standard_ci
     name: one nexus-vfs pin
     runs-on: ubuntu-latest
     defaults:
@@ -435,6 +443,7 @@ jobs:
           echo "one nexus-vfs pin: $MANIFEST_TAGS ($LOCK_COMMITS)"
 
   bench-compile:
+    if: *standard_ci
     name: cargo bench --no-run (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -465,6 +474,7 @@ jobs:
           if-no-files-found: warn
 
   clippy-workspace:
+    if: *standard_ci
     name: cargo clippy --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -492,8 +502,9 @@ jobs:
     # can only be started by someone with write access, so the token secret is
     # never exposed to a fork's code.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      !inputs.render_performance &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -521,8 +532,9 @@ jobs:
   live-bash-process-tree:
     name: Live Bash process tree (${{ matrix.os }})
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      !inputs.render_performance &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     strategy:
       fail-fast: false
       matrix:

@@ -70,6 +70,8 @@ the separate status publisher executes trusted code only.
 Initial rollout: run Rust CI's optional `render_performance` dispatch on the
 candidate branch to validate hosted A/A calibration, merge the harness, then require
 the published `render performance` status in main's branch protection. The
+calibration dispatch skips ordinary CI jobs and live API calls; PR checks still run.
+The
 initial budgets are local regression limits and need hosted calibration before
 claiming reliable CI protection. A failed run is investigated; reruns do not
 replace its original evidence.

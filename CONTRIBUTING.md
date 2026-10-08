@@ -347,7 +347,8 @@ selecting an optimization; the macOS measurements do not establish that cause.
 
 ### Other acceptance checks
 
-Renderer changes use the shared [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
+Renderer changes must pass the required `render performance` status from the
+shared [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
 Discuss budget, baseline or measurement changes with a maintainer using the
 retained A/A and A/B evidence; get explicit approval before relaxing the gate.
 

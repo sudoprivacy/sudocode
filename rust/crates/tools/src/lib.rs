@@ -8254,6 +8254,7 @@ fn push_output_block(
             thinking,
             signature,
         } => {
+            events.push(AssistantEvent::ThinkingStart);
             events.push(AssistantEvent::Thinking {
                 thinking,
                 signature,
@@ -10827,14 +10828,14 @@ mod tests {
         );
 
         match &events[..] {
-            [runtime::AssistantEvent::Thinking {
+            [runtime::AssistantEvent::ThinkingStart, runtime::AssistantEvent::Thinking {
                 thinking,
                 signature,
             }] => {
                 assert_eq!(thinking, "weighing the options");
                 assert_eq!(signature.as_deref(), Some("sig-abc"));
             }
-            other => panic!("expected one signed thinking event, got {other:?}"),
+            other => panic!("expected a distinct signed thinking block, got {other:?}"),
         }
     }
 

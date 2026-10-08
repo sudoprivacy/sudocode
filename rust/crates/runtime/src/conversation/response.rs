@@ -243,6 +243,7 @@ fn observe_assistant_event(
 ) {
     if let Some(obs) = observer.as_deref_mut() {
         match &event {
+            AssistantEvent::ThinkingStart => {}
             AssistantEvent::Thinking { thinking, .. } => {
                 // A signature-only event carries
                 // no text; forwarding it would

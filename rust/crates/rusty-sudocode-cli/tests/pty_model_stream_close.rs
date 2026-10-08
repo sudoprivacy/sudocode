@@ -16,10 +16,13 @@ use serde_json::{json, Value};
 enum ResponseKind {
     Interrupted,
     Complete,
-    SplitTerminal,
-    LogicalTerminalOnly,
+    StopReasonOnly,
+    DelayedTerminal,
+    StopReasonKeepAlive,
     EmptyThenComplete,
     AlwaysEmpty,
+    EmptyThinkingThenComplete,
+    AlwaysEmptyThinking,
     InvalidRequestWithStatusDigits,
     MissingModel,
     RefusedStream,
@@ -41,6 +44,7 @@ struct StreamProvider {
     url: String,
     stopped: Arc<AtomicBool>,
     requests: Arc<AtomicUsize>,
+    terminal_connection_state: Arc<AtomicUsize>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -51,6 +55,9 @@ impl StreamProvider {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let stopped = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));
+        // 0: not checked yet; 1: connected when terminal tail is sent; 2: closed.
+        let terminal_connection_state = Arc::new(AtomicUsize::new(0));
+        let terminal_state = terminal_connection_state.clone();
         let stop = stopped.clone();
         let count = requests.clone();
         let worker = thread::spawn(move || {
@@ -96,36 +103,86 @@ impl StreamProvider {
                     let _ = socket.write_all(response.as_bytes());
                     continue;
                 }
-                let empty = matches!(kind, ResponseKind::AlwaysEmpty)
-                    || (matches!(kind, ResponseKind::EmptyThenComplete) && index == 0);
+                let empty = matches!(
+                    kind,
+                    ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
+                ) || (matches!(
+                    kind,
+                    ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
+                ) && index == 0);
                 let mut body = refusal_body(kind).unwrap_or_else(|| {
                     response_body(!matches!(kind, ResponseKind::Interrupted), empty)
                 });
-                if matches!(kind, ResponseKind::LogicalTerminalOnly) {
-                    // The codec may finish at stop_reason without exposing a
-                    // final frame. Exercise that contract without a timing race.
-                    body.truncate(body.rfind("event: message_stop").unwrap());
+                if empty
+                    && matches!(
+                        kind,
+                        ResponseKind::AlwaysEmptyThinking | ResponseKind::EmptyThinkingThenComplete
+                    )
+                {
+                    let boundary = body.find("event: message_delta").unwrap();
+                    body.insert_str(boundary, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n");
+                }
+                if matches!(
+                    kind,
+                    ResponseKind::StopReasonOnly | ResponseKind::StopReasonKeepAlive
+                ) {
+                    // The provider adapter stops reading after stop_reason. A
+                    // message_stop in a later packet is therefore never seen.
+                    let end = body.find("event: message_stop").unwrap();
+                    body.truncate(end);
                 }
                 // Promise bytes that never arrive: reqwest must raise a body
                 // read error, instead of accepting ordinary clean HTTP EOF.
-                let missing = if matches!(kind, ResponseKind::Interrupted | ResponseKind::Complete)
-                {
+                let missing = if matches!(
+                    kind,
+                    ResponseKind::Interrupted
+                        | ResponseKind::Complete
+                        | ResponseKind::StopReasonKeepAlive
+                ) {
                     128
                 } else {
                     0
                 };
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len() + missing);
-                if matches!(kind, ResponseKind::SplitTerminal) {
-                    // Real gateways can deliver the logical stop and its final
-                    // frame in separate reads. Keep the connection alive while
-                    // the CLI processes the first part, as observed live.
-                    let split = response.rfind("event: message_stop").unwrap();
-                    let _ = socket.write_all(&response.as_bytes()[..split]);
-                    let _ = socket.flush();
-                    thread::sleep(Duration::from_millis(250));
-                    let _ = socket.write_all(&response.as_bytes()[split..]);
-                } else {
-                    let _ = socket.write_all(response.as_bytes());
+                if matches!(kind, ResponseKind::DelayedTerminal) {
+                    let split = response.find("event: message_stop").unwrap();
+                    socket.write_all(response[..split].as_bytes()).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(250)))
+                        .unwrap();
+                    let closed = match socket.peek(&mut [0]) {
+                        Ok(0) => true,
+                        Err(error) => !matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ),
+                        _ => false,
+                    };
+                    terminal_state.store(if closed { 2 } else { 1 }, Ordering::SeqCst);
+                    let _ = socket.write_all(response[split..].as_bytes());
+                    continue;
+                }
+                let _ = socket.write_all(response.as_bytes());
+                if matches!(kind, ResponseKind::StopReasonKeepAlive) {
+                    // No terminal event or HTTP EOF: only the client's bounded
+                    // logical-stop recovery can let the user finish this turn.
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(100)))
+                        .unwrap();
+                    while !stop.load(Ordering::SeqCst) {
+                        match socket.peek(&mut [0]) {
+                            Ok(0) => break,
+                            Err(error)
+                                if !matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                ) =>
+                            {
+                                break
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         });
@@ -133,6 +190,7 @@ impl StreamProvider {
             url,
             stopped,
             requests,
+            terminal_connection_state,
             worker: Some(worker),
         }
     }
@@ -230,6 +288,12 @@ fn check_response(kind: ResponseKind) {
     );
     cli.set_default_timeout(common::at_least(Duration::from_secs(45)));
     let exit = cli.expect_eof().unwrap();
+    if matches!(
+        kind,
+        ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
+    ) {
+        assert_ne!(exit, 0, "two empty responses cannot complete a turn");
+    }
     // expect_eof waits for the child, not the PTY reader. ConPTY can deliver
     // the final diagnostic after the process has already exited.
     let screen = common::expect_screen(
@@ -247,15 +311,24 @@ fn check_response(kind: ResponseKind) {
     if matches!(
         kind,
         ResponseKind::Complete
-            | ResponseKind::SplitTerminal
-            | ResponseKind::LogicalTerminalOnly
+            | ResponseKind::StopReasonOnly
+            | ResponseKind::DelayedTerminal
+            | ResponseKind::StopReasonKeepAlive
             | ResponseKind::EmptyThenComplete
+            | ResponseKind::EmptyThinkingThenComplete
     ) {
         assert_eq!(exit, 0, "{screen}");
         assert!(screen.contains("STREAM_BODY_VERIFIED"), "{screen}");
+        if matches!(kind, ResponseKind::DelayedTerminal) {
+            assert_eq!(provider.terminal_connection_state.load(Ordering::SeqCst), 1,
+                "client must read a separately framed message_stop, not close immediately on stop_reason");
+        }
         assert_eq!(
             provider.requests.load(Ordering::SeqCst),
-            if matches!(kind, ResponseKind::EmptyThenComplete) {
+            if matches!(
+                kind,
+                ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
+            ) {
                 2
             } else {
                 1
@@ -287,7 +360,10 @@ fn check_response(kind: ResponseKind) {
             "a refusal must never be retried"
         );
         assert_refusal_trace(&log_path);
-    } else if matches!(kind, ResponseKind::AlwaysEmpty) {
+    } else if matches!(
+        kind,
+        ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
+    ) {
         assert_ne!(
             exit, 0,
             "two empty responses cannot complete a turn: {screen}"
@@ -355,13 +431,18 @@ fn terminal_response_survives_a_broken_http_body() {
 }
 
 #[test]
-fn logical_terminal_response_completes_before_a_delayed_stop_frame() {
-    check_response(ResponseKind::SplitTerminal);
+fn logical_stop_completes_without_a_coalesced_message_stop() {
+    check_response(ResponseKind::StopReasonOnly);
 }
 
 #[test]
-fn logical_terminal_response_completes_without_a_trailing_stop_frame() {
-    check_response(ResponseKind::LogicalTerminalOnly);
+fn logical_stop_drains_a_delayed_terminal_event_before_releasing_the_response() {
+    check_response(ResponseKind::DelayedTerminal);
+}
+
+#[test]
+fn logical_stop_with_a_nonterminating_body_has_bounded_recovery() {
+    check_response(ResponseKind::StopReasonKeepAlive);
 }
 
 #[test]
@@ -377,6 +458,16 @@ fn empty_terminal_response_retries_and_returns_the_answer() {
 #[test]
 fn repeated_empty_terminal_responses_fail_after_one_retry() {
     check_response(ResponseKind::AlwaysEmpty);
+}
+
+#[test]
+fn unsigned_empty_thinking_recovers_once_and_returns_the_answer() {
+    check_response(ResponseKind::EmptyThinkingThenComplete);
+}
+
+#[test]
+fn unsigned_empty_thinking_cannot_complete_a_turn_after_recovery() {
+    check_response(ResponseKind::AlwaysEmptyThinking);
 }
 
 #[test]

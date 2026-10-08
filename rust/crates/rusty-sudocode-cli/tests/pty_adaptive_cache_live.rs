@@ -46,7 +46,7 @@ impl Drop for Evidence {
             .collect();
         let shape: Vec<_> = events.iter().filter(|r| r["event"] == "request_debug").map(|r| {
             let body = &r["attributes"]["body"];
-            json!({"model":body["model"], "thinking":body["thinking"], "effort":body["output_config"]["effort"],
+            json!({"request_id":r["attributes"]["request_id"], "model":body["model"], "thinking":body["thinking"], "effort":body["output_config"]["effort"],
                 "max_tokens":body["max_tokens"], "messages":body["messages"].as_array().map(Vec::len),
                 "compaction":body.to_string().contains("Create a concise checkpoint"),
                 "metadata_hash":fingerprint(&body["metadata"]),
@@ -68,7 +68,14 @@ impl Drop for Evidence {
                 }
             }
         }
-        let report = json!({"requests":shape, "usage":usage});
+        let lifecycle: Vec<_> = events.iter().filter(|event| {
+            matches!(event["event"].as_str(), Some("request_started" | "request_succeeded" | "request_failed" | "response_usage"))
+        }).map(|event| {
+            let attributes = &event["attributes"];
+            json!({"event":event["event"], "request_id":attributes["request_id"],
+                "attempt":attributes["attempt"], "status":attributes["status"], "retryable":attributes["retryable"]})
+        }).collect();
+        let report = json!({"requests":shape, "lifecycle":lifecycle, "usage":usage});
         let _ = std::fs::write(destination, serde_json::to_vec_pretty(&report).unwrap());
     }
 }
@@ -91,15 +98,7 @@ fn transcript(dir: &Path) -> Option<PathBuf> {
 }
 
 fn requests(path: &Path) -> Vec<Value> {
-    std::fs::read_to_string(path)
-        .unwrap()
-        .lines()
-        .filter_map(|line| {
-            let row: Value = serde_json::from_str(line).ok()?;
-            (row["event"] == "request_debug" && row["attributes"]["body"]["messages"].is_array())
-                .then(|| row["attributes"]["body"].clone())
-        })
-        .collect()
+    common::request_evidence::accepted_messages(path)
 }
 
 fn turn(cli: &mut pty_expect::PtySession, prompt: &str) {

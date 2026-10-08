@@ -423,12 +423,16 @@ fn fixture(env: &TestEnv, capture: &Capture) -> std::path::PathBuf {
 }
 
 fn spawn(env: &TestEnv, path: &std::path::Path) -> PtySession {
-    let cli = env.spawn(&[
-        "--resume",
-        path.to_str().unwrap(),
-        "--permission-mode",
-        "danger-full-access",
-    ]);
+    let log = env.workspace_root().join("cache-prefix-requests.jsonl");
+    let cli = env.spawn_with_env(
+        &[
+            "--resume",
+            path.to_str().unwrap(),
+            "--permission-mode",
+            "danger-full-access",
+        ],
+        &[("SCODE_LOG_PATH", log.to_str().unwrap())],
+    );
     common::expect_input_line_cleared(&cli, WAIT, "resume ready");
     cli
 }
@@ -663,6 +667,19 @@ fn retry_and_automatic_compaction_preserve_session_fields() {
     let mut cli = spawn(&env, &path);
     turn(&mut cli, "Begin the next step.");
     capture.retry_next.store(true, Ordering::Relaxed);
+    turn(&mut cli, "Continue the retry step.");
+    let accepted = common::request_evidence::accepted_messages(
+        &env.workspace_root().join("cache-prefix-requests.jsonl"),
+    );
+    assert_eq!(
+        accepted.len(),
+        2,
+        "a failed HTTP attempt is not an extra completed model request"
+    );
+    assert_eq!(
+        accepted,
+        vec![capture.bodies()[0].clone(), capture.bodies()[2].clone()]
+    );
     capture.pressure_next.store(true, Ordering::Relaxed);
     turn(&mut cli, "Continue and checkpoint if needed.");
     turn(&mut cli, "Continue after the checkpoint.");

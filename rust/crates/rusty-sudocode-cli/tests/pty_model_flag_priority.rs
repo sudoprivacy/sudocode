@@ -15,14 +15,14 @@ use serde_json::{json, Value};
 
 const BUDGET: Duration = Duration::from_secs(120);
 
-fn setup(label: &str) -> TestEnv {
+fn setup(label: &str, model: &str) -> TestEnv {
     let env = TestEnv::new(label);
     if env.is_mock() {
         let path = env.config_home().join("sudocode.json");
         let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        config["models"][DEFAULT_MODEL] = json!({
-            "alias":DEFAULT_MODEL,"name":"Explicit default model fixture","input":["text"],
-            "providers":{"api-key":{"provider":"anthropic","model":DEFAULT_MODEL}}
+        config["models"][model] = json!({
+            "alias":model,"name":"Explicit model fixture","input":["text"],
+            "providers":{"api-key":{"provider":"anthropic","model":model}}
         });
         fs::write(path, config.to_string()).unwrap();
     }
@@ -91,7 +91,7 @@ fn task(env: &TestEnv, resume: bool) -> (String, String) {
     (prompt, nonce)
 }
 
-fn assert_requests(env: &TestEnv, minimum: usize, nonce: &str) {
+fn assert_requests(env: &TestEnv, model: &str, minimum: usize, nonce: &str) {
     let requests: Vec<Value> = fs::read_dir(request_directory(env))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -110,10 +110,7 @@ fn assert_requests(env: &TestEnv, minimum: usize, nonce: &str) {
     let mut results = std::collections::BTreeSet::new();
     let mut has_fixture_result = false;
     for request in requests {
-        assert_eq!(
-            request["model"], DEFAULT_MODEL,
-            "explicit flag changed on the wire"
-        );
+        assert_eq!(request["model"], model, "explicit flag changed on the wire");
         for message in request["messages"].as_array().unwrap() {
             let Some(blocks) = message["content"].as_array() else {
                 continue;
@@ -172,13 +169,13 @@ fn assert_answer(env: &TestEnv, nonce: &str) {
     );
 }
 
-fn turn(env: &TestEnv, resume: bool) -> String {
+fn turn(env: &TestEnv, model: &str, resume: bool) -> String {
     let auth = if env.is_live() { "proxy" } else { "api-key" };
     let mut args = vec![
         "--auth",
         auth,
         "--model",
-        DEFAULT_MODEL,
+        model,
         "--permission-mode",
         "read-only",
     ];
@@ -235,16 +232,31 @@ fn turn(env: &TestEnv, resume: bool) -> String {
 
 #[test]
 fn explicit_default_model_survives_repl_and_resume_with_conflicting_defaults() {
-    let env = setup("model-flag-resume");
-    let nonce = turn(&env, false);
-    assert_requests(&env, 2, &nonce);
-    let nonce = turn(&env, true);
-    assert_requests(&env, 4, &nonce);
+    let env = setup("model-flag-resume", DEFAULT_MODEL);
+    let nonce = turn(&env, DEFAULT_MODEL, false);
+    assert_requests(&env, DEFAULT_MODEL, 2, &nonce);
+    let nonce = turn(&env, DEFAULT_MODEL, true);
+    assert_requests(&env, DEFAULT_MODEL, 4, &nonce);
+}
+
+#[test]
+fn configured_model_reads_updated_file_after_resume() {
+    // Use a canonical wire model so the request assertion also checks routing.
+    // The compiled-default tests above remain independent of this live pin.
+    let model = std::env::var("SCODE_LIVE_MODEL")
+        .ok()
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+    let env = setup("configured-model-resume", &model);
+    let nonce = turn(&env, &model, false);
+    assert_requests(&env, &model, 2, &nonce);
+    let nonce = turn(&env, &model, true);
+    assert_requests(&env, &model, 4, &nonce);
 }
 
 #[test]
 fn explicit_default_model_reaches_headless_file_tools_with_conflicting_defaults() {
-    let env = setup("model-flag-headless");
+    let env = setup("model-flag-headless", DEFAULT_MODEL);
     let auth = if env.is_live() { "proxy" } else { "api-key" };
     let (prompt, nonce) = task(&env, false);
     let mut cli = spawn(
@@ -274,5 +286,5 @@ fn explicit_default_model_reaches_headless_file_tools_with_conflicting_defaults(
         "headless response lacks the file contents: {screen}"
     );
     assert_answer(&env, &nonce);
-    assert_requests(&env, 2, &nonce);
+    assert_requests(&env, DEFAULT_MODEL, 2, &nonce);
 }

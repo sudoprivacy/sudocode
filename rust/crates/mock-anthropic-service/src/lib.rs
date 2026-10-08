@@ -50,6 +50,7 @@ pub const COHOST_REPLY_BODY: &str = "PONG from the co-host";
 
 pub const UNIFIED_SEND_BODY: &str = "hello from unified send PARITY_SCENARIO:single_turn_text";
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+pub const PROSE_PREVIEW_DOC: &str = "ProseStart 中文 e\u{301} 💻 ordinary text with **bold words**, `inline code`, and a [link](https://example.com). More ordinary prose wraps across several rows while the input stays available. ProseDone.";
 
 /// Canned compaction summary returned by the `LlmCompactionRoundtrip`
 /// scenario. Follows the CC `<analysis>` + `<summary>` format that
@@ -178,6 +179,7 @@ impl Drop for MockAnthropicService {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
+    ProsePreview,
     StreamingText,
     SpinnerActivity,
     BashRenderFixture,
@@ -335,6 +337,7 @@ pub const DELAYED_TEXT_LATENCY: Duration = Duration::from_secs(3);
 impl Scenario {
     fn parse(value: &str) -> Option<Self> {
         match value.trim() {
+            "prose_preview" => Some(Self::ProsePreview),
             "streaming_text" => Some(Self::StreamingText),
             "spinner_activity" => Some(Self::SpinnerActivity),
             "bash_render_fixture" => Some(Self::BashRenderFixture),
@@ -416,6 +419,7 @@ impl Scenario {
 
     fn name(self) -> &'static str {
         match self {
+            Self::ProsePreview => "prose_preview",
             Self::StreamingText => "streaming_text",
             Self::SpinnerActivity => "spinner_activity",
             Self::BashRenderFixture => "bash_render_fixture",
@@ -609,6 +613,53 @@ async fn handle_connection(
             return Ok(());
         }
     }
+    if scenario == Scenario::ProsePreview && request.stream {
+        let control = prose_preview_control(&request);
+        let document = control["document"].as_str().unwrap_or(PROSE_PREVIEW_DOC);
+        let chunk_chars =
+            usize::try_from(control["chunk_chars"].as_u64().unwrap_or(12).clamp(1, 1024))
+                .unwrap_or(12);
+        let delay = Duration::from_millis(control["delay_ms"].as_u64().unwrap_or(20));
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await?;
+        let template = final_text_sse("");
+        let (prefix, rest) = template.split_once("event: content_block_delta").unwrap();
+        let (_, suffix) = rest.split_once("event: content_block_stop").unwrap();
+        socket.write_all(prefix.as_bytes()).await?;
+        if let Some(ready) = control["start_ready"].as_str() {
+            std::fs::write(ready, "stream connected")?;
+        }
+        if let Some(release) = control["start_release"].as_str() {
+            wait_for_fixture_release(release).await;
+        }
+        let chars: Vec<_> = document.chars().collect();
+        for chunk in chars.chunks(chunk_chars) {
+            let mut delta = String::new();
+            append_sse(
+                &mut delta,
+                "content_block_delta",
+                json!({
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": chunk.iter().collect::<String>()}
+                }),
+            );
+            socket.write_all(delta.as_bytes()).await?;
+            tokio::time::sleep(delay).await;
+        }
+        if let Some(ready) = control["ready"].as_str() {
+            std::fs::write(ready, "all deltas sent")?;
+        }
+        if let Some(release) = control["release"].as_str() {
+            wait_for_fixture_release(release).await;
+        }
+        socket
+            .write_all(format!("event: content_block_stop{suffix}").as_bytes())
+            .await?;
+        return Ok(());
+    }
     if scenario == Scenario::SpinnerActivity && request.stream {
         socket
             .write_all(
@@ -774,12 +825,23 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
         .map(|call| ConcurrencyCall {
             stream_wait_for: call["stream_wait_for"].as_str().map(str::to_string),
             stream_fail_after: call["stream_fail_after"].as_bool().unwrap_or(false),
-            stream_text_chunks: call["stream_text_chunks"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|text| text.as_str().expect("stream text chunk").to_string())
-                .collect(),
+            // File-backed chunks keep response markers out of the echoed prompt.
+            stream_text_chunks: call["stream_text_chunks_path"].as_str().map_or_else(
+                || {
+                    call["stream_text_chunks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|text| text.as_str().expect("stream text chunk").to_string())
+                        .collect()
+                },
+                |path| {
+                    serde_json::from_str(
+                        &std::fs::read_to_string(path).expect("stream text chunks file"),
+                    )
+                    .expect("stream text chunks JSON")
+                },
+            ),
             id: call["id"].as_str().expect("call id").to_string(),
             name: call["name"].as_str().expect("call name").to_string(),
             input: call["input"].clone(),
@@ -826,6 +888,35 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
     }
 
     None
+}
+
+/// Optional file-backed controls keep response text out of the echoed prompt.
+async fn wait_for_fixture_release(path: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !std::path::Path::new(path).exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn prose_preview_control(request: &MessageRequest) -> Value {
+    request
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|message| message.content.iter().rev())
+        .find_map(|block| {
+            let InputContentBlock::Text { text } = block else {
+                return None;
+            };
+            let (_, json) = text.split_once("PROSE_CONTROL:")?;
+            let control = serde_json::Deserializer::from_str(json)
+                .into_iter::<Value>()
+                .next()?
+                .ok()?;
+            let path = control["path"].as_str()?;
+            serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+        })
+        .unwrap_or(Value::Null)
 }
 
 fn is_cache_safe_compaction(request: &MessageRequest) -> bool {
@@ -1511,6 +1602,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             }
         }
 
+        Scenario::ProsePreview => markdown_showcase_sse(PROSE_PREVIEW_DOC),
         Scenario::SpinnerActivity => spinner_activity_stream()
             .into_iter()
             .map(|(_, chunk)| chunk)
@@ -2125,6 +2217,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             plan_fixture_response(request, scenario)
         }
 
+        Scenario::ProsePreview => text_message_response("msg_prose_preview", PROSE_PREVIEW_DOC),
         Scenario::SpinnerActivity => text_message_response(
             "msg_activity",
             "progress progress progress progress progress resumed",
@@ -2874,6 +2967,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
 
 fn request_id_for(scenario: Scenario) -> &'static str {
     match scenario {
+        Scenario::ProsePreview => "req_prose_preview",
         Scenario::StreamingText => "req_streaming_text",
         Scenario::SpinnerActivity => "req_spinner_activity",
         Scenario::BashRenderFixture => "req_bash_render_fixture",

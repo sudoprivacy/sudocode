@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "baseline_commit": "82a99dd262c746a1872ccfaf0ea46d7fe4bd6754",
+  "rounds": { "calibration": 5, "comparison": 7 },
+  "sampling": { "input": 60, "resize": 40, "cancel": 20 },
+  "profiles": {
+    "core": ["short", "long", "cap", "markdown", "foreground", "background"],
+    "stress": ["short", "long", "cap", "markdown", "foreground", "background", "repeated"]
+  },
+  "cases": {
+    "short": { "kind": "prose", "bytes": 2300, "turns": 1 },
+    "long": { "kind": "prose", "bytes": 8192, "turns": 1 },
+    "cap": { "kind": "prose", "bytes": 12288, "turns": 1 },
+    "markdown": { "kind": "markdown", "bytes": 2300, "turns": 1 },
+    "foreground": { "kind": "foreground", "bytes": 0, "turns": 1, "batches": 10 },
+    "background": { "kind": "background", "bytes": 0, "turns": 1, "batches": 10 },
+    "repeated": { "kind": "prose", "bytes": 2300, "turns": 30 }
+  },
+  "contracts": { "idle_bytes": 0, "idle_frames": 0 },
+  "metrics": {
+    "input_wait_p50_ms": { "limit": 20, "relative": 0.2, "absolute": 3 },
+    "input_wait_p95_ms": { "limit": 50, "relative": 0.2, "absolute": 5 },
+    "input_stream_p50_ms": { "limit": 20, "relative": 0.2, "absolute": 3 },
+    "input_stream_p95_ms": { "limit": 50, "relative": 0.2, "absolute": 5 },
+    "input_history_p50_ms": { "limit": 20, "relative": 0.2, "absolute": 3 },
+    "input_history_p95_ms": { "limit": 50, "relative": 0.2, "absolute": 5 },
+    "first_visible_ms": { "limit": 3000, "relative": 0.2, "absolute": 100 },
+    "cpu_ms": { "limit": 800, "relative": 0.2, "absolute": 30 },
+    "idle_cpu_ms": { "limit": 50, "relative": 0.2, "absolute": 20 },
+    "rss_peak_mib": { "limit": 80, "relative": 0.15, "absolute": 3 },
+    "rss_after_mib": { "limit": 64, "relative": 0.15, "absolute": 3 },
+    "rss_growth_mib": { "limit": 16, "relative": 0.2, "absolute": 3 },
+    "wire_kib": { "limit": 500, "relative": 0.2, "absolute": 8 },
+    "resize_ms": { "limit": 100, "relative": 0.2, "absolute": 10 },
+    "paste_ms": { "limit": 100, "relative": 0.2, "absolute": 10 },
+    "cancel_ms": { "limit": 200, "relative": 0.2, "absolute": 20 }
+  }
+}

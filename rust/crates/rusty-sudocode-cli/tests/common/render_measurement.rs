@@ -3,6 +3,15 @@ use super as common;
 use pty_expect::PtySession;
 use std::time::{Duration, Instant};
 
+/// Fixed real-shell producer shared by manual and CI rendering measurements.
+pub fn background_output_command(batches: Option<u64>) -> String {
+    let condition = batches.map_or_else(
+        || "! -f release".into(),
+        |count| format!("$batch -lt {count}"),
+    );
+    format!("batch=0; while [ {condition} ]; do i=0; while [ $i -lt 200 ]; do echo PERFORMANCE_OUTPUT_LINE_0123456789; i=$((i+1)); done; batch=$((batch+1)); sleep 0.2; done; touch producer-ready; while [ ! -f release ]; do sleep 0.05; done")
+}
+
 pub fn measure_keys(sess: &mut PtySession, phase: &str) {
     let mut expected = String::new();
     let mut samples = Vec::new();

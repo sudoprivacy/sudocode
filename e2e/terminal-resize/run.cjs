@@ -1,78 +1,13 @@
-// Use the real terminal's reflow and retain its complete scrollback buffer.
+// Scenario assertions share the same PTY, terminal model and trace lifecycle.
 const path = require('node:path');
 const fs = require('node:fs');
-const os = require('node:os');
 const assert = require('node:assert/strict');
-const modules = process.env.SCODE_TERMINAL_MODULES;
-const host = name => require(modules ? path.join(modules, name) : name);
-const pty = host('node-pty');
-const { Terminal } = host('@xterm/headless');
-const { Unicode11Addon } = host('@xterm/addon-unicode11');
+const { createHost } = require('./host.cjs');
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-assert(['bundled', 'system'].includes(config.backend), 'unknown ConPTY backend');
 const initial = config.scenario === 'parallel' ? { cols: 100, rows: 80 }
   : config.scenario === 'a2a' ? { cols: 100, rows: 50 } : { cols: 120, rows: 24 };
-const terminal = new Terminal({
-  ...initial, scrollback: 10000, allowProposedApi: true,
-  reflowCursorLine: config.backend !== 'system',
-  windowsPty: process.platform === 'win32'
-    ? { backend: 'conpty', buildNumber: Number(os.release().split('.')[2]) } : undefined,
-});
-terminal.loadAddon(new Unicode11Addon());
-terminal.unicode.activeVersion = '11';
-console.log(JSON.stringify({ platform: process.platform, os: os.release(),
-  node: process.versions.node, electron: process.versions.electron,
-  pty: host('node-pty/package.json').version,
-  xterm: host('@xterm/headless/package.json').version, backend: config.backend }));
-const env = { ...process.env, SUDO_CODE_CONFIG_HOME: config.configHome,
-  HOME: path.join(config.root, 'home'), TERM: 'xterm-256color', COLORTERM: 'truecolor',
-  SUDOCODE_INTERRUPT_QUEUE_MODE: 'queue', SUDOCODE_TODO_STORE: config.todos,
-  SUDOCODE_MAX_TOOL_USE_CONCURRENCY: '10' };
-for (const key of ['ELECTRON_RUN_AS_NODE', 'NO_COLOR', 'SCODE_GLOBAL_CONFIG_DIR', 'SCODE_PROJECT_CONFIG_DIR'])
-  delete env[key];
-const child = pty.spawn(config.binary, config.args, { cwd: config.root, env,
-  ...initial, useConpty: true, useConptyDll: config.backend === 'bundled' });
-const wire = [];
-let pending = 0, lastData = Date.now(), exited = false, exitCode;
-child.onData(data => {
-  wire.push({ data, time: Date.now() });
-  pending++; lastData = Date.now();
-  terminal.write(data, () => pending--);
-});
-terminal.onData(data => child.write(data));
-if (process.platform === 'win32') terminal.parser.registerCsiHandler({ final: 'c' }, params => {
-  if (!params.length || (params.length === 1 && params[0] === 0)) {
-    child.write('\x1b[?61;4c'); return true;
-  }
-  return false;
-});
-child.onExit(event => { exited = true; exitCode = event.exitCode; });
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function snapshot() {
-  const buffer = terminal.buffer.active;
-  return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i).translateToString(true)).join('\n');
-}
-async function settle(predicate, notBefore = 0) {
-  const deadline = Date.now() + 20000;
-  while (Date.now() < deadline) {
-    await sleep(25);
-    if (!pending && lastData >= notBefore && Date.now() - lastData >= 300
-      && predicate(snapshot())) return;
-    assert(!exited, `scode exited before the expected frame\n${snapshot()}`);
-  }
-  throw new Error(`terminal did not settle\n${snapshot()}`);
-}
-async function frame(predicate, notBefore = 0) {
-  // A running turn animates continuously. Wait for parsed output satisfying
-  // the complete frame condition without requiring that animation to stop.
-  const deadline = Date.now() + 45000;
-  while (Date.now() < deadline) {
-    await sleep(25);
-    if (!pending && lastData >= notBefore && predicate(snapshot())) return;
-    assert(!exited, `scode exited before the expected frame\n${snapshot()}`);
-  }
-  throw new Error(`expected terminal frame was not drawn\n${snapshot()}`);
-}
+const host = createHost({ ...initial, ...config });
+const { child, terminal, state, sleep, snapshot, viewport, settle, frame, resize, close } = host;
 function check(label) {
   const text = snapshot();
   for (const marker of ['turn 1', '1 todos', 'ResizeCompletedTask', 'ResizeHistorySentinel', 'DraftSurvivesResize'])
@@ -81,11 +16,6 @@ function check(label) {
     assert.equal(text.split('\n').filter(line => line.trim() === `Earlier history line ${i}`).length,
       1, `${label}: history ${i} was lost or duplicated\n${text}`);
   console.log(JSON.stringify({ label, history: 70, chrome: 1, draft: true }));
-}
-function resize(cols, rows) {
-  // Keep resize and tracing free of synchronous disk I/O.
-  wire.push({ resize: [cols, rows], time: Date.now() });
-  terminal.resize(cols, rows); child.resize(cols, rows);
 }
 async function queuedPeer() {
   await settle(text => text.includes('❯'));
@@ -151,7 +81,11 @@ async function parallelTools() {
 }
 async function run() {
   try {
-    if (config.scenario === 'a2a') {
+    fs.mkdirSync(config.logRoot, { recursive: true });
+    if (config.scenario === 'performance') {
+      await require('./performance.cjs').run(host, config);
+
+    } else if (config.scenario === 'a2a') {
       await queuedPeer();
     } else if (config.scenario === 'parallel') {
       await parallelTools();
@@ -179,25 +113,15 @@ async function run() {
     await settle(text => text.includes('❯ /exit'));
     child.write('\r');
     for (let i = 0; i < 250; i++) {
-      if (exitCode === undefined && process.platform === 'win32') exitCode = child._agent?.exitCode;
-      if (exited && exitCode !== undefined && !pending) break;
+      if (state.exitCode === undefined && process.platform === 'win32') state.exitCode = child._agent?.exitCode;
+      if (state.exited && state.exitCode !== undefined && !state.pending) break;
       await sleep(20);
     }
-    assert(exited, 'scode did not exit');
-    assert.equal(exitCode, 0);
+    assert(state.exited, 'scode did not exit');
+    assert.equal(state.exitCode, 0);
     console.log('SCODE_XTERM_RESIZE_PASS');
   } finally {
-    // Even a failed assertion should let the owned REPL release ConPTY.
-    // Closing an active native terminal immediately can hang host teardown.
-    if (!exited) {
-      child.write('\x15/exit\r');
-      for (let i = 0; i < 100 && !exited; i++) await sleep(20);
-    }
-    if (!exited) child.kill();
-    fs.mkdirSync(config.logRoot, { recursive: true });
-    fs.writeFileSync(path.join(config.logRoot, 'wire.jsonl'), wire.map(row => JSON.stringify(row)).join('\n'));
-    fs.writeFileSync(path.join(config.logRoot, 'terminal.txt'), snapshot());
-    terminal.dispose();
+    await close();
   }
 }
 run().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });

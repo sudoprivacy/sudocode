@@ -347,6 +347,10 @@ selecting an optimization; the macOS measurements do not establish that cause.
 
 ### Other acceptance checks
 
+Renderer changes use the shared [release performance gate](e2e/terminal-resize/README.md#release-performance-gate).
+Discuss budget, baseline or measurement changes with a maintainer using the
+retained A/A and A/B evidence; get explicit approval before relaxing the gate.
+
 The daily `Model Compatibility` workflow discovers gateway models and runs
 live PTYs in batches of at most eight, with three batches running concurrently.
 Each process has one 90-second deadline. A pass requires exit 0 and the expected

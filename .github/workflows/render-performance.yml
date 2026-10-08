@@ -1,0 +1,177 @@
+name: Rendering performance
+
+on:
+  # The workflow and evaluator run from the protected base. Candidate code runs
+  # only in the measurement job, with read permissions and no persisted token.
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      profile:
+        type: choice
+        options: [core, stress]
+        default: core
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        default: core
+  schedule:
+    - cron: '20 17 * * *'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: render-performance-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: Rendering benchmark policy
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      baseline: ${{ steps.policy.outputs.baseline }}
+      head: ${{ steps.policy.outputs.head }}
+      is_needed: ${{ steps.policy.outputs.is_needed }}
+    steps:
+      - name: Mark the candidate gate pending
+        if: github.event_name == 'pull_request_target'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha: context.payload.pull_request.head.sha,
+              context: 'render performance', state: 'pending',
+              description: 'Waiting for policy, A/A calibration and A/B measurements',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/github-script@v7
+        id: policy
+        with:
+          script: |
+            await require('./e2e/terminal-resize/policy-review.cjs')({
+              github, context, core, root: process.cwd(), output: 'selected-policy',
+            });
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rendering-policy
+          path: selected-policy
+          if-no-files-found: error
+
+  measure:
+    name: Release rendering A/A and A/B
+    needs: policy
+    if: needs.policy.outputs.is_needed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ (github.event_name == 'schedule' || inputs.profile == 'stress') && 180 || 120 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.policy.outputs.baseline }}
+          path: baseline
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ needs.policy.outputs.head }}
+          path: candidate
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: rendering-policy
+          path: selected-policy
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # No shared cache: this job builds untrusted PR code. Keep write tokens
+      # and the status publisher in separate jobs with no candidate execution.
+      - name: Install the shared terminal observer
+        run: npm ci --prefix trusted/e2e/terminal-resize
+      - name: Compile both releases and the trusted fixture before timing
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/render-build
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path baseline/rust/Cargo.toml -p rusty-sudocode-cli
+          cp "$CARGO_TARGET_DIR/release/scode" "$RUNNER_TEMP/scode-baseline"
+          cargo build --locked --release --manifest-path candidate/rust/Cargo.toml -p rusty-sudocode-cli
+          cp "$CARGO_TARGET_DIR/release/scode" "$RUNNER_TEMP/scode-candidate"
+          cargo test --locked --release --manifest-path trusted/rust/Cargo.toml -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json > "$RUNNER_TEMP/render-driver.jsonl"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          messages = [json.loads(line) for line in Path(os.environ['RUNNER_TEMP'], 'render-driver.jsonl').read_text().splitlines()]
+          drivers = [item['executable'] for item in messages if item.get('reason') == 'compiler-artifact' and item.get('target', {}).get('name') == 'pty_render_performance' and item.get('executable')]
+          assert len(drivers) == 1, drivers
+          with open(os.environ['GITHUB_ENV'], 'a') as stream:
+              stream.write('SCODE_RENDER_DRIVER=' + drivers[0] + '\n')
+          PY
+          rustc --version > "$RUNNER_TEMP/render-toolchain.txt"
+      - name: Calibrate and compare fixed workloads
+        env:
+          RENDER_PROFILE: ${{ github.event_name == 'schedule' && 'stress' || inputs.profile || 'core' }}
+        run: |
+          python3 trusted/e2e/terminal-resize/benchmark.py \
+            --driver "$SCODE_RENDER_DRIVER" \
+            --base "$RUNNER_TEMP/scode-baseline" \
+            --candidate "$RUNNER_TEMP/scode-candidate" \
+            --policy selected-policy/performance-policy.json \
+            --profile "$RENDER_PROFILE" --output "$RUNNER_TEMP/render-results"
+      - name: Preserve partial measurements and approval evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendering-measurements
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/render-results
+            ${{ runner.temp }}/render-toolchain.txt
+            selected-policy
+          if-no-files-found: error
+
+  status:
+    name: Publish rendering gate
+    if: always() && github.event_name == 'pull_request_target'
+    needs: [policy, measure]
+    runs-on: ubuntu-24.04
+    permissions:
+      statuses: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          POLICY_RESULT: ${{ needs.policy.result }}
+          MEASURE_RESULT: ${{ needs.measure.result }}
+          IS_NEEDED: ${{ needs.policy.outputs.is_needed }}
+        with:
+          script: |
+            const success = process.env.POLICY_RESULT === 'success'
+              && (process.env.MEASURE_RESULT === 'success'
+                || (process.env.IS_NEEDED === 'false' && process.env.MEASURE_RESULT === 'skipped'));
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha: context.payload.pull_request.head.sha,
+              context: 'render performance', state: success ? 'success' : 'failure',
+              description: success ? (process.env.IS_NEEDED === 'false'
+                ? 'No runtime or benchmark changes' : 'Release A/A calibration and A/B budgets passed')
+                : 'Policy, calibration or performance failed; inspect artifacts',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });

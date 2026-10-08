@@ -141,20 +141,26 @@ fn roundtrip(queue: bool, width: u16) {
             "prompt pasted",
         );
     } else {
-        std::fs::write(
-            env.workspace_root().join("spacing-instructions.md"),
-            &prompt,
-        )
-        .unwrap();
+        let instructions = env.workspace_root().join("spacing-instructions.md");
+        std::fs::write(&instructions, &prompt).unwrap();
         let input = if env.is_mock() {
-            "PARITY_SCENARIO:transcript_spacing"
+            "PARITY_SCENARIO:transcript_spacing".to_string()
         } else {
-            "Read spacing-instructions.md and follow its instructions."
+            let path = instructions.to_string_lossy().replace('\\', "/");
+            format!("Read the local file at {path:?} with read_file and follow its instructions.")
         };
-        sess.send(input).unwrap();
-        common::expect_input_line(&sess, input, common::DEFAULT_TIMEOUT, "sync input");
+        // Anchor the file instead of letting the provider guess a workspace.
+        // Keep the input assertion on one row, then restore the tested width
+        // before checking the live transcript and its replay.
+        let input_width = u16::try_from(input.chars().count() + 8).unwrap().max(width);
+        sess.resize(120, input_width).unwrap();
+        sess.send(&input).unwrap();
+        common::expect_input_line(&sess, &input, common::DEFAULT_TIMEOUT, "sync input");
     }
     sess.send("\r").unwrap();
+    if !queue {
+        sess.resize(120, width).unwrap();
+    }
     common::expect_screen_settled(
         &sess,
         |s| s.contains("Spacing end.") && s.contains("ctx "),

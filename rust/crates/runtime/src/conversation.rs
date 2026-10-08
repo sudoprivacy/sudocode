@@ -1483,7 +1483,7 @@ where
                 | AssistantEvent::MessageStop => {}
             }
         }
-        flush_text_block(&mut text, &mut blocks);
+        finish_assistant_blocks(&mut text, &mut blocks);
 
         // Append an [interrupted] marker to the assistant message so the
         // model knows this turn was cancelled.  This stays attached to the
@@ -2893,7 +2893,7 @@ fn build_assistant_message(
         }
     }
 
-    flush_text_block(&mut text, &mut blocks);
+    finish_assistant_blocks(&mut text, &mut blocks);
 
     if !finished {
         return Err(RuntimeError::new(
@@ -3079,6 +3079,16 @@ fn start_thinking_block(text: &mut String, blocks: &mut Vec<ContentBlock>) {
     blocks.push(ContentBlock::Thinking {
         thinking: String::new(),
         signature: None,
+    });
+}
+
+fn finish_assistant_blocks(text: &mut String, blocks: &mut Vec<ContentBlock>) {
+    flush_text_block(text, blocks);
+    // A start frame is a boundary, not content. Keep signed empty blocks and
+    // readable summaries while dropping placeholders that never received data.
+    blocks.retain(|block| {
+        !matches!(block, ContentBlock::Thinking { thinking, signature }
+            if thinking.is_empty() && signature.as_deref().is_none_or(str::is_empty))
     });
 }
 

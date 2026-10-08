@@ -21,6 +21,8 @@ enum ResponseKind {
     StopReasonKeepAlive,
     EmptyThenComplete,
     AlwaysEmpty,
+    EmptyThinkingThenComplete,
+    AlwaysEmptyThinking,
     InvalidRequestWithStatusDigits,
     MissingModel,
     RefusedStream,
@@ -101,11 +103,25 @@ impl StreamProvider {
                     let _ = socket.write_all(response.as_bytes());
                     continue;
                 }
-                let empty = matches!(kind, ResponseKind::AlwaysEmpty)
-                    || (matches!(kind, ResponseKind::EmptyThenComplete) && index == 0);
+                let empty = matches!(
+                    kind,
+                    ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
+                ) || (matches!(
+                    kind,
+                    ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
+                ) && index == 0);
                 let mut body = refusal_body(kind).unwrap_or_else(|| {
                     response_body(!matches!(kind, ResponseKind::Interrupted), empty)
                 });
+                if empty
+                    && matches!(
+                        kind,
+                        ResponseKind::AlwaysEmptyThinking | ResponseKind::EmptyThinkingThenComplete
+                    )
+                {
+                    let boundary = body.find("event: message_delta").unwrap();
+                    body.insert_str(boundary, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n");
+                }
                 if matches!(
                     kind,
                     ResponseKind::StopReasonOnly | ResponseKind::StopReasonKeepAlive
@@ -272,6 +288,12 @@ fn check_response(kind: ResponseKind) {
     );
     cli.set_default_timeout(common::at_least(Duration::from_secs(45)));
     let exit = cli.expect_eof().unwrap();
+    if matches!(
+        kind,
+        ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
+    ) {
+        assert_ne!(exit, 0, "two empty responses cannot complete a turn");
+    }
     // expect_eof waits for the child, not the PTY reader. ConPTY can deliver
     // the final diagnostic after the process has already exited.
     let screen = common::expect_screen(
@@ -293,6 +315,7 @@ fn check_response(kind: ResponseKind) {
             | ResponseKind::DelayedTerminal
             | ResponseKind::StopReasonKeepAlive
             | ResponseKind::EmptyThenComplete
+            | ResponseKind::EmptyThinkingThenComplete
     ) {
         assert_eq!(exit, 0, "{screen}");
         assert!(screen.contains("STREAM_BODY_VERIFIED"), "{screen}");
@@ -302,7 +325,10 @@ fn check_response(kind: ResponseKind) {
         }
         assert_eq!(
             provider.requests.load(Ordering::SeqCst),
-            if matches!(kind, ResponseKind::EmptyThenComplete) {
+            if matches!(
+                kind,
+                ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
+            ) {
                 2
             } else {
                 1
@@ -334,7 +360,10 @@ fn check_response(kind: ResponseKind) {
             "a refusal must never be retried"
         );
         assert_refusal_trace(&log_path);
-    } else if matches!(kind, ResponseKind::AlwaysEmpty) {
+    } else if matches!(
+        kind,
+        ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
+    ) {
         assert_ne!(
             exit, 0,
             "two empty responses cannot complete a turn: {screen}"
@@ -429,6 +458,16 @@ fn empty_terminal_response_retries_and_returns_the_answer() {
 #[test]
 fn repeated_empty_terminal_responses_fail_after_one_retry() {
     check_response(ResponseKind::AlwaysEmpty);
+}
+
+#[test]
+fn unsigned_empty_thinking_recovers_once_and_returns_the_answer() {
+    check_response(ResponseKind::EmptyThinkingThenComplete);
+}
+
+#[test]
+fn unsigned_empty_thinking_cannot_complete_a_turn_after_recovery() {
+    check_response(ResponseKind::AlwaysEmptyThinking);
 }
 
 #[test]

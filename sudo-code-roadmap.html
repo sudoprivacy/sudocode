@@ -164,7 +164,9 @@
   <ol>
     <li><a href="#what-sudo-code-is">What sudo code is</a></li>
     <li><a href="#north-star">North star</a></li>
-    <li><a href="#goal-1">Goal 1 · Lock the baseline (e2e ≥ 90%)</a></li>
+    <li><a href="#goal-1">Goal 1 · Lock the baseline (e2e ≥ 90%)</a>
+      <ul><li><a href="#compaction-budget-validation">会话压缩预算与验收技术方案</a></li></ul>
+    </li>
     <li><a href="#goal-2">Goal 2 · cc/codex parity</a></li>
     <li><a href="#goal-3">Goal 3 · Ship features real users miss</a></li>
     <li><a href="#goal-4">Goal 4 · Be a good unit in the copilot-worker topology</a></li>
@@ -950,6 +952,328 @@ semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
   guards in the same PR as the first gated context (likely VIM edit mode
   or interactive tool confirmation overlay).
 </div>
+
+<section id="compaction-budget-validation" lang="zh-CN">
+<h3>会话压缩预算与验收技术方案</h3>
+
+<p class="meta">状态：核心修复已在 <code>feat/compaction-budget-validation</code> 实现，本地受控与渲染性能验证通过；真实模型续接与托管 CI 验收尚未完成，尚未合并或发布。目标已确认：压后通常保留原历史的 30%～50%，仅达标候选可提交。代码基线：main <code>f6e724b1</code>；方案更新日期 2026 年 10 月 10 日。</p>
+
+<p>修复的核心是把“摘要比删掉的历史短一点”改成“整个压后历史达到明确目标，并满足下一次请求预算”。一次压缩应尽量将完整历史压到原来的 30%～50%；成功的上限是 50%，30% 是理想规划值，低于 30% 也可达标。摘要、保留消息、续接说明和 Todo 都计入压后历史。手动、自动和超窗恢复共用严格合同：未达标时有界重试，最终仍未达标则不提交候选，保留原历史并报告失败原因。</p>
+
+<p>首版沿用现有 LLM 摘要、最近消息保护、工具结果剪裁、归档和事件通道，统一手动与自动压缩的验收合同。增加动态摘要预算、同次操作内的有界重试、完整候选校验和准确的状态展示。OpenAI 原生 compaction 接入作为后续 provider 适配，不纳入此次修复。</p>
+
+<nav aria-label="压缩方案章节">
+  <p><a href="#compact-current">现状与根因</a> · <a href="#compact-contract">目标与预算公式</a> · <a href="#compact-summary-budget">摘要与保留策略</a> · <a href="#compact-flow">执行流程</a> · <a href="#compact-results">结果合同</a> · <a href="#compact-commit">持久化与取消</a> · <a href="#compact-skip">重复压缩</a> · <a href="#compact-report">报告与显示</a> · <a href="#compact-billing">尝试计费</a> · <a href="#compact-changes">改动范围</a> · <a href="#compact-acceptance">验收与发布</a></p>
+</nav>
+
+<h4 id="compact-current">现状与根因</h4>
+
+<table>
+  <thead><tr><th>当前行为</th><th>造成的问题</th><th>此次调整</th></tr></thead>
+  <tbody>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/runtime/src/compact.rs#L305">摘要校验</a>只要求带续接说明的替换估算小于被移除部分。</td><td>减少 1 个估算 token 也能通过；没有完整历史的目标比例。</td><td>按操作开始时的完整历史计算目标，校验最终组装的候选。</td></tr>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/runtime/src/conversation.rs#L2180">尾部预算</a>取窗口的 16%、安全历史预算的一半、当前历史的五分之一中的最小值；至少保留 4 条消息，工具交互边界可扩大尾部。</td><td>这个预算只控制保留尾部，不能保证摘要加尾部达到压缩目标。</td><td>首版保留保护规则，但让摘要与实际尾部共用最终历史预算。</td></tr>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/runtime/src/conversation.rs#L2493">自动压缩</a>剪裁工具结果后，只要历史低于安全预算就结束。</td><td>恢复了请求空间，却可能仍保留绝大部分历史。</td><td>剪裁同时满足比例目标与安全预算才直接达标，否则继续摘要。</td></tr>
+    <tr><td>摘要提示通常指导 8K，硬输出上限为 12K；cache-safe 路径还可能预留 thinking。</td><td>固定摘要长度没有随当前历史大小及实际剩余空间收紧。</td><td>保留 8K 软指导和 12K 可见摘要上限，增加更紧的动态预算。</td></tr>
+    <tr><td>部分 CLI 状态仍读取压前的 turn usage；固定开销估算采用冷工具目录。</td><td>压缩后占用可能不刷新；已发现工具实际展开后，预算可能偏小。</td><td>使用活跃上下文的完整请求估算，并复用实际工具选择逻辑。</td></tr>
+  </tbody>
+</table>
+
+<p>上述三项压缩机制在 <code>v0.2.16</code> 与本次 main 基线中都存在。Apeiron 的内网、互联网和本地镜像配置目前固定该版本，但实际部署中的二进制版本仍须在发布验收时核对。现有覆盖表中的 Covered 表示已有压缩能力与回归，不表示下文的新比例合同已经实现。</p>
+
+<h4 id="compact-codex">Codex 机制与本项目标准</h4>
+
+<p><a href="https://developers.openai.com/api/docs/guides/compaction">OpenAI compaction 官方文档</a>描述了服务端压缩状态，其中原生压缩项是不透明的加密状态；它与 scode 的可读文本 checkpoint 不是同一载体。<a href="https://learn.chatgpt.com/docs/config-file/config-reference">Codex 配置参考</a>提供模型相关的自动触发设置，<a href="https://developers.openai.com/api/reference/resources/responses/methods/compact">Responses compact 接口</a>返回压缩后的完整窗口，后续请求应使用该返回窗口。</p>
+
+<p>官方资料没有规定统一的压后留存比例、最低缩减率或语义无损评分。原生接口的 usage 表示压缩调用用量，不能直接当作压后上下文大小。因此 30%～50% 是本项目的工程目标；此次方案参考其预算管理与上下文续接原则，不宣称复制 Codex 的内部实现。</p>
+
+<h4 id="compact-contract">目标与预算公式</h4>
+
+<p>所有比例比较使用同一个历史估算器。当前实现主要采用文本字节数除以 4 的近似计算，因此下文数字均为估算 token；provider 实际输入、输出和计费用量单独记录。估算达标与真实请求被 provider 接受是两项验收。</p>
+
+<table>
+  <thead><tr><th>符号</th><th>定义</th></tr></thead>
+  <tbody>
+    <tr><td><code>H0</code></td><td>本次操作开始时，整个活跃历史的估算量；在工具剪裁前取值，包含旧摘要、受保护尾部及已经加入历史的用户输入。整个操作保持该基数。</td></tr>
+    <tr><td><code>W</code></td><td>实际 provider 路由与 wire model 对应的上下文窗口。</td></tr>
+    <tr><td><code>R</code></td><td>下一次任务请求实际要求的输出预留；按 provider 的输出及 thinking/reasoning 规则计算。</td></tr>
+    <tr><td><code>O</code></td><td>该候选下一次实际请求携带的 system、instructions 与工具 schema 固定开销估算。工具集合按候选内容、已发现工具与 reveal 状态选择。</td></tr>
+    <tr><td><code>B</code></td><td>现有模型相关上下文安全 buffer；保留现有缩放策略。</td></tr>
+    <tr><td><code>P</code></td><td>尚未加入历史的新输入预留。preflight 扣一次；in-turn 或 post-turn 输入已在历史中时为 0。</td></tr>
+    <tr><td><code>L0</code></td><td>开始快照 S0 对应的安全历史预算，使用原请求的实际固定开销计算并冻结；仅用于判断原历史是否已经超预算。</td></tr>
+    <tr><td><code>Ha</code></td><td>最终完整候选历史的估算量，包含摘要、保留尾部、续接 framing、Todo 和其他实际注入内容。</td></tr>
+  </tbody>
+</table>
+
+<pre><code>L = W − R − O − B − P                  安全历史预算
+N = floor(0.50 × H0)                    正常比例上限
+T = min(N, L)                           本次正常验收上限
+I = min(floor(0.30 × H0), T)             理想规划值
+
+正常达标：Ha ≤ T
+完整请求预算：Ha + O + P + R + B ≤ W
+留存比例：Ha / H0
+节省比例：(H0 − Ha) / H0</code></pre>
+
+<p>预算运算使用有符号中间值或 checked arithmetic，<code>L ≤ 0</code> 时不能生成或接受该候选，避免饱和减法掩盖“固定开销已经用完窗口”。<code>H0 = 0</code> 时显示“没有可压缩历史”，不计算百分比。候选的实际工具展开等请求形态变化时重新计算 <code>O/L/T/I</code>，<code>H0</code> 与 <code>L0</code> 始终不变；源历史、待发输入或冻结配置被用户改变时，按提交边界终止该 run，不能拿新源沿用旧基数。</p>
+
+<p>目标比较的是完整历史，不包括固定 system/tool 开销；完整请求占用另行展示。实际工具开销应由 <a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/engine-core/src/engine_client.rs#L244">request_tool_definitions</a> 等现有请求构造逻辑提供，不能继续用冷工具目录填写所谓“实际开销”。</p>
+
+<h4 id="compact-summary-budget">摘要与保留策略</h4>
+
+<p>先选保留尾部，再计算摘要空间。首版沿用现有尾部预算启发式、至少 4 条消息及完整 ToolUse/ToolResult 交互保护；不为了比例删除受保护消息，不预先剥离尾部 thinking。自动路径仍允许现有规则下的超长工具文本剪裁，保留调用标识、错误状态、头尾内容和原文恢复位置；ToolSearch 结果继续免于剪裁。</p>
+
+<pre><code>K = 按安全消息边界实际保留的尾部估算
+F = 真实续接 framing、Todo 等非摘要历史的估算
+C = min(12_000, T − K − F, provider 允许的摘要空间)</code></pre>
+
+<p><code>C</code> 是可见摘要的规划上界。生成前用现有续接构造函数组装占位候选取得 <code>F</code>，生成后再组装真实候选重新测量；字节估算的取整和动态文字可能造成偏差，最终以完整 <code>Ha</code> 校验为准。Todo 在上下文中只注入一次，其结构化持久状态继续沿用现有机制。</p>
+
+<p>当前软提示要求尽量进入 <code>I</code> 对应的剩余空间，并保留 8K 软指导。后续可用真实模型评估为完整收尾预留可见摘要预算的 20%，即把正文指导控制在 <code>0.8 × C</code> 以内；本分支尚未启用这个额外比例。理想剩余空间不足时，直接使用正常目标的可达空间，不因达不到 30% 而判失败。</p>
+
+<p>若 <code>K + F ≥ T</code> 或没有可供完整摘要使用的空间，不发送 0 输出预算请求，也不设定“至少 1K 才有语义价值”这样的硬标准。有可摘要源、但受保护内容使目标不可达时，返回 failed / retention_limited，保留原历史；不放宽比例或另设较大的可提交预算。只达不到理想值 I、但仍能达到正常上限 T 时，继续按 T 规划。</p>
+
+<p>skipped 仅适用于上次达标且指纹未变，或确实没有可摘要源且原请求安全的情况。<code>K + F &gt; L</code> 只证明新增摘要候选放不下，不一定原请求不安全；不能据此阻止一个原本安全的新请求，也不能把目标不可达改报成 skipped。自动压缩失败仍终止本次运行；后续新请求重新检查实际预算。原历史仍超窗且没有达标候选时，停止发送。</p>
+
+<p>摘要保留现有续接关键章节：当前任务与目标、用户修正和硬约束、关键标识与路径、已完成工作及证据、未完成事项、已作决定、已排除方向、下一步动作。事实、推测和待验证状态须分清。自定义压缩指令加入同一提示。首版不引入额外 LLM 评分器；语义可用性通过真实任务续接验收，比例校验不等于信息完全无损。</p>
+
+<h4 id="compact-provider-budget">摘要请求与 provider 输出预算</h4>
+
+<p>压后任务请求和生成摘要的请求分别预检。即使 <code>Ha ≤ L</code>，摘要源加摘要指令仍可能超窗；生成前必须按所选路径的实际请求形态，检查源历史、system、工具 schema、压缩指令、安全 buffer 和输出预留。</p>
+
+<p>可见摘要预算与 API <code>max_tokens</code> 分开。Anthropic cache-safe 路径可能需要“摘要 allowance 加原 thinking budget”，而 OpenAI-compatible 路径按对应 adapter 的 reasoning 与输出规则计算。adapter 返回最终参数和预留量；不得把 <code>C</code> 直接当作所有 provider 的总输出参数，也不得把当前字节估算单位当作真实 tokenizer 的一比一映射。</p>
+
+<p>保持现有 12K 可见摘要上限，同时受模型输出能力与动态剩余空间约束。cache-safe 优先复用原 system、工具与 thinking 前缀；若放不下，显式选择较低预留的可支持路径或标准摘要路径，说明缓存复用可能损失。标准路径沿用现有待摘要前缀转换，不默默截掉最早历史来换取请求通过。两条路径都放不下时，本次返回失败，不扩展为多段递归摘要。</p>
+
+<h4 id="compact-flow">执行流程与全局次数限制</h4>
+
+<p>一次 compaction run 指从一次手动命令或自动触发开始，到最终结果结束的完整操作。cache-safe、标准路径、传输重试和更短摘要重试都属于同一 run。手动 <code>/compact</code> 不受自动压力触发阈值限制；自动路径保留既有触发条件。</p>
+
+<pre><code>冻结源历史与配置，取得 H0 和 history revision
+  → 检查有效的重复压缩记录
+  → 自动路径在副本上剪裁工具结果
+  → 剪裁同时达标且安全：选定该候选
+  → 否则规划保留尾部与动态摘要预算
+  → 预检摘要请求，生成第一份摘要响应
+  → 组装完整候选并校验
+  → 未达标或无效：同次 run 内尝试更短摘要或可行回退
+  → 选定达标候选；额度耗尽仍未达标则失败并保留源历史
+  → 复核源 revision 与完整请求预算
+  → 归档并提交一次，安装内存状态，发布结果</code></pre>
+
+<ol>
+  <li>冻结源快照 <code>S0</code>、预算配置、Todo、自定义压缩指令和工具发现状态，记录 <code>H0</code>。候选期间不修改活跃会话。</li>
+  <li>自动路径先生成工具剪裁副本。它同时满足 <code>Ha ≤ T</code> 和请求安全预算时，可直接选为 <code>target_met / tool_pruning</code>；只满足安全预算时继续摘要，不能单独提交该副本。</li>
+  <li>确定本次固定的摘要源：手动使用 <code>S0</code>，自动沿用当前规则使用一次性剪裁副本；两份摘要均来自同一冻结源。旧 checkpoint 与较新历史一并重写，不能仅对第一份失败摘要继续摘要。归档保留剪裁前的原文。</li>
+  <li>优先使用可行的 cache-safe 路径。每份响应都经过现有完成性检查，再组装完整候选，检查工具配对、续接内容、Todo、严格收缩和 <code>Ha/T/L</code>。</li>
+  <li>第一份未达标时，在同次 run 内要求更短、合并重复事项、去掉已完成细节并保留约束。新提示携带剩余摘要预算及失败原因，重新使用固定源。没有空间或已确定正常目标不可达时，直接失败，不循环要求更短。</li>
+  <li>候选达标后停止生成，复核并提交。额度耗尽仍未达标，丢弃暂存候选并返回 failed；较早候选即使完整、缩短且安全，也不能在最后一次请求失败后降级安装。用户提交前取消同样不提交候选。</li>
+</ol>
+
+<table>
+  <thead><tr><th>额度</th><th>建议默认值</th><th>计数口径</th></tr></thead>
+  <tbody>
+    <tr><td>已完成摘要响应</td><td>每 run 最多 2 份</td><td>包括返回完整响应但摘要为空、截断、格式错误或不收缩的情况；不能只计有效候选。cache-safe 与标准回退共享。</td></tr>
+    <tr><td>实际摘要 HTTP 请求</td><td>每 run 最多 4 次</td><td>包括失败、流中断、较低 cap 回退和网络重试。实际发送前扣额度，provider 内部重试也必须纳入同一计数。</td></tr>
+    <tr><td>传输重试</td><td>最多 2 次，退避 1 秒和 2 秒</td><td>全 run 共享且受 4 次请求上限约束。只重试可恢复传输错误；鉴权、永久协议错误及原样超窗请求不重发。</td></tr>
+    <tr><td>单个工具 turn 的压缩次数</td><td>保留现有最多 8 次守卫</td><td>这是上层额度，不是单个 run 的重试额度。同一 turn 后续新增工具结果可能再次触发；不得借换路径或立即重启 run 绕过额度。</td></tr>
+  </tbody>
+</table>
+
+<p>本地预检拒绝和未发送请求的 NotSupported 不消耗 HTTP 额度；token-count 调用单独记录。所有分支共享取消信号与宿主 deadline，不能通过回退重置已经设置的 deadline；单次 provider 超时沿用现有配置。既有下层 retry loop 应接入共享计数或上移，防止“每条路径两次重试”产生乘法放大。相同预算与历史下的结构性失败应直接终止本轮请求，不反复发相同 payload。</p>
+
+<h4 id="compact-results">结果合同与异常处理</h4>
+
+<table>
+  <thead><tr><th>结果</th><th>条件</th><th>提交与继续任务</th></tr></thead>
+  <tbody>
+    <tr><td><code>target_met</code></td><td>候选有效，严格收缩，且 <code>Ha ≤ T ≤ L</code>。</td><td>提交；显示达标与留存比例。压到 30% 以下也属于达标。</td></tr>
+    <tr><td><code>skipped</code></td><td>无修改，当前历史安全；已达标的提交后指纹未变，或确实没有可摘要源。</td><td>不提交；说明已压缩且没有新内容，或没有可压缩历史。不能把有摘要源但目标不可达的情况改报 skipped。</td></tr>
+    <tr><td><code>failed</code></td><td>额度耗尽无达标候选、目标受保护下限限制、请求预算不可行、永久 API 错误、源 revision 变化或持久化失败。</td><td>不安装候选；保留源历史并说明原因。实际下一请求超预算时停止发送。</td></tr>
+    <tr><td><code>cancelled</code></td><td>取消发生在提交前。</td><td>丢弃暂存候选；保留源历史，不提交较早生成的候选。</td></tr>
+  </tbody>
+</table>
+
+<p>提交只有一个验收条件：候选有效、严格收缩，且 <code>Ha ≤ T ≤ L</code>。<code>Ha &gt; T</code> 时，即使已经缩短很多、满足安全预算，也不能提交；不存在较小节省率的替代成功条件。<code>15,000 → 12,000</code> 与 <code>15,000 → 14,999</code> 都须重试，最终未达标则保留原历史并失败。</p>
+
+<p>超窗恢复不豁免比例验收。原历史 <code>H0 &gt; L0</code>，候选只恢复到 <code>Ha ≤ L</code>、但仍有 <code>Ha &gt; T</code> 时，不安装候选，也不发送仍然超窗的原任务请求。严格目标不可达时需要调整保留策略或处理过大的输入，不能以应急恢复名义提交未达标历史。估算达标后的真实 provider 拒绝仍按显式恢复与失败流程处理。</p>
+
+<p>原因采用稳定枚举，至少包括 <code>retention_limited</code>、<code>summary_target_unmet</code>、<code>attempts_exhausted</code>、<code>required_context_exceeds_budget</code>、<code>nothing_compactable</code> 和 <code>persistence_failed</code>。只有实测保护下限使目标不可达，才使用 retention_limited；摘要单纯太长不能归咎于保留策略。重试耗尽时保留未达标诊断与终止原因，候选只进入日志。</p>
+
+<p>空摘要、输出被截断、摘要工具调用、未闭合 summary、非收缩和未达标候选一律拒绝。cache-safe 不支持或路径预算不可行时，可在共享额度内回退到标准路径；该回退只是换生成方式，仍须满足同一目标。不得安装无效摘要、流式中间文本、本地消息统计或未达标工具剪裁副本。preflight、in-turn、provider-rejection 和 post-turn 的压缩失败仍沿用当前终止语义；已经合法追加的用户输入和回答不能因本次失败被回滚。</p>
+
+<p>永久 API 错误立即终止模型重试并返回 failed，保留 API 错误与源历史；不通过较早未达标候选降级提交。源状态变化、取消和持久化失败同样禁止提交。达标候选选定后不再发额外摘要请求，提交前仍须重新校验完整预算与源 revision。</p>
+
+<h4 id="compact-commit">持久化与取消边界</h4>
+
+<p>沿用 <a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/runtime/src/session.rs#L540">save_compacted_to_path</a>：先保存 durable 原历史到 <code>.before-compact-&lt;timestamp&gt;</code>，再提交选定候选。本地文件使用原子替换；append-stream/VFS 使用现有完整快照提交语义。归档与提交仅对最终候选执行一次，生成和重试期间不产生中间会话替换。</p>
+
+<p>提交前检查源 history revision、预算相关配置及取消信号。源历史、冻结 Todo、指令、待发输入或用户配置发生变化，本 run 明确失败，后续新 run 使用新的基数和配置；不能覆盖新增消息，也不能以“重新规划”重置本次额度。候选本身引起的 schema 展开可以重新计算预算而不换源。持久化失败时不安装候选；必要时留下的恢复归档不影响活跃历史。无持久化路径的临时会话以一次内存安装为提交点。</p>
+
+<p>本分支通过同一次读取的 durable 字节解析历史并计算 SHA-256，先确认它与冻结的内存历史一致，同时合并该快照的维护计费收据，再在归档和替换前检查 revision。失败、取消和跳过时的元数据写入也检查该 revision；变化时重新加载最新历史，未能安全保存的请求收据保留在内存并报告。源无法解析或重载时，阻止退出、普通持久化及旧源重建写回；成功重载后恢复。维护快照直接原子替换，避免先轮转原文件、再写入失败导致原路径消失。该检查能检测读到的外部变化，但未引入跨进程锁或后端 compare-and-swap，不能声称消除了最后一次检查到写入之间的并发窗口。</p>
+
+<p>durable 提交完成后立即安装内存、清除旧上下文 anchor 并发布最终报告；提交到安装之间不放可取消 await。取消到达提交之后时，结果仍应报告已提交的达标压缩，不能再声称“历史未变”。重启恢复读取最后已提交快照，继续任务使用该活跃历史。</p>
+
+<h4 id="compact-skip">重复压缩与状态指纹</h4>
+
+<p>正常达标后保存提交后的状态指纹及原操作基数、目标和结果。立即再次输入同一 <code>/compact</code>，若状态与预算未变且当前仍安全，显示“没有新内容，已压缩”。此时不按新历史再次计算 50% 并要求继续减半；旧目标记录只用于判定跳过。</p>
+
+<p>跳过报告的 before/after 均取当前历史。例如上次 15,000→7,000 后，本次 skipped 报告 7,000→7,000，target/ideal 为空，不展示本次缩减百分比。若展示旧依据，应另标“上次压缩结果”，不能复用整份旧报告冒充本次又压缩了一遍。</p>
+
+<ul>
+  <li>指纹覆盖活跃消息的角色、内容块和内容，旧 checkpoint、Todo、续接 framing 与自定义压缩指令。</li>
+  <li>覆盖 resolved provider、wire model、有效 system/instructions、实际工具 schema、已发现及 reveal 状态。</li>
+  <li>覆盖窗口、下一次输出预留、buffer、待发输入，以及压缩策略与估算器版本。</li>
+  <li>新增消息、切换模型或工具、修改 Todo 或指令均使指纹失效；累计账单与费用不进入指纹。</li>
+</ul>
+
+<p>失败不记录成永久“已经压好”；确实没有可摘要源且原请求安全时，可返回 nothing_compactable；有可摘要源但目标受限时为 failed。自动循环仍由现有守卫控制，不能以立即重启 run 绕过本次失败和额度。provider-rejection 恢复绕过旧的已达标 skip，重新检查实际预算。当前无参 <code>/compact</code> 遵循重复跳过规则；显式强制进一步压缩的 CLI 入口留作后续扩展，本分支未提供该选项。</p>
+
+<p>建议在现有 SessionCompaction 元数据中以可选字段持久化达标记录与 policy version，并对旧会话默认缺省；工具剪裁达标也需要同等记录。缺少记录的旧会话重新评估，不能仅凭“存在摘要”推定已达标。</p>
+
+<h4 id="compact-report">共享报告与界面显示</h4>
+
+<p>runtime 提供一份共享报告，手动、自动、CLI、ACP 与 Apeiron 沿现有事件链消费，不新增 engine 与 renderer 之间的通道。字段为设计形状，具体 Rust 类型遵循现有 crate 边界：</p>
+
+<pre><code>CompactionReport {
+    run_id,                  // 对应 CompactionProgress.id
+    before_history,          // H0，剪裁前完整历史
+    after_history,           // 实际安装的活跃历史
+    target_history,          // T，skipped 或未能规划时为空
+    ideal_history,           // I，skipped 或未能规划时为空
+    source_safe_history_budget, // L0
+    safe_history_budget,     // L
+    actual_fixed_overhead,   // O，实际请求形态的估算
+    method,                  // tool_pruning | llm_summary，可空
+    outcome,                 // target_met | skipped | failed | cancelled
+    reason,                  // 稳定原因码，可空
+    attempts,                // 实际摘要 HTTP 请求次数
+    completed_responses,     // 已完成摘要响应数，含被拒绝响应
+    estimate_source,         // 当前为 local_history_estimate_v1
+}</code></pre>
+
+<p>失败和提交前取消的 <code>after_history</code> 等于实际保留的历史量，不能展示未安装候选的较小数字。候选数据放诊断日志。CompactionProgress 增加可选 report，现有 <code>status / before_tokens / after_tokens</code> 名称与历史估算含义保持兼容；Completed 仅对应 target_met 或合法 skipped，失败与提交前取消分别使用 Failed 与 Cancelled。仅工具剪裁虽未移除消息，仍可能发生真实修改，不能再由 removed_message_count 是否为 0 推定 skipped。</p>
+
+<p>同一 turn 内每个 run 的 CompactionProgress 是结果事实来源，按 id 展示一次。报告自身携带与 progress.id 相同的 run_id，TurnComplete.auto_compaction 保留旧的消息移除数汇总时，只携带最后一份 report 作为摘要，不能相加不同 H0 的目标或比例，也不能让 preflight 的达标报告覆盖后来的失败。CLI 消费 EngineEvent::Compaction；回合结束按 run_id 去重，JSON 输出兼容增加可选 report。</p>
+
+<p>CLI 与 ACP 文本报告展示压前、压后、留存比例、正常目标、方法、结果与原因。CLI 上下文占用优先使用有效 provider anchor；压缩后 anchor 失效时，使用 <a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/engine-host/src/context_usage.rs#L93">ContextUsage.total_tokens</a> 的完整请求估算，显示 <code>≈</code>。手动、自动和 resume 都刷新状态；累计 token、费用和历史 usage 不清零。</p>
+
+<p>ACP <code>/compact</code> 成功继续使用既有结束方式，失败沿用错误返回，通过报告和 progress 更新状态，不伪造 PromptUsage。Apeiron 后端沿用 rawOutput 保存与透传，前端展示“达标”“跳过”“失败”“取消”，压缩方法另列“LLM 摘要”或“仅工具剪裁”。结果必须读取 outcome，不能仅凭工具剪裁方法或旧版 Completed 推断严格达标。失败明确显示未应用候选与原历史保留。旧无 report 事件及未知字段兼容读取，旧版结果沿用旧文案，不推定符合新比例目标。</p>
+
+<h4 id="compact-billing">摘要尝试计费与活跃上下文</h4>
+
+<p>基线 provider 层已有 usage receipt 与 tracer，但原 <a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/api/src/completion.rs#L93">complete_text 转换</a>未将 response.usage 传入 runtime 的 TextCompletion；aggregate_compaction_usage 只搬运被移除历史消息的 usage。本分支已接入摘要尝试的 usage 收据，修复“累计不清零”仍遗漏摘要重试账单的问题。</p>
+
+<p>TextCompletion 与失败路径提供 provider-neutral 的尝试收据，按 run id 和 attempt id 去重，所有已收到的 usage 都进入累计计费：包括未选候选、截断、无效摘要、网络中断中已知用量、最终失败与取消。未知 usage 明确标未知，不写成 0，也不由历史估算补造。正常请求、摘要请求、provider tracer 和运行时聚合不能对同一 receipt 重复计费。</p>
+
+<p>现有会话元数据增加可选 maintenance_usage 收据，独立于活跃消息与 SessionCompaction 中搬运的旧历史 usage。resume 重建时只聚合一次；候选提交合并本 run 期间新增的收据，不能用开始快照覆盖计费更新。失败或取消保留原消息历史，但仍持久化已知计费元数据；这里写入维护元数据与原历史的完整快照，不安装摘要，也不单独追加会清空 JSONL 重放历史的 session_meta。持久化异常应明确报告，不能声称账单已经完整保存。</p>
+
+<p>UsageTracker 增加仅累计维护用量的入口，不直接复用同时更新 latest、context anchor 与 turns 的普通 record。摘要请求不伪造聊天回合，其输入用量也不作为压后活跃上下文 anchor。累计账单、压缩比例和当前完整请求占用分别显示；ACP slash 仍不伪造 PromptUsage。</p>
+
+<h4 id="compact-example">数值示例与用户可见结果</h4>
+
+<p>假设完整原历史 <code>H0 = 15,000</code>，安全历史预算 <code>L = 30,000</code>，受保护尾部 <code>K = 6,000</code>，续接 framing 与 Todo <code>F = 500</code>：</p>
+
+<table>
+  <thead><tr><th>项目</th><th>估算 token</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>正常验收上限 T</td><td>7,500</td><td>完整压后历史最多保留 50%。</td></tr>
+    <tr><td>理想规划值 I</td><td>4,500</td><td>理想保留 30%，本例被保护尾部限制。</td></tr>
+    <tr><td>尾部与续接固定部分 K + F</td><td>6,500</td><td>超过理想值，但仍低于正常上限。</td></tr>
+    <tr><td>正常 raw summary 空间</td><td>1,000</td><td>正文连同尾部与 framing 必须共同落在 7,500 内。</td></tr>
+  </tbody>
+</table>
+
+<p>第一份完整候选若为 <code>14,999</code>，拒绝弱收缩并在同次操作内重试；第二份为 <code>7,000</code>，提交为达标。若额度耗尽只有 <code>12,000</code> 的完整安全候选，仍因超过 7,500 而失败，不提交；只有 <code>14,999</code> 时同样失败。两种失败的实际活跃历史都保持 <code>15,000</code>，未应用候选数字仅进诊断日志。本例达不到 30% 不是失败，因为仍能达到 50%。</p>
+
+<pre><code>压缩达标：≈15,000 → ≈7,000，保留 46.7%
+正常目标：≤7,500；方式：LLM 摘要；请求次数：2
+
+压缩失败：目标 ≤7,500，已用完本次尝试额度仍未达标
+未应用候选；当前历史仍为 ≈15,000
+
+未应用压缩：候选只减少约 1 token，缩减不足；原历史保留
+
+跳过压缩：没有新内容，上次压缩已达标</code></pre>
+
+<p>若安全预算更紧，例如 <code>L = 5,000</code>，则 <code>T = 5,000</code>；即使候选达到正常比例的 <code>7,000</code>，仍不安全，不能提交。当前保护部分为 6,500 时，目标不可达，应明确报所需上下文超过预算；原历史 15,000 也不安全，因此停止本次任务请求。</p>
+
+<h4 id="compact-changes">代码改动范围与实现顺序</h4>
+
+<table>
+  <thead><tr><th>位置</th><th>具体改动</th></tr></thead>
+  <tbody>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/runtime/src/compact.rs">runtime compact</a></td><td>共享预算计划、动态摘要指导、完整候选校验、结果与报告类型；生成函数接受共享额度，不再私自叠加重试。</td></tr>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/runtime/src/conversation.rs">runtime conversation</a></td><td>手动、自动与超窗恢复复用同一严格合同；冻结源、工具剪裁判定、两响应与四请求计数、仅达标提交、失败保留历史、指纹与旧 anchor 清除；现有 observer 透传 report。</td></tr>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/engine-core/src/engine_client.rs">engine client 与现有 provider adapter</a></td><td>复用最终请求的真实 system 与工具选择；提供摘要请求 preflight、thinking/output 预留与实际发送计数，覆盖下层 retry。</td></tr>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/runtime/src/session.rs">runtime session</a></td><td>复用原始归档与提交后安装顺序；可选持久化目标记录、指纹、策略版本及维护计费收据，兼容旧会话。</td></tr>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/api/src/completion.rs">API completion</a>、<a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/runtime/src/usage.rs">runtime usage</a></td><td>把每次已知摘要 usage 传到运行时，复用 provider 收据、去重并持久化；累计计费与 context anchor/聊天回合分开。</td></tr>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/engine-host/src/session_engine.rs">engine host</a></td><td>手动命令、ACP 与 preflight 使用同一报告；待发输入仅扣一次；移除用消息移除数判断 skip 的做法，统一归档与提交点。</td></tr>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/commands/src/reports.rs">commands reports</a>、<a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/engine-acp/src/session_ops.rs">ACP session ops</a></td><td>报告比例、方法、达标/跳过/失败/取消及原因；失败展示实际保留历史，新字段可选，保留旧事件兼容与 ACP 结束语义。</td></tr>
+    <tr><td><a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/rusty-sudocode-cli/src/main.rs">CLI main</a>、<a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/rusty-sudocode-cli/src/cli/format.rs">CLI format</a>、<a href="https://github.com/sudoprivacy/sudocode/blob/f60b6339095ef67adf0bbbe8dbc884b117ffb9cc/rust/crates/rusty-sudocode-cli/src/render_engine.rs">CLI render engine</a></td><td>消费逐次 EngineEvent::Compaction 并避免回合结束重复打印；刷新完整上下文估算，兼容 JSON 报告，不清零累计计费。</td></tr>
+    <tr><td><a href="/Users/hanlu/Desktop/chentu/apeiron/frontend/fe-apeiron-app/src/apps/admin/chat/components/ToolCall/tool-call-display.ts">Apeiron tool call display</a></td><td>按可选 outcome 展示达标/跳过/失败/取消、方法及原因；旧版本结果兼容读取；后端已有 rawOutput 路径继续沿用。</td></tr>
+  </tbody>
+</table>
+
+<p>分三步交付：先完成 runtime 预算、候选验收与提交合同；再连接 CLI、ACP 和 Apeiron 显示；最后补齐 PTY 与真实模型验收并发布 scode。三步共享同一字段合同。此次为既有压缩缺陷修复，正常比例与结果默认启用，不增加一个默认关闭的压缩模式；额外原生压缩适配另行评审。</p>
+
+<h4 id="compact-acceptance">验收矩阵</h4>
+
+<p>按仓库测试规则扩展现有 PTY 场景，不新增 unit tests。确定性 PTY 验证边界与实际请求体，真实 provider PTY 验证窗口兼容、thinking、任务续接和取消。纯函数模拟或 mock 通过不能替代发布验收。</p>
+
+<table>
+  <thead><tr><th>场景</th><th>必须满足的结果</th></tr></thead>
+  <tbody>
+    <tr><td>一次命令内纠正弱缩减</td><td>第一份 15,000→14,999 不提交；第二份 7,000 达标，只提交一次。所有重试基数均为 15,000。</td></tr>
+    <tr><td>未达标结果与重复命令</td><td>12,000 候选即使完整且安全，额度耗尽后仍 failed；不安装，实际 before/after 都为 15,000。立即再试仍可评估；只有上次达标且提交后指纹未变才跳过。新增消息、Todo、模型或 schema 后重新压缩。</td></tr>
+    <tr><td>工具剪裁</td><td>剪裁后超过 T、但不超过 L 时继续摘要；Ha≤T 且满足安全预算才直接达标。即使 removed_message_count=0，也正确显示真实剪裁和归档。</td></tr>
+    <tr><td>受保护尾部</td><td>保留 4 消息、完整 ToolUse/ToolResult 与尾部 thinking，不拆配对凑比例。有摘要源但保护下限使 T 不可达时 failed；只有无摘要源且原请求安全时可 skipped。新增 framing 超窗不等于原请求超窗；原请求也超预算时停止发送。</td></tr>
+    <tr><td>超窗恢复不放宽目标</td><td>构造 H0&gt;L0，候选 Ha≤L 但 Ha&gt;T；即使腾出了请求空间也不安装，实际原历史保留，停止发送超窗任务请求。达标候选才可恢复运行。</td></tr>
+    <tr><td>实际 Todo、framing 与已发现工具</td><td>正文预算内但完整候选超 T 不能达标；已发现工具扩大 O 时收紧 L。Todo 不重复注入，状态与关键约束保留。</td></tr>
+    <tr><td>待发输入</td><td>preflight 新输入扣一次，in-turn 已入历史输入不重复扣。post-turn 失败保留已合法追加内容。</td></tr>
+    <tr><td>provider 预算与 cache</td><td>分别捕获 Anthropic thinking 开关、cache-safe 回退和 OpenAI-compatible 小输出上限的真实请求；摘要请求与下一任务请求均预检，12K 不被当作总 thinking 输出上限。</td></tr>
+    <tr><td>全局额度</td><td>混合网络失败、回退、截断和缩减重试，完成响应≤2、实际摘要请求≤4、传输 retry≤2。下层 retry 不漏计，原样超窗不重发。</td></tr>
+    <tr><td>失败、取消与持久化</td><td>空、截断、工具调用、无效和变大摘要均不安装；提交前取消或 persist 失败保留原历史；提交后取消显示真实已提交结果。归档原文可恢复，resume 读取最终快照。</td></tr>
+    <tr><td>旧协议与占用显示</td><td>新旧 ACP 事件都可读；失败正确返回错误并显示未应用候选，不能由旧 Completed 推定新目标已达成；手动、自动、resume 状态刷新并标估算；累计账单不清零，按已知真实 usage 增长。</td></tr>
+    <tr><td>多 run 报告与计费</td><td>同一 turn 多次压缩逐次报告、汇总保留最后一份且不重复打印；较早达标不得覆盖后续失败，不同 H0 的比例不合并。所有已知摘要尝试 usage 去重入账，失败/取消后 resume 仍可重建，未知不冒充 0，不污染上下文 anchor 或回合数。</td></tr>
+    <tr><td>真实任务连续性</td><td>压缩后继续执行，核对最早用户修正、硬约束、关键 ID/路径、未完成事项与下一步；不能只检查“回答正常”或缩减数字。</td></tr>
+  </tbody>
+</table>
+
+<p>优先扩展现有 <code>pty_compaction_safety</code>、<code>pty_context_usage</code>、工具结果剪裁及会话 resume 场景。按 CONTRIBUTING 执行 fmt、严格 Clippy、workspace tests 与现有 CI 门禁；正式验收同时覆盖 Linux、macOS 和 Windows 的适用 PTY 路径。</p>
+
+<h4 id="compact-release">发布验收与回退</h4>
+
+<ol>
+  <li>用同一实现 commit 的候选 scode 二进制完成关键 PTY。真实模型会话执行“准备任务历史 → 一次 compact → 立即第二次 → 继续任务 → resume”，分别验证所宣称支持的 provider 路线。</li>
+  <li>记录二进制版本、commit/digest、实际 provider 与 wire model、<code>H0/T/I/K/F/C/L0/L/O</code>、结果、实际请求次数、输出 cap、thinking、stop reason、provider input/output/cache usage，以及续接回答中的关键事实。</li>
+  <li>发布 scode tag 后，再更新 Apeiron 的内网、互联网和本地 profile pin；启动测试环境核对镜像与实际二进制版本，用内网真实 provider 重跑关键流程。</li>
+  <li>确认新可选元数据不破坏旧会话读取及旧前端；若需回退二进制，活跃压缩历史仍可加载，原始全文保留在恢复归档。语义回退使用对应原始归档，并明确此后新增历史的合并边界。</li>
+</ol>
+
+<p>工作区版本为 0.2.23，依赖已恢复，候选 CLI 已从本分支源码构建并运行真实 PTY。受控 HTTP 场景验证比例、请求体、次数上限、取消、归档、计费与 resume；真实模型验收分别遇到 <code>401 Invalid token</code> 与 <code>503 No available accounts</code>，尚未完成真实任务续接验收。Apeiron 前端适配、版本 pin、发布与部署仍需后续交付。</p>
+
+<h4 id="compact-local-validation">本分支实际验证记录</h4>
+
+<p>以下为 2026 年 10 月 10 日在本地 macOS 的验证；受控 HTTP 通过不替代真实模型语义验收，也不表示其他平台或生产环境已经验收。</p>
+
+<table>
+  <thead><tr><th>检查</th><th>实际结果与边界</th></tr></thead>
+  <tbody>
+    <tr><td>压缩与上下文 PTY</td><td><code>pty_compaction_safety</code> 28 个受控场景通过，另 1 个 live-only 场景明确跳过；<code>pty_context_usage</code> 7 个通过。覆盖弱缩减重试、完整目标、实际请求体、计费、取消、外部源保护与 resume。</td></tr>
+    <tr><td>ACP</td><td>5 个压缩专项与 stdio / WebSocket 两个综合用例通过。旧短历史及整文件相等期待已按严格合同调整，协议、工具配对、取消和续接断言保留。</td></tr>
+    <tr><td>全工作区</td><td><code>SCODE_TEST_BACKEND=mock cargo test --workspace --locked --no-fail-fast -j2 -- --test-threads=1</code> 运行 185 个套件：2,293 通过、7 失败、34 ignored，命令 exit 101。两个颜色用例在清除 <code>NO_COLOR</code> 后重测通过；两个 ACP 综合用例修正旧数据后重测通过；其余三个 <code>acp_live_smoke</code> 用例为真实响应超时，尚未通过。</td></tr>
+    <tr><td>格式与架构边界</td><td><code>cargo fmt --all --check</code>、<code>git diff --check</code>、提交脚本执行位、renderer 禁止内部类型检查及已发布 VFS proto 对比通过。</td></tr>
+    <tr><td>Clippy</td><td>严格 <code>cargo clippy --workspace --all-targets -- -D warnings</code> 被未修改的 <code>telemetry/src/lib.rs</code> 14 条既有警告阻断。全 targets 的 <code>--cap-lints warn</code> 诊断 exit 0，未发现本次新增警告；诊断不计作严格通过。</td></tr>
+    <tr><td>渲染性能</td><td>本地 macOS 正常 release 构建与固定 <code>core</code> 性能检查通过，exit 0、<code>status=passed</code>、失败项为空。完成 156 个独立 PTY 样本：12 个预热、5 轮 A/A 的 60 个校准样本、7 轮 A/B 的 84 个对比样本，覆盖 6 个固定场景；policy、预算、基线与可信驱动均未放宽。required <code>render performance</code> 状态仍需后续托管 CI 验证。</td></tr>
+    <tr><td>真实模型</td><td>压缩文件任务与上下文流程分别受 <code>401 Invalid token</code>、<code>503 No available accounts</code> 阻断；真实 ACP 三项为响应超时，日志不足以归因到同一鉴权或账号错误。真实压缩后任务续接尚未验收。</td></tr>
+  </tbody>
+</table>
+
+<p>性能候选由源码提交 <code>0a755385</code> 正常 release 构建，固定二进制 SHA-256 为 <code>1e1ed0a1dae6ec3b4b3cbcc181347f580d9b2f6deb514174d06b64d8825ea492</code>；固定基线为 <code>82a99dd262c746a1872ccfaf0ea46d7fe4bd6754</code>，可信驱动来自 main <code>f6e724b1</code>。候选之后的 Rust 差异仅为回合压缩额度注释，可执行逻辑未改。原始报告、样本、构建日志与源码记录保留在 <code>/tmp/sudocode-render-run-20261010/</code>；这些临时文件不是长期发布制品。</p>
+
+<p>本方案的完成条件是：只有完整历史达到 ≤50% 且满足安全预算的候选才可提交；未达标时有界重试，最终失败保留原历史并准确报告原因，超窗任务停止；合法跳过不冒充新达标；后续请求满足真实 provider 限制；无效、提交前取消或持久化失败不破坏会话；连续任务与原文恢复可用；显示与计费口径正确。发布和部署在实现与验收完成后单独执行。</p>
+</section>
 
 <h2 id="goal-2">Goal 2 · cc/codex parity</h2>
 

@@ -995,8 +995,9 @@ impl CompactionMethod {
 /// is not making progress — what is left is the preserved tail, and no
 /// further pass can shrink it. Spending the allowance is therefore the
 /// signal that the overflow is structural, and it surfaces as a real error
-/// instead of an unbounded compaction loop. Worst case per turn is eight
-/// extra round-trips.
+/// instead of an unbounded compaction loop. This in-turn allowance covers
+/// eight runs, each capped at two completed responses and four model HTTP
+/// attempts. Pre-send and post-turn maintenance use their own run scopes.
 const MAX_TURN_COMPACTIONS: usize = 8;
 
 /// The config every guard in this file compacts with.

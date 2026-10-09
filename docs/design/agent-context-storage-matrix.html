@@ -416,7 +416,7 @@ agent-memory/&lt;type&gt;/           per-agent-type memory
     <div class="el"><b>→ sudocode:</b> agent-to-agent messaging and durable consumption belong to the engine; the UI does not own another inbox.</div>
     <span class="b na">n/a</span></td>
   <td>
-    <div class="el"><b>Target:</b> <code>chat-with-me DT_STREAM</code> + kernel <code>a2a</code> crate. The current substrate stores pairwise conversations. A per-sender <code>chat-with-me</code> view over that existing store is under discussion; the path shape and mapping are not yet decided. See <a href="#agent-delivery-contract">the audit</a>.</div>
+    <div class="el"><b>Target:</b> <code>chat-with-me DT_STREAM</code> + kernel <code>a2a</code> crate. The confirmed refinement is a caller-specific view: B accesses <code>/agents/A/chat-with-me</code> as A↔B's existing conversation stream; C sees A↔C through that same path. The backing store remains the existing pairwise conversation. Routing and authorization are not yet implemented; see <a href="#agent-delivery-contract">the audit</a>.</div>
     <div class="el"><code>MailboxStampingHook</code> stamps unforgeable <code>from</code>, armed at boot, universal for all writers</div>
     <div class="el">raft cross-node (§3.3)</div>
     <span class="b partial">contract alignment open</span></td>
@@ -551,12 +551,16 @@ contact-entry contract.</p>
 <p><b>Scope agreed in the follow-up discussion.</b> Minimize contract changes
 because multiple developers depend on this matrix. Reuse the existing
 <code>/conversations/&lt;cid&gt;/transcript</code>, participant indexes, reader
-registers, leases and <code>acp-mailbox/1</code>. Limit the proposed change to
-a per-sender <code>chat-with-me</code> view over the existing conversation;
-do not add another message store. Whether the same path resolves according to
-the authenticated sender or sender-specific child paths expose the view is
-still open. Zone and mount granularity remain implementation questions to
-verify against these paths and their authorized readers.</p>
+registers, leases and <code>acp-mailbox/1</code>. The confirmed refinement is
+a per-sender view at the same <code>/agents/A/chat-with-me</code> path:
+authenticated B sees the existing A↔B conversation stream, authenticated C
+sees A↔C. There is still one stored transcript per conversation. Resolve from
+authenticated caller identity, not a caller-authored envelope's <code>from</code>,
+and do not switch a global mount target between concurrent callers. Receiver A
+continues discovering unread messages through its existing conversation index.
+Zone and mount granularity remain implementation questions to verify against
+these paths and their authorized readers; this document does not declare the
+view implemented.</p>
 
 <p><b>Mount constraints to verify.</b> Keep the established flat+link paths and
 use zone visibility to separate authorized replication sets. Determine the

@@ -21,7 +21,7 @@ use common::TestEnv;
 /// answer that follows it is still rendered.
 #[test]
 fn thinking_content_is_rendered_before_the_answer() {
-    let env = TestEnv::new("thinking-visible");
+    let env = TestEnv::new_mock("thinking-visible");
     let prompt = env.prompt(
         "What is 17 times 23? Work it out step by step, then give the number.",
         "thinking_then_text",
@@ -49,36 +49,27 @@ fn thinking_content_is_rendered_before_the_answer() {
         panic!("thinking header should render: {e}\nPTY:\n{screen}");
     });
 
-    if env.is_mock() {
-        // Both halves of the canned reasoning must survive. The second one is
-        // the real gate: it arrives as a delta that starts mid-sentence on a
-        // line the previous delta opened, which is exactly where a per-delta
-        // spinner clear used to erase what had been drawn.
-        sess.expect("Reasoning step one").unwrap_or_else(|e| {
+    // Both halves of the canned reasoning must survive. The second one is
+    // the real gate: it arrives as a delta that starts mid-sentence on a
+    // line the previous delta opened, which is exactly where a per-delta
+    // spinner clear used to erase what had been drawn.
+    sess.expect("Reasoning step one").unwrap_or_else(|e| {
+        let screen = sess.render(|s| s.contents());
+        panic!("first reasoning delta should render: {e}\nPTY:\n{screen}");
+    });
+    sess.expect("step two continues the same line")
+        .unwrap_or_else(|e| {
             let screen = sess.render(|s| s.contents());
-            panic!("first reasoning delta should render: {e}\nPTY:\n{screen}");
+            panic!(
+                "a reasoning delta that resumes mid-line must not be erased \
+                 by the spinner clear: {e}\nPTY:\n{screen}"
+            );
         });
-        sess.expect("step two continues the same line")
-            .unwrap_or_else(|e| {
-                let screen = sess.render(|s| s.contents());
-                panic!(
-                    "a reasoning delta that resumes mid-line must not be erased \
-                     by the spinner clear: {e}\nPTY:\n{screen}"
-                );
-            });
-        sess.expect("The answer follows the reasoning")
-            .unwrap_or_else(|e| {
-                let screen = sess.render(|s| s.contents());
-                panic!("the answer must still render after thinking: {e}\nPTY:\n{screen}");
-            });
-    } else {
-        // Live mode cannot assert on the model's wording, only that reasoning
-        // produced visible text and the answer arrived.
-        sess.expect("391").unwrap_or_else(|e| {
+    sess.expect("The answer follows the reasoning")
+        .unwrap_or_else(|e| {
             let screen = sess.render(|s| s.contents());
             panic!("the answer must still render after thinking: {e}\nPTY:\n{screen}");
         });
-    }
 
     sess.expect("❯").unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());

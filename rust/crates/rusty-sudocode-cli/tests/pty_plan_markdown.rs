@@ -44,10 +44,28 @@ fn start(env: &TestEnv, queue: bool, no_color: bool) -> PtySession {
 }
 
 fn submit_plan(env: &TestEnv, sess: &mut PtySession) {
-    let prompt = env.prompt(&format!(
-        "Earlier I considered editing the sample application. I have instead chosen the plan below. Call write_plan now with exactly this Markdown content:\n{PLAN_REVIEW_MARKDOWN}\nSet context to 'Review context marker', constraints to 'Only write the approved artifact.', and acceptance to 'The artifact contains the approved text.'. Wait for the tool's approval decision before using write_file to execute the plan."
-    ), "plan_execution_roundtrip");
+    let prompt = if env.is_live() {
+        env.prompt(&format!(
+            "Earlier I considered editing the sample application. I have instead chosen the plan below. Call write_plan now. Set content to exactly the Markdown between BEGIN_PLAN_MARKDOWN and END_PLAN_MARKDOWN, excluding the delimiter lines. Only that Markdown belongs in content; do not include the instructions or the separate fields below.\nBEGIN_PLAN_MARKDOWN\n{PLAN_REVIEW_MARKDOWN}\nEND_PLAN_MARKDOWN\nSet the independent context field to 'Review context marker', constraints field to 'Only write the approved artifact.', and acceptance field to 'The artifact contains the approved text.'. Wait for the tool's approval decision before using write_file to execute the plan."
+        ), "plan_execution_roundtrip")
+    } else {
+        env.prompt(
+            "Earlier I considered editing the sample application.",
+            "plan_execution_roundtrip",
+        )
+    };
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+    let expected_input = if env.is_live() {
+        format!("[Pasted text #1 +{} lines]", prompt.matches('\n').count())
+    } else {
+        prompt.clone()
+    };
+    common::expect_screen(
+        sess,
+        |screen| common::input_line_of(screen) == expected_input,
+        env.timeout(),
+        "complete plan prompt pasted into current input",
+    );
     sess.send("\r").unwrap();
     common::expect_screen(
         sess,

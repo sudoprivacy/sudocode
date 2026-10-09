@@ -2,19 +2,27 @@
 mod common;
 
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use runtime::{ContentBlock, MessageRole, Session, SessionStore};
 
+fn file_session(env: &common::TestEnv) -> Option<Session> {
+    let store = SessionStore::from_cwd(env.workspace_root()).ok()?;
+    // Resume creates an empty placeholder alongside the real conversation.
+    let sessions: Vec<_> = store
+        .list_sessions()
+        .ok()?
+        .into_iter()
+        .filter(|session| session.message_count > 0)
+        .collect();
+    if sessions.len() != 1 {
+        return None;
+    }
+    Session::load_from_path(&sessions[0].path).ok()
+}
+
 fn assert_file_roundtrip(env: &common::TestEnv, nonce: &str, format: &str) {
-    let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
-    let sessions = store.list_sessions().unwrap();
-    assert_eq!(
-        sessions.len(),
-        1,
-        "{format}: expected one persisted session"
-    );
-    let session = Session::load_from_path(&sessions[0].path).unwrap();
+    let session = file_session(env).expect("expected one persisted conversation");
     let fixture = env.workspace_root().join("fixture.txt");
     let mut reads = std::collections::BTreeSet::new();
     let mut successful_reads = std::collections::BTreeSet::new();
@@ -77,6 +85,71 @@ fn assert_file_roundtrip(env: &common::TestEnv, nonce: &str, format: &str) {
         text.contains(nonce),
         "{format}: final persisted answer lacks the actual file contents"
     );
+}
+
+#[test]
+fn interactive_file_reads_updated_contents_after_resume() {
+    let env = common::TestEnv::new("relative-file-resume");
+    let budget = Duration::from_secs(120);
+    for resume in [false, true] {
+        let nonce = format!(
+            "RESUMED_FILE_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::fs::write(env.workspace_root().join("fixture.txt"), &nonce).unwrap();
+        let requests = std::env::var_os("SCODE_LIVE_ARTIFACTS").map_or_else(
+            || env.workspace_root().join("requests"),
+            |root| PathBuf::from(root).join(env.workspace_root().file_name().unwrap()),
+        );
+        let args = if resume {
+            vec!["--permission-mode", "read-only", "--resume"]
+        } else {
+            vec!["--permission-mode", "read-only"]
+        };
+        let mut cli = env.spawn_with_env(
+            &args,
+            &[("SUDOCODE_DUMP_REQUESTS", requests.to_str().unwrap())],
+        );
+        cli.resize(48, 160).unwrap();
+        common::expect_input_line_cleared(&cli, budget, "relative file task prompt");
+        let task = if resume {
+            "The file has changed. Read fixture.txt again and report its current contents."
+        } else {
+            "Read fixture.txt and report its exact contents."
+        };
+        let task = env.prompt(task, "read_file_roundtrip");
+        cli.send(&task).unwrap();
+        common::expect_input_line(&cli, &task, budget, "relative file task input");
+        cli.send("\r").unwrap();
+        common::expect_screen(
+            &cli,
+            |_| {
+                file_session(&env).is_some_and(|session| {
+                    session
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == MessageRole::Assistant)
+                        .is_some_and(|m| {
+                            m.blocks.iter().any(
+                                |b| matches!(b,ContentBlock::Text {text} if text.contains(&nonce)),
+                            )
+                        })
+                })
+            },
+            budget,
+            "current file contents in persisted answer",
+        );
+        common::expect_input_line_cleared(&cli, budget, "file task completed");
+        cli.send("/exit").unwrap();
+        common::expect_input_line(&cli, "/exit", budget, "exit command input");
+        cli.send("\r").unwrap();
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+        assert_file_roundtrip(&env, &nonce, if resume { "resume" } else { "interactive" });
+    }
 }
 
 #[test]

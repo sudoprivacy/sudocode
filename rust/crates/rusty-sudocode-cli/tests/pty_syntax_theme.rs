@@ -46,19 +46,29 @@ fn showcase(light: bool, truecolor: bool, no_color: bool) {
         ],
     );
     sess.resize(110, 100).expect("resize");
-    sess.expect("❯").expect("ready");
-    let prompt = env.prompt(
-        &format!(
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "stable input ready");
+    let natural_prompt = if env.is_live() {
+        format!(
             "Reply with exactly this Markdown, without an outer fence or explanation:\n{}",
             mock_anthropic_service::SYNTAX_SHOWCASE_DOC
-        ),
-        "syntax_highlight_showcase",
-    );
+        )
+    } else {
+        "Show the syntax showcase fixture".to_string()
+    };
+    let prompt = env.prompt(&natural_prompt, "syntax_highlight_showcase");
+    let pasted_input = if env.is_live() {
+        format!(
+            "[Pasted text #1 +{} lines]",
+            prompt.chars().filter(|&c| c == '\n').count()
+        )
+    } else {
+        prompt.clone()
+    };
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~"))
         .expect("paste fixture request");
     common::expect_screen(
         &sess,
-        |s| s.contains("Pasted") || s.contains("Reply with exactly"),
+        |s| common::input_line_of(s) == pasted_input,
         common::DEFAULT_TIMEOUT,
         "paste consumed",
     );
@@ -71,8 +81,9 @@ fn showcase(light: bool, truecolor: bool, no_color: bool) {
     );
     // Retain cells even if a raw-attribute assertion fails before inspection.
     sess.render(|screen| save_report(screen, light, truecolor, no_color));
+    #[cfg(not(windows))]
     if !no_color {
-        // vt100 exposes no strikethrough attribute; inspect the real PTY bytes.
+        // ConPTY can rewrite SGR; vt100 exposes no strikethrough attribute.
         sess.expect("\\x1b\\[9mThemeStrike")
             .expect("Markdown strikethrough reaches the terminal");
     }
@@ -198,12 +209,26 @@ fn check_cell(
     } else {
         json!({"fg":expected["fg"], "bg":expected["bg"], "bold":expected["bold"], "italic":expected["italic"], "underline":expected["underline"]})
     };
-    assert_eq!(
-        actual,
-        wanted,
-        "Codex style mismatch at ({row}, {col}) {:?}",
-        cell.contents()
-    );
+    for color in ["fg", "bg"] {
+        assert!(
+            common::colors_equal(
+                actual[color].as_str().unwrap(),
+                wanted[color].as_str().unwrap()
+            ),
+            "Codex {color} mismatch at ({row}, {col}) {:?}: actual {}, wanted {}",
+            cell.contents(),
+            actual[color],
+            wanted[color]
+        );
+    }
+    for attribute in ["bold", "italic", "underline"] {
+        assert_eq!(
+            actual[attribute],
+            wanted[attribute],
+            "Codex {attribute} mismatch at ({row}, {col}) {:?}",
+            cell.contents()
+        );
+    }
     assert!(!cell.dim(), "unexpected dim at ({row}, {col})");
 }
 
@@ -267,7 +292,7 @@ fn oversized_code_falls_back_without_blocking_input() {
         ],
     );
     sess.resize(70, 100).expect("resize");
-    sess.expect("❯").expect("ready");
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "stable input ready");
     let prompt = env.prompt("Show the long-line fixture", "syntax_highlight_limits");
     sess.send(&format!("{prompt}\r")).expect("submit");
     common::expect_screen(

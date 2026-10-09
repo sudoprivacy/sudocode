@@ -47,6 +47,74 @@ use runtime::config::default_config_home;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub fn colors_equal(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        fn expanded(color: &str) -> Option<String> {
+            let index: u8 = color
+                .strip_prefix("Idx(")?
+                .strip_suffix(')')?
+                .parse()
+                .ok()?;
+            let (r, g, b) = match index {
+                16..=231 => {
+                    let n = index - 16;
+                    let levels = [0, 95, 135, 175, 215, 255];
+                    (
+                        levels[(n / 36) as usize],
+                        levels[((n / 6) % 6) as usize],
+                        levels[(n % 6) as usize],
+                    )
+                }
+                232..=255 => {
+                    let gray = 8 + (index - 232) * 10;
+                    (gray, gray, gray)
+                }
+                _ => return None,
+            };
+            Some(format!("Rgb({r}, {g}, {b})"))
+        }
+        return expanded(actual).is_some_and(|rgb| rgb == expected)
+            || expanded(expected).is_some_and(|rgb| rgb == actual);
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+#[cfg(test)]
+mod color_tests {
+    #[test]
+    fn equivalent_colors_keep_exact_values_and_palette_boundaries() {
+        assert!(super::colors_equal("Idx(241)", "Idx(241)"));
+        assert!(super::colors_equal("Default", "Default"));
+        for (index, rgb) in [
+            (16, "Rgb(0, 0, 0)"),
+            (220, "Rgb(255, 215, 0)"),
+            (231, "Rgb(255, 255, 255)"),
+            (232, "Rgb(8, 8, 8)"),
+            (241, "Rgb(98, 98, 98)"),
+            (255, "Rgb(238, 238, 238)"),
+        ] {
+            let indexed = format!("Idx({index})");
+            assert_eq!(super::colors_equal(&indexed, rgb), cfg!(windows));
+            assert_eq!(super::colors_equal(rgb, &indexed), cfg!(windows));
+        }
+        for (a, b) in [
+            ("Default", "Rgb(0, 0, 0)"),
+            ("Idx(0)", "Rgb(0, 0, 0)"),
+            ("Idx(15)", "Rgb(255, 255, 255)"),
+            ("Idx(241)", "Rgb(99, 98, 98)"),
+            ("Idx(241)", "Idx(242)"),
+            ("Rgb(1, 2, 3)", "Rgb(1, 2, 4)"),
+        ] {
+            assert!(!super::colors_equal(a, b), "{a} must differ from {b}");
+        }
+    }
+}
+
 // A free function keeps both Screen lifetimes late-bound for PtySession::render.
 fn screen_contents(screen: &pty_expect::Screen<'_>) -> String {
     screen.contents()
@@ -875,7 +943,7 @@ fn spawn_with_workspace(
     // found` masquerades as a 127 exit. `/usr/bin/env` resolves the
     // same way on Linux, macOS, and Git Bash on Windows.
     let mut cmd = format!(
-        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR",
+        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR -u FORCE_COLOR -u CLICOLOR -u CLICOLOR_FORCE -u COLORTERM -u COLORFGBG",
         shell_quote(&workspace_root)
     );
     write!(
@@ -1131,7 +1199,7 @@ pub fn spawn_scode_in_dir_with_env(
     // reliably and resolves the scode path identically on Linux, macOS, and
     // Git Bash (see the note in `spawn_with_workspace`).
     let mut cmd = format!(
-        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR",
+        "cd {} && {MSYS_ARGV_PASSTHROUGH} exec /usr/bin/env -u SCODE_GLOBAL_CONFIG_DIR -u SCODE_PROJECT_CONFIG_DIR -u FORCE_COLOR -u CLICOLOR -u CLICOLOR_FORCE -u COLORTERM -u COLORFGBG",
         shell_quote(&dir_str)
     );
     for (key, value) in env {

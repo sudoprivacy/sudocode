@@ -703,7 +703,7 @@ const PASTE_PLACEHOLDER_MAX_LINES: usize = 2;
 fn should_use_paste_placeholder(text: &str) -> bool {
     let newline_count = text.chars().filter(|&c| c == '\n').count();
     text.chars().count() > PASTE_PLACEHOLDER_CHAR_THRESHOLD
-        || newline_count > PASTE_PLACEHOLDER_MAX_LINES
+        || newline_count >= PASTE_PLACEHOLDER_MAX_LINES
 }
 
 /// Normalize pasted line endings to `\n`.
@@ -2941,6 +2941,22 @@ mod tests {
         assert_eq!(out, "hi there");
         assert!(store.is_empty(), "short paste is literal, not stored");
         assert_eq!(id, 1, "no id consumed");
+    }
+
+    #[test]
+    fn apply_paste_line_count_boundary() {
+        for (pasted, expected, next_id) in [
+            ("l1\nl2", "l1\nl2", 1),
+            ("l1\nl2\nl3", "[Pasted text #1 +2 lines]", 2),
+        ] {
+            let mut store = std::collections::HashMap::new();
+            let mut id = 1;
+            let out = apply_paste_to_buffer("", pasted, &mut id, &mut store);
+            assert_eq!(out, expected);
+            assert_eq!(id, next_id);
+            assert_eq!(store.is_empty(), next_id == 1);
+            assert_eq!(expand_paste_placeholders(&out, &store), pasted);
+        }
     }
 
     #[test]

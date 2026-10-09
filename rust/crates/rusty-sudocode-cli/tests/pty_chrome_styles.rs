@@ -48,7 +48,9 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
     loop {
         let actual = attributes(sess, needle);
         if actual.as_ref().is_some_and(|(color, bold, dim)| {
-            color == expected.0 && *bold == expected.1 && *dim == expected.2
+            common::colors_equal(color, expected.0)
+                && *bold == expected.1
+                && ((cfg!(windows) && expected.2) || *dim == expected.2)
         }) {
             return;
         }
@@ -127,7 +129,8 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
         ],
     );
     sess.resize(40, 100).expect("resize");
-    // The PTY's vt100 model has no strikethrough field; verify it on the wire.
+    // ConPTY drops strikethrough; application-side tests cover it on Windows.
+    #[cfg(not(windows))]
     sess.expect(r"\x1b\[9mFinished parser")
         .expect("completed label is crossed out");
     sess.expect("❯").expect("input ready");
@@ -172,7 +175,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
         ],
     );
     sess.resize(50, 100).unwrap();
-    sess.expect("❯").unwrap();
+    common::expect_input_line_cleared(&sess, env.timeout(), "info input ready");
     // Both a persistent info label and the active status slot use the role.
     expect_style(&sess, "■", (green, false, false));
     let marker = common::turn_status_marker(&sess);
@@ -180,13 +183,16 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
         "What is 17 times 23? Work it out, then give the number.",
         "delayed_text",
     );
-    sess.send(&format!("{prompt}\r")).unwrap();
+    sess.send(&prompt).unwrap();
+    common::expect_input_line(&sess, &prompt, common::DEFAULT_TIMEOUT, "info prompt input");
+    sess.send("\r").unwrap();
     common::expect_screen(
         &sess,
         |_| {
             ["Thinking...", "Reasoning..."].iter().any(|label| {
-                attributes(&sess, label)
-                    .is_some_and(|(color, bold, dim)| color == green && !bold && !dim)
+                attributes(&sess, label).is_some_and(|(color, bold, dim)| {
+                    common::colors_equal(&color, green) && !bold && !dim
+                })
             })
         },
         common::LIVE_TURN_BUDGET,
@@ -213,7 +219,9 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
         "Run exactly this Bash command: printf 'alpha from bash'. Then say done.",
         "bash_stdout_roundtrip",
     );
-    sess.send(&format!("{prompt}\r")).unwrap();
+    sess.send(&prompt).unwrap();
+    common::expect_input_line(&sess, &prompt, common::DEFAULT_TIMEOUT, "info prompt input");
+    sess.send("\r").unwrap();
     common::expect_turn_complete_after(&sess, &marker, common::LIVE_TURN_BUDGET, "tool completed");
     expect_style(&sess, "╰─", (green, !no_color, false));
     exit(&mut sess);
@@ -322,16 +330,21 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
     sess.resize(40, 100).expect("resize");
     // The screen model cannot represent bold and dim simultaneously; keep
     // that bridge regression on the wire even though summaries no longer dim.
-    let wire = sess
-        .expect("BoldDimSample")
-        .expect("combined styles appear");
-    let normalized = wire.replace("\r\n", "");
-    assert!(
-        normalized.contains("\x1b[1m\x1b[2mBoldDimSample")
-            || normalized.contains("\x1b[1;2mBoldDimSample"),
-        "rich text must retain bold and dim: {wire:?}"
-    );
+    #[cfg(not(windows))]
+    {
+        let wire = sess
+            .expect("BoldDimSample")
+            .expect("combined styles appear");
+        let normalized = wire.replace("\r\n", "");
+        assert!(
+            normalized.contains("\x1b[1m\x1b[2mBoldDimSample")
+                || normalized.contains("\x1b[1;2mBoldDimSample"),
+            "rich text must retain bold and dim: {wire:?}"
+        );
+    }
     sess.expect("❯").expect("input ready");
+    #[cfg(windows)]
+    expect_style(&sess, "BoldDimSample", ("Idx(8)", true, true));
     expect_style(
         &sess,
         "TrueColorSample",

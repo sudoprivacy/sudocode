@@ -19,7 +19,7 @@ mod python;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1090,7 +1090,7 @@ fn read_session_transcript(root: &std::path::Path, session_id: &str) -> String {
         .collect()
 }
 
-/// `/compact`: after three turns the two oldest messages are summarised (the
+/// `/compact`: after three turns the long oldest exchange is summarised (the
 /// mock answers compaction requests with its canned summary, so the LLM path
 /// is taken), the compaction is on disk immediately, and the next model
 /// request no longer carries the summarised turn.
@@ -1101,10 +1101,20 @@ async fn scenario_slash_compact(
 ) {
     let session_id = scenario_session_new(client, &workspace.root).await;
     for marker in ["ACP_COMPACT_ONE", "ACP_COMPACT_TWO", "ACP_COMPACT_THREE"] {
+        // The old exchange must dominate the four protected recent messages
+        // so the summary plus continuation framing can meet the 50% target.
+        let repetitions = if marker == "ACP_COMPACT_ONE" {
+            800
+        } else {
+            100
+        };
         run_marked_turn(
             client,
             &session_id,
-            &format!("{marker} {}", "migration design context. ".repeat(100)),
+            &format!(
+                "{marker} {}",
+                "migration design context. ".repeat(repetitions)
+            ),
         )
         .await;
     }
@@ -1113,6 +1123,10 @@ async fn scenario_slash_compact(
         !before.contains("\"type\":\"compaction\""),
         "no compaction record before /compact"
     );
+    let transcript_path = find_session_transcript(&workspace.root, &session_id);
+    let source = runtime::Session::load_from_path(&transcript_path)
+        .expect("source transcript should load before /compact");
+    let before_history = runtime::estimate_session_tokens(&source);
 
     let (text, _resp) = run_slash_command(client, &session_id, "/compact").await;
     assert!(
@@ -1140,6 +1154,20 @@ async fn scenario_slash_compact(
         after.contains("\"type\":\"compaction\""),
         "compaction metadata should be on disk right after /compact"
     );
+    let compacted = runtime::Session::load_from_path(&transcript_path)
+        .expect("compacted transcript should load immediately after /compact");
+    let report = compacted
+        .last_compaction_report
+        .as_ref()
+        .expect("successful /compact should persist its final report");
+    assert_eq!(report.outcome, runtime::CompactionOutcome::TargetMet);
+    assert_eq!(report.before_history, before_history);
+    assert_eq!(
+        report.after_history,
+        runtime::estimate_session_tokens(&compacted)
+    );
+    assert!(report.after_history <= report.before_history / 2);
+    assert!(report.after_history <= report.safe_history_budget);
 
     // The model now sees the summary instead of the oldest turn.
     let body =
@@ -1155,7 +1183,8 @@ async fn scenario_slash_compact(
 }
 
 /// `session/cancel` during `/compact`: the turn ends with `cancelled`, and
-/// neither the in-memory nor the on-disk transcript is touched.
+/// message history remains unchanged in memory and on disk while the final
+/// report and actual maintenance attempts are persisted.
 ///
 /// The first turn uses the mock's `delayed_text` scenario. Compaction
 /// requests are classified by the markers of the messages being summarised,
@@ -1173,15 +1202,25 @@ async fn scenario_slash_compact_cancel(
             "session/prompt",
             json!({
                 "sessionId": session_id,
-                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}delayed_text ACP_CANCEL_ONE") }]
+                "prompt": [{ "type": "text", "text": format!(
+                    "{SCENARIO_PREFIX}delayed_text ACP_CANCEL_ONE {}",
+                    "migration design context. ".repeat(800)
+                ) }]
             }),
         )
         .await;
     assert!(first["result"].get("stopReason").is_some(), "{first}");
     for marker in ["ACP_CANCEL_TWO", "ACP_CANCEL_THREE"] {
-        run_marked_turn(client, &session_id, marker).await;
+        run_marked_turn(
+            client,
+            &session_id,
+            &format!("{marker} {}", "migration design context. ".repeat(200)),
+        )
+        .await;
     }
-    let transcript_before = read_session_transcript(&workspace.root, &session_id);
+    let transcript_path = find_session_transcript(&workspace.root, &session_id);
+    let source = runtime::Session::load_from_path(&transcript_path)
+        .expect("source transcript should load before cancellation");
     let requests_before = server.captured_requests().await.len();
 
     let compact_id = client
@@ -1243,18 +1282,52 @@ async fn scenario_slash_compact_cancel(
     prefix.extend(notifs);
     assert_compaction_lifecycle(&prefix, "cancelled");
 
-    // Nothing changed on disk…
-    let transcript_after = read_session_transcript(&workspace.root, &session_id);
-    assert_eq!(
-        transcript_before, transcript_after,
-        "a cancelled /compact must leave the persisted transcript untouched"
-    );
+    // Durable message history is unchanged; the cancelled run's maintenance
+    // report and receipt ledger still survive for accounting and inspection.
+    assert_cancelled_compaction_persisted(&transcript_path, &source);
     // …or in memory: the next turn still carries the would-be-summarised turn.
     let body =
         last_model_request_after_prompt(client, server, &session_id, "ACP_CANCEL_FOUR").await;
     assert!(
         body.contains("ACP_CANCEL_ONE"),
         "a cancelled /compact must not replace the in-memory transcript"
+    );
+}
+
+fn assert_cancelled_compaction_persisted(transcript_path: &Path, source: &runtime::Session) {
+    let restored = runtime::Session::load_from_path(transcript_path)
+        .expect("cancelled compaction transcript should load");
+    assert_eq!(restored.messages, source.messages);
+    assert_eq!(restored.compaction, source.compaction);
+    assert_eq!(
+        restored.compaction_achievement,
+        source.compaction_achievement
+    );
+    let report = restored
+        .last_compaction_report
+        .as_ref()
+        .expect("cancelled /compact should persist its final report");
+    assert_eq!(report.outcome, runtime::CompactionOutcome::Cancelled);
+    assert_eq!(
+        report.before_history,
+        runtime::estimate_session_tokens(source)
+    );
+    assert_eq!(report.after_history, report.before_history);
+    assert!((1..=4).contains(&report.attempts), "{report:?}");
+    assert_eq!(report.completed_responses, 0);
+    let receipts: Vec<_> = restored
+        .maintenance_usage
+        .iter()
+        .filter(|receipt| receipt.run_id == report.run_id)
+        .collect();
+    assert_eq!(receipts.len(), report.attempts);
+    assert!(receipts.iter().all(|receipt| receipt.usage.is_none()));
+    assert!(receipts
+        .iter()
+        .all(|receipt| (1..=4).contains(&receipt.attempt_id)));
+    assert_eq!(
+        restored.maintenance_usage.len(),
+        source.maintenance_usage.len() + receipts.len()
     );
 }
 
@@ -1943,6 +2016,10 @@ async fn acp_stdio_context_limit_rejection_is_compacted_and_retried() {
         reloaded.compaction.is_some(),
         "transcript on disk should record the compaction"
     );
+    let report = reloaded.last_compaction_report.as_ref().unwrap();
+    assert_eq!(report.outcome, runtime::CompactionOutcome::TargetMet);
+    assert!(report.after_history <= report.before_history / 2);
+    assert!(report.after_history <= report.safe_history_budget);
     assert!(
         reloaded
             .messages
@@ -1983,7 +2060,7 @@ async fn acp_stdio_tool_loop_compacts_before_next_request() {
         "tool loop fixture line\n",
     )
     .expect("fixture should be written");
-    let (session_id, _transcript_path) = seed_filler_history(&server, &workspace, 32).await;
+    let (session_id, transcript_path) = seed_filler_history(&server, &workspace, 32).await;
 
     let mut client = spawn_stdio_client(&workspace);
     scenario_initialize(&mut client).await;
@@ -2056,6 +2133,12 @@ async fn acp_stdio_tool_loop_compacts_before_next_request() {
         &requests[before + follow_up].raw_body
             [..requests[before + follow_up].raw_body.len().min(400)]
     );
+
+    let reloaded = runtime::Session::load_from_path(&transcript_path).unwrap();
+    let report = reloaded.last_compaction_report.as_ref().unwrap();
+    assert_eq!(report.outcome, runtime::CompactionOutcome::TargetMet);
+    assert!(report.after_history <= report.before_history / 2);
+    assert!(report.after_history <= report.safe_history_budget);
 
     client.shutdown().await;
     workspace.cleanup();
@@ -5538,7 +5621,7 @@ async fn acp_stdio_fork_from_persisted_session_across_processes() {
 }
 
 /// A provider failure during manual maintenance is a failed prompt, with
-/// ordered lifecycle notifications and an unchanged durable transcript.
+/// ordered lifecycle notifications and unchanged durable message history.
 #[tokio::test]
 async fn acp_compaction_failure_is_terminal_and_preserves_history() {
     let server = MockAnthropicService::spawn().await.unwrap();
@@ -5546,9 +5629,9 @@ async fn acp_compaction_failure_is_terminal_and_preserves_history() {
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
     let (session_id, path) = seed_filler_history(&server, &workspace, 32).await;
-    let before = fs::read(&path).unwrap();
-    // A deliberately incompatible response is a permanent summary failure,
-    // avoiding the transport backoff used for an unreachable provider.
+    let before = runtime::Session::load_from_path(&path).unwrap();
+    // A deliberately incompatible response exercises a bounded summary
+    // failure while its real HTTP attempts still produce usage receipts.
     let invalid_provider = OpenAiCompatMock::spawn("").await.unwrap();
     workspace.write_sudocode_json(invalid_provider.base_url());
     let mut client = spawn_stdio_client(&workspace);
@@ -5581,7 +5664,31 @@ async fn acp_compaction_failure_is_terminal_and_preserves_history() {
         .unwrap()
         .contains("上下文压缩失败，本次对话已停止"));
     assert!(text.contains("上下文压缩失败，本次对话已停止"), "{text}");
-    assert_eq!(fs::read(path).unwrap(), before);
+    let restored = runtime::Session::load_from_path(&path).unwrap();
+    assert_eq!(restored.messages, before.messages);
+    assert_eq!(restored.compaction, before.compaction);
+    assert_eq!(
+        restored.compaction_achievement,
+        before.compaction_achievement
+    );
+    let report = restored.last_compaction_report.as_ref().unwrap();
+    assert_eq!(report.outcome, runtime::CompactionOutcome::Failed);
+    assert_eq!(
+        report.before_history,
+        runtime::estimate_session_tokens(&before)
+    );
+    assert_eq!(report.after_history, report.before_history);
+    assert!((1..=4).contains(&report.attempts), "{report:?}");
+    assert!(report.completed_responses <= 2, "{report:?}");
+    let receipts: Vec<_> = restored
+        .maintenance_usage
+        .iter()
+        .filter(|receipt| receipt.run_id == report.run_id)
+        .collect();
+    assert_eq!(receipts.len(), report.attempts);
+    assert!(receipts
+        .iter()
+        .all(|receipt| (1..=4).contains(&receipt.attempt_id)));
     client.shutdown().await;
     workspace.cleanup();
 }

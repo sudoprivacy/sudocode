@@ -290,6 +290,29 @@ pub fn live_model() -> String {
         .unwrap_or_else(|| "sonnet".to_string())
 }
 
+/// Opt a live fixture into the caller's Anthropic environment credentials.
+/// Only the disposable config is changed; developer configuration is untouched.
+pub fn configure_live_anthropic_env(env: &TestEnv) {
+    if !env.is_live() || std::env::var("SCODE_LIVE_USE_ANTHROPIC_ENV").as_deref() != Ok("1") {
+        return;
+    }
+    assert_eq!(
+        std::env::var("SCODE_LIVE_AUTH_MODE").as_deref(),
+        Ok("api-key")
+    );
+    let base_url = std::env::var("ANTHROPIC_BASE_URL").expect("Anthropic base URL must be present");
+    let token = std::env::var("ANTHROPIC_AUTH_TOKEN").expect("Anthropic token must be present");
+    assert!(!base_url.is_empty() && !token.is_empty());
+    let path = env.config_home().join("sudocode.json");
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["auth_modes"]["api-key"]["anthropic"] =
+        serde_json::json!({"baseUrl":base_url,"apiKeyEnv":"ANTHROPIC_AUTH_TOKEN"});
+    let model = live_model();
+    config["models"][&model]["providers"]["api-key"] =
+        serde_json::json!({"provider":"anthropic","model":model,"api":"anthropic-messages"});
+    fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+}
+
 /// The last `chars` characters of the rendered screen, for a panic message.
 ///
 /// Taken from the end because a PTY failure is almost always explained by what

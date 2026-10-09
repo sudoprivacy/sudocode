@@ -236,3 +236,112 @@ fn context_uses_the_sessions_discovered_model_window() {
         });
     exit_repl(&mut sess);
 }
+
+fn compaction_timeout(env: &TestEnv) -> Duration {
+    Duration::from_secs(if env.is_live() { 90 } else { 30 })
+}
+
+/// A maintenance response is billable, but its input usage describes the
+/// pre-compaction request. It must not become the next task's occupancy anchor.
+/// The same real CLI workflow runs against mock and configured live providers.
+#[test]
+fn compaction_clears_the_context_anchor_and_resumes_critical_facts() {
+    let env = TestEnv::new("context-after-compaction");
+    common::configure_live_anthropic_env(&env);
+    let mut source = runtime::Session::new().with_workspace_root(env.workspace_root());
+    let facts = env.prompt(
+        "The release channel is blue. The migration counter is 73. Do not deploy until checks pass.",
+        "llm_compaction_roundtrip",
+    );
+    for index in 0..10 {
+        let prefix = if index == 0 {
+            facts.clone()
+        } else {
+            format!("Historical implementation log {index}. ")
+        };
+        let text = prefix.clone() + &"x".repeat(5_997 - prefix.len());
+        source
+            .push_message(if index % 2 == 0 {
+                runtime::ConversationMessage::user_text(text)
+            } else {
+                runtime::ConversationMessage::assistant(vec![runtime::ContentBlock::Text { text }])
+            })
+            .unwrap();
+    }
+    assert_eq!(runtime::estimate_session_tokens(&source), 15_000);
+    let path = env.workspace_root().join("history.jsonl");
+    source.save_to_path(&path).unwrap();
+    let mut compact = env.spawn(&["--resume", path.to_str().unwrap(), "/compact"]);
+    compact.set_default_timeout(compaction_timeout(&env));
+    let code = compact.expect_eof().unwrap();
+    let compacted = runtime::Session::load_from_path(&path).unwrap();
+    assert_eq!(
+        code, 0,
+        "compaction report: {:?}",
+        compacted.last_compaction_report
+    );
+    let report = compacted.last_compaction_report.as_ref().unwrap();
+    assert_eq!(report.outcome, runtime::CompactionOutcome::TargetMet);
+    assert!(runtime::estimate_session_tokens(&compacted) <= 7_500);
+    assert!(!compacted.maintenance_usage.is_empty());
+
+    let mut sess = env.spawn(&[
+        "--resume",
+        path.to_str().unwrap(),
+        "--permission-mode",
+        "read-only",
+    ]);
+    sess.set_default_timeout(compaction_timeout(&env));
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "resumed context ready");
+    sess.send("/context\r").unwrap();
+    sess.expect("Context Usage").unwrap();
+    sess.expect("Messages:").unwrap();
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "context report complete");
+    let screen = screen_tail(&sess, 10_000);
+    assert!(
+        screen.contains('≈'),
+        "maintenance usage must leave context marked estimated: {screen}"
+    );
+
+    let prompt = env.prompt(
+        "What release channel and migration counter were specified before compaction? Answer as LIVE_COMPACTION_OK <channel> <counter>. Do not use tools.",
+        "single_turn_text",
+    );
+    let marker = common::turn_status_marker(&sess);
+    sess.send(&format!("{prompt}\r")).unwrap();
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        compaction_timeout(&env),
+        "continue from the compacted context",
+    );
+    sess.send("/exit\r").unwrap();
+    assert_eq!(sess.expect_eof().unwrap(), 0);
+    let continued = runtime::Session::load_from_path(&path).unwrap();
+    let assistant = continued
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == runtime::MessageRole::Assistant)
+        .unwrap();
+    let text = assistant
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            runtime::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if env.is_live() {
+        assert!(
+            text.contains("LIVE_COMPACTION_OK blue 73"),
+            "continuation must preserve the initial facts: {text}"
+        );
+    } else {
+        assert!(
+            text.contains('4'),
+            "the deterministic task reply must reach the resumed session: {text}"
+        );
+    }
+}

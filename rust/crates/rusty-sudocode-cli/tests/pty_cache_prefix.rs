@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use common::TestEnv;
 use pty_expect::PtySession;
-use runtime::{ContentBlock, ConversationMessage, Session};
+use runtime::{ContentBlock, ConversationMessage, MessageRole, Session};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 
@@ -21,6 +21,8 @@ const WAIT: Duration = Duration::from_secs(30);
 struct Capture {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    attempt_ids: Arc<Mutex<Vec<(String, String)>>>,
+    return_gateway_id: Arc<AtomicBool>,
     retry_next: Arc<AtomicBool>,
     pressure_next: Arc<AtomicBool>,
     thinking_blocks: Arc<AtomicBool>,
@@ -34,6 +36,10 @@ impl Capture {
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let attempt_ids = Arc::new(Mutex::new(Vec::new()));
+        let wire_ids = Arc::clone(&attempt_ids);
+        let return_gateway_id = Arc::new(AtomicBool::new(false));
+        let return_id = Arc::clone(&return_gateway_id);
         let retry_next = Arc::new(AtomicBool::new(false));
         let pressure_next = Arc::new(AtomicBool::new(false));
         let thinking_blocks = Arc::new(AtomicBool::new(false));
@@ -48,7 +54,9 @@ impl Capture {
         let worker = thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((socket, _)) => serve(socket, &captured, &retry, &pressure, &thinking),
+                    Ok((socket, _)) => serve(
+                        socket, &captured, &retry, &pressure, &thinking, &wire_ids, &return_id,
+                    ),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -59,6 +67,8 @@ impl Capture {
         Self {
             url,
             requests,
+            attempt_ids,
+            return_gateway_id,
             retry_next,
             pressure_next,
             thinking_blocks,
@@ -79,13 +89,15 @@ impl Drop for Capture {
     }
 }
 
-fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>)> {
+fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>, String, String)> {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let mut first = String::new();
     if reader.read_line(&mut first).unwrap_or(0) == 0 {
         return None;
     }
     let mut length = 0;
+    let mut client_id = String::new();
+    let mut logical_id = String::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap() == 0 {
@@ -97,12 +109,17 @@ fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>)> {
         if let Some((key, value)) = line.split_once(':') {
             if key.eq_ignore_ascii_case("content-length") {
                 length = value.trim().parse().unwrap();
+            } else if key.eq_ignore_ascii_case("x-client-request-id") {
+                assert!(client_id.is_empty(), "must send exactly one attempt ID");
+                client_id = value.trim().to_string();
+            } else if key.eq_ignore_ascii_case("x-request-id") {
+                logical_id = value.trim().to_string();
             }
         }
     }
     let mut bytes = vec![0; length];
     reader.read_exact(&mut bytes).unwrap();
-    Some((first, bytes))
+    Some((first, bytes, client_id, logical_id))
 }
 
 fn serve(
@@ -111,12 +128,14 @@ fn serve(
     retry: &AtomicBool,
     pressure: &AtomicBool,
     thinking: &AtomicBool,
+    attempt_ids: &Mutex<Vec<(String, String)>>,
+    return_gateway_id: &AtomicBool,
 ) {
     socket.set_nonblocking(false).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let Some((first, bytes)) = read_request(&socket) else {
+    let Some((first, bytes, client_id, logical_id)) = read_request(&socket) else {
         return;
     };
     if !first.starts_with("POST ") || first.contains("count_tokens") {
@@ -129,6 +148,7 @@ fn serve(
         return;
     }
     let request: Value = serde_json::from_slice(&bytes).unwrap();
+    attempt_ids.lock().unwrap().push((client_id, logical_id));
     let number = {
         let mut all = captured.lock().unwrap();
         all.push(request.clone());
@@ -209,11 +229,24 @@ fn serve(
         }
         events.splice(1..1, prefix);
     }
+    respond_events(
+        &mut socket,
+        events,
+        return_gateway_id.load(Ordering::Relaxed),
+    );
+}
+
+fn respond_events(socket: &mut TcpStream, events: Vec<(&str, Value)>, return_id: bool) {
     let mut body = String::new();
     for (event, data) in events {
         write!(body, "event: {event}\ndata: {data}\n\n").unwrap();
     }
-    respond(&mut socket, "200 OK", "text/event-stream", &body);
+    let status = if return_id {
+        "200 OK\r\nx-client-request-id: gateway-authoritative-id"
+    } else {
+        "200 OK"
+    };
+    respond(socket, status, "text/event-stream", &body);
 }
 
 fn thinking_fixture(number: usize) -> Vec<Value> {
@@ -593,6 +626,154 @@ fn retry_and_automatic_compaction_preserve_session_fields() {
     );
     for request in &requests[1..] {
         fixed_prefix(&requests[0], request);
+    }
+    let attempts = capture.attempt_ids.lock().unwrap();
+    let ids: std::collections::HashSet<_> = attempts.iter().map(|(id, _)| id).collect();
+    assert_eq!(
+        ids.len(),
+        attempts.len(),
+        "each HTTP attempt must have a fresh UUID"
+    );
+    for (id, _) in attempts.iter() {
+        let parts: Vec<_> = id.split('-').collect();
+        assert_eq!(
+            parts.iter().map(|part| part.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12]
+        );
+        assert!(parts
+            .iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_hexdigit())));
+        assert!(parts[2].starts_with('4'));
+        assert!(matches!(parts[3].as_bytes()[0], b'8' | b'9' | b'a' | b'b'));
+    }
+    assert_eq!(
+        attempts[1].1, attempts[2].1,
+        "a retry retains its logical trace ID"
+    );
+    let rows = cache_ledger_rows(&env);
+    let successful: std::collections::HashSet<_> = rows
+        .iter()
+        .map(|row| row["gateway_request_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !successful.contains(attempts[1].0.as_str()),
+        "failed attempts cannot inherit successful usage"
+    );
+    assert!(
+        successful.contains(attempts[2].0.as_str()),
+        "successful SSE row must retain its exact sent UUID"
+    );
+}
+
+fn cache_ledger_rows(env: &TestEnv) -> Vec<Value> {
+    let mut rows = Vec::new();
+    for session in std::fs::read_dir(env.config_home().join("cache/prompt-cache")).unwrap() {
+        let path = session.unwrap().path().join("requests.jsonl");
+        if !path.exists() {
+            continue;
+        }
+        let text = std::fs::read_to_string(path).unwrap();
+        rows.extend(
+            text.lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap()),
+        );
+    }
+    rows
+}
+
+#[test]
+fn streaming_ledger_prefers_the_returned_gateway_id() {
+    let env = TestEnv::new_mock("cache-returned-id");
+    let capture = Capture::new();
+    capture.return_gateway_id.store(true, Ordering::Relaxed);
+    let path = fixture(&env, &capture);
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "Continue the project.");
+    exit(&mut cli);
+    let rows = cache_ledger_rows(&env);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["gateway_request_id"], "gateway-authoritative-id");
+    let attempts = capture.attempt_ids.lock().unwrap();
+    assert_ne!(attempts[0].0, "gateway-authoritative-id");
+}
+
+#[test]
+fn streaming_attempt_id_is_recorded_in_the_cache_ledger() {
+    let env = TestEnv::new("streaming-attempt-ledger");
+    let prompt = env.prompt(
+        "What is 2+2? Answer with the number only.",
+        "single_turn_text",
+    );
+    let request_log = env.workspace_root().join("request-trace.jsonl");
+    let mut cli = env.spawn_with_env(
+        &["-p", &prompt, "--permission-mode", "read-only"],
+        &[("SCODE_LOG_PATH", request_log.to_str().unwrap())],
+    );
+    if env.is_live() {
+        cli.set_default_timeout(Duration::from_secs(90));
+    }
+    let exit = cli.expect_eof();
+    if exit.is_err() {
+        let log = std::fs::read_to_string(&request_log).unwrap_or_default();
+        let summary: Vec<_> = log.lines().filter_map(|line| {
+            let event: Value = serde_json::from_str(line).ok()?;
+            matches!(event["event"].as_str(), Some("request_started" | "request_failed" | "request_succeeded"))
+                .then(|| json!({"event":event["event"], "status":event["attributes"]["status"],
+                    "request_id":event["attributes"]["request_id"],
+                    "no_available_accounts":event["attributes"]["error"].as_str().is_some_and(|error| error.contains("No available accounts"))}))
+        }).collect();
+        eprintln!("HTTP attempt summary: {}", json!(summary));
+    }
+    assert_eq!(exit.unwrap(), 0);
+    let path = common::find_session_transcript(&env.workspace_root().join(".scode"))
+        .expect("the CLI must persist its actual assistant response");
+    let session = Session::load_from_path(&path).unwrap();
+    let assistant = session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::Assistant)
+        .unwrap();
+    let answer = assistant
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(
+        answer.trim(),
+        if env.is_live() {
+            "4"
+        } else {
+            "The answer is 4"
+        }
+    );
+    let rows = cache_ledger_rows(&env);
+    assert!(
+        !rows.is_empty(),
+        "a real streamed response must create a cache ledger row"
+    );
+    for row in &rows {
+        let id = row["gateway_request_id"]
+            .as_str()
+            .expect("each successful response needs a gateway join key");
+        assert_ne!(id, "");
+        assert!(
+            row["provider_request_id"].is_string(),
+            "provider response ID remains separate"
+        );
+    }
+    if let Ok(path) = std::env::var("SCODE_REQUEST_ID_REPORT") {
+        let correlation: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                json!({"gateway_request_id":row["gateway_request_id"],
+            "provider_request_id":row["provider_request_id"],"model":row["model"]})
+            })
+            .collect();
+        std::fs::write(path, serde_json::to_vec(&correlation).unwrap()).unwrap();
     }
 }
 

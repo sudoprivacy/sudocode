@@ -94,20 +94,24 @@ print(result)
         .replace('\\', "/");
     let command = format!("'{python}' '{script}'");
     let command_words = shell_words::split(&command).unwrap();
-    let mut prompt = format!("Call one Bash Agent with model={model}, run_in_background=false, and this prompt: Run exactly this Bash command once, with no other commands or retries: {command}. Report its actual output. Wait for the child and report its output.");
+    let child_prompt = format!("Run exactly this Bash command once, with no other commands or retries: {command}. Report its actual output.");
+    let mut prompt = format!("Call one Agent with model={model}, run_in_background=false, and this exact child prompt: {}. Wait for the child and report its output.", serde_json::to_string(&child_prompt).unwrap());
     if verify_report {
-        prompt.push_str(" After it completes, have a second read-only Agent read the completed child's saved Markdown report and return the actual invoice output. It must only read that report, without running any commands. Report that verified output.");
+        prompt.push_str(" The Agent tool already saves its report at the outputFile path in its returned result. After it completes, have a second read-only Explore Agent read that exact outputFile and return the actual invoice output. It must only read that report, without running commands or creating another report. Report that verified output.");
     }
     let marker = common::turn_status_marker(&cli);
     cli.send(&prompt).unwrap();
     common::expect_screen(
         &cli,
         |s| {
-            s.contains(if verify_report {
-                "Report that verified output."
-            } else {
-                "report its output."
-            })
+            s.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(if verify_report {
+                    "Report that verified output."
+                } else {
+                    "report its output."
+                })
         },
         BUDGET,
         "agent task input",

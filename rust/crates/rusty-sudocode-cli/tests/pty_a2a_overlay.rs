@@ -55,9 +55,32 @@ fn has_chip(screen: &str, marker: &str) -> bool {
 
 /// Ctrl-D exits even when the input contains recalled text.
 fn exit(sess: &mut PtySession) {
+    exit_with_context(sess, "REPL");
+}
+
+fn exit_with_context(sess: &mut PtySession, context: &str) {
     sess.send("\x04").expect("exit REPL");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
-    sess.expect_eof().expect("REPL should exit cleanly");
+    sess.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "{context} should exit cleanly: {error:?}\nPTY:\n{}",
+            sess.render(|screen| screen.contents())
+        )
+    });
+}
+
+fn expect_replay_input_ready(sess: &mut PtySession) {
+    // Resume prints the restored transcript before iocraft enters raw mode.
+    // Seeing its markers alone does not mean that Ctrl-D reaches the REPL.
+    common::expect_input_line_cleared(sess, BUDGET, "persisted replay is ready for input");
+    sess.send("REPLAY-INPUT-READY")
+        .expect("type into resumed input");
+    common::expect_screen_settled(
+        sess,
+        |screen| input_text(screen) == "REPLAY-INPUT-READY",
+        BUDGET,
+        "resumed input receives keys before Ctrl-D",
+    );
 }
 
 /// Keep the model busy and wait until each submitted item is actually queued.
@@ -371,8 +394,13 @@ fn queued_and_offline_messages_survive_receiver_restart() {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
-    exit(&mut resumed);
-    let mut replay = env.spawn(&["--resume", "latest", "--permission-mode", "read-only"]);
+    exit_with_context(&mut resumed, "recovered receiver");
+    // TestEnv defaults to the synchronous REPL, where Ctrl-D edits a nonempty
+    // draft. Keep the A2A receiver's queue mode across this second restart.
+    let mut replay = env.spawn_with_env(
+        &["--resume", "latest", "--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
     replay.resize(80, 100).unwrap();
     common::expect_screen(
         &replay,
@@ -382,8 +410,9 @@ fn queued_and_offline_messages_survive_receiver_restart() {
         BUDGET,
         "consumed peer messages are present in the persisted session",
     );
+    expect_replay_input_ready(&mut replay);
     replay.render(|screen| assert!(!screen.contents().contains("STALE-CONTROL-MARKER")));
-    exit(&mut replay);
+    exit_with_context(&mut replay, "persisted replay");
 }
 
 fn complete_received_block(screen: &str) -> bool {
@@ -448,6 +477,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
         live,
         "live and replay must use the same layout"
     );
+    expect_replay_input_ready(&mut resumed);
     exit(&mut resumed);
 }
 
@@ -726,6 +756,7 @@ fn a2a_replay_preserves_mixed_sources_and_literal_markup() {
         assert!(!text.contains("Message from code-example"));
         assert!(!text.contains("Message from incomplete"));
     });
+    expect_replay_input_ready(&mut sess);
     exit(&mut sess);
 }
 

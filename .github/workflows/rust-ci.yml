@@ -585,6 +585,7 @@ jobs:
           cargo test -p rusty-sudocode-cli --test pty_headless -- --test-threads=1 --nocapture
           SCODE_LIVE_MODEL=deepseek-v3.2-azure cargo test -p rusty-sudocode-cli --test pty_azure_inline_reasoning azure_live_file_roundtrip_has_a_final_answer -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_model_flag_priority configured_model_reads_updated_file_after_resume -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_a2a_overlay queued_and_offline_messages_survive_receiver_restart -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_agent_permission_bubble -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress --test pty_arrow_keys -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_background_tasks inspecting_running_task_does_not_acknowledge_its_future_result -- --nocapture

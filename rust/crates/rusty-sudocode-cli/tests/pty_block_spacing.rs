@@ -53,6 +53,15 @@ fn position(rows: &[String], needle: &str) -> usize {
         .unwrap_or_else(|| panic!("missing {needle}: {rows:#?}"))
 }
 
+fn assistant_position(rows: &[String], text: &str) -> usize {
+    rows.iter()
+        .rposition(|row| {
+            let row = row.trim();
+            row.strip_prefix("• ").unwrap_or(row) == text
+        })
+        .unwrap_or_else(|| panic!("missing assistant paragraph {text}: {rows:#?}"))
+}
+
 fn assert_gap(rows: &[String], before: usize, after: usize, blank_rows: usize) {
     assert_eq!(after - before - 1, blank_rows, "wrong gap: {rows:#?}");
     assert!(
@@ -65,8 +74,8 @@ fn assert_gap(rows: &[String], before: usize, after: usize, blank_rows: usize) {
 
 fn assert_transcript(sess: &PtySession) {
     let rows = rows(sess);
-    let intro = position(&rows, "Spacing intro.");
-    let end = position(&rows, "Spacing end.");
+    let intro = assistant_position(&rows, "Spacing intro.");
+    let end = assistant_position(&rows, "Spacing end.");
     let headers: Vec<_> = (intro + 1..end)
         .filter(|&row| rows[row].starts_with("╭─ Bash("))
         .collect();
@@ -92,7 +101,12 @@ fn assert_transcript(sess: &PtySession) {
             assert_gap(&rows, before, header, 1);
         }
     }
-    assert_gap(&rows, caps[1], position(&rows, "Spacing done."), 1);
+    assert_gap(
+        &rows,
+        caps[1],
+        assistant_position(&rows, "Spacing done."),
+        1,
+    );
     for marker in ["ONE", "TWO"] {
         let first = position(&rows, &format!("{marker}_START"));
         let last = position(&rows, &format!("{marker}_END"));
@@ -100,10 +114,31 @@ fn assert_transcript(sess: &PtySession) {
         assert!(rows[first + 1..last].iter().all(|row| row.trim() == "│"));
         let header = headers
             .iter()
-            .copied()
-            .find(|&row| row < first && first < row + 3)
-            .unwrap();
-        assert_eq!(first, header + 1, "no padding between tool title and body");
+            .enumerate()
+            .find_map(|(index, &header)| (header < first && last < caps[index]).then_some(header))
+            .unwrap_or_else(|| {
+                panic!("file contents must stay inside their own tool frame: {rows:#?}")
+            });
+        let preamble = &rows[header + 1..first];
+        if !preamble.is_empty() {
+            // A model-supplied description can truncate even a short command's
+            // title on a narrow terminal. Its command and separator are body
+            // content; neither may introduce padding before the file output.
+            assert_eq!(preamble.len(), 2, "unexpected tool body rows: {rows:#?}");
+            assert_eq!(
+                preamble[0].trim(),
+                format!("│ $ cat spacing-{}.txt", marker.to_lowercase()),
+                "a truncated title must reveal the actual command: {rows:#?}"
+            );
+            let rule = preamble[1]
+                .trim()
+                .strip_prefix("│ ")
+                .unwrap_or_else(|| panic!("separator must stay inside its frame: {rows:#?}"));
+            assert!(
+                !rule.is_empty() && rule.chars().all(|ch| ch == '─'),
+                "command/output separator must have no padding: {rows:#?}"
+            );
+        }
     }
     assert_gap(
         &rows,
@@ -129,14 +164,16 @@ fn roundtrip(queue: bool, width: u16) {
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("settings.json"), r#"{"thinking":false}"#).unwrap();
     let mut sess = start(&env, false, queue, width);
-    let prompt = env.prompt(&format!("First say exactly Spacing intro. Then run two separate Bash tool calls: `cat spacing-one.txt` and `cat spacing-two.txt`. Do not combine commands and do not repeat the file contents in your answer. After both tools finish reply with exactly this Markdown, without an outer code fence:\n{}", mock_anthropic_service::SPACING_FINAL), "transcript_spacing");
+    let prompt = env.prompt(&format!("Read spacing-one.txt and spacing-two.txt now using two separate Bash tool calls: `cat spacing-one.txt` and `cat spacing-two.txt`. Give them the descriptions `Read first spacing file` and `Read second spacing file`, respectively. Immediately before calling the tools, emit the exact plain standalone paragraph `Spacing intro.` including its final period, then continue with the tool calls in the same turn. Do not end the turn after that paragraph. Do not combine commands and do not repeat the file contents in your answer. After both tools finish reply with exactly this Markdown, without an outer code fence:\n{}", mock_anthropic_service::SPACING_FINAL), "transcript_spacing");
     // The sync editor also intercepts bracketed paste for OS clipboard images.
     // Type a short line there; live runs read the full instructions from a file.
     if queue {
         sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
         common::expect_screen(
             &sess,
-            |s| s.contains("Pasted") || s.contains("PARITY_SCENARIO:") || s.contains("First say"),
+            |s| {
+                s.contains("Pasted") || s.contains("PARITY_SCENARIO:") || s.contains("Read spacing")
+            },
             common::DEFAULT_TIMEOUT,
             "prompt pasted",
         );
@@ -157,14 +194,21 @@ fn roundtrip(queue: bool, width: u16) {
         sess.send(&input).unwrap();
         common::expect_input_line(&sess, &input, common::DEFAULT_TIMEOUT, "sync input");
     }
+    let marker = common::turn_status_marker(&sess);
     sess.send("\r").unwrap();
     if !queue {
         sess.resize(120, width).unwrap();
     }
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "completed spacing turn",
+    );
     common::expect_screen_settled(
         &sess,
-        |s| s.contains("Spacing end.") && s.contains("ctx "),
-        common::LIVE_TURN_BUDGET,
+        |s| s.contains("Spacing end."),
+        common::DEFAULT_TIMEOUT,
         "completed transcript",
     );
     assert_transcript(&sess);
@@ -240,10 +284,17 @@ fn split_reasoning_stays_contiguous_before_separated_answer() {
         common::DEFAULT_TIMEOUT,
         "thinking prompt",
     );
+    let marker = common::turn_status_marker(&sess);
     sess.send("\r").unwrap();
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::DEFAULT_TIMEOUT,
+        "completed thinking turn",
+    );
     common::expect_screen_settled(
         &sess,
-        |s| s.contains("The answer follows the reasoning.") && s.contains("ctx "),
+        |s| s.contains("The answer follows the reasoning."),
         common::DEFAULT_TIMEOUT,
         "completed thinking",
     );

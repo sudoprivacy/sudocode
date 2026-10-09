@@ -592,7 +592,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cargo test -p rusty-sudocode-cli --test pty_file_operations windows_verbatim_paths_read_the_same_file -- --nocapture
           fi
-          cargo test -p rusty-sudocode-cli --test pty_block_spacing sync_renderer_uses_the_same_spacing -- --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_block_spacing -- --test-threads=1 --nocapture
       - name: Summarize live model routing evidence
         if: always()
         working-directory: .

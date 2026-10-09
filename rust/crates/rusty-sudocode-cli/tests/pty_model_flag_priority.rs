@@ -2,6 +2,8 @@
 //! CI checks CLI precedence with a deterministic transport on all platforms.
 //! SCODE_TEST_BACKEND=live additionally probes the compiled-in default provider.
 mod common;
+#[path = "support/wire_requests.rs"]
+mod wire_requests;
 
 use std::fs;
 use std::path::Path;
@@ -95,7 +97,7 @@ fn assert_requests(env: &TestEnv, model: &str, minimum: usize, nonce: &str) {
     let requests: Vec<Value> = fs::read_dir(request_directory(env))
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| common::is_inference_request_dump(path))
+        .filter(|path| wire_requests::is_inference_request_dump(path))
         .map(|path| serde_json::from_slice(&fs::read(path).unwrap()).unwrap())
         .collect();
     assert!(
@@ -106,7 +108,7 @@ fn assert_requests(env: &TestEnv, model: &str, minimum: usize, nonce: &str) {
     let mut has_fixture_result = false;
     for request in requests {
         assert_eq!(request["model"], model, "explicit flag changed on the wire");
-        for block in common::request_tool_blocks(&request)
+        for block in wire_requests::request_tool_blocks(&request)
             .iter()
             .filter(|block| block["type"] == "tool_result")
         {

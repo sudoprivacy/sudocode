@@ -1,6 +1,8 @@
 //! Child Bash approval on the parent terminal -> fresh invoice -> follow-up.
 //! Run with SCODE_TEST_BACKEND=live and the normal live provider configuration.
 mod common;
+#[path = "support/wire_requests.rs"]
+mod wire_requests;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -15,7 +17,7 @@ fn requests(directory: &Path) -> Vec<Value> {
     std::fs::read_dir(directory)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| common::is_inference_request_dump(path))
+        .filter(|path| wire_requests::is_inference_request_dump(path))
         .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
         .collect()
 }
@@ -136,7 +138,7 @@ print(result)
             request["model"], model,
             "parent or child used a different model"
         );
-        for block in common::request_tool_blocks(&request) {
+        for block in wire_requests::request_tool_blocks(&request) {
             if block["type"] == "tool_use" {
                 match block["name"].as_str() {
                     Some("Agent" | "agent_spawn") => {

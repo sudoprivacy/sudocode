@@ -130,19 +130,52 @@ mod tests {
 
     #[test]
     fn rich_text_preserves_bold_and_dim_and_resets_both() {
-        let text = StyledText::from_ansi("\x1b[1;2mBoldDimSample\x1b[0mPlainSample");
-        let spans = contents(&text, Some(Color::DarkGrey));
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].text, "BoldDimSample");
-        assert_eq!(spans[0].color, Some(Color::DarkGrey));
-        assert_eq!(spans[0].weight, Weight::Bold);
-        assert!(spans[0].dim);
-        assert!(!spans[0].strikethrough);
-        assert_eq!(spans[1].text, "PlainSample");
-        assert_eq!(spans[1].color, Some(Color::DarkGrey));
-        assert_eq!(spans[1].weight, Weight::Normal);
-        assert!(!spans[1].dim);
-        assert!(!spans[1].strikethrough);
+        for intensity in ["1;2", "2;1"] {
+            for reset in ["22", "0"] {
+                let text = StyledText::from_ansi(&format!(
+                    "\x1b[{intensity}mBoldDimSample\x1b[{reset}mPlainSample"
+                ));
+                let spans = contents(&text, Some(Color::DarkGrey));
+                assert_eq!(spans.len(), 2);
+                assert_eq!(spans[0].text, "BoldDimSample");
+                assert_eq!(spans[0].color, Some(Color::DarkGrey));
+                assert_eq!(spans[0].weight, Weight::Bold);
+                assert!(spans[0].dim);
+                assert!(!spans[0].strikethrough);
+                assert_eq!(spans[1].text, "PlainSample");
+                assert_eq!(spans[1].color, Some(Color::DarkGrey));
+                assert_eq!(spans[1].weight, Weight::Normal);
+                assert!(!spans[1].dim);
+                assert!(!spans[1].strikethrough);
+
+                let content = std::sync::Arc::new(StyledText::from_ansi(&format!(
+                    "\x1b[90m\x1b[{intensity}mBoldDimSample\x1b[{reset}m\x1b[90mPlainSample \
+                     \x1b[1mBoldSample\x1b[22m \x1b[2mDimSample\x1b[22m IntensityResetSample"
+                )));
+                let canvas = element! { RichText(content) }.render(Some(100));
+                let mut wire = Vec::new();
+                canvas.write_ansi(&mut wire).unwrap();
+                let rendered = StyledText::from_ansi(std::str::from_utf8(&wire).unwrap());
+                assert_eq!(
+                    rendered.text.trim_end(),
+                    "BoldDimSamplePlainSample BoldSample DimSample IntensityResetSample"
+                );
+                for (label, bold, dim) in [
+                    ("BoldDimSample", true, true),
+                    ("PlainSample", false, false),
+                    ("BoldSample", true, false),
+                    ("DimSample", false, true),
+                    ("IntensityResetSample", false, false),
+                ] {
+                    let start = rendered.text.rfind(label).unwrap();
+                    for (style, _) in rendered.spans(start..start + label.len()) {
+                        assert_eq!(style.foreground_color, Some(TerminalColor::DarkGrey));
+                        assert_eq!(style.attributes.has(Attribute::Bold), bold, "{label}");
+                        assert_eq!(style.attributes.has(Attribute::Dim), dim, "{label}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

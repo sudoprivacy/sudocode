@@ -671,7 +671,13 @@ async fn drive_prompt(
         let complete = engine_blocking
             .run_turn(blocks, &mut observer, &mut bridge)
             .map_err(|error| AcpError::from_turn_error(&error))?;
-        let auto_compacted = complete.auto_compaction.is_some();
+        let auto_compacted = complete.auto_compaction.as_ref().is_some_and(|event| {
+            event.removed_message_count > 0
+                || event
+                    .report
+                    .as_ref()
+                    .is_none_or(|report| report.outcome == runtime::CompactionOutcome::TargetMet)
+        });
         session_ops::record_turn_usage(&engine_blocking, &complete);
         let usage = session_ops::build_prompt_usage(&engine_blocking, &complete, auto_compacted);
         let stop = if complete.cancelled {

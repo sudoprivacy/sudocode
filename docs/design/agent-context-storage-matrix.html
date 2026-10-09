@@ -85,7 +85,7 @@
 <div class="lead">
 <b>The frame (read first).</b> Nexus's two namespaces are the <i>given</i> end-state, not an open question — same split an OS makes between an <i>executable on disk</i> and a <i>running process</i> (<code>nexus-integration-architecture</code> §2):
 <b>image layer = <code>/agents/{name}/</code></b> (<code>config.toml</code> · <code>prompts/</code> · <code>skills/</code> · <code>memory/</code> — persistent, Metastore, the addressable identity; its <code>sessions/</code> is a DT_LINK index into the flat <code>/sessions/</code> store, <i>not</i> the bytes) vs
-<b>runtime layer = <code>/proc/{pid}/</code></b> (<code>status</code> · <code>agent</code>→link · <code>chat-with-me</code> · <code>workspace/</code> — ephemeral, stamped at <code>start_session</code>, reaped on exit; <code>pid</code> = an <b>ephemeral run handle</b>, <i>not</i> the session id (session-id is the durable layer — Q1)).
+<b>runtime layer = <code>/proc/{pid}/</code></b> (<code>status</code> · <code>agent</code>→link · <code>chat-with-me</code> · <code>workspace/</code> — ephemeral, stamped at <code>start_session</code>, reaped on exit; <code>pid</code> = an <b>ephemeral run handle</b>, <i>not</i> the session id (session-id is the durable layer — Q1)). The historical mailbox paths and the OS-derived PID target have implementation drift; see the <a href="#agent-delivery-contract">delivery/runtime audit</a> before treating these paths as deployed capabilities.
 <br><br>
 <b>Three IDs</b> (Q1 design, 2026-08): <code>agent-name</code> (durable principal) · <code>session-id</code> (durable UUID, the <code>--resume</code> key, intended to span many pids) · <code>pid</code> (ephemeral runtime handle). <b>session-id ≠ pid.</b> Shared-daemon session bytes live at <span class="path">/sessions/&lt;sid&gt;/</span>, keyed by session-id alone; ownership and agent/repo associations are separate. Sudocode co-host already writes this layout. Standalone retains a local workspace partition for discovery and resume. The current managed-agent RPC still names its pid field <code>session_id</code>; see Q1 for the distinction between that field and the transcript key.
 <br><br>
@@ -408,17 +408,18 @@ agent-memory/&lt;type&gt;/           per-agent-type memory
   <td class="item">Agent-to-agent messaging</td>
   <td class="cc"><div class="el"><span class="b na">n/a</span> — single machine, no native A2A</div></td>
   <td>
-    <div class="el"><span class="was"><span class="path">&lt;ws&gt;/.sudocode-inbox/&lt;recipient&gt;.jsonl</span> (append-only, <code>MailboxEnvelope</code>) — standalone</span> <span class="arw">→</span> <span class="to">chat-with-me DT_STREAM (nexus a2a)</span></div>
-    <span class="b ok">done</span></td>
+    <div class="el"><b>Current:</b> standalone and co-host share <code>Mailbox</code>; each pair has one <span class="path">/conversations/&lt;cid&gt;/transcript</span> and durable reader registers, indexed by DT_LINKs under both agents. Hosted ACP uses this same transport through <code>acp-mailbox/1</code>.</div>
+    <div class="el"><b>Required:</b> messages to an offline Agent remain pending and enter its A2A queue on the next start. Contact discovery, runtime registration and cross-owner zone isolation still need alignment; see <a href="#agent-delivery-contract">the contract audit</a>.</div>
+    <span class="b partial">partial</span></td>
   <td>
     <div class="el"><b>stays:</b> IM channels (Telegram / Lark / DingTalk) — sudowork's own bridging surface</div>
-    <div class="el"><b>→ sudocode:</b> agent-to-agent messaging is the engine's (chat-with-me)</div>
+    <div class="el"><b>→ sudocode:</b> agent-to-agent messaging and durable consumption belong to the engine; the UI does not own another inbox.</div>
     <span class="b na">n/a</span></td>
   <td>
-    <div class="el"><b>chat-with-me DT_STREAM</b> + kernel <code>a2a</code> crate</div>
+    <div class="el"><b>Target:</b> <code>chat-with-me DT_STREAM</code> + kernel <code>a2a</code> crate. The confirmed refinement is a caller-specific view: B accesses <code>/agents/A/chat-with-me</code> as A↔B's existing conversation stream; C sees A↔C through that same path. The backing store remains the existing pairwise conversation. Routing and authorization are not yet implemented; see <a href="#agent-delivery-contract">the audit</a>.</div>
     <div class="el"><code>MailboxStampingHook</code> stamps unforgeable <code>from</code>, armed at boot, universal for all writers</div>
     <div class="el">raft cross-node (§3.3)</div>
-    <span class="b ok">substrate done</span></td>
+    <span class="b partial">contract alignment open</span></td>
 </tr>
 
 <!-- WORKSPACE -->
@@ -490,6 +491,123 @@ agent-memory/&lt;type&gt;/           per-agent-type memory
 <b>Access = zone-level</b> <code>zone_perms:[(zone,"rw"|"r")]</code> — not per-path; workspace ≠ fence (sandbox via OS seccomp/namespace).
 <b>Cleanup:</b> sudowork consumes <code>on_terminate</code> + <code>sys_rmdir</code> for ephemeral GC; DT_LINK has no refcount (symlink semantics, owner = agent-name).
 <small><b>sudowork to build</b> (design-ready, no new nexus primitive): the zone layout · per-pid DT_LINK wiring · on_terminate GC · zone_perms adoption. <b>nexus committed</b> (non-blocking): Rust glob/grep search-plugin; path-aware gate fix. Open reconcile → Q1.</small>
+</div>
+
+<h2 id="agent-delivery-contract">Agent delivery, runtime identity and visibility</h2>
+<div class="qbox">
+<p><b>Confirmed contract — 2026-10-09, Agent Move design discussion with Ethan.</b>
+An Agent is a durable identity. It can receive authorized A2A messages with
+<b>zero runtimes and no PID</b>, including before its first start. A successful
+durable send leaves the message available; on the next start the engine
+discovers unread conversations and feeds their messages into its A2A queue.
+Starting a receiver is not a precondition for sending. An in-memory enqueue
+alone must not advance durable consumption past work that a crash would lose.
+This does not promise exactly-once execution: retries and recovery still need
+acknowledgement and deduplication rules. A missing storage service or refused
+authorization must surface as a failure, not a successful delivery.</p>
+
+<p><b>Agent → runtimes is one-to-many.</b> <code>/agents/{name}</code> survives
+every runtime. Each runtime has its own node-local <code>/proc/{pid}</code>,
+whose <code>agent</code> DT_LINK points back to that Agent. Runtime identity is
+not a durable session ID. The existing
+<a href="https://github.com/nexi-lab/nexus-vfs/blob/b24e10b76863913d28e015bc210b504e9e878653/rust/contracts/src/agent_pid.rs">PID contract</a>
+encodes <code>OS PID[.local_id]</code>; the local suffix distinguishes runtimes
+sharing a host process. Runtime publication must correspond to a real hosted
+runtime, and termination must remove its live presence. Process existence,
+runtime initialization and ability to accept a turn are separate facts; state
+must report them accurately. A remote PID is interpreted with its host, never
+as a local process handle.</p>
+
+<p><b>Implementation gap, not a replacement contract:</b> at nexus-vfs
+<code>8be8c95f5</code>, unmanaged registration uses that encoder when given an
+OS PID, but managed-agent still allocates <code>pid-&lt;random&gt;</code> before
+spawning and optionally returns a separate <code>os_pid</code>. A slim start
+can register without a runtime provider. The
+<a href="https://github.com/nexi-lab/nexus-vfs/blob/8be8c95f5922f662ab369e9c9d51133e5db781c5/rust/managed_agent/src/session.rs">allocator</a>
+and lifecycle must be aligned structurally across subprocess and co-host
+paths. The managed <code>/proc/{pid}/agent</code> link already exists; standalone
+Sudocode's A2A connection does not yet register/heartbeat with that registry.
+Do not infer a runtime from <code>conversations/</code>: first send can create
+that directory for a recipient that has never run.</p>
+
+<p><b>Why the implementation changed.</b>
+<a href="https://github.com/sudoprivacy/sudocode/pull/723">Sudocode #723</a>
+replaced the shared recipient inbox and node-local cursor with one pairwise
+transcript and a durable reader register containing position and lease. This
+addressed replay storms, skipped opening messages and cursor loss across
+machines, and removed the second co-host mailbox implementation.
+<a href="https://github.com/nexi-lab/nexus-vfs/pull/301">Nexus #301</a> then
+removed the unused Agent inbox; <a href="https://github.com/nexi-lab/nexus-vfs/pull/303">#303</a>
+removed the per-PID inbox. Later,
+<a href="https://github.com/nexi-lab/nexus-vfs/pull/380">Nexus #380</a> and
+<a href="https://github.com/sudoprivacy/sudocode/commit/39c3b6a0e938dacb6bacf21ddb40b14aa4aebe72">the Sudocode change included in #881</a>
+unified ACP and peer turns in managed sessions: <code>kind=session</code> carries ACP JSON-RPC,
+approvals and cancellation through the existing conversation, with a channel
+generation and sequence. Ordinary peer text enters the same engine. Old
+control frames must not become new prompts on restart. These are verified
+implementation decisions; they do not by themselves approve a new public
+contact-entry contract.</p>
+
+<p><b>Scope agreed in the follow-up discussion.</b> Minimize contract changes
+because multiple developers depend on this matrix. Reuse the existing
+<code>/conversations/&lt;cid&gt;/transcript</code>, participant indexes, reader
+registers, leases and <code>acp-mailbox/1</code>. The confirmed refinement is
+a per-sender view at the same <code>/agents/A/chat-with-me</code> path:
+authenticated B sees the existing A↔B conversation stream, authenticated C
+sees A↔C. There is still one stored transcript per conversation. Resolve from
+authenticated caller identity, not a caller-authored envelope's <code>from</code>,
+and do not switch a global mount target between concurrent callers. Receiver A
+continues discovering unread messages through its existing conversation index.
+Zone and mount granularity remain implementation questions to verify against
+these paths and their authorized readers; this document does not declare the
+view implemented.</p>
+
+<p><b>Mount constraints to verify.</b> Keep the established flat+link paths and
+use zone visibility to separate authorized replication sets. Determine the
+zone and mount arrangement from the existing addressing contract; joining
+discovery must not grant private data or another pair's messages. A full
+private mount can shadow a public entry, so composition must preserve the
+contact path explicitly. Caller-specific resolution, directory composition and
+live mount reconciliation need acceptance tests before the contact view is
+declared implemented. The
+<a href="https://github.com/nexi-lab/nexus-vfs/pull/407">native probe</a>
+verified same-path single-stream mounts, but also showed that a subtree view
+does not limit the zone metadata or stream frames replicated to the node.
+Metadata includes paths, link targets, content IDs, owner IDs and writer
+addresses. Intentionally public metadata is safe to publish; private metadata
+does not become public merely because the content is fetched lazily.
+Envelope <code>from</code> authenticates origin; it does not isolate readers.
+Zone admission, authenticated writes and scoped blob reads remain required.</p>
+
+<p><b>Verified stream-alias blocker:</b>
+<a href="https://github.com/nexi-lab/nexus-vfs/issues/410">Nexus #410</a>
+records a native WAL reproduction: mounting a contact path onto an existing
+conversation returns DT_STREAM metadata, but the alias cannot read the original
+record. Appending through the alias creates a separate stream that the original
+path cannot read. Shared stream address resolution must preserve the canonical
+backing identity and caller context before this view can ship. The reproduction
+uses synthetic data and does not establish caller authorization.</p>
+
+<p><b>Evidence boundary.</b> Existing managed-agent tests cover proc link
+creation/removal; the current live offline-send probe proves storage is
+readable by a later reader, not an entire restart-to-model turn. The successful
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/37636145266/job/112842776820">authenticated daemon A2A job</a>,
+<a href="https://github.com/sudoprivacy/sudocode/actions/runs/37636145266/job/112842777159">live ACP job</a> and
+<a href="https://github.com/sudoprivacy/moss/actions/runs/37764879417/job/113274031218">Moss recovery job</a>
+cover peer replies, approvals and session recovery. These individual jobs do not
+claim that every job in their parent workflow passed. This coverage does not
+yet establish the full OS-derived-PID contract or three-party zone isolation.
+Acceptance must send while no runtime exists, restart the receiver on another
+authorized node, observe the queued A2A turn, reject stale ACP control, verify
+multiple real runtimes and cleanup, and inspect a third node's actual replica
+for absence of the other pair's metadata and bytes.</p>
+<p><b>Production observation — read-only, inspection started 2026-10-09 10:35 UTC.</b>
+The active Moss service runs from <code>server-v0.1.49</code>, whose packaged
+scode reports <code>0.2.23</code>. The running broker reports
+<code>nexusd-cluster v0.8.0</code>; the process inventory contains no running
+<code>nexusd-cohost</code>. This updates the relevant version observations in
+Q1's older snapshot, but does not establish an end-to-end production proc-link,
+offline-delivery or co-host recovery acceptance.</p>
 </div>
 
 <h2>A template is not an agent</h2>

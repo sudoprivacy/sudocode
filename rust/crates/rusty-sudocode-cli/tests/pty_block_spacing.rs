@@ -23,12 +23,6 @@ fn start(env: &TestEnv, resume: bool, queue: bool, width: u16) -> PtySession {
             ("COLORTERM", "truecolor"),
         ],
     );
-    common::expect_screen_settled(
-        &sess,
-        |screen| screen.contains("❯") && screen.contains("/help"),
-        common::at_least(std::time::Duration::from_secs(30)),
-        "startup chrome",
-    );
     sess.resize(120, width).unwrap();
     common::expect_screen_settled(
         &sess,

@@ -579,6 +579,15 @@ does not become public merely because the content is fetched lazily.
 Envelope <code>from</code> authenticates origin; it does not isolate readers.
 Zone admission, authenticated writes and scoped blob reads remain required.</p>
 
+<p><b>Verified stream-alias blocker:</b>
+<a href="https://github.com/nexi-lab/nexus-vfs/issues/410">Nexus #410</a>
+records a native WAL reproduction: mounting a contact path onto an existing
+conversation returns DT_STREAM metadata, but the alias cannot read the original
+record. Appending through the alias creates a separate stream that the original
+path cannot read. Shared stream address resolution must preserve the canonical
+backing identity and caller context before this view can ship. The reproduction
+uses synthetic data and does not establish caller authorization.</p>
+
 <p><b>Evidence boundary.</b> Existing managed-agent tests cover proc link
 creation/removal; the current live offline-send probe proves storage is
 readable by a later reader, not an entire restart-to-model turn. The successful

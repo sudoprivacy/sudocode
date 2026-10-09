@@ -107,6 +107,17 @@ See [Anthropic's refusal protocol](https://platform.claude.com/docs/en/build-wit
 
 ## Provider-specific handling
 
+Anthropic SSE `error` events stop the response with the provider's error
+type and message. They are not parsed as answer events or retried after the
+stream has begun. See the [Anthropic stream error format](https://platform.claude.com/docs/en/build-with-claude/streaming#error-events).
+
+Translating Claude-style messages to OpenAI-compatible chat completion
+requests requires a few model-specific adjustments. Each rule below names
+the model family and the request shape the family expects.
+
+All detection strips a leading provider prefix (`dashscope/kimi-k2.5` →
+`kimi-k2.5`) before matching.
+
 ### Azure DeepSeek inline reasoning
 
 For `deepseek-*` deployment names ending in `-azure`, a leading
@@ -119,13 +130,6 @@ still includes the provider's reasoning tokens.
 A nonempty `reasoning_content` field takes precedence. In that structured
 format, literal tags in the answer remain intact. Other model names keep their
 existing text handling.
-
-Translating Claude-style messages to OpenAI-compatible chat completion
-requests requires a few model-specific adjustments. Each rule below names
-the model family and the request shape the family expects.
-
-All detection strips a leading provider prefix (`dashscope/kimi-k2.5` →
-`kimi-k2.5`) before matching.
 
 ### Kimi family — tool result field shape
 

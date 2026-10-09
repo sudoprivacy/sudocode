@@ -46,20 +46,47 @@ impl Provider {
                                 json!({"data":[{"id":model,"tool_calling_supported":true}]})
                                     .to_string(),
                             )
+                        } else if path.ends_with("/count_tokens") {
+                            ("application/json", json!({"input_tokens":1}).to_string())
                         } else {
                             let request = request.unwrap();
-                            let has_result = request["messages"]
-                                .as_array()
-                                .unwrap()
-                                .iter()
-                                .any(|m| m["role"] == "tool");
-                            captured.lock().unwrap().push(request.clone());
+                            let has_result =
+                                request["messages"].as_array().unwrap().iter().any(|m| {
+                                    m["role"] == "tool"
+                                        || m["content"].as_array().is_some_and(|blocks| {
+                                            blocks.iter().any(|b| b["type"] == "tool_result")
+                                        })
+                                });
+                            let mut capture = request.clone();
+                            capture["_fixture_path"] = json!(path);
+                            captured.lock().unwrap().push(capture);
                             if has_result {
                                 assert!(
                                     request.to_string().contains(&nonce),
                                     "actual local file contents must reach the provider"
                                 );
                                 answer(&model, &case, &nonce)
+                            } else if case == "anthropic-error" {
+                                let frames = [
+                                    json!({"type":"message_start","message":{"id":"read-fixture","type":"message","model":model,"role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}),
+                                    json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"read-local","name":"read_file","input":{}}}),
+                                    json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"fixture.txt\"}"}}),
+                                    json!({"type":"content_block_stop","index":0}),
+                                    json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":1}}),
+                                    json!({"type":"message_stop"}),
+                                ];
+                                (
+                                    "text/event-stream",
+                                    frames
+                                        .iter()
+                                        .map(|f| {
+                                            format!(
+                                                "event: {}\ndata: {f}\n\n",
+                                                f["type"].as_str().unwrap()
+                                            )
+                                        })
+                                        .collect(),
+                                )
                             } else {
                                 ("application/json", json!({"id":"read-fixture","model":model,"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"read-local","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"fixture.txt\"}"}}]},"finish_reason":"tool_calls"}]}).to_string())
                             }
@@ -131,6 +158,15 @@ fn read_request(socket: &mut TcpStream) -> (String, Option<Value>) {
 }
 
 fn answer(model: &str, case: &str, nonce: &str) -> (&'static str, String) {
+    if case == "anthropic-error" {
+        return (
+            "text/event-stream",
+            format!(
+                "event: error\ndata: {}\n\n",
+                json!({"type":"error","error":{"type":"overloaded_error","message":"fixture upstream unavailable"}})
+            ),
+        );
+    }
     let text = match case {
         "truncated" => "<think>fixture checked".to_owned(),
         "literal-prefix" => format!("<thimble>{nonce}"),
@@ -165,6 +201,7 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
         "literal-prefix",
         "empty",
         "truncated",
+        "anthropic-error",
     ] {
         let env = common::TestEnv::new("azure-inline-reasoning");
         if env.is_live() {
@@ -189,7 +226,11 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
         config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
         config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
         config["models"]["claude-sonnet"]["providers"]["api-key"]["api"] =
-            json!("openai-completions");
+            json!(if case == "anthropic-error" {
+                "anthropic-messages"
+            } else {
+                "openai-completions"
+            });
         std::fs::write(path, config.to_string()).unwrap();
         let mut cli = env.spawn(&[
             "-p",
@@ -201,11 +242,13 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
         ]);
         if case == "truncated" {
             cli.expect("missing its closing tag").unwrap();
+        } else if case == "anthropic-error" {
+            cli.expect("fixture upstream unavailable").unwrap();
         }
         let code = cli.expect_eof().unwrap();
         assert_eq!(
             code == 0,
-            case != "truncated",
+            !matches!(case, "truncated" | "anthropic-error"),
             "{case}: unexpected CLI result"
         );
         let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
@@ -226,7 +269,26 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
                 _ => None,
             })
             .collect();
-        if case == "truncated" {
+        let thinking: String = final_message
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+                _ => None,
+            })
+            .collect();
+        match case {
+            "stream" | "json" => assert_eq!(thinking, "校验 fixture"),
+            "structured" => assert_eq!(thinking, "structured fixture check"),
+            "truncated" | "anthropic-error" => {} // The runtime discards the failed response.
+            _ => assert!(thinking.is_empty(), "{case}: unexpected reasoning"),
+        }
+        if case == "anthropic-error" {
+            assert!(
+                text.is_empty(),
+                "an upstream error must not produce an answer"
+            );
+        } else if case == "truncated" {
             assert_eq!(
                 text.trim(),
                 "[Provider stream failed; unfinished tool calls were cancelled.]"
@@ -240,7 +302,15 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
             assert_eq!(text.trim(), nonce);
         }
         let requests = provider.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2, "{case}: no hidden retries");
+        assert_eq!(
+            requests.len(),
+            2,
+            "{case}: no hidden retries; routes={:?}",
+            requests
+                .iter()
+                .map(|r| &r["_fixture_path"])
+                .collect::<Vec<_>>()
+        );
         assert!(requests.iter().all(|r| r["model"] == model));
     }
 }

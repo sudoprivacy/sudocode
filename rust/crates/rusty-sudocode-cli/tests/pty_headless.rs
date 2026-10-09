@@ -1,6 +1,157 @@
 //! Print mode must never read approval answers, even from a real terminal.
 mod common;
 
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use runtime::{ContentBlock, MessageRole, Session, SessionStore};
+
+fn file_session(env: &common::TestEnv) -> Option<Session> {
+    let store = SessionStore::from_cwd(env.workspace_root()).ok()?;
+    // Resume creates an empty placeholder alongside the real conversation.
+    let sessions: Vec<_> = store
+        .list_sessions()
+        .ok()?
+        .into_iter()
+        .filter(|session| session.message_count > 0)
+        .collect();
+    if sessions.len() != 1 {
+        return None;
+    }
+    Session::load_from_path(&sessions[0].path).ok()
+}
+
+fn assert_file_roundtrip(env: &common::TestEnv, nonce: &str, format: &str) {
+    let session = file_session(env).expect("expected one persisted conversation");
+    let fixture = env.workspace_root().join("fixture.txt");
+    let mut reads = std::collections::BTreeSet::new();
+    let mut successful_reads = std::collections::BTreeSet::new();
+    for message in &session.messages {
+        for block in &message.blocks {
+            match block {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } if matches!(name.as_str(), "read_file" | "Read") => {
+                    let args: serde_json::Value = serde_json::from_str(input).unwrap();
+                    let path = args["path"].as_str().expect("read_file requires a path");
+                    // A foreign path that later fails must not be hidden by a
+                    // subsequent successful read. Keep the ordinary relative
+                    // task: supplying an absolute path would mask this incident.
+                    let requested = env.workspace_root().join(PathBuf::from(path));
+                    assert_eq!(
+                        std::fs::canonicalize(&requested).ok(),
+                        Some(std::fs::canonicalize(&fixture).unwrap()),
+                        "{format}: model read an unrelated path: {path}"
+                    );
+                    reads.insert(id.as_str());
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    output,
+                    ..
+                } => {
+                    assert!(
+                        !is_error,
+                        "{format}: file workflow recovered from a failed tool: {tool_use_id}"
+                    );
+                    if output.contains(nonce) {
+                        successful_reads.insert(tool_use_id.as_str());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        !reads.is_disjoint(&successful_reads),
+        "{format}: no actual file read returned this run's contents"
+    );
+    let answer = session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::Assistant)
+        .expect("headless command must persist its assistant answer");
+    let text: String = answer
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.contains(nonce),
+        "{format}: final persisted answer lacks the actual file contents"
+    );
+}
+
+#[test]
+fn interactive_file_reads_updated_contents_after_resume() {
+    let env = common::TestEnv::new("relative-file-resume");
+    let budget = Duration::from_secs(120);
+    for resume in [false, true] {
+        let nonce = format!(
+            "RESUMED_FILE_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::fs::write(env.workspace_root().join("fixture.txt"), &nonce).unwrap();
+        let requests = std::env::var_os("SCODE_LIVE_ARTIFACTS").map_or_else(
+            || env.workspace_root().join("requests"),
+            |root| PathBuf::from(root).join(env.workspace_root().file_name().unwrap()),
+        );
+        let args = if resume {
+            vec!["--permission-mode", "read-only", "--resume"]
+        } else {
+            vec!["--permission-mode", "read-only"]
+        };
+        let mut cli = env.spawn_with_env(
+            &args,
+            &[("SUDOCODE_DUMP_REQUESTS", requests.to_str().unwrap())],
+        );
+        cli.resize(48, 160).unwrap();
+        common::expect_input_line_cleared(&cli, budget, "relative file task prompt");
+        let task = if resume {
+            "The file has changed. Read fixture.txt again and report its current contents."
+        } else {
+            "Read fixture.txt and report its exact contents."
+        };
+        let task = env.prompt(task, "read_file_roundtrip");
+        cli.send(&task).unwrap();
+        common::expect_input_line(&cli, &task, budget, "relative file task input");
+        cli.send("\r").unwrap();
+        common::expect_screen(
+            &cli,
+            |_| {
+                file_session(&env).is_some_and(|session| {
+                    session
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == MessageRole::Assistant)
+                        .is_some_and(|m| {
+                            m.blocks.iter().any(
+                                |b| matches!(b,ContentBlock::Text {text} if text.contains(&nonce)),
+                            )
+                        })
+                })
+            },
+            budget,
+            "current file contents in persisted answer",
+        );
+        common::expect_input_line_cleared(&cli, budget, "file task completed");
+        cli.send("/exit").unwrap();
+        common::expect_input_line(&cli, "/exit", budget, "exit command input");
+        cli.send("\r").unwrap();
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+        assert_file_roundtrip(&env, &nonce, if resume { "resume" } else { "interactive" });
+    }
+}
+
 #[test]
 fn print_denies_approval_without_reading_the_terminal() {
     let env = common::TestEnv::new("headless-permission");
@@ -73,26 +224,39 @@ fn print_waits_for_synchronous_agent_past_auto_background_threshold() {
 fn print_completes_tool_roundtrip_in_each_output_format() {
     for format in ["text", "json", "stream-json"] {
         let env = common::TestEnv::new("headless-output");
-        std::fs::write(
-            env.workspace_root().join("fixture.txt"),
-            "alpha parity line\n",
-        )
-        .unwrap();
+        let nonce = format!(
+            "HEADLESS_FILE_{}_{}",
+            format,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::fs::write(env.workspace_root().join("fixture.txt"), &nonce).unwrap();
         let prompt = env.prompt(
             "Read fixture.txt and report its exact contents.",
             "read_file_roundtrip",
         );
-        let mut child = env.spawn(&[
-            "-p",
-            &prompt,
-            "--permission-mode",
-            "read-only",
-            "--output-format",
-            format,
-        ]);
-        child.expect("alpha parity line").unwrap_or_else(|error| {
+        let requests = std::env::var_os("SCODE_LIVE_ARTIFACTS").map_or_else(
+            || env.workspace_root().join("requests"),
+            |root| PathBuf::from(root).join(env.workspace_root().file_name().unwrap()),
+        );
+        let requests = requests.to_str().unwrap();
+        let mut child = env.spawn_with_env(
+            &[
+                "-p",
+                &prompt,
+                "--permission-mode",
+                "read-only",
+                "--output-format",
+                format,
+            ],
+            &[("SUDOCODE_DUMP_REQUESTS", requests)],
+        );
+        child.expect(&nonce).unwrap_or_else(|error| {
             panic!("{format}: {error}; {}", common::screen_tail(&child, 6000))
         });
         assert_eq!(child.expect_eof().unwrap(), 0);
+        assert_file_roundtrip(&env, &nonce, format);
     }
 }

@@ -285,6 +285,11 @@ pub(crate) fn parse_frame_with_provider(
     if let Some(error) = refusal_from_response(&raw, provider, model) {
         return Err(error);
     }
+    if raw["type"] == "error" {
+        if let Some(error) = detect_non_sse_error(&payload) {
+            return Err(error);
+        }
+    }
     serde_json::from_value::<StreamEvent>(raw)
         .map(Some)
         .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))

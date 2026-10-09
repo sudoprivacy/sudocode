@@ -1,6 +1,8 @@
 //! Child Bash approval on the parent terminal -> fresh invoice -> follow-up.
 //! Run with SCODE_TEST_BACKEND=live and the normal live provider configuration.
 mod common;
+#[path = "support/wire_requests.rs"]
+mod wire_requests;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -15,12 +17,7 @@ fn requests(directory: &Path) -> Vec<Value> {
     std::fs::read_dir(directory)
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .filter(|path| {
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .ends_with("-messages.json")
-        })
+        .filter(|path| wire_requests::is_inference_request_dump(path))
         .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
         .collect()
 }
@@ -141,36 +138,31 @@ print(result)
             request["model"], model,
             "parent or child used a different model"
         );
-        for message in request["messages"].as_array().unwrap() {
-            let Some(blocks) = message["content"].as_array() else {
-                continue;
-            };
-            for block in blocks {
-                if block["type"] == "tool_use" {
-                    match block["name"].as_str() {
-                        Some("Agent" | "agent_spawn") => {
-                            agents.insert(block["id"].to_string());
-                        }
-                        Some("Bash" | "bash") => {
-                            let actual = block["input"]["command"]
-                                .as_str()
-                                .expect("child Bash command must be a string");
-                            assert_eq!(
-                                shell_words::split(actual).expect("valid child shell command"),
-                                command_words,
-                                "child ran a different invoice command"
-                            );
-                            child_commands.insert(block["id"].to_string());
-                        }
-                        _ => {}
+        for block in wire_requests::request_tool_blocks(&request) {
+            if block["type"] == "tool_use" {
+                match block["name"].as_str() {
+                    Some("Agent" | "agent_spawn") => {
+                        agents.insert(block["id"].to_string());
                     }
+                    Some("Bash" | "bash") => {
+                        let actual = block["input"]["command"]
+                            .as_str()
+                            .expect("child Bash command must be a string");
+                        assert_eq!(
+                            shell_words::split(actual).expect("valid child shell command"),
+                            command_words,
+                            "child ran a different invoice command"
+                        );
+                        child_commands.insert(block["id"].to_string());
+                    }
+                    _ => {}
                 }
-                if block["type"] == "tool_result" {
-                    assert_ne!(
-                        block["is_error"], true,
-                        "workflow recovered from a failed tool"
-                    );
-                }
+            }
+            if block["type"] == "tool_result" {
+                assert_ne!(
+                    block["is_error"], true,
+                    "workflow recovered from a failed tool"
+                );
             }
         }
     }

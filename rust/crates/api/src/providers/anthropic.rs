@@ -1596,7 +1596,7 @@ fn observe_cache_diagnostics(frame: &Value) {
 /// it was supposed to observe. This call site is after serialisation and before
 /// the send, so it can only add a copy on disk — the bytes on the wire are the
 /// same whether it runs or not. That property is the whole point of it.
-fn dump_request_body(kind: &str, body: &Value) {
+pub(super) fn dump_request_body(kind: &str, body: &Value) {
     let Some(dir) = dump_request_dir() else {
         return;
     };

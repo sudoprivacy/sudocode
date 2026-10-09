@@ -37,19 +37,33 @@ for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
       });
     } else if (event.event === 'request_debug') {
       const body = data.body ?? {};
+      const messages = Array.isArray(body.messages) ? body.messages : [];
       const system = typeof body.system === 'string' ? body.system
-        : (Array.isArray(body.system) ? body.system.map(block => block.text ?? '').join('\n') : '');
+        : (Array.isArray(body.system) ? body.system.map(block => block.text ?? '').join('\n')
+          : messages.filter(message => message.role === 'system')
+            .map(message => typeof message.content === 'string' ? message.content : '').join('\n'));
       const environment = system.split(/\r?\n/)
         .filter(line => /^\s*-\s*(Working directory|Platform):/.test(line))
         .slice(0, 20).map(line => clean(line));
       const assistantTools = [];
-      for (const message of Array.isArray(body.messages) ? body.messages : []) {
-        if (message.role !== 'assistant' || !Array.isArray(message.content)) continue;
-        for (const block of message.content) {
-          if (block.type !== 'tool_use') continue;
-          assistantTools.push({ name: clean(block.name, 256),
-            path: clean(block.input?.path ?? block.input?.file_path) });
+      const captureCall = (name, args) => {
+        if (typeof args === 'string') {
+          try { args = JSON.parse(args); } catch { args = {}; }
         }
+        assistantTools.push({ name: clean(name, 256), path: clean(args?.path ?? args?.file_path) });
+      };
+      for (const message of messages) {
+        if (message.role !== 'assistant') continue;
+        for (const block of Array.isArray(message.content) ? message.content : []) {
+          if (block.type !== 'tool_use') continue;
+          captureCall(block.name, block.input);
+        }
+        for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
+          captureCall(call.function?.name, call.function?.arguments);
+        }
+      }
+      for (const item of Array.isArray(body.input) ? body.input : []) {
+        if (item.type === 'function_call') captureCall(item.name, item.arguments);
       }
       let origin;
       try { origin = new URL(data.url).origin; } catch {}

@@ -526,13 +526,14 @@ jobs:
           # token that expires/gets suspended and takes this job red on main.
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           PROXY_BASE_URL: https://api.sudorouter.ai/v1
+          SCODE_LIVE_MODEL: gpt-6-luna
         run: cargo test -p rusty-sudocode-cli --test acp_live_smoke -- --test-threads=1
       - name: Real model through the co-host controller mailbox
         working-directory: rust
         env:
           ANTHROPIC_API_KEY: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           ANTHROPIC_BASE_URL: https://api.sudorouter.ai
-          SUDOCODE_TEST_MODEL: claude-sonnet-4-6
+          SUDOCODE_TEST_MODEL: gpt-6-luna
         run: cargo test --locked -p engine-acp --features mailbox --test session_mailbox_live -- --ignored --nocapture
 
   live-bash-process-tree:
@@ -562,7 +563,7 @@ jobs:
           SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-process-tree-config
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           SCODE_TEST_BACKEND: live
-          SCODE_LIVE_MODEL: claude-sonnet-4-6
+          SCODE_LIVE_MODEL: gpt-6-luna
           SCODE_LIVE_AUTH_PROFILE: sudorouter
           SCODE_LOG_PATH: ${{ runner.temp }}/scode-live-model-trace.jsonl
           SCODE_LIVE_ARTIFACTS: ${{ runner.temp }}/scode-live-requests
@@ -579,7 +580,10 @@ jobs:
             models: {}
           }), { mode: 0o600 });
           NODE
-          cargo test -p rusty-sudocode-cli --test pty_headless print_completes_tool_roundtrip_in_each_output_format -- --test-threads=1 --nocapture
+          # This client gate uses a route verified with correct workspace paths.
+          # Explicit local Sonnet runs retain the upstream environment incident.
+          cargo test -p rusty-sudocode-cli --test pty_headless -- --test-threads=1 --nocapture
+          SCODE_LIVE_MODEL=deepseek-v3.2-azure cargo test -p rusty-sudocode-cli --test pty_azure_inline_reasoning azure_live_file_roundtrip_has_a_final_answer -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_model_flag_priority configured_model_reads_updated_file_after_resume -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_agent_permission_bubble -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress --test pty_arrow_keys -- --test-threads=1 --nocapture
@@ -588,7 +592,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cargo test -p rusty-sudocode-cli --test pty_file_operations windows_verbatim_paths_read_the_same_file -- --nocapture
           fi
-          cargo test -p rusty-sudocode-cli --test pty_block_spacing sync_renderer_uses_the_same_spacing -- --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_block_spacing -- --test-threads=1 --nocapture
       - name: Summarize live model routing evidence
         if: always()
         working-directory: .

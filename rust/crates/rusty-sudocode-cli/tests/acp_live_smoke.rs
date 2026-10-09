@@ -528,6 +528,7 @@ async fn await_agent_result(manifest_file: &str, budget: Duration) -> String {
 }
 
 async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: &str) {
+    let model = std::env::var("SCODE_LIVE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
     let (notifs, resp) = client
         .send_request(
             "session/prompt",
@@ -538,6 +539,7 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
                     "Do NOT answer the questions yourself. Do NOT skip the Agent tool.\n",
                     "The entire purpose of this request is to test the Agent tool.\n\n",
                     "For each calculation below, call Agent with:\n",
+                    "  model: <LIVE_MODEL>\n",
                     "  description: \"calc <N>\"\n",
                     "  prompt: \"What is <expr>? Reply with ONLY the number.\"\n\n",
                     "Calculations:\n",
@@ -546,7 +548,7 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
                     "3. 301 + 302\n\n",
                     "After all 3 agents return, output exactly this JSON and nothing else:\n",
                     "{\"results\": [<agent1_answer>, <agent2_answer>, <agent3_answer>]}"
-                )}]
+                ).replace("<LIVE_MODEL>", &model)}]
             }),
         )
         .await;
@@ -643,74 +645,53 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         })
         .collect();
 
-    if agent_starts.is_empty() {
-        // A rejected credential lands HERE, not in the assertion below: no Agent tool
-        // call was made because no turn happened, so the "model bypassed Agent" branch
-        // is exactly the path a dead credential takes — and then reports its refusal
-        // text as a wrong answer. This is the sibling of the guard at the `pong`
-        // assertion; missing it left the same failure misfiled on `main`, which is how
-        // it was found (the run said "text output is also wrong (expected 203, 403,
-        // 603)" and quoted an authentication failure).
-        fail_clearly_if_the_credential_was_rejected(&text_output);
+    fail_clearly_if_the_credential_was_rejected(&text_output);
+    assert_eq!(
+        agent_starts.len(),
+        3,
+        "expected exactly 3 Agent tool_call starts, got {}",
+        agent_starts.len()
+    );
+    assert!(
+        failed_updates.is_empty(),
+        "subagent workflow contains failed tools"
+    );
+    assert_eq!(
+        spawn_manifests.len(),
+        3,
+        "each spawn must report the manifest that will carry its result, got {spawn_manifests:?}"
+    );
 
-        // Model bypassed Agent and answered directly.  Verify it at least
-        // produced the correct numbers so we know the prompt/session works —
-        // but warn that the subagent pipeline was not exercised.
-        eprintln!(
-            "WARN: model did not use Agent tool — subagent pipeline NOT exercised. \
-             Verifying text output contains correct answers instead."
-        );
+    // Read the answers off the manifests the runtime wrote, not out of the
+    // orchestrator's reply.
+    //
+    // This used to assert `rawOutput.result` on a completed tool_call_update,
+    // which is only ever populated by a `pid_output` call — so it asserted
+    // that the MODEL chose to collect. It stopped choosing to once
+    // `pid_output` became a deferred tool: it spawns the three agents, finds
+    // `pid_output` through ToolSearch, then satisfies the prompt's
+    // "output the JSON" by doing the arithmetic itself (101 + 102 is not a
+    // calculation a model needs an agent for). Identical counts on five
+    // consecutive main runs — a deterministic shortcut, not a flake.
+    //
+    // What this test exists to prove is that the subagent pipeline runs over
+    // ACP: three agents really started, really executed, and really produced
+    // their answers. The manifests are that fact, and they hold it however
+    // the orchestrator decides to narrate the turn.
+    // Concurrently, on one shared budget: the three agents run in parallel,
+    // so waiting for them in series would bill their latencies end to end.
+    let results = futures_util::future::join_all(
+        spawn_manifests
+            .iter()
+            .map(|m| await_agent_result(m, Duration::from_secs(90))),
+    )
+    .await;
+    let joined = results.join(" | ");
+    for expected in ["203", "403", "603"] {
         assert!(
-            text_output.contains("203")
-                && text_output.contains("403")
-                && text_output.contains("603"),
-            "model bypassed Agent but text output is also wrong \
-             (expected 203, 403, 603): {text_output:?}"
+            joined.contains(expected),
+            "no subagent produced {expected}; manifests said: {joined}"
         );
-    } else {
-        assert_eq!(
-            agent_starts.len(),
-            3,
-            "expected exactly 3 Agent tool_call starts, got {}",
-            agent_starts.len()
-        );
-        assert_eq!(
-            spawn_manifests.len(),
-            3,
-            "each spawn must report the manifest that will carry its result, got {spawn_manifests:?}"
-        );
-
-        // Read the answers off the manifests the runtime wrote, not out of the
-        // orchestrator's reply.
-        //
-        // This used to assert `rawOutput.result` on a completed tool_call_update,
-        // which is only ever populated by a `pid_output` call — so it asserted
-        // that the MODEL chose to collect. It stopped choosing to once
-        // `pid_output` became a deferred tool: it spawns the three agents, finds
-        // `pid_output` through ToolSearch, then satisfies the prompt's
-        // "output the JSON" by doing the arithmetic itself (101 + 102 is not a
-        // calculation a model needs an agent for). Identical counts on five
-        // consecutive main runs — a deterministic shortcut, not a flake.
-        //
-        // What this test exists to prove is that the subagent pipeline runs over
-        // ACP: three agents really started, really executed, and really produced
-        // their answers. The manifests are that fact, and they hold it however
-        // the orchestrator decides to narrate the turn.
-        // Concurrently, on one shared budget: the three agents run in parallel,
-        // so waiting for them in series would bill their latencies end to end.
-        let results = futures_util::future::join_all(
-            spawn_manifests
-                .iter()
-                .map(|m| await_agent_result(m, Duration::from_secs(90))),
-        )
-        .await;
-        let joined = results.join(" | ");
-        for expected in ["203", "403", "603"] {
-            assert!(
-                joined.contains(expected),
-                "no subagent produced {expected}; manifests said: {joined}"
-            );
-        }
     }
 
     // Print the whole response, not just the field: a JSON-RPC error carries no

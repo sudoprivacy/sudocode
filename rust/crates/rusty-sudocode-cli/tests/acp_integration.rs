@@ -3451,19 +3451,31 @@ async fn collect_until_finished(
     seen: &[Value],
     want: usize,
 ) -> Vec<Value> {
-    let mut more = Vec::new();
+    collect_until_subagent_condition(
+        client,
+        seen,
+        |updates| finished_count(updates) >= want,
+        &format!("{want} finished sub-agents"),
+    )
+    .await
+}
+
+async fn collect_until_subagent_condition(
+    client: &mut AcpTestClient,
+    seen: &[Value],
+    ready: impl Fn(&[Value]) -> bool,
+    goal: &str,
+) -> Vec<Value> {
+    let mut updates = seen.to_vec();
     let deadline = tokio::time::Instant::now() + SUBAGENT_EVENTS_WAIT;
-    while finished_count(seen) + finished_count(&more) < want {
+    while !ready(&updates) {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let Ok(msg) = timeout(remaining, client.recv_inner()).await else {
-            panic!(
-                "only {} of {want} sub-agents finished within {SUBAGENT_EVENTS_WAIT:?}; after the prompt saw: {more:#?}",
-                finished_count(seen) + finished_count(&more)
-            );
+            panic!("did not observe {goal} within {SUBAGENT_EVENTS_WAIT:?}: {updates:#?}");
         };
-        more.push(msg);
+        updates.push(msg);
     }
-    more
+    updates.split_off(seen.len())
 }
 
 /// What one spawned agent looked like on the wire.
@@ -3881,11 +3893,16 @@ async fn acp_subagent_events_background_parallel() {
     let mut client = spawn_stdio_client_danger(&workspace);
     initialize_with_subagent_events(&mut client).await;
     let session_id = scenario_session_new(&mut client, &workspace.root).await;
-    let (during, _) = prompt_scenario(&mut client, &session_id, "subagent_events_background").await;
+    let release = workspace.root.join("release-background-children");
+    let scenario = format!(
+        "subagent_events_background SUBAGENT_RELEASE:{}",
+        json!(release.to_str().expect("fixture release path"))
+    );
+    let (during, _) = prompt_scenario(&mut client, &session_id, &scenario).await;
     assert_eq!(
         finished_count(&during),
         0,
-        "slow background children cannot have finished inside the turn"
+        "unreleased background children cannot have finished inside the turn"
     );
     for id in ["toolu_events_bg_1", "toolu_events_bg_2"] {
         let result = tool_result_named(&during, id);
@@ -3895,7 +3912,26 @@ async fn acp_subagent_events_background_parallel() {
             true
         );
     }
-    let after = collect_until_finished(&mut client, &during, 2).await;
+    // Observe real child streams before either can finish. Fixed response
+    // delays only made overlap probable and flaked under workspace build load.
+    // A serial executor cannot satisfy this barrier and still fails the test.
+    let before_release = collect_until_subagent_condition(
+        &mut client,
+        &during,
+        |updates| {
+            assert_eq!(finished_count(updates), 0, "child finished before release");
+            let active: std::collections::BTreeSet<_> = updates
+                .iter()
+                .filter_map(|n| sudocode_meta(n)["subagent"]["agentId"].as_str())
+                .collect();
+            active.len() == 2
+        },
+        "two active child streams before release",
+    )
+    .await;
+    let seen: Vec<Value> = during.iter().chain(&before_release).cloned().collect();
+    fs::write(release, "both child streams observed").expect("release real children");
+    let after = collect_until_finished(&mut client, &seen, 2).await;
     for n in &after {
         assert_eq!(
             n["method"], "session/update",
@@ -3903,7 +3939,7 @@ async fn acp_subagent_events_background_parallel() {
         );
         assert_eq!(n["params"]["sessionId"], session_id.as_str());
     }
-    let all: Vec<Value> = during.iter().chain(&after).cloned().collect();
+    let all: Vec<Value> = seen.iter().chain(&after).cloned().collect();
     dump_subagent_events("background", &all);
 
     let traces = assert_subagent_invariants(&all);

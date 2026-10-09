@@ -1,6 +1,8 @@
 //! Capture the actual HTTP payload after provider conversion while driving the
 //! real CLI through a PTY. No assertion treats mock usage as a real cache hit.
 mod common;
+#[path = "support/request_evidence.rs"]
+mod request_evidence;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -668,7 +670,7 @@ fn retry_and_automatic_compaction_preserve_session_fields() {
     turn(&mut cli, "Begin the next step.");
     capture.retry_next.store(true, Ordering::Relaxed);
     turn(&mut cli, "Continue the retry step.");
-    let accepted = common::request_evidence::accepted_messages(
+    let accepted = request_evidence::accepted_messages(
         &env.workspace_root().join("cache-prefix-requests.jsonl"),
     );
     assert_eq!(

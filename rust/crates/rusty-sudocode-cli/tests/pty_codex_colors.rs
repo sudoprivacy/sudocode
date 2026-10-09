@@ -832,7 +832,10 @@ fn bash_output_session(env: &TestEnv, output: &str, light: bool, no_color: bool)
     );
     sess.resize(60, 100).unwrap();
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "prompt ready");
-    let prompt = env.prompt("Run exactly `cat render-output.txt` using Bash. Then say only Render fixture done. Do not quote the file contents in your reply.", "bash_render_fixture");
+    let prompt = env.prompt(
+        "Bash: cat render-output.txt. Say only Render fixture done.",
+        "bash_render_fixture",
+    );
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,

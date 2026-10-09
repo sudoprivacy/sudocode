@@ -579,7 +579,9 @@ jobs:
             models: {}
           }), { mode: 0o600 });
           NODE
-          cargo test -p rusty-sudocode-cli --test pty_headless print_completes_tool_roundtrip_in_each_output_format -- --test-threads=1 --nocapture
+          # This client gate uses a route verified with correct workspace paths.
+          # Explicit local Sonnet runs retain the upstream environment incident.
+          SCODE_LIVE_MODEL=gpt-6-luna cargo test -p rusty-sudocode-cli --test pty_headless print_completes_tool_roundtrip_in_each_output_format -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_model_flag_priority configured_model_reads_updated_file_after_resume -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_agent_permission_bubble -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress --test pty_arrow_keys -- --test-threads=1 --nocapture

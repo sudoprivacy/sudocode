@@ -601,12 +601,7 @@ async fn handle_connection(
                 };
                 if let Some(call) = waiting_call {
                     if let Some(path) = &call.stream_wait_for {
-                        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                        while !std::path::Path::new(path).exists()
-                            && tokio::time::Instant::now() < deadline
-                        {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
+                        wait_for_fixture_release(path).await?;
                         if call.stream_fail_after {
                             return Ok(());
                         }
@@ -636,7 +631,7 @@ async fn handle_connection(
             std::fs::write(ready, "stream connected")?;
         }
         if let Some(release) = control["start_release"].as_str() {
-            wait_for_fixture_release(release).await;
+            wait_for_fixture_release(release).await?;
         }
         let chars: Vec<_> = document.chars().collect();
         for chunk in chars.chunks(chunk_chars) {
@@ -656,7 +651,7 @@ async fn handle_connection(
             std::fs::write(ready, "all deltas sent")?;
         }
         if let Some(release) = control["release"].as_str() {
-            wait_for_fixture_release(release).await;
+            wait_for_fixture_release(release).await?;
         }
         socket
             .write_all(format!("event: content_block_stop{suffix}").as_bytes())
@@ -679,7 +674,15 @@ async fn handle_connection(
         tokio::time::sleep(DELAYED_TEXT_LATENCY).await;
     }
     if scenario == Scenario::SubagentSlowChild {
-        tokio::time::sleep(SUBAGENT_SLOW_CHILD_LATENCY).await;
+        if let Some(release) = subagent_release_path(&request) {
+            // Let each actual child stream its tool call first. Only its final
+            // answer waits for the client to observe both active children.
+            if current_turn_tool_result(&request).is_some() {
+                wait_for_fixture_release(&release).await?;
+            }
+        } else {
+            tokio::time::sleep(SUBAGENT_SLOW_CHILD_LATENCY).await;
+        }
     }
     // How many times this scenario has already been served AT THIS PATH, so a
     // scenario can answer differently on a retry. Per-path because a turn is
@@ -894,11 +897,34 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
 }
 
 /// Optional file-backed controls keep response text out of the echoed prompt.
-async fn wait_for_fixture_release(path: &str) {
+async fn wait_for_fixture_release(path: &str) -> io::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while !std::path::Path::new(path).exists() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    if std::path::Path::new(path).exists() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "fixture was not released before its deadline",
+        ))
+    }
+}
+
+fn subagent_release_path(request: &MessageRequest) -> Option<String> {
+    request.messages.iter().rev().find_map(|message| {
+        message.content.iter().rev().find_map(|block| {
+            let InputContentBlock::Text { text } = block else {
+                return None;
+            };
+            let (_, value) = text.split_once("SUBAGENT_RELEASE:")?;
+            serde_json::Deserializer::from_str(value)
+                .into_iter::<String>()
+                .next()?
+                .ok()
+        })
+    })
 }
 
 fn prose_preview_control(request: &MessageRequest) -> Value {
@@ -1285,6 +1311,13 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
     }
     let done = current_turn_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
+    let background_child = |rest: &str| {
+        let prompt = child("subagent_slow_child", rest);
+        match subagent_release_path(request) {
+            Some(path) => format!("{prompt} SUBAGENT_RELEASE:{}", json!(path)),
+            None => prompt,
+        }
+    };
     match (scenario, done) {
         (Scenario::SubagentEventsSync | Scenario::SubagentEventsSyncSlow, None) => {
             SubagentStep::Tools(vec![(
@@ -1311,7 +1344,7 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
                 "Agent",
                 agent_call_input(
                     "background child one",
-                    &child("subagent_slow_child", "first look"),
+                    &background_child("first look"),
                     "general-purpose",
                     true,
                 ),
@@ -1321,7 +1354,7 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
                 "Agent",
                 agent_call_input(
                     "background child two",
-                    &child("subagent_slow_child", "second look"),
+                    &background_child("second look"),
                     "general-purpose",
                     true,
                 ),

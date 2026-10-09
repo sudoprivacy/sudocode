@@ -4,6 +4,7 @@ mod common;
 use common::TestEnv;
 use pty_expect::PtySession;
 use runtime::{ContentBlock, SessionStore};
+use std::collections::{BTreeMap, BTreeSet};
 
 fn start(env: &TestEnv, resume: bool, queue: bool, width: u16) -> PtySession {
     let mut args = vec!["--permission-mode", "danger-full-access"];
@@ -72,7 +73,73 @@ fn assert_gap(rows: &[String], before: usize, after: usize, blank_rows: usize) {
     );
 }
 
-fn assert_transcript(sess: &PtySession) {
+fn expected_file_frames(env: &TestEnv) -> BTreeMap<&'static str, usize> {
+    let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
+    let saved = store.load_session("latest").unwrap().session;
+    let mut calls = BTreeMap::new();
+    let mut successful = BTreeSet::new();
+    for message in &saved.messages {
+        for block in &message.blocks {
+            match block {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } if matches!(name.as_str(), "Bash" | "bash") => {
+                    let input: serde_json::Value = serde_json::from_str(input).unwrap();
+                    let marker = match input["command"].as_str() {
+                        Some("cat spacing-one.txt") => "ONE",
+                        Some("cat spacing-two.txt") => "TWO",
+                        _ => continue,
+                    };
+                    assert!(
+                        calls.insert(id.as_str(), marker).is_none(),
+                        "duplicate persisted tool ID"
+                    );
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    output,
+                    ..
+                } => {
+                    assert!(!is_error, "spacing workflow contains a failed tool result");
+                    if let Some(marker) = calls.get(tool_use_id.as_str()) {
+                        let result: serde_json::Value = serde_json::from_str(output).unwrap();
+                        let stdout = result["stdout"]
+                            .as_str()
+                            .expect("Bash result must contain stdout");
+                        assert!(
+                            stdout
+                                .replace("\r\n", "\n")
+                                .contains(&format!("{marker}_START\n\n\n{marker}_END")),
+                            "real command must return its file contents"
+                        );
+                        assert!(
+                            successful.insert(tool_use_id.as_str()),
+                            "duplicate persisted command result"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        successful.len(),
+        calls.len(),
+        "every file command must finish successfully"
+    );
+    let mut expected = BTreeMap::new();
+    for marker in calls.values() {
+        *expected.entry(*marker).or_default() += 1;
+    }
+    assert!(
+        expected.contains_key("ONE") && expected.contains_key("TWO"),
+        "both real files must be read"
+    );
+    expected
+}
+
+fn assert_transcript(sess: &PtySession, expected: &BTreeMap<&str, usize>) {
     let rows = rows(sess);
     let intro = assistant_position(&rows, "Spacing intro.");
     let end = assistant_position(&rows, "Spacing end.");
@@ -84,11 +151,16 @@ fn assert_transcript(sess: &PtySession) {
         .collect();
     assert_eq!(
         headers.len(),
-        2,
-        "two real, separately framed calls: {rows:#?}"
+        expected.values().sum::<usize>(),
+        "each persisted file command must have its own frame: {rows:#?}"
     );
-    assert_eq!(caps.len(), 2, "one completed frame per call: {rows:#?}");
-    for (before, header) in [(intro, headers[0]), (caps[0], headers[1])] {
+    assert_eq!(
+        caps.len(),
+        headers.len(),
+        "one completed frame per call: {rows:#?}"
+    );
+    for (index, &header) in headers.iter().enumerate() {
+        let before = if index == 0 { intro } else { caps[index - 1] };
         // Live progress is transient and is absent from replay. Each visible
         // block still has one blank row around it.
         let progress: Vec<_> = (before + 1..header)
@@ -103,22 +175,31 @@ fn assert_transcript(sess: &PtySession) {
     }
     assert_gap(
         &rows,
-        caps[1],
+        *caps.last().unwrap(),
         assistant_position(&rows, "Spacing done."),
         1,
     );
-    for marker in ["ONE", "TWO"] {
-        let first = position(&rows, &format!("{marker}_START"));
-        let last = position(&rows, &format!("{marker}_END"));
+    let mut shown = BTreeMap::new();
+    for (&header, &cap) in headers.iter().zip(&caps) {
+        let body = &rows[header + 1..cap];
+        let markers: Vec<_> = ["ONE", "TWO"]
+            .into_iter()
+            .filter(|marker| {
+                body.iter()
+                    .any(|row| row.contains(&format!("{marker}_START")))
+            })
+            .collect();
+        assert_eq!(
+            markers.len(),
+            1,
+            "each frame must contain one file result: {rows:#?}"
+        );
+        let marker = markers[0];
+        *shown.entry(marker).or_default() += 1;
+        let first = header + 1 + position(body, &format!("{marker}_START"));
+        let last = header + 1 + position(body, &format!("{marker}_END"));
         assert_eq!(last - first, 3, "log blank lines are content: {rows:#?}");
         assert!(rows[first + 1..last].iter().all(|row| row.trim() == "│"));
-        let header = headers
-            .iter()
-            .enumerate()
-            .find_map(|(index, &header)| (header < first && last < caps[index]).then_some(header))
-            .unwrap_or_else(|| {
-                panic!("file contents must stay inside their own tool frame: {rows:#?}")
-            });
         let preamble = &rows[header + 1..first];
         if !preamble.is_empty() {
             // A model-supplied description can truncate even a short command's
@@ -140,6 +221,10 @@ fn assert_transcript(sess: &PtySession) {
             );
         }
     }
+    assert_eq!(
+        &shown, expected,
+        "rendered file frames must match the persisted commands"
+    );
     assert_gap(
         &rows,
         position(&rows, "CODE_START"),
@@ -211,7 +296,8 @@ fn roundtrip(queue: bool, width: u16) {
         common::DEFAULT_TIMEOUT,
         "completed transcript",
     );
-    assert_transcript(&sess);
+    let expected = expected_file_frames(&env);
+    assert_transcript(&sess, &expected);
     finish(&mut sess);
     let mut resumed = start(&env, true, queue, width);
     common::expect_screen_settled(
@@ -220,12 +306,12 @@ fn roundtrip(queue: bool, width: u16) {
         common::DEFAULT_TIMEOUT,
         "replayed transcript",
     );
-    assert_transcript(&resumed);
+    assert_transcript(&resumed, &expected);
     finish(&mut resumed);
 
     // The final frame can look correct after the model first reads an unrelated
     // workspace and recovers. This fixture only asks for successful file reads
-    // and two successful commands; retain earlier tool failures in acceptance.
+    // and successful commands; retain earlier tool failures in acceptance.
     let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
     let saved = store.load_session("latest").unwrap().session;
     let results: Vec<_> = saved

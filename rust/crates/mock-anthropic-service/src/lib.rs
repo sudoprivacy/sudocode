@@ -1647,7 +1647,14 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 12,
                 Some("Spacing intro.\n\n"),
             ),
-            Some(_) => final_text_sse(SPACING_FINAL),
+            Some(_) if count_tool_uses_by_name(request, "bash") >= 3 => {
+                final_text_sse(SPACING_FINAL)
+            }
+            Some(_) => tool_use_sse(
+                "toolu_spacing_repeat",
+                "bash",
+                &[r#"{"command":"cat spacing-one.txt"}"#],
+            ),
         },
         Scenario::BashRenderFixture => match latest_tool_result(request) {
             None => tool_use_sse(
@@ -2262,7 +2269,15 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 );
                 response
             }
-            Some(_) => text_message_response("msg_spacing_done", SPACING_FINAL),
+            Some(_) if count_tool_uses_by_name(request, "bash") >= 3 => {
+                text_message_response("msg_spacing_done", SPACING_FINAL)
+            }
+            Some(_) => tool_message_response(
+                "msg_spacing_repeat",
+                "toolu_spacing_repeat",
+                "bash",
+                json!({"command":"cat spacing-one.txt"}),
+            ),
         },
         Scenario::BashRenderFixture => match latest_tool_result(request) {
             None => tool_message_response(

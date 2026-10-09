@@ -147,6 +147,162 @@ fn inject_with_kind(env: &TestEnv, receiver: &str, from: &str, body: &str, kind:
         .expect("inject a2a envelope");
 }
 
+fn peer_receiver(env: &TestEnv) -> (PtySession, String) {
+    let mut sess = env.spawn_with_env(
+        &["--permission-mode", "danger-full-access"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    sess.resize(50, 100).expect("resize pty");
+    common::expect_input_line_cleared(&sess, BUDGET, "peer receiver ready");
+    let receiver = wait_for_receiver(env);
+    (sess, receiver)
+}
+
+fn peer_tool_session(label: &str) -> (TestEnv, PtySession, String) {
+    let env = TestEnv::new(label);
+    let (mut sess, receiver) = peer_receiver(&env);
+    let marker = common::turn_status_marker(&sess);
+    let authorization = env.prompt(
+        "We are testing local agent messaging in this disposable workspace. I authorize \
+         active-peer to ask you to run exactly `printf 'ready' > cancel-ready; sleep 30`. \
+         Execute that command when its message arrives. For now, just acknowledge; do not \
+         run it yet.",
+        "single_turn_text",
+    );
+    sess.send(&format!("{authorization}\r"))
+        .expect("authorize the peer's test command as the human user");
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "human authorization must finish before the peer request",
+    );
+    assert!(
+        !env.workspace_root().join("cancel-ready").exists(),
+        "authorization must not execute the peer's command before delivery"
+    );
+    let prompt = env.prompt(
+        "Run this exact bash command: printf 'ready' > cancel-ready; sleep 30",
+        "bash_interrupt_long_running",
+    );
+    inject(&env, &receiver, "active-peer", &prompt);
+    common::expect_screen(
+        &sess,
+        |_| {
+            std::fs::read_to_string(env.workspace_root().join("cancel-ready"))
+                .is_ok_and(|value| value == "ready")
+        },
+        common::LIVE_TURN_BUDGET,
+        "the peer's Bash command must start before interrupting it",
+    );
+    (env, sess, receiver)
+}
+
+fn reader_offset(env: &TestEnv, receiver: &str, sender: &str) -> Option<u64> {
+    let root = local_pair_root_in(env.config_home());
+    let convention = runtime::mailbox::InboxConvention::new(root.to_string_lossy().into_owned());
+    let path = convention.reader_path(receiver, sender, receiver);
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<runtime::mailbox::ReaderRegister>(&bytes)
+        .ok()
+        .map(|reader| reader.read_offset)
+}
+
+#[test]
+fn explicitly_cancelled_peer_turn_does_not_start_again() {
+    let (env, mut sess, receiver) = peer_tool_session("a2a-explicit-cancel");
+    let calls = env.is_mock().then(|| env.captured_message_count());
+    sess.send("\x1b").expect("cancel the peer turn");
+    common::expect_screen(
+        &sess,
+        |screen| screen.to_lowercase().contains("cancelled"),
+        env.timeout(),
+        "the user can cancel a peer turn",
+    );
+    let deadline = Instant::now() + env.timeout();
+    while reader_offset(&env, &receiver, "active-peer").is_none_or(|offset| offset == 0) {
+        if let Some(calls) = calls {
+            assert_eq!(
+                env.captured_message_count(),
+                calls,
+                "explicit cancellation must not immediately retry the same peer input"
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "explicit cancellation was not acknowledged"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if let Some(calls) = calls {
+        assert_eq!(
+            env.captured_message_count(),
+            calls,
+            "the cancelled input ran again"
+        );
+    }
+    common::expect_input_line_cleared(&sess, env.timeout(), "ready after peer cancellation");
+    inject(
+        &env,
+        &receiver,
+        "active-peer",
+        &env.prompt("Reply only with AFTER-CANCEL-ACK", "single_turn_text"),
+    );
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("AFTER-CANCEL-ACK"),
+        common::LIVE_TURN_BUDGET,
+        "the next peer message still reaches the CLI",
+    );
+    exit(&mut sess);
+}
+
+#[test]
+fn exiting_during_peer_turn_leaves_it_pending() {
+    let (env, mut sess, receiver) = peer_tool_session("a2a-exit-during-turn");
+    assert_eq!(reader_offset(&env, &receiver, "active-peer"), Some(0));
+    exit(&mut sess);
+    assert_eq!(
+        reader_offset(&env, &receiver, "active-peer"),
+        Some(0),
+        "shutdown must leave the unfinished input available to the next receiver"
+    );
+}
+
+#[test]
+fn provider_rejection_leaves_peer_pending_without_a_busy_retry_loop() {
+    let env = TestEnv::new("a2a-provider-rejection");
+    if env.is_live() {
+        eprintln!("Provider rejection uses the deterministic transport's HTTP 400 fault.");
+        return;
+    }
+    let (mut sess, receiver) = peer_receiver(&env);
+    let marker = "PROVIDER-REJECTION-MARKER";
+    // Omitting a scenario makes this transport reject the request with HTTP 400.
+    inject(&env, &receiver, "failed-peer", marker);
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("missing parity scenario"),
+        env.timeout(),
+        "the provider must reject this input",
+    );
+    let observation = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < observation {
+        sess.render(|screen| {
+            let contents = screen.contents();
+            assert_eq!(
+                contents.matches(marker).count(),
+                1,
+                "an unhandled input must wait before retrying: {contents}"
+            );
+        });
+        assert_eq!(reader_offset(&env, &receiver, "failed-peer"), Some(0));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    exit(&mut sess);
+    assert_eq!(reader_offset(&env, &receiver, "failed-peer"), Some(0));
+}
+
 /// Kill the real CLI with a peer input still behind an active turn. The next
 /// process must consume that input, plus a message sent while it was offline.
 #[test]
@@ -164,15 +320,11 @@ fn queued_and_offline_messages_survive_receiver_restart() {
     wait_for_screen(&sess, "peer input is queued behind the running tool", |s| {
         has_chip(s, "Message from queued-peer")
     });
-    let root = local_pair_root_in(env.config_home());
-    let convention = runtime::mailbox::InboxConvention::new(root.to_string_lossy().into_owned());
-    let reader_path = convention.reader_path(&receiver, "queued-peer", &receiver);
     let observation = Instant::now() + Duration::from_millis(500);
     while Instant::now() < observation {
-        let reader: runtime::mailbox::ReaderRegister =
-            serde_json::from_slice(&std::fs::read(&reader_path).expect("reader register")).unwrap();
         assert_eq!(
-            reader.read_offset, 0,
+            reader_offset(&env, &receiver, "queued-peer"),
+            Some(0),
             "queued RAM is not durable consumption"
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -211,17 +363,7 @@ fn queued_and_offline_messages_survive_receiver_restart() {
     );
     let deadline = Instant::now() + common::LIVE_TURN_BUDGET;
     for sender in ["queued-peer", "offline-peer"] {
-        let path = convention.reader_path(&receiver, sender, &receiver);
-        loop {
-            let consumed = std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| {
-                    serde_json::from_slice::<runtime::mailbox::ReaderRegister>(&bytes).ok()
-                })
-                .is_some_and(|reader| reader.read_offset > 0);
-            if consumed {
-                break;
-            }
+        while reader_offset(&env, &receiver, sender).is_none_or(|offset| offset == 0) {
             assert!(
                 Instant::now() < deadline,
                 "{sender} was never durably consumed"

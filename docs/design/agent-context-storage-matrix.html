@@ -602,8 +602,10 @@ source and test evidence, not a production deployment or scoped zone-admission
 acceptance.</p>
 
 <p><b>Consumer audit.</b> The standalone REPL must retain each delivery receipt
-with its queued input, then acknowledge it only after a successful persisted
-engine turn. Shutdown refuses queued inputs that never ran and joins both
+with its queued input, then acknowledge it after a persisted engine turn or an
+explicit user cancellation. Closing the receiver leaves an interrupted turn
+pending. Failed delivery retries use bounded backoff without delaying successful
+delivery. Shutdown refuses queued inputs that never ran and joins both
 mailbox pollers so cursor commits and releases finish before process exit.
 Queue contents and receipts remain process-local; the conversation and consumed
 position are durable facts. Failure between turn persistence and cursor commit
@@ -618,11 +620,17 @@ delivery across every host.</p>
 creation/removal. A standalone CLI PTY regression kills a receiver with a peer
 message still queued, sends another message while it is offline, then verifies
 both messages are consumed and restored from the saved session after restart.
-It also checks that session control frames do not become peer prompts. The
-  test passed with real CLI processes and storage using both a deterministic
-  transport and the configured live model (requested as <code>sonnet</code>).
-  The pre-fix 0.2.23 binary fails the deterministic regression because its reader
-  offset advances while queued.
+It also checks that session control frames do not become peer prompts. Further
+PTY cases verify that explicit cancellation does not restart the same input,
+graceful exit keeps an interrupted input pending, and a rejected model request
+does not cause a busy retry loop. The crash/restart case passed with real CLI
+processes and storage using both a deterministic transport and the configured
+live model (requested as <code>sonnet</code>). The pre-fix 0.2.23 binary fails the
+deterministic regression because its reader offset advances while queued.
+The live graceful-exit case also passed. Live explicit-cancellation acceptance
+remains incomplete: the model refused the authorized peer command before Bash
+started, so the test could not reach cancellation. The deterministic cancellation
+case passes; it is not a substitute for that missing live evidence.
 The separate live daemon offline-send probe proves storage is readable by a
 later reader, rather than that entire restart workflow. The successful
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/37636145266/job/112842776820">authenticated daemon A2A job</a>,

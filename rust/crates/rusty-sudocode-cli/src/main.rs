@@ -2557,8 +2557,8 @@ enum CoordinatorEvent {
     /// The receiver must not advance its durable cursor past a message that is
     /// only sitting in this channel: a crash then loses it silently, with the
     /// sender already told "delivered". So it blocks on this ack until the
-    /// turn has completed and persisted, which makes the channel
-    /// back-pressured rather than a place messages accumulate behind the
+    /// turn has completed or the user explicitly cancelled it, which makes
+    /// the channel back-pressured rather than a place messages accumulate behind the
     /// cursor. Dropping the sender is a refusal and re-delivers.
     PeerMessage(runtime::agent_mailbox::MailboxEnvelope, mpsc::Sender<()>),
     SubagentCompleted {
@@ -2568,7 +2568,7 @@ enum CoordinatorEvent {
     TurnComplete,
 }
 
-/// Hand a peer's message to the coordinator and wait for its persisted turn.
+/// Build a mailbox sink that waits for terminal handling by the coordinator.
 ///
 /// The return value is what the inbox receiver uses to decide whether to
 /// advance its durable cursor, so "handed over" is not good enough — a message
@@ -2577,20 +2577,22 @@ enum CoordinatorEvent {
 /// thread here is the point: it is the back-pressure that keeps the cursor and
 /// the consumer in step.
 ///
-/// `false` when the coordinator loop is gone (shutting down) or dropped the ack
-/// without handling the message; either way the receiver re-delivers.
-fn ack_after_peer_turn(
-    tx: &mpsc::Sender<CoordinatorEvent>,
-    msg: &runtime::agent_mailbox::MailboxEnvelope,
-) -> bool {
-    let (ack_tx, ack_rx) = mpsc::channel();
-    if tx
-        .send(CoordinatorEvent::PeerMessage(msg.clone(), ack_tx))
-        .is_err()
-    {
-        return false;
+/// Refuse delivery when the coordinator drops the receipt or shuts down. In
+/// particular, closing the engine must not acknowledge an interrupted turn.
+fn peer_turn_sink(
+    tx: mpsc::Sender<CoordinatorEvent>,
+    stop: runtime::HookAbortSignal,
+) -> impl Fn(&runtime::agent_mailbox::MailboxEnvelope) -> bool + Send + Sync {
+    move |msg| {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if tx
+            .send(CoordinatorEvent::PeerMessage(msg.clone(), ack_tx))
+            .is_err()
+        {
+            return false;
+        }
+        ack_rx.recv().is_ok() && !stop.is_aborted()
     }
-    ack_rx.recv().is_ok()
 }
 
 /// Show an interactive selection question via iocraft's InputSlot and
@@ -3301,11 +3303,10 @@ fn run_repl_iocraft_dispatch(
     let mailbox_abort = runtime::HookAbortSignal::new();
     let mut mailbox_pollers = Vec::new();
     if let Ok(Some(a2a_session)) = engine_host::nexus_a2a::session() {
-        let coord_tx_a2a = coord_tx.clone();
         mailbox_pollers.push(engine_host::nexus_a2a::spawn_poller(
             a2a_session,
             mailbox_abort.clone(),
-            move |msg| ack_after_peer_turn(&coord_tx_a2a, msg),
+            peer_turn_sink(coord_tx.clone(), mailbox_abort.clone()),
         ));
     }
 
@@ -3322,14 +3323,13 @@ fn run_repl_iocraft_dispatch(
     // from the process directory is how a peer's reply arrives at an inbox
     // nothing is polling.
     {
-        let coord_tx_local = coord_tx.clone();
         let self_name = session_agent_name;
         let root = runtime::mailbox::local_pair_root();
         mailbox_pollers.push(runtime::mailbox::spawn_local_poller(
             root,
             self_name,
             mailbox_abort.clone(),
-            move |msg| ack_after_peer_turn(&coord_tx_local, msg),
+            peer_turn_sink(coord_tx.clone(), mailbox_abort.clone()),
         ));
     }
 
@@ -3348,6 +3348,7 @@ fn run_repl_iocraft_dispatch(
         let event = match coord_rx.recv() {
             Ok(evt) => evt,
             Err(_) => {
+                mailbox_abort.abort();
                 let _ = commands.send(EngineCommand::Close);
                 cancel_pending_question_answer(&pending_question_answer);
                 repl_ui_cmd.clear_question();
@@ -3472,6 +3473,7 @@ fn run_repl_iocraft_dispatch(
             }
             CoordinatorEvent::Human(input_event) => match input_event {
                 repl_ui::InputEvent::Exit => {
+                    mailbox_abort.abort();
                     let _ = commands.send(EngineCommand::Close);
                     cancel_pending_question_answer(&pending_question_answer);
                     repl_ui_cmd.clear_question();
@@ -3823,7 +3825,7 @@ fn spawn_iocraft_turn(
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    output.println(&format!("{}{error}{}", ansi_fg(theme().error), RESET))
+                    output.println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
                 }
             }
             let _ = done_tx.send(CoordinatorEvent::TurnComplete);
@@ -4786,10 +4788,9 @@ impl LiveCli {
         )?;
         spinner_state.stop_turn();
 
-        let is_delivered = outcome
-            .complete
-            .as_ref()
-            .is_some_and(|turn| !turn.cancelled);
+        // Explicit cancellation finishes this input. The mailbox sink decides
+        // whether the receiver is still running and can acknowledge delivery.
+        let is_handled = outcome.complete.is_some();
         match outcome.complete {
             Some(tc) if tc.cancelled => output.println(&format!(
                 "{}\u{23f9} Cancelled{}",
@@ -4807,7 +4808,7 @@ impl LiveCli {
             // Error already rendered by the EngineEventRenderer (Error event).
             None => {}
         }
-        Ok(is_delivered)
+        Ok(is_handled)
     }
 
     fn run_turn_with_output(

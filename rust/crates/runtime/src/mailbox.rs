@@ -909,6 +909,10 @@ const CONVERSATION_DISCOVERY_MS: u64 = 1_000;
 
 const LOCAL_POLL_BLOCK_MS: u64 = 1000;
 
+/// Refused inputs stay unread and retry with backoff, capped at the renewal
+/// interval so a fast consumer failure cannot spin or defer lease renewal.
+const DELIVERY_RETRY_INITIAL_MS: u64 = 1_000;
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1229,6 +1233,7 @@ fn spawn_conversation_tail(
                     }
                 };
                 let mut renew_at = now_ms() + READER_RENEW_MS;
+                let mut retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
                 while !abort.is_aborted() {
                     let (msgs, next) = match mailbox.poll_conversation(&peer, cursor, block_ms) {
                         Ok(batch) => batch,
@@ -1241,6 +1246,12 @@ fn spawn_conversation_tail(
                         }
                     };
                     let accepted = msgs.iter().all(|m| sink(m));
+                    if accepted {
+                        retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
+                    } else {
+                        sleep_unless_aborted(&abort, retry_delay_ms);
+                        retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
+                    }
                     // Commit only on real forward progress the consumer took in
                     // full, otherwise only when the lease needs renewing. A
                     // batch is all-or-nothing because the position is one

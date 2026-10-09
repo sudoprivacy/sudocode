@@ -1,4 +1,4 @@
-//! Match logical message requests rather than counting HTTP attempts.
+//! Wire evidence for the cache PTYs, independent of terminal fixture support.
 use serde_json::Value;
 use std::{collections::HashMap, path::Path};
 

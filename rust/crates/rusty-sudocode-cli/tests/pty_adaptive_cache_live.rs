@@ -3,6 +3,8 @@
 //! SCODE_LIVE_AUTH_PROFILE=<account> cargo test --test pty_adaptive_cache_live -- --nocapture
 //! Set SCODE_ADAPTIVE_DISPLAY=omitted for the hidden-summary acceptance arm.
 mod common;
+#[path = "support/request_evidence.rs"]
+mod request_evidence;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -98,7 +100,7 @@ fn transcript(dir: &Path) -> Option<PathBuf> {
 }
 
 fn requests(path: &Path) -> Vec<Value> {
-    common::request_evidence::accepted_messages(path)
+    request_evidence::accepted_messages(path)
 }
 
 fn turn(cli: &mut pty_expect::PtySession, prompt: &str) {

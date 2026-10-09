@@ -781,6 +781,8 @@ impl<K: KernelConvenience> KernelFsBackend<K> {
     /// The [`OperationContext`] is the agent's own (owner / zone / name);
     /// `workspace_root` is the absolute VFS path relative tool paths
     /// resolve against (typically the agent's procfs workspace subtree).
+    /// File tools are not system operations: the host's permission provider
+    /// must authorize this agent's access.
     /// Constructing the context here keeps `kernel`-crate types off the
     /// `tools`-crate factory that calls this.
     pub fn for_agent(
@@ -790,7 +792,7 @@ impl<K: KernelConvenience> KernelFsBackend<K> {
         agent_name: &str,
         workspace_root: impl Into<String>,
     ) -> Self {
-        let ctx = OperationContext::new(owner_id, zone_id, false, Some(agent_name), true);
+        let ctx = OperationContext::new(owner_id, zone_id, false, Some(agent_name), false);
         Self::new(kernel, ctx, workspace_root)
     }
 
@@ -964,7 +966,15 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
         self.kernel
             .sys_write(path, &self.ctx, data, 0)
             .map_err(kernel_err)
-            .map(|_| ())
+            .and_then(|result| {
+                if result.hit {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(format!(
+                        "Nexus did not write {path}: no writable backend handled this path"
+                    )))
+                }
+            })
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -974,13 +984,13 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
         // Regular files have no O(1) append, so fall back to read-concat-write
         // (kernel `sys_write` is a whole-object replace, not an OS append).
         if self.is_stream_entry(path) {
-            return self
-                .kernel
-                .sys_write(path, &self.ctx, data, 0)
-                .map_err(kernel_err)
-                .map(|_| ());
+            return self.write(path, data);
         }
-        let existing = self.read(path).unwrap_or_default();
+        let existing = match self.read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
         let mut combined = existing;
         combined.extend_from_slice(data);
         self.write(path, &combined)

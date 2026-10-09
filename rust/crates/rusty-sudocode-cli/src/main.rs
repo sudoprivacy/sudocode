@@ -2557,8 +2557,8 @@ enum CoordinatorEvent {
     /// The receiver must not advance its durable cursor past a message that is
     /// only sitting in this channel: a crash then loses it silently, with the
     /// sender already told "delivered". So it blocks on this ack until the
-    /// coordinator loop has taken the message, which makes the channel
-    /// back-pressured rather than a place messages accumulate behind the
+    /// turn has completed or the user explicitly cancelled it, which makes
+    /// the channel back-pressured rather than a place messages accumulate behind the
     /// cursor. Dropping the sender is a refusal and re-delivers.
     PeerMessage(runtime::agent_mailbox::MailboxEnvelope, mpsc::Sender<()>),
     SubagentCompleted {
@@ -2568,7 +2568,7 @@ enum CoordinatorEvent {
     TurnComplete,
 }
 
-/// Hand a peer's message to the coordinator loop and block until it is taken.
+/// Build a mailbox sink that waits for terminal handling by the coordinator.
 ///
 /// The return value is what the inbox receiver uses to decide whether to
 /// advance its durable cursor, so "handed over" is not good enough — a message
@@ -2577,20 +2577,22 @@ enum CoordinatorEvent {
 /// thread here is the point: it is the back-pressure that keeps the cursor and
 /// the consumer in step.
 ///
-/// `false` when the coordinator loop is gone (shutting down) or dropped the ack
-/// without handling the message; either way the receiver re-delivers.
-fn ack_after_coordinator_takes(
-    tx: &mpsc::Sender<CoordinatorEvent>,
-    msg: &runtime::agent_mailbox::MailboxEnvelope,
-) -> bool {
-    let (ack_tx, ack_rx) = mpsc::channel();
-    if tx
-        .send(CoordinatorEvent::PeerMessage(msg.clone(), ack_tx))
-        .is_err()
-    {
-        return false;
+/// Refuse delivery when the coordinator drops the receipt or shuts down. In
+/// particular, closing the engine must not acknowledge an interrupted turn.
+fn peer_turn_sink(
+    tx: mpsc::Sender<CoordinatorEvent>,
+    stop: runtime::HookAbortSignal,
+) -> impl Fn(&runtime::agent_mailbox::MailboxEnvelope) -> bool + Send + Sync {
+    move |msg| {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        if tx
+            .send(CoordinatorEvent::PeerMessage(msg.clone(), ack_tx))
+            .is_err()
+        {
+            return false;
+        }
+        ack_rx.recv().is_ok() && !stop.is_aborted()
     }
-    ack_rx.recv().is_ok()
 }
 
 /// Show an interactive selection question via iocraft's InputSlot and
@@ -3297,16 +3299,15 @@ fn run_repl_iocraft_dispatch(
         })
         .expect("spawn input bridge");
 
-    // nexus A2A receive-half: peer messages feed into the coordinator
-    // event channel, replacing the old println side-channel. The REPL
-    // loop handles display and (future) turn injection.
+    // Both transports share the coordinator's delivery and shutdown boundary.
+    let mailbox_abort = runtime::HookAbortSignal::new();
+    let mut mailbox_pollers = Vec::new();
     if let Ok(Some(a2a_session)) = engine_host::nexus_a2a::session() {
-        let coord_tx_a2a = coord_tx.clone();
-        let _poller = engine_host::nexus_a2a::spawn_poller(
+        mailbox_pollers.push(engine_host::nexus_a2a::spawn_poller(
             a2a_session,
-            runtime::HookAbortSignal::new(),
-            move |msg| ack_after_coordinator_takes(&coord_tx_a2a, msg),
-        );
+            mailbox_abort.clone(),
+            peer_turn_sink(coord_tx.clone(), mailbox_abort.clone()),
+        ));
     }
 
     // Local same-machine mailbox poller: picks up messages that a peer scode
@@ -3322,15 +3323,14 @@ fn run_repl_iocraft_dispatch(
     // from the process directory is how a peer's reply arrives at an inbox
     // nothing is polling.
     {
-        let coord_tx_local = coord_tx.clone();
         let self_name = session_agent_name;
         let root = runtime::mailbox::local_pair_root();
-        let _local_poller = runtime::mailbox::spawn_local_poller(
+        mailbox_pollers.push(runtime::mailbox::spawn_local_poller(
             root,
             self_name,
-            runtime::HookAbortSignal::new(),
-            move |msg| ack_after_coordinator_takes(&coord_tx_local, msg),
-        );
+            mailbox_abort.clone(),
+            peer_turn_sink(coord_tx.clone(), mailbox_abort.clone()),
+        ));
     }
 
     // Coordinator loop on the current thread. All events arrive through
@@ -3348,6 +3348,7 @@ fn run_repl_iocraft_dispatch(
         let event = match coord_rx.recv() {
             Ok(evt) => evt,
             Err(_) => {
+                mailbox_abort.abort();
                 let _ = commands.send(EngineCommand::Close);
                 cancel_pending_question_answer(&pending_question_answer);
                 repl_ui_cmd.clear_question();
@@ -3396,7 +3397,7 @@ fn run_repl_iocraft_dispatch(
                     turn_active = true;
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
-                        next.prompt,
+                        next,
                         repl_output.clone(),
                         repl_ui_cmd.clone(),
                         repl_spinner.clone(),
@@ -3431,11 +3432,19 @@ fn run_repl_iocraft_dispatch(
                         input_queue::QueuedKind::Subagent => repl_output.println(&display),
                         _ => echo_peer_to_scrollback(&repl_output, &display),
                     }
-                    let _ = coord.lock().unwrap().submit_when_idle(prompt.clone());
+                    let next = coord
+                        .lock()
+                        .unwrap()
+                        .submit_when_idle(input_queue::QueuedInput {
+                            text: prompt,
+                            display: display.clone(),
+                            kind,
+                            receipt: ack,
+                        });
                     turn_active = true;
                     runner_handle = Some(spawn_iocraft_turn(
                         Arc::clone(&cli_shared),
-                        prompt,
+                        next,
                         repl_output.clone(),
                         repl_ui_cmd.clone(),
                         repl_spinner.clone(),
@@ -3449,6 +3458,7 @@ fn run_repl_iocraft_dispatch(
                             text: prompt,
                             display: display.clone(),
                             kind,
+                            receipt: ack,
                         },
                         input_queue::QueueMode::Queue,
                     );
@@ -3459,17 +3469,11 @@ fn run_repl_iocraft_dispatch(
                     };
                     repl_ui_cmd.queued_message_push(&preview, false);
                 }
-                // Taken: the message is this process's responsibility now, so
-                // the receiver may advance its cursor. What remains — the
-                // turn-input queue, an in-flight turn — are the same windows
-                // human input has, and a human can retype.
-                if let Some(ack) = ack {
-                    let _ = ack.send(());
-                }
                 continue;
             }
             CoordinatorEvent::Human(input_event) => match input_event {
                 repl_ui::InputEvent::Exit => {
+                    mailbox_abort.abort();
                     let _ = commands.send(EngineCommand::Close);
                     cancel_pending_question_answer(&pending_question_answer);
                     repl_ui_cmd.clear_question();
@@ -3677,11 +3681,14 @@ fn run_repl_iocraft_dispatch(
                     // it actually flushes (see `drain_next`'s `echoes`).
                     if !turn_active {
                         echo_submit_to_scrollback(&repl_output, &display);
-                        let next = coord.lock().unwrap().submit_when_idle(text);
+                        let next = coord
+                            .lock()
+                            .unwrap()
+                            .submit_when_idle(input_queue::QueuedInput::human(text, display));
                         turn_active = true;
                         runner_handle = Some(spawn_iocraft_turn(
                             Arc::clone(&cli_shared),
-                            next.prompt,
+                            next,
                             repl_output.clone(),
                             repl_ui_cmd.clone(),
                             repl_spinner.clone(),
@@ -3717,6 +3724,15 @@ fn run_repl_iocraft_dispatch(
                 }
             },
         }
+    }
+
+    // Refuse inputs that never ran, then finish cursor commits and release
+    // reader seats before process exit. No queued receipt remains in RAM.
+    mailbox_abort.abort();
+    drop(coord_rx);
+    coord.lock().unwrap().clear();
+    for poller in mailbox_pollers {
+        let _ = poller.join();
     }
 
     // Persist the session before shutting down the REPL — the UI thread may
@@ -3782,7 +3798,7 @@ fn run_repl_iocraft_dispatch(
 /// can update it atomically.
 fn spawn_iocraft_turn(
     cli_shared: Arc<Mutex<LiveCli>>,
-    prompt: String,
+    next: input_queue::NextTurn<mpsc::Sender<()>>,
     output: repl_ui::OutputSender,
     ui: repl_ui::UiCommandSender,
     spinner: repl_ui::SpinnerState,
@@ -3795,10 +3811,22 @@ fn spawn_iocraft_turn(
         .name("repl-runner".into())
         .spawn(move || {
             let mut cli = cli_shared.lock().expect("LiveCli mutex poisoned");
-            if let Err(e) =
-                cli.run_turn_iocraft(&prompt, &output, &ui, &spinner, pending_question_answer)
-            {
-                output.println(&format!("{}{e}{}", ansi_fg(theme().error), RESET));
+            match cli.run_turn_iocraft(
+                &next.prompt,
+                &output,
+                &ui,
+                &spinner,
+                pending_question_answer,
+            ) {
+                Ok(true) => {
+                    for receipt in next.receipts {
+                        let _ = receipt.send(());
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    output.println(&format!("{}{error}{}", ansi_fg(theme().error), RESET));
+                }
             }
             let _ = done_tx.send(CoordinatorEvent::TurnComplete);
         })
@@ -4733,7 +4761,7 @@ impl LiveCli {
         ui: &repl_ui::UiCommandSender,
         spinner_state: &repl_ui::SpinnerState,
         pending_question_answer: PendingQuestionAnswer,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         let turn_start = Instant::now();
         let token_budget = crate::render::parse_token_budget(input);
         let model = self.lifecycle.current_model();
@@ -4760,6 +4788,9 @@ impl LiveCli {
         )?;
         spinner_state.stop_turn();
 
+        // Explicit cancellation finishes this input. The mailbox sink decides
+        // whether the receiver is still running and can acknowledge delivery.
+        let is_handled = outcome.complete.is_some();
         match outcome.complete {
             Some(tc) if tc.cancelled => output.println(&format!(
                 "{}\u{23f9} Cancelled{}",
@@ -4777,7 +4808,7 @@ impl LiveCli {
             // Error already rendered by the EngineEventRenderer (Error event).
             None => {}
         }
-        Ok(())
+        Ok(is_handled)
     }
 
     fn run_turn_with_output(

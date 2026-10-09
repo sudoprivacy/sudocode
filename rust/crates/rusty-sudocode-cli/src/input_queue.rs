@@ -103,10 +103,12 @@ impl QueueMode {
 /// for an inbound A2A peer message. Both echo on flush (symmetric): the queued
 /// item lands in scrollback at the moment it actually runs, never earlier.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueuedInput {
+pub struct QueuedInput<R = ()> {
     pub text: String,
     pub display: String,
     pub kind: QueuedKind,
+    /// Opaque completion receipt, owned by this input until its turn finishes.
+    pub receipt: Option<R>,
 }
 
 /// Where a queued item came from — selects its scrollback marker on flush.
@@ -117,12 +119,13 @@ pub enum QueuedKind {
     Subagent,
 }
 
-impl QueuedInput {
+impl<R> QueuedInput<R> {
     pub fn human(text: impl Into<String>, display: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             display: display.into(),
             kind: QueuedKind::Human,
+            receipt: None,
         }
     }
     pub fn peer(text: impl Into<String>, display: impl Into<String>) -> Self {
@@ -130,6 +133,7 @@ impl QueuedInput {
             text: text.into(),
             display: display.into(),
             kind: QueuedKind::Peer,
+            receipt: None,
         }
     }
 }
@@ -156,7 +160,7 @@ pub enum SubmitOutcome {
 /// The next batch to run after a turn ends. `None` = queue is empty, sit at
 /// the prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NextTurn {
+pub struct NextTurn<R = ()> {
     /// The prompt text to hand to `run_turn`. When multiple items were batched,
     /// this is their `text` fields joined with `\n\n` in submission order.
     pub prompt: String,
@@ -167,6 +171,7 @@ pub struct NextTurn {
     pub echoes: Vec<EchoLine>,
     /// How many queued items this run consumed.
     pub consumed: usize,
+    pub receipts: Vec<R>,
 }
 
 /// The active [`QueueMode`], shared with whatever reads it mid-session.
@@ -196,11 +201,11 @@ pub fn load_queue_mode(shared: &SharedQueueMode) -> QueueMode {
 /// The coordinator itself is pure sync — no threads, no channels. Wiring it to
 /// the async input-thread + tokio worker lives in `main.rs`.
 #[derive(Debug, Default)]
-pub struct TurnInputCoordinator {
-    queue: VecDeque<QueuedInput>,
+pub struct TurnInputCoordinator<R = ()> {
+    queue: VecDeque<QueuedInput<R>>,
 }
 
-impl TurnInputCoordinator {
+impl<R> TurnInputCoordinator<R> {
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -228,17 +233,18 @@ impl TurnInputCoordinator {
     /// path. `echoes` is empty: an idle submit's echo is printed by the caller
     /// right away, not deferred to a turn boundary.
     #[must_use]
-    pub fn submit_when_idle(&mut self, text: String) -> NextTurn {
+    pub fn submit_when_idle(&mut self, input: QueuedInput<R>) -> NextTurn<R> {
         NextTurn {
-            prompt: text,
+            prompt: input.text,
             echoes: Vec::new(),
             consumed: 1,
+            receipts: input.receipt.into_iter().collect(),
         }
     }
 
     /// Called when a submit lands WHILE a turn is running. Returns what the
     /// caller must do next.
-    pub fn submit_during_turn(&mut self, input: QueuedInput, mode: QueueMode) -> SubmitOutcome {
+    pub fn submit_during_turn(&mut self, input: QueuedInput<R>, mode: QueueMode) -> SubmitOutcome {
         if mode.queue_enabled() {
             self.queue.push_back(input);
             return SubmitOutcome::Queued;
@@ -255,25 +261,28 @@ impl TurnInputCoordinator {
     ///
     /// Returns `None` when the queue is empty — the caller reverts to the
     /// idle prompt.
-    pub fn drain_next(&mut self) -> Option<NextTurn> {
+    pub fn drain_next(&mut self) -> Option<NextTurn<R>> {
         if self.queue.is_empty() {
             return None;
         }
         let mut parts = Vec::new();
         let mut echoes = Vec::new();
         let mut consumed = 0_usize;
+        let mut receipts = Vec::new();
         while let Some(item) = self.queue.pop_front() {
             echoes.push(EchoLine {
                 display: item.display,
                 kind: item.kind,
             });
             parts.push(item.text);
+            receipts.extend(item.receipt);
             consumed += 1;
         }
         Some(NextTurn {
             prompt: parts.join("\n\n"),
             echoes,
             consumed,
+            receipts,
         })
     }
 
@@ -342,8 +351,8 @@ mod queue_docs {
 
     #[test]
     fn idle_submit_runs_alone_without_deferred_echo() {
-        let mut c = TurnInputCoordinator::new();
-        let next = c.submit_when_idle("hello".to_string());
+        let mut c = TurnInputCoordinator::<()>::new();
+        let next = c.submit_when_idle(human("hello"));
         assert_eq!(next.prompt, "hello");
         assert!(next.echoes.is_empty());
         assert_eq!(next.consumed, 1);
@@ -354,7 +363,7 @@ mod queue_docs {
     fn queue_mode_batches_and_echoes_on_turn_end() {
         // queue ON. Three inputs during a turn should flush as ONE batched turn
         // joined with "\n\n", echoing each queued display line in order.
-        let mut c = TurnInputCoordinator::new();
+        let mut c = TurnInputCoordinator::<()>::new();
         let mode = QueueMode::Queue;
         assert_eq!(
             c.submit_during_turn(human("B"), mode),
@@ -383,7 +392,7 @@ mod queue_docs {
     fn peer_and_human_both_echo_with_their_kind() {
         // Both human and peer messages echo on flush now (symmetric), each with
         // its own marker kind so the caller renders `❯` vs `📨`.
-        let mut c = TurnInputCoordinator::new();
+        let mut c = TurnInputCoordinator::<()>::new();
         let mode = QueueMode::Queue;
         c.submit_during_turn(human("human"), mode);
         c.submit_during_turn(QueuedInput::peer("peer-text", "peer-display"), mode);
@@ -398,7 +407,7 @@ mod queue_docs {
 
     #[test]
     fn off_mode_rejects_during_turn() {
-        let mut c = TurnInputCoordinator::new();
+        let mut c = TurnInputCoordinator::<()>::new();
         assert_eq!(
             c.submit_during_turn(human("B"), QueueMode::Off),
             SubmitOutcome::Rejected
@@ -410,7 +419,7 @@ mod queue_docs {
     fn dequeue_all_human_returns_all_in_submit_order() {
         // One ↑ pops ALL human items at once, joined oldest-at-top (submit
         // order), and empties the human side of the queue.
-        let mut c = TurnInputCoordinator::new();
+        let mut c = TurnInputCoordinator::<()>::new();
         let mode = QueueMode::Queue;
         c.submit_during_turn(human("first"), mode);
         c.submit_during_turn(human("second"), mode);
@@ -429,7 +438,7 @@ mod queue_docs {
         // Peer (a2a) items interleaved with humans must be skipped: `↑` pulls
         // only the human texts (in order) and every peer item stays in the
         // queue, in its original relative order, to flush on turn end.
-        let mut c = TurnInputCoordinator::new();
+        let mut c = TurnInputCoordinator::<()>::new();
         let mode = QueueMode::Queue;
         c.submit_during_turn(human("h1"), mode);
         c.submit_during_turn(QueuedInput::peer("p1-text", "p1-display"), mode);
@@ -445,7 +454,7 @@ mod queue_docs {
     fn dequeue_all_human_returns_none_when_only_peer_items_queued() {
         // All-peer queue: `↑` finds no human item, returns None so the caller
         // falls through to prompt-history. No peer item is popped.
-        let mut c = TurnInputCoordinator::new();
+        let mut c = TurnInputCoordinator::<()>::new();
         let mode = QueueMode::Queue;
         c.submit_during_turn(QueuedInput::peer("a", "a"), mode);
         c.submit_during_turn(QueuedInput::peer("b", "b"), mode);

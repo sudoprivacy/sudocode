@@ -232,6 +232,7 @@ pub const DEFAULT_STREAM_CAPACITY: u64 = 65_536;
 /// Serialization-friendly kind constants — recipients match on these
 /// strings.
 pub mod kinds {
+    pub use a2a::session::SESSION_KIND as SESSION;
     pub const MESSAGE: &str = "message";
     pub const SHUTDOWN_REQUEST: &str = "shutdown_request";
     pub const SHUTDOWN_RESPONSE: &str = "shutdown_response";

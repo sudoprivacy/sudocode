@@ -8,6 +8,7 @@ use crate::types::{MessageRequest, MessageResponse};
 pub mod anthropic;
 pub mod codex;
 pub mod gemini;
+mod inline_reasoning;
 pub mod openai_compat;
 pub mod registry;
 

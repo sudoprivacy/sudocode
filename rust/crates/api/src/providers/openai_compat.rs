@@ -16,6 +16,7 @@ use crate::types::{
     OutputContentBlock, StreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
 };
 
+use super::inline_reasoning::InlineReasoning;
 use super::registry::{preflight_message_request, ApiFormat};
 use super::{Provider, ProviderFuture};
 
@@ -751,11 +752,13 @@ struct ChatStreamState {
     tool_calls: BTreeMap<u32, ToolCallState>,
     thinking_started: bool,
     thinking_finished: bool,
+    inline_reasoning: Option<InlineReasoning>,
 }
 
 impl ChatStreamState {
     fn new(model: String) -> Self {
         Self {
+            inline_reasoning: InlineReasoning::for_model(&model),
             model,
             message_id: None,
             response_model: None,
@@ -786,43 +789,21 @@ impl ChatStreamState {
 
         for choice in chunk.choices {
             if let Some(reasoning) = choice.delta.reasoning_content {
-                if !self.thinking_started {
-                    self.ensure_message_started(&mut events);
-                    self.thinking_started = true;
-                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
-                        index: 0,
-                        content_block: OutputContentBlock::Thinking {
-                            thinking: String::new(),
-                            signature: None,
-                        },
-                    }));
-                }
                 if !reasoning.is_empty() {
-                    events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                        index: 0,
-                        delta: ContentBlockDelta::ThinkingDelta {
-                            thinking: reasoning,
-                        },
-                    }));
+                    // Native structured reasoning already establishes the
+                    // protocol. Its answer may contain literal <think> text.
+                    self.inline_reasoning = None;
                 }
+                self.ingest_thinking(reasoning, &mut events);
             }
 
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
-                self.close_thinking(&mut events);
-                if !self.text_started {
-                    self.ensure_message_started(&mut events);
-                    self.text_started = true;
-                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
-                        index: self.text_block_index(),
-                        content_block: OutputContentBlock::Text {
-                            text: String::new(),
-                        },
-                    }));
-                }
-                events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                    index: self.text_block_index(),
-                    delta: ContentBlockDelta::TextDelta { text: content },
-                }));
+                let segments = if let Some(parser) = &mut self.inline_reasoning {
+                    parser.push(&content)
+                } else {
+                    vec![(false, content)]
+                };
+                self.ingest_content(segments, &mut events);
             }
 
             for tool_call in choice.delta.tool_calls {
@@ -891,6 +872,10 @@ impl ChatStreamState {
         self.finished = true;
 
         let mut events = Vec::new();
+        if let Some(parser) = &mut self.inline_reasoning {
+            let segments = parser.finish()?;
+            self.ingest_content(segments, &mut events);
+        }
         self.close_thinking(&mut events);
         if self.text_started && !self.text_finished {
             self.text_finished = true;
@@ -945,6 +930,50 @@ impl ChatStreamState {
             events.push(StreamEvent::MessageStop(MessageStopEvent {}));
         }
         Ok(events)
+    }
+
+    fn ingest_content(&mut self, segments: Vec<(bool, String)>, events: &mut Vec<StreamEvent>) {
+        for (reasoning, text) in segments {
+            if reasoning {
+                self.ingest_thinking(text, events);
+            } else {
+                self.close_thinking(events);
+                if !self.text_started {
+                    self.ensure_message_started(events);
+                    self.text_started = true;
+                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                        index: self.text_block_index(),
+                        content_block: OutputContentBlock::Text {
+                            text: String::new(),
+                        },
+                    }));
+                }
+                events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                    index: self.text_block_index(),
+                    delta: ContentBlockDelta::TextDelta { text },
+                }));
+            }
+        }
+    }
+
+    fn ingest_thinking(&mut self, thinking: String, events: &mut Vec<StreamEvent>) {
+        if !self.thinking_started {
+            self.ensure_message_started(events);
+            self.thinking_started = true;
+            events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: 0,
+                content_block: OutputContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                },
+            }));
+        }
+        if !thinking.is_empty() {
+            events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                index: 0,
+                delta: ContentBlockDelta::ThinkingDelta { thinking },
+            }));
+        }
     }
 
     fn ensure_message_started(&mut self, events: &mut Vec<StreamEvent>) {
@@ -2367,7 +2396,22 @@ fn normalize_response(
         });
     }
     if let Some(text) = choice.message.content.filter(|value| !value.is_empty()) {
-        content.push(OutputContentBlock::Text { text });
+        if let Some(mut parser) = InlineReasoning::for_model(model).filter(|_| content.is_empty()) {
+            let mut segments = parser.push(&text);
+            segments.extend(parser.finish()?);
+            for (reasoning, text) in segments {
+                content.push(if reasoning {
+                    OutputContentBlock::Thinking {
+                        thinking: text,
+                        signature: None,
+                    }
+                } else {
+                    OutputContentBlock::Text { text }
+                });
+            }
+        } else {
+            content.push(OutputContentBlock::Text { text });
+        }
     }
     for tool_call in choice.message.tool_calls {
         content.push(OutputContentBlock::ToolUse {

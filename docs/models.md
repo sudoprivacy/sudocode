@@ -99,6 +99,19 @@ See [Anthropic's refusal protocol](https://platform.claude.com/docs/en/build-wit
 
 ## Provider-specific handling
 
+### Azure DeepSeek inline reasoning
+
+For `deepseek-*` deployment names ending in `-azure`, a leading
+`<think>…</think>` envelope is parsed into a reasoning block followed by the
+final answer. This follows the [Azure DeepSeek response format](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/tutorials/get-started-deepseek-r1#reasoning-content).
+Streaming accepts tags split across frames. An unclosed envelope fails the
+response instead of treating unfinished reasoning as an answer. Reported usage
+still includes the provider's reasoning tokens.
+
+A nonempty `reasoning_content` field takes precedence. In that structured
+format, literal tags in the answer remain intact. Other model names keep their
+existing text handling.
+
 Translating Claude-style messages to OpenAI-compatible chat completion
 requests requires a few model-specific adjustments. Each rule below names
 the model family and the request shape the family expects.

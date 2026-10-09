@@ -343,6 +343,14 @@ impl OpenAiCompatClient {
             _ => unreachable!("OpenAiCompatClient only supports OpenAI-compatible formats"),
         };
         merge_extra_body(&mut body, &self.extra_body);
+        super::anthropic::dump_request_body(
+            if self.api_format == ApiFormat::OpenAiResponses {
+                "responses"
+            } else {
+                "chat-completions"
+            },
+            &body,
+        );
 
         let headers = vec![
             ("content-type".to_string(), "application/json".to_string()),

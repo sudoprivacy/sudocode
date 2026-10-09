@@ -88,7 +88,12 @@ fn middle_paste_then_typing_preserves_submitted_content() {
     );
     let marker = common::turn_status_marker(&session);
     session.send("\r").unwrap();
-    common::expect_turn_complete_after(&session, &marker, env.timeout(), "pasted prompt turn");
+    let turn_budget = if env.is_live() {
+        common::LIVE_TURN_BUDGET
+    } else {
+        env.timeout()
+    };
+    common::expect_turn_complete_after(&session, &marker, turn_budget, "pasted prompt turn");
     exit(&mut session, &env);
 
     let mut paths = Vec::new();

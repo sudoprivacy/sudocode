@@ -10,6 +10,14 @@ including when it names the compiled-in default model. Without the flag,
 the environment wins over configuration, followed by the compiled-in default.
 The same selection applies to interactive sessions, resumed sessions and `-p`.
 
+`--model` uses the selected account's credentials and quota. It does not change
+accounts or replenish an exhausted quota. Use `--account <profile>` to select a
+configured account for this invocation, for example:
+
+```bash
+scode --account sudorouter --model gpt-6-luna
+```
+
 ## Aliases
 
 Short names resolve to the current pinned versions:

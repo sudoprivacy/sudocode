@@ -656,11 +656,15 @@ impl Mailbox {
     ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
         let path = self.transcript_path(peer);
         let is_stream = self.backend_frames(&path);
-        if is_stream {
+        let (mut messages, next) = if is_stream {
             self.poll_stream(&path, cursor, block_ms)
         } else {
             self.poll_jsonl(&path, cursor, block_ms)
-        }
+        }?;
+        // Session control has its own generation-aware codec and consumer.
+        // All peer consumers skip those frames while advancing past them.
+        messages.retain(|message| message.kind != a2a::session::SESSION_KIND);
+        Ok((messages, next))
     }
 
     /// DT_STREAM: one frame per `tail_read`, drain burst non-blocking

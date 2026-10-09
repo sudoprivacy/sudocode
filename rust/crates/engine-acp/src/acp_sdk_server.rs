@@ -907,8 +907,7 @@ fn ensure_a2a_receiver(
         "acp-peer",
         stop.clone(),
         move |message| {
-            // Structured session envelopes have their own authenticated codec.
-            if message.kind == "session" || message.body.trim().is_empty() {
+            if message.body.trim().is_empty() {
                 return true;
             }
             let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);

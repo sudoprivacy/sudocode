@@ -127,6 +127,10 @@ fn wait_for_receiver(env: &TestEnv) -> String {
 /// shared transcript. Writing a path by hand is what let this test keep
 /// injecting into a file the receiver had stopped reading.
 fn inject(env: &TestEnv, receiver: &str, from: &str, body: &str) {
+    inject_with_kind(env, receiver, from, body, agent_mailbox::kinds::MESSAGE);
+}
+
+fn inject_with_kind(env: &TestEnv, receiver: &str, from: &str, body: &str, kind: &str) {
     let mailbox =
         Mailbox::workspace_local(&local_pair_root_in(env.config_home()), from.to_string());
     mailbox
@@ -137,10 +141,107 @@ fn inject(env: &TestEnv, receiver: &str, from: &str, body: &str) {
             summary: Some("mock a2a".to_string()),
             timestamp: 0,
             color: None,
-            kind: agent_mailbox::kinds::MESSAGE.to_string(),
+            kind: kind.to_string(),
             request_id: None,
         })
         .expect("inject a2a envelope");
+}
+
+/// Kill the real CLI with a peer input still behind an active turn. The next
+/// process must consume that input, plus a message sent while it was offline.
+#[test]
+fn queued_and_offline_messages_survive_receiver_restart() {
+    let (env, sess) = queued_session("a2a-crash-before-consumption", &[]);
+    let receiver = wait_for_receiver(&env);
+    let body = format!(
+        "QUEUED-RECOVERY-MARKER\n{}",
+        env.prompt(
+            "Reply only with RECOVERY-ACK. Do not call tools.",
+            "single_turn_text"
+        )
+    );
+    inject(&env, &receiver, "queued-peer", &body);
+    wait_for_screen(&sess, "peer input is queued behind the running tool", |s| {
+        has_chip(s, "Message from queued-peer")
+    });
+    let root = local_pair_root_in(env.config_home());
+    let convention = runtime::mailbox::InboxConvention::new(root.to_string_lossy().into_owned());
+    let reader_path = convention.reader_path(&receiver, "queued-peer", &receiver);
+    let observation = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < observation {
+        let reader: runtime::mailbox::ReaderRegister =
+            serde_json::from_slice(&std::fs::read(&reader_path).expect("reader register")).unwrap();
+        assert_eq!(
+            reader.read_offset, 0,
+            "queued RAM is not durable consumption"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // PtySession::drop kills its child, without sending a graceful CLI exit.
+    drop(sess);
+    inject_with_kind(
+        &env,
+        &receiver,
+        "offline-peer",
+        r#"{"jsonrpc":"2.0","method":"session/cancel","id":"STALE-CONTROL-MARKER"}"#,
+        agent_mailbox::kinds::SESSION,
+    );
+    let offline = format!(
+        "OFFLINE-RECOVERY-MARKER\n{}",
+        env.prompt(
+            "Reply only with OFFLINE-ACK. Do not call tools.",
+            "single_turn_text"
+        )
+    );
+    inject(&env, &receiver, "offline-peer", &offline);
+
+    let mut resumed = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    resumed.resize(80, 100).unwrap();
+    let recovery_budget = common::at_least(Duration::from_secs(75));
+    common::expect_screen(
+        &resumed,
+        |screen| {
+            screen.contains("QUEUED-RECOVERY-MARKER") && screen.contains("OFFLINE-RECOVERY-MARKER")
+        },
+        recovery_budget,
+        "both queued and offline messages reach the restarted CLI",
+    );
+    let deadline = Instant::now() + common::LIVE_TURN_BUDGET;
+    for sender in ["queued-peer", "offline-peer"] {
+        let path = convention.reader_path(&receiver, sender, &receiver);
+        loop {
+            let consumed = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| {
+                    serde_json::from_slice::<runtime::mailbox::ReaderRegister>(&bytes).ok()
+                })
+                .is_some_and(|reader| reader.read_offset > 0);
+            if consumed {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{sender} was never durably consumed"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    exit(&mut resumed);
+    let mut replay = env.spawn(&["--resume", "latest", "--permission-mode", "read-only"]);
+    replay.resize(80, 100).unwrap();
+    common::expect_screen(
+        &replay,
+        |screen| {
+            screen.contains("QUEUED-RECOVERY-MARKER") && screen.contains("OFFLINE-RECOVERY-MARKER")
+        },
+        BUDGET,
+        "consumed peer messages are present in the persisted session",
+    );
+    replay.render(|screen| assert!(!screen.contents().contains("STALE-CONTROL-MARKER")));
+    exit(&mut replay);
 }
 
 fn complete_received_block(screen: &str) -> bool {

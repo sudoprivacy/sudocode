@@ -85,7 +85,7 @@
 <div class="lead">
 <b>The frame (read first).</b> Nexus's two namespaces are the <i>given</i> end-state, not an open question — same split an OS makes between an <i>executable on disk</i> and a <i>running process</i> (<code>nexus-integration-architecture</code> §2):
 <b>image layer = <code>/agents/{name}/</code></b> (<code>config.toml</code> · <code>prompts/</code> · <code>skills/</code> · <code>memory/</code> — persistent, Metastore, the addressable identity; its <code>sessions/</code> is a DT_LINK index into the flat <code>/sessions/</code> store, <i>not</i> the bytes) vs
-<b>runtime layer = <code>/proc/{pid}/</code></b> (<code>status</code> · <code>agent</code>→link · <code>chat-with-me</code> · <code>workspace/</code> — ephemeral, stamped at <code>start_session</code>, reaped on exit; <code>pid</code> = an <b>ephemeral run handle</b>, <i>not</i> the session id (session-id is the durable layer — Q1)). The historical mailbox paths and the OS-derived PID target have implementation drift; see the <a href="#agent-delivery-contract">delivery/runtime audit</a> before treating these paths as deployed capabilities.
+<b>runtime layer = <code>/proc/{pid}/</code></b> (<code>status</code> · <code>agent</code>→link · <code>workspace/</code> — ephemeral, stamped at <code>start_session</code>, reaped on exit; <code>pid</code> = an <b>ephemeral run handle</b>, <i>not</i> the session id (session-id is the durable layer — Q1)). The OS-derived PID target has implementation drift; see the <a href="#agent-delivery-contract">delivery/runtime audit</a> before treating these paths as deployed capabilities.
 <br><br>
 <b>Three IDs</b> (Q1 design, 2026-08): <code>agent-name</code> (durable principal) · <code>session-id</code> (durable UUID, the <code>--resume</code> key, intended to span many pids) · <code>pid</code> (ephemeral runtime handle). <b>session-id ≠ pid.</b> Shared-daemon session bytes live at <span class="path">/sessions/&lt;sid&gt;/</span>, keyed by session-id alone; ownership and agent/repo associations are separate. Sudocode co-host already writes this layout. Standalone retains a local workspace partition for discovery and resume. The current managed-agent RPC still names its pid field <code>session_id</code>; see Q1 for the distinction between that field and the transcript key.
 <br><br>
@@ -187,7 +187,7 @@ agent-memory/&lt;type&gt;/           per-agent-type memory
   <td>
     <div class="el"><b>agent-name</b> — durable principal; the addressable identity. <span class="path">/agents/{name}/</span></div>
     <div class="el"><b>session-id</b> — durable UUID, the <code>--resume</code> key; spans N pids. <span class="path">/sessions/&lt;sid&gt;/</span></div>
-    <div class="el"><b>pid</b> — ephemeral run handle, one boot; reaped on exit. <span class="path">/proc/{pid}/</span> holds <code>status</code> · <code>chat-with-me</code> · <code>workspace/</code> (see those rows)</div>
+    <div class="el"><b>pid</b> — ephemeral run handle, one boot; reaped on exit. <span class="path">/proc/{pid}/</span> holds <code>status</code> · <code>agent</code>→link · <code>workspace/</code> (see those rows)</div>
     <div class="el"><b>Compatible wire:</b> nexus-vfs <code>managed_agent.start_session_v1</code> retains the runtime pid in <code>session_id</code> for get/cancel, accepts optional <code>resume_session_id</code>, and returns the provider's optional <code>durable_session_id</code>. Co-host implements these fields; providers without recovery and raw subprocess starts reject a resume request. See Q1 for rollout and remaining work.</div>
     <span class="b ok">given</span></td>
 </tr>
@@ -416,7 +416,7 @@ agent-memory/&lt;type&gt;/           per-agent-type memory
     <div class="el"><b>→ sudocode:</b> agent-to-agent messaging and durable consumption belong to the engine; the UI does not own another inbox.</div>
     <span class="b na">n/a</span></td>
   <td>
-    <div class="el"><b>Target:</b> <code>chat-with-me DT_STREAM</code> + kernel <code>a2a</code> crate. The confirmed refinement is a caller-specific view: B accesses <code>/agents/A/chat-with-me</code> as A↔B's existing conversation stream; C sees A↔C through that same path. The backing store remains the existing pairwise conversation. Routing and authorization are not yet implemented; see <a href="#agent-delivery-contract">the audit</a>.</div>
+    <div class="el"><b>Pairwise conversations:</b> <code>/agents/A/conversations/B</code> and <code>/agents/B/conversations/A</code> are participant indexes into one <code>/conversations/&lt;cid&gt;</code>. Both agents derive the same conversation ID from their unordered names. An additional caller-specific <code>chat-with-me</code> alias is unnecessary for this addressing contract; see <a href="#agent-delivery-contract">the audit</a>.</div>
     <div class="el"><code>MailboxStampingHook</code> stamps unforgeable <code>from</code>, armed at boot, universal for all writers</div>
     <div class="el">raft cross-node (§3.3)</div>
     <span class="b partial">contract alignment open</span></td>
@@ -548,28 +548,26 @@ control frames must not become new prompts on restart. These are verified
 implementation decisions; they do not by themselves approve a new public
 contact-entry contract.</p>
 
-<p><b>Scope agreed in the follow-up discussion.</b> Minimize contract changes
-because multiple developers depend on this matrix. Reuse the existing
-<code>/conversations/&lt;cid&gt;/transcript</code>, participant indexes, reader
-registers, leases and <code>acp-mailbox/1</code>. The confirmed refinement is
-a per-sender view at the same <code>/agents/A/chat-with-me</code> path:
-authenticated B sees the existing A↔B conversation stream, authenticated C
-sees A↔C. There is still one stored transcript per conversation. Resolve from
-authenticated caller identity, not a caller-authored envelope's <code>from</code>,
-and do not switch a global mount target between concurrent callers. Receiver A
-continues discovering unread messages through its existing conversation index.
-Zone and mount granularity remain implementation questions to verify against
-these paths and their authorized readers; this document does not declare the
-view implemented.</p>
+<p><b>Addressing — reuse the existing pair, without another contact alias.</b>
+Minimize contract changes because multiple developers depend on this matrix.
+The unordered participant names already determine one conversation ID.
+<code>/agents/A/conversations/B</code> and
+<code>/agents/B/conversations/A</code> link to that same
+<code>/conversations/&lt;cid&gt;</code>, containing its transcript and reader
+positions. Either participant can find or create it directly. A static DT_LINK
+does not choose a target from the caller's identity; adding that behavior is
+not needed to share one transcript. Keep the existing session flat+link layout
+and <code>acp-mailbox/1</code> unchanged. Receiver A discovers pending messages
+through its own conversation index. Discovery and authorization must not expose
+another participant's private conversation index.</p>
 
 <p><b>Mount constraints to verify.</b> Keep the established flat+link paths and
 use zone visibility to separate authorized replication sets. Determine the
 zone and mount arrangement from the existing addressing contract; joining
 discovery must not grant private data or another pair's messages. A full
-private mount can shadow a public entry, so composition must preserve the
-contact path explicitly. Caller-specific resolution, directory composition and
-live mount reconciliation need acceptance tests before the contact view is
-declared implemented. The
+private mount can shadow a public entry, so directory composition and live
+mount reconciliation need acceptance tests. Mounting a conversation into a
+directory must preserve its existing backing identity. The
 <a href="https://github.com/nexi-lab/nexus-vfs/pull/407">native probe</a>
 verified same-path single-stream mounts, but also showed that a subtree view
 does not limit the zone metadata or stream frames replicated to the node.
@@ -579,18 +577,54 @@ does not become public merely because the content is fetched lazily.
 Envelope <code>from</code> authenticates origin; it does not isolate readers.
 Zone admission, authenticated writes and scoped blob reads remain required.</p>
 
-<p><b>Verified stream-alias blocker:</b>
+<p><b>Conversation provisioning is a separate authorization boundary.</b>
+The current opener writes both participant indexes. Once those indexes live
+in private zones, initiating a conversation must not grant the sender write
+access to the recipient's private directory. An authorized service must open
+the shared conversation and arrange each participant's index within the proper
+zone. A contact alias does not provide that authority. The authorized reader
+set determines which data can share a replication zone; a subtree mount cannot
+remove other records from that zone's WAL.</p>
+
+<p><b>Verified stream-alias fix:</b>
 <a href="https://github.com/nexi-lab/nexus-vfs/issues/410">Nexus #410</a>
-records a native WAL reproduction: mounting a contact path onto an existing
-conversation returns DT_STREAM metadata, but the alias cannot read the original
-record. Appending through the alias creates a separate stream that the original
-path cannot read. Shared stream address resolution must preserve the canonical
-backing identity and caller context before this view can ship. The reproduction
-uses synthetic data and does not establish caller authorization.</p>
+recorded a native WAL reproduction where a renamed mount exposed the right
+inode but opened a different stream.
+<a href="https://github.com/nexi-lab/nexus-vfs/pull/412">Nexus #412</a>
+is merged after all 14 CI checks passed. Stream identity now includes the
+owning zone and its canonical path; aliases share records, offsets and replica
+wakeups, while equal paths in different zones stay separate. Authorization
+retains caller identity and current grants. Native tests cover fresh handles,
+sender stamping, read-only denial, replication and cold-segment retention.
+Existing WAL records under a mounted old alias produce an explicit migration
+error; the change does not automatically merge historical streams. This is
+source and test evidence, not a production deployment or scoped zone-admission
+acceptance.</p>
+
+<p><b>Consumer audit.</b> The standalone REPL must retain each delivery receipt
+with its queued input, then acknowledge it only after a successful persisted
+engine turn. Shutdown refuses queued inputs that never ran and joins both
+mailbox pollers so cursor commits and releases finish before process exit.
+Queue contents and receipts remain process-local; the conversation and consumed
+position are durable facts. Failure between turn persistence and cursor commit
+can replay a message; this is at-least-once delivery, not exactly-once effects.
+The existing reader lease uses read/write/read without an atomic claim and
+does not renew while its sink blocks. Concurrent runtimes therefore still need
+a fenced ownership design. One-shot <code>take_unread</code> consumers and ACP
+error acknowledgement also need alignment before claiming complete offline
+delivery across every host.</p>
 
 <p><b>Evidence boundary.</b> Existing managed-agent tests cover proc link
-creation/removal; the current live offline-send probe proves storage is
-readable by a later reader, not an entire restart-to-model turn. The successful
+creation/removal. A standalone CLI PTY regression kills a receiver with a peer
+message still queued, sends another message while it is offline, then verifies
+both messages are consumed and restored from the saved session after restart.
+It also checks that session control frames do not become peer prompts. The
+  test passed with real CLI processes and storage using both a deterministic
+  transport and the configured live model (requested as <code>sonnet</code>).
+  The pre-fix 0.2.23 binary fails the deterministic regression because its reader
+  offset advances while queued.
+The separate live daemon offline-send probe proves storage is readable by a
+later reader, rather than that entire restart workflow. The successful
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/37636145266/job/112842776820">authenticated daemon A2A job</a>,
 <a href="https://github.com/sudoprivacy/sudocode/actions/runs/37636145266/job/112842777159">live ACP job</a> and
 <a href="https://github.com/sudoprivacy/moss/actions/runs/37764879417/job/113274031218">Moss recovery job</a>

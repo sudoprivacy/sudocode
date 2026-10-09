@@ -298,6 +298,8 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
     let store = env.workspace_root().join("todos.json");
     let labels = [
         "\x1b[1;2mBoldDimSample\x1b[0m",
+        #[cfg(windows)]
+        "\x1b[1mBoldSample\x1b[22m \x1b[2mDimSample\x1b[22m IntensityResetSample",
         "\x1b[38;2;42;142;210mTrueColorSample\x1b[39m DefaultSample",
         "\x1b[38:2::128:64:32mColonRgbSample\x1b[0m",
         "\x1b[38:5:79mIndexedSample\x1b[0m",
@@ -343,8 +345,21 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         );
     }
     sess.expect("❯").expect("input ready");
+    // ConPTY can drop even independent dim. The production Canvas regression
+    // checks dim and combined intensity before that boundary; check bold and
+    // reset here without expect_style's Windows dim tolerance.
     #[cfg(windows)]
-    expect_style(&sess, "BoldDimSample", ("Idx(8)", true, true));
+    for (label, bold, dim) in [
+        ("BoldSample", true, false),
+        ("IntensityResetSample", false, false),
+    ] {
+        common::expect_screen(
+            &sess,
+            |_| attributes(&sess, label) == Some(("Idx(8)".into(), bold, dim)),
+            common::DEFAULT_TIMEOUT,
+            &format!("{label}: expected (Idx(8), {bold}, {dim})"),
+        );
+    }
     expect_style(
         &sess,
         "TrueColorSample",

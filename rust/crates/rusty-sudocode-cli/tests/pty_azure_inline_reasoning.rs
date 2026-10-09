@@ -170,10 +170,11 @@ fn answer(model: &str, case: &str, nonce: &str) -> (&'static str, String) {
     let text = match case {
         "truncated" => "<think>fixture checked".to_owned(),
         "literal-prefix" => format!("<thimble>{nonce}"),
+        "prefaced" => format!("The exact file contents are:\n\n{nonce}"),
         "empty" => format!("<think></think>{nonce}"),
         _ => format!("<think>校验 fixture</think>\n{nonce}"),
     };
-    if case == "json" {
+    if matches!(case, "json" | "prefaced") {
         return ("application/json", json!({"id":"final","model":model,"choices":[{"index":0,"message":{"role":"assistant","content":text},"finish_reason":"stop"}]}).to_string());
     }
     let mut body = String::new();
@@ -196,6 +197,7 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
     for case in [
         "stream",
         "json",
+        "prefaced",
         "structured",
         "ordinary",
         "literal-prefix",
@@ -294,6 +296,9 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
                 "[Provider stream failed; unfinished tool calls were cancelled.]"
             );
             assert!(!text.contains("fixture checked") && !text.contains(&nonce));
+        } else if case == "prefaced" {
+            assert_eq!(text, format!("The exact file contents are:\n\n{nonce}"));
+            assert_final_file_answer(&text, &nonce);
         } else if matches!(case, "structured" | "ordinary") {
             assert_eq!(text, format!("<think>校验 fixture</think>\n{nonce}"));
         } else if case == "literal-prefix" {
@@ -380,15 +385,28 @@ fn azure_live_file_roundtrip_has_a_final_answer() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        text.trim(),
-        nonce,
-        "final answer must not include a reasoning envelope"
-    );
+    assert_final_file_answer(&text, &nonce);
     let thinking = final_message
         .blocks
         .iter()
         .filter(|b| matches!(b, ContentBlock::Thinking { .. }))
         .count();
     eprintln!("LIVE AZURE FILE PASS: persisted contents verified; thinking blocks={thinking}");
+}
+
+fn assert_final_file_answer(text: &str, nonce: &str) {
+    // Live models can add an introduction. Require the fresh file answer and
+    // keep reasoning envelopes out of the text that users receive.
+    assert_eq!(
+        text.matches(nonce).count(),
+        1,
+        "final answer must include the fresh file contents exactly once"
+    );
+    let answer = text.to_ascii_lowercase();
+    for envelope in ["<think>", "</think>", "<thinking>", "</thinking>"] {
+        assert!(
+            !answer.contains(envelope),
+            "final answer must not include a reasoning envelope"
+        );
+    }
 }

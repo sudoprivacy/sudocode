@@ -934,7 +934,8 @@ impl<K: KernelConvenience> KernelFsBackend<K> {
 /// `runtime/tests/spawn_task.rs`, which fails if the variant is ever renamed.
 fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
     let text = format!("{e:?}");
-    if text.contains("FileNotFound") {
+    // A filename in a permission error can contain FileNotFound.
+    if text.starts_with("FileNotFound(") {
         return io::Error::new(io::ErrorKind::NotFound, text);
     }
     io::Error::other(text)

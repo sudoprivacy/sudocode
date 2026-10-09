@@ -69,12 +69,17 @@ fn append_preserves_the_original_file_when_reading_it_is_denied() {
         "agent",
         "/agents/agent",
     );
-    fs.write("proof", b"original bytes").unwrap();
+    for path in ["proof", "FileNotFound.txt"] {
+        fs.write(path, b"original bytes").unwrap();
+    }
     kernel.set_permission_provider(Arc::new(Box::new(DenyAgentRead)));
-    assert!(fs.read("proof").is_err());
-    assert!(fs.append("proof", b"replacement").is_err());
     let auditor = KernelFsBackend::for_agent(kernel, "auditor", "root", "auditor", "/agents/agent");
-    assert_eq!(auditor.read("proof").unwrap(), b"original bytes");
+    for path in ["proof", "FileNotFound.txt"] {
+        let error = fs.read(path).expect_err("the agent cannot read this file");
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound, "{path}");
+        assert!(fs.append(path, b"replacement").is_err());
+        assert_eq!(auditor.read(path).unwrap(), b"original bytes");
+    }
 }
 
 #[test]

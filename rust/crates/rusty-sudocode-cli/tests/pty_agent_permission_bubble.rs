@@ -4,7 +4,7 @@ mod common;
 #[path = "support/wire_requests.rs"]
 mod wire_requests;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -24,6 +24,15 @@ fn requests(directory: &Path) -> Vec<Value> {
 
 #[test]
 fn permission_prompt_from_subagent_bubbles_to_parent_terminal() {
+    child_approval_workflow(false);
+}
+
+#[test]
+fn child_report_verification_keeps_one_approved_invoice_execution() {
+    child_approval_workflow(true);
+}
+
+fn child_approval_workflow(verify_report: bool) {
     let env = TestEnv::new("pty-agent-perm-bubble");
     if env.is_mock() {
         eprintln!("SKIP: this workflow requires real parent and child model requests");
@@ -85,12 +94,21 @@ print(result)
         .replace('\\', "/");
     let command = format!("'{python}' '{script}'");
     let command_words = shell_words::split(&command).unwrap();
-    let prompt = format!("Call one Bash Agent with model={model}, run_in_background=false, and this prompt: Run exactly this Bash command once, with no other commands or retries: {command}. Report its actual output. Wait for the child and report its output.");
+    let mut prompt = format!("Call one Bash Agent with model={model}, run_in_background=false, and this prompt: Run exactly this Bash command once, with no other commands or retries: {command}. Report its actual output. Wait for the child and report its output.");
+    if verify_report {
+        prompt.push_str(" After it completes, have a second read-only Agent read the completed child's saved Markdown report and return the actual invoice output. It must only read that report, without running any commands. Report that verified output.");
+    }
     let marker = common::turn_status_marker(&cli);
     cli.send(&prompt).unwrap();
     common::expect_screen(
         &cli,
-        |s| s.contains("report its output."),
+        |s| {
+            s.contains(if verify_report {
+                "Report that verified output."
+            } else {
+                "report its output."
+            })
+        },
         BUDGET,
         "agent task input",
     );
@@ -133,6 +151,9 @@ print(result)
     );
     let mut agents = BTreeSet::new();
     let mut child_commands = BTreeSet::new();
+    let mut report_reads = BTreeSet::new();
+    let mut fixture_reads = BTreeMap::new();
+    let mut results = BTreeMap::new();
     for request in requests(&captured) {
         assert_eq!(
             request["model"], model,
@@ -155,7 +176,50 @@ print(result)
                         );
                         child_commands.insert(block["id"].to_string());
                     }
-                    _ => {}
+                    Some("Read" | "read_file") => {
+                        // A parent may inspect its completed child's report through
+                        // a read-only agent, or inspect the supplied script and data.
+                        // None of those reads is another invoice execution.
+                        let path = block["input"]["path"]
+                            .as_str()
+                            .or_else(|| block["input"]["file_path"].as_str())
+                            .expect("report read must name a file");
+                        let path = Path::new(path);
+                        let path = if path.is_absolute() {
+                            path.to_path_buf()
+                        } else {
+                            env.workspace_root().join(path)
+                        };
+                        let actual = path.canonicalize().expect("report file must exist");
+                        let reports = env
+                            .workspace_root()
+                            .join(".sudocode-agents")
+                            .canonicalize()
+                            .unwrap();
+                        let is_report = actual.parent() == Some(reports.as_path())
+                            && actual.extension().and_then(|ext| ext.to_str()) == Some("md");
+                        let is_fixture =
+                            ["invoice.py", "order.csv", "result.txt"]
+                                .iter()
+                                .any(|name| {
+                                    env.workspace_root().join(name).canonicalize().unwrap()
+                                        == actual
+                                });
+                        assert!(
+                            is_report || is_fixture,
+                            "child read outside the invoice fixture"
+                        );
+                        let contents = std::fs::read_to_string(actual).unwrap();
+                        if is_report {
+                            assert!(
+                                contents.contains(&nonce)
+                                    && contents.contains(&subtotal.to_string())
+                            );
+                            report_reads.insert(block["id"].to_string());
+                        }
+                        fixture_reads.insert(block["id"].to_string(), contents);
+                    }
+                    other => panic!("unexpected tool in child approval workflow: {other:?}"),
                 }
             }
             if block["type"] == "tool_result" {
@@ -163,18 +227,76 @@ print(result)
                     block["is_error"], true,
                     "workflow recovered from a failed tool"
                 );
+                results.insert(block["tool_use_id"].to_string(), block["content"].clone());
             }
         }
     }
-    assert_eq!(agents.len(), 1, "the parent retried or omitted its child");
+    assert!(!agents.is_empty(), "the parent omitted its child");
     assert_eq!(
         child_commands.len(),
         1,
         "the child retried or omitted the invoice command"
     );
+    if verify_report {
+        assert!(
+            agents.len() >= 2,
+            "the report verification child was omitted"
+        );
+        assert!(!report_reads.is_empty(), "no child report was read");
+    }
+    for id in &agents {
+        let result: Value = serde_json::from_str(
+            results
+                .get(id)
+                .expect("every child must complete")
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            result["status"], "completed",
+            "child did not finish successfully"
+        );
+        assert_eq!(result["model"], model, "child used a different model");
+    }
+    assert!(
+        agents.iter().any(|id| {
+            let output = results[id].to_string();
+            output.contains(&nonce) && output.contains(&subtotal.to_string())
+        }),
+        "no completed child returned the actual invoice result"
+    );
+    for id in child_commands.iter().chain(&report_reads) {
+        let output = results.get(id).expect("every observed tool must complete");
+        let output = output.to_string();
+        assert!(
+            output.contains(&nonce) && output.contains(&subtotal.to_string()),
+            "a tool did not return the actual child result"
+        );
+    }
+    for (id, contents) in fixture_reads {
+        let result: Value = serde_json::from_str(
+            results
+                .get(&id)
+                .expect("every read must complete")
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            result["file"]["content"]
+                .as_str()
+                .unwrap()
+                .replace("\r\n", "\n")
+                .trim_end(),
+            contents.replace("\r\n", "\n").trim_end(),
+            "read did not return the actual fixture contents"
+        );
+    }
     cli.send("/exit\r").unwrap();
     assert_eq!(cli.expect_eof().unwrap(), 0);
     eprintln!(
-        "LIVE CHILD APPROVAL PASS: fresh file, terminal Bash approval and follow-up total verified"
+        "LIVE CHILD APPROVAL PASS: fresh file, terminal Bash approval and follow-up total verified; {} agents, {} invoice command, {} report reads",
+        agents.len(), child_commands.len(), report_reads.len()
     );
 }

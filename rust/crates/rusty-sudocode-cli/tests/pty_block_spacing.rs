@@ -139,10 +139,10 @@ fn expected_file_frames(env: &TestEnv) -> BTreeMap<&'static str, usize> {
     expected
 }
 
-fn assert_transcript(sess: &PtySession, expected: &BTreeMap<&str, usize>) {
+fn assert_file_frames(sess: &PtySession, expected: &BTreeMap<&str, usize>, final_text: &str) {
     let rows = rows(sess);
     let intro = assistant_position(&rows, "Spacing intro.");
-    let end = assistant_position(&rows, "Spacing end.");
+    let end = assistant_position(&rows, final_text);
     let headers: Vec<_> = (intro + 1..end)
         .filter(|&row| rows[row].starts_with("╭─ Bash("))
         .collect();
@@ -173,12 +173,7 @@ fn assert_transcript(sess: &PtySession, expected: &BTreeMap<&str, usize>) {
             assert_gap(&rows, before, header, 1);
         }
     }
-    assert_gap(
-        &rows,
-        *caps.last().unwrap(),
-        assistant_position(&rows, "Spacing done."),
-        1,
-    );
+    assert_gap(&rows, *caps.last().unwrap(), end, 1);
     let mut shown = BTreeMap::new();
     for (&header, &cap) in headers.iter().zip(&caps) {
         let body = &rows[header + 1..cap];
@@ -225,6 +220,11 @@ fn assert_transcript(sess: &PtySession, expected: &BTreeMap<&str, usize>) {
         &shown, expected,
         "rendered file frames must match the persisted commands"
     );
+}
+
+fn assert_transcript(sess: &PtySession, expected: &BTreeMap<&str, usize>) {
+    assert_file_frames(sess, expected, "Spacing done.");
+    let rows = rows(sess);
     assert_gap(
         &rows,
         position(&rows, "CODE_START"),
@@ -344,6 +344,65 @@ fn narrow_live_and_replay_keep_spacing_and_content() {
 #[test]
 fn sync_renderer_uses_the_same_spacing() {
     roundtrip(false, 100);
+}
+
+#[test]
+fn repeated_file_read_has_one_frame_per_saved_command() {
+    let env = TestEnv::new_mock("repeated-file-spacing");
+    for (file, body) in [
+        ("spacing-one.txt", "ONE_START\n\n\nONE_END\n"),
+        ("spacing-two.txt", "TWO_START\n\n\nTWO_END\n"),
+    ] {
+        std::fs::write(env.workspace_root().join(file), body).unwrap();
+    }
+    let config = env.workspace_root().join(".nexus/sudocode");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("settings.json"), r#"{"thinking":false}"#).unwrap();
+    let batch = serde_json::json!([
+        {"id":"spacing_one", "name":"bash", "input":{"command":"cat spacing-one.txt"}, "stream_text_chunks":["Spacing intro.\n\n"]},
+        {"id":"spacing_two", "name":"bash", "input":{"command":"cat spacing-two.txt"}},
+        {"id":"spacing_one_again", "name":"bash", "input":{"command":"cat spacing-one.txt"}},
+    ]);
+    let prompt = env.prompt(
+        &format!("Run these file reads. TOOL_BATCH:{batch}"),
+        "tool_concurrency",
+    );
+    let mut sess = start(&env, false, true, 100);
+    sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains("Pasted") || s.contains("TOOL_BATCH:"),
+        common::DEFAULT_TIMEOUT,
+        "file batch pasted",
+    );
+    let marker = common::turn_status_marker(&sess);
+    sess.send("\r").unwrap();
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "completed repeated file reads",
+    );
+    let final_text = "Concurrency batch done.";
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains(final_text),
+        common::DEFAULT_TIMEOUT,
+        "completed file batch",
+    );
+    let expected = expected_file_frames(&env);
+    assert_eq!(expected, BTreeMap::from([("ONE", 2), ("TWO", 1)]));
+    assert_file_frames(&sess, &expected, final_text);
+    finish(&mut sess);
+    let mut resumed = start(&env, true, true, 100);
+    common::expect_screen_settled(
+        &resumed,
+        |s| s.contains(final_text),
+        common::DEFAULT_TIMEOUT,
+        "replayed file batch",
+    );
+    assert_file_frames(&resumed, &expected, final_text);
+    finish(&mut resumed);
 }
 
 fn assert_reasoning(sess: &PtySession) {

@@ -216,7 +216,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     );
     let marker = common::turn_status_marker(&sess);
     let prompt = env.prompt(
-        "Run exactly this Bash command: printf 'alpha from bash'. Then say done.",
+        "Bash: printf 'alpha from bash'. Then say done.",
         "bash_stdout_roundtrip",
     );
     sess.send(&prompt).unwrap();

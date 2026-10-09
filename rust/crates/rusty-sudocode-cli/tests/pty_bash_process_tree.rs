@@ -46,7 +46,7 @@ fn is_exited(node: &str, pid: u64) -> bool {
 }
 
 /// The marker comes from a grandchild, so neither a canned reply nor killing
-/// just the shell can satisfy the assertions. The next turn reads its token.
+/// just the shell can satisfy the assertions. The next turn reads its run ID.
 #[test]
 fn live_esc_reaps_bash_descendants_and_next_turn_works() {
     run_bash_tree_workflow(true);
@@ -65,15 +65,15 @@ fn write_fixture(root: &Path) -> (String, String) {
     assert!(node.status.success());
     let node = String::from_utf8(node.stdout).expect("node path UTF-8");
     let node = node.trim().replace('\\', "/");
-    let token = root
+    let run_id = root
         .file_name()
         .expect("unique workspace")
         .to_string_lossy()
         .into_owned();
-    let token_json = serde_json::to_string(&token).expect("token JSON");
+    let run_id_json = serde_json::to_string(&run_id).expect("run ID JSON");
     fs::write(
         root.join("descendant.cjs"),
-        format!("const fs=require('fs'); fs.writeFileSync('started.json', JSON.stringify({{pid:process.pid,token:{token_json}}})); setInterval(()=>{{}},1000);"),
+        format!("const fs=require('fs'); fs.writeFileSync('started.json', JSON.stringify({{pid:process.pid,run_id:{run_id_json}}})); setInterval(()=>{{}},1000);"),
     )
     .expect("write descendant");
     fs::write(
@@ -83,10 +83,10 @@ fn write_fixture(root: &Path) -> (String, String) {
     .expect("write parent");
     fs::write(
         root.join("recover.cjs"),
-        "const fs=require('fs'); const marker=JSON.parse(fs.readFileSync('started.json','utf8')); fs.writeFileSync('recovered.txt',marker.token);",
+        "const fs=require('fs'); const marker=JSON.parse(fs.readFileSync('started.json','utf8')); fs.writeFileSync('recovered.txt',marker.run_id);",
     )
     .expect("write recovery");
-    (node, token)
+    (node, run_id)
 }
 
 fn run_bash_tree_workflow(is_cancel: bool) {
@@ -98,10 +98,10 @@ fn run_bash_tree_workflow(is_cancel: bool) {
         return;
     }
     let root = env.workspace_root();
-    let (node, token) = write_fixture(root);
+    let (node, run_id) = write_fixture(root);
     let command = format!("\"{node}\" parent.cjs");
     let timeout_ms = if is_cancel { 120_000 } else { 5_000 };
-    let prompt = format!("Use the bash tool to run exactly: {command}. Run once in the foreground with timeout={timeout_ms}. Do not retry, read or edit either script.");
+    let prompt = format!("This workspace contains a local process-cancellation regression fixture. parent.cjs starts descendant.cjs, which records its PID and a synthetic run_id in started.json. Use the bash tool to run exactly: {command}. Run once in the foreground with timeout={timeout_ms}. Do not retry, read or edit either script.");
     let mut session = env.spawn(&[
         "--permission-mode",
         "danger-full-access",
@@ -161,9 +161,9 @@ fn run_bash_tree_workflow(is_cancel: bool) {
     let marker = common::turn_status_marker(&session);
     // Keep shell syntax out of the model's recovery choice: this acceptance
     // checks that a new real tool call works after cancellation or timeout.
-    // The script still reads the fresh grandchild token and writes the result.
+    // The script still reads the fresh grandchild run ID and writes the result.
     let follow_up = format!(
-        "Use the bash tool to run exactly: \"{node}\" recover.cjs. Run once in the foreground. This reads started.json and writes its token to recovered.txt. Execute it; do not just describe it."
+        "Continue the local process-cancellation regression fixture. Use the bash tool to run exactly: \"{node}\" recover.cjs. Run once in the foreground. This reads the synthetic run_id recorded by descendant.cjs in started.json and writes that run ID to recovered.txt. Execute it; do not just describe it."
     );
     session
         .send(&format!("{follow_up}\r"))
@@ -172,11 +172,11 @@ fn run_bash_tree_workflow(is_cancel: bool) {
         wait_for(
             || {
                 fs::read_to_string(root.join("recovered.txt"))
-                    .is_ok_and(|text| text.trim() == token)
+                    .is_ok_and(|text| text.trim() == run_id)
             },
             Duration::from_secs(90),
         ),
-        "next turn did not write the recovered token: {}",
+        "next turn did not write the recovered run ID: {}",
         common::screen_tail(&session, 4000)
     );
     common::expect_turn_complete_after(

@@ -13,6 +13,7 @@ pub mod bash_validation;
 mod bootstrap;
 pub mod branch_lock;
 mod compact;
+pub mod compaction_scope;
 pub mod config;
 pub mod config_schema;
 pub mod config_validate;
@@ -101,8 +102,9 @@ pub use compact::{
     autocompact_buffer_tokens, compact_session, compact_session_sync,
     compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
     format_compact_summary, get_compact_continuation_message, render_todo_continuity_block,
-    should_compact, CompactionConfig, CompactionError, CompactionResult, CompactionSummarySource,
-    ContextBudget, AUTOCOMPACT_BUFFER_TOKENS, COMPACTION_FAILED, COMPACT_MAX_OUTPUT_TOKENS,
+    should_compact, CompactionConfig, CompactionError, CompactionOutcome, CompactionReport,
+    CompactionResult, CompactionSummarySource, ContextBudget, AUTOCOMPACT_BUFFER_TOKENS,
+    COMPACTION_FAILED, COMPACT_MAX_OUTPUT_TOKENS,
 };
 pub use config::{
     default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,
@@ -228,8 +230,9 @@ pub use sandbox::{
     SandboxRequest, SandboxStatus,
 };
 pub use session::{
-    model_tool_history, ContentBlock, ConversationMessage, HostedSessionIdentity, MessageRole,
-    Session, SessionCompaction, SessionError, SessionFork, SessionMode, SessionPromptEntry,
+    model_tool_history, ContentBlock, ConversationMessage, HostedSessionIdentity,
+    MaintenanceUsageReceipt, MessageRole, Session, SessionCompaction, SessionError, SessionFork,
+    SessionMode, SessionPromptEntry,
 };
 pub use sse::{IncrementalSseParser, SseEvent};
 pub use stale_base::{

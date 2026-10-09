@@ -465,6 +465,55 @@ impl ApiClient for EngineApiClient {
         }
     }
 
+    fn context_budget_for_request(
+        &self,
+        model: &str,
+        request: &ApiRequest,
+    ) -> runtime::ContextBudget {
+        let mut budget = self.context_budget(model, &request.system_prompt);
+        let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
+        let tools = self.request_tools(request);
+        budget.overhead_tokens =
+            api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize;
+        budget
+    }
+
+    fn compaction_route_fingerprint(&self, request: &ApiRequest) -> String {
+        format!(
+            "{}|{}|{}|{:?}|{}",
+            self.client.route_identity(),
+            self.model,
+            self.thinking_enabled,
+            self.reasoning_effort,
+            serde_json::to_string(&self.request_tools(request)).unwrap_or_default()
+        )
+    }
+
+    fn context_budget_for_completion(
+        &self,
+        model: &str,
+        request: &ApiRequest,
+        options: runtime::TextCompletionOptions,
+    ) -> runtime::ContextBudget {
+        let mut budget = self.context_budget(model, &request.system_prompt);
+        let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
+        let tools = options
+            .include_tools
+            .then(|| self.request_tools(request))
+            .flatten();
+        budget.overhead_tokens =
+            api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize;
+        budget.max_output_tokens = options.max_tokens as usize;
+        budget
+    }
+
+    async fn prepare_compaction_route(&mut self) -> Result<(), RuntimeError> {
+        if let Some(catalog) = &self.catalog {
+            catalog.refresh_if_missing().await;
+        }
+        Ok(())
+    }
+
     async fn complete_text(
         &mut self,
         request: ApiRequest,

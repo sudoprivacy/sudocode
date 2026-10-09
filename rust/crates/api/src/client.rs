@@ -216,6 +216,18 @@ impl ProviderClient {
         }
     }
 
+    /// Stable request route identity for context-maintenance skip validation.
+    #[must_use]
+    pub fn route_identity(&self) -> String {
+        let base_url = match self {
+            Self::Anthropic(client) => client.base_url(),
+            Self::Xai(client) | Self::OpenAi(client) => client.base_url(),
+            Self::Codex(client) => client.base_url(),
+            Self::Gemini(client) => client.base_url(),
+        };
+        format!("{:?}|{base_url}", self.provider_kind())
+    }
+
     #[must_use]
     pub fn with_session_tracer(self, session_tracer: SessionTracer) -> Self {
         match self {
@@ -395,11 +407,45 @@ impl MessageStream {
     ) -> Result<MessageResponse, ApiError> {
         let request_id = self.request_id().map(ToString::to_string);
         let mut accumulator = ResponseAccumulator::new(self.provider_label(), request_model);
+        let mut saw_terminal = false;
         while let Some(event) = self.next_event().await? {
+            saw_terminal |= matches!(&event, StreamEvent::MessageStop(_))
+                || matches!(&event, StreamEvent::MessageDelta(delta) if delta.delta.stop_reason.is_some())
+                || matches!(&event, StreamEvent::MessageStart(start) if start.message.stop_reason.is_some());
+            record_compaction_stream_event(&event)?;
             accumulator.push(event);
+        }
+        if runtime::compaction_scope::is_active() && !saw_terminal {
+            return Err(ApiError::incomplete_stream(
+                self.provider_label(),
+                request_model,
+                "summary stream ended without a provider terminal event",
+            ));
         }
         accumulator.finish(request_id)
     }
+}
+
+/// Capture received summary usage before a queued event can be cancelled.
+pub(crate) fn record_compaction_stream_event(event: &StreamEvent) -> Result<(), ApiError> {
+    let usage = match event {
+        StreamEvent::MessageStart(start) => Some(&start.message.usage),
+        StreamEvent::MessageDelta(delta) => Some(&delta.usage),
+        _ => None,
+    };
+    // Synthetic initial events in Codex/Gemini carry default usage.
+    // Only a received bill changes an unknown receipt into known usage.
+    if let Some(usage) = usage.filter(|usage| **usage != crate::types::Usage::default()) {
+        runtime::compaction_scope::record_usage(usage.token_usage());
+    }
+    if matches!(event, StreamEvent::MessageStop(_))
+        || matches!(event, StreamEvent::MessageDelta(delta) if delta.delta.stop_reason.is_some())
+        || matches!(event, StreamEvent::MessageStart(start) if start.message.stop_reason.is_some())
+    {
+        runtime::compaction_scope::record_completed_response()
+            .map_err(|error| ApiError::Configuration(error.to_string()))?;
+    }
+    Ok(())
 }
 
 pub use anthropic::{

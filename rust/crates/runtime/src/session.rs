@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 use crate::fs_backend::{FsBackend, StdFsBackend};
 use crate::json::{JsonError, JsonValue};
 use crate::prompt::SessionPromptSnapshot;
@@ -227,6 +229,134 @@ impl HostedSessionIdentity {
     }
 }
 
+/// One real model HTTP attempt during context maintenance. Missing usage means
+/// the provider did not report a bill, rather than a zero-cost request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceUsageReceipt {
+    pub run_id: String,
+    pub attempt_id: u32,
+    pub usage: Option<TokenUsage>,
+}
+
+impl MaintenanceUsageReceipt {
+    fn to_json(&self) -> JsonValue {
+        let mut object = BTreeMap::from([
+            ("run_id".into(), JsonValue::String(self.run_id.clone())),
+            (
+                "attempt_id".into(),
+                JsonValue::Number(i64::from(self.attempt_id)),
+            ),
+        ]);
+        if let Some(usage) = self.usage {
+            object.insert("usage".into(), usage_to_json(usage));
+        }
+        JsonValue::Object(object)
+    }
+
+    fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| SessionError::Format("maintenance receipt must be an object".into()))?;
+        Ok(Self {
+            run_id: required_string(object, "run_id")?,
+            attempt_id: required_u32(object, "attempt_id")?,
+            usage: object.get("usage").map(usage_from_json).transpose()?,
+        })
+    }
+}
+
+/// Evidence for a previously committed, target-achieving compaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionAchievement {
+    pub fingerprint: String,
+    pub before_history: usize,
+    pub target_history: usize,
+    pub after_history: usize,
+    pub policy_version: String,
+}
+
+impl CompactionAchievement {
+    fn to_json(&self) -> Result<JsonValue, SessionError> {
+        Ok(JsonValue::Object(BTreeMap::from([
+            (
+                "fingerprint".into(),
+                JsonValue::String(self.fingerprint.clone()),
+            ),
+            (
+                "before_history".into(),
+                JsonValue::Number(
+                    i64::try_from(self.before_history)
+                        .map_err(|_| SessionError::Format("before_history overflow".into()))?,
+                ),
+            ),
+            (
+                "target_history".into(),
+                JsonValue::Number(
+                    i64::try_from(self.target_history)
+                        .map_err(|_| SessionError::Format("target_history overflow".into()))?,
+                ),
+            ),
+            (
+                "after_history".into(),
+                JsonValue::Number(
+                    i64::try_from(self.after_history)
+                        .map_err(|_| SessionError::Format("after_history overflow".into()))?,
+                ),
+            ),
+            (
+                "policy_version".into(),
+                JsonValue::String(self.policy_version.clone()),
+            ),
+        ])))
+    }
+
+    fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
+        let object = value.as_object().ok_or_else(|| {
+            SessionError::Format("compaction achievement must be an object".into())
+        })?;
+        let history = |key| {
+            usize::try_from(required_u64(object, key)?)
+                .map_err(|_| SessionError::Format(format!("{key} overflow")))
+        };
+        Ok(Self {
+            fingerprint: required_string(object, "fingerprint")?,
+            before_history: history("before_history")?,
+            target_history: history("target_history")?,
+            after_history: history("after_history")?,
+            policy_version: required_string(object, "policy_version")?,
+        })
+    }
+}
+
+fn compaction_report_from_json(
+    object: &BTreeMap<String, JsonValue>,
+) -> Result<Option<crate::compact::CompactionReport>, SessionError> {
+    object
+        .get("last_compaction_report")
+        .map(|value| {
+            serde_json::from_str(&value.render())
+                .map_err(|error| SessionError::Format(error.to_string()))
+        })
+        .transpose()
+}
+
+fn maintenance_usage_from_json(
+    object: &BTreeMap<String, JsonValue>,
+) -> Result<Vec<MaintenanceUsageReceipt>, SessionError> {
+    object
+        .get("maintenance_usage")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| SessionError::Format("maintenance_usage must be an array".into()))?
+                .iter()
+                .map(MaintenanceUsageReceipt::from_json)
+                .collect()
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
 /// Persisted conversational state for the runtime and CLI session manager.
 ///
 /// `workspace_root` binds the session to the worktree it was created in. The
@@ -243,6 +373,9 @@ pub struct Session {
     pub updated_at_ms: u64,
     pub messages: Vec<ConversationMessage>,
     pub compaction: Option<SessionCompaction>,
+    pub maintenance_usage: Vec<MaintenanceUsageReceipt>,
+    pub compaction_achievement: Option<CompactionAchievement>,
+    pub last_compaction_report: Option<crate::compact::CompactionReport>,
     pub fork: Option<SessionFork>,
     pub workspace_root: Option<PathBuf>,
     pub identity: Option<HostedSessionIdentity>,
@@ -269,6 +402,9 @@ impl PartialEq for Session {
             && self.updated_at_ms == other.updated_at_ms
             && self.prompt_snapshot == other.prompt_snapshot
             && self.messages == other.messages
+            && self.maintenance_usage == other.maintenance_usage
+            && self.compaction_achievement == other.compaction_achievement
+            && self.last_compaction_report == other.last_compaction_report
             && self.compaction == other.compaction
             && self.fork == other.fork
             && self.identity == other.identity
@@ -287,6 +423,7 @@ pub enum SessionError {
     Io(std::io::Error),
     Json(JsonError),
     Format(String),
+    SourceChanged,
 }
 
 impl Display for SessionError {
@@ -295,6 +432,7 @@ impl Display for SessionError {
             Self::Io(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
             Self::Format(error) => write!(f, "{error}"),
+            Self::SourceChanged => f.write_str("session source changed during compaction"),
         }
     }
 }
@@ -324,6 +462,9 @@ impl Session {
             updated_at_ms: now,
             messages: Vec::new(),
             compaction: None,
+            maintenance_usage: Vec::new(),
+            compaction_achievement: None,
+            last_compaction_report: None,
             fork: None,
             workspace_root: None,
             identity: None,
@@ -419,6 +560,71 @@ impl Session {
     #[must_use]
     pub fn persistence_path(&self) -> Option<&Path> {
         self.persistence.as_ref().map(|value| value.path.as_path())
+    }
+
+    /// Revision of the current durable transcript through its own backend.
+    /// In-memory sessions have no revision. A configured path which is absent
+    /// has a distinct sentinel, so external creation also counts as a change.
+    pub fn durable_revision(&self) -> Result<Option<String>, SessionError> {
+        let Some(path) = self.persistence_path() else {
+            return Ok(None);
+        };
+        let bytes = match self.backend().read(&path.to_string_lossy()) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Some(durable_bytes_revision(bytes.as_deref())))
+    }
+
+    /// Bind a source history to the revision of the same durable bytes.
+    /// A source cloned before an external append must not capture the newer
+    /// revision and subsequently replace messages it never saw. Metadata may
+    /// differ, but replayed message history must match after the same orphan
+    /// repair used on load. This is a read-time check, not a backend lock.
+    pub fn durable_revision_for_history(&self) -> Result<Option<String>, SessionError> {
+        self.durable_history_revision()
+            .map(|(revision, _)| revision)
+    }
+
+    /// Bind the same history and preserve maintenance receipts observed in
+    /// those durable bytes. Return newly known bills for the live tracker;
+    /// pending receipts and staged prompt metadata remain in memory.
+    pub fn capture_durable_revision_for_history(
+        &mut self,
+    ) -> Result<(Option<String>, Vec<TokenUsage>), SessionError> {
+        let (revision, receipts) = self.durable_history_revision()?;
+        let newly_known = self.merge_maintenance_usage(&receipts);
+        Ok((revision, newly_known))
+    }
+
+    fn durable_history_revision(
+        &self,
+    ) -> Result<(Option<String>, Vec<MaintenanceUsageReceipt>), SessionError> {
+        let Some(path) = self.persistence_path() else {
+            return Ok((None, Vec::new()));
+        };
+        let bytes = match self.backend().read(&path.to_string_lossy()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Some(durable_bytes_revision(None)), Vec::new()));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let contents = std::str::from_utf8(&bytes).map_err(|_| {
+            SessionError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session transcript is not valid UTF-8",
+            ))
+        })?;
+        let durable = Self::from_persisted_contents(contents)?;
+        if durable.messages != self.messages {
+            return Err(SessionError::SourceChanged);
+        }
+        Ok((
+            Some(durable_bytes_revision(Some(&bytes))),
+            durable.maintenance_usage,
+        ))
     }
 
     /// The filesystem this session persists through, as a shareable handle.
@@ -544,7 +750,29 @@ impl Session {
         original: &Session,
         path: impl AsRef<Path>,
     ) -> Result<(), SessionError> {
+        self.save_compacted_to_path_checked(original, path, None)
+    }
+
+    /// Check the source revision before making either the archive or the
+    /// replacement. This detects changes observed at commit preparation; it
+    /// does not impose a lock or compare-and-swap on other backend writers.
+    pub fn save_compacted_to_path_checked(
+        &self,
+        original: &Session,
+        path: impl AsRef<Path>,
+        expected_revision: Option<&str>,
+    ) -> Result<(), SessionError> {
         let path = path.as_ref();
+        let durable = match self.backend().read(&path.to_string_lossy()) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if expected_revision
+            .is_some_and(|expected| expected != durable_bytes_revision(durable.as_deref()))
+        {
+            return Err(SessionError::SourceChanged);
+        }
         let archive = format!(
             "{}.before-compact-{}",
             path.display(),
@@ -552,12 +780,14 @@ impl Session {
         );
         // Preserve the durable source byte-for-byte. In-memory metadata can
         // already contain a staged prompt snapshot for a legacy transcript.
-        let snapshot = match self.backend().read_to_string(&path.to_string_lossy()) {
-            Ok(snapshot) => snapshot,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                original.render_jsonl_snapshot()?
-            }
-            Err(error) => return Err(error.into()),
+        let snapshot = match durable {
+            Some(bytes) => String::from_utf8(bytes).map_err(|_| {
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session transcript is not valid UTF-8",
+                ))
+            })?,
+            None => original.render_jsonl_snapshot()?,
         };
         write_atomic_with(self.backend(), &archive, &snapshot)?;
         if self.backend().is_append_stream(&path.to_string_lossy())? {
@@ -596,7 +826,12 @@ impl Session {
     ) -> Result<Self, SessionError> {
         let path = path.as_ref();
         let contents = fs.read_to_string(&path.to_string_lossy())?;
-        let mut session = match JsonValue::parse(&contents) {
+        Ok(Self::from_persisted_contents(&contents)?.with_persistence_path(path.to_path_buf()))
+    }
+
+    /// Replay either persisted format with the repairs used by every load.
+    fn from_persisted_contents(contents: &str) -> Result<Self, SessionError> {
+        let mut session = match JsonValue::parse(contents) {
             Ok(value)
                 if value
                     .as_object()
@@ -604,12 +839,12 @@ impl Session {
             {
                 Self::from_json(&value)?
             }
-            Err(_) | Ok(_) => Self::from_jsonl(&contents)?,
+            Err(_) | Ok(_) => Self::from_jsonl(contents)?,
         };
         // Recover interrupted calls without changing existing result records:
         // local consumers such as /undo still need their structured payloads.
         session.sanitize_orphan_tool_uses();
-        Ok(session.with_persistence_path(path.to_path_buf()))
+        Ok(session)
     }
 
     /// Repair unfinished tool batches before a new turn uses this history.
@@ -731,6 +966,9 @@ impl Session {
             updated_at_ms: now,
             messages: self.messages.clone(),
             compaction: self.compaction.clone(),
+            maintenance_usage: self.maintenance_usage.clone(),
+            compaction_achievement: self.compaction_achievement.clone(),
+            last_compaction_report: self.last_compaction_report.clone(),
             fork: Some(SessionFork {
                 parent_session_id: self.session_id.clone(),
                 branch_name: normalize_optional_string(branch_name),
@@ -809,6 +1047,7 @@ impl Session {
                 ),
             );
         }
+        self.insert_maintenance_metadata(&mut object)?;
         Ok(JsonValue::Object(object))
     }
 
@@ -848,6 +1087,12 @@ impl Session {
             .get("compaction")
             .map(SessionCompaction::from_json)
             .transpose()?;
+        let maintenance_usage = maintenance_usage_from_json(object)?;
+        let compaction_achievement = object
+            .get("compaction_achievement")
+            .map(CompactionAchievement::from_json)
+            .transpose()?;
+        let last_compaction_report = compaction_report_from_json(object)?;
         let fork = object.get("fork").map(SessionFork::from_json).transpose()?;
         let identity = object
             .get("identity")
@@ -887,6 +1132,9 @@ impl Session {
             updated_at_ms,
             messages,
             compaction,
+            maintenance_usage,
+            compaction_achievement,
+            last_compaction_report,
             fork,
             workspace_root,
             identity,
@@ -911,6 +1159,9 @@ impl Session {
         let mut updated_at_ms = None;
         let mut messages = Vec::new();
         let mut compaction = None;
+        let mut maintenance_usage = Vec::new();
+        let mut compaction_achievement = None;
+        let mut last_compaction_report = None;
         let mut fork = None;
         let mut workspace_root = None;
         let mut identity = None;
@@ -953,6 +1204,12 @@ impl Session {
                     messages.clear();
                     prompt_history.clear();
                     compaction = None;
+                    maintenance_usage = maintenance_usage_from_json(object)?;
+                    compaction_achievement = object
+                        .get("compaction_achievement")
+                        .map(CompactionAchievement::from_json)
+                        .transpose()?;
+                    last_compaction_report = compaction_report_from_json(object)?;
                     version = required_u32(object, "version")?;
                     session_id = Some(required_string(object, "session_id")?);
                     created_at_ms = Some(required_u64(object, "created_at_ms")?);
@@ -1040,6 +1297,9 @@ impl Session {
             updated_at_ms: updated_at_ms.unwrap_or(created_at_ms.unwrap_or(now)),
             messages,
             compaction,
+            maintenance_usage,
+            compaction_achievement,
+            last_compaction_report,
             fork,
             workspace_root,
             identity,
@@ -1213,7 +1473,96 @@ impl Session {
                 JsonValue::String(self.mode.as_str().to_string()),
             );
         }
+        self.insert_maintenance_metadata(&mut object)?;
         Ok(JsonValue::Object(object))
+    }
+
+    fn insert_maintenance_metadata(
+        &self,
+        object: &mut BTreeMap<String, JsonValue>,
+    ) -> Result<(), SessionError> {
+        if !self.maintenance_usage.is_empty() {
+            object.insert(
+                "maintenance_usage".into(),
+                JsonValue::Array(
+                    self.maintenance_usage
+                        .iter()
+                        .map(MaintenanceUsageReceipt::to_json)
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(achievement) = &self.compaction_achievement {
+            object.insert("compaction_achievement".into(), achievement.to_json()?);
+        }
+        if let Some(report) = &self.last_compaction_report {
+            let rendered = serde_json::to_string(report)
+                .map_err(|error| SessionError::Format(error.to_string()))?;
+            object.insert(
+                "last_compaction_report".into(),
+                JsonValue::parse(&rendered)?,
+            );
+        }
+        Ok(())
+    }
+
+    /// Merge receipts by run and HTTP attempt. Return only newly known bills
+    /// for the live usage tracker; replay reconstructs them from this ledger.
+    pub fn merge_maintenance_usage(
+        &mut self,
+        receipts: &[MaintenanceUsageReceipt],
+    ) -> Vec<TokenUsage> {
+        let mut newly_known = Vec::new();
+        for receipt in receipts {
+            if let Some(existing) = self.maintenance_usage.iter_mut().find(|existing| {
+                existing.run_id == receipt.run_id && existing.attempt_id == receipt.attempt_id
+            }) {
+                if existing.usage.is_none() && receipt.usage.is_some() {
+                    existing.usage = receipt.usage;
+                    newly_known.extend(receipt.usage);
+                }
+            } else {
+                newly_known.extend(receipt.usage);
+                self.maintenance_usage.push(receipt.clone());
+            }
+        }
+        if !receipts.is_empty() {
+            self.touch();
+        }
+        newly_known
+    }
+
+    /// Persist billing and achievement metadata in a full snapshot. Appending
+    /// a lone `session_meta` would erase history on JSONL replay. A failed write
+    /// keeps all known receipts in memory for the caller to report or retry.
+    pub fn persist_maintenance_metadata(&self) -> Result<(), SessionError> {
+        self.persist_maintenance_metadata_checked(None)
+    }
+
+    /// Guard metadata snapshot writes as well as candidate commits: failed,
+    /// skipped and cancelled runs must not overwrite externally changed history.
+    pub fn persist_maintenance_metadata_checked(
+        &self,
+        expected_revision: Option<&str>,
+    ) -> Result<(), SessionError> {
+        if let Some(expected) = expected_revision {
+            if self.durable_revision()?.as_deref() != Some(expected) {
+                return Err(SessionError::SourceChanged);
+            }
+        }
+        let Some(path) = self.persistence_path() else {
+            return Ok(());
+        };
+        let path_str = path.to_string_lossy();
+        let snapshot = self.render_jsonl_snapshot()?;
+        let backend = self.backend();
+        if backend.is_append_stream(&path_str)? {
+            backend.append(&path_str, snapshot.as_bytes())?;
+            return Ok(());
+        }
+        // Metadata failures must preserve the original transcript path, even
+        // for large sessions which ordinary saves would rotate first.
+        write_atomic_with(backend, &path_str, &snapshot)
     }
 
     fn touch(&mut self) {
@@ -1225,6 +1574,13 @@ impl Default for Session {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn durable_bytes_revision(bytes: Option<&[u8]>) -> String {
+    bytes.map_or_else(
+        || "missing".into(),
+        |bytes| format!("{:x}", Sha256::digest(bytes)),
+    )
 }
 
 impl ConversationMessage {

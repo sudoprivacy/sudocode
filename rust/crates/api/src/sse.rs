@@ -43,6 +43,7 @@ impl SseParser {
 
         while let Some(frame) = self.next_frame() {
             if let Some(event) = self.parse_frame_with_context(&frame)? {
+                crate::client::record_compaction_stream_event(&event)?;
                 events.push(event);
             }
         }
@@ -185,6 +186,12 @@ fn non_sse_message_events(trimmed: &str) -> Option<Vec<StreamEvent>> {
         return None;
     }
     let message = serde_json::from_value::<MessageResponse>(raw).ok()?;
+    if runtime::compaction_scope::is_active() && message.stop_reason.is_none() {
+        if message.usage != crate::types::Usage::default() {
+            runtime::compaction_scope::record_usage(message.usage.token_usage());
+        }
+        return None;
+    }
     let delta = MessageDelta {
         stop_reason: message.stop_reason.clone(),
         stop_sequence: message.stop_sequence.clone(),

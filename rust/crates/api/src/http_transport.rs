@@ -207,6 +207,14 @@ impl HttpTransport {
         F: Fn(reqwest::Response) -> Fut,
         Fut: Future<Output = Result<reqwest::Response, ApiError>>,
     {
+        // The compaction orchestrator owns its single global retry budget.
+        // Nested provider retries would resend the entire history invisibly.
+        let compaction_active = runtime::compaction_scope::is_active();
+        let max_retries = if compaction_active {
+            0
+        } else {
+            retry_policy.max_retries
+        };
         let path = extract_path(url);
         let mut attempts = 0u32;
         let mut last_error: Option<ApiError>;
@@ -248,6 +256,8 @@ impl HttpTransport {
                 );
             }
 
+            runtime::compaction_scope::reserve_request_attempt()
+                .map_err(|error| ApiError::Configuration(error.to_string()))?;
             // Build and send request.
             let send_result = if let Some(nexus) = &self.nexus {
                 nexus.send(url, headers, body, &request_id).await
@@ -315,7 +325,9 @@ impl HttpTransport {
                             });
                         }
                         Err(error)
-                            if error.is_retryable() && attempts <= retry_policy.max_retries + 1 =>
+                            if error.is_retryable()
+                                && attempts <= max_retries + 1
+                                && !compaction_active =>
                         {
                             self.record_failure(
                                 &request_id,
@@ -338,7 +350,11 @@ impl HttpTransport {
                         }
                     }
                 }
-                Err(error) if error.is_retryable() && attempts <= retry_policy.max_retries + 1 => {
+                Err(error)
+                    if error.is_retryable()
+                        && attempts <= max_retries + 1
+                        && !compaction_active =>
+                {
                     self.record_failure(&request_id, attempts, &path, &error, start_timestamp_ms);
                     last_error = Some(error);
                 }
@@ -348,7 +364,7 @@ impl HttpTransport {
                 }
             }
 
-            if attempts > retry_policy.max_retries {
+            if attempts > max_retries {
                 break;
             }
 
@@ -374,7 +390,7 @@ impl HttpTransport {
                 // indicator once the notifier stopped being installed, which is
                 // what let that regression go unnoticed.
                 if let Some(ref notifier) = self.retry_notifier {
-                    notifier.on_retry(attempts, retry_policy.max_retries, &reason);
+                    notifier.on_retry(attempts, max_retries, &reason);
                 }
             }
             tokio::time::sleep(delay).await;

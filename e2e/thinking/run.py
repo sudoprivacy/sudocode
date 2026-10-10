@@ -28,6 +28,12 @@ parser.add_argument("binary", type=Path)
 parser.add_argument("--profile", default="sudorouter")
 parser.add_argument("--model", default="claude-sonnet-4-6")
 parser.add_argument(
+    "--effort",
+    choices=("low", "high"),
+    default="low",
+    help="Recorded adaptive thinking effort",
+)
+parser.add_argument(
     "--config", type=Path, default=Path.home() / ".nexus/sudocode/sudocode.json"
 )
 parser.add_argument(
@@ -131,7 +137,7 @@ class Proxy(BaseHTTPRequestHandler):
             # Omitted summaries cause the real provider to emit an empty signed
             # block. Hold the same bounded profile throughout the tool journey.
             body["thinking"] = {"type": "adaptive", "display": "omitted"}
-            body["output_config"] = {"effort": "low"}
+            body["output_config"] = {"effort": args.effort}
             raw = json.dumps(body, ensure_ascii=False).encode()
             (workspace / f"request-{number}-live.json").write_bytes(raw)
         headers = {
@@ -362,6 +368,7 @@ try:
                 "profile": args.profile,
                 "model": args.model,
                 "thinking_control": "adaptive-omitted",
+                "effort": args.effort,
                 "live_api_inference": True,
             }
         ),

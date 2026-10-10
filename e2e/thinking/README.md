@@ -16,6 +16,8 @@ generated those words.
 ```powershell
 python -m pip install -r e2e/thinking/requirements.txt
 python e2e/thinking/run.py C:/path/to/scode.exe --profile sudorouter --model claude-sonnet-4-6 --artifacts C:/path/to/artifacts
+# Select high effort for a comparison with Claude Code's recorded default:
+python e2e/thinking/run.py C:/path/to/scode.exe --profile sudorouter --model claude-sonnet-4-6 --effort high --artifacts C:/path/to/artifacts
 ```
 
 Credentials come from the named proxy profile in
@@ -23,8 +25,9 @@ Credentials come from the named proxy profile in
 process has an isolated home/config and only a placeholder key. Real keys stay
 in the recording proxy's memory and are excluded from saved requests.
 
-The proxy sets `thinking: {type: adaptive, display: omitted}` and low effort
-to obtain the target block from the real provider. It caps each response at
+The proxy sets `thinking: {type: adaptive, display: omitted}` and the selected
+`--effort` (`low` by default, or `high`) to obtain the target block from the real
+provider. The startup output records the selected effort. It caps each response at
 2048 tokens and permits at most five message requests. The expected journey
 uses three requests. This validates signed-block preservation with that
 explicit profile; it does not test the CLI's default thinking configuration.

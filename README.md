@@ -54,6 +54,33 @@ dashboard. Sudo Code stays the
 
 ---
 
+## Runtime footprint
+
+**Keep memory available for local models.** On unified-memory machines such as
+[Apple silicon Macs](https://developer.apple.com/videos/play/wwdc2020/10686/) and
+[NVIDIA DGX Spark](https://docs.nvidia.com/dgx/dgx-spark-porting-guide/overview.html),
+the CPU and GPU share physical memory. A smaller agent runtime leaves more room
+for model weights, KV caches, and inference, especially with several agents open.
+
+The [Rendering performance CI](https://github.com/sudoprivacy/sudocode/actions/workflows/render-performance.yml)
+already checks release-build process memory alongside terminal responsiveness:
+peak RSS, RSS after the workload, and growth across turns. It compares relevant
+PRs against a fixed baseline and runs a daily stress profile with 30 turns.
+The [measurement guide](e2e/terminal-resize/README.md#release-performance-gate)
+and [versioned policy](e2e/terminal-resize/performance-policy.json) define the
+workloads, budgets, and regression checks.
+
+For example, the [2026-10-09 UTC stress run](https://github.com/sudoprivacy/sudocode/actions/runs/37995377154)
+measured **28.27–32.71 MiB peak RSS** across its scenarios (the median of seven
+candidate runs per scenario). The 30-turn scenario peaked at **29.42 MiB**, with
+**1.77 MiB** growth from the first to the last turn. These are Linux measurements
+of one `scode` process using a deterministic provider. They exclude tool child
+processes, browsers, Nexus, and the model server; they are not a fixed footprint
+for every workload or an Apple/Spark hardware benchmark. RSS also counts shared
+pages, so adding several processes' RSS is not a measurement of unique memory use.
+
+---
+
 ## Design principles
 
 These are design constraints, not a claim that every implementation

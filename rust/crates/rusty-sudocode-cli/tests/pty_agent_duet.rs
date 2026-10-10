@@ -151,7 +151,11 @@ fn receiver_mailbox(transport: &Transport, _config_home: &Path) -> Mailbox {
             }
             .connect()
             .expect("dial the receiver's node");
-            Mailbox::over_nexus(client, RECEIVER, String::new())
+            // The mTLS dial is the server-verified credential (identity from
+            // the cert's SAN), so this is the transport-verified construction
+            // production's standalone session uses — not the fail-closed
+            // env/delegation one.
+            Mailbox::over_nexus_mtls(client, RECEIVER, String::new(), "root")
         }
     }
 }

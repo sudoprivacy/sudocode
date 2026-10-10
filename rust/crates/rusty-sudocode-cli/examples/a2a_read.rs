@@ -18,7 +18,9 @@ use runtime::mailbox::Mailbox;
 
 /// The unified mailbox for `agent` — the same transport a running agent uses.
 fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
-    Mailbox::over_nexus(Arc::clone(client), agent, auth)
+    // The mTLS dial is the server-verified credential, so this is the
+    // transport-verified construction a running agent uses.
+    Mailbox::over_nexus_mtls(Arc::clone(client), agent, auth, "root")
 }
 
 fn main() {

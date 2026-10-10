@@ -13,6 +13,7 @@
 //! the claim is checked rather than asserted.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

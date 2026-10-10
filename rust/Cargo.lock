@@ -2995,6 +2995,21 @@ version = "0.1.0"
 source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.4#37b5e1d8e08aa4f582afa533481777e5ea311a83"
 
 [[package]]
+name = "nexus-rebac"
+version = "0.1.0"
+source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.4#37b5e1d8e08aa4f582afa533481777e5ea311a83"
+dependencies = [
+ "ahash",
+ "contracts",
+ "kernel",
+ "lib",
+ "parking_lot",
+ "raft 0.1.0",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "nexus-search-common"
 version = "0.1.0"
 source = "git+https://github.com/nexi-lab/nexus-vfs?tag=v0.8.4#37b5e1d8e08aa4f582afa533481777e5ea311a83"
@@ -4376,6 +4391,7 @@ dependencies = [
  "kernel",
  "keyring",
  "lib",
+ "nexus-rebac",
  "nexus-vfs-client",
  "nix 0.29.0",
  "plugins",
@@ -4388,8 +4404,10 @@ dependencies = [
  "telemetry",
  "tokio",
  "tokio-tungstenite",
+ "tonic 0.14.6",
  "tower-http",
  "tracing",
+ "transport",
  "tree-sitter",
  "tree-sitter-bash",
  "walkdir",

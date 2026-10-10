@@ -1617,6 +1617,16 @@ impact, lowest implementation cost first:</p>
 
 <h4>Inline rendering design principles</h4>
 
+<p><strong>Todo semantic emphasis.</strong> All summary quantities, including
+zero, use bold terminal foreground; labels and punctuation use readable muted
+color without an extra dim attribute. A shared count-span role applies to every
+quantity. Ordinary task descriptions retain terminal foreground
+rather than a slot-wide grey override; in-progress labels stay bold, completed
+labels stay dim and struck through, and semantic icons keep their existing
+colors. Amber remains the identity/activity accent, not a neutral-number
+highlight. Acceptance: the existing <code>pty_chrome_styles</code> real REPL
+style checks in dark/light themes and after resize.</p>
+
 <p><strong>External terminal ownership (#584).</strong> CCB validation:
 <code>src/commands/memory/memory.tsx</code> and
 <code>src/utils/promptEditor.ts</code> (CCB <code>236d99ed</code>) confirm a

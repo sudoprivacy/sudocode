@@ -127,6 +127,25 @@ impl HostZoneContext {
         Self::from_parts_with_scope(zone_id, nexus_v2_base_url, delegation_ref, None, source)
     }
 
+    /// Transport-verified path (R6.2): the connection itself carries the
+    /// credential the server verifies — an mTLS client certificate, whose SAN
+    /// the node derives identity from. That is a different claim from an
+    /// env/descriptor delegation reference (which the server never sees and
+    /// [`ContextSource::UnverifiedDelegationRef`] keeps fail-closed): here the
+    /// authorization is server-side by construction, so the context is
+    /// [`ContextSource::TrustedLocal`]. A host-injected
+    /// [`ENV_NEXUS_RESOURCE_SCOPE`] still narrows it when present.
+    #[must_use]
+    pub fn from_verified_transport(zone_id: impl Into<String>) -> Self {
+        Self::from_parts_with_scope(
+            zone_id,
+            None,
+            None,
+            std::env::var(ENV_NEXUS_RESOURCE_SCOPE).ok().as_deref(),
+            ContextSource::TrustedLocal,
+        )
+    }
+
     #[must_use]
     pub fn from_parts_with_scope(
         zone_id: impl Into<String>,

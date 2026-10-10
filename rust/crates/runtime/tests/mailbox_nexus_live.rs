@@ -54,8 +54,12 @@ use runtime::agent_mailbox::MailboxEnvelope;
 /// blocking tail. Production had already moved to `Mailbox`, so the tests were
 /// exercising the copy: green here proved nothing about what ships. They now
 /// drive the same code the running agent does.
+///
+/// The harness dials mTLS with a minted CA-signed bundle (see
+/// `e2e/nexus-a2a/lib.sh`), so the transport itself is the server-verified
+/// credential — the same construction production's standalone session uses.
 fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
-    Mailbox::over_nexus(Arc::clone(client), agent, auth)
+    Mailbox::over_nexus_mtls(Arc::clone(client), agent, auth, "root")
 }
 
 /// The client every test here dials with: mTLS when the harness points at an
@@ -1124,10 +1128,11 @@ fn live_directory_unions_local_and_nexus_peers() {
         },
         Member {
             label: "nexus",
-            mailbox: Arc::new(Mailbox::over_nexus(
+            mailbox: Arc::new(Mailbox::over_nexus_mtls(
                 Arc::clone(&client),
                 me.clone(),
                 auth.clone(),
+                "root",
             )),
         },
     ]);

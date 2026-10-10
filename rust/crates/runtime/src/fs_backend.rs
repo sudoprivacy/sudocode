@@ -1531,9 +1531,28 @@ impl NexusVfsFsBackend {
         }
     }
 
+    /// Build the backend over a connection that IS the credential: an mTLS
+    /// client certificate the daemon verifies (identity from its SAN). Unlike
+    /// [`Self::from_arc`] the transport itself is the server-verified
+    /// authorization, so the zone context is [`ContextSource::TrustedLocal`]
+    /// and local ResourceRef checks are the early-deny layer, not the only
+    /// one. A host-injected `NEXUS_RESOURCE_SCOPE` still narrows it.
+    pub fn from_arc_mtls(
+        client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
+        auth_token: String,
+        zone_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            client,
+            auth_token,
+            zone_context: HostZoneContext::from_verified_transport(zone_id),
+        }
+    }
+
     fn authorize_target(&self, path: &str, access_kind: ResourceAccessKind) -> io::Result<()> {
         let normalized = lexical_join("/", path)?.replace('\\', "/");
-        self.zone_context
+        let verdict = self
+            .zone_context
             .authorize_path_for(
                 access_kind,
                 match access_kind {
@@ -1543,13 +1562,22 @@ impl NexusVfsFsBackend {
                 &normalized,
             )
             .map(|_| ())
-            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))?;
-        // A descriptor/env delegation reference is not a credential the VFS
-        // server can verify. Scope matching is only an early-deny layer.
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            ZoneAuthError::DelegationInvalid,
-        ))
+            .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error));
+        match self.zone_context.source() {
+            // A transport the server itself authenticated (mTLS SAN identity)
+            // carries its own authorization; the scope check above is the
+            // early-deny layer and its verdict stands.
+            ContextSource::TrustedLocal => verdict,
+            // A descriptor/env delegation reference is not a credential the VFS
+            // server can verify. Scope matching is only an early-deny layer.
+            ContextSource::Absent | ContextSource::UnverifiedDelegationRef => {
+                verdict?; // surface the early-deny reason when it has one
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    ZoneAuthError::DelegationInvalid,
+                ))
+            }
+        }
     }
 }
 

@@ -73,6 +73,8 @@
 //! (`StreamEvent`, `MessageRequest`, the provider clients, …) stay internal to
 //! the engine side.
 
+pub mod cache_metrics;
+pub mod cache_report;
 mod engine_client;
 mod session;
 pub use engine_client::EngineApiClient;

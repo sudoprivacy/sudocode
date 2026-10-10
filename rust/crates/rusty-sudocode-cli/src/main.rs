@@ -884,6 +884,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model,
             permission_mode,
             auth_mode,
+            reasoning_effort,
         } => run_resume(
             &session_path,
             &commands,
@@ -891,6 +892,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model,
             permission_mode,
             auth_mode,
+            reasoning_effort,
         ),
         CliAction::ListSessions { output_format } => {
             list_sessions_cli(output_format)?;
@@ -1545,6 +1547,7 @@ fn run_resume(
     model: String,
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
+    reasoning_effort: Option<String>,
 ) {
     let session_reference = session_path.display().to_string();
     let (handle, session) = match load_session_reference(&session_reference) {
@@ -1586,7 +1589,14 @@ fn run_resume(
             return;
         }
         // No commands — enter the interactive REPL with the restored session.
-        let mut cli = match LiveCli::new(model, true, None, permission_mode, None, auth_mode) {
+        let mut cli = match LiveCli::new(
+            model,
+            true,
+            None,
+            permission_mode,
+            reasoning_effort,
+            auth_mode,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("failed to initialize: {e}");
@@ -1676,7 +1686,13 @@ fn run_resume(
             }
         };
         let outcome = if matches!(command, SlashCommand::Compact) {
-            run_resumed_compaction(&resolved_path, &model, permission_mode, auth_mode)
+            run_resumed_compaction(
+                &resolved_path,
+                &model,
+                permission_mode,
+                auth_mode,
+                reasoning_effort.clone(),
+            )
         } else {
             run_resume_command(&resolved_path, &session, &command)
         };
@@ -1733,13 +1749,14 @@ fn run_resumed_compaction(
     model: &str,
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
+    reasoning_effort: Option<String>,
 ) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
     let cli = LiveCli::new(
         model.to_string(),
         true,
         None,
         permission_mode,
-        None,
+        reasoning_effort,
         auth_mode,
     )?;
     cli.lifecycle.resume_session(&path.display().to_string())?;

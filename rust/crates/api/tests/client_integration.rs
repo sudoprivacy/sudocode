@@ -784,6 +784,12 @@ async fn send_message_reuses_recent_completion_cache_entries() {
     assert_eq!(cache_stats.completion_cache_hits, 1);
     assert_eq!(cache_stats.completion_cache_misses, 1);
     assert_eq!(cache_stats.completion_cache_writes, 1);
+    // A replay has no provider request, usage charge or prompt-cache refresh.
+    assert_eq!(cache_stats.tracked_requests, 1);
+    assert_eq!(cache_stats.input_tokens_observed_requests, 1);
+    assert_eq!(cache_stats.total_input_tokens, 3);
+    assert_eq!(cache_stats.total_cache_read_input_tokens, 4000);
+    assert_eq!(cache_stats.total_cache_creation_input_tokens, 5);
 
     let _ = std::fs::remove_dir_all(temp_root);
     std::env::remove_var("SUDO_CODE_CONFIG_HOME");

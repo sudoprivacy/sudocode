@@ -110,6 +110,12 @@ pub struct PromptCacheStats {
     pub breaks_by_cause: BTreeMap<String, u64>,
     pub total_cache_creation_input_tokens: u64,
     pub total_cache_read_input_tokens: u64,
+    /// Legacy rollups did not retain uncached input. Coverage must match the
+    /// tracked count before reporting percentages over all prompt tokens.
+    #[serde(default)]
+    pub total_input_tokens: u64,
+    #[serde(default)]
+    pub input_tokens_observed_requests: u64,
     pub last_cache_creation_input_tokens: Option<u32>,
     pub last_cache_read_input_tokens: Option<u32>,
     pub last_request_hash: Option<String>,
@@ -283,16 +289,9 @@ impl PromptCache {
         }
 
         inner.stats.completion_cache_hits += 1;
-        apply_usage_to_stats(
-            &mut inner.stats,
-            &entry.response.usage,
-            &request_hash,
-            "completion-cache",
-        );
-        inner.previous = Some(TrackedPromptState::from_usage(
-            request,
-            &entry.response.usage,
-        ));
+        // A local replay sends no provider request and cannot refresh its
+        // prompt cache. Keep the last real usage and timestamp intact.
+        inner.stats.last_cache_source = Some("completion-cache".to_owned());
         persist_state(&inner);
         Some(entry.response)
     }
@@ -581,6 +580,8 @@ fn apply_usage_to_stats(
 ) {
     stats.total_cache_creation_input_tokens += u64::from(usage.cache_creation_input_tokens);
     stats.total_cache_read_input_tokens += u64::from(usage.cache_read_input_tokens);
+    stats.total_input_tokens += u64::from(usage.input_tokens);
+    stats.input_tokens_observed_requests += 1;
     stats.last_cache_creation_input_tokens = Some(usage.cache_creation_input_tokens);
     stats.last_cache_read_input_tokens = Some(usage.cache_read_input_tokens);
     stats.last_request_hash = Some(request_hash.to_string());

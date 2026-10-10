@@ -14,8 +14,10 @@ for (const command of [10, 11]) {
   terminal.parser.registerOscHandler(command, data => {
     if (data !== '?') return false;
     queries.push(command);
-    // Model a terminal whose answer arrives after the startup probe's deadline.
-    replies.push(`\x1b]${command};rgb:ffff/ffff/ffff\x1b\\`);
+    const reply = `\x1b]${command};rgb:ffff/ffff/ffff\x1b\\`;
+    // Both startup (before VT input ownership) and delayed terminal responses.
+    if (config.replyTiming === 'startup') child.write(reply);
+    else replies.push(reply);
     return true;
   });
 }
@@ -58,7 +60,8 @@ async function run() {
     }
     assert(state.exited, 'scode did not exit');
     assert.equal(state.exitCode, 0);
-    console.log(JSON.stringify({ backend: config.backend, background: config.env.COLORFGBG,
+    console.log(JSON.stringify({ backend: config.backend, replyTiming: config.replyTiming,
+      background: config.env.COLORFGBG,
       queries, input: 'PaletteDraft', muted: label.getFgColor() }));
     console.log('SCODE_WINDOWS_PALETTE_PASS');
   } finally {

@@ -186,7 +186,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "api"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "base64 0.22.1",
  "criterion",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "commands"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "api",
  "plugins",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "compat-harness"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "commands",
  "runtime",
@@ -1514,7 +1514,7 @@ checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 
 [[package]]
 name = "engine-acp"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "a2a",
  "agent-client-protocol",
@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "engine-core"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "api",
  "async-trait",
@@ -1561,14 +1561,14 @@ dependencies = [
 
 [[package]]
 name = "engine-events"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "runtime",
 ]
 
 [[package]]
 name = "engine-host"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "backends",
  "commands",
@@ -2913,7 +2913,7 @@ dependencies = [
 
 [[package]]
 name = "mock-anthropic-service"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "api",
  "serde_json",
@@ -2997,21 +2997,6 @@ version = "0.1.0"
 source = "git+https://github.com/nexi-lab/nexus-vfs?rev=cdff812ee498221464e70efac5d341a491b976b5#cdff812ee498221464e70efac5d341a491b976b5"
 
 [[package]]
-name = "nexus-rebac"
-version = "0.1.0"
-source = "git+https://github.com/nexi-lab/nexus-vfs?rev=cdff812ee498221464e70efac5d341a491b976b5#cdff812ee498221464e70efac5d341a491b976b5"
-dependencies = [
- "ahash",
- "contracts",
- "kernel",
- "lib",
- "parking_lot",
- "raft 0.1.0",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
 name = "nexus-search-common"
 version = "0.1.0"
 source = "git+https://github.com/nexi-lab/nexus-vfs?rev=cdff812ee498221464e70efac5d341a491b976b5#cdff812ee498221464e70efac5d341a491b976b5"
@@ -3026,7 +3011,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-vfs-client"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "prost 0.13.5",
  "protoc-bin-vendored",
@@ -3038,7 +3023,7 @@ dependencies = [
 
 [[package]]
 name = "nexusd-cohost"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "a2a",
  "anyhow",
@@ -3510,7 +3495,7 @@ dependencies = [
 
 [[package]]
 name = "plugins"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "serde",
  "serde_json",
@@ -4372,7 +4357,7 @@ dependencies = [
 
 [[package]]
 name = "runtime"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "a2a",
  "agent-client-protocol",
@@ -4394,7 +4379,6 @@ dependencies = [
  "kernel",
  "keyring",
  "lib",
- "nexus-rebac",
  "nexus-vfs-client",
  "nix 0.29.0",
  "plugins",
@@ -4408,10 +4392,8 @@ dependencies = [
  "telemetry",
  "tokio",
  "tokio-tungstenite",
- "tonic 0.14.6",
  "tower-http",
  "tracing",
- "transport",
  "tree-sitter",
  "tree-sitter-bash",
  "walkdir",
@@ -4550,7 +4532,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rusty-sudocode-cli"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "arboard",
  "async-trait",
@@ -5089,7 +5071,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stdin-peek"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -5257,7 +5239,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "chrono",
  "dirs",
@@ -5611,7 +5593,7 @@ dependencies = [
 
 [[package]]
 name = "tools"
-version = "0.2.24"
+version = "0.2.23"
 dependencies = [
  "api",
  "async-trait",

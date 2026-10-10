@@ -39,6 +39,11 @@ parser.add_argument(
     help="Require the exact project instruction nonce in both answers",
 )
 parser.add_argument(
+    "--session-id",
+    type=uuid.UUID,
+    help="Reuse a diagnostic session UUID for upstream routing comparisons",
+)
+parser.add_argument(
     "--config", type=Path, default=Path.home() / ".nexus/sudocode/sudocode.json"
 )
 parser.add_argument(
@@ -77,13 +82,14 @@ if context_nonce:
         f"diagnostic_nonce: {context_nonce}\n", encoding="utf-8"
     )
 session = workspace / "session.jsonl"
+session_id = str(args.session_id or uuid.uuid4())
 stamp = int(time.time() * 1000)
 session.write_text(
     json.dumps(
         {
             "type": "session_meta",
             "version": 1,
-            "session_id": str(uuid.uuid4()),
+            "session_id": session_id,
             "created_at_ms": stamp,
             "updated_at_ms": stamp,
             "model": args.model,
@@ -143,6 +149,10 @@ class Proxy(BaseHTTPRequestHandler):
                 records.append({"number": number, "completed": False})
             (workspace / f"request-{number}-client.json").write_bytes(raw)
             body = json.loads(raw)
+            if args.session_id:
+                assert json.loads(body["metadata"]["user_id"])["session_id"] == (
+                    session_id
+                ), "CLI did not preserve the selected diagnostic session id"
             body["max_tokens"] = 2048
             # Omitted summaries cause the real provider to emit an empty signed
             # block. Hold the same bounded profile throughout the tool journey.
@@ -380,6 +390,7 @@ try:
                 "thinking_control": "adaptive-omitted",
                 "effort": args.effort,
                 "check_context": args.check_context,
+                "session_id": session_id,
                 "live_api_inference": True,
             }
         ),

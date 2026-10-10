@@ -41,6 +41,12 @@ first user prompt. A correct sum alone cannot pass this check. Missing or
 replaced project context fails even when the route returns HTTP 200 and the
 Read tool succeeds.
 
+The startup output records the session UUID. `--session-id <UUID>` reuses a
+diagnostic UUID and checks that the CLI forwards it in `metadata.user_id`.
+This holds the requested session identity constant when comparing fresh
+workspaces or request profiles. Each workspace still has new file values and a new context
+nonce, so a cached old answer cannot pass.
+
 The provider must support that profile and return an empty signed block;
 otherwise the test fails instead of counting another response shape as
 coverage. Workspaces are created beneath `%PUBLIC%` and must have no inherited

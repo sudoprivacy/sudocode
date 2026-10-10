@@ -83,14 +83,16 @@ pub fn agent_workspace(pid: &str) -> String {
 pub fn provision_stream_transcript(kernel: &Kernel, path: &str) {
     use kernel::abc::meta_store::DT_STREAM;
     let parent = path.rsplit_once('/').map_or("/", |(dir, _)| dir);
+    let ctx = user_ctx();
     let _ = kernel.sys_setattr(
-        parent, 1, // DT_DIR
+        parent, &ctx, 1, // DT_DIR
         "", None, None, None, "balanced", "root", false, 0, None, None, None, None, None, None,
         None, None, None, None, None,
     );
     kernel
         .sys_setattr(
             path,
+            &ctx,
             DT_STREAM as i32,
             "",
             None,
@@ -219,7 +221,8 @@ pub fn mount_model(
     kernel
         .mount(
             "/model",
-            MountOptions::new("model").with_backend(built.backend.expect("model backend")),
+            MountOptions::new(&user_ctx(), "model")
+                .with_backend(built.backend.expect("model backend")),
         )
         .expect("mount model");
     storage

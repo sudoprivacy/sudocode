@@ -376,7 +376,11 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
             );
             sess.resize(40, 100).unwrap();
             sess.expect("❯").expect("input ready");
-            for (rows, width) in [(40, 100), (40, 60), (12, 60), (40, 100)] {
+            // Eight rows force the three-item panel to use the summary-only
+            // projection. Its spans must match the full panel, and items
+            // must reappear with their styles on expansion. A single item
+            // may still fit; its zero-open quantity remains covered.
+            for (rows, width) in [(40, 100), (40, 60), (8, 60), (40, 100)] {
                 resize_idle_chrome(&mut sess, rows, width);
                 for label in [" todos (", " done, ", " open)"] {
                     expect_style(&sess, label, (muted, false, false));
@@ -391,6 +395,35 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                 if statuses.len() > 1 {
                     expect_style(&sess, "1 in progress", ("Default", true, false));
                     expect_style(&sess, " in progress, ", (muted, false, false));
+                }
+                let visible = sess.render(|screen| {
+                    screen
+                        .raw()
+                        .rows(0, screen.raw().size().1)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                });
+                if rows == 8 {
+                    if statuses.len() > 1 {
+                        assert!(
+                            !visible.contains("Task 0"),
+                            "folded completed item: {visible}"
+                        );
+                        assert!(
+                            !visible.contains("Working 1"),
+                            "folded active item: {visible}"
+                        );
+                        assert!(
+                            !visible.contains("Task 2"),
+                            "folded pending item: {visible}"
+                        );
+                    }
+                } else {
+                    expect_style(&sess, "Task 0", ("Default", false, true));
+                    if statuses.len() > 1 {
+                        expect_style(&sess, "Working 1", ("Default", true, false));
+                        expect_style(&sess, "Task 2", ("Default", false, false));
+                    }
                 }
             }
             exit(&mut sess);

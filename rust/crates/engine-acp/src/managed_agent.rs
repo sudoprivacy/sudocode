@@ -9,10 +9,9 @@ use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
 use a2a::session_io::SessionMailbox;
 use engine_host::managed_agent::{prepare_managed_agent, PreparedManagedAgent};
 use engine_host::SessionEngine;
-use kernel::kernel::OperationContext;
 use managed_agent::{SpawnHandle, SpawnOptions, SpawnTask};
 use runtime::spawn_task::{AgentDescriptor, AgentState, KernelConvenience};
-use runtime::HookAbortSignal;
+use runtime::{agent_operation_context, HookAbortSignal, KernelFsAccess};
 
 use crate::acp_sdk_server::{
     run_acp_on_transport, AcpError, HostedSessionFactory, SdkAcpConfig, SessionRegistry,
@@ -74,7 +73,9 @@ impl HostedSessionFactory for Factory {
 
 pub struct SudoCodeSpawnAdapter;
 
-impl<K: KernelConvenience + Send + Sync + 'static> SpawnTask<K> for SudoCodeSpawnAdapter {
+impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> SpawnTask<K>
+    for SudoCodeSpawnAdapter
+{
     fn spawn(
         &self,
         _kernel: Arc<K>,
@@ -112,13 +113,7 @@ impl<K: KernelConvenience + Send + Sync + 'static> SpawnTask<K> for SudoCodeSpaw
             git_sha: None,
             build_target: None,
         };
-        let ctx = OperationContext::new(
-            &desc.owner_id,
-            &desc.zone_id,
-            false,
-            Some(&desc.name),
-            false,
-        );
+        let ctx = agent_operation_context(&desc.owner_id, &desc.zone_id, &desc.name);
         let mailbox = Arc::new(SessionMailbox::open(
             kernel,
             ctx,

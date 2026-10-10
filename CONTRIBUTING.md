@@ -585,12 +585,13 @@ review comments.
 
 Once approved, a maintainer merges with **`--merge`** (not squash)
 to preserve the feature-branch commit history. The "Block Merge
-Commits in PR" CI check requires you to **rebase** (not merge) when
-syncing your feature branch onto the latest `main` —
-`git fetch origin`, `git rebase origin/main`, then
-`git push --force-with-lease` is the safe form. The required check
-examines the actual PR head, rejects PR-only merge commits and new
-conflict markers, and runs for every PR regardless of changed paths.
+Commits in PR" CI check requires your branch to include the latest
+`main`. Update with `git fetch origin`, `git merge origin/main`,
+resolve any conflicts, and `git push`. This keeps the original commits
+reachable. The check examines the actual PR head and allows two-parent
+integrations whose second parent belongs to `main`'s history. It rejects
+unrelated branch merges, octopus merges, and new conflict markers, and
+runs for every PR regardless of changed paths.
 Strict branch protection also requires the PR to remain up to date
 and pass the required CI checks before merging, including for admins.
 

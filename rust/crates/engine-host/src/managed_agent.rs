@@ -19,7 +19,7 @@ use runtime::mailbox::Mailbox;
 use runtime::spawn_task::{
     cohost_a2a_prompt_section, cohost_shell_prompt_section, AgentDescriptor, KernelConvenience,
 };
-use runtime::{FsBackend, KernelFsBackend, PermissionMode, SystemPrompt};
+use runtime::{FsBackend, KernelFsAccess, KernelFsBackend, PermissionMode, SystemPrompt};
 
 use crate::config::{require_sudocode_config_for_cwd, resolve_auth_mode};
 use crate::runtime_build::{HostContext, RuntimeConfig};
@@ -85,7 +85,7 @@ pub fn prepare_managed_agent<K>(
     options: &SpawnOptions,
 ) -> Result<PreparedManagedAgent, String>
 where
-    K: KernelConvenience + Send + Sync + 'static,
+    K: KernelConvenience + KernelFsAccess + Send + Sync + 'static,
 {
     // Nothing in this daemon ticks `crons.json`: the scode scheduler is the
     // `scode cron daemon` / OS-cron path, which is a CLI process. A `CronCreate`

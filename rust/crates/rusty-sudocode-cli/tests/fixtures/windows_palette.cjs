@@ -20,7 +20,7 @@ for (const command of [10, 11]) {
   });
 }
 function exactInput(text, draft) {
-  return text.split('\n').some(row => row.trimEnd() === `❯ ${draft}`);
+  return text.split('\n').some(row => row.trimEnd() === `❯ ${draft}`.trimEnd());
 }
 function mutedLabel() {
   const buffer = terminal.buffer.active;

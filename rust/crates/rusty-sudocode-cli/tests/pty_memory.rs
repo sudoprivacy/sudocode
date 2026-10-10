@@ -477,12 +477,17 @@ fn memory_write_read_forget_workflow() {
     // Pre-create AGENTS.md so /memory has something to list.
     fs::write(root.join("AGENTS.md"), "# Project rules\n").expect("write AGENTS.md");
 
+    let memory_dir = root.join(".nexus/sudocode/memory");
+
     // Spawn the REPL in danger-full-access mode (permits all writes).
     // The memory write carve-out also works with workspace-write, but
     // danger-full-access avoids prompt escalation for non-memory tools.
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "danger-full-access"],
-        &[("EDITOR", "true")],
+        &[
+            ("EDITOR", "true"),
+            ("SUDOCODE_MEMORY_DIR", memory_dir.to_str().expect("utf8")),
+        ],
     );
     sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
 
@@ -509,19 +514,22 @@ fn memory_write_read_forget_workflow() {
     );
 
     // Verify a .md file appeared in the memory directory.
-    // TestEnv sets HOME to workspace/home, so memory lands there.
-    let workspace_home = root.join("home");
-    let projects_dir = workspace_home.join(".scode").join("projects");
-    if !has_memory_files(&projects_dir) {
+    if count_md_files(&memory_dir) == 0 {
         let screen = sess.render(|s| s.contents());
         panic!(
             "expected memory files after 'remember' command\n\
-             projects_dir: {}\n\
+             memory_dir: {}\n\
              PTY screen:\n{}",
-            projects_dir.display(),
+            memory_dir.display(),
             screen
         );
     }
+
+    let remembered = memory_entry_text(&memory_dir);
+    assert!(
+        remembered.to_lowercase().contains("rust"),
+        "remember must save the requested fact; on disk:\n{remembered}"
+    );
 
     // ── Step 2: /memory shows instruction files ──────────────────────
     // See memory_tab_completion: `/memory` shows an interactive "Select memory
@@ -560,7 +568,7 @@ fn memory_write_read_forget_workflow() {
     // entry still sitting on disk. The index (`MEMORY.md`) is excluded by the
     // helper, so this is about the memory the next session would actually be
     // reminded of.
-    let remaining = memory_entry_text(&projects_dir);
+    let remaining = memory_entry_text(&memory_dir);
     assert!(
         !remaining.to_lowercase().contains("rust"),
         "forget must remove the entry, not just acknowledge the request; \
@@ -608,10 +616,7 @@ fn memory_dedup_does_not_create_duplicate() {
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
     // Pre-seed a memory entry about the user's role.
-    let workspace_home = root.join("home");
-    // SUDOCODE_MEMORY_DIR pins the memory path, so this test never has to
-    // derive the per-workspace slug under `.scode/projects/`.
-    let memory_dir = workspace_home.join("test-memory");
+    let memory_dir = root.join(".nexus/sudocode/memory");
     fs::create_dir_all(&memory_dir).expect("create memory dir");
 
     write_entry(
@@ -643,14 +648,16 @@ fn memory_dedup_does_not_create_duplicate() {
     });
 
     // Ask to remember the same fact that's already stored.
+    let marker = common::turn_status_marker(&sess);
     sess.send("Remember this: I am a backend developer. Save it to memory.\r")
         .expect("send remember request");
 
-    // Wait for turn completion.
-    sess.expect("❯").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("prompt after dedup attempt: {e}\nPTY screen:\n{screen}");
-    });
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "memory dedup turn",
+    );
 
     // The LLM should have recognized the existing entry. Either:
     //   (a) it updated user_role.md (same file count), or
@@ -663,6 +670,12 @@ fn memory_dedup_does_not_create_duplicate() {
          Before: {md_count_before}, After: {md_count_after}. \
          Files: {:?}",
         list_md_files(&memory_dir),
+    );
+
+    let remembered = memory_entry_text(&memory_dir);
+    assert!(
+        remembered.to_lowercase().contains("backend developer"),
+        "dedup must preserve the stored fact; on disk:\n{remembered}"
     );
 
     // Cleanup is not part of the dedup contract. On Windows ConPTY a completed
@@ -703,8 +716,7 @@ fn memory_staleness_updates_existing_entry() {
         .expect("git init");
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
-    let workspace_home = root.join("home");
-    let memory_dir = workspace_home.join("test-memory");
+    let memory_dir = root.join(".nexus/sudocode/memory");
     fs::create_dir_all(&memory_dir).expect("create memory dir");
 
     // Seed with outdated information.
@@ -773,7 +785,7 @@ fn memory_staleness_updates_existing_entry() {
             // LLM might have chosen a different filename — find any .md
             list_md_files(&memory_dir)
                 .into_iter()
-                .find(|name| name != "MEMORY.md")
+                .find(|name| !name.eq_ignore_ascii_case("MEMORY.md"))
                 .map(|name| fs::read_to_string(memory_dir.join(&name)).unwrap_or_default())
                 .ok_or(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -862,8 +874,7 @@ fn memory_multi_type_single_session() {
         .expect("git init");
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
-    let workspace_home = root.join("home");
-    let memory_dir = workspace_home.join("test-memory");
+    let memory_dir = root.join(".nexus/sudocode/memory");
     fs::create_dir_all(&memory_dir).expect("create memory dir");
 
     let mut sess = env.spawn_with_env(
@@ -907,7 +918,10 @@ fn memory_multi_type_single_session() {
 
     // Verify at least 3 memory files were created (excluding MEMORY.md).
     let files = list_md_files(&memory_dir);
-    let non_index: Vec<_> = files.iter().filter(|f| *f != "MEMORY.md").collect();
+    let non_index: Vec<_> = files
+        .iter()
+        .filter(|name| !name.eq_ignore_ascii_case("MEMORY.md"))
+        .collect();
     assert!(
         non_index.len() >= 3,
         "should create at least 3 memory files for 3 facts. \
@@ -954,15 +968,15 @@ fn memory_multi_type_single_session() {
 fn count_md_files(dir: &Path) -> usize {
     list_md_files(dir)
         .into_iter()
-        .filter(|name| name != "MEMORY.md")
+        .filter(|name| !name.eq_ignore_ascii_case("MEMORY.md"))
         .count()
 }
 
 /// List `.md` filenames in a directory.
 fn list_md_files(dir: &Path) -> Vec<String> {
     fs::read_dir(dir)
-        .into_iter()
-        .flat_map(|entries| entries.flatten())
+        .expect("read memory directory")
+        .map(|entry| entry.expect("read memory directory entry"))
         .filter_map(|e| {
             let path = e.path();
             if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
@@ -974,58 +988,14 @@ fn list_md_files(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Check if any `projects/*/memory/*.md` files exist.
-/// Concatenated text of every memory entry under `projects_dir`, excluding the
-/// `MEMORY.md` index — what the model would be reminded of on a later turn.
-fn memory_entry_text(projects_dir: &Path) -> String {
-    let mut out = String::new();
-    let Ok(slugs) = fs::read_dir(projects_dir) else {
-        return out;
-    };
-    for slug in slugs.flatten() {
-        let memory_dir = slug.path().join("memory");
-        let Ok(entries) = fs::read_dir(&memory_dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file()
-                && path.extension().is_some_and(|e| e == "md")
-                && path
-                    .file_name()
-                    .is_some_and(|n| !n.eq_ignore_ascii_case("MEMORY.md"))
-            {
-                if let Ok(body) = fs::read_to_string(&path) {
-                    out.push_str(&body);
-                    out.push('\n');
-                }
-            }
-        }
-    }
-    out
-}
-
-fn has_memory_files(projects_dir: &Path) -> bool {
-    let Ok(slugs) = fs::read_dir(projects_dir) else {
-        return false;
-    };
-    for slug in slugs.flatten() {
-        let memory_dir = slug.path().join("memory");
-        if let Ok(entries) = fs::read_dir(&memory_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file()
-                    && path.extension().is_some_and(|e| e == "md")
-                    && path
-                        .file_name()
-                        .is_some_and(|n| !n.eq_ignore_ascii_case("MEMORY.md"))
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+/// Concatenated text of every memory entry, excluding the `MEMORY.md` index.
+fn memory_entry_text(memory_dir: &Path) -> String {
+    list_md_files(memory_dir)
+        .into_iter()
+        .filter(|name| !name.eq_ignore_ascii_case("MEMORY.md"))
+        .map(|name| fs::read_to_string(memory_dir.join(name)).expect("read memory entry"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ──────────────────────────────────────────────────────────────────────

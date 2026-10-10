@@ -20,7 +20,7 @@ fn start(env: &TestEnv, background: &str) -> PtySession {
         ],
     );
     sess.resize(60, 40).expect("resize");
-    sess.expect("❯").expect("prompt");
+    common::expect_input_line_cleared(&sess, env.timeout(), "layout input ready");
     sess
 }
 
@@ -49,7 +49,10 @@ fn showcase(background: &str, link_color: &str, code_color: &str) {
     // Wait for paste consumption before Enter, including its collapsed preview.
     common::expect_screen(
         &sess,
-        |s| s.contains("Pasted") || s.contains("Reply with exactly"),
+        |s| {
+            common::input_line_of(s)
+                == format!("[Pasted text #1 +{} lines]", prompt.matches('\n').count())
+        },
         common::DEFAULT_TIMEOUT,
         "prompt paste",
     );

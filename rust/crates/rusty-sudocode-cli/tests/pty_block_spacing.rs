@@ -24,9 +24,9 @@ fn start(env: &TestEnv, resume: bool, queue: bool, width: u16) -> PtySession {
         ],
     );
     sess.resize(120, width).unwrap();
-    common::expect_screen(
+    common::expect_screen_settled(
         &sess,
-        |screen| screen.contains("❯"),
+        |screen| screen.contains("❯") && screen.contains("/help"),
         common::at_least(std::time::Duration::from_secs(30)),
         if resume {
             "resumed prompt"
@@ -64,6 +64,7 @@ fn assistant_position(rows: &[String], text: &str) -> usize {
 }
 
 fn assert_gap(rows: &[String], before: usize, after: usize, blank_rows: usize) {
+    assert!(before < after, "blocks out of order: {rows:#?}");
     assert_eq!(after - before - 1, blank_rows, "wrong gap: {rows:#?}");
     assert!(
         rows[before + 1..after]
@@ -143,6 +144,7 @@ fn assert_file_frames(sess: &PtySession, expected: &BTreeMap<&str, usize>, final
     let rows = rows(sess);
     let intro = assistant_position(&rows, "Spacing intro.");
     let end = assistant_position(&rows, final_text);
+    assert!(intro < end, "transcript out of order: {rows:#?}");
     let headers: Vec<_> = (intro + 1..end)
         .filter(|&row| rows[row].starts_with("╭─ Bash("))
         .collect();
@@ -193,6 +195,7 @@ fn assert_file_frames(sess: &PtySession, expected: &BTreeMap<&str, usize>, final
         *shown.entry(marker).or_default() += 1;
         let first = header + 1 + position(body, &format!("{marker}_START"));
         let last = header + 1 + position(body, &format!("{marker}_END"));
+        assert!(first < last, "log markers out of order: {rows:#?}");
         assert_eq!(last - first, 3, "log blank lines are content: {rows:#?}");
         assert!(rows[first + 1..last].iter().all(|row| row.trim() == "│"));
         let preamble = &rows[header + 1..first];
@@ -254,13 +257,15 @@ fn roundtrip(queue: bool, width: u16) {
     // Type a short line there; live runs read the full instructions from a file.
     if queue {
         sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
-        common::expect_screen(
+        let placeholder = format!(
+            "[Pasted text #1 +{} lines]",
+            prompt.chars().filter(|&ch| ch == '\n').count()
+        );
+        common::expect_screen_settled(
             &sess,
-            |s| {
-                s.contains("Pasted") || s.contains("PARITY_SCENARIO:") || s.contains("Read spacing")
-            },
+            |s| common::input_line_of(s) == placeholder,
             common::DEFAULT_TIMEOUT,
-            "prompt pasted",
+            "complete multiline prompt pasted",
         );
     } else {
         let instructions = env.workspace_root().join("spacing-instructions.md");
@@ -276,11 +281,23 @@ fn roundtrip(queue: bool, width: u16) {
         // before checking the live transcript and its replay.
         let input_width = u16::try_from(input.chars().count() + 8).unwrap().max(width);
         sess.resize(120, input_width).unwrap();
+        common::expect_screen_settled(
+            &sess,
+            |s| s.contains("❯") && s.contains("/help"),
+            common::DEFAULT_TIMEOUT,
+            "resized sync chrome",
+        );
         sess.send(&input).unwrap();
         common::expect_input_line(&sess, &input, common::DEFAULT_TIMEOUT, "sync input");
     }
     let marker = common::turn_status_marker(&sess);
     sess.send("\r").unwrap();
+    common::expect_turn_complete_after(
+        &sess,
+        &marker,
+        common::LIVE_TURN_BUDGET,
+        "spacing turn completed and input rearmed",
+    );
     if !queue {
         sess.resize(120, width).unwrap();
     }

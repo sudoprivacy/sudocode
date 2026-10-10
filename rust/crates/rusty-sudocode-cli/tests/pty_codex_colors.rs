@@ -19,7 +19,7 @@ fn showcase(env: &TestEnv, background: &str, no_color: bool) -> PtySession {
         ],
     );
     sess.resize(100, 110).expect("reference viewport");
-    sess.expect("❯").expect("prompt");
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "prompt ready");
     let prompt = env.prompt(
         &format!(
             "Reply with exactly this Markdown, without wrapping the entire answer in a code fence:\n{}",
@@ -31,7 +31,10 @@ fn showcase(env: &TestEnv, background: &str, no_color: bool) -> PtySession {
         .expect("paste prompt");
     common::expect_screen(
         &sess,
-        |screen| screen.contains("Pasted") || screen.contains("PARITY_SCENARIO:"),
+        |screen| {
+            common::input_line_of(screen)
+                == format!("[Pasted text #1 +{} lines]", prompt.matches('\n').count())
+        },
         common::DEFAULT_TIMEOUT,
         "pasted input",
     );
@@ -193,9 +196,9 @@ fn palette_probe_preserves_early_keys_paste_and_ignores_late_replies() {
     sess.send("ffff/ffff\x07\x1b[200~paste '$HOME' ~/.zshrc\x1b[201~")
         .unwrap();
     sess.send("\x1b]11;rgb:0000/0000/0000\x1b\\").unwrap();
-    common::expect_input_line(
+    common::expect_screen(
         &sess,
-        "early-paste '$HOME' ~/.zshrc",
+        |screen| common::input_line_of(screen) == "early-paste '$HOME' ~/.zshrc",
         common::DEFAULT_TIMEOUT,
         "queued input retained exactly",
     );
@@ -231,7 +234,7 @@ fn detected_background_overrides_colorfgbg() {
     sess.expect(r"\x1b\]11;\?").expect("palette query");
     sess.send("\x1b]10;rgb:0000/0000/0000\x07\x1b]11;rgb:ffff/ffff/ffff\x07")
         .unwrap();
-    sess.expect("❯").unwrap();
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "prompt ready");
     let prompt = env.prompt(
         &format!(
             "Reply with exactly this Markdown:\n{}",
@@ -242,7 +245,10 @@ fn detected_background_overrides_colorfgbg() {
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
-        |s| s.contains("Pasted") || s.contains("PARITY_SCENARIO:"),
+        |screen| {
+            common::input_line_of(screen)
+                == format!("[Pasted text #1 +{} lines]", prompt.matches('\n').count())
+        },
         common::DEFAULT_TIMEOUT,
         "prompt pasted",
     );
@@ -391,12 +397,15 @@ fn diff_roundtrip(light: bool) {
     .unwrap();
     let mut sess = colored_session(&env, light);
     sess.resize(60, 100).unwrap();
-    sess.expect("❯").unwrap();
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "prompt ready");
     let prompt = env.prompt(&format!("First read colors.rs, then use edit_file to replace this exact line:\n{CODEX_DIFF_OLD}\nwith:\n{CODEX_DIFF_NEW}\nThen say Color diff done."), "codex_diff_showcase");
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
-        |s| s.contains("Pasted") || s.contains("PARITY_SCENARIO:"),
+        |screen| {
+            common::input_line_of(screen)
+                == format!("[Pasted text #1 +{} lines]", prompt.matches('\n').count())
+        },
         common::DEFAULT_TIMEOUT,
         "edit prompt pasted",
     );
@@ -465,9 +474,9 @@ fn diff_roundtrip(light: bool) {
     // A source snippet copied from history must remain ordinary input text.
     sess.send("\x1b[200~source ~/.zshrc && cc-sudo\x1b[201~")
         .unwrap();
-    common::expect_input_line(
+    common::expect_screen(
         &sess,
-        "source ~/.zshrc && cc-sudo",
+        |screen| common::input_line_of(screen) == "source ~/.zshrc && cc-sudo",
         common::DEFAULT_TIMEOUT,
         "paste source snippet",
     );
@@ -678,7 +687,7 @@ fn bash_roundtrip(light: bool, no_color: bool) {
         ],
     );
     sess.resize(80, 100).unwrap();
-    sess.expect("❯").unwrap();
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "prompt ready");
     let prompt = env.prompt(
         &format!(
             "Run these two scripts with Bash, in separate calls and exactly as written. First:\n{CODEX_BASH_SINGLE}\nSecond:\n{CODEX_BASH_MULTI}\nThen say only Color bash done."
@@ -688,7 +697,10 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
-        |s| s.contains("Pasted") || s.contains("PARITY_SCENARIO:"),
+        |screen| {
+            common::input_line_of(screen)
+                == format!("[Pasted text #1 +{} lines]", prompt.matches('\n').count())
+        },
         common::DEFAULT_TIMEOUT,
         "Bash prompt pasted",
     );
@@ -713,9 +725,9 @@ fn bash_roundtrip(light: bool, no_color: bool) {
     assert_running_title_resizes(&mut sess, &header, light, no_color);
     sess.send("\x1b[200~draft '$HOME' && echo hi\x1b[201~")
         .unwrap();
-    common::expect_input_line(
+    common::expect_screen(
         &sess,
-        "draft '$HOME' && echo hi",
+        |screen| common::input_line_of(screen) == "draft '$HOME' && echo hi",
         common::DEFAULT_TIMEOUT,
         "paste beside highlighted running command",
     );
@@ -776,7 +788,7 @@ fn denied_tool_keeps_a_red_border_without_a_new_status_icon() {
         ],
     );
     sess.resize(60, 100).unwrap();
-    sess.expect("❯").unwrap();
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "prompt ready");
     sess.send("PARITY_SCENARIO:bash_stdout_roundtrip\r")
         .unwrap();
     common::expect_screen_settled(
@@ -819,12 +831,15 @@ fn bash_output_session(env: &TestEnv, output: &str, light: bool, no_color: bool)
         ],
     );
     sess.resize(60, 100).unwrap();
-    sess.expect("❯").unwrap();
-    let prompt = env.prompt("Run exactly `cat render-output.txt` using Bash. Then say only Render fixture done. Do not quote the file contents in your reply.", "bash_render_fixture");
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "prompt ready");
+    let prompt = env.prompt(
+        "Bash: cat render-output.txt. Say only Render fixture done.",
+        "bash_render_fixture",
+    );
     sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
-        |s| s.contains("Pasted") || s.contains("PARITY_SCENARIO:") || s.contains("Do not quote"),
+        |screen| common::input_line_of(screen) == prompt,
         common::DEFAULT_TIMEOUT,
         "Bash prompt pasted",
     );

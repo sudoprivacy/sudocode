@@ -133,18 +133,22 @@ fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
         });
         if let Some((line, color)) = snapshot {
             if line.contains("(3.") && !line.contains('↓') {
-                assert_eq!(color, "Rgb(166, 227, 161)", "initial wait remains green");
+                assert!(
+                    common::colors_equal(&color, "Rgb(166, 227, 161)"),
+                    "initial wait remains green: {color}"
+                );
                 saw_initial_wait = true;
             }
             if line.contains("↓ 9 tokens") || line.contains("↓ 11 tokens") {
-                if color == "Idx(220)" {
+                if common::colors_equal(&color, "Idx(220)") {
                     saw_stall = true;
                 } else {
-                    assert_eq!(color, "Rgb(166, 227, 161)");
+                    assert!(common::colors_equal(&color, "Rgb(166, 227, 161)"));
                     saw_long_progress = true;
                 }
             }
-            if line.contains("↓ 13 tokens") && color == "Rgb(166, 227, 161)" {
+            if line.contains("↓ 13 tokens") && common::colors_equal(&color, "Rgb(166, 227, 161)")
+            {
                 saw_recovery = true;
                 break;
             }

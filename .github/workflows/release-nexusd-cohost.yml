@@ -284,6 +284,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          make_latest: false
           files: |
             dist/nexusd-cohost-*
             dist/SHA256SUMS.txt

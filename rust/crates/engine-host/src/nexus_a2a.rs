@@ -57,8 +57,12 @@ pub fn session() -> Result<Option<&'static Session>, String> {
             Some(config) => {
                 let client = config.connect()?;
                 // Cert-only auth: the client cert IS the authorization (the node derives
-                // identity from its SAN), so no per-request token is sent.
-                let backend = NexusVfsFsBackend::from_arc(client, String::new());
+                // identity from its SAN), so no per-request token is sent. That
+                // server-verified identity is also why the zone context is the
+                // transport-verified one rather than the fail-closed env/delegation
+                // context: the mTLS handshake, not a local string, is the credential.
+                // `root` is the standalone session's legacy namespace.
+                let backend = NexusVfsFsBackend::from_arc_mtls(client, String::new(), "root");
                 let mailbox = Arc::new(Mailbox::daemon_absolute(
                     Arc::new(backend),
                     config.agent.clone(),

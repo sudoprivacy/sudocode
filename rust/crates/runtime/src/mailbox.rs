@@ -382,6 +382,29 @@ impl Mailbox {
         )
     }
 
+    /// The same mailbox over a connection that IS the credential: an mTLS
+    /// client certificate the daemon verifies (identity from its SAN). The
+    /// fail-closed env/delegation context behind [`Self::over_nexus`] does not
+    /// apply — the transport itself is the server-verified authorization — but
+    /// a host-injected `NEXUS_RESOURCE_SCOPE` still narrows it.
+    #[must_use]
+    pub fn over_nexus_mtls(
+        client: Arc<nexus_vfs_client::NexusVfsClient>,
+        agent: impl Into<String>,
+        auth_token: impl Into<String>,
+        zone_id: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            Arc::new(crate::fs_backend::NexusVfsFsBackend::from_arc_mtls(
+                client,
+                auth_token.into(),
+                zone_id,
+            )),
+            agent.into(),
+            InboxConvention::new(String::new()),
+        )
+    }
+
     #[must_use]
     #[inline]
     pub fn self_id(&self) -> &str {

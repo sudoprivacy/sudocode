@@ -27,11 +27,15 @@ fn cohost_fs() -> (Arc<Kernel>, Arc<dyn FsBackend>) {
         Some(Arc::new(runtime::test_support::MemObjectStore::default())),
         false,
     );
-    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        AGENT,
+        &kernel::core::agents::registry::AgentDescriptor {
+            pid: "pid-7".to_string(),
+            name: AGENT.to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..kernel::core::agents::registry::AgentDescriptor::default()
+        },
         "/proc/7/workspace".to_string(),
     ));
     (kernel, fs)

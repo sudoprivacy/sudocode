@@ -111,10 +111,12 @@ where
     // permission checks that a `std::fs` write never sees.
     let workspace_root = format!("/proc/{}/workspace", desc.pid);
     // Built from the complete planted descriptor so the agent's delegation
-    // reference participates in every target authorization the backend makes.
+    // reference participates in every target authorization the backend makes
+    // (zone-scoped ResourceRef checks), rather than trusting caller-supplied
+    // owner/zone/name strings.
     let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
-        Arc::clone(kernel),
-        desc,
+        Arc::clone(&kernel),
+        &desc,
         workspace_root.clone(),
     ));
 

@@ -9,6 +9,7 @@ mod common;
 
 use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
 use a2a::session_io::SessionMailbox;
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::{Kernel, OperationContext};
 use runtime::{FsBackend, KernelFsBackend};
 use serde_json::{json, Value};
@@ -357,11 +358,15 @@ fn controller_workflow(compact: bool) {
     let session = response(&mailbox, "new");
     let sid = session["sessionId"].as_str().unwrap();
     assert_eq!(started["durable_session_id"], sid);
-    let fs = KernelFsBackend::for_agent(
+    let fs = KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        "stock-worker",
+        &AgentDescriptor {
+            pid: format!("pid-{}", started["session_id"].as_str().unwrap()),
+            name: "stock-worker".to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
         format!(
             "/proc/{}/workspace",
             started["session_id"].as_str().unwrap()

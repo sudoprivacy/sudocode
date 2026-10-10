@@ -128,11 +128,13 @@ fn kernel_with_backend(zone_id: &str) -> Arc<Kernel> {
     kernel
 }
 
-/// A `KernelFsBackend` rooted at `/ws`, over the given kernel.
+/// A `KernelFsBackend` rooted at `/ws`, over the given kernel. The context
+/// names agent-x: the agents-base subtrees (`managed_root`) are keyed by the
+/// context's agent identity, and a context without one roots nothing.
 fn vfs_backend(kernel: &Arc<Kernel>) -> KernelFsBackend<Kernel> {
     KernelFsBackend::new(
         Arc::clone(kernel),
-        OperationContext::new("system", "root", true, None, true),
+        OperationContext::new("system", "root", true, Some("agent-x"), true),
         "/ws",
     )
 }
@@ -207,23 +209,25 @@ fn p1a_resource_targets_require_the_same_delegated_zone_for_cohost_and_subproces
         media_type: None,
         size_bytes: None,
     };
-    assert_eq!(
-        cohost.authorize_resource_ref(&own_ref),
-        subprocess.authorize_resource_ref(&own_ref),
-        "cohost and subprocess must make the same ResourceRef decision",
-    );
+    // The cohost context is trusted-local — a descriptor planted by the
+    // trusted ManagedAgentService is authority by construction — so a
+    // ResourceRef inside its zone and scope is AUTHORIZED, enforced to the
+    // descriptor's scope rules. The subprocess context is host-injected env
+    // without a server-verifiable credential and stays fail-closed.
+    assert!(cohost.authorize_resource_ref(&own_ref).is_ok());
     assert!(matches!(
-        cohost.authorize_resource_ref(&own_ref),
+        subprocess.authorize_resource_ref(&own_ref),
         Err(runtime::zone_context::ZoneAuthError::DelegationInvalid)
     ));
 
     let backend = KernelFsBackend::for_agent_descriptor(Arc::clone(&kernel), &descriptor, "/ws");
-    let denied = backend.write("/ws/allowed.txt", b"zone-scoped");
-    assert_eq!(
-        denied.unwrap_err().kind(),
-        std::io::ErrorKind::PermissionDenied
+    backend
+        .write("/ws/allowed.txt", b"zone-scoped")
+        .expect("a planted descriptor with a /ws write rule authorizes the write");
+    assert!(
+        permission_checks.load(Ordering::Relaxed) > 0,
+        "an authorized write reaches the kernel's permission provider"
     );
-    assert_eq!(permission_checks.load(Ordering::Relaxed), 0);
 
     let foreign_ref = ResourceRef {
         zone_id: "other-zone".to_string(),
@@ -734,11 +738,15 @@ fn two_cohosted_agents_do_not_share_one_todo_list() {
 
     let kernel = kernel_with_root_backend();
     let agent = |name: &str| -> Arc<dyn FsBackend> {
-        Arc::new(KernelFsBackend::for_agent(
+        Arc::new(KernelFsBackend::for_agent_descriptor(
             Arc::clone(&kernel),
-            "test-owner",
-            "root",
-            name,
+            &AgentDescriptor {
+                pid: format!("pid-{name}"),
+                name: name.to_string(),
+                owner_id: "test-owner".to_string(),
+                zone_id: "root".to_string(),
+                ..AgentDescriptor::default()
+            },
             "/ws",
         ))
     };
@@ -804,11 +812,15 @@ fn a_cohosted_agents_plan_lives_in_its_own_workspace() {
 
     let kernel = kernel_with_root_backend();
     let agent = |name: &str, workspace: &str| -> Arc<dyn FsBackend> {
-        Arc::new(KernelFsBackend::for_agent(
+        Arc::new(KernelFsBackend::for_agent_descriptor(
             Arc::clone(&kernel),
-            "test-owner",
-            "root",
-            name,
+            &AgentDescriptor {
+                pid: format!("pid-{name}"),
+                name: name.to_string(),
+                owner_id: "test-owner".to_string(),
+                zone_id: "root".to_string(),
+                ..AgentDescriptor::default()
+            },
             workspace.to_string(),
         ))
     };
@@ -858,8 +870,17 @@ fn a_path_outside_all_mounts_reads_a_transparent_error() {
     kernel
         .vfs_router_arc()
         .add_mount("/mnt", "root", Some(backend), false);
-    let fs =
-        KernelFsBackend::for_agent(Arc::clone(&kernel), "test-owner", "root", "agent-x", "/mnt");
+    let fs = KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &AgentDescriptor {
+            pid: "pid-agent-x".to_string(),
+            name: "agent-x".to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
+        "/mnt",
+    );
 
     let err = fs
         .read("/elsewhere/secret.txt")

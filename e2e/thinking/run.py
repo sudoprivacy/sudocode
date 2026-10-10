@@ -34,6 +34,11 @@ parser.add_argument(
     help="Recorded adaptive thinking effort",
 )
 parser.add_argument(
+    "--check-context",
+    action="store_true",
+    help="Require the exact project instruction nonce in both answers",
+)
+parser.add_argument(
     "--config", type=Path, default=Path.home() / ".nexus/sudocode/sudocode.json"
 )
 parser.add_argument(
@@ -66,6 +71,11 @@ home.mkdir()
 fixture = workspace / "values.txt"
 a, b = secrets.randbelow(400) + 100, secrets.randbelow(400) + 100
 fixture.write_text(f"code={code}\na={a}\nb={b}\n", encoding="utf-8")
+context_nonce = "CONTEXT-" + secrets.token_hex(12) if args.check_context else None
+if context_nonce:
+    (workspace / "AGENTS.md").write_text(
+        f"diagnostic_nonce: {context_nonce}\n", encoding="utf-8"
+    )
 session = workspace / "session.jsonl"
 stamp = int(time.time() * 1000)
 session.write_text(
@@ -369,23 +379,57 @@ try:
                 "model": args.model,
                 "thinking_control": "adaptive-omitted",
                 "effort": args.effort,
+                "check_context": args.check_context,
                 "live_api_inference": True,
             }
         ),
         flush=True,
     )
     start()
-    send(
-        "Read values.txt with the Read tool. Return only READ_DONE <code from file> sum=<a+b>."
-    )
+    read_prompt = "Read values.txt with the Read tool. Return only READ_DONE <code from file> sum=<a+b>."
+    read_expected = f"READ_DONE {code} sum={a + b}"
+    resume_expected = f"RESUME_DONE {code} value={a + b - 17}"
+    if context_nonce:
+        read_prompt = (
+            "Read values.txt with the Read tool. Return only READ_DONE "
+            "<code from file> sum=<a+b> context=<diagnostic_nonce from project instructions>."
+        )
+        read_expected += f" context={context_nonce}"
+        resume_expected += f" context={context_nonce}"
+    send(read_prompt)
     wait(lambda: f"READ_DONE {code} sum={a + b}" in visible())
     (workspace / "read-screen.txt").write_text(visible(), encoding="utf-8")
+    if context_nonce:
+        wait(lambda: len(records) >= 2 and records[1].get("completed"))
+        original = json.loads((workspace / "request-0-client.json").read_bytes())
+        assert context_nonce in json.dumps(original["system"]), (
+            "CLI did not load the project instruction nonce"
+        )
+        assert context_nonce not in json.dumps(original["messages"]), (
+            "nonce must come from project instructions, not the user prompt"
+        )
+        assert len(records) == 2, (
+            "project context check required extra tool or retry requests"
+        )
+        blocks, _, _ = parse_sse((workspace / "response-1.sse").read_bytes())
+        answer = "".join(block.get("text", "") for block in blocks).strip()
+        assert answer == read_expected, (
+            "provider did not return the exact project instruction nonce with the Read result"
+        )
     close()
     fixture.rename(workspace / "values.unavailable")
     start()
-    send(
-        "Use the saved sum, subtract 17, and return only RESUME_DONE <same code> value=<result>. Do not use tools."
+    resume_prompt = (
+        "Use the saved sum, subtract 17, and return only RESUME_DONE "
+        "<same code> value=<result>. Do not use tools."
     )
+    if context_nonce:
+        resume_prompt = (
+            "Use the saved sum, subtract 17, and return only RESUME_DONE "
+            "<same code> value=<result> context=<diagnostic_nonce from project instructions>. "
+            "Do not use tools."
+        )
+    send(resume_prompt)
     wait(lambda: f"RESUME_DONE {code} value={a + b - 17}" in visible())
     (workspace / "resume-screen.txt").write_text(visible(), encoding="utf-8")
     close()
@@ -429,6 +473,10 @@ try:
         "empty signed thinking was dropped or changed before the tool continuation"
     )
     resumed = json.loads((workspace / "request-2-client.json").read_bytes())
+    if context_nonce:
+        assert context_nonce in json.dumps(resumed["system"]), (
+            "project instruction nonce was lost during restart/resume"
+        )
     resumed_blocks = [
         b
         for m in resumed["messages"]
@@ -450,8 +498,8 @@ try:
         for r in records
     ), "all streams must finish"
     for number, expected in (
-        (1, f"READ_DONE {code} sum={a + b}"),
-        (2, f"RESUME_DONE {code} value={a + b - 17}"),
+        (1, read_expected),
+        (2, resume_expected),
     ):
         blocks, _, _ = parse_sse((workspace / f"response-{number}.sse").read_bytes())
         answer = "".join(block.get("text", "") for block in blocks).strip()
@@ -464,6 +512,7 @@ try:
             {
                 "passed_workflow": True,
                 "empty_signed_thinking_replayed": intact,
+                "project_context_checked": args.check_context,
                 "requests": len(records),
                 "live_api_inference": True,
             }

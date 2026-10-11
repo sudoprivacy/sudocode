@@ -1759,15 +1759,29 @@ fn live_cohost_session_resume() {
         "",
     )
     .unwrap();
+    // The restored history carries the first turn's `send` tool result, so the
+    // scenario's mock answers this message with its final text instead of
+    // calling `send` again — and a turn that sent nothing has its prose
+    // delivered to the sender by the loop's auto-reply fallback (production
+    // behaviour, not a test shim). The sender is the session credential this
+    // test dials with, so that is the mailbox the reply lands in: poll it from
+    // the session's own point of view rather than the operator's.
+    let session_agent = runtime::nexus_mailbox::AgentCredential::load(
+        &std::env::var("NEXUS_A2A_TEST_CERT_DIR").expect("cert dir"),
+    )
+    .expect("load the dialling session credential")
+    .agent;
+    let session_mb = mailbox(&client, &session_agent, "");
+    let mut session_cursor = 0u64;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let (received, next) = mb
-            .poll_conversation(&agent, cursor, DELIVERY_WAIT_MS)
+        let (received, next) = session_mb
+            .poll_conversation(&agent, session_cursor, DELIVERY_WAIT_MS)
             .unwrap();
-        cursor = next;
+        session_cursor = next;
         if received
             .iter()
-            .any(|m| m.from == agent && m.kind != "session" && m.body.contains("PONG"))
+            .any(|m| m.from == agent && m.kind != "session" && m.body.contains("cohost replied"))
         {
             break;
         }

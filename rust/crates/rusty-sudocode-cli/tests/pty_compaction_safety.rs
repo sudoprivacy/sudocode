@@ -1654,7 +1654,9 @@ fn failed_empty_truncated_and_growing_summaries_preserve_durable_history() {
     }
 }
 
+// Keep compaction, persistence and task continuation in one connected CLI workflow.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn adaptive_compaction_keeps_its_output_ceiling_and_continues_the_task() {
     for model in ["claude-opus-5-5", "vendor/claude-opus-5-5"] {
         let provider = Provider::new("success");

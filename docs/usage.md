@@ -9,6 +9,13 @@ replacement text. Pasting inserts at the cursor and preserves text on either
 side. Long or multiline pastes appear as compact placeholders; submitting the
 prompt expands them back to the original content, including subsequent typing.
 
+`Up` first moves to the start of the logical line, then walks prompt history;
+`Down` moves to its end or restores the saved draft from history. Real newlines,
+not terminal wrapping, define these boundaries. Navigation and subsequent
+typing share the editor's current buffer and cursor, even in one key burst;
+no redraw is required between them. On an empty draft, `Up` recalls queued
+human messages before history, leaving inbound peer messages queued.
+
 ## Global and project directories
 
 All native config paths resolve through `runtime::config`. The same roots own
@@ -242,6 +249,19 @@ as assistant answers and transcript replay. Both choice widgets and the legacy
 REPL preserve headings, lists, code, tables, and links. Plain configuration and
 permission descriptions keep their literal text. The live prompt caches its
 formatted document until the source or terminal width changes.
+
+Live slots share one row budget. InputSlot has priority: when a long draft or
+small window leaves insufficient space, PendingSlot, StatusSlot, TodoSlot and
+FooterSlot fold into explicit summaries rather than silently disappearing.
+Growing the window restores their full contents. Long drafts scroll within the
+same editor, preserving the complete text and cursor.
+
+Long question and plan descriptions scroll independently of their choices:
+PgUp/PgDn pages the body and Ctrl+Home/End jumps to its start/end. The choice
+controls stay visible. If the terminal is too small to show those controls
+safely, an enlargement warning replaces the panel; confirmation and hidden
+edits are disabled, but Esc/Ctrl-C can still cancel. Resizing does not answer a
+question, alter the saved plan, or clear conversation history.
 
 `write_plan` saves the complete Markdown document, including Context,
 Constraints, and Acceptance Criteria, before presenting it for review. The

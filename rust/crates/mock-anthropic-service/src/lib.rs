@@ -217,6 +217,7 @@ enum Scenario {
     EditFileRoundtrip,
     GlobSearchRoundtrip,
     WritePlanRoundtrip,
+    WritePlanReview,
     PlanExecutionRoundtrip,
     QuestionMarkdownMany,
     TodoWriteRoundtrip,
@@ -368,6 +369,7 @@ impl Scenario {
             "edit_file_roundtrip" => Some(Self::EditFileRoundtrip),
             "glob_search_roundtrip" => Some(Self::GlobSearchRoundtrip),
             "write_plan_roundtrip" => Some(Self::WritePlanRoundtrip),
+            "write_plan_review" => Some(Self::WritePlanReview),
             "plan_execution_roundtrip" => Some(Self::PlanExecutionRoundtrip),
             "question_markdown_many" => Some(Self::QuestionMarkdownMany),
             "todo_write_roundtrip" => Some(Self::TodoWriteRoundtrip),
@@ -450,6 +452,7 @@ impl Scenario {
             Self::EditFileRoundtrip => "edit_file_roundtrip",
             Self::GlobSearchRoundtrip => "glob_search_roundtrip",
             Self::WritePlanRoundtrip => "write_plan_roundtrip",
+            Self::WritePlanReview => "write_plan_review",
             Self::PlanExecutionRoundtrip => "plan_execution_roundtrip",
             Self::QuestionMarkdownMany => "question_markdown_many",
             Self::TodoWriteRoundtrip => "todo_write_roundtrip",
@@ -598,12 +601,7 @@ async fn handle_connection(
                 };
                 if let Some(call) = waiting_call {
                     if let Some(path) = &call.stream_wait_for {
-                        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-                        while !std::path::Path::new(path).exists()
-                            && tokio::time::Instant::now() < deadline
-                        {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
+                        wait_for_fixture_release(path).await?;
                         if call.stream_fail_after {
                             return Ok(());
                         }
@@ -633,7 +631,7 @@ async fn handle_connection(
             std::fs::write(ready, "stream connected")?;
         }
         if let Some(release) = control["start_release"].as_str() {
-            wait_for_fixture_release(release).await;
+            wait_for_fixture_release(release).await?;
         }
         let chars: Vec<_> = document.chars().collect();
         for chunk in chars.chunks(chunk_chars) {
@@ -653,7 +651,7 @@ async fn handle_connection(
             std::fs::write(ready, "all deltas sent")?;
         }
         if let Some(release) = control["release"].as_str() {
-            wait_for_fixture_release(release).await;
+            wait_for_fixture_release(release).await?;
         }
         socket
             .write_all(format!("event: content_block_stop{suffix}").as_bytes())
@@ -676,7 +674,15 @@ async fn handle_connection(
         tokio::time::sleep(DELAYED_TEXT_LATENCY).await;
     }
     if scenario == Scenario::SubagentSlowChild {
-        tokio::time::sleep(SUBAGENT_SLOW_CHILD_LATENCY).await;
+        if let Some(release) = subagent_release_path(&request) {
+            // Let each actual child stream its tool call first. Only its final
+            // answer waits for the client to observe both active children.
+            if current_turn_tool_result(&request).is_some() {
+                wait_for_fixture_release(&release).await?;
+            }
+        } else {
+            tokio::time::sleep(SUBAGENT_SLOW_CHILD_LATENCY).await;
+        }
     }
     // How many times this scenario has already been served AT THIS PATH, so a
     // scenario can answer differently on a retry. Per-path because a turn is
@@ -891,11 +897,34 @@ fn detect_scenario(request: &MessageRequest) -> Option<Scenario> {
 }
 
 /// Optional file-backed controls keep response text out of the echoed prompt.
-async fn wait_for_fixture_release(path: &str) {
+async fn wait_for_fixture_release(path: &str) -> io::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while !std::path::Path::new(path).exists() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    if std::path::Path::new(path).exists() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "fixture was not released before its deadline",
+        ))
+    }
+}
+
+fn subagent_release_path(request: &MessageRequest) -> Option<String> {
+    request.messages.iter().rev().find_map(|message| {
+        message.content.iter().rev().find_map(|block| {
+            let InputContentBlock::Text { text } = block else {
+                return None;
+            };
+            let (_, value) = text.split_once("SUBAGENT_RELEASE:")?;
+            serde_json::Deserializer::from_str(value)
+                .into_iter::<String>()
+                .next()?
+                .ok()
+        })
+    })
 }
 
 fn prose_preview_control(request: &MessageRequest) -> Value {
@@ -1282,6 +1311,13 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
     }
     let done = current_turn_tool_result(request);
     let child = |marker: &str, rest: &str| format!("{SCENARIO_PREFIX}{marker} {rest}");
+    let background_child = |rest: &str| {
+        let prompt = child("subagent_slow_child", rest);
+        match subagent_release_path(request) {
+            Some(path) => format!("{prompt} SUBAGENT_RELEASE:{}", json!(path)),
+            None => prompt,
+        }
+    };
     match (scenario, done) {
         (Scenario::SubagentEventsSync | Scenario::SubagentEventsSyncSlow, None) => {
             SubagentStep::Tools(vec![(
@@ -1308,7 +1344,7 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
                 "Agent",
                 agent_call_input(
                     "background child one",
-                    &child("subagent_slow_child", "first look"),
+                    &background_child("first look"),
                     "general-purpose",
                     true,
                 ),
@@ -1318,7 +1354,7 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
                 "Agent",
                 agent_call_input(
                     "background child two",
-                    &child("subagent_slow_child", "second look"),
+                    &background_child("second look"),
                     "general-purpose",
                     true,
                 ),
@@ -1934,18 +1970,18 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                 &[r#"{"pattern":"*.txt"}"#],
             ),
         },
-        Scenario::WritePlanRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => {
-                final_text_sse(&format!("write_plan roundtrip complete: {tool_output}"))
+        Scenario::WritePlanRoundtrip | Scenario::WritePlanReview => {
+            match latest_tool_result(request) {
+                Some((tool_output, _)) => {
+                    final_text_sse(&format!("write_plan roundtrip complete: {tool_output}"))
+                }
+                None => tool_use_sse(
+                    "toolu_write_plan",
+                    "write_plan",
+                    &[&write_plan_fixture(scenario).to_string()],
+                ),
             }
-            None => tool_use_sse(
-                "toolu_write_plan",
-                "write_plan",
-                &[
-                    r##"{"content":"# Plan\n1. First step\n2. Second step","context":"mock context","constraints":"mock constraints","acceptance":"mock acceptance"}"##,
-                ],
-            ),
-        },
+        }
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => {
                 final_text_sse(&format!("todo_write roundtrip complete: {tool_output}"))
@@ -2642,18 +2678,20 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 json!({"pattern": "*.txt"}),
             ),
         },
-        Scenario::WritePlanRoundtrip => match latest_tool_result(request) {
-            Some((tool_output, _)) => text_message_response(
-                "msg_write_plan_final",
-                &format!("write_plan roundtrip complete: {tool_output}"),
-            ),
-            None => tool_message_response(
-                "msg_write_plan_tool",
-                "toolu_write_plan",
-                "write_plan",
-                json!({"content": "# Plan\n1. First step\n2. Second step", "context": "mock context", "constraints": "mock constraints", "acceptance": "mock acceptance"}),
-            ),
-        },
+        Scenario::WritePlanRoundtrip | Scenario::WritePlanReview => {
+            match latest_tool_result(request) {
+                Some((tool_output, _)) => text_message_response(
+                    "msg_write_plan_final",
+                    &format!("write_plan roundtrip complete: {tool_output}"),
+                ),
+                None => tool_message_response(
+                    "msg_write_plan_tool",
+                    "toolu_write_plan",
+                    "write_plan",
+                    write_plan_fixture(scenario),
+                ),
+            }
+        }
         Scenario::TodoWriteRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_todo_write_final",
@@ -2965,6 +3003,28 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
     }
 }
 
+fn write_plan_fixture(scenario: Scenario) -> serde_json::Value {
+    let content = if matches!(scenario, Scenario::WritePlanReview) {
+        (0..64)
+            .map(|i| format!("- **ReviewStep{i:02}**: inspect the complete plan."))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        "# Plan\n1. First step\n2. Second step".to_string()
+    };
+    let context = if matches!(scenario, Scenario::WritePlanReview) {
+        "Review all labelled steps from ReviewStep00 through ReviewStep63."
+    } else {
+        "mock context"
+    };
+    let acceptance = if matches!(scenario, Scenario::WritePlanReview) {
+        "The saved plan displays all 64 bullets (ReviewStep00 through ReviewStep63) verbatim in order, and the plan-review UI pages and resizes correctly across the terminal sizes."
+    } else {
+        "mock acceptance"
+    };
+    json!({"content": content, "context": context, "constraints": "mock constraints", "acceptance": acceptance})
+}
+
 fn request_id_for(scenario: Scenario) -> &'static str {
     match scenario {
         Scenario::ProsePreview => "req_prose_preview",
@@ -3006,6 +3066,7 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::EditFileRoundtrip => "req_edit_file_roundtrip",
         Scenario::GlobSearchRoundtrip => "req_glob_search_roundtrip",
         Scenario::WritePlanRoundtrip => "req_write_plan_roundtrip",
+        Scenario::WritePlanReview => "req_write_plan_review",
         Scenario::PlanExecutionRoundtrip => "req_plan_execution_roundtrip",
         Scenario::QuestionMarkdownMany => "req_question_markdown_many",
         Scenario::TodoWriteRoundtrip => "req_todo_write_roundtrip",

@@ -167,12 +167,34 @@ wait "$AUTHON_DAEMON_PID" 2>/dev/null || true
 AUTHON_DAEMON_PID=
 CLIENT_ID="live-probe"
 [ "${NEXUS_A2A_MODEL_LIVE:-0}" != 1 ] || CLIENT_ID="$OPERATOR"
-CLIENT_BUNDLE="$(authon_mint "$CLIENT_ID")" || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+CLIENT_BUNDLE="$(authon_mint "$CLIENT_ID")" \
+  || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
 # Recovery also exercises automatic replies, which address the authenticated
 # sender. Give that workflow the operator's own credential.
 RESUME_CLIENT_BUNDLE="$(authon_mint "$OPERATOR")"
+# The front door: a plain agent cert whose whole job is minting the session
+# credential below. It never drives the agent control plane itself.
+FRONTDOOR_ID="cohost-front-door"
+FRONTDOOR_BUNDLE="$(authon_mint "$FRONTDOOR_ID")"
 authon_boot
 authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
+
+# v0.8.5's control plane takes `start_session_v1` from a session credential
+# only, and the front-door shape is how one is legitimately obtained: the node
+# cert that administers the allow-list is the daemon's own, sitting in the
+# data dir this harness owns; the front door then mints a per-session identity
+# bound to the operator. See lib.sh's session-credential block for why the
+# Rust tests cannot link this surface themselves.
+echo "== 3d. allow the front door, mint the session credential =="
+session_mint_tools_init
+allow_session_minter "$ENDPOINT" "$AUTHON_DATA_DIR/data" "$FRONTDOOR_ID" \
+  || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+SESSION_BUNDLE="$(mint_session_bundle "$ENDPOINT" "$(shell_path "$FRONTDOOR_BUNDLE")" \
+  "$OPERATOR" "$WORK_DIR/session-bundle")" \
+  || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+SESSION_RESUME_BUNDLE="$(mint_session_bundle "$ENDPOINT" "$(shell_path "$FRONTDOOR_BUNDLE")" \
+  "$OPERATOR" "$WORK_DIR/session-resume-bundle")" \
+  || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
 
 ready=
 for i in $(seq 1 30); do
@@ -211,7 +233,7 @@ echo "   both sides filed"
 
 if [ "${NEXUS_A2A_MODEL_LIVE:-0}" = 1 ]; then
   echo "== 5. real-model child and two-turn VFS workflow =="
-  if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_BUNDLE" \
     NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
     NEXUS_A2A_TEST_INBOX="$AGENT" NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
     NEXUS_A2A_TEST_MODEL="$MODEL" \
@@ -228,8 +250,7 @@ echo "== 6. attach a controller, send a peer message, and approve its tools =="
 # The agent runs inside the daemon, so when it does not answer, the daemon's log
 # is the only place that says why. Dumping it on failure is the difference
 # between a diagnosis and a guess.
-if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_BUNDLE" \
   NEXUS_A2A_TEST_INBOX="$AGENT" \
   NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
   NEXUS_A2A_TEST_REPLY_BODY="$REPLY" NEXUS_A2A_TEST_MODEL="$MODEL" \
@@ -243,14 +264,14 @@ if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE
 fi
 
 echo "== 7. delegate with VFS context and conflicting host instructions =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_BUNDLE" \
   NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
   NEXUS_A2A_TEST_INBOX="$AGENT" NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
   NEXUS_A2A_TEST_MODEL="$MODEL" \
   "${CARGO_TEST[@]}" live_cohost_subagent_context -- --ignored --nocapture
 
 echo "== 8. stop and restore a durable co-host session on a new pid =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$RESUME_CLIENT_BUNDLE" \
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_RESUME_BUNDLE" \
   NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
   NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" NEXUS_A2A_TEST_MODEL="$MODEL" \
   "${CARGO_TEST[@]}" live_cohost_session_resume -- --ignored --nocapture

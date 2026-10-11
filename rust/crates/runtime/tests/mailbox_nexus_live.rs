@@ -777,8 +777,9 @@ fn live_spawn_cohost() {
     let client = Arc::new(model_operator());
 
     // String-only params -> rpc_codec is plain JSON, so a raw JSON payload works.
-    let payload =
-        format!(r#"{{"agent_id":"{agent}","model":"{model}","owner_id":"root","zone_id":"root"}}"#);
+    // No `owner_id` / `zone_id`: dial with a session credential, whose owner
+    // SAN supplies the owner and whose omitted zone takes the root default.
+    let payload = format!(r#"{{"agent_id":"{agent}","model":"{model}"}}"#);
     let resp = client
         .call("managed_agent.start_session_v1", payload.as_bytes(), "")
         .expect("start_session_v1 call");
@@ -1357,7 +1358,12 @@ fn live_cohost_subagent_context() {
     );
     std::fs::write(&host_instructions, &host_marker).unwrap();
 
-    let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
+    // No `owner_id` / `zone_id`: the harness dials with a session credential
+    // (front-door minted, owner SAN'd), and v0.8.5's session-caller path takes
+    // the owner from the credential and the zone from the root default — a
+    // named zone would need an explicit grant the session cert by design
+    // carries none of.
+    let payload = json!({"agent_id":agent,"model":model});
     let started: Value = serde_json::from_slice(
         &operator
             .call(
@@ -1465,7 +1471,12 @@ fn live_cohost_model_workflow() {
         operator.read(&format!("{data}/quote.txt"), "").unwrap(),
         quote.as_bytes()
     );
-    let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
+    // No `owner_id` / `zone_id`: the harness dials with a session credential
+    // (front-door minted, owner SAN'd), and v0.8.5's session-caller path takes
+    // the owner from the credential and the zone from the root default — a
+    // named zone would need an explicit grant the session cert by design
+    // carries none of.
+    let payload = json!({"agent_id":agent,"model":model});
     println!("LIVE COHOST: starting managed session");
     let started: Value = serde_json::from_slice(
         &operator
@@ -1644,7 +1655,10 @@ fn live_cohost_session_resume() {
 
     let mb = mailbox(&client, &user, "");
     mb.ensure_conversation(&agent).unwrap();
-    let mut request = json!({"agent_id":agent,"owner_id":"root","zone_id":"root","model":model});
+    // No `owner_id` / `zone_id`: the harness dials with a session credential
+    // (front-door minted, owner SAN'd), and v0.8.5's session-caller path takes
+    // the owner from the credential and the zone from the root default.
+    let mut request = json!({"agent_id":agent,"model":model});
     let rpc = |method: &str, payload: &Value| -> Result<Value, String> {
         let bytes = operator
             .call(method, payload.to_string().as_bytes(), "")

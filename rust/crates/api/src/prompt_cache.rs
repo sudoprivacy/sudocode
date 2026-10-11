@@ -168,7 +168,8 @@ pub struct CacheBreakEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptCacheRequestRow {
     pub at_unix_secs: u64,
-    /// The gateway's correlation id, absent when talking straight to a provider.
+    /// The echoed gateway correlation id, or the UUID sent for this HTTP attempt.
+    /// Resolving the latter requires the route to preserve `x-client-request-id`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_request_id: Option<String>,
     /// The provider's (or gateway's own) request id, as the response reported it.

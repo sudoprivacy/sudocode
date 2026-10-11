@@ -36,7 +36,7 @@ const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const ONEAPI_REQUEST_ID_HEADER: &str = "x-oneapi-request-id";
 /// A gateway's per-client correlation id. Separate from the ids above because
-/// it indexes a *different* ledger — see [`client_trace_from_headers`].
+/// it indexes a *different* ledger — see [`gateway_trace_from_headers`].
 const CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 
 /// Result of a successful HTTP request with tracking information.
@@ -45,6 +45,10 @@ pub struct HttpRequestResult {
     pub response: reqwest::Response,
     /// Client-generated unique request ID for tracking.
     pub request_id: String,
+    /// UUID sent as `x-client-request-id` for the successful HTTP attempt.
+    /// Retries keep the logical `request_id` but each send has a fresh UUID.
+    /// Absent for Nexus mounts whose header contract does not allow it yet.
+    pub client_request_id: Option<String>,
 }
 
 /// Returns the current timestamp in milliseconds since Unix epoch.
@@ -219,6 +223,18 @@ impl HttpTransport {
         loop {
             attempts += 1;
             let start_timestamp_ms = current_timestamp_ms();
+            let client_request_id = self
+                .nexus
+                .is_none()
+                .then(|| uuid::Uuid::new_v4().to_string());
+            let mut attempt_headers: Vec<_> = headers
+                .iter()
+                .filter(|(name, _)| !name.eq_ignore_ascii_case(CLIENT_REQUEST_ID_HEADER))
+                .cloned()
+                .collect();
+            if let Some(id) = &client_request_id {
+                attempt_headers.push((CLIENT_REQUEST_ID_HEADER.to_string(), id.clone()));
+            }
 
             // Log started.
             if let Some(tracer) = &self.session_tracer {
@@ -234,7 +250,7 @@ impl HttpTransport {
             // Log debug (every attempt — matches existing Anthropic behavior).
             // Include X-Request-ID in the logged headers for visibility.
             if let Some(tracer) = &self.session_tracer {
-                let mut logged_headers = telemetry::mask_sensitive_headers(headers);
+                let mut logged_headers = telemetry::mask_sensitive_headers(&attempt_headers);
                 logged_headers.insert(
                     "X-Request-ID".to_string(),
                     Value::String(request_id.clone()),
@@ -250,10 +266,10 @@ impl HttpTransport {
 
             // Build and send request.
             let send_result = if let Some(nexus) = &self.nexus {
-                nexus.send(url, headers, body, &request_id).await
+                nexus.send(url, &attempt_headers, body, &request_id).await
             } else {
                 let mut builder = self.inner.post(url);
-                for (name, value) in headers {
+                for (name, value) in &attempt_headers {
                     builder = builder.header(name.as_str(), value.as_str());
                 }
                 // Add X-Request-ID header for end-to-end tracing
@@ -312,6 +328,7 @@ impl HttpTransport {
                             return Ok(HttpRequestResult {
                                 response,
                                 request_id,
+                                client_request_id,
                             });
                         }
                         Err(error)
@@ -498,8 +515,9 @@ pub fn request_id_from_headers(headers: &reqwest::header::HeaderMap) -> Option<S
 ///   question behind every cache-break investigation: a cold prefix and an
 ///   account change are indistinguishable from the client side without it.
 ///
-/// Returns `None` when talking straight to a provider, which is correct — there
-/// is no gateway to correlate with.
+/// Returns `None` when the response does not echo a value. Callers retain the
+/// attempt UUID sent on the request as their fallback. A gateway join still
+/// requires every intermediary to preserve that header.
 #[must_use]
 pub fn gateway_trace_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
     headers

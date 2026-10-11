@@ -425,7 +425,8 @@ impl AnthropicClient {
         // what a pooling gateway records against the upstream account it chose,
         // so it is the only way a cache break here can be attributed to an
         // account change rather than guessed at.
-        let gateway_request_id = gateway_trace_from_headers(result.response.headers());
+        let gateway_request_id =
+            gateway_trace_from_headers(result.response.headers()).or(result.client_request_id);
         let body = result.response.text().await.map_err(ApiError::from)?;
         let mut response = serde_json::from_str::<MessageResponse>(&body).map_err(|error| {
             ApiError::json_deserialize("Anthropic", &request.model, &body, error)
@@ -490,7 +491,8 @@ impl AnthropicClient {
             .await?;
         Ok(MessageStream {
             request_id: request_id_from_headers(result.response.headers()),
-            gateway_request_id: gateway_trace_from_headers(result.response.headers()),
+            gateway_request_id: gateway_trace_from_headers(result.response.headers())
+                .or(result.client_request_id),
             client_request_id: Some(result.request_id),
             response: result.response,
             parser: SseParser::new().with_context("Anthropic", request.model.clone()),

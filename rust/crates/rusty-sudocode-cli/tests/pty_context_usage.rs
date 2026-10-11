@@ -247,7 +247,6 @@ fn compaction_timeout(env: &TestEnv) -> Duration {
 #[test]
 fn compaction_clears_the_context_anchor_and_resumes_critical_facts() {
     let env = TestEnv::new("context-after-compaction");
-    common::configure_live_anthropic_env(&env);
     let mut source = runtime::Session::new().with_workspace_root(env.workspace_root());
     let facts = env.prompt(
         "The release channel is blue. The migration counter is 73. Do not deploy until checks pass.",

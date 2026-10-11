@@ -1384,7 +1384,6 @@ fn live_compaction_resumes_a_file_task_using_constraints_from_removed_history() 
         eprintln!("SKIP live compaction semantics: run this test with SCODE_TEST_BACKEND=live");
         return;
     }
-    common::configure_live_anthropic_env(&env);
     let mut source = Session::new().with_workspace_root(env.workspace_root());
     let constraints = "Task: prepare release-check.txt later, after reviewing the old implementation logs. Its exact contents must be three lines: release_channel=blue, migration_counter=73, release_gate=checks_passed, in that order, with one key=value pair per line and a final newline. Do not deploy anything or execute deployment commands. The file has not been created yet. ";
     for index in 0..10 {

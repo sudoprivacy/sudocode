@@ -94,28 +94,6 @@ The assistant read several files and identified gaps in compact output tests.
    Run the new tests to verify the compaction roundtrip works end-to-end.
 </summary>";
 
-/// Complete small checkpoint for the migration-history recovery fixtures.
-/// Keep every section while honoring the dynamic cap of a short conversation.
-const SHORT_COMPACTION_SUMMARY: &str = "\
-<summary>
-1. Primary Request and Intent: Continue migration plan.
-2. Key Technical Concepts: Planning.
-3. Files and Code: (none).
-4. Errors and Fixes: (none).
-5. Pending Tasks: Continue plan.
-6. Current Work: Prior discussion acknowledged.
-7. Next Step: Follow latest request.
-8. Critical Context: Preserve migration decisions.
-</summary>";
-
-fn canned_compaction_summary(request: &MessageRequest) -> &'static str {
-    if request.max_tokens as usize > CANNED_COMPACTION_SUMMARY.len() / 4 {
-        CANNED_COMPACTION_SUMMARY
-    } else {
-        SHORT_COMPACTION_SUMMARY
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedRequest {
     pub method: String,
@@ -2069,7 +2047,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             // The compaction path uses `send_message` (stream=false), so
             // this arm is hit via `build_message_response`. If it ever
             // switches to streaming, this SSE path serves as a fallback.
-            final_text_sse(canned_compaction_summary(request))
+            final_text_sse(CANNED_COMPACTION_SUMMARY)
         }
         Scenario::DeferredToolRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!("roundtrip complete: {tool_output}")),
@@ -2802,7 +2780,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             ),
         },
         Scenario::LlmCompactionRoundtrip => {
-            text_message_response("msg_llm_compaction", canned_compaction_summary(request))
+            text_message_response("msg_llm_compaction", CANNED_COMPACTION_SUMMARY)
         }
         Scenario::DeferredToolRoundtrip => match latest_tool_result(request) {
             Some((tool_output, _)) => text_message_response(

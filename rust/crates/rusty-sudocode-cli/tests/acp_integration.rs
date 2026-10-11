@@ -1939,7 +1939,9 @@ async fn acp_stdio_context_limit_rejection_is_compacted_and_retried() {
     let workspace = TestWorkspace::new("stdio-context-limit");
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
-    let (session_id, transcript_path) = seed_filler_history(&server, &workspace, 32).await;
+    // Leave room for the mock's fixed complete checkpoint while keeping local
+    // history far below preflight: the provider rejection must trigger compaction.
+    let (session_id, transcript_path) = seed_filler_history(&server, &workspace, 64).await;
 
     let mut client = spawn_stdio_client(&workspace);
     scenario_initialize(&mut client).await;
@@ -2060,7 +2062,9 @@ async fn acp_stdio_tool_loop_compacts_before_next_request() {
         "tool loop fixture line\n",
     )
     .expect("fixture should be written");
-    let (session_id, transcript_path) = seed_filler_history(&server, &workspace, 32).await;
+    // The fixed mock checkpoint must fit, but local history stays small so
+    // provider-reported context growth triggers this in-turn compaction.
+    let (session_id, transcript_path) = seed_filler_history(&server, &workspace, 64).await;
 
     let mut client = spawn_stdio_client(&workspace);
     scenario_initialize(&mut client).await;

@@ -1680,7 +1680,7 @@ fn adaptive_compaction_keeps_its_output_ceiling_and_continues_the_task() {
         for message in &mut source.messages {
             for block in &mut message.blocks {
                 if let ContentBlock::Text { text } = block {
-                    *text = text.repeat(4);
+                    *text = text.repeat(10);
                 }
             }
         }

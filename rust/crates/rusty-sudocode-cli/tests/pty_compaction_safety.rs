@@ -1655,6 +1655,128 @@ fn failed_empty_truncated_and_growing_summaries_preserve_durable_history() {
 }
 
 #[test]
+fn adaptive_compaction_keeps_its_output_ceiling_and_continues_the_task() {
+    for model in ["claude-opus-5-5", "vendor/claude-opus-5-5"] {
+        let provider = Provider::new("success");
+        let env = TestEnv::new_mock("adaptive-compaction-output-ceiling");
+        let sample = runtime::SAMPLE_SUDOCODE_JSON
+            .replace("https://api.anthropic.com", &provider.url)
+            .replace("<YOUR_ANTHROPIC_API_KEY>", "test-adaptive-compaction-key");
+        let mut config: Value = serde_json::from_str(&sample).unwrap();
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
+        config["models"]["claude-sonnet"]["contextWindow"] = json!(1_000_000);
+        config["models"]["claude-sonnet"]["maxOutputTokens"] = json!(32_000);
+        std::fs::write(env.config_home().join("sudocode.json"), config.to_string()).unwrap();
+        std::fs::write(
+            env.config_home().join("settings.json"),
+            json!({"thinking": true}).to_string(),
+        )
+        .unwrap();
+        let path = budget_fixture(&env);
+        let mut source = Session::load_from_path(&path).unwrap();
+        // Leave ample room below the strict history target so the request uses
+        // the full 12K visible ceiling. The former production path added a
+        // fictitious 16K manual thinking reservation to this adaptive model.
+        for message in &mut source.messages {
+            for block in &mut message.blocks {
+                if let ContentBlock::Text { text } = block {
+                    *text = text.repeat(4);
+                }
+            }
+        }
+        source.save_to_path(&path).unwrap();
+        let mut cli = env.spawn(&[
+            "--resume",
+            path.to_str().unwrap(),
+            "--reasoning-effort",
+            "high",
+            "--permission-mode",
+            "read-only",
+        ]);
+        let wait = Duration::from_secs(30);
+        common::expect_input_line_cleared(&cli, wait, "adaptive source loaded");
+        cli.send("/compact\r").unwrap();
+        common::expect_screen(
+            &cli,
+            |_| {
+                Session::load_from_path(&path).is_ok_and(|session| {
+                    session
+                        .last_compaction_report
+                        .as_ref()
+                        .is_some_and(|report| {
+                            report.outcome == runtime::CompactionOutcome::TargetMet
+                        })
+                })
+            },
+            wait,
+            "adaptive checkpoint committed",
+        );
+        common::expect_input_line_cleared(&cli, wait, "adaptive compaction finished");
+        let compacted = Session::load_from_path(&path).unwrap();
+        assert!(estimate_session_tokens(&compacted) <= estimate_session_tokens(&source) / 2);
+        let report = compacted.last_compaction_report.as_ref().unwrap();
+        assert_eq!(report.attempts, 1);
+        assert_eq!(report.completed_responses, 1);
+        assert!(compacted
+            .compaction
+            .as_ref()
+            .unwrap()
+            .summary
+            .contains("ALPHA"));
+
+        let marker = common::turn_status_marker(&cli);
+        cli.send("Continue PROJECT_ALPHA. PROJECT_ADAPTIVE_CONTINUE\r")
+            .unwrap();
+        cli.expect("ALPHA_CONTEXT_OK").unwrap();
+        common::expect_turn_complete_after(&cli, &marker, wait, "adaptive task continued");
+        common::expect_input_line_cleared(&cli, wait, "adaptive task finished");
+        cli.send("/exit\r").unwrap();
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+
+        let requests = provider.requests.lock().unwrap();
+        let checkpoints = requests
+            .iter()
+            .filter(|request| is_compaction_request(request))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            checkpoints.len(),
+            1,
+            "adaptive summary must need one request"
+        );
+        let checkpoint = checkpoints[0];
+        assert_eq!(checkpoint["model"], model);
+        assert_eq!(checkpoint["max_tokens"], json!(12_000));
+        assert_eq!(
+            checkpoint["thinking"],
+            json!({"type": "adaptive", "display": "summarized"})
+        );
+        assert_eq!(checkpoint["output_config"]["effort"], "high");
+        assert!(checkpoint.get("reasoning_effort").is_none());
+        let tasks = requests
+            .iter()
+            .filter(|request| !is_compaction_request(request))
+            .collect::<Vec<_>>();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["max_tokens"], json!(32_000));
+        for key in ["model", "thinking", "output_config", "tools", "system"] {
+            assert_eq!(
+                tasks[0][key], checkpoint[key],
+                "adaptive prefix changed: {key}"
+            );
+        }
+        let continued = tasks[0]["messages"].to_string();
+        assert!(continued.contains("Consolidated checkpoint"));
+        assert_eq!(continued.matches("PROJECT_ADAPTIVE_CONTINUE").count(), 1);
+        let restored = Session::load_from_path(&path).unwrap();
+        assert!(restored.messages.iter().any(|message| {
+            message.blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text == "ALPHA_CONTEXT_OK"),
+            )
+        }));
+    }
+}
+
+#[test]
 fn compaction_uses_fixed_output_ceiling_and_summary_length_guidance() {
     // `expected_limit` is the summary's own allowance (`COMPACT_MAX_OUTPUT_TOKENS`
     // capped by the model) plus the thinking budget the request has to declare to

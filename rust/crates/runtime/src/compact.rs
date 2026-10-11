@@ -469,6 +469,8 @@ impl PreparedCompaction {
             crate::model_capabilities::max_output_tokens_or_default(model) as usize;
         let thinking = if cache_safe
             && api.thinking_enabled()
+            && crate::model_capabilities::anthropic_thinking_mode(model)
+                == crate::model_capabilities::AnthropicThinkingMode::Budgeted
             && crate::model_capabilities::request_max_output_tokens(model)
                 > crate::model_capabilities::MIN_THINKING_BUDGET_TOKENS
         {

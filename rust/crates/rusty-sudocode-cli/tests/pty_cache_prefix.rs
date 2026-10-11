@@ -1,6 +1,8 @@
 //! Capture the actual HTTP payload after provider conversion while driving the
 //! real CLI through a PTY. No assertion treats mock usage as a real cache hit.
 mod common;
+#[path = "support/request_evidence.rs"]
+mod request_evidence;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -262,6 +264,91 @@ fn thinking_blocks_survive_turns_and_resume_without_merging_or_dropping() {
     assert_thinking_replayed(&requests[2], 2);
 }
 
+#[test]
+fn adaptive_thinking_and_effort_stay_fixed_across_compaction_and_resume() {
+    for model in ["claude-opus-5-5", "vendor/claude-opus-5-5"] {
+        let env = TestEnv::new_mock("adaptive-cache-prefix");
+        let capture = Capture::new();
+        capture.thinking_blocks.store(true, Ordering::Relaxed);
+        let path = fixture(&env, &capture);
+        let config_path = env.config_home().join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        let start = || {
+            let cli = env.spawn(&[
+                "--resume",
+                path.to_str().unwrap(),
+                "--reasoning-effort",
+                "high",
+                "--permission-mode",
+                "read-only",
+            ]);
+            common::expect_input_line_cleared(&cli, WAIT, "adaptive resume ready");
+            cli
+        };
+        let mut cli = start();
+        turn(&mut cli, "Continue with adaptive thinking.");
+        let baseline = capture.bodies()[0].clone();
+        assert_eq!(baseline["model"], model);
+        assert_eq!(
+            baseline["thinking"],
+            json!({"type":"adaptive","display":"summarized"})
+        );
+        assert_eq!(baseline["output_config"]["effort"], "high");
+        assert!(baseline.get("reasoning_effort").is_none());
+        turn(&mut cli, "Continue the next step.");
+        assert_thinking_replayed(&capture.bodies()[1], 1);
+        cli.send("/compact\r").unwrap();
+        cli.expect("Messages removed").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "adaptive compaction finished");
+        turn(&mut cli, "Continue after compaction.");
+        exit(&mut cli);
+        let mut cli = start();
+        turn(&mut cli, "Continue after restart.");
+        exit(&mut cli);
+        let requests = capture.bodies();
+        assert!(requests.iter().any(|r| r.to_string().contains(COMPACT)));
+        for request in &requests[1..] {
+            fixed_prefix(&baseline, request);
+        }
+        assert_thinking_replayed(requests.last().unwrap(), requests.len() - 1);
+    }
+}
+
+#[test]
+fn adaptive_hidden_thinking_keeps_signed_history_and_uses_provider_default_effort() {
+    let env = TestEnv::new_mock("adaptive-hidden-thinking");
+    let capture = Capture::new();
+    capture.thinking_blocks.store(true, Ordering::Relaxed);
+    let path = fixture(&env, &capture);
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!("claude-opus-5-5");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    std::fs::write(
+        env.config_home().join("settings.json"),
+        r#"{"thinking":false}"#,
+    )
+    .unwrap();
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "Thinking display is hidden.");
+    turn(&mut cli, "Keep the hidden signed response.");
+    exit(&mut cli);
+    let requests = capture.bodies();
+    for request in &requests {
+        assert_eq!(
+            request["thinking"],
+            json!({"type":"adaptive","display":"omitted"})
+        );
+        assert!(request.get("output_config").is_none());
+        assert!(request.get("reasoning_effort").is_none());
+    }
+    assert_thinking_replayed(&requests[1], 1);
+}
+
 fn response_content(request: &Value, number: usize) -> Value {
     let compact = request.to_string().contains(COMPACT);
     let last = request["messages"].as_array().unwrap().last().unwrap()["content"].to_string();
@@ -338,12 +425,16 @@ fn fixture(env: &TestEnv, capture: &Capture) -> std::path::PathBuf {
 }
 
 fn spawn(env: &TestEnv, path: &std::path::Path) -> PtySession {
-    let cli = env.spawn(&[
-        "--resume",
-        path.to_str().unwrap(),
-        "--permission-mode",
-        "danger-full-access",
-    ]);
+    let log = env.workspace_root().join("cache-prefix-requests.jsonl");
+    let cli = env.spawn_with_env(
+        &[
+            "--resume",
+            path.to_str().unwrap(),
+            "--permission-mode",
+            "danger-full-access",
+        ],
+        &[("SCODE_LOG_PATH", log.to_str().unwrap())],
+    );
     common::expect_input_line_cleared(&cli, WAIT, "resume ready");
     cli
 }
@@ -578,6 +669,19 @@ fn retry_and_automatic_compaction_preserve_session_fields() {
     let mut cli = spawn(&env, &path);
     turn(&mut cli, "Begin the next step.");
     capture.retry_next.store(true, Ordering::Relaxed);
+    turn(&mut cli, "Continue the retry step.");
+    let accepted = request_evidence::accepted_messages(
+        &env.workspace_root().join("cache-prefix-requests.jsonl"),
+    );
+    assert_eq!(
+        accepted.len(),
+        2,
+        "a failed HTTP attempt is not an extra completed model request"
+    );
+    assert_eq!(
+        accepted,
+        vec![capture.bodies()[0].clone(), capture.bodies()[2].clone()]
+    );
     capture.pressure_next.store(true, Ordering::Relaxed);
     turn(&mut cli, "Continue and checkpoint if needed.");
     turn(&mut cli, "Continue after the checkpoint.");

@@ -206,7 +206,11 @@ Queued messages are dimmed, and Todo
 items distinguish active and completed states. This uses the same palette as
 the transcript; it does not introduce a new color theme. Completed Todo labels
 retain their dim strikethrough. Todo summaries use one muted foreground for all
-labels and punctuation, with every count bold. Per-turn status uses the same
+labels and punctuation, with every count in bold terminal foreground, including
+zero. Ordinary task descriptions also retain the terminal foreground instead
+of a slot-wide grey; active labels remain bold and completed labels retain dim
+strikethrough. Amber is reserved for accent/activity, not neutral quantities.
+Per-turn status uses the same
 theme-selected muted foreground without an additional dim attribute; cache
 health indicators keep their semantic colors. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
@@ -216,11 +220,12 @@ themes, including inline code, Bash command previews, language grammars, and
 added/removed diff fills. Bash commands are highlighted in both running and
 completed cards; stdout/stderr retain the producing program’s own colors.
 Recognized plain unified diffs reuse the Edit palette; ordinary logs stay plain.
-The default REPL queries the terminal palette once at startup, with a shared
-250 ms deadline and preservation of queued keys and pastes. Native Windows
-console windows can also supply their color table; ConPTY does not use its
-backing console as the visible palette. If the query is unsupported,
-`COLORFGBG` selects the theme (dark otherwise). `NO_COLOR` skips the query and
+On Unix, the default REPL queries the terminal palette once at startup, with
+a shared 250 ms deadline and preservation of queued keys and pastes. Windows
+does not send OSC 10/11 color queries: some console hosts deliver replies as
+input, so startup uses `COLORFGBG` instead (dark if absent or invalid). This
+also avoids treating ConPTY's backing-console colors as the visible theme.
+Unsupported Unix queries use the same fallback. `NO_COLOR` skips the query and
 colors; noninteractive commands do not query the terminal. The legacy REPL
 uses `COLORFGBG`. Running tool previews cache syntax highlighting; repainting
 or editing input does not reparse their code. Output stays in native terminal

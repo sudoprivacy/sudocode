@@ -30,6 +30,9 @@ on:
       - e2e/**
       - install.sh
       - scripts/publish_release_mirror.py
+      - scripts/generate_cache_metrics.py
+      - scripts/cache_metrics.py
+      - spec/cache_metrics.json
   pull_request:
     branches:
       - main
@@ -57,6 +60,9 @@ on:
       - e2e/**
       - install.sh
       - scripts/publish_release_mirror.py
+      - scripts/generate_cache_metrics.py
+      - scripts/cache_metrics.py
+      - spec/cache_metrics.json
   workflow_dispatch:
     inputs:
       render_performance:
@@ -130,6 +136,8 @@ jobs:
           workspaces: rust -> target
       - name: Check formatting
         run: cargo fmt --all --check
+      - name: Check generated cache metrics
+        run: python3 ../scripts/generate_cache_metrics.py --check
 
   boundary-gate:
     if: *standard_ci

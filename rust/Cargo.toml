@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.23"
+version = "0.2.24"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -11,17 +11,10 @@ publish = false
 [workspace.dependencies]
 # ── nexus-vfs: ONE pin for every crate sudocode takes from it ─────────
 #
-# The pin is a correctness constraint, not a preference. A co-hosted agent
-# receives the daemon's `Arc<Kernel>` and hands back a `SpawnTask<Kernel>`, so two
-# nexus-vfs revs anywhere in this graph are two `Kernel` types in one process and
-# that seam stops unifying. Stated eight times across three manifests, as it was,
-# it is eight chances to move one copy and not the rest.
-#
-# A TAG, not a rev, because that is the rule the harness enforces: the
-# `nexus-A2A live` job fetches the published `nexusd-cluster` matching this pin,
-# and a pin between releases has no daemon to match it. Bumping therefore means
-# tagging nexus-vfs first — which the manifest now says, instead of leaving a
-# script to discover it.
+# Co-hosted agents exchange `Arc<Kernel>` and `SpawnTask<Kernel>` with the daemon.
+# Every Nexus crate must resolve to the same revision for those types to unify.
+# The `nexus-A2A live` harness downloads the daemon matching this published tag.
+# A version bump therefore requires a matching nexus-vfs release first.
 #
 # `default-features = false` on all of them: the kernel's runtime defaults
 # (mimalloc, the connector stack, py-hook adapters) are daemon concerns that would
@@ -35,6 +28,9 @@ kernel = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.4", defaul
 lib = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.4", default-features = false, features = ["runtime-bridge"] }
 managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.4", default-features = false }
 llm-mount = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.4", default-features = false }
+# Test the shipped authorization provider and VFS host through the same kernel.
+nexus-rebac = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.4", default-features = false }
+transport = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.4", default-features = false }
 # The daemon `nexusd-cohost` IS, entered at `run_with_services` so the co-host
 # picks its service set without forking the composition root. Same pin as the
 # kernel above, necessarily: this crate and the agent runtime it hosts have to

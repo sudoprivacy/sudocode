@@ -136,8 +136,8 @@ impl NexusVfsClient {
     /// (`client_cert_pem` + `client_key_pem`), and validate the server
     /// against `server_name` (the cluster's fixed SAN, e.g. `nexus-node`).
     /// Required to reach an auth-on `nexusd-cluster` (which serves MUTUAL
-    /// TLS — a plaintext client is rejected). Caller identity still rides
-    /// the per-request `auth_token`, not the client cert.
+    /// TLS — a plaintext client is rejected). A verified agent certificate
+    /// supplies identity when the per-request `auth_token` is absent.
     pub fn connect_tls(
         endpoint: &str,
         ca_pem: Vec<u8>,
@@ -411,11 +411,13 @@ impl NexusVfsClient {
                                         ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
-                                        if r.found {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else if r.found {
                                             Ok(VfsStat {
                                                 size: u64::try_from(r.size).unwrap_or(0),
                                                 is_directory: r.is_directory,
-                                                modified_at_ms: None,
+                                                modified_at_ms: r.modified_at_ms,
                                                 link_target: Some(r.link_target)
                                                     .filter(|t| !t.is_empty()),
                                             })
@@ -713,31 +715,37 @@ where
 {
     match result {
         Ok(resp) => f(resp.into_inner()),
-        Err(status) => Err(io::Error::other(status.to_string())),
+        Err(status) => {
+            let kind = match status.code() {
+                tonic::Code::NotFound => io::ErrorKind::NotFound,
+                tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
+                    io::ErrorKind::PermissionDenied
+                }
+                tonic::Code::DeadlineExceeded => io::ErrorKind::TimedOut,
+                _ => io::ErrorKind::Other,
+            };
+            Err(io::Error::new(kind, status.to_string()))
+        }
     }
 }
 
-/// Map a node error payload to an `io::Error`, preserving "not found".
-///
-/// Callers BRANCH on that one: a receiver listing a chat list that does not
-/// exist yet has no conversations, which is not the same as a call that
-/// failed. Flattened to `Other`, the two are indistinguishable and the
-/// receiver reports an error where the honest answer is "none yet".
-///
-/// Every other code keeps its message and lands as `Other`, since nothing
-/// downstream tells them apart today.
+/// Preserve missing-entry and admission errors from the VFS response envelope.
 fn vfs_err(payload: &[u8]) -> io::Error {
     /// `FileNotFound` on the node's error enum (`transport/src/grpc.rs`).
     const FILE_NOT_FOUND: i64 = -32007;
+    const PERMISSION_ERROR: i64 = -32003;
+    const ACCESS_DENIED: i64 = -32018;
 
     let text = String::from_utf8_lossy(payload).into_owned();
     let code = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| v.get("code").and_then(serde_json::Value::as_i64));
-    if code == Some(FILE_NOT_FOUND) {
-        return io::Error::new(io::ErrorKind::NotFound, text);
-    }
-    io::Error::other(text)
+    let kind = match code {
+        Some(FILE_NOT_FOUND) => io::ErrorKind::NotFound,
+        Some(PERMISSION_ERROR | ACCESS_DENIED) => io::ErrorKind::PermissionDenied,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, text)
 }
 
 fn broken_pipe() -> io::Error {

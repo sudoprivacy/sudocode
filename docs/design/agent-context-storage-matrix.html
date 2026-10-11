@@ -549,7 +549,9 @@ implementation decisions; they do not by themselves approve a new public
 contact-entry contract.</p>
 
 <p><b>Addressing — reuse the existing pair, without another contact alias.</b>
-Minimize contract changes because multiple developers depend on this matrix.
+Confirmed 2026-10-10: retain the existing links and do not add
+<code>chat-with-me</code>. Minimize contract changes because multiple developers
+depend on this matrix.
 The unordered participant names already determine one conversation ID.
 <code>/agents/A/conversations/B</code> and
 <code>/agents/B/conversations/A</code> link to that same
@@ -560,6 +562,18 @@ not needed to share one transcript. Keep the existing session flat+link layout
 and <code>acp-mailbox/1</code> unchanged. Receiver A discovers pending messages
 through its own conversation index. Discovery and authorization must not expose
 another participant's private conversation index.</p>
+
+<pre>/agents/A/conversations/B ─┐
+                          ├─→ /conversations/&lt;cid&gt;/
+/agents/B/conversations/A ─┘       transcript
+                                 readers/{agent}</pre>
+<p>The indexes use the shared <code>FsBackend::link/read_link</code> contract:
+DT_LINK on Nexus (in-process and gRPC), a filesystem link or junction locally,
+with a pointer-file fallback. The indexes store a target, never a second
+transcript. Computing the same CID selects the canonical conversation; links
+make it discoverable from either Agent. Following a link still requires access
+to its target zone. The matching transport specification is
+<a href="https://s.shareone.vip/s/nexus-integration-architecture#a2a">Nexus Integration Architecture §3</a>.</p>
 
 <p><b>Mount constraints to verify.</b> Keep the established flat+link paths and
 use zone visibility to separate authorized replication sets. Determine the
@@ -643,6 +657,18 @@ Acceptance must send while no runtime exists, restart the receiver on another
 authorized node, observe the queued A2A turn, reject stale ACP control, verify
 multiple real runtimes and cleanup, and inspect a third node's actual replica
 for absence of the other pair's metadata and bytes.</p>
+<p><b>Agent Move prerequisites.</b> Cohost and standalone must share one durable
+AgentHome layout while preserving the flat session/conversation stores and
+their links. On each device, all scode and Sudowork clients of one OS user must
+discover one managed <code>nexusd-cluster</code> through a coordinated startup
+path. This integration is pending; an embedded workspace kernel is separate
+from the shared broker. Runtime presence and queues remain transient. Normal
+local writes and remote content fetches remain valid, but Move completion also
+requires explicit confirmation that referenced durable content is available
+with the source offline. See
+<a href="https://s.shareone.vip/s/nexus-integration-architecture#orchestration">the broker and AgentHome design</a>.
+Zone admission, actual replica isolation and fenced multi-runtime consumption
+must be accepted before the complete Move workflow.</p>
 <p><b>Production observation — read-only, inspection started 2026-10-09 10:35 UTC.</b>
 The active Moss service runs from <code>server-v0.1.49</code>, whose packaged
 scode reports <code>0.2.23</code>. The running broker reports

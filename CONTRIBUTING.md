@@ -430,8 +430,9 @@ rewrites an earlier part of a request throws away everything cached after it.
 That failure is invisible in normal output — the run still succeeds, it just
 costs several times more input. Two places report it:
 
-- **Live, per turn** — the status line's `⚡NN%` (hit rate, higher is better)
-  and `✎NN%` (write rate, lower is steadier; red on a spike ≥25%).
+- **Live, per turn** — `⚡NN%` and `✎NN%` are cache reads and writes divided
+  by all prompt input, including uncached input. `Σ⚡NN%` is the session's
+  cumulative read share. Write shares of at least 25% appear red.
 - **After the fact, across sessions** — `scode cache stats`
   (`--output-format json` for a machine-readable version):
 
@@ -441,7 +442,13 @@ scode cache stats
 
 It reads per-session records under
 `~/.nexus/sudocode/cache/prompt-cache/<session-id>/stats.json` and reports
-reads, writes, hit rate and cache breaks. A break is classified: `system
+reads, writes, cache reuse and cache breaks. Reuse divides reads by reads plus
+writes, so it differs from the status line's prompt denominator. JSON includes
+both metrics and per-session completion-interval histograms. Each histogram
+reads at most the last 512 KiB and reports sampling, duplicates and malformed
+rows. These are response-completion intervals; they do not establish expiry.
+Legacy rollups without uncached-input coverage report prompt shares as unknown.
+A break is classified: `system
 prompt changed` / `tool definitions changed` / `model changed` / `message
 history rewritten at index N`, or **`unexpected`** when reads dropped while
 the request fingerprint held steady — that last one means the prefix went
@@ -459,6 +466,16 @@ Two limits worth knowing before reading the numbers:
 If you change anything that touches the system prompt, the tool list, or the
 message history, take a reading before and after — the cost of getting this
 wrong does not show up as a failure.
+
+`spec/cache_metrics.json` is the calculation source for the StatusSlot, offline
+reports and Ladder monitoring. Update it, run
+`python scripts/generate_cache_metrics.py`, and commit both generated outputs.
+CI runs `--check` to prevent drift. Ladder vendors `scripts/cache_metrics.py`
+at a recorded commit and SHA-256; sync it with Ladder's
+`tools/sync_cache_metrics.py --source-root <scode-checkout>` after committing
+the canonical changes. Keep calculations in this shared contract instead of
+adding separate percentages or TTL price formulas to a renderer or monitor.
+Changes to measurement do not enable telemetry or automatic TTL selection.
 
 Main turns, subagent turns, and compaction share
 `api::session_message_request`. Add session-level request fields there rather
@@ -568,12 +585,13 @@ review comments.
 
 Once approved, a maintainer merges with **`--merge`** (not squash)
 to preserve the feature-branch commit history. The "Block Merge
-Commits in PR" CI check requires you to **rebase** (not merge) when
-syncing your feature branch onto the latest `main` —
-`git fetch origin`, `git rebase origin/main`, then
-`git push --force-with-lease` is the safe form. The required check
-examines the actual PR head, rejects PR-only merge commits and new
-conflict markers, and runs for every PR regardless of changed paths.
+Commits in PR" CI check requires your branch to include the latest
+`main`. Update with `git fetch origin`, `git merge origin/main`,
+resolve any conflicts, and `git push`. This keeps the original commits
+reachable. The check examines the actual PR head and allows two-parent
+integrations whose second parent belongs to `main`'s history. It rejects
+unrelated branch merges, octopus merges, and new conflict markers, and
+runs for every PR regardless of changed paths.
 Strict branch protection also requires the PR to remain up to date
 and pass the required CI checks before merging, including for admins.
 

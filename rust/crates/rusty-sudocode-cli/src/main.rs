@@ -889,6 +889,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model,
             permission_mode,
             auth_mode,
+            reasoning_effort,
         } => run_resume(
             &session_path,
             &commands,
@@ -896,6 +897,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             model,
             permission_mode,
             auth_mode,
+            reasoning_effort,
         ),
         CliAction::ListSessions { output_format } => {
             list_sessions_cli(output_format)?;
@@ -1168,12 +1170,17 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
             *by_cause.entry(cause.clone()).or_insert(0) += count;
         }
     }
-    let hit_rate = (reads + writes > 0).then(|| {
-        #[allow(clippy::cast_precision_loss)]
-        {
-            100.0 * reads as f64 / (reads + writes) as f64
-        }
-    });
+    let uncached: u64 = sessions.iter().map(|(_, s)| s.total_input_tokens).sum();
+    let inputs_observed: u64 = sessions
+        .iter()
+        .map(|(_, s)| s.input_tokens_observed_requests)
+        .sum();
+    let mut efficiency = engine_core::cache_metrics::cache_efficiency(reads, writes, uncached);
+    if inputs_observed != requests {
+        efficiency.read_share_pct = None;
+        efficiency.write_share_pct = None;
+    }
+    let hit_rate = efficiency.reuse_pct;
 
     if matches!(output_format, CliOutputFormat::Json) {
         let payload = serde_json::json!({
@@ -1187,6 +1194,28 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
             "breaks_by_cause": by_cause,
             "root": root.display().to_string(),
             "coverage": "anthropic-provider only",
+            "cache_metrics_schema_version": engine_core::cache_metrics::CACHE_METRICS_SCHEMA_VERSION,
+            "cache_metrics_spec_sha256": engine_core::cache_metrics::CACHE_METRICS_SPEC_SHA256,
+            "cache_efficiency": efficiency,
+            "input_tokens_observed_requests": inputs_observed,
+            "uncached_input_tokens": (inputs_observed == requests).then_some(uncached),
+            "per_session": sessions.iter().enumerate().map(|(index, (name, stats))| {
+                let mut metrics = engine_core::cache_metrics::cache_efficiency(
+                    stats.total_cache_read_input_tokens, stats.total_cache_creation_input_tokens,
+                    stats.total_input_tokens,
+                );
+                if stats.input_tokens_observed_requests != stats.tracked_requests {
+                    metrics.read_share_pct = None;
+                    metrics.write_share_pct = None;
+                }
+                serde_json::json!({
+                    "session": index + 1,
+                    "tracked_requests": stats.tracked_requests,
+                    "cache_efficiency": metrics,
+                    "completion_intervals": engine_core::cache_report::completion_intervals(
+                        &root.join(name).join("requests.jsonl")),
+                })
+            }).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -1199,9 +1228,14 @@ fn run_cache_stats(output_format: CliOutputFormat) -> Result<(), Box<dyn std::er
     println!("  cache read      {reads}");
     println!("  cache written   {writes}");
     match hit_rate {
-        Some(rate) => println!("  hit rate        {rate:.1}%  (read / (read + written))"),
-        None => println!("  hit rate        n/a"),
+        Some(rate) => println!("  cache reuse     {rate:.1}%  (read / (read + written))"),
+        None => println!("  cache reuse     n/a"),
     }
+    match efficiency.read_share_pct {
+        Some(share) => println!("  prompt read     {share:.1}%  (same denominator as status ⚡)"),
+        None => println!("  prompt read     unknown (legacy input-token coverage)"),
+    }
+    println!("  interval data   per-session in JSON; response completion, expiry unconfirmed");
     println!("  breaks          {unexpected} unexpected, {expected} expected");
     if !by_cause.is_empty() {
         // The counts that tell you what to go fix. "Expected" only means the
@@ -1550,6 +1584,7 @@ fn run_resume(
     model: String,
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
+    reasoning_effort: Option<String>,
 ) {
     let session_reference = session_path.display().to_string();
     let (handle, session) = match load_session_reference(&session_reference) {
@@ -1591,7 +1626,14 @@ fn run_resume(
             return;
         }
         // No commands — enter the interactive REPL with the restored session.
-        let mut cli = match LiveCli::new(model, true, None, permission_mode, None, auth_mode) {
+        let mut cli = match LiveCli::new(
+            model,
+            true,
+            None,
+            permission_mode,
+            reasoning_effort,
+            auth_mode,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("failed to initialize: {e}");
@@ -1681,7 +1723,13 @@ fn run_resume(
             }
         };
         let outcome = if matches!(command, SlashCommand::Compact) {
-            run_resumed_compaction(&resolved_path, &model, permission_mode, auth_mode)
+            run_resumed_compaction(
+                &resolved_path,
+                &model,
+                permission_mode,
+                auth_mode,
+                reasoning_effort.clone(),
+            )
         } else {
             run_resume_command(&resolved_path, &session, &command)
         };
@@ -1742,13 +1790,14 @@ fn run_resumed_compaction(
     model: &str,
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
+    reasoning_effort: Option<String>,
 ) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
     let cli = LiveCli::new(
         model.to_string(),
         true,
         None,
         permission_mode,
-        None,
+        reasoning_effort,
         auth_mode,
     )?;
     cli.lifecycle.resume_session(&path.display().to_string())?;

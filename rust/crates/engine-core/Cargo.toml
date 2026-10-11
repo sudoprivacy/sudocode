@@ -32,6 +32,7 @@ futures = "0.3"
 telemetry = { path = "../telemetry" }
 # Tool-use input parsing + fallback JSON in the wire-message conversion.
 serde_json = { workspace = true }
+serde = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true

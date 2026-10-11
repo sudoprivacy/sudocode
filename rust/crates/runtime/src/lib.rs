@@ -34,6 +34,7 @@ mod hooks;
 pub mod image_input;
 pub mod image_registry;
 mod json;
+mod kernel_context;
 mod lane_events;
 pub mod lsp_client;
 pub mod mailbox;
@@ -144,13 +145,14 @@ pub use file_tracker::{CleanupResult, CleanupStrategy, FileOp, TurnFileTracker};
 pub use fs_backend::ManagedRoot;
 pub use fs_backend::{
     host_fs, host_fs_arc, vfs_path_for_host_path, FsBackend, FsDirEntry, FsMetadata,
-    KernelFsBackend, NexusVfsFsBackend, StdFsBackend,
+    KernelFsAccess, KernelFsBackend, NexusVfsFsBackend, StdFsBackend,
 };
 pub use git_context::{GitCommitEntry, GitContext};
 pub use hooks::{
     HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult, HookRunner,
 };
 pub use image_registry::{ImageRegistry, RegisteredImage};
+pub use kernel_context::agent_operation_context;
 pub use lane_events::{
     compute_event_fingerprint, dedupe_superseded_commit_events, dedupe_terminal_events,
     is_terminal_event, BlockedSubphase, EventProvenance, LaneCommitProvenance, LaneEvent,

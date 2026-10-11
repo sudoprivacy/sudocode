@@ -133,12 +133,12 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     sess.expect("❯").expect("input ready");
     expect_style(&sess, "✓", ("Idx(10)", false, false));
     expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
-    expect_style(&sess, "Checking styles", ("Idx(8)", true, false));
-    expect_style(&sess, "Finished parser", ("Idx(8)", false, true));
-    expect_style(&sess, "Review output", ("Idx(8)", false, false));
+    expect_style(&sess, "Checking styles", ("Default", true, false));
+    expect_style(&sess, "Finished parser", ("Default", false, true));
+    expect_style(&sess, "Review output", ("Default", false, false));
     // Reflow must not merge differently styled spans or lose their attributes.
     resize_idle_chrome(&mut sess, 30, 68);
-    expect_style(&sess, "Checking styles", ("Idx(8)", true, false));
+    expect_style(&sess, "Checking styles", ("Default", true, false));
     exit(&mut sess);
 }
 
@@ -173,6 +173,9 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     );
     sess.resize(50, 100).unwrap();
     sess.expect("❯").unwrap();
+    // Neutral quantities keep terminal foreground and weight in every color
+    // mode, including NO_COLOR, independent of icon/status semantic colors.
+    expect_style(&sess, "1 todos", ("Default", true, false));
     // Both a persistent info label and the active status slot use the role.
     expect_style(&sess, "■", (green, false, false));
     let marker = common::turn_status_marker(&sess);
@@ -339,9 +342,9 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
     );
     expect_style(&sess, "ColonRgbSample", ("Rgb(128, 64, 32)", false, false));
     expect_style(&sess, "IndexedSample", ("Idx(79)", false, false));
-    expect_style(&sess, "DefaultSample", ("Idx(8)", false, false));
-    expect_style(&sess, "NoOperandLeak", ("Idx(8)", false, false));
-    expect_style(&sess, "SafePrefixSafeSuffix", ("Idx(8)", false, false));
+    expect_style(&sess, "DefaultSample", ("Default", false, false));
+    expect_style(&sess, "NoOperandLeak", ("Default", false, false));
+    expect_style(&sess, "SafePrefixSafeSuffix", ("Default", false, false));
     assert!(!sess
         .render(|screen| screen.raw().contents())
         .contains("HiddenTitle"));
@@ -373,8 +376,8 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
             );
             sess.resize(40, 100).unwrap();
             sess.expect("❯").expect("input ready");
-            for width in [100, 60] {
-                resize_idle_chrome(&mut sess, 40, width);
+            for (rows, width) in [(40, 100), (40, 60), (12, 60), (40, 100)] {
+                resize_idle_chrome(&mut sess, rows, width);
                 for label in [" todos (", " done, ", " open)"] {
                     expect_style(&sess, label, (muted, false, false));
                 }
@@ -383,10 +386,10 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                     "1 done".into(),
                     format!("{} open", statuses.len() - 1),
                 ] {
-                    expect_style(&sess, &count, (muted, true, false));
+                    expect_style(&sess, &count, ("Default", true, false));
                 }
                 if statuses.len() > 1 {
-                    expect_style(&sess, "1 in progress", (muted, true, false));
+                    expect_style(&sess, "1 in progress", ("Default", true, false));
                     expect_style(&sess, " in progress, ", (muted, false, false));
                 }
             }

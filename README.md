@@ -54,6 +54,33 @@ dashboard. Sudo Code stays the
 
 ---
 
+## Runtime footprint
+
+**Keep memory available for local models.** On unified-memory machines such as
+[Apple silicon Macs](https://developer.apple.com/videos/play/wwdc2020/10686/) and
+[NVIDIA DGX Spark](https://docs.nvidia.com/dgx/dgx-spark-porting-guide/overview.html),
+the CPU and GPU share physical memory. A smaller agent runtime leaves more room
+for model weights, KV caches, and inference, especially with several agents open.
+
+The [Rendering performance CI](https://github.com/sudoprivacy/sudocode/actions/workflows/render-performance.yml)
+already checks release-build process memory alongside terminal responsiveness:
+peak RSS, RSS after the workload, and growth across turns. It compares relevant
+PRs against a fixed baseline and runs a daily stress profile with 30 turns.
+The [measurement guide](e2e/terminal-resize/README.md#release-performance-gate)
+and [versioned policy](e2e/terminal-resize/performance-policy.json) define the
+workloads, budgets, and regression checks.
+
+For example, the [2026-10-09 UTC stress run](https://github.com/sudoprivacy/sudocode/actions/runs/37995377154)
+measured **28.27–32.71 MiB peak RSS** across its scenarios (the median of seven
+candidate runs per scenario). The 30-turn scenario peaked at **29.42 MiB**, with
+**1.77 MiB** growth from the first to the last turn. These are Linux measurements
+of one `scode` process using a deterministic provider. They exclude tool child
+processes, browsers, Nexus, and the model server; they are not a fixed footprint
+for every workload or an Apple/Spark hardware benchmark. RSS also counts shared
+pages, so adding several processes' RSS is not a measurement of unique memory use.
+
+---
+
 ## Design principles
 
 These are design constraints, not a claim that every implementation
@@ -69,6 +96,7 @@ the principles.
 | **Evidence over reassurance.** | Show commands, paths, diffs, failures, and costs. Make important activity easy to scan and details available to inspect. "Reading `src/auth.rs:42–89`" beats "working on it". |
 | **Protect work before appearance.** | Preserve input and terminal history during ordinary interaction and resize. A cleaner screen is never a reason to silently discard the user's record. |
 | **Responsive under load.** | Typing, cancellation, and resize matter as much as first-token latency. Measure the real workflow, including memory across long sessions and parallel processes; Rust alone is not evidence of speed. |
+| **Keep runtime memory small.** | On unified-memory machines, agent runtimes share physical memory with the GPU running the local model. Track peak RSS and growth across turns in [performance CI](https://github.com/sudoprivacy/sudocode/actions/workflows/render-performance.yml) so parallel agents leave room for model weights and KV caches. See [measured footprint and scope](#runtime-footprint). |
 | **Meaningful visual design.** | Amber is the primary accent. Use color, contrast, and spacing to distinguish state, not decorate it. Keep text readable and state understandable without color; no spectacle at the expense of clarity. |
 | **Composable, headless first-class.** | Work with the shell, pipes, scripts, and editors. REPL and ACP share the engine; the CLI is an agent unit, not an orchestration hub. |
 | **Local-first, inspectable state.** | File-based config, JSONL sessions, filesystem plugins. Keep state readable and portable. Model and tool traffic goes to the services the user configures; local-first does not mean offline. |

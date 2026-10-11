@@ -284,8 +284,46 @@ instructions. Standalone CLI subagents use their local project context.
 `none` / `minimal` are part of OpenAI's own ladder and are what several
 OpenAI-compatible backends accept to switch reasoning off; on DashScope
 they are the only accepted values that do (`low` still reasons). The
-flag reaches the wire on the `acp` and REPL paths; `--print` does not
-send it. For a backend that wants a body field instead, use `extraBody`.
+flag reaches the wire on ACP, REPL, `--print` and explicit `--resume` paths,
+including resumed `/compact`. For a backend that wants a body field instead,
+use `extraBody`.
+
+### Anthropic thinking and prompt-cache continuity
+
+The model-capability table owns the Anthropic thinking mode. Opus 5.5
+requires adaptive thinking; scode sends `thinking.type: "adaptive"` and maps
+the session's reasoning effort to `output_config.effort`, not the OpenAI
+top-level `reasoning_effort` field. An unset effort uses the provider's
+default; it is never derived from a request's output-token cap. Existing
+budgeted models retain their model-level `budget_tokens` policy.
+
+For Opus 5.5, `thinking: true` requests readable summaries with
+`display: "summarized"`. `thinking: false` requests `display: "omitted"`:
+it hides summaries, **not the model's mandatory reasoning or its cost**.
+No `disabled` or manual-budget request is sent to this model. See the
+[provider's thinking contract](https://platform.claude.com/docs/en/build-with-claude/thinking).
+
+Main turns, tool continuations and cache-safe compaction use the same
+session thinking and effort settings. Changing those settings or models can
+start a different cache prefix; changing only a summary's output cap must
+not silently change them. History preserves each signed thinking block,
+including empty text, separate adjacent blocks and split signature deltas,
+plus `redacted_thinking` ciphertext. Compaction keeps the preserved tail's
+blocks unchanged, and saving/resuming does not strip them.
+
+Cache acceptance compares actual provider-converted requests and real
+per-request `cache_read_input_tokens` / `cache_creation_input_tokens`.
+HTTP 200, a stable client-side prefix, or the status-bar percentage alone
+does not establish a hit. Existing system/tool snapshots, routing metadata,
+breakpoints and the five-minute TTL policy are unchanged.
+
+The Anthropic adapter drains the actual `message_stop` after a logical
+`stop_reason` instead of closing the response at a network-packet boundary.
+If a gateway never finishes that terminal tail, a one-second absolute grace
+deadline preserves the confirmed completion and records usage exactly once.
+This is not an unconditional delay; normally the terminal event arrives
+immediately. Interrupted content before a logical end and explicit refusals
+still fail the turn.
 
 ## Adding a model
 

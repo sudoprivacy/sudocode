@@ -6,6 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# P1a (§8.11 R6.1)：仅 common/auth 子集的派生 Rust 契约（zone-id/path owner
+# validators + ResourceRef）。Git exact pin 到 sudostack feat/contract-zone
+# assembly revision；本 crate 不引入 Moss business policy。
+sudo-contracts = { package = "sudo-contracts", git = "https://github.com/sudoprivacy/sudostack", rev = "8323b0f6ac50270594dd76120919c20cc57318dd" }
 agent-client-protocol = { workspace = true }
 agent-client-protocol-schema = { workspace = true }
 agent-client-protocol-tokio = { workspace = true }
@@ -64,12 +68,6 @@ walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["poll", "process"] }
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-# Exercise the shipped VFS host and its error envelopes over real TCP.
-transport = { workspace = true }
-nexus-rebac = { workspace = true }
-tonic-host = { package = "tonic", version = "0.14", default-features = false }
 
 [target.'cfg(unix)'.dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

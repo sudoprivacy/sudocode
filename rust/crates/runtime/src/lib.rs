@@ -89,6 +89,7 @@ mod usage;
 pub mod user_paths;
 pub mod worker_boot;
 pub mod workspace_root;
+pub mod zone_context;
 
 pub use bash::{
     clear_bash_progress_callback, execute_bash, execute_bash_with_abort,

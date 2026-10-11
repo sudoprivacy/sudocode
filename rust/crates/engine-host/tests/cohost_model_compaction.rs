@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use engine_core::{AuthMode, EngineApiClient, ModelAccess};
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::core::dispatch::{HookContext, HookOutcome, NativeInterceptHook};
 use kernel::kernel::Kernel;
 use runtime::{ApiClient, ConversationMessage, KernelFsBackend};
@@ -151,11 +152,15 @@ fn model_client(home: &std::path::Path, model: &str, kernel: Arc<Kernel>) -> Eng
         false,
         None,
         &ModelAccess {
-            fs: Arc::new(KernelFsBackend::for_agent(
+            fs: Arc::new(KernelFsBackend::for_agent_descriptor(
                 kernel,
-                "owner",
-                "root",
-                "compactor",
+                &AgentDescriptor {
+                    pid: "pid-compactor".to_string(),
+                    name: "compactor".to_string(),
+                    owner_id: "owner".to_string(),
+                    zone_id: "root".to_string(),
+                    ..AgentDescriptor::default()
+                },
                 "/",
             )),
             require_mount: true,

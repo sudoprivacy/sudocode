@@ -5,6 +5,7 @@ mod common;
 
 use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
 use a2a::session_io::SessionMailbox;
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::{Kernel, OperationContext};
 use runtime::{FsBackend, KernelFsBackend};
 use serde_json::{json, Value};
@@ -103,11 +104,15 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     assert!(created.get("error").is_none(), "{created}");
     let sid = created["result"]["sessionId"].as_str().unwrap();
     assert_eq!(started["durable_session_id"], sid);
-    let fs = KernelFsBackend::for_agent(
+    let fs = KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        "worker",
+        &AgentDescriptor {
+            pid: format!("pid-{}", started["session_id"].as_str().unwrap()),
+            name: "worker".to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
         format!(
             "/proc/{}/workspace",
             started["session_id"].as_str().unwrap()
@@ -186,12 +191,16 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     // A peer text message enters the same driver and asks the bound controller.
     let peer_path = a2a::conversation_transcript_path(&a2a::conversation_id("worker", "peer"));
     common::provision_stream_transcript(&kernel, &peer_path);
-    let peer_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let peer_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        "peer",
-        "/",
+        &AgentDescriptor {
+            pid: "pid-peer".to_string(),
+            name: "peer".to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
+        "/".to_string(),
     ));
     let peer = Arc::new(runtime::mailbox::Mailbox::daemon_absolute(
         peer_fs,

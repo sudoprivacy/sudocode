@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use engine_host::HostContext;
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
 use runtime::{FsBackend, KernelFsBackend, ManagedRoot};
 
@@ -49,11 +50,15 @@ fn sandbox(name: &str) -> tempfile::TempDir {
 /// The co-host's context, built through the production constructor.
 fn cohost() -> HostContext {
     let kernel = Arc::new(Kernel::new());
-    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        COHOST_AGENT,
+        &AgentDescriptor {
+            pid: "pid-cohost".to_string(),
+            name: COHOST_AGENT.to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
         COHOST_WORKSPACE.to_string(),
     ));
     let mailbox = Arc::new(runtime::mailbox::Mailbox::daemon_absolute(

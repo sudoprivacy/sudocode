@@ -30,6 +30,7 @@ use common::{
     make_desc, mount_agent_world, provision_stream_transcript, send_prompt, user_ctx,
     wait_for_agent_reply,
 };
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
 use managed_harness::spawn_managed_agent;
 use runtime::mailbox::{InboxConvention, Mailbox};
@@ -72,11 +73,15 @@ fn cohost_agent_replies_via_mailbox_with_real_llm() {
     // Mailbox over this same kernel — rather than planting entries by hand.
     // Hand-planting is how a test ends up exercising a shape production never
     // creates, and this one is here precisely to exercise the production path.
-    let user_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let user_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        user,
+        &AgentDescriptor {
+            pid: format!("pid-{user}"),
+            name: user.to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
         "/".to_string(),
     ));
     let transcript = InboxConvention::new(String::new()).transcript_path(user, agent_id);

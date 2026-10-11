@@ -41,7 +41,9 @@ use runtime::agent_mailbox::MailboxEnvelope;
 /// `Mailbox` and duplicated it. Production had already moved, so exercising the
 /// copy proved nothing about what ships.
 fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
-    Mailbox::over_nexus(Arc::clone(client), agent, auth)
+    // The mTLS dial is the server-verified credential, so this is the
+    // transport-verified construction a running agent uses.
+    Mailbox::over_nexus_mtls(Arc::clone(client), agent, auth, "root")
 }
 
 fn send_to(

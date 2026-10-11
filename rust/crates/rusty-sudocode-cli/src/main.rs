@@ -70,12 +70,13 @@ use cli::format::{
     format_account_switch_report, format_acp_compact_report, format_auth_report,
     format_auth_switch_report, format_auto_compaction_notice, format_bughunter_report,
     format_commit_preflight_report, format_commit_skipped_report, format_compact_report,
-    format_context_report, format_cost_report, format_internal_prompt_progress_line,
-    format_issue_report, format_model_report, format_model_switch_report,
-    format_permission_prompt_box, format_permissions_report, format_permissions_switch_report,
-    format_pr_report, format_resume_report, format_sandbox_report, format_tool_call_start,
-    format_tool_result, format_ultraplan_report, render_messages, render_resume_usage,
-    render_version_report, truncate_for_summary, turn_status_line, TurnStatus,
+    format_compaction_notice, format_context_report, format_cost_report,
+    format_internal_prompt_progress_line, format_issue_report, format_model_report,
+    format_model_switch_report, format_permission_prompt_box, format_permissions_report,
+    format_permissions_switch_report, format_pr_report, format_resume_report,
+    format_sandbox_report, format_tool_call_start, format_tool_result, format_ultraplan_report,
+    render_messages, render_resume_usage, render_version_report, truncate_for_summary,
+    turn_status_line, turn_status_line_with_context_estimate, TurnStatus,
 };
 use cli::git::{
     enforce_broad_cwd_policy, git_output, parse_git_status_branch, parse_git_status_metadata,
@@ -618,16 +619,20 @@ fn main() {
             // stdout receive errors with the same envelope as success responses.
             let kind = classify_error_kind(&message);
             let (short_reason, hint) = split_error_hint(&message);
-            println!(
-                "{}",
-                serde_json::json!({
-                    "type": "error",
-                    "error": short_reason,
-                    "kind": kind,
-                    "hint": hint,
-                })
-            );
+            let mut envelope = serde_json::json!({
+                "type": "error",
+                "error": short_reason,
+                "kind": kind,
+                "hint": hint,
+            });
+            add_compaction_error_reports(&mut envelope, error.as_ref());
+            println!("{envelope}");
         } else {
+            if let Some(failure) = error.downcast_ref::<CompactionReportedError>() {
+                for report in &failure.reports {
+                    eprintln!("{}", format_compaction_notice(report));
+                }
+            }
             // #156: Add machine-readable error kind to text output so stderr observers
             // don't need to regex-scrape the prose.
             let kind = classify_error_kind(&message);
@@ -1751,15 +1756,19 @@ fn run_resume(
             }
             Err(error) => {
                 if output_format == CliOutputFormat::Json {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "type": "error",
-                            "error": error.to_string(),
-                            "command": raw_command,
-                        })
-                    );
+                    let mut envelope = serde_json::json!({
+                        "type": "error",
+                        "error": error.to_string(),
+                        "command": raw_command,
+                    });
+                    add_compaction_error_reports(&mut envelope, error.as_ref());
+                    eprintln!("{envelope}");
                 } else {
+                    if let Some(failure) = error.downcast_ref::<CompactionReportedError>() {
+                        for report in &failure.reports {
+                            eprintln!("{}", format_compaction_notice(report));
+                        }
+                    }
                     eprintln!("{error}");
                 }
                 std::process::exit(2);
@@ -1792,16 +1801,44 @@ fn run_resumed_compaction(
         auth_mode,
     )?;
     cli.lifecycle.resume_session(&path.display().to_string())?;
-    let (removed, kept, skipped, source) = cli.lifecycle.run_compaction()?;
+    // Maintenance runs through the lifecycle port while the turn pump is
+    // idle. Keep SIGINT alive until its receipts and final report are saved.
+    let _cancel_guard = SignalCancelGuard::install_compaction(cli.lifecycle.clone());
+    let outcome = cli.lifecycle.run_compaction().map_err(|message| {
+        Box::new(CompactionReportedError {
+            message,
+            reports: cli
+                .lifecycle
+                .session_snapshot()
+                .last_compaction_report
+                .into_iter()
+                .collect(),
+        }) as Box<dyn std::error::Error>
+    })?;
+    let skipped = outcome.method.is_none();
     Ok(ResumeCommandOutcome {
         session: cli.lifecycle.session_snapshot(),
-        message: Some(format_compact_report(removed, kept, skipped, &source)),
+        message: Some(format_lifecycle_compaction(&outcome)),
         json: Some(serde_json::json!({
             "kind": "compact", "skipped": skipped,
-            "removed_messages": removed, "kept_messages": kept,
-            "summary_source": source.to_string(),
+            "removed_messages": outcome.removed, "kept_messages": outcome.kept,
+            "summary_source": outcome.method.as_ref().map(|(_, source)| source.to_string()),
+            "report": outcome.report,
         })),
     })
+}
+
+fn format_lifecycle_compaction(outcome: &engine_host::session_engine::CompactionOutcome) -> String {
+    format_compact_report(
+        outcome.removed,
+        outcome.kept,
+        outcome.method.is_none(),
+        outcome
+            .method
+            .as_ref()
+            .map_or(&runtime::CompactionSummarySource::Llm, |(_, source)| source),
+        outcome.report.as_ref(),
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2467,8 +2504,9 @@ async fn ctrl_break_cancel_signal() {
 }
 
 /// Installs a process SIGINT / Ctrl-C handler for the duration of a
-/// **non-interactive one-shot turn** (`scode <prompt>`, incl. `--output-format
-/// json`), translating the signal into an `EngineCommand::Cancel` across the
+/// **non-interactive one-shot operation** (`scode <prompt>` or resumed
+/// `/compact`, incl. `--output-format json`), translating the signal into a
+/// cancellation request. For turns this is `EngineCommand::Cancel` across the
 /// seam. The pump then aborts the in-flight turn — the running tool returns an
 /// interrupted result and the turn ends `cancelled`, so the process still
 /// prints its final text / JSON and exits cleanly (exit 0), matching the
@@ -2496,6 +2534,16 @@ struct SignalCancelGuard {
 
 impl SignalCancelGuard {
     fn install(commands: std::sync::mpsc::Sender<EngineCommand>) -> Self {
+        Self::install_with_cancel(move || {
+            let _ = commands.send(EngineCommand::Cancel);
+        })
+    }
+
+    fn install_compaction(lifecycle: Arc<dyn SessionLifecycle>) -> Self {
+        Self::install_with_cancel(move || lifecycle.cancel_compaction())
+    }
+
+    fn install_with_cancel(cancel: impl Fn() + Send + 'static) -> Self {
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let join_handle = thread::spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread()
@@ -2513,11 +2561,11 @@ impl SignalCancelGuard {
                 tokio::select! {
                     result = tokio::signal::ctrl_c() => {
                         if result.is_ok() {
-                            let _ = commands.send(EngineCommand::Cancel);
+                            cancel();
                         }
                     }
                     () = ctrl_break_cancel_signal() => {
-                        let _ = commands.send(EngineCommand::Cancel);
+                        cancel();
                     }
                     _ = stop => {}
                 }
@@ -3690,6 +3738,7 @@ fn run_repl_iocraft_dispatch(
                         }
                         Ok(Some(command)) => {
                             let mut cli_lock = cli_shared.lock().expect("LiveCli mutex poisoned");
+                            let refresh_context = matches!(command, SlashCommand::Compact);
                             match cli_lock.handle_repl_command(command) {
                                 Ok(true) => {
                                     if let Err(e) = cli_lock.persist_session() {
@@ -3706,6 +3755,11 @@ fn run_repl_iocraft_dispatch(
                                     ansi_fg(theme().error),
                                     RESET
                                 )),
+                            }
+                            if refresh_context {
+                                if let Some(status) = cli_lock.resume_status_line() {
+                                    repl_ui_cmd.set_turn_result(&status);
+                                }
                             }
                             true
                         }
@@ -4020,6 +4074,31 @@ struct TurnOutcome {
     tool_uses: Vec<serde_json::Value>,
     tool_results: Vec<serde_json::Value>,
     prompt_cache_events: Vec<serde_json::Value>,
+    compaction_reports: Vec<engine_events::CompactionReport>,
+}
+
+/// Preserve per-run data through the existing one-shot error envelope.
+#[derive(Debug)]
+struct CompactionReportedError {
+    message: String,
+    reports: Vec<engine_events::CompactionReport>,
+}
+
+impl std::fmt::Display for CompactionReportedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CompactionReportedError {}
+
+fn add_compaction_error_reports(
+    envelope: &mut serde_json::Value,
+    error: &(dyn std::error::Error + 'static),
+) {
+    if let Some(failure) = error.downcast_ref::<CompactionReportedError>() {
+        envelope["compaction_reports"] = json!(failure.reports);
+    }
 }
 
 /// A question prompter that declines to answer (empty selection). The
@@ -4399,7 +4478,7 @@ impl LiveCli {
         let model = self.lifecycle.current_model();
         let latest = tracker.current_turn_usage();
         let cumulative_usage = tracker.cumulative_usage();
-        let context_window = runtime::model_capabilities::context_window_or_default(&model);
+        let context = self.lifecycle.context_occupancy();
         let cumulative_duration = (tracker.cumulative_duration_ms() > 0)
             .then(|| Duration::from_millis(tracker.cumulative_duration_ms()));
         let elapsed = tracker.latest_turn_duration_ms().map(Duration::from_millis);
@@ -4407,18 +4486,23 @@ impl LiveCli {
             .ok()
             .and_then(|cwd| resolve_git_branch_for(&cwd));
         let account = self.lifecycle.current_billing_account();
-        Some(turn_status_line(&TurnStatus {
+        let status = TurnStatus {
             model: &model,
             turn: tracker.turns(),
             usage: &latest,
             cumulative_usage: &cumulative_usage,
-            context_tokens: Some(latest.context_tokens()),
-            context_window: Some(context_window),
+            context_tokens: Some(context.tokens),
+            context_window: Some(context.window),
             elapsed,
             cumulative_duration,
             branch: branch.as_deref(),
             account: account.name(),
-        }))
+        };
+        Some(if context.estimated {
+            turn_status_line_with_context_estimate(&status, true)
+        } else {
+            turn_status_line(&status)
+        })
     }
 
     fn repl_completion_candidates(
@@ -4560,6 +4644,17 @@ impl LiveCli {
                         "current_cache_read_input_tokens": event.current_cache_read_input_tokens,
                         "token_drop": event.token_drop,
                     }));
+                }
+                EngineEvent::Compaction(progress) => {
+                    if let Some(report) = &progress.report {
+                        if !outcome
+                            .compaction_reports
+                            .iter()
+                            .any(|previous| previous.run_id == report.run_id)
+                        {
+                            outcome.compaction_reports.push(report.clone());
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -4707,12 +4802,12 @@ impl LiveCli {
         drop(cancel_monitor);
 
         match outcome.complete {
-            Some(tc) if tc.cancelled => spinner.fail("⏹ Cancelled"),
-            Some(tc) => {
+            Some(tc) if tc.cancelled => {
+                spinner.fail("⏹ Cancelled");
+                self.print_turn_status_line(&model, turn_start.elapsed(), None, None);
+            }
+            Some(_) => {
                 spinner.clear();
-                if let Some(event) = tc.auto_compaction {
-                    self.out_println(format_auto_compaction_notice(event.removed_message_count));
-                }
                 self.print_turn_status_line(&model, turn_start.elapsed(), None, None);
             }
             None => {
@@ -4748,25 +4843,15 @@ impl LiveCli {
             .as_ref()
             .map(runtime::model_discovery::ModelCatalog::enter);
         let usage_tracker = self.lifecycle.usage_snapshot();
-        // Two different needs from one turn:
-        //  - context occupancy is the LATEST request's context_tokens (what the
-        //    window currently holds; the metric auto-compaction uses).
-        //  - billed tokens/cost is the SUM of every request this turn issued
-        //    (a tool-loop turn makes several), so the status line reports the
-        //    whole turn, not just the last request.
-        let latest = usage_tracker.current_turn_usage();
+        // Billing retains every request. The meter separately prefers a valid
+        // provider anchor, or estimates the full next request after compaction.
         let usage = usage_tracker.current_turn_total_usage();
         let cumulative_usage = usage_tracker.cumulative_usage();
         let cumulative_duration = (usage_tracker.cumulative_duration_ms() > 0)
             .then(|| Duration::from_millis(usage_tracker.cumulative_duration_ms()));
         let turns = usage_tracker.turns();
-        // Current context-window occupancy (what the provider just processed),
-        // the same metric auto-compaction uses — not the session-cumulative
-        // total, which never shrinks and overshoots the window. Window is sized
-        // off the session model so the percentage and the compaction trigger
-        // share one denominator.
-        let context_tokens = latest.context_tokens();
-        let context_window = runtime::model_capabilities::context_window_or_default(model);
+        // The current request meter and compaction share the live route's window.
+        let context = self.lifecycle.context_occupancy();
         let branch = env::current_dir()
             .ok()
             .and_then(|cwd| resolve_git_branch_for(&cwd));
@@ -4774,18 +4859,23 @@ impl LiveCli {
         // second copy of the precedence rules. A turn takes seconds; the config
         // read behind this does not register next to it.
         let account = self.lifecycle.current_billing_account();
-        let line = turn_status_line(&TurnStatus {
+        let status = TurnStatus {
             model,
             turn: turns,
             usage: &usage,
             cumulative_usage: &cumulative_usage,
-            context_tokens: Some(context_tokens),
-            context_window: Some(context_window),
+            context_tokens: Some(context.tokens),
+            context_window: Some(context.window),
             elapsed: Some(elapsed),
             cumulative_duration,
             branch: branch.as_deref(),
             account: account.name(),
-        });
+        };
+        let line = if context.estimated {
+            turn_status_line_with_context_estimate(&status, true)
+        } else {
+            turn_status_line(&status)
+        };
         match (ui, output) {
             // Show in the ChromeSlot only (visible until the next turn). The
             // status line is deliberately NOT echoed to scrollback: the
@@ -4841,15 +4931,15 @@ impl LiveCli {
         // whether the receiver is still running and can acknowledge delivery.
         let is_handled = outcome.complete.is_some();
         match outcome.complete {
-            Some(tc) if tc.cancelled => output.println(&format!(
-                "{}\u{23f9} Cancelled{}",
-                ansi_fg(theme().error),
-                RESET
-            )),
-            Some(tc) => {
-                if let Some(event) = tc.auto_compaction {
-                    output.println(&format_auto_compaction_notice(event.removed_message_count));
-                }
+            Some(tc) if tc.cancelled => {
+                output.println(&format!(
+                    "{}\u{23f9} Cancelled{}",
+                    ansi_fg(theme().error),
+                    RESET
+                ));
+                self.print_turn_status_line(&model, turn_start.elapsed(), Some(output), Some(ui));
+            }
+            Some(_) => {
                 // The status line is part of the transcript: printed once, in
                 // order, above the next prompt.
                 self.print_turn_status_line(&model, turn_start.elapsed(), Some(output), Some(ui));
@@ -4899,7 +4989,10 @@ impl LiveCli {
             None,
         )?;
         if let Some(message) = outcome.error {
-            return Err(message.into());
+            return Err(Box::new(CompactionReportedError {
+                message,
+                reports: outcome.compaction_reports,
+            }));
         }
         Ok(outcome)
     }
@@ -4921,6 +5014,9 @@ impl LiveCli {
     fn run_prompt_compact(&mut self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut permission_prompter = self.compact_permission_prompter();
         let outcome = self.run_noninteractive_turn(input, permission_prompter.as_mut())?;
+        for report in &outcome.compaction_reports {
+            eprintln!("{}", format_compaction_notice(report));
+        }
         self.out_println(outcome.final_text);
         Ok(())
     }
@@ -4936,6 +5032,7 @@ impl LiveCli {
             json!({
                 "message": outcome.final_text,
                 "compact": true,
+                "compaction_reports": outcome.compaction_reports,
                 "model": model,
                 "usage": {
                     "input_tokens": tc.turn_usage.input_tokens,
@@ -4961,10 +5058,14 @@ impl LiveCli {
         let tc = outcome
             .complete
             .ok_or_else(|| "engine turn did not complete".to_string())?;
-        let auto_compaction_json = tc.auto_compaction.map(|event| {
+        let auto_compaction_json = tc.auto_compaction.as_ref().map(|event| {
             json!({
                 "removed_messages": event.removed_message_count,
-                "notice": format_auto_compaction_notice(event.removed_message_count),
+                "notice": event.report.as_ref().map_or_else(
+                    || format_auto_compaction_notice(event.removed_message_count),
+                    format_compaction_notice,
+                ),
+                "report": event.report,
             })
         });
         let estimated_cost = format_usd(
@@ -4981,6 +5082,7 @@ impl LiveCli {
                 "model": model,
                 "iterations": tc.iterations,
                 "auto_compaction": auto_compaction_json,
+                "compaction_reports": outcome.compaction_reports,
                 "tool_uses": outcome.tool_uses,
                 "tool_results": outcome.tool_results,
                 "prompt_cache_events": outcome.prompt_cache_events,
@@ -6119,13 +6221,22 @@ impl LiveCli {
     }
 
     fn compact(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let (removed, kept, skipped, summary_source) = self.lifecycle.run_compaction()?;
-        self.out_println(format_compact_report(
-            removed,
-            kept,
-            skipped,
-            &summary_source,
-        ));
+        match self.lifecycle.run_compaction() {
+            Ok(outcome) => {
+                self.out_println(format_lifecycle_compaction(&outcome));
+                if self.is_repl && self.iocraft_output.is_none() {
+                    if let Some(status) = self.resume_status_line() {
+                        self.out_println(status.to_string());
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(report) = self.lifecycle.session_snapshot().last_compaction_report {
+                    self.out_println(commands::reports::format_compaction_report(&report));
+                }
+                return Err(error.into());
+            }
+        }
         Ok(())
     }
 

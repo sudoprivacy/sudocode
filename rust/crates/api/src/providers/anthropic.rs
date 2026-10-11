@@ -302,6 +302,11 @@ impl AnthropicClient {
     }
 
     #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         // OAuth subscription tokens must always use the direct Anthropic API.
         if !self.oauth_system_prefix {
@@ -1096,6 +1101,9 @@ impl MessageStream {
                     Err(_) if self.logically_complete => Vec::new(),
                     Err(error) => return Err(error),
                 };
+                for event in &remaining {
+                    crate::client::record_compaction_stream_event(event)?;
+                }
                 self.pending.extend(remaining);
                 if let Some(event) = self.pending.pop_front() {
                     // Observe it like any other event: a frame recovered here
@@ -1130,6 +1138,9 @@ impl MessageStream {
                         .parser
                         .push(&chunk)
                         .map_err(|error| self.record_refusal(error))?;
+                    for event in &events {
+                        crate::client::record_compaction_stream_event(event)?;
+                    }
                     self.pending.extend(events);
                 }
                 Ok(None) => {
@@ -1251,6 +1262,10 @@ impl MessageStream {
     /// `message_delta` carrying a `stop_reason` and then `message_stop` — and
     /// which of the two arrives is not guaranteed.
     fn record_usage_once(&mut self) {
+        if let Some(usage) = &self.latest_usage {
+            runtime::compaction_scope::record_usage(usage.token_usage());
+        }
+
         if self.usage_recorded {
             return;
         }
@@ -1259,6 +1274,7 @@ impl MessageStream {
         let Some(usage) = self.latest_usage.clone() else {
             return;
         };
+        runtime::compaction_scope::record_usage(usage.token_usage());
         if let Some(prompt_cache) = &self.prompt_cache {
             let record = prompt_cache.record_usage(
                 &self.request,

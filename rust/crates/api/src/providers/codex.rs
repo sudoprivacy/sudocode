@@ -485,6 +485,13 @@ impl MessageStream {
             }
 
             if self.done {
+                if runtime::compaction_scope::is_active() && self.state.stop_reason.is_none() {
+                    return Err(ApiError::incomplete_stream(
+                        "Codex",
+                        &self.state.model,
+                        "summary stream ended without a provider terminal event",
+                    ));
+                }
                 self.pending.extend(self.state.finish());
                 if let Some(event) = self.pending.pop_front() {
                     return Ok(Some(event));
@@ -502,6 +509,14 @@ impl MessageStream {
                     self.done = true;
                 }
             }
+        }
+    }
+}
+
+impl Drop for MessageStream {
+    fn drop(&mut self) {
+        if let Some(usage) = &self.state.usage {
+            runtime::compaction_scope::record_usage(usage.token_usage());
         }
     }
 }
@@ -674,7 +689,7 @@ impl StreamState {
                 }
             }
 
-            "response.completed" => {
+            "response.completed" | "response.incomplete" | "response.failed" => {
                 let resp = json.get("response").unwrap_or(&json);
                 if let Some(u) = resp.get("usage") {
                     self.usage = Some(Usage {
@@ -687,11 +702,48 @@ impl StreamState {
                         ..Usage::default()
                     });
                 }
-                self.stop_reason = Some(if self.tool_blocks.is_empty() {
-                    "end_turn".to_string()
+                runtime::compaction_scope::record_completed_response()
+                    .map_err(|error| ApiError::Configuration(error.to_string()))?;
+                let event_type = frame.event_type.as_str();
+                let refusal = resp
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item.get("content").and_then(Value::as_array))
+                    .flatten()
+                    .find_map(|part| {
+                        (part["type"] == "refusal").then(|| {
+                            part["refusal"]
+                                .as_str()
+                                .unwrap_or("provider refusal")
+                                .to_string()
+                        })
+                    });
+                if runtime::compaction_scope::is_active()
+                    && (event_type == "response.failed"
+                        || refusal.is_some()
+                        || (event_type == "response.incomplete"
+                            && resp["incomplete_details"]["reason"] == "content_filter"))
+                {
+                    return Err(ApiError::ProviderRefusal {
+                        provider: "Codex".into(),
+                        model: self.model.clone(),
+                        category: Some(event_type.into()),
+                        explanation: refusal
+                            .or_else(|| resp["error"]["message"].as_str().map(str::to_string)),
+                        usage: self.usage.clone().map(Box::new),
+                    });
+                }
+                if event_type == "response.incomplete" {
+                    self.stop_reason = Some("incomplete".into());
                 } else {
-                    "tool_use".to_string()
-                });
+                    self.stop_reason = Some(if self.tool_blocks.is_empty() {
+                        "end_turn".to_string()
+                    } else {
+                        "tool_use".to_string()
+                    });
+                }
             }
 
             _ => {} // Ignore unknown event types.

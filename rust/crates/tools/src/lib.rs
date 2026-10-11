@@ -7875,6 +7875,45 @@ impl ApiClient for ProviderRuntimeClient {
         }
     }
 
+    fn context_budget_for_request(
+        &self,
+        model: &str,
+        request: &ApiRequest,
+    ) -> runtime::ContextBudget {
+        self.context_budget(model, &request.system_prompt)
+    }
+
+    fn context_budget_for_completion(
+        &self,
+        model: &str,
+        request: &ApiRequest,
+        options: runtime::TextCompletionOptions,
+    ) -> runtime::ContextBudget {
+        let mut budget = self.context_budget(model, &request.system_prompt);
+        let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
+        budget.overhead_tokens = api::estimate_request_overhead_tokens(
+            system.as_deref(),
+            options.include_tools.then(|| self.definitions()),
+        ) as usize;
+        budget.max_output_tokens = options.max_tokens as usize;
+        budget
+    }
+
+    fn compaction_route_fingerprint(&self, _request: &ApiRequest) -> String {
+        let route = self
+            .chain
+            .first()
+            .map(|entry| format!("{}|{}", entry.client.route_identity(), entry.model))
+            .unwrap_or_default();
+        format!(
+            "{}|{}|{:?}|{}",
+            route,
+            self.execution.thinking_enabled,
+            self.execution.reasoning_effort,
+            serde_json::to_string(self.definitions()).unwrap_or_default()
+        )
+    }
+
     async fn complete_text(
         &mut self,
         request: ApiRequest,

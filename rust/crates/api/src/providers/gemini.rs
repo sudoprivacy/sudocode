@@ -104,6 +104,11 @@ impl Clone for GeminiClient {
 }
 
 impl GeminiClient {
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Build from resolved config values.
     pub fn from_resolved(resolved: &ResolvedProvider) -> Result<Self, ApiError> {
         let is_subscription = matches!(
@@ -800,6 +805,13 @@ impl MessageStream {
             }
 
             if self.done {
+                if runtime::compaction_scope::is_active() && self.state.stop_reason.is_none() {
+                    return Err(ApiError::incomplete_stream(
+                        "Gemini",
+                        &self.state.model,
+                        "summary stream ended without a provider terminal event",
+                    ));
+                }
                 self.pending.extend(self.state.finish());
                 if let Some(event) = self.pending.pop_front() {
                     return Ok(Some(event));
@@ -824,6 +836,14 @@ impl MessageStream {
     }
 }
 
+impl Drop for MessageStream {
+    fn drop(&mut self) {
+        if let Some(usage) = &self.state.usage {
+            runtime::compaction_scope::record_usage(usage.token_usage());
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stream state machine
 // ---------------------------------------------------------------------------
@@ -842,6 +862,7 @@ struct StreamState {
     next_block_index: u32,
     usage: Option<Usage>,
     has_tool_calls: bool,
+    stop_reason: Option<String>,
 }
 
 impl StreamState {
@@ -855,6 +876,7 @@ impl StreamState {
             next_block_index: 0,
             usage: None,
             has_tool_calls: false,
+            stop_reason: None,
         }
     }
 
@@ -993,6 +1015,46 @@ impl StreamState {
             });
         }
 
+        let finish_reason = json["candidates"]
+            .as_array()
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate["finishReason"].as_str());
+        if finish_reason.is_some_and(|reason| reason != "FINISH_REASON_UNSPECIFIED")
+            || json["promptFeedback"]["blockReason"].as_str().is_some()
+        {
+            runtime::compaction_scope::record_completed_response()
+                .map_err(|error| ApiError::Configuration(error.to_string()))?;
+        }
+        let block_reason = json["promptFeedback"]["blockReason"].as_str();
+        if let Some(reason) = block_reason.or(finish_reason.filter(|reason| {
+            !matches!(*reason, "STOP" | "MAX_TOKENS" | "FINISH_REASON_UNSPECIFIED")
+        })) {
+            if runtime::compaction_scope::is_active() {
+                return Err(ApiError::ProviderRefusal {
+                    provider: "Gemini".into(),
+                    model: self.model.clone(),
+                    category: Some(reason.into()),
+                    explanation: json["promptFeedback"]["blockReasonMessage"]
+                        .as_str()
+                        .map(str::to_string),
+                    usage: self.usage.clone().map(Box::new),
+                });
+            }
+        }
+        if let Some(reason) = finish_reason.filter(|reason| *reason != "FINISH_REASON_UNSPECIFIED")
+        {
+            self.stop_reason = Some(
+                if reason == "MAX_TOKENS" {
+                    "max_tokens"
+                } else if self.has_tool_calls {
+                    "tool_use"
+                } else {
+                    "end_turn"
+                }
+                .into(),
+            );
+        }
+
         Ok(events)
     }
 
@@ -1034,7 +1096,11 @@ impl StreamState {
 
             events.push(StreamEvent::MessageDelta(MessageDeltaEvent {
                 delta: MessageDelta {
-                    stop_reason: Some(stop_reason.to_string()),
+                    stop_reason: Some(
+                        self.stop_reason
+                            .clone()
+                            .unwrap_or_else(|| stop_reason.to_string()),
+                    ),
                     stop_sequence: None,
                 },
                 usage: self.usage.clone().unwrap_or_default(),

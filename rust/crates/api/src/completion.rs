@@ -84,13 +84,56 @@ impl ProviderClient {
             .send_message_streamed(&message_request, None)
             .await
             .map_err(|error| {
-                if error.is_context_window_failure() {
+                if let crate::ApiError::ProviderRefusal { usage, .. } = &error {
+                    if let Some(usage) = usage {
+                        runtime::compaction_scope::record_usage(usage.token_usage());
+                    }
+                    let _ = runtime::compaction_scope::record_completed_response();
+                }
+                let path_not_supported = match &error {
+                    crate::ApiError::ToolCallingUnsupported { .. } => true,
+                    crate::ApiError::Api {
+                        status,
+                        message,
+                        body,
+                        ..
+                    } => {
+                        *status == reqwest::StatusCode::BAD_REQUEST
+                            && message
+                                .as_deref()
+                                .unwrap_or(body)
+                                .trim()
+                                .to_ascii_lowercase()
+                                .ends_with("cache-safe compaction not supported")
+                    }
+                    _ => false,
+                };
+                if path_not_supported {
+                    RuntimeError::compaction_path_not_supported(error.to_string())
+                } else if error.is_context_window_failure() {
                     RuntimeError::context_window_blocked(error.to_string())
                 } else {
-                    RuntimeError::new(error.to_string())
+                    RuntimeError::new(error.to_string()).retryable(error.is_retryable())
                 }
             })?;
+        let usage = (response.usage != crate::types::Usage::default())
+            .then(|| response.usage.token_usage());
+        if let Some(usage) = usage {
+            runtime::compaction_scope::record_usage(usage);
+        }
+        runtime::compaction_scope::record_completed_response()
+            .map_err(|error| RuntimeError::new(error.to_string()))?;
+        if matches!(
+            response.stop_reason.as_deref(),
+            Some("refusal" | "content_filter" | "safety" | "blocked")
+        ) {
+            return Err(RuntimeError::new(format!(
+                "provider declined compaction: {}",
+                response.stop_reason.as_deref().unwrap_or("refusal")
+            )));
+        }
         Ok(TextCompletion {
+            usage,
             text: response
                 .content
                 .iter()

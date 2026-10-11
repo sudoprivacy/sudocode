@@ -548,6 +548,10 @@ impl MessageStream {
     }
 
     fn record_usage_once(&mut self) {
+        if let Some(usage) = self.state.usage() {
+            runtime::compaction_scope::record_usage(usage.token_usage());
+        }
+
         if self.usage_recorded {
             return;
         }
@@ -555,6 +559,7 @@ impl MessageStream {
         let Some(usage) = self.state.usage() else {
             return;
         };
+        runtime::compaction_scope::record_usage(usage.token_usage());
         let Some(tracer) = &self.session_tracer else {
             return;
         };
@@ -586,6 +591,17 @@ enum MessageStreamState {
 
 impl MessageStreamState {
     fn finish(&mut self) -> Result<Vec<StreamEvent>, ApiError> {
+        let terminal = match self {
+            Self::Chat(state) => state.stop_reason.is_some(),
+            Self::Responses(state) => state.stop_reason.is_some(),
+        };
+        if runtime::compaction_scope::is_active() && !terminal {
+            return Err(ApiError::incomplete_stream(
+                "OpenAI-compatible",
+                self.model(),
+                "summary stream ended without a provider terminal event",
+            ));
+        }
         match self {
             Self::Chat(state) => state.finish(),
             Self::Responses(state) => Ok(state.finish()),
@@ -645,6 +661,17 @@ impl OpenAiSseParser {
 
         while let Some(frame) = next_sse_frame(&mut self.buffer) {
             if let Some(event) = parse_sse_frame(&frame, &self.provider, &self.model)? {
+                if let Some(usage) = &event.usage {
+                    runtime::compaction_scope::record_usage(usage.to_api_usage().token_usage());
+                }
+                if event
+                    .choices
+                    .iter()
+                    .any(|choice| choice.finish_reason.is_some())
+                {
+                    runtime::compaction_scope::record_completed_response()
+                        .map_err(|error| ApiError::Configuration(error.to_string()))?;
+                }
                 events.push(event);
             }
         }
@@ -1377,7 +1404,7 @@ impl ResponsesStreamState {
                     }
                 }
             }
-            "response.completed" => {
+            "response.completed" | "response.incomplete" | "response.failed" => {
                 let resp = json.get("response").unwrap_or(&json);
                 if let Some(u) = resp.get("usage") {
                     self.usage = Some(Usage {
@@ -1390,11 +1417,34 @@ impl ResponsesStreamState {
                         ..Usage::default()
                     });
                 }
-                self.stop_reason = Some(if self.tool_blocks.is_empty() {
-                    "end_turn".to_string()
+                runtime::compaction_scope::record_completed_response()
+                    .map_err(|error| ApiError::Configuration(error.to_string()))?;
+                let event_type = frame.event_type.as_str();
+                let refusal = responses_refusal(resp);
+                if runtime::compaction_scope::is_active()
+                    && (event_type == "response.failed"
+                        || refusal.is_some()
+                        || (event_type == "response.incomplete"
+                            && resp["incomplete_details"]["reason"] == "content_filter"))
+                {
+                    return Err(ApiError::ProviderRefusal {
+                        provider: "OpenAI-compatible".into(),
+                        model: self.model.clone(),
+                        category: Some(event_type.into()),
+                        explanation: refusal
+                            .or_else(|| resp["error"]["message"].as_str().map(str::to_string)),
+                        usage: self.usage.clone().map(Box::new),
+                    });
+                }
+                if event_type == "response.incomplete" {
+                    self.stop_reason = Some("incomplete".into());
                 } else {
-                    "tool_use".to_string()
-                });
+                    self.stop_reason = Some(if self.tool_blocks.is_empty() {
+                        "end_turn".to_string()
+                    } else {
+                        "tool_use".to_string()
+                    });
+                }
             }
             _ => {}
         }
@@ -1491,6 +1541,23 @@ impl ResponsesStreamState {
 
         events
     }
+}
+
+fn responses_refusal(response: &Value) -> Option<String> {
+    response
+        .get("output")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .find_map(|part| {
+            (part["type"] == "refusal").then(|| {
+                part["refusal"]
+                    .as_str()
+                    .unwrap_or("provider refusal")
+                    .to_string()
+            })
+        })
 }
 
 #[derive(Debug, Deserialize)]

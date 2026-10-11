@@ -315,6 +315,9 @@ pub struct UsageTracker {
     context_tokens: Option<u32>,
     cumulative: TokenUsage,
     cumulative_cost: UsageCostAggregation,
+    /// A sent maintenance request without received usage makes the complete
+    /// session bill unknown, while its known token and cost subtotal survives.
+    unknown_maintenance_receipts: usize,
     turns: u32,
     /// Wall-clock time the most recently recorded turn took, in milliseconds.
     /// The status line's `+Ns` field. `None` until a turn duration is recorded.
@@ -346,10 +349,52 @@ impl UsageTracker {
                 tracker.record_turn_duration(duration_ms);
             }
         }
-        if session.compaction.is_some() {
+        if session.compaction.is_some() || session.compaction_achievement.is_some() {
             tracker.clear_context_usage();
         }
+        for usage in session
+            .maintenance_usage
+            .iter()
+            .filter_map(|receipt| receipt.usage)
+        {
+            tracker.record_maintenance(usage);
+        }
+        tracker.set_unknown_maintenance_receipts(
+            session
+                .maintenance_usage
+                .iter()
+                .filter(|receipt| receipt.usage.is_none())
+                .count(),
+        );
         tracker
+    }
+
+    /// Add context-maintenance billing without changing task turn usage or
+    /// the provider context anchor.
+    pub fn record_maintenance(&mut self, usage: TokenUsage) {
+        self.cumulative.add_assign_token_counts(usage);
+        self.cumulative_cost.push(usage);
+        self.cumulative_cost.apply_to(&mut self.cumulative);
+    }
+
+    /// Update cost completeness from the deduplicated session receipt ledger.
+    /// Keep known subtotals so a later received bill can restore a complete
+    /// cumulative cost without changing task usage or inventing zero usage.
+    pub fn set_unknown_maintenance_receipts(&mut self, count: usize) {
+        self.unknown_maintenance_receipts = count;
+    }
+
+    /// Rebuild session totals after reloading externally changed history while
+    /// retaining the current task's usage and duration. Its provider context
+    /// anchor no longer describes the reloaded transcript.
+    pub fn refresh_session_totals(&mut self, session: &Session) {
+        let refreshed = Self::from_session(session);
+        self.cumulative = refreshed.cumulative;
+        self.cumulative_cost = refreshed.cumulative_cost;
+        self.unknown_maintenance_receipts = refreshed.unknown_maintenance_receipts;
+        self.turns = refreshed.turns;
+        self.cumulative_duration_ms = refreshed.cumulative_duration_ms;
+        self.clear_context_usage();
     }
 
     /// Reset the per-turn accumulator at the start of a turn, so
@@ -377,6 +422,13 @@ impl UsageTracker {
     /// cumulative billing and completed-turn usage remain untouched.
     pub fn clear_context_usage(&mut self) {
         self.context_tokens = None;
+    }
+
+    /// A provider anchor is absent after history replacement until the next
+    /// task request reports occupancy.
+    #[must_use]
+    pub fn current_context_usage(&self) -> Option<u32> {
+        self.context_tokens
     }
 
     /// Latest provider context that still describes the active history.
@@ -416,7 +468,12 @@ impl UsageTracker {
 
     #[must_use]
     pub fn cumulative_usage(&self) -> TokenUsage {
-        self.cumulative
+        let mut cumulative = self.cumulative;
+        if self.unknown_maintenance_receipts > 0 {
+            cumulative.cost_units = None;
+            cumulative.cost_currency = None;
+        }
+        cumulative
     }
 
     #[must_use]

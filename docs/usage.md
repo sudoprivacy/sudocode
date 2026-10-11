@@ -474,10 +474,15 @@ See [`permissions-and-sandbox.md`](./permissions-and-sandbox.md).
 color per category (system prompt, system tools, MCP tools, agent types,
 memory files, skills, messages), with free space in `⛶` and the buffer
 auto-compaction keeps in reserve in `⛝`. The legend lists each category's
-estimated tokens and share of the window; the headline total is the
-provider-reported occupancy of the latest response once a turn has completed,
-and a local estimate before that. The footer summarises each source with a
-count and a token total; `/context all` expands it to one line per tool,
+estimated tokens and share of the window. The headline total uses a valid
+provider-reported occupancy anchor from the latest task response. Without one,
+it shows a full next-request estimate, including the actual system and tool
+overhead, marked `≈`. Successful compaction clears the old anchor; manual,
+automatic, and resumed sessions refresh the meter without resetting cumulative
+tokens or cost. Summary-request usage counts toward the cumulative bill but
+does not become a task-response anchor or add a conversation turn.
+The footer summarises each source with a count and a token total;
+`/context all` expands it to one line per tool,
 agent type, memory file, and skill. Tool definitions are counted exactly as
 the next request would carry them: a deferred tool the model has not yet
 discovered through ToolSearch is listed but costs no tokens.
@@ -501,21 +506,71 @@ or is cancelled.
 
 `/compact` in the REPL, ACP, or `scode --resume <id> /compact` uses the same
 model-backed checkpoint pipeline, even below the automatic pressure threshold.
-The configured provider must be available. Older history and any previous
-checkpoint are summarized together; recent messages and complete tool exchanges
-are retained by token budget. Automatic compaction first tries trimming large
-tool outputs to avoid an unnecessary model call.
+Older history and any previous checkpoint are summarized together. The whole
+replacement history, including the checkpoint, recent messages, continuation
+framing, and Todo state, must shrink to at most **50% of the original history**
+and fit the next request's safe budget. **30% is the ideal target**, rather than
+a minimum or a separate success condition. These figures use local content
+estimates; reaching them does not guarantee lossless summarization.
 
-The checkpoint prompt asks for a complete summary within 8,000 tokens where
-possible. Generation has a fixed ceiling of 12,000 output tokens, capped by
-the model's smaller output limit (including a `maxOutputTokens` override).
-The model's context-window limit still applies.
+The retention ratio uses the original history before any tool-output trimming.
+The run retains at least four recent messages and complete tool exchanges by
+token budget. Automatic compaction first stages large-tool-output trimming; it
+can commit that alone only when the same 50% and request-budget checks pass.
+Otherwise, both summary attempts reuse that same frozen, trimmed copy; manual
+compaction summarizes its frozen original source. If protected content prevents
+the target, the operation fails without installing a weaker replacement.
 
-Failed, empty, truncated, or non-shrinking summaries leave history intact and
-report an error instead of continuing with a statistical or empty history.
-Pre-request failure stops that request. A post-turn maintenance failure keeps
-the already completed response. Successful replacements archive the original
-JSONL at `<transcript>.before-compact-<timestamp>` before committing the new
+The visible summary allowance is dynamic: at most 12,000 tokens, reduced by the
+space left after retained history and framing, the next-request target, and
+the model's output limit (including `maxOutputTokens` overrides). The prompt
+keeps 8,000 tokens as soft guidance and asks for a shorter summary when needed.
+Budgeted thinking can require additional output reservation. Adaptive thinking
+does not add a manual thinking budget to the summary's output ceiling. Both the
+summary request and the following task request are checked against their own
+actual system, tool schemas, output reservation, and safety buffer; pending
+user input also reduces the next request's history budget.
+
+One run allows at most two completed summary responses, four actual model HTTP
+requests, and two transient retries, shared across cache-safe generation,
+standard-path fallback, and shorter-summary attempts. Local preflight rejection
+does not count as an HTTP request. Authentication and permanent protocol errors
+stop immediately; unchanged oversized requests are not resent.
+
+Reports distinguish `target_met`, `skipped`, `failed`, and `cancelled`, with
+the method, estimated before/after history, retention ratio, target, and reason.
+An unchanged, previously committed achievement with the same request state and
+budget can skip without another model call; history with no summarizable source
+can also skip when the original request is safe. A skipped report describes the
+current unchanged history and does not claim a new reduction. The configured
+provider must be available when a summary request is needed.
+
+Empty, truncated, tool-calling, non-shrinking, or over-target summaries are never
+installed. Failure or cancellation before commit preserves source messages;
+pre-request failure stops that request, while post-turn maintenance failure
+keeps the already streamed response in history but still fails the prompt/run.
+Streamed output alone does not make that run successful. Cancellation after a
+durable commit reports the committed result. Resumed one-shot `/compact` handles
+Ctrl-C by waiting for its final report and usage receipts before exiting.
+
+Known usage from every summary attempt, including rejected summaries and
+cancelled requests, is saved separately as maintenance usage and counted once
+toward cumulative billing. Unknown usage stays unknown in its receipt, leaving
+the complete cumulative paid amount unknown while retaining known token
+subtotals. The status line can still show an estimated cost marked `~`.
+Maintenance metadata does not change active history or its occupancy anchor;
+a persistence failure is reported explicitly. Durable maintenance receipts are
+merged when capturing the source revision, including receipts added externally
+while message history stays unchanged.
+
+Before archiving or replacing history, the source's durable revision is checked.
+A detected external change rejects the candidate and reloads the newer source
+without writing the stale snapshot; unsaved maintenance metadata is reported.
+If the source cannot be parsed or reloaded, ordinary persistence and exit do
+not write back the stale history. A successful reload restores normal writes.
+The check detects changes observed during commit preparation and is not a
+cross-process lock or compare-and-swap. Successful replacements archive the
+original JSONL at `<transcript>.before-compact-<timestamp>` before committing the new
 history. Keep these files to inspect or recover older context; they are not
 subject to automatic cleanup. See [ACP compaction](acp.md#slash-commands) for
 budgets and persistence details.

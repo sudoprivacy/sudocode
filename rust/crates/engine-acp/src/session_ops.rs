@@ -17,9 +17,9 @@ use agent_client_protocol_schema::{
     ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 use commands::reports::{
-    format_acp_compact_report, format_model_report, format_model_switch_report,
-    format_status_report, render_config_report, render_doctor_report, status_context, BuildInfo,
-    StatusUsage,
+    format_acp_compact_report, format_compaction_report_with_messages, format_model_report,
+    format_model_switch_report, format_status_report, render_config_report, render_doctor_report,
+    status_context, BuildInfo, StatusUsage,
 };
 use commands::{
     acp_slash_commands, format_acp_unsupported_slash_command, render_acp_slash_command_help,
@@ -854,6 +854,10 @@ pub(crate) fn handle_slash_command(
                 .map_err(crate::AcpError::internal)?;
             if outcome.cancelled {
                 stop = AcpStopReason::Cancelled;
+            }
+            if let Some(report) = &outcome.report {
+                format_compaction_report_with_messages(report, outcome.removed, outcome.kept)
+            } else if outcome.cancelled {
                 "Compact\n  Result           cancelled\n  Transcript       unchanged".to_string()
             } else {
                 format_acp_compact_report(

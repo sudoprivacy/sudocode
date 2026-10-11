@@ -41,7 +41,9 @@ pub use runtime::{
     // Prompt-cache + auto-compaction telemetry (AssistantEvent::PromptCache,
     // TurnSummary::auto_compaction).
     AutoCompactionEvent,
+    CompactionOutcome,
     CompactionProgress,
+    CompactionReport,
     CompactionStatus,
     // The content-block vocabulary a renderer sends back in an
     // `EngineCommand::Prompt` (text, images, …).

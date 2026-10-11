@@ -9,6 +9,7 @@
 //! is blocked on a permission / question answer (which the loop collects and
 //! sends back as an `EngineCommand`) and when the turn is finished.
 
+use std::collections::HashSet;
 use std::io::Write;
 
 use engine_events::{
@@ -16,7 +17,9 @@ use engine_events::{
     RetryEvent, ToolProgressEvent,
 };
 
-use crate::cli::format::format_tool_result;
+use crate::cli::format::{
+    format_auto_compaction_notice, format_compaction_notice, format_tool_result,
+};
 use crate::render::{
     layout_policy::LayoutPolicy, query_terminal_width, MarkdownStreamState, ResponseGlyphState,
     SpinnerRef, TerminalRenderer, DIM, RESET,
@@ -73,6 +76,8 @@ pub(crate) struct EngineEventRenderer {
     tool_inputs: crate::cli::format::ToolInputRegistry,
     /// Whether the latest progress summary occupies the live status row.
     activity_visible: bool,
+    /// Final progress and TurnComplete can carry the same run's report.
+    compaction_runs: HashSet<String>,
 }
 
 /// Consecutive chunks of prose/reasoning/activity belong to the same block.
@@ -101,6 +106,7 @@ impl EngineEventRenderer {
             thinking_printed: false,
             tool_inputs: crate::cli::format::ToolInputRegistry::default(),
             activity_visible: false,
+            compaction_runs: HashSet::new(),
         }
     }
 
@@ -409,7 +415,27 @@ impl EngineEventRenderer {
                 self.finish_turn();
                 RenderOutcome::Done
             }
-            EngineEvent::TurnComplete(_) => {
+            EngineEvent::Compaction(progress) => {
+                if let Some(report) = progress.report {
+                    if self.compaction_runs.insert(report.run_id.clone()) {
+                        self.finish_response();
+                        self.write_block(&format_compaction_notice(&report), OutputBlock::Notice);
+                        self.resume_spinner();
+                    }
+                }
+                RenderOutcome::Continue
+            }
+            EngineEvent::TurnComplete(complete) => {
+                self.finish_response();
+                if let Some(event) = complete.auto_compaction {
+                    if let Some(report) = event.report {
+                        if self.compaction_runs.insert(report.run_id.clone()) {
+                            self.write_block(&format_compaction_notice(&report), OutputBlock::Notice);
+                        }
+                    } else {
+                        self.write_block(&format_auto_compaction_notice(event.removed_message_count), OutputBlock::Notice);
+                    }
+                }
                 // A turn can end on a thinking block (the model reasoned and
                 // then produced no text, e.g. it was interrupted): close it so
                 // the next prompt is not written into an open dim run.
@@ -432,7 +458,6 @@ impl EngineEventRenderer {
             | EngineEvent::Usage(_)
             | EngineEvent::PromptCache(_)
             | EngineEvent::AutoCompaction(_)
-            | EngineEvent::Compaction(_)
             | EngineEvent::ModelChanged { .. }
             | EngineEvent::PermissionModeChanged { .. }
             // Background completions are scheduled by the REPL event bridge.

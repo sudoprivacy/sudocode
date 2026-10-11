@@ -206,7 +206,7 @@ no `usage`. The ACP agent implements a fixed subset of the REPL commands:
 | `/status` | Model, usage, git and config status for this session. |
 | `/cost` | Cumulative token usage for this session. |
 | `/model [<model-id>]` | Show the current model, or switch this session to another model. |
-| `/compact` | Summarise older messages to free context. A validated LLM checkpoint; failures preserve the original history and return an error. No token threshold — an explicit request always compacts when there is anything beyond the preserved recent tail. The compacted transcript is persisted immediately. The reply reports the method used, messages removed / kept, and the estimated token count before and after. The original transcript is archived before replacement. |
+| `/compact` | Summarise older messages to free context under the strict compaction contract below. A successful replacement meets both the history-reduction target and the next-request budget, is persisted immediately, and archives the original transcript. An unchanged achieved target or safe history with nothing summarizable can skip. The reply reports the outcome, method, estimated history before / after and target; the structured report also includes request attempts. Failure preserves message history and returns an error; known maintenance usage is still recorded. |
 | `/config [section]` | Show the effective configuration (read-only; `/config set` is REPL-only). |
 | `/diff` | Staged and unstaged git changes in the session directory. |
 | `/doctor` | Local health checks for auth, config and workspace. |
@@ -243,10 +243,12 @@ already knows the session id when it arrives; be ready to receive
 because this one follows immediately. The same table drives `/help` and the
 unknown-command hint, so the three never disagree.
 
-`session/cancel` applies to `/compact`: a cancel during the model round-trip
-drops the call, a cancel that lands after it discards the result; either way
-the transcript in memory and on disk is left untouched and the prompt ends
-with `stopReason: "cancelled"`. The other commands are local and complete
+`session/cancel` applies to `/compact`: cancellation before the durable commit
+stops the pending call or discards its staged candidate, preserves the original
+message history, and ends the prompt with `stopReason: "cancelled"`. The runtime
+finalizes any usage already received before returning, so maintenance metadata
+can change even though message history does not. A completed durable commit
+wins over a later cancellation. The other commands are local and complete
 before a cancel could matter.
 
 **Live compaction lifecycle.** Before manual or automatic context maintenance,
@@ -256,12 +258,76 @@ engine-owned operation, not a tool registered with the model. `rawInput` carries
 `trigger` (`manual`, `preflight`, `in_turn_budget`, `provider_rejection`, or
 `post_turn_usage`) and `before_tokens`. Completion emits `tool_call_update` with
 the same ID, status `completed` or `failed`, and `rawOutput` containing `id`,
-`trigger`, `status` (`completed`, `failed`, or `cancelled`), `before_tokens`, and
-`after_tokens` on success. Counts are estimates; summary text is never included.
-Cancellation uses ACP status `completed` with `rawOutput.status: "cancelled"`.
+`trigger`, `status` (`completed`, `failed`, or `cancelled`), `before_tokens`,
+optional `after_tokens`, and an optional structured `report`. Counts are
+estimates; summary text is never included. Cancellation uses ACP status
+`completed` with `rawOutput.status: "cancelled"`. A skipped run also uses ACP
+status `completed`; `report.outcome` distinguishes it from a committed result.
 Every terminal update is delivered before the prompt response, including error
 responses. A failed compaction ends the prompt with an error; clients must mark
 the run failed. The completed operation remains available for client replay.
+
+**Compaction contract.** A replacement is accepted only when the estimated
+tokens of the complete resulting history are at most
+`min(50% of the original history, safe history budget for the next request)`.
+The ideal is 30% of the original history, bounded by that same target. The
+complete history includes the checkpoint, continuation framing, Todo state and
+protected recent tail. The safe history budget reserves the routed model's
+output allowance, actual system prompt and selected tool schemas, pending input
+and pressure buffer. These are local estimates, not tokenizer guarantees; a
+provider context rejection still requires recovery or a failed prompt.
+
+The visible summary ceiling is computed from the remaining target after
+protected history and framing, capped at 12,000 tokens and the model's available
+output limit. Budgeted thinking is reserved separately before choosing that
+visible ceiling; adaptive thinking adds no manual thinking reservation. The
+ceiling can therefore be much smaller than 12,000; fitting
+the summary alone is insufficient if the complete history misses the target.
+No partially reduced candidate is installed.
+
+All summary paths and retries in one run share limits of two completed model
+responses, four actual model HTTP attempts and two transient-error retries.
+Local budget checks and token estimates do not consume HTTP attempts. Provider
+transport retries do not add a separate allowance. A quality retry starts from
+the same frozen source, protected tail and Todo state; it does not summarize a
+rejected candidate. Permanent provider errors stop the run. Cache-preserving
+compaction can switch to the fallback for a context overflow, a typed
+unsupported-path error, or a completed checkpoint whose truncation or visible
+ceiling requires a quality retry. A generic authentication or configuration
+failure does not qualify.
+
+The report's `outcome` is `target_met`, `skipped`, `failed` or `cancelled`.
+`target_met` means the accepted complete history meets the bound. `skipped`
+can mean a previously achieved target remains safe with an unchanged
+history/context/configuration/tools/budget fingerprint, or there is no
+summarizable source and the existing history is safe. A provider-rejection
+recovery does not use those skips. Failed and cancelled runs preserve message
+history; rejected or cancelled candidates are not installed or archived.
+
+The optional `report` contains:
+
+| Fields | Meaning |
+|---|---|
+| `run_id` | The same ID as the enclosing progress `id` and ACP `toolCallId`. |
+| `before_history`, `after_history` | Estimated complete history before and after the run. |
+| `target_history`, `ideal_history` | Acceptance bound and preferred target; null for a skipped run. |
+| `source_safe_history_budget`, `safe_history_budget`, `actual_fixed_overhead` | Source and final next-request history budgets, and the final estimated system/tool overhead. |
+| `method`, `outcome`, `reason` | Selected method, result and diagnostic reason. |
+| `attempts`, `completed_responses` | Actual model HTTP sends and completed model responses in this run. |
+| `estimate_source` | Estimator identity, currently `local_history_estimate_v1`. |
+
+Maintenance usage receipts are keyed by run and actual request attempt. Known
+usage is counted once in cumulative session usage and cost, including usage
+received before a failed or cancelled response. It is persisted as optional
+session metadata and restored on load; an unknown receipt remains unknown.
+Maintenance usage does not become the current task's usage, add a task turn or
+set the context anchor for the next task request. Metadata persistence failures
+are reported. If the durable source changes, its newer history is preserved and
+any receipts that could not be saved remain in memory.
+Capturing a revision also merges durable maintenance receipts from the same
+snapshot, so externally added bills survive unchanged-history compaction.
+An unreadable or unreloadable source prevents stale persistence during exit or
+later operations until a successful reload restores the session.
 
 **Automatic compaction.** When a turn compacts the transcript on its own —
 either the pre-turn overflow guard or the in-turn threshold path — the
@@ -278,8 +344,9 @@ pressure handling from [DeepSeek Harness](https://github.com/deepseek-ai/deepsee
 Sudo Code retains its model-specific output reservation and pressure buffer.
 
 Compaction stages changes before replacing the live transcript. An empty,
-truncated, or non-shrinking summary is rejected. Failure before or during a
-turn stops the pending model request with history intact. Post-turn compaction
+truncated, or non-shrinking summary, or a candidate that misses the complete
+history target, is rejected. Failure before or during a turn stops the pending
+model request with message history intact. Post-turn compaction
 failure also fails the prompt, even if answer text has already streamed; it must
 not report a successful run or continue queued work. No automatic
 local-statistics fallback is used. The next request cannot proceed when its
@@ -288,8 +355,9 @@ history still exceeds the context budget.
 Automatic pressure first trims oversized tool text (over 8,192 Unicode code
 points) to a 4,096-point head and 1,024-point tail plus a marker. ToolSearch
 results are exempt because their JSON also enables deferred tool schemas.
-If trimming suffices, no summary call is made. Otherwise the same checkpoint
-pipeline as manual compaction runs. A checkpoint rewrites prior summaries
+If trimming meets the complete-history target, no summary call is made.
+Otherwise the same checkpoint pipeline as manual compaction runs. A checkpoint
+rewrites prior summaries
 with newer history instead of concatenating them. Recent retention is token
 priced: at most 16% of the model window, capped at half the available history
 budget and one fifth of current history, with a four-message minimum and
@@ -301,13 +369,20 @@ Main-agent and subagent clients use the same non-streaming text transport in
 and tool schemas; runtime owns compaction prompts, retry policy and validation.
 The shared transport also owns message conversion and cache hints.
 
-Both LLM paths ask for a summary within 8,000 tokens where possible and request
-at most 12,000 output tokens (or the model's smaller limit). The preferred
-path reuses the system prompt, tool schemas and older
-message prefix; the fallback strips thinking and replaces images with text
-placeholders. Neither path drops the oldest input to recover from overflow.
-Transient failures are retried with bounded backoff.
+Both LLM paths use the dynamic visible summary ceiling above and ask for the
+ideal size, up to 8,000 tokens, where possible. The preferred path reuses the
+system prompt, tool schemas and older message prefix, with a separate model
+thinking reservation where required; the fallback strips thinking and replaces
+images with text placeholders. Neither path drops the oldest input to recover
+from overflow. Transient failures use bounded backoff within the shared run
+limits.
 
+Only the final accepted candidate is committed. Run preparation replays the
+durable source and requires its message history to match the frozen source
+before capturing that revision. Before any archive or replacement, the
+filesystem backend checks the captured revision again. An observed source
+change fails the run and preserves the newer transcript. These checks are not
+a cross-process compare-and-swap or lock.
 On successful replacement, `<transcript>.before-compact-<timestamp>` retains
 the original JSONL snapshot through the same filesystem backend. These
 snapshots are not listed as independent sessions and are not automatically

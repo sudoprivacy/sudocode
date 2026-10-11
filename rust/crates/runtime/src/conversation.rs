@@ -13,9 +13,10 @@ mod tool_context;
 mod tool_execution;
 
 use crate::compact::{
-    autocompact_buffer_tokens, compact_session, compact_session_cache_safe, compact_session_sync,
-    estimate_block_tokens, estimate_session_tokens, prune_tool_results, unchanged_compaction,
-    CompactionConfig, CompactionError, CompactionResult, CompactionSummarySource, ContextBudget,
+    autocompact_buffer_tokens, compact_session_sync, estimate_block_tokens,
+    estimate_session_tokens, prune_tool_results, unchanged_compaction, CompactionAttemptOptions,
+    CompactionConfig, CompactionError, CompactionOutcome, CompactionReport, CompactionResult,
+    CompactionSummarySource, ContextBudget, PreparedCompaction, COMPACTION_POLICY_VERSION,
 };
 use crate::config::RuntimeFeatureConfig;
 use crate::hooks::{
@@ -25,7 +26,7 @@ use crate::permissions::{
     PermissionContext, PermissionOutcome, PermissionPolicy, PermissionPrompter,
 };
 use crate::prompt::SystemPrompt;
-use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
+use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session, SessionError};
 use crate::usage::{TokenUsage, UsageAggregation, UsageTracker};
 
 const AUTO_COMPACTION_THRESHOLD_ENV_VAR: &str = "CLAUDE_CODE_AUTO_COMPACT_INPUT_TOKENS";
@@ -144,6 +145,7 @@ pub struct TextCompletionOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextCompletion {
     pub text: String,
+    pub usage: Option<TokenUsage>,
     pub stop_reason: Option<String>,
     pub has_tool_calls: bool,
 }
@@ -247,7 +249,7 @@ pub trait ApiClient: Send {
         _request: ApiRequest,
         _options: TextCompletionOptions,
     ) -> Result<TextCompletion, RuntimeError> {
-        Err(RuntimeError::new(
+        Err(RuntimeError::compaction_path_not_supported(
             "text completion not supported by this API client",
         ))
     }
@@ -358,6 +360,48 @@ pub trait ApiClient: Send {
             overhead_tokens,
             buffer_tokens: autocompact_buffer_tokens(model) as usize,
         }
+    }
+
+    /// Budget the schemas selected for this exact request, including tools
+    /// revealed in the retained history or before an earlier compaction.
+    fn context_budget_for_request(&self, model: &str, request: &ApiRequest) -> ContextBudget {
+        self.context_budget(model, &request.system_prompt)
+    }
+
+    /// The request-specific budget for a summary completion. Its output cap
+    /// and schema selection can differ from the next task request.
+    fn context_budget_for_completion(
+        &self,
+        model: &str,
+        request: &ApiRequest,
+        options: TextCompletionOptions,
+    ) -> ContextBudget {
+        let mut budget = self.context_budget_for_request(model, request);
+        budget.max_output_tokens = options.max_tokens as usize;
+        if !options.include_tools {
+            let system =
+                (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
+            // Match the API's serialized field estimator without depending on
+            // that crate. The absent tools field serializes as `null` (2 tokens).
+            budget.overhead_tokens =
+                serde_json::to_vec(&system).map_or(0, |bytes| bytes.len() / 4 + 1) + 2;
+        }
+        budget
+    }
+
+    /// Resolve discovery before freezing one compaction run's request limits.
+    async fn prepare_compaction_route(&mut self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
+    /// Request-shaping route state included in target-achievement fingerprints.
+    fn compaction_route_fingerprint(&self, _request: &ApiRequest) -> String {
+        format!(
+            "{:?}|{}|{:?}",
+            self.wire_model_id(),
+            self.thinking_enabled(),
+            self.reasoning_effort()
+        )
     }
 }
 
@@ -803,6 +847,10 @@ pub struct RuntimeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeErrorKind {
     Generic,
+    /// This completion shape is unsupported; another compaction shape may work.
+    CompactionPathNotSupported,
+    /// A provider completed its response, but its summary cannot be installed.
+    InvalidCompactionSummary,
     /// The request was rejected — locally by the API client's preflight or
     /// by the provider — because it does not fit the model's context window.
     ContextWindowBlocked,
@@ -816,6 +864,34 @@ impl RuntimeError {
             kind: RuntimeErrorKind::Generic,
             retryable: false,
         }
+    }
+
+    #[must_use]
+    pub fn invalid_compaction_summary(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: RuntimeErrorKind::InvalidCompactionSummary,
+            retryable: false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_invalid_compaction_summary(&self) -> bool {
+        self.kind == RuntimeErrorKind::InvalidCompactionSummary
+    }
+
+    #[must_use]
+    pub fn compaction_path_not_supported(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: RuntimeErrorKind::CompactionPathNotSupported,
+            retryable: false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_compaction_path_not_supported(&self) -> bool {
+        self.kind == RuntimeErrorKind::CompactionPathNotSupported
     }
 
     /// An error whose cause is the request exceeding the context window.
@@ -919,8 +995,9 @@ impl CompactionMethod {
 /// is not making progress — what is left is the preserved tail, and no
 /// further pass can shrink it. Spending the allowance is therefore the
 /// signal that the overflow is structural, and it surfaces as a real error
-/// instead of an unbounded compaction loop. Worst case per turn is eight
-/// extra round-trips.
+/// instead of an unbounded compaction loop. This in-turn allowance covers
+/// eight runs, each capped at two completed responses and four model HTTP
+/// attempts. Pre-send and post-turn maintenance use their own run scopes.
 const MAX_TURN_COMPACTIONS: usize = 8;
 
 /// The config every guard in this file compacts with.
@@ -986,6 +1063,8 @@ pub struct CompactionProgress {
     pub before_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<CompactionReport>,
 }
 
 impl CompactionProgress {
@@ -1004,14 +1083,43 @@ impl CompactionProgress {
             status: CompactionStatus::Started,
             before_tokens,
             after_tokens: None,
+            report: None,
         }
     }
 }
 
 /// Details about automatic session compaction applied during a turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutoCompactionEvent {
     pub removed_message_count: usize,
+    pub report: Option<CompactionReport>,
+}
+
+#[derive(Clone, Copy)]
+struct CompactionRunOptions {
+    allow_pruning: bool,
+    allow_repeat_skip: bool,
+}
+
+#[derive(Clone)]
+enum CompactionSourceRevision {
+    InMemory,
+    Durable(String),
+}
+
+impl From<Option<String>> for CompactionSourceRevision {
+    fn from(revision: Option<String>) -> Self {
+        revision.map_or(Self::InMemory, Self::Durable)
+    }
+}
+
+impl CompactionSourceRevision {
+    fn as_deref(&self) -> Option<&str> {
+        match self {
+            Self::InMemory => None,
+            Self::Durable(revision) => Some(revision),
+        }
+    }
 }
 
 /// Coordinates the model loop, tool execution, hooks, and session updates.
@@ -1060,6 +1168,12 @@ pub struct ConversationRuntime<C, T> {
     user_request_intent: Option<crate::file_intent::UserRequestIntent>,
     /// Trace ID for the current request (passed from ACP _meta.traceId).
     trace_id: Option<String>,
+    compaction_pending_input_tokens: usize,
+    last_compaction_report: Option<CompactionReport>,
+    /// Absent until a source read succeeds; in-memory sources need no hash.
+    compaction_source_revision: Option<CompactionSourceRevision>,
+    /// An unreadable or changed durable source forbids writing this snapshot.
+    session_source_stale: bool,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -1121,6 +1235,10 @@ where
             current_turn_id: None,
             user_request_intent: None,
             trace_id: None,
+            compaction_pending_input_tokens: 0,
+            last_compaction_report: None,
+            compaction_source_revision: None,
+            session_source_stale: false,
         }
     }
 
@@ -1643,6 +1761,13 @@ where
         prompter: Option<&mut dyn PermissionPrompter>,
         observer: Option<&mut dyn RuntimeObserver>,
     ) -> Result<TurnSummary, RuntimeError> {
+        if self.session_source_stale {
+            self.refresh_compaction_source().map_err(|error| {
+                RuntimeError::new(format!(
+                    "session source could not be refreshed; durable history preserved: {error}"
+                ))
+            })?;
+        }
         let installs_hook_reporter = observer
             .as_deref()
             .and_then(RuntimeObserver::hook_progress_sink)
@@ -1673,6 +1798,11 @@ where
         // turn leaves the session as the close-time save finds it, rather than
         // committing a half-turn as though it completed.
         if summary.is_ok() {
+            self.ensure_session_persistence_allowed().map_err(|error| {
+                RuntimeError::new(format!(
+                    "refusing to persist a stale session; durable history preserved: {error}"
+                ))
+            })?;
             if let Some(path) = self.session.persistence_path() {
                 self.session.save_to_path(path).map_err(|error| {
                     RuntimeError::new(format!("failed to persist session: {error}"))
@@ -1760,6 +1890,7 @@ where
         self.session
             .push_user_blocks(prepared_blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
+        self.compaction_pending_input_tokens = 0;
 
         // Hook workers share the current observer's progress sink, so slow
         // hooks never hold the event loop while reporting lifecycle changes.
@@ -1828,7 +1959,13 @@ where
                             runtime_observer_mut(&mut observer),
                         )
                         .await;
-                    if self.hook_abort_signal.is_aborted() {
+                    if self.hook_abort_signal.is_aborted()
+                        && !(attempt.is_err()
+                            && self
+                                .last_compaction_report
+                                .as_ref()
+                                .is_some_and(|report| report.outcome == CompactionOutcome::Failed))
+                    {
                         return Ok(self.cancelled_summary(
                             assistant_messages,
                             tool_results,
@@ -1856,10 +1993,8 @@ where
                 }
             }
 
-            let budget = self
-                .api_client
-                .context_budget(&self.compaction_model(), &self.system_prompt);
-            if !budget.fits(estimate_session_tokens(&self.session)) {
+            let (budget, _) = self.safe_history_budget(&self.session);
+            if !budget.fits_buffered(estimate_session_tokens(&self.session)) {
                 return Err(RuntimeError::context_window_blocked(
                     "Context remains too large after compaction; history preserved. No model request sent."));
             }
@@ -1917,7 +2052,12 @@ where
                                 runtime_observer_mut(&mut observer),
                             )
                             .await;
-                        if self.hook_abort_signal.is_aborted() {
+                        if self.hook_abort_signal.is_aborted()
+                            && !(attempt.is_err()
+                                && self.last_compaction_report.as_ref().is_some_and(|report| {
+                                    report.outcome == CompactionOutcome::Failed
+                                }))
+                        {
                             return Ok(self.cancelled_summary(
                                 assistant_messages,
                                 tool_results,
@@ -1933,12 +2073,6 @@ where
                                 merge_auto_compaction(overflow_compaction, Some(event));
                             continue;
                         }
-                    }
-                    if error.is_context_window_blocked() && assistant_messages.is_empty() {
-                        // Nothing answered this prompt; keeping it would make
-                        // every retry start from a bigger history than the
-                        // one that was just rejected.
-                        self.discard_unanswered_user_turn();
                     }
                     self.record_turn_failed(iterations, &error);
                     return Err(error);
@@ -1979,7 +2113,12 @@ where
                         let attempt = self
                             .maybe_auto_compact(runtime_observer_mut(&mut observer))
                             .await;
-                        if self.hook_abort_signal.is_aborted() {
+                        if self.hook_abort_signal.is_aborted()
+                            && !(attempt.is_err()
+                                && self.last_compaction_report.as_ref().is_some_and(|report| {
+                                    report.outcome == CompactionOutcome::Failed
+                                }))
+                        {
                             return Ok(self.cancelled_summary(
                                 assistant_messages,
                                 tool_results,
@@ -2090,7 +2229,13 @@ where
         let attempt = self
             .maybe_auto_compact(runtime_observer_mut(&mut observer))
             .await;
-        if self.hook_abort_signal.is_aborted() {
+        if self.hook_abort_signal.is_aborted()
+            && !(attempt.is_err()
+                && self
+                    .last_compaction_report
+                    .as_ref()
+                    .is_some_and(|report| report.outcome == CompactionOutcome::Failed))
+        {
             return Ok(self.cancelled_summary(
                 assistant_messages,
                 tool_results,
@@ -2159,73 +2304,572 @@ where
     /// explicit and leaves the original session available for retry.
     pub async fn compact_with_method(
         &mut self,
+        config: CompactionConfig,
+        custom_instructions: Option<&str>,
+    ) -> Result<(CompactionResult, CompactionMethod), CompactionError> {
+        let run_id =
+            CompactionProgress::started("manual", estimate_session_tokens(&self.session)).id;
+        self.compact_with_method_for_run(config, custom_instructions, run_id)
+            .await
+    }
+
+    /// Reuse the engine's Started event ID for the report and usage receipts.
+    pub async fn compact_with_method_for_run(
+        &mut self,
         mut config: CompactionConfig,
         custom_instructions: Option<&str>,
+        run_id: String,
     ) -> Result<(CompactionResult, CompactionMethod), CompactionError> {
         config.max_estimated_tokens = 0;
         let source = self.session.clone();
-        let config = self.compaction_retention(&source, config);
         let result = self
-            .summarize_history(&source, config, custom_instructions)
+            .run_compaction(
+                &source,
+                config,
+                custom_instructions,
+                CompactionRunOptions {
+                    allow_pruning: false,
+                    allow_repeat_skip: true,
+                },
+                run_id,
+            )
             .await?;
         Ok((result, CompactionMethod::LlmSummary))
     }
 
-    /// Install a replacement that the owning engine has already persisted.
+    /// Install only after the owning engine has durably committed the candidate.
     pub fn install_compacted_session(&mut self, session: Session) {
         self.session = session;
         self.usage_tracker.clear_context_usage();
     }
 
-    fn compaction_retention(&self, source: &Session, config: CompactionConfig) -> CompactionConfig {
+    pub fn set_compaction_report(&mut self, report: CompactionReport) {
+        self.session.last_compaction_report = Some(report.clone());
+        self.last_compaction_report = Some(report);
+    }
+
+    pub fn mark_compaction_committed(&mut self, result: &CompactionResult) {
+        self.last_compaction_report.clone_from(&result.report);
+        self.usage_tracker.clear_context_usage();
+    }
+
+    /// Refuse ordinary persistence while the durable source could not be
+    /// validated or reloaded. A successful refresh must precede another write.
+    pub fn ensure_session_persistence_allowed(&self) -> Result<(), SessionError> {
+        if self.session_source_stale {
+            Err(SessionError::SourceChanged)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Reload a changed durable source without writing the stale transcript.
+    /// Keep this run's known billing in memory until it can be safely saved.
+    pub fn refresh_compaction_source(&mut self) -> Result<(), SessionError> {
+        // Failed reloads must also disable any later stale metadata write.
+        self.compaction_source_revision = None;
+        self.session_source_stale = true;
+        let Some(path) = self
+            .session
+            .persistence_path()
+            .map(std::path::Path::to_path_buf)
+        else {
+            self.session_source_stale = false;
+            return Ok(());
+        };
+        let fs = self.session.fs_handle();
+        let mut refreshed = Session::load_from_path_with(fs.as_ref(), &path)?.with_fs_backend(fs);
+        refreshed.merge_maintenance_usage(&self.session.maintenance_usage);
+        self.usage_tracker.refresh_session_totals(&refreshed);
+        self.session = refreshed;
+        self.session_source_stale = false;
+        Ok(())
+    }
+
+    pub fn set_compaction_pending_input_tokens(&mut self, tokens: usize) {
+        self.compaction_pending_input_tokens = tokens;
+    }
+
+    #[must_use]
+    pub fn last_compaction_report(&self) -> Option<&CompactionReport> {
+        self.last_compaction_report.as_ref()
+    }
+
+    fn history_request(&self, source: &Session) -> ApiRequest {
+        ApiRequest {
+            system_prompt: self.system_prompt.clone(),
+            messages: source.messages.clone(),
+            trace_id: self.trace_id.clone(),
+            pre_compact_discovered_tools: source
+                .compaction
+                .as_ref()
+                .map(|c| c.pre_compact_discovered_tools.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    #[must_use]
+    pub fn context_budget_for_next_request(&self) -> ContextBudget {
+        let catalog = self.api_client.model_catalog();
+        let _scope = catalog
+            .as_ref()
+            .map(crate::model_discovery::ModelCatalog::enter);
+        self.api_client.context_budget_for_request(
+            &self.compaction_model(),
+            &self.history_request(&self.session),
+        )
+    }
+
+    fn safe_history_budget(&self, source: &Session) -> (ContextBudget, usize) {
+        let catalog = self.api_client.model_catalog();
+        let _scope = catalog
+            .as_ref()
+            .map(crate::model_discovery::ModelCatalog::enter);
         let budget = self
             .api_client
-            .context_budget(&self.compaction_model(), &self.system_prompt);
-        // Budget recent history by size, not message count. Cap retention at
-        // one fifth of the current history so explicit compact is useful even
-        // below pressure; the message floor and tool pairing still win.
+            .context_budget_for_request(&self.compaction_model(), &self.history_request(source));
+        let safe = budget
+            .history_budget()
+            .saturating_sub(self.compaction_pending_input_tokens);
+        (budget, safe)
+    }
+
+    fn compaction_fingerprint(&self, source: &Session, custom: Option<&str>) -> String {
+        use sha2::{Digest, Sha256};
+        let request = self.history_request(source);
+        let (budget, safe) = self.safe_history_budget(source);
+        let content: Vec<_> = source
+            .messages
+            .iter()
+            .map(|m| (&m.role, &m.blocks))
+            .collect();
+        // Debug content excludes all usage/model/duration metadata, which cannot change the request.
+        let material = format!(
+            "{:?}|{:?}|{:?}|{}|{}|{:?}|{}|{}|{}",
+            content,
+            crate::compact::render_todo_continuity_block(source.fs_handle()),
+            custom,
+            self.system_prompt.render(),
+            self.api_client.compaction_route_fingerprint(&request),
+            budget,
+            safe,
+            self.compaction_pending_input_tokens,
+            COMPACTION_POLICY_VERSION
+        );
+        format!("{:x}", Sha256::digest(material.as_bytes()))
+    }
+
+    fn compaction_retention(&self, source: &Session, config: CompactionConfig) -> CompactionConfig {
+        let (budget, safe) = self.safe_history_budget(source);
         let tokens = (budget.context_limit * 16 / 100)
-            .min(budget.history_budget() / 2)
+            .min(safe / 2)
             .min(estimate_session_tokens(source) / 5);
         config.with_token_retention(source, tokens)
     }
 
-    async fn summarize_history(
+    /// One frozen-source run. All provider sends and fallback paths share this scope.
+    async fn run_compaction(
         &mut self,
         source: &Session,
         config: CompactionConfig,
-        custom_instructions: Option<&str>,
+        custom: Option<&str>,
+        options: CompactionRunOptions,
+        run_id: String,
     ) -> Result<CompactionResult, CompactionError> {
-        let model = self.compaction_model();
-        if source.messages.len() <= config.preserve_recent_messages
-            || estimate_session_tokens(source) < config.max_estimated_tokens
+        self.last_compaction_report = None;
+        self.compaction_source_revision = None;
+        let mut source = source.clone();
+        let abort = self.hook_abort_signal.clone();
+        let mut source_changed = false;
+        let preparation = match source.capture_durable_revision_for_history() {
+            Ok((revision, _)) => {
+                let new_usage = self
+                    .session
+                    .merge_maintenance_usage(&source.maintenance_usage);
+                self.record_compaction_maintenance_usage(new_usage);
+                self.compaction_source_revision = Some(revision.into());
+                self.session_source_stale = false;
+                tokio::select! {
+                    biased;
+                    () = abort.cancelled() => Err(RuntimeError::new("cancelled")),
+                    result = self.api_client.prepare_compaction_route() => result,
+                }
+            }
+            Err(error) => {
+                self.session_source_stale = true;
+                source_changed = matches!(error, SessionError::SourceChanged);
+                let refresh = if source_changed {
+                    self.refresh_compaction_source().err()
+                } else {
+                    None
+                };
+                Err(RuntimeError::new(refresh.map_or_else(
+                    || format!("source revision could not be read: {error}"),
+                    |refresh| format!("{error}; latest source could not be reloaded: {refresh}"),
+                )))
+            }
+        };
+        if let Err(error) = preparation {
+            let before = estimate_session_tokens(&source);
+            let (budget, safe) = self.safe_history_budget(&source);
+            self.set_compaction_report(CompactionReport {
+                run_id,
+                before_history: before,
+                after_history: if source_changed {
+                    estimate_session_tokens(&self.session)
+                } else {
+                    before
+                },
+                target_history: Some((before / 2).min(safe)),
+                ideal_history: Some((before * 30 / 100).min(safe).min(before / 2)),
+                source_safe_history_budget: safe,
+                safe_history_budget: safe,
+                actual_fixed_overhead: budget.overhead_tokens,
+                method: None,
+                outcome: if abort.is_aborted() && !source_changed {
+                    CompactionOutcome::Cancelled
+                } else {
+                    CompactionOutcome::Failed
+                },
+                reason: Some(
+                    if source_changed {
+                        "source_changed"
+                    } else if abort.is_aborted() {
+                        "cancelled"
+                    } else if self.compaction_source_revision.is_none() {
+                        "source_read_failed"
+                    } else {
+                        "route_preparation_failed"
+                    }
+                    .into(),
+                ),
+                attempts: 0,
+                completed_responses: 0,
+                estimate_source: "local_history_estimate_v1".into(),
+            });
+            return Err(CompactionError::ApiError(error.to_string()));
+        }
+        let catalog = self.api_client.model_catalog();
+        let operation = self.run_compaction_inner(&source, config, custom, options, run_id);
+        if let Some(catalog) = catalog {
+            catalog.scope(operation).await
+        } else {
+            operation.await
+        }
+    }
+
+    // Finalize receipts for both completion and cancellation before returning to the owner.
+    #[allow(clippy::too_many_lines)]
+    async fn run_compaction_inner(
+        &mut self,
+        source: &Session,
+        config: CompactionConfig,
+        custom: Option<&str>,
+        options: CompactionRunOptions,
+        run_id: String,
+    ) -> Result<CompactionResult, CompactionError> {
+        use crate::compaction_scope::CompactionRequestScope;
+        let before = estimate_session_tokens(source);
+        let (budget, safe) = self.safe_history_budget(source);
+        let target = (before / 2).min(safe);
+        let ideal = (before * 30 / 100).min(target);
+        let mut report = CompactionReport {
+            run_id: run_id.clone(),
+            before_history: before,
+            after_history: before,
+            target_history: Some(target),
+            ideal_history: Some(ideal),
+            source_safe_history_budget: safe,
+            safe_history_budget: safe,
+            actual_fixed_overhead: budget.overhead_tokens,
+            method: None,
+            outcome: CompactionOutcome::Failed,
+            reason: None,
+            attempts: 0,
+            completed_responses: 0,
+            estimate_source: "local_history_estimate_v1".into(),
+        };
+        let scope = CompactionRequestScope::new(run_id);
+        let abort = self.hook_abort_signal.clone();
+        let operation =
+            self.run_compaction_attempts(source, config, custom, options, &scope, &mut report);
+        let mut result = scope
+            .scope(async {
+                tokio::select! {
+                    biased;
+                    () = abort.cancelled() => Err(CompactionError::ApiError("cancelled".into())),
+                    result = operation => result,
+                }
+            })
+            .await;
+        let snapshot = scope.snapshot();
+        report.attempts = snapshot.attempts as usize;
+        report.completed_responses = snapshot.completed_responses as usize;
+        let new_usage = self.session.merge_maintenance_usage(&snapshot.receipts);
+        self.record_compaction_maintenance_usage(new_usage);
+        match &mut result {
+            Ok(candidate) => {
+                candidate.source_revision = self
+                    .compaction_source_revision
+                    .as_ref()
+                    .and_then(CompactionSourceRevision::as_deref)
+                    .map(str::to_owned);
+                candidate
+                    .compacted_session
+                    .merge_maintenance_usage(&snapshot.receipts);
+                if report.outcome == CompactionOutcome::TargetMet {
+                    candidate.compacted_session.compaction_achievement =
+                        Some(crate::session::CompactionAchievement {
+                            fingerprint: self
+                                .compaction_fingerprint(&candidate.compacted_session, custom),
+                            before_history: before,
+                            target_history: report.target_history.unwrap_or(target),
+                            after_history: report.after_history,
+                            policy_version: COMPACTION_POLICY_VERSION.into(),
+                        });
+                }
+                candidate.report = Some(report.clone());
+                candidate.compacted_session.last_compaction_report = Some(report.clone());
+            }
+            Err(error) => {
+                report.outcome = if self.hook_abort_signal.is_aborted() {
+                    CompactionOutcome::Cancelled
+                } else {
+                    CompactionOutcome::Failed
+                };
+                report.after_history = before;
+                report.reason = Some(
+                    match error {
+                        _ if self.hook_abort_signal.is_aborted() => "cancelled",
+                        CompactionError::InvalidSummary(text)
+                            if text.contains("target not met") =>
+                        {
+                            "summary_target_unmet"
+                        }
+                        CompactionError::InvalidSummary(text)
+                            if text.contains("protected history") =>
+                        {
+                            "retention_limited"
+                        }
+                        CompactionError::InvalidSummary(text)
+                            if text.contains("exceed") && text.contains("context") =>
+                        {
+                            "required_context_exceeds_budget"
+                        }
+                        CompactionError::ApiError(text)
+                            if text.contains("context budget")
+                                || text.contains("output reservation") =>
+                        {
+                            "required_context_exceeds_budget"
+                        }
+                        _ if snapshot.attempts >= 4
+                            || snapshot.completed_responses >= 2
+                            || snapshot.outer_retries >= 2 =>
+                        {
+                            "attempts_exhausted"
+                        }
+                        CompactionError::InvalidSummary(_) => "invalid_summary",
+                        _ => "provider_error",
+                    }
+                    .into(),
+                );
+                self.session.last_compaction_report = Some(report.clone());
+                self.last_compaction_report = Some(report.clone());
+                if !snapshot.receipts.is_empty() {
+                    self.persist_compaction_maintenance();
+                    report = self.last_compaction_report.clone().unwrap_or(report);
+                }
+            }
+        }
+        self.last_compaction_report = Some(report);
+        result
+    }
+
+    // One run owns pruning, quality attempts and fallback; none may reset its quotas.
+    #[allow(clippy::too_many_lines)]
+    async fn run_compaction_attempts(
+        &mut self,
+        source: &Session,
+        config: CompactionConfig,
+        custom: Option<&str>,
+        options: CompactionRunOptions,
+        scope: &crate::compaction_scope::CompactionRequestScope,
+        report: &mut CompactionReport,
+    ) -> Result<CompactionResult, CompactionError> {
+        let before = estimate_session_tokens(source);
+        let (budget, _) = self.safe_history_budget(source);
+        if !budget.fits_buffered(self.compaction_pending_input_tokens) {
+            return Err(CompactionError::InvalidSummary(
+                "fixed request overhead and reservations exceed the context window".into(),
+            ));
+        }
+        let target = report.target_history.unwrap_or_default();
+        let ideal = report.ideal_history.unwrap_or_default();
+        let fingerprint = self.compaction_fingerprint(source, custom);
+        if options.allow_repeat_skip
+            && source.compaction_achievement.as_ref().is_some_and(|a| {
+                a.fingerprint == fingerprint
+                    && a.policy_version == COMPACTION_POLICY_VERSION
+                    && a.after_history == before
+                    && a.after_history <= a.target_history
+                    && a.target_history <= a.before_history / 2
+            })
+            && before <= report.safe_history_budget
         {
+            report.outcome = CompactionOutcome::Skipped;
+            report.target_history = None;
+            report.ideal_history = None;
+            report.reason = Some("unchanged_achieved_target".into());
             return Ok(unchanged_compaction(source));
         }
-        if let Ok(result) = compact_session_cache_safe(
-            source,
-            config,
-            &mut self.api_client,
-            &model,
-            &self.system_prompt,
-            custom_instructions,
-        )
-        .await
-        {
-            return Ok(result);
+        let mut frozen = source.clone();
+        if options.allow_pruning && prune_tool_results(&mut frozen) > 0 {
+            let after = estimate_session_tokens(&frozen);
+            let (current_budget, current_safe) = self.safe_history_budget(&frozen);
+            if after < before && after <= target.min(current_safe) {
+                report.outcome = CompactionOutcome::TargetMet;
+                report.method = Some("tool_pruning".into());
+                report.after_history = after;
+                report.safe_history_budget = current_safe;
+                report.target_history = Some((before / 2).min(current_safe));
+                report.ideal_history =
+                    Some((before * 30 / 100).min(report.target_history.unwrap_or_default()));
+                report.actual_fixed_overhead = current_budget.overhead_tokens;
+                let mut result = unchanged_compaction(&frozen);
+                result.summary_source = CompactionSummarySource::ToolPruning;
+                return Ok(result);
+            }
         }
-        match compact_session(
-            source,
-            config,
-            &mut self.api_client,
-            &model,
-            custom_instructions,
-        )
-        .await
-        {
-            Ok(result) => Ok(result),
-            Err(CompactionError::NothingToCompact) => Ok(unchanged_compaction(source)),
-            Err(error) => Err(error),
+        let config = self.compaction_retention(&frozen, config);
+        let prepared = PreparedCompaction::new(&frozen, config, target, ideal);
+        if !prepared.has_source() {
+            if options.allow_repeat_skip && before <= report.safe_history_budget {
+                report.outcome = CompactionOutcome::Skipped;
+                report.target_history = None;
+                report.ideal_history = None;
+                report.reason = Some("nothing_compactable".into());
+                return Ok(unchanged_compaction(source));
+            }
+            return Err(CompactionError::InvalidSummary(
+                "no summarizable source and request is oversized".into(),
+            ));
+        }
+        if prepared.raw_summary_budget == 0 {
+            return Err(CompactionError::InvalidSummary(
+                "protected history makes target infeasible".into(),
+            ));
+        }
+        let mut cap = prepared.raw_summary_budget;
+        let mut cache_safe = true;
+        let model = self.compaction_model();
+        let mut quality_responses = 0;
+        loop {
+            if cap == 0 {
+                return Err(CompactionError::InvalidSummary(
+                    "protected history makes revised target infeasible".into(),
+                ));
+            }
+            let completed_before = scope.snapshot().completed_responses;
+            let attempt = prepared
+                .attempt(
+                    &mut self.api_client,
+                    &model,
+                    &self.system_prompt,
+                    CompactionAttemptOptions {
+                        custom,
+                        cache_safe,
+                        visible_cap: cap,
+                        quality_retry: quality_responses > 0,
+                    },
+                )
+                .await;
+            let mut snapshot = scope.snapshot();
+            if snapshot.completed_responses == completed_before
+                && (attempt.is_ok()
+                    || attempt
+                        .as_ref()
+                        .err()
+                        .is_some_and(RuntimeError::is_invalid_compaction_summary))
+            {
+                scope
+                    .record_completion(None)
+                    .map_err(|e| CompactionError::InvalidSummary(e.to_string()))?;
+                snapshot = scope.snapshot();
+            }
+            let completed = snapshot.completed_responses > completed_before;
+            if completed {
+                quality_responses += 1;
+            }
+            match attempt {
+                Ok(candidate) => {
+                    let after = estimate_session_tokens(&candidate.compacted_session);
+                    let (budget, current_safe) =
+                        self.safe_history_budget(&candidate.compacted_session);
+                    let current_target = (before / 2).min(current_safe);
+                    report.safe_history_budget = current_safe;
+                    report.actual_fixed_overhead = budget.overhead_tokens;
+                    report.target_history = Some(current_target);
+                    report.ideal_history = Some((before * 30 / 100).min(current_target));
+                    if !prepared.todo_unchanged() {
+                        return Err(CompactionError::InvalidSummary(
+                            "Todo changed during compaction; retry with fresh source".into(),
+                        ));
+                    }
+                    if after < before && after <= current_target {
+                        report.after_history = after;
+                        report.method = Some("llm_summary".into());
+                        report.outcome = CompactionOutcome::TargetMet;
+                        return Ok(candidate);
+                    }
+                    if quality_responses >= 2 || snapshot.completed_responses >= 2 {
+                        return Err(CompactionError::InvalidSummary(format!(
+                            "target not met: candidate {after}, target {current_target}"
+                        )));
+                    }
+                    cap = cap
+                        .saturating_sub(after.saturating_sub(current_target))
+                        .min(cap * 3 / 4);
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    if cache_safe
+                        && !completed
+                        && (error.is_context_window_blocked()
+                            || error.is_compaction_path_not_supported())
+                    {
+                        cache_safe = false;
+                        continue;
+                    }
+                    if error.is_retryable()
+                        && !error.is_context_window_blocked()
+                        && snapshot.attempts < 4
+                        && snapshot.completed_responses < 2
+                        && crate::compaction_scope::claim_outer_retry()
+                    {
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            1 << snapshot.outer_retries,
+                        ))
+                        .await;
+                        continue;
+                    }
+                    if completed && error.is_invalid_compaction_summary() {
+                        if cache_safe
+                            && (message.contains("truncated")
+                                || message.contains("visible output ceiling"))
+                        {
+                            cache_safe = false;
+                        }
+                        if quality_responses >= 2 || snapshot.completed_responses >= 2 {
+                            return Err(CompactionError::InvalidSummary(message));
+                        }
+                        // A second completed response gets a tighter visible
+                        // allowance even when changing provider request shape.
+                        cap = cap * 3 / 4;
+                        continue;
+                    }
+                    return Err(CompactionError::ApiError(message));
+                }
+            }
         }
     }
 
@@ -2382,10 +3026,8 @@ where
     /// for everything it has already processed but says nothing about what
     /// was pushed since. Either one over its own budget means compact.
     fn next_request_exceeds_budget(&self) -> bool {
-        let budget = self
-            .api_client
-            .context_budget(self.compaction_model().as_str(), &self.system_prompt);
-        estimate_session_tokens(&self.session) > budget.history_budget()
+        let (budget, _) = self.safe_history_budget(&self.session);
+        !budget.fits_buffered(estimate_session_tokens(&self.session))
             || self.projected_context_tokens() as usize > budget.reported_context_budget()
     }
 
@@ -2467,17 +3109,25 @@ where
         if let Some(observer) = observer.as_deref_mut() {
             observer.on_compaction(&progress);
         }
-        let result = self.compact_in_place_inner(config, trigger, before).await;
-        progress.status = if self.hook_abort_signal.is_aborted() {
-            CompactionStatus::Cancelled
-        } else if result.is_ok() {
-            CompactionStatus::Completed
-        } else {
-            CompactionStatus::Failed
+        let result = self
+            .compact_in_place_inner(config, trigger, progress.id.clone())
+            .await;
+        // A durable commit wins over a cancellation arriving afterwards.
+        progress.status = match self
+            .last_compaction_report
+            .as_ref()
+            .map(|report| report.outcome)
+        {
+            Some(CompactionOutcome::TargetMet | CompactionOutcome::Skipped) => {
+                CompactionStatus::Completed
+            }
+            Some(CompactionOutcome::Cancelled) => CompactionStatus::Cancelled,
+            None if result.is_ok() => CompactionStatus::Completed,
+            None if self.hook_abort_signal.is_aborted() => CompactionStatus::Cancelled,
+            Some(CompactionOutcome::Failed) | None => CompactionStatus::Failed,
         };
-        if result.is_ok() {
-            progress.after_tokens = Some(estimate_session_tokens(&self.session));
-        }
+        progress.after_tokens = Some(estimate_session_tokens(&self.session));
+        progress.report = self.last_compaction_report.clone();
         if let Some(observer) = observer {
             observer.on_compaction(&progress);
         }
@@ -2488,88 +3138,183 @@ where
         &mut self,
         config: CompactionConfig,
         trigger: CompactionTrigger,
-        before: usize,
+        run_id: String,
     ) -> Result<Option<AutoCompactionEvent>, CompactionError> {
-        let mut candidate = self.session.clone();
-        let pruned = prune_tool_results(&mut candidate);
-        let budget = self
-            .api_client
-            .context_budget(&self.compaction_model(), &self.system_prompt);
-        let (candidate, removed, source) = if pruned > 0
-            && estimate_session_tokens(&candidate) <= budget.history_budget()
-        {
-            (candidate, 0, CompactionSummarySource::ToolPruning)
-        } else {
-            let config = self.compaction_retention(&candidate, config);
-            let abort = self.hook_abort_signal.clone();
-            let attempt = tokio::select! {
-                biased;
-                () = abort.cancelled() => Err(CompactionError::ApiError("cancelled".into())),
-                result = self.summarize_history(&candidate, config, None) => result,
-            };
-            let result = match attempt {
-                Ok(result) => result,
-                Err(error) => {
-                    if let Some(tracer) = &self.session_tracer {
-                        let mut attributes = Map::new();
-                        attributes.insert("trigger".into(), Value::String(trigger.as_str().into()));
-                        attributes.insert("error".into(), Value::String(error.to_string()));
-                        tracer.record("session_compaction_failed", attributes);
-                    }
-                    return Err(error);
-                }
-            };
-            (
-                result.compacted_session,
-                result.removed_message_count,
-                result.summary_source,
+        let source = self.session.clone();
+        let before = estimate_session_tokens(&source);
+        let result = self
+            .run_compaction(
+                &source,
+                config,
+                None,
+                CompactionRunOptions {
+                    allow_pruning: true,
+                    allow_repeat_skip: trigger != CompactionTrigger::ProviderRejection,
+                },
+                run_id,
             )
-        };
-        let after = estimate_session_tokens(&candidate);
-        if candidate.messages == self.session.messages {
+            .await?;
+        if result.compacted_session.messages == self.session.messages {
+            if let Some(report) = &result.report {
+                self.set_compaction_report(report.clone());
+            }
+            self.persist_compaction_maintenance();
+            if self.last_compaction_report.as_ref().is_some_and(|report| {
+                report.outcome == CompactionOutcome::Failed
+                    && report
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.starts_with("source_changed"))
+            }) {
+                return Err(CompactionError::Persistence(
+                    SessionError::SourceChanged.to_string(),
+                ));
+            }
             return Ok(None);
         }
-        if after >= before {
-            return Err(CompactionError::InvalidSummary(
-                "replacement does not reduce context".into(),
-            ));
-        }
         if self.hook_abort_signal.is_aborted() {
+            if let Some(report) = &mut self.last_compaction_report {
+                report.outcome = CompactionOutcome::Cancelled;
+                report.after_history = before;
+                report.reason = Some("cancelled_before_commit".into());
+            }
+            self.persist_compaction_maintenance();
             return Err(CompactionError::ApiError("cancelled".into()));
         }
         if let Some(path) = self.session.persistence_path() {
-            candidate
-                .save_compacted_to_path(&self.session, path)
-                .map_err(|error| CompactionError::Persistence(error.to_string()))?;
+            if let Err(error) = result.compacted_session.save_compacted_to_path_checked(
+                &self.session,
+                path,
+                result.source_revision.as_deref(),
+            ) {
+                let source_changed = matches!(error, SessionError::SourceChanged);
+                let refresh_error = if source_changed {
+                    self.compaction_source_revision = None;
+                    self.refresh_compaction_source().err()
+                } else {
+                    None
+                };
+                let active_history = estimate_session_tokens(&self.session);
+                if let Some(report) = &mut self.last_compaction_report {
+                    report.outcome = CompactionOutcome::Failed;
+                    report.after_history = active_history;
+                    report.reason = Some(if source_changed {
+                        refresh_error.map_or_else(
+                            || "source_changed; maintenance metadata remains in memory".into(),
+                            |refresh| format!("source_changed; source reload failed: {refresh}; maintenance metadata remains in memory"),
+                        )
+                    } else {
+                        "persistence_failed".into()
+                    });
+                }
+                if source_changed {
+                    self.session
+                        .last_compaction_report
+                        .clone_from(&self.last_compaction_report);
+                } else {
+                    self.persist_compaction_maintenance();
+                }
+                return Err(CompactionError::Persistence(error.to_string()));
+            }
         }
-        self.session = candidate;
-        // Provider usage describes the OLD prefix. Do not trigger another
-        // compaction from it before a response has priced the replacement.
-        self.usage_tracker.clear_context_usage();
-        self.record_compaction(trigger, removed, before, after, Some(&source));
-        Ok(Some(AutoCompactionEvent {
-            removed_message_count: removed,
-        }))
+        let after = estimate_session_tokens(&result.compacted_session);
+        let event = AutoCompactionEvent {
+            removed_message_count: result.removed_message_count,
+            report: result.report.clone(),
+        };
+        let removed = result.removed_message_count;
+        let summary_source = result.summary_source;
+        self.install_compacted_session(result.compacted_session);
+        self.record_compaction(trigger, removed, before, after, Some(&summary_source));
+        Ok(Some(event))
     }
 
-    /// Drop the trailing user message of a turn that produced no assistant
-    /// output, and rewrite the transcript to match. Used when the request
-    /// was rejected for its size: leaving the prompt in place would make the
-    /// user's next attempt start from a larger history than the one that
-    /// just failed, and consecutive user messages would accumulate on disk.
-    fn discard_unanswered_user_turn(&mut self) {
-        if !self
-            .session
-            .messages
-            .last()
-            .is_some_and(|message| message.role == MessageRole::User)
-        {
+    pub fn persist_compaction_maintenance(&mut self) {
+        self.session.last_compaction_report = self.last_compaction_report.clone();
+        let Some(expected_revision) = self.compaction_source_revision.clone() else {
             return;
+        };
+        if let Err(error) = self
+            .session
+            .persist_maintenance_metadata_checked(expected_revision.as_deref())
+        {
+            let source_changed = matches!(error, SessionError::SourceChanged);
+            let refresh_error = if source_changed {
+                self.compaction_source_revision = None;
+                self.refresh_compaction_source().err()
+            } else {
+                None
+            };
+            let active_history = estimate_session_tokens(&self.session);
+            if let Some(report) = &mut self.last_compaction_report {
+                if source_changed {
+                    report.outcome = CompactionOutcome::Failed;
+                    report.after_history = active_history;
+                    report.reason = Some(refresh_error.map_or_else(
+                        || "source_changed".into(),
+                        |refresh| format!("source_changed; source reload failed: {refresh}"),
+                    ));
+                }
+                report.reason = Some(format!(
+                    "{}; maintenance metadata could not be saved: {error}",
+                    report.reason.as_deref().unwrap_or("failed")
+                ));
+                self.session.last_compaction_report = Some(report.clone());
+            }
+            self.record_session_persist_error("compaction_maintenance_usage", &error.to_string());
+        } else {
+            // A second owner finalize must compare with our own metadata write.
+            match self.session.capture_durable_revision_for_history() {
+                Ok((revision, new_usage)) => {
+                    self.record_compaction_maintenance_usage(new_usage);
+                    self.compaction_source_revision = Some(revision.into());
+                    self.session_source_stale = false;
+                }
+                Err(error) => {
+                    self.compaction_source_revision = None;
+                    self.session_source_stale = true;
+                    let source_changed = matches!(error, SessionError::SourceChanged);
+                    let refresh_error = if source_changed {
+                        self.refresh_compaction_source().err()
+                    } else {
+                        None
+                    };
+                    let active_history = estimate_session_tokens(&self.session);
+                    if let Some(report) = &mut self.last_compaction_report {
+                        report.outcome = CompactionOutcome::Failed;
+                        report.after_history = active_history;
+                        report.reason = Some(if source_changed {
+                            refresh_error.map_or_else(
+                                || "source_changed".into(),
+                                |refresh| {
+                                    format!("source_changed; source reload failed: {refresh}")
+                                },
+                            )
+                        } else {
+                            format!("source_revision_read_failed: {error}")
+                        });
+                        self.session.last_compaction_report = Some(report.clone());
+                    }
+                    self.record_session_persist_error(
+                        "compaction_maintenance_revision",
+                        &error.to_string(),
+                    );
+                }
+            }
         }
-        self.session.messages.pop();
-        if let Err(error) = self.session.rewrite_persisted() {
-            self.record_session_persist_error("discard_unanswered_user_turn", &error.to_string());
+    }
+
+    fn record_compaction_maintenance_usage(&mut self, new_usage: Vec<TokenUsage>) {
+        for usage in new_usage {
+            self.usage_tracker.record_maintenance(usage);
         }
+        self.usage_tracker.set_unknown_maintenance_receipts(
+            self.session
+                .maintenance_usage
+                .iter()
+                .filter(|receipt| receipt.usage.is_none())
+                .count(),
+        );
     }
 
     fn record_session_persist_error(&self, operation: &str, error: &str) {
@@ -2796,6 +3541,7 @@ fn merge_auto_compaction(
         (Some(event), None) | (None, Some(event)) => Some(event),
         (Some(a), Some(b)) => Some(AutoCompactionEvent {
             removed_message_count: a.removed_message_count + b.removed_message_count,
+            report: b.report,
         }),
     }
 }
@@ -4874,6 +5620,7 @@ mod tests {
                 self.seen.push(options);
                 Ok(TextCompletion {
                     text: "<summary>a checkpoint</summary>".to_string(),
+                    usage: None,
                     stop_reason: Some("end_turn".to_string()),
                     has_tool_calls: false,
                 })
@@ -5715,8 +6462,10 @@ mod tests {
     async fn turn_compacts_proactively_instead_of_waiting_for_a_rejection() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        const LIMIT: usize = 4_000;
-        const STEPS: usize = 12;
+        // Leave room for a complete checkpoint plus the protected tool pairs
+        // while still forcing this long turn across the request budget.
+        const LIMIT: usize = 100_000;
+        const STEPS: usize = 110;
 
         struct BudgetedApi {
             rejections: Arc<AtomicUsize>,
@@ -5791,13 +6540,13 @@ mod tests {
                 rejections: Arc::clone(&rejections),
                 steps: Arc::clone(&steps),
             },
-            // Each tool result adds ~1000 estimated tokens, so the 3.4K
-            // history budget is exhausted after three or four steps.
+            // Keep individual outputs below the pruning threshold. The full
+            // turn crosses the budget while leaving room for the summary send.
             StaticToolExecutor::new().register("bulk", |_| Ok("x".repeat(4_000))),
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             SystemPrompt::default(),
         )
-        .with_max_iterations(64);
+        .with_max_iterations(128);
 
         let summary = runtime
             .run_turn("do many steps", None, None)
@@ -5848,7 +6597,7 @@ mod tests {
     async fn in_turn_compaction_is_recorded_with_its_trigger_and_summary_source() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        const LIMIT: usize = 4_000;
+        const LIMIT: usize = 100_000;
 
         struct TinyBudgetApi {
             steps: Arc<AtomicUsize>,
@@ -5874,7 +6623,7 @@ mod tests {
                 _request: ApiRequest,
             ) -> Result<AssistantEventStream, RuntimeError> {
                 let step = self.steps.fetch_add(1, Ordering::Relaxed);
-                if step < 6 {
+                if step < 110 {
                     Ok(events_to_stream(vec![
                         AssistantEvent::ToolUse {
                             id: format!("tool-{step}"),
@@ -5914,7 +6663,7 @@ mod tests {
             PermissionPolicy::new(PermissionMode::DangerFullAccess),
             SystemPrompt::default(),
         )
-        .with_max_iterations(64)
+        .with_max_iterations(128)
         .with_session_tracer(tracer);
 
         runtime
@@ -5945,7 +6694,10 @@ mod tests {
             .get("estimated_tokens_after")
             .and_then(serde_json::Value::as_u64)
             .expect("after estimate");
-        assert!(after < before, "compaction should shrink the estimate");
+        assert!(
+            after <= before / 2,
+            "compaction should meet the complete-history target"
+        );
     }
 
     /// Reproduces the reported production failure, using only surface that

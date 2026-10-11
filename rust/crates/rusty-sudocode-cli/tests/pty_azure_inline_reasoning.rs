@@ -1,7 +1,8 @@
-//! Real CLI -> local file tool -> Azure response envelope -> persisted answer.
-//! Live acceptance also runs pty_model_compat against deepseek-v3.2-azure.
+//! Real CLI -> local file tool -> compatible reasoning -> persisted answer.
+//! Live acceptance also runs `pty_model_compat` against deepseek-v3.2-azure.
 mod common;
 
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
@@ -158,6 +159,29 @@ fn read_request(socket: &mut TcpStream) -> (String, Option<Value>) {
 }
 
 fn answer(model: &str, case: &str, nonce: &str) -> (&'static str, String) {
+    if let Some(case) = case.strip_prefix("reasoning-") {
+        let (is_json, case) = case
+            .strip_prefix("json-")
+            .map_or((false, case), |case| (true, case));
+        if is_json {
+            let mut message = reasoning_fields(case, "校验 fixture\n最后一步");
+            message["role"] = json!("assistant");
+            message["content"] = json!(nonce);
+            return (
+                "application/json",
+                json!({"id":"final","model":model,"choices":[{"index":0,"message":message,"finish_reason":"stop"}]}).to_string(),
+            );
+        }
+        let mut body = String::new();
+        for text in ["校验 ", "fixture\n", "最后一步"] {
+            let delta = reasoning_fields(case, text);
+            let chunk = json!({"id":"final","model":model,"choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+            writeln!(body, "data: {chunk}\n").unwrap();
+        }
+        let chunk = json!({"id":"final","model":model,"choices":[{"index":0,"delta":{"content":nonce},"finish_reason":"stop"}]});
+        write!(body, "data: {chunk}\n\ndata: [DONE]\n\n").unwrap();
+        return ("text/event-stream", body);
+    }
     if case == "anthropic-error" {
         return (
             "text/event-stream",
@@ -178,8 +202,14 @@ fn answer(model: &str, case: &str, nonce: &str) -> (&'static str, String) {
         return ("application/json", json!({"id":"final","model":model,"choices":[{"index":0,"message":{"role":"assistant","content":text},"finish_reason":"stop"}]}).to_string());
     }
     let mut body = String::new();
-    if case == "structured" {
-        let chunk = json!({"id":"final","model":model,"choices":[{"index":0,"delta":{"reasoning_content":"structured fixture check"},"finish_reason":null}]});
+    if matches!(case, "structured" | "structured-reasoning") {
+        let field = if case == "structured" {
+            "reasoning_content"
+        } else {
+            "reasoning"
+        };
+        let delta = json!({field: "structured fixture check"});
+        let chunk = json!({"id":"final","model":model,"choices":[{"index":0,"delta":delta,"finish_reason":null}]});
         body.push_str(&format!("data: {chunk}\n\n"));
     }
     // A character per SSE frame splits both tag boundaries and exercises UTF-8.
@@ -192,6 +222,113 @@ fn answer(model: &str, case: &str, nonce: &str) -> (&'static str, String) {
     ("text/event-stream", body)
 }
 
+fn reasoning_fields(case: &str, text: &str) -> Value {
+    match case {
+        "current" => json!({"reasoning":text}),
+        "legacy" => json!({"reasoning_content":text}),
+        "both" => json!({"reasoning":text,"reasoning_content":"must not be duplicated"}),
+        "null-current" => json!({"reasoning":null,"reasoning_content":text}),
+        "empty-current" => json!({"reasoning":"","reasoning_content":text}),
+        "null-legacy" => json!({"reasoning":text,"reasoning_content":null}),
+        "none" => json!({}),
+        "empty" => json!({"reasoning":"","reasoning_content":null}),
+        _ => panic!("unknown reasoning fixture: {case}"),
+    }
+}
+
+/// Real PTY -> local file tool -> OpenAI-compatible HTTP -> display and disk.
+/// These deterministic wire-format cases run in CI; they do not claim live
+/// vLLM model acceptance.
+#[test]
+fn openai_reasoning_fields_reach_the_terminal_and_session() {
+    for case in [
+        "current",
+        "legacy",
+        "both",
+        "null-current",
+        "empty-current",
+        "null-legacy",
+        "none",
+        "empty",
+        "json-current",
+        "json-legacy",
+        "json-both",
+        "json-null-current",
+        "json-empty-current",
+    ] {
+        let env = common::TestEnv::new("openai-reasoning-fields");
+        if env.is_live() {
+            return;
+        }
+        let nonce = format!("REASONING_FILE_{case}");
+        std::fs::write(env.workspace_root().join("fixture.txt"), &nonce).unwrap();
+        let model = "glm-fixture";
+        let provider = Provider::new(model, &format!("reasoning-{case}"), &nonce);
+        let path = env.config_home().join("sudocode.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["api"] =
+            json!("openai-completions");
+        std::fs::write(path, config.to_string()).unwrap();
+
+        let mut cli = env.spawn(&["--permission-mode", "read-only"]);
+        cli.expect("❯").unwrap();
+        cli.send("Read fixture.txt and report its contents.\r")
+            .unwrap();
+        let has_thinking = !matches!(case, "none" | "empty");
+        if has_thinking {
+            cli.expect("✻ Thinking").expect(case);
+            cli.expect("校验 fixture").unwrap();
+            cli.expect("最后一步").unwrap();
+        }
+        cli.expect(&nonce).unwrap();
+        cli.expect("❯").unwrap();
+        cli.send("/exit\r").unwrap();
+        assert_eq!(cli.expect_eof().unwrap(), 0, "{case}: CLI exit");
+
+        let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
+        let sessions = store.list_sessions().unwrap();
+        let session = Session::load_from_path(&sessions[0].path).unwrap();
+        assert!(session
+            .messages
+            .iter()
+            .flat_map(|m| &m.blocks)
+            .any(|b| matches!(b,
+            ContentBlock::ToolResult {output,is_error:false,..} if output.contains(&nonce))));
+        let blocks = &session.messages.last().unwrap().blocks;
+        let thinking: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            thinking,
+            if has_thinking {
+                vec!["校验 fixture\n最后一步"]
+            } else {
+                vec![]
+            },
+            "{case}: preserve reasoning once, separately from the answer",
+        );
+        let text: String = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, nonce, "{case}: preserve the actual file answer");
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "{case}: no hidden retries");
+        assert!(requests
+            .iter()
+            .all(|r| r["model"] == model && r["stream"] == true));
+    }
+}
+
 #[test]
 fn azure_envelopes_preserve_file_answers_and_literal_text() {
     for case in [
@@ -199,6 +336,7 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
         "json",
         "prefaced",
         "structured",
+        "structured-reasoning",
         "ordinary",
         "literal-prefix",
         "empty",
@@ -281,7 +419,9 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
             .collect();
         match case {
             "stream" | "json" => assert_eq!(thinking, "校验 fixture"),
-            "structured" => assert_eq!(thinking, "structured fixture check"),
+            "structured" | "structured-reasoning" => {
+                assert_eq!(thinking, "structured fixture check");
+            }
             "truncated" | "anthropic-error" => {} // The runtime discards the failed response.
             _ => assert!(thinking.is_empty(), "{case}: unexpected reasoning"),
         }
@@ -299,7 +439,7 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
         } else if case == "prefaced" {
             assert_eq!(text, format!("The exact file contents are:\n\n{nonce}"));
             assert_final_file_answer(&text, &nonce);
-        } else if matches!(case, "structured" | "ordinary") {
+        } else if matches!(case, "structured" | "structured-reasoning" | "ordinary") {
             assert_eq!(text, format!("<think>校验 fixture</think>\n{nonce}"));
         } else if case == "literal-prefix" {
             assert_eq!(text, format!("<thimble>{nonce}"));

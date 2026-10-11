@@ -118,6 +118,15 @@ the model family and the request shape the family expects.
 All detection strips a leading provider prefix (`dashscope/kimi-k2.5` →
 `kimi-k2.5`) before matching.
 
+### OpenAI-compatible reasoning fields
+
+Chat Completions responses accept both `reasoning` (current vLLM) and
+`reasoning_content` (older compatible APIs), in streaming `delta` objects and
+non-streaming `message` objects. A nonempty `reasoning` takes precedence; if it
+is absent, null, or empty, `reasoning_content` is used instead. When both are
+present, the text is consumed once. It is emitted as thinking, separately from
+the answer's `content`, through both the CLI and ACP.
+
 ### Azure DeepSeek inline reasoning
 
 For `deepseek-*` deployment names ending in `-azure`, a leading
@@ -127,9 +136,9 @@ Streaming accepts tags split across frames. An unclosed envelope fails the
 response instead of treating unfinished reasoning as an answer. Reported usage
 still includes the provider's reasoning tokens.
 
-A nonempty `reasoning_content` field takes precedence. In that structured
-format, literal tags in the answer remain intact. Other model names keep their
-existing text handling.
+A nonempty `reasoning` or `reasoning_content` field takes precedence. In that
+structured format, literal tags in the answer remain intact. Other model names
+keep their existing text handling.
 
 ### Kimi family — tool result field shape
 

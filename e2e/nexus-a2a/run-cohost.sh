@@ -187,8 +187,17 @@ authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
 # Rust tests cannot link this surface themselves.
 echo "== 3d. allow the front door, mint the session credential =="
 session_mint_tools_init
-allow_session_minter "$ENDPOINT" "$AUTHON_DATA_DIR/data" "$FRONTDOOR_ID" \
-  || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+# The gRPC plane binds after the zone topology the wait above keyed on, so the
+# first dial can race the listener. Retry until it answers rather than fail a
+# run on a startup ordering that says nothing about the code under test.
+allow_ok=
+for _ in $(seq 1 30); do
+  if allow_session_minter "$ENDPOINT" "$AUTHON_DATA_DIR/data" "$FRONTDOOR_ID"; then
+    allow_ok=1; break
+  fi
+  sleep 2
+done
+[ -n "$allow_ok" ] || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
 SESSION_BUNDLE="$(mint_session_bundle "$ENDPOINT" "$(shell_path "$FRONTDOOR_BUNDLE")" \
   "$OPERATOR" "$WORK_DIR/session-bundle")" \
   || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }

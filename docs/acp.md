@@ -279,8 +279,9 @@ provider context rejection still requires recovery or a failed prompt.
 
 The visible summary ceiling is computed from the remaining target after
 protected history and framing, capped at 12,000 tokens and the model's available
-output limit. Required thinking is reserved separately before choosing that
-visible ceiling. The ceiling can therefore be much smaller than 12,000; fitting
+output limit. Budgeted thinking is reserved separately before choosing that
+visible ceiling; adaptive thinking adds no manual thinking reservation. The
+ceiling can therefore be much smaller than 12,000; fitting
 the summary alone is insufficient if the complete history misses the target.
 No partially reduced candidate is installed.
 

@@ -525,7 +525,8 @@ The visible summary allowance is dynamic: at most 12,000 tokens, reduced by the
 space left after retained history and framing, the next-request target, and
 the model's output limit (including `maxOutputTokens` overrides). The prompt
 keeps 8,000 tokens as soft guidance and asks for a shorter summary when needed.
-Provider-specific thinking can require additional output reservation. Both the
+Budgeted thinking can require additional output reservation. Adaptive thinking
+does not add a manual thinking budget to the summary's output ceiling. Both the
 summary request and the following task request are checked against their own
 actual system, tool schemas, output reservation, and safety buffer; pending
 user input also reduces the next request's history budget.

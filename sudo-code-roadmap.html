@@ -956,7 +956,7 @@ semantics through one ESC / Ctrl+C keypress, with priority ordering:</p>
 <section id="compaction-budget-validation" lang="zh-CN">
 <h3>会话压缩预算与验收技术方案</h3>
 
-<p class="meta">状态：核心修复已在 <code>feat/compaction-budget-validation</code> 实现，本地受控与渲染性能验证通过；真实模型续接与托管 CI 验收尚未完成，尚未合并或发布。目标已确认：压后通常保留原历史的 30%～50%，仅达标候选可提交。代码基线：main <code>f6e724b1</code>；方案更新日期 2026 年 10 月 10 日。</p>
+<p class="meta">状态：核心修复已在 <code>feat/compaction-budget-validation</code> 实现，实际验证结果与边界见下表；托管 CI 以 <a href="https://github.com/sudoprivacy/sudocode/pull/922">PR #922</a> 当前提交检查为准，尚未合并或发布。目标已确认：压后通常保留原历史的 30%～50%，仅达标候选可提交。已合入 main <code>89d33e6a</code>；方案更新日期 2026 年 10 月 11 日。</p>
 
 <p>修复的核心是把“摘要比删掉的历史短一点”改成“整个压后历史达到明确目标，并满足下一次请求预算”。一次压缩应尽量将完整历史压到原来的 30%～50%；成功的上限是 50%，30% 是理想规划值，低于 30% 也可达标。摘要、保留消息、续接说明和 Todo 都计入压后历史。手动、自动和超窗恢复共用严格合同：未达标时有界重试，最终仍未达标则不提交候选，保留原历史并报告失败原因。</p>
 
@@ -1041,7 +1041,7 @@ C = min(12_000, T − K − F, provider 允许的摘要空间)</code></pre>
 
 <p>压后任务请求和生成摘要的请求分别预检。即使 <code>Ha ≤ L</code>，摘要源加摘要指令仍可能超窗；生成前必须按所选路径的实际请求形态，检查源历史、system、工具 schema、压缩指令、安全 buffer 和输出预留。</p>
 
-<p>可见摘要预算与 API <code>max_tokens</code> 分开。Anthropic cache-safe 路径可能需要“摘要 allowance 加原 thinking budget”，而 OpenAI-compatible 路径按对应 adapter 的 reasoning 与输出规则计算。adapter 返回最终参数和预留量；不得把 <code>C</code> 直接当作所有 provider 的总输出参数，也不得把当前字节估算单位当作真实 tokenizer 的一比一映射。</p>
+<p>可见摘要预算与 API <code>max_tokens</code> 分开。Anthropic cache-safe 的 Budgeted thinking 路径可能需要“摘要 allowance 加原 thinking budget”；adaptive thinking 不添加手动 thinking reservation，保留其 adaptive 参数与 effort，而 OpenAI-compatible 路径按对应 adapter 的 reasoning 与输出规则计算。adapter 返回最终参数和预留量；不得把 <code>C</code> 直接当作所有 provider 的总输出参数，也不得把当前字节估算单位当作真实 tokenizer 的一比一映射。</p>
 
 <p>保持现有 12K 可见摘要上限，同时受模型输出能力与动态剩余空间约束。cache-safe 优先复用原 system、工具与 thinking 前缀；若放不下，显式选择较低预留的可支持路径或标准摘要路径，说明缓存复用可能损失。标准路径沿用现有待摘要前缀转换，不默默截掉最早历史来换取请求通过。两条路径都放不下时，本次返回失败，不扩展为多段递归摘要。</p>
 
@@ -1251,11 +1251,11 @@ C = min(12_000, T − K − F, provider 允许的摘要空间)</code></pre>
   <li>确认新可选元数据不破坏旧会话读取及旧前端；若需回退二进制，活跃压缩历史仍可加载，原始全文保留在恢复归档。语义回退使用对应原始归档，并明确此后新增历史的合并边界。</li>
 </ol>
 
-<p>工作区版本为 0.2.23，依赖已恢复，候选 CLI 已从本分支源码构建并运行真实 PTY。受控 HTTP 场景验证比例、请求体、次数上限、取消、归档、计费与 resume。最初真实模型验收分别遇到 <code>401 Invalid token</code> 与 <code>503 No available accounts</code>；随后使用可用的 api-key 路由完成真实压缩文件任务、关键约束续接及两组自动压缩验收。修改前对照也一次摘要达标，因此本次交付定位为压缩验收与可靠性增强，不宣称提高首次压缩率或修复未复现的首次压缩不足根因。Apeiron 前端适配、版本 pin、发布与部署仍需后续交付。</p>
+<p>早期真实模型对照使用 0.2.23；本分支合入最新 main 后版本为 0.2.24，依赖已恢复，候选 CLI 从本分支源码构建并运行 PTY。受控 HTTP 场景验证比例、请求体、次数上限、取消、归档、计费与 resume。最初真实模型验收分别遇到 <code>401 Invalid token</code> 与 <code>503 No available accounts</code>；随后使用可用的 api-key 路由完成真实压缩文件任务、关键约束续接及两组自动压缩验收。修改前对照也一次摘要达标，因此本次交付定位为压缩验收与可靠性增强，不宣称提高首次压缩率或修复未复现的首次压缩不足根因。Apeiron 前端适配、版本 pin、发布与部署仍需后续交付。</p>
 
 <h4 id="compact-local-validation">本分支实际验证记录</h4>
 
-<p>以下为 2026 年 10 月 10 日在本地 macOS 的验证；受控 HTTP 通过不替代真实模型语义验收，也不表示其他平台或生产环境已经验收。</p>
+<p>以下记录 2026 年 10 月 10 日至 11 日在本地 macOS 的验证；受控 HTTP 通过不替代真实模型语义验收，也不表示其他平台或生产环境已经验收。</p>
 
 <table>
   <thead><tr><th>检查</th><th>实际结果与边界</th></tr></thead>
@@ -1268,6 +1268,9 @@ C = min(12_000, T − K − F, provider 允许的摘要空间)</code></pre>
     <tr><td>渲染性能</td><td>本地 macOS 正常 release 构建与固定 <code>core</code> 性能检查通过，exit 0、<code>status=passed</code>、失败项为空。完成 156 个独立 PTY 样本：12 个预热、5 轮 A/A 的 60 个校准样本、7 轮 A/B 的 84 个对比样本，覆盖 6 个固定场景；policy、预算、基线与可信驱动均未放宽。required <code>render performance</code> 状态仍需后续托管 CI 验证。</td></tr>
     <tr><td>真实模型与续接</td><td>后续可用 api-key 路由的 live PTY 文件任务通过：30,000 → 12,703，一份完整摘要后生成文件并恢复被移除历史中的约束。<code>80549934</code> 构建的 <code>claude-sonnet-4-6</code> 普通 prompt 自动触发 preflight：124,989 → 28,758（23.008%）、144,996 → 33,068（22.806%），均一份完整摘要且后续清单任务与关键事实通过；145K 首次 HTTP 遇到上游 400，重试后成功。未覆盖真实 in-turn / post-turn 自动压缩。真实 ACP 三项响应超时仍未通过。</td></tr>
     <tr><td>修改前同输入对照</td><td>基线 <code>f6e724b1</code> 以同一模型、配置、workspace、正常任务及冻结历史运行：124,989 → 28,378（22.704%）、144,996 → 33,072（22.809%），均一份完整摘要并正确续接；145K 同样先遇到一次上游 400。两版摘要请求的 system、工具定义、历史前缀、thinking 和 max_tokens 均相同，差异为新增长度指令。每组每版仅运行一次，不构成成功率统计；两组是由真实仓库资料构造的工程历史，比例使用本地估算，未复现原来的首次压缩不足。</td></tr>
+    <tr><td>2026-10-11：CI 修复</td><td>正常 merge <code>origin/main 89d33e6a</code>，保留原 PR 全部提交；merge hygiene 脚本与 13 个生命周期场景通过。共享 <code>mock-anthropic-service</code> 与 <code>tests/common</code> 恢复 main 原样，两个 ACP 用例 seed 改为 64 对完整消息，行为断言保留。PR 对受保护性能路径无差异；实际 policy 脚本本地调用通过，未改变预算、基线或审批规则。最终托管 policy 和实际 <code>render performance</code> 以 PR 当前提交结果为准。</td></tr>
+    <tr><td>2026-10-11：预算回归</td><td><code>d5798e7c</code> 的生产入口仅为 Budgeted thinking 额外预留手动 thinking budget；adaptive 保持其原参数与 12K 可见摘要上限。移除 guard 的反证真实发送 28K，被新增 PTY 的 12K 断言拒绝；恢复源码后普通与 vendor 前缀 adaptive 模型均完成一份摘要、持久化及任务续接。专项 57 个受控场景通过：压缩 29（另 1 个 live-only 提前跳过，Cargo 显示 30 passed）、上下文 7、缓存前缀 11、缓存统计 2、mock parity 1、ACP 压缩 5 和 stdio / WebSocket 综合 2。格式、diff、文档 SSOT 通过；新增 adaptive 用例未产生 Clippy 警告，<code>--cap-lints warn</code> 诊断不计作严格通过。后续 <code>66b71f70</code> 仅增加连贯测试流程的窄 lint 说明。</td></tr>
+    <tr><td>2026-10-11：真实路由复验限制</td><td>以本次 Cargo 构建的 0.2.24、<code>claude-sonnet-4-6</code>、api-key 与 thinking=true，从标准复制配置机制重跑文件续接和上下文续接 PTY，未降低窗口或输出配置。文件场景收到上游 <code>503 No available accounts</code>；上下文场景同样耗尽请求尝试、完成摘要数为 0。两个场景未续接，不能计为通过；30K / 15K 原历史完整保留，用户全局配置哈希未变。此前成功的自动 preflight 对照属于较早二进制，不能替代本次真实模型验收。</td></tr>
     <tr><td>接上最新 main 后的回归</td><td>本分支接上 <code>origin/main 1305331c</code>，Rust 源码提交 <code>419ce8d5</code> 的 mock 回归通过：压缩 PTY 28 个受控场景（另 1 个 live-only 用例提前跳过，Cargo 显示 29 passed）、上下文 7、缓存前缀 9、mock parity 1；ACP 压缩专项 5 及 stdio / WebSocket 综合 2 全部通过。使用本次 Cargo 构建产物，未指定旧 <code>SCODE_TEST_BIN</code>。格式、diff 与文档 SSOT 检查通过；未在 rebase 后重跑完整 workspace、严格 Clippy 或真实模型对照，最终托管 CI 仍待验证。</td></tr>
   </tbody>
 </table>

@@ -4,6 +4,7 @@ import base64
 from concurrent.futures import Future, ThreadPoolExecutor
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -18,7 +19,8 @@ class Rpc:
     def __init__(self, binary, root):
         env = os.environ | {'SCODE_SERVICE_ROOT': str(root),
                             'SUDO_CODE_CONFIG_HOME': str(root / 'config'),
-                            'SCODE_CHECK_UPDATES': '0', 'RUST_LOG': 'info'}
+                            'SCODE_CHECK_UPDATES': '0', 'RUST_LOG': 'info',
+                            'NEXUS_IDENTITY_DIR': str(root / 'unrelated-identity')}
         self.child = subprocess.Popen([str(binary), 'service', 'stdio'], env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding='utf-8',
@@ -65,6 +67,11 @@ class Rpc:
 
 
 def run(binary, root):
+    unrelated = root / 'unrelated-identity' / 'identity.json'
+    unrelated.parent.mkdir()
+    unrelated_body = json.dumps({'schema_version': 2, 'peers': [],
+        'zones': [{'zone_id': 'foreign-fixture-zone', 'members': [], 'as_role': 'voter'}]})
+    unrelated.write_text(unrelated_body, encoding='utf-8')
     a, b = Rpc(binary, root), Rpc(binary, root)
     session = None
     try:
@@ -76,6 +83,9 @@ def run(binary, root):
             first, second = first.result(), second.result()
         assert first['nexusPid'] == second['nexusPid'] and first['instance'] == second['instance']
         assert first['zone_id'], 'Readiness must name the serving zone'
+        identity = json.loads((root / 'identity/identity.json').read_text())
+        assert all(zone['zone_id'] != 'foreign-fixture-zone' for zone in identity['zones'])
+        assert unrelated.read_text(encoding='utf-8') == unrelated_body
         print('PASS: concurrent clients share one authenticated ready service', flush=True)
         plugins = a.request('service.checkInstalled')['plugins']
         assert len(plugins) >= 2, 'Vault and local connector must be present'
@@ -103,6 +113,20 @@ def run(binary, root):
         assert a.request('vault.get', {'namespace': namespace, 'key': 'sample', 'version': 1}) == secret
         assert len(a.request('vault.versions', {'namespace': namespace, 'key': 'sample'})) == 2
         assert secret not in json.dumps(a.request('vault.list', {'namespace': namespace}))
+        other_root = root / 'independent-service'
+        other_root.mkdir()
+        shutil.copytree(root / 'runtimes', other_root / 'runtimes')
+        independent = Rpc(binary, other_root)
+        try:
+            isolated = independent.request('service.start')
+            assert isolated['nexusPid'] != first['nexusPid'] and isolated['instance'] != first['instance']
+            assert independent.request('vault.get', {'namespace': namespace, 'key': 'sample'}) is None
+            assert (root / 'data/.node_id').read_bytes() != (other_root / 'data/.node_id').read_bytes()
+            assert (other_root / 'identity/identity.json').is_file()
+            print('PASS: independent managed roots isolate identity, node ID and Vault content', flush=True)
+        finally:
+            independent.request('service.shutdown')
+            independent.close()
         a.request('vault.delete', {'namespace': namespace, 'key': 'sample'})
         assert b.request('vault.get', {'namespace': namespace, 'key': 'sample'}) is None
         b.request('vault.restore', {'namespace': namespace, 'key': 'sample'})

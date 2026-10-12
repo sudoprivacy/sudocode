@@ -24,9 +24,11 @@ connection token. Closing a frontend closes its process channel; the shared
 service continues serving its other clients. An explicit shutdown drains requests
 and releases the Nexus child. Managed runtimes keep the service in use.
 
-`data/` holds durable Nexus and Vault content. `run/` holds discovery, locks and
+`data/` holds durable Nexus and Vault content. `identity/` holds the service's
+transport peer and zone membership identity, scoped to the same managed root.
+`run/` holds discovery, locks and
 diagnostics. Verified runtime assemblies live in `runtimes/`. Installation repair
-and removal operate on assemblies and preserve `data/`.
+and removal operate on assemblies and preserve `data/` and `identity/`.
 
 The Nexus release comes from the workspace dependency in
 [rust/Cargo.toml](../rust/Cargo.toml). Plugin releases and archive hashes come from

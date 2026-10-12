@@ -553,6 +553,8 @@ pub fn run_daemon() -> Result<()> {
             "--data-dir",
         ])
         .arg(root.join("data"))
+        .arg("--identity-dir")
+        .arg(root.join("identity"))
         .arg("--plugin-dir")
         .arg(artifacts::plugins(&root))
         .env("NEXUS_DATA_DIR", root.join("data"))

@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ProviderErrorBody, ProviderErrorEnvelope};
 use crate::http_transport::{
     parse_retry_after, request_id_from_headers, HttpTransport, RetryPolicy,
 };
@@ -244,10 +244,7 @@ impl OpenAiCompatClient {
                 return Err(ApiError::Api {
                     status: reqwest::StatusCode::from_u16(code.unwrap_or(400))
                         .unwrap_or(reqwest::StatusCode::BAD_REQUEST),
-                    error_type: err_obj
-                        .get("type")
-                        .and_then(|t| t.as_str())
-                        .map(str::to_owned),
+                    error_type: ProviderErrorBody::kind_from_json(err_obj),
                     message: Some(msg),
                     request_id,
                     body,
@@ -1763,18 +1760,6 @@ struct DeltaFunction {
     arguments: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
-}
-
-#[derive(Debug, Deserialize)]
-struct ErrorBody {
-    #[serde(rename = "type")]
-    error_type: Option<String>,
-    message: Option<String>,
-}
-
 /// Returns true for models known to reject tuning parameters like temperature,
 /// `top_p`, `frequency_penalty`, and `presence_penalty`. These are typically
 /// reasoning/chain-of-thought models with fixed sampling.
@@ -2671,10 +2656,7 @@ fn parse_sse_frame(frame: &str, provider: &str, model: &str) -> Result<ChatSseFr
                 .unwrap_or(reqwest::StatusCode::BAD_REQUEST);
             return Err(ApiError::Api {
                 status,
-                error_type: err_obj
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .map(str::to_owned),
+                error_type: ProviderErrorBody::kind_from_json(err_obj),
                 message: Some(msg),
                 request_id: None,
                 body: payload.clone(),
@@ -2736,7 +2718,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let request_id = request_id_from_headers(response.headers());
     let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
-    let parsed_error = serde_json::from_str::<ErrorEnvelope>(&body).ok();
+    let parsed_error = serde_json::from_str::<ProviderErrorEnvelope>(&body).ok();
     let retryable = crate::error::is_retryable_http_status(status.as_u16())
         || crate::error::is_retryable_masked_400(status, &body);
 
@@ -2744,9 +2726,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
 
     Err(ApiError::Api {
         status,
-        error_type: parsed_error
-            .as_ref()
-            .and_then(|error| error.error.error_type.clone()),
+        error_type: parsed_error.as_ref().and_then(|error| error.error.kind()),
         message: parsed_error
             .as_ref()
             .and_then(|error| error.error.message.clone()),
@@ -2813,7 +2793,7 @@ mod tests {
         normalize_response, openai_tool_choice, parse_tool_arguments, ChatStreamState,
         OpenAiCompatClient, OpenAiCompatConfig, ResponsesSseFrame, ResponsesStreamState,
     };
-    use crate::error::ApiError;
+    use crate::error::{ApiError, ProviderErrorBody, ProviderErrorEnvelope};
     use crate::types::{
         ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
         InputContentBlock, InputMessage, MessageRequest, OutputContentBlock, StreamEvent,

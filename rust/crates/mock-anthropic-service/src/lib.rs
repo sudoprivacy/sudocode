@@ -254,7 +254,6 @@ enum Scenario {
     /// the transport's retry loop, and therefore the retry indicator, without
     /// waiting on a real provider to rate-limit us.
     RetryThenSucceed,
-    ProviderReject,
     DeferredToolRoundtrip,
     UnifiedSendRoundtrip,
     UnifiedSendFromNamedPeer,
@@ -392,7 +391,6 @@ impl Scenario {
             "tool_loop_context_growth" => Some(Self::ToolLoopContextGrowth),
             "ask_user_question_roundtrip" => Some(Self::AskUserQuestionRoundtrip),
             "retry_then_succeed" => Some(Self::RetryThenSucceed),
-            "provider_reject" => Some(Self::ProviderReject),
             "deferred_tool_roundtrip" => Some(Self::DeferredToolRoundtrip),
             "unified_send_roundtrip" => Some(Self::UnifiedSendRoundtrip),
             "unified_send_from_named_peer" => Some(Self::UnifiedSendFromNamedPeer),
@@ -471,7 +469,6 @@ impl Scenario {
             Self::DelayedText => "delayed_text",
             Self::AskUserQuestionRoundtrip => "ask_user_question_roundtrip",
             Self::RetryThenSucceed => "retry_then_succeed",
-            Self::ProviderReject => "provider_reject",
             Self::ContextLimitThenText => "context_limit_then_text",
             Self::ToolLoopContextGrowth => "tool_loop_context_growth",
             Self::DeferredToolRoundtrip => "deferred_tool_roundtrip",
@@ -566,14 +563,6 @@ async fn handle_connection(
         stream: request.stream,
         raw_body,
     });
-
-    if scenario == Scenario::ProviderReject {
-        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"fixture provider rejected this turn"}}"#;
-        socket
-            .write_all(http_response("400 Bad Request", "application/json", body, &[]).as_bytes())
-            .await?;
-        return Ok(());
-    }
 
     if scenario == Scenario::ToolConcurrency
         && request.stream
@@ -1668,9 +1657,6 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
             ),
             Some(_) => final_text_sse("Render fixture done."),
         },
-        Scenario::ProviderReject => {
-            unreachable!("provider rejection returns an HTTP error before building a message")
-        }
         Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
             streaming_text_sse()
         }
@@ -2342,9 +2328,6 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
         },
         Scenario::SyntaxHighlightLimits => {
             text_message_response("msg_syntax_limits", &syntax_limits_doc())
-        }
-        Scenario::ProviderReject => {
-            unreachable!("provider rejection returns an HTTP error before building a message")
         }
         Scenario::StreamingText | Scenario::DelayedText | Scenario::RetryThenSucceed => {
             text_message_response(
@@ -3036,7 +3019,6 @@ fn request_id_for(scenario: Scenario) -> &'static str {
         Scenario::LlmCompactionRoundtrip => "req_llm_compaction_roundtrip",
         Scenario::AskUserQuestionRoundtrip => "req_ask_user_question_roundtrip",
         Scenario::RetryThenSucceed => "req_retry_then_succeed",
-        Scenario::ProviderReject => "req_provider_reject",
         Scenario::ContextLimitThenText => "req_context_limit_then_text",
         Scenario::ToolLoopContextGrowth => "req_tool_loop_context_growth",
         Scenario::DeferredToolRoundtrip => "req_deferred_tool_roundtrip",

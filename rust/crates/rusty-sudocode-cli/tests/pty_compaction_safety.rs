@@ -641,7 +641,18 @@ fn compact_env_with_auth(env: &TestEnv, path: &std::path::Path, auth: &str) -> (
             cli.render(rendered_contents)
         )
     });
-    (code, cli.render(rendered_contents))
+    // Child exit can precede the PTY reader draining the final error output.
+    let screen = if code == 0 {
+        cli.render(rendered_contents)
+    } else {
+        common::expect_screen(
+            &cli,
+            |screen| screen.contains("history preserved"),
+            Duration::from_secs(30),
+            "the complete compaction error reaches the terminal",
+        )
+    };
+    (code, screen)
 }
 
 fn compaction_request_count(provider: &Provider) -> usize {

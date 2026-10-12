@@ -449,10 +449,37 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         );
     }
 
-    // A provider rejection is not a completed peer turn. The ACP host must
-    // retain the offset while reporting the error to its controller.
+    // A fresh session has no earlier parity marker to replay. The provider's
+    // existing missing-scenario HTTP 400 is a permanent rejection, isolated
+    // from the successful session and the shared benchmark fixture.
+    let failed_start = call(
+        &kernel,
+        "start_session_v1",
+        json!({"agent_id":"failed-worker","model":"scripted"}),
+    );
+    let failed_endpoint: SessionEndpoint =
+        serde_json::from_value(failed_start["session_endpoint"].clone()).unwrap();
+    let failed_mailbox = SessionMailbox::open(
+        Arc::clone(&kernel),
+        OperationContext::new("test-owner", "root", false, Some("operator"), false),
+        failed_endpoint,
+        SessionSide::Controller,
+    )
+    .unwrap();
+    send(
+        &failed_mailbox,
+        json!({"jsonrpc":"2.0","id":"failed-init","method":"initialize",
+        "params":{"protocolVersion":1,"clientCapabilities":{}}}),
+    );
+    until(&failed_mailbox, |message| message["id"] == "failed-init");
+    send(
+        &failed_mailbox,
+        json!({"jsonrpc":"2.0","id":"failed-new","method":"session/new",
+        "params":{"cwd":"/","mcpServers":[]}}),
+    );
+    until(&failed_mailbox, |message| message["id"] == "failed-new");
     let failed_path =
-        a2a::conversation_transcript_path(&a2a::conversation_id("worker", "failed-peer"));
+        a2a::conversation_transcript_path(&a2a::conversation_id("failed-worker", "failed-peer"));
     common::provision_stream_transcript(&kernel, &failed_path);
     let failed_peer = runtime::mailbox::Mailbox::daemon_absolute(
         Arc::new(KernelFsBackend::for_agent(
@@ -467,8 +494,8 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     failed_peer
         .send(runtime::agent_mailbox::MailboxEnvelope {
             from: "failed-peer".into(),
-            to: "worker".into(),
-            body: "FAILED-ACP-DELIVERY PARITY_SCENARIO:provider_reject".into(),
+            to: "failed-worker".into(),
+            body: "FAILED-ACP-DELIVERY".into(),
             summary: None,
             timestamp: 0,
             color: None,
@@ -476,12 +503,10 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             request_id: None,
         })
         .unwrap();
-    until(&mailbox, |message| {
-        message
-            .to_string()
-            .contains("fixture provider rejected this turn")
+    until(&failed_mailbox, |message| {
+        message.to_string().contains("missing parity scenario")
     });
-    let worker = runtime::mailbox::Mailbox::daemon_absolute(Arc::new(fs), "worker".into());
+    let worker = runtime::mailbox::Mailbox::daemon_absolute(Arc::new(fs), "failed-worker".into());
     let observation = Instant::now() + Duration::from_millis(500);
     while Instant::now() < observation {
         assert_eq!(
@@ -492,25 +517,31 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
+    failed_mailbox
+        .send(SessionPayload::Closed {
+            reason: "failed controller disconnected".into(),
+        })
+        .unwrap();
     mailbox
         .send(SessionPayload::Closed {
             reason: "controller disconnected".into(),
         })
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let state = call(
-            &kernel,
-            "get_session_v1",
-            json!({"session_id":started["session_id"]}),
-        );
-        if state["state"] == "terminated" {
-            break;
+    for pid in [&started["session_id"], &failed_start["session_id"]] {
+        let process_path = format!("/proc/{}", pid.as_str().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let state = call(&kernel, "get_session_v1", json!({"session_id":pid}));
+            let view =
+                kernel::kernel::syscall::KernelSyscall::sys_stat(&*kernel, &process_path, "root");
+            if state["state"] == "terminated" && view.is_none() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "channel closure must terminate the runtime and remove its procfs view: {state}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(
-            Instant::now() < deadline,
-            "channel closure must terminate the process: {state}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
     }
 }

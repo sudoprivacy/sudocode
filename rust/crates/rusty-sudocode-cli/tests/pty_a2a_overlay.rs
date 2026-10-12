@@ -881,6 +881,15 @@ fn pending_batch_and_two_runtimes_share_one_durable_reader() {
         assert!(Instant::now() < deadline, "unacknowledged batch was lost");
         std::thread::sleep(Duration::from_millis(50));
     }
+    // The durable commit and the terminal repaint are separate events.
+    common::expect_screen_settled(
+        &first,
+        |screen| {
+            screen.contains(marker) || second.render(|screen| screen.contents().contains(marker))
+        },
+        BUDGET,
+        "the consumed message reaches one terminal",
+    );
     let rendered = [
         first.render(|screen| screen.contents().contains(marker)),
         second.render(|screen| screen.contents().contains(marker)),
@@ -892,4 +901,36 @@ fn pending_batch_and_two_runtimes_share_one_durable_reader() {
     );
     exit(&mut first);
     exit(&mut second);
+    let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
+    let deliveries = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .map(|summary| {
+            store
+                .load_session(&summary.id)
+                .unwrap()
+                .session
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == runtime::MessageRole::User
+                        && message.blocks.iter().any(|block| {
+                            matches!(block, runtime::ContentBlock::Text { text } if text.contains(marker))
+                        })
+                })
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(
+        deliveries, 1,
+        "delivery persists in exactly one runtime history"
+    );
+    if env.is_mock() {
+        assert_eq!(
+            env.captured_message_count(),
+            1,
+            "one model turn consumed the batch"
+        );
+    }
 }

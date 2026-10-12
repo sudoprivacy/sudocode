@@ -11,6 +11,13 @@ use std::io;
 use std::sync::mpsc;
 use std::time::Duration;
 
+pub struct StreamReadResult {
+    pub data: Vec<u8>,
+    pub next_offset: u64,
+    pub eof: bool,
+    pub timed_out: bool,
+}
+
 /// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
 /// `Setattr` when provisioning a mailbox DT_STREAM.
 const DT_STREAM: i32 = 4;
@@ -73,7 +80,7 @@ enum VfsOp {
         blocking: bool,
         timeout_ms: u64,
         auth_token: String,
-        resp: mpsc::SyncSender<io::Result<(Vec<u8>, u64, bool)>>,
+        resp: mpsc::SyncSender<io::Result<StreamReadResult>>,
     },
     /// `sys_setattr(<entry_type>)` — create (or no-op if present) a typed entry at
     /// `path`. Returns whether it was freshly created.
@@ -381,7 +388,12 @@ impl NexusVfsClient {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
                                         } else {
-                                            Ok((r.data, r.next_offset, r.eof))
+                                            Ok(StreamReadResult {
+                                                data: r.data,
+                                                next_offset: r.next_offset,
+                                                eof: r.eof,
+                                                timed_out: r.timed_out,
+                                            })
                                         }
                                     }));
                                 }
@@ -417,6 +429,8 @@ impl NexusVfsClient {
                                             Ok(VfsStat {
                                                 size: u64::try_from(r.size).unwrap_or(0),
                                                 is_directory: r.is_directory,
+                                                entry_type: r.entry_type,
+                                                zone_id: r.zone_id,
                                                 modified_at_ms: r.modified_at_ms,
                                                 link_target: Some(r.link_target)
                                                     .filter(|t| !t.is_empty()),
@@ -453,6 +467,7 @@ impl NexusVfsClient {
                                                 .map(|e| VfsDirEntry {
                                                     name: e.name,
                                                     is_directory: e.entry_type == DT_DIR,
+                                                    entry_type: e.entry_type,
                                                 })
                                                 .collect())
                                         }
@@ -539,7 +554,7 @@ impl NexusVfsClient {
         blocking: bool,
         timeout_ms: u64,
         auth_token: &str,
-    ) -> io::Result<(Vec<u8>, u64, bool)> {
+    ) -> io::Result<StreamReadResult> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
             .send(VfsOp::StreamReadAt {
@@ -693,6 +708,8 @@ impl NexusVfsClient {
 pub struct VfsStat {
     pub size: u64,
     pub is_directory: bool,
+    pub entry_type: i32,
+    pub zone_id: String,
     pub modified_at_ms: Option<i64>,
     /// Where a DT_LINK points; `None` for every other entry type.
     ///
@@ -707,6 +724,7 @@ pub struct VfsStat {
 pub struct VfsDirEntry {
     pub name: String,
     pub is_directory: bool,
+    pub entry_type: u32,
 }
 
 fn grpc_result<T, R, F>(result: Result<tonic::Response<T>, tonic::Status>, f: F) -> io::Result<R>

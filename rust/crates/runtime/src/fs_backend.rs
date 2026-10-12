@@ -1634,6 +1634,7 @@ impl FsBackend for NexusVfsFsBackend {
     ) -> io::Result<(Vec<u8>, u64, bool)> {
         self.client
             .stream_read_at(path, cursor, block_ms > 0, block_ms, &self.auth_token)
+            .map(|result| (result.data, result.next_offset, result.eof))
     }
 }
 

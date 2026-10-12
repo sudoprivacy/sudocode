@@ -1,0 +1,41 @@
+name: Shared services E2E
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'rust/**'
+      - 'e2e/shared-services/**'
+      - '.github/workflows/shared-services.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  services:
+    name: Shared services (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Build the actual frontend CLI
+        working-directory: rust
+        run: cargo build --locked -p rusty-sudocode-cli
+      - name: Exercise real runtime installation, ownership, authentication and durable data
+        shell: bash
+        run: |
+          set -euo pipefail
+          SUFFIX=''
+          if [ "$RUNNER_OS" = 'Windows' ]; then SUFFIX='.exe'; fi
+          python e2e/shared-services/run.py --scode "rust/target/debug/scode${SUFFIX}"

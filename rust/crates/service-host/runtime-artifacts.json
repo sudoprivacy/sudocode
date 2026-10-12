@@ -1,0 +1,26 @@
+{
+  "versions": {
+    "nexus-vault": "0.5.68",
+    "nexus-local-connector": "0.4.64",
+    "nexus-fuse-plugin": "0.6.64"
+  },
+  "sha256": {
+    "nexusd-cluster-linux-aarch64.tar.gz": "48777cdf40a04623c77df5de4de89735a8b286288e7bd5955fbf22c0cef63444",
+    "nexusd-cluster-linux-x86_64.tar.gz": "c1a68a14e636dbe3a408947b05c74765e28a16bfb0c7f129b9c39e62986372ff",
+    "nexusd-cluster-macos-aarch64.tar.gz": "cb0690cdb40eefbed99ca72ed5a40a60855193aa3baaab94af59044111eb2cd9",
+    "nexusd-cluster-macos-x86_64.tar.gz": "8d5d5ed28681a8e6639c1ee095962cd1dba4a0c7d47337536760688a2744775f",
+    "nexusd-cluster-windows-aarch64.zip": "9d2a07f00f7fd051293515684e39c47a3af8920de4139544072b491529b487d9",
+    "nexusd-cluster-windows-x86_64.zip": "ba5b2b52b76459878d4c9ebacfb3c2bfe5ee9f33e60cf2c4839b348f93ddd155",
+    "nexus-vault-linux-x86_64.tar.gz": "60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914",
+    "nexus-vault-macos-arm64.tar.gz": "4d0a0814c94bc9dff4934331885d2d811ee51a13c9c661377fef0f9ca6f4c018",
+    "nexus-vault-macos-x86_64.tar.gz": "6380f3435ea549db9f0c7399ea402600a07efce0f73df94a1bce54b966385525",
+    "nexus-vault-windows-x86_64.zip": "2c8b0818a148a5e9d84b584ef577b62309eaff20a559b7c7c4f0a3a31a1e22cd",
+    "nexus-local-connector-linux-x86_64.tar.gz": "8034f83e60725664bc0fa4f9ae5af067cfbe76b55f3d6d4540f6626637e32061",
+    "nexus-local-connector-macos-arm64.tar.gz": "982725fabae2e04e94f04a94aea5ea87dd885351a051d81f432946148a5170a2",
+    "nexus-local-connector-macos-x86_64.tar.gz": "159537d1bf085e71265f9d5cf14972755dc39dc8b0baf95fddd44ee94745744f",
+    "nexus-local-connector-windows-x86_64.zip": "333e546b34243c6222aecf52ff07151b64048b16cce5ca936db23337e1a68188",
+    "nexus-fuse-plugin-linux-x86_64.tar.gz": "d890c473ddeef209663733af26dc4ea862a4dca42aa53499ac134a59d3a4e16c",
+    "nexus-fuse-plugin-macos-arm64.tar.gz": "6f4692a043d5095659a297e1bd00b854a350be01979aaf1257eb5d6d7e312033",
+    "nexus-fuse-plugin-macos-x86_64.tar.gz": "6974057dcbc492e3fb0aad50f17f0d953ced63de648e96b9dfbc935073ddd3d1"
+  }
+}

@@ -40,6 +40,7 @@ serde = { version = "1", features = ["derive"] }
 smol = "2"
 shell-words = "1"
 serde_json.workspace = true
+service-host = { path = "../service-host" }
 sha2 = "0.10"
 flate2 = "1"
 tar = "0.4"

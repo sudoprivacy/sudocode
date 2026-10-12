@@ -207,6 +207,11 @@ enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
+    /// Connect frontends to Sudocode's shared local services
+    Service {
+        #[command(subcommand)]
+        action: ServiceSub,
+    },
     /// Export a session transcript
     Export {
         /// Session reference (defaults to latest)
@@ -297,12 +302,24 @@ enum AcpSub {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ServiceSub {
+    /// Serve capabilities on a newline-delimited process channel
+    Stdio,
+    /// Run the OS-user service supervisor
+    #[command(hide = true)]
+    Daemon,
+}
+
 // ---------------------------------------------------------------------------
 // Public CliAction types (unchanged contract for downstream consumers)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CliAction {
+    Service {
+        is_daemon: bool,
+    },
     Headless(super::headless::HeadlessOptions),
     DumpManifests {
         output_format: CliOutputFormat,
@@ -449,6 +466,7 @@ impl CliAction {
                 | CliAction::Login
                 | CliAction::Logout
                 | CliAction::Update { .. }
+                | CliAction::Service { .. }
         )
     }
 }
@@ -709,6 +727,9 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 yes,
             }),
             Cmd::Logout => Ok(CliAction::Logout),
+            Cmd::Service { action } => Ok(CliAction::Service {
+                is_daemon: matches!(action, ServiceSub::Daemon),
+            }),
             Cmd::Export { session, output } => Ok(CliAction::Export {
                 session_reference: session,
                 output_path: output,

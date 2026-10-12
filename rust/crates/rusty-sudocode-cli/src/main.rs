@@ -852,6 +852,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // If an ensure_authenticated() call is ever added below this point it
     // MUST be guarded by `if !action.is_informational()`.
     match action {
+        CliAction::Service { is_daemon } => {
+            let result = if is_daemon {
+                service_host::run_daemon()
+            } else {
+                service_host::run_stdio()
+            };
+            result.map_err(|error| error as Box<dyn std::error::Error>)?;
+        }
         CliAction::Headless(options) => cli::headless::run(options)?,
         CliAction::DumpManifests {
             output_format,

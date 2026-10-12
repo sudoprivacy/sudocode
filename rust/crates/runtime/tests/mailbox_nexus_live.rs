@@ -1526,7 +1526,9 @@ fn live_cohost_session_resume() {
         let mut offset = 0;
         loop {
             match operator.stream_read_at(path, offset, false, 0, "") {
-                Ok((bytes, next, _)) => {
+                Ok(result) => {
+                    let bytes = result.data;
+                    let next = result.next_offset;
                     let is_empty = bytes.is_empty();
                     contents.extend_from_slice(&bytes);
                     if is_empty || next <= offset {

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     routing::post,
     Json, Router,
@@ -23,7 +23,7 @@ use crate::{
     Result,
 };
 
-const MAX_REQUEST_BYTES: u64 = 1024 * 1024;
+const MAX_REQUEST_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Discovery {
@@ -245,7 +245,7 @@ async fn serve_stdio() -> Result<()> {
             break;
         }
         if count as u64 > MAX_REQUEST_BYTES {
-            return Err("service request exceeds 1 MiB".into());
+            return Err("service request exceeds 8 MiB".into());
         }
         let root = root.clone();
         let http = http.clone();
@@ -624,7 +624,8 @@ pub fn run_daemon() -> Result<()> {
     executor.block_on(async {
         let (shutdown, mut stopping) = tokio::sync::watch::channel(false);
         let state = ServiceState { client, discovery, shutdown, admission: Arc::new(tokio::sync::RwLock::new(false)) };
-        let app = Router::new().route("/rpc", post(handle)).with_state(state);
+        let app = Router::new().route("/rpc", post(handle))
+            .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES as usize)).with_state(state);
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let stop = async move {
             let stopped_child = async {

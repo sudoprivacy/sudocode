@@ -109,7 +109,7 @@ def run(binary, root):
         print('PASS: encrypted Vault versions, deletion, restoration and metadata', flush=True)
 
         a.request('files.mkdir', {'path': '/acceptance/body'})
-        data = ('durable-body-中文-' + uuid.uuid4().hex).encode()
+        data = ('durable-body-中文-' + uuid.uuid4().hex).encode() + b'x' * (2 * 1024 * 1024)
         a.request('files.write', {'path': '/acceptance/body/content', 'data': base64.b64encode(data).decode()})
         a.request('files.link', {'path': '/acceptance/body/alias', 'target': '/acceptance/body/content'})
         assert base64.b64decode(b.request('files.read', {'path': '/acceptance/body/alias'})) == data

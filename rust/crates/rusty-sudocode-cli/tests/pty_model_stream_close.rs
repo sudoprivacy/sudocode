@@ -25,6 +25,10 @@ enum ResponseKind {
     AlwaysEmptyThinking,
     InvalidRequestWithStatusDigits,
     MissingModel,
+    MissingModelUnavailable,
+    MissingModelCodeUnavailable,
+    MissingModelCodeOnlyUnavailable,
+    OverloadedThenComplete,
     RefusedStream,
     RefusedJson,
     RefusedAfterText,
@@ -114,7 +118,7 @@ impl StreamProvider {
                 let index = count.fetch_add(1, Ordering::SeqCst);
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(request["stream"], true);
-                if let Some(response) = error_response(kind) {
+                if let Some(response) = error_response(kind, index) {
                     let _ = socket.write_all(response.as_bytes());
                     continue;
                 }
@@ -261,17 +265,36 @@ impl Drop for StreamProvider {
     }
 }
 
-fn error_response(kind: ResponseKind) -> Option<String> {
-    let (status, message) = match kind {
-        ResponseKind::MissingModel => ("404 Not Found", "selected deployment absent"),
+fn error_response(kind: ResponseKind, index: usize) -> Option<String> {
+    let (status, error) = match kind {
+        ResponseKind::MissingModel => (
+            "404 Not Found",
+            json!({"type":"invalid_request_error","message":"selected deployment absent"}),
+        ),
         ResponseKind::InvalidRequestWithStatusDigits => (
             "400 Bad Request",
-            "invalid max_tokens; diagnostic id: 404-429-502-503",
+            json!({"type":"invalid_request_error","message":"invalid max_tokens; diagnostic id: 404-429-502-503"}),
+        ),
+        ResponseKind::MissingModelUnavailable => (
+            "503 Service Unavailable",
+            json!({"type":"model_not_found","message":"selected model is not available"}),
+        ),
+        ResponseKind::MissingModelCodeUnavailable => (
+            "503 Service Unavailable",
+            json!({"type":"invalid_request_error","code":"model_not_found","message":"selected model is not available"}),
+        ),
+        ResponseKind::MissingModelCodeOnlyUnavailable => (
+            "503 Service Unavailable",
+            json!({"code":"model_not_found","message":"selected model is not available"}),
+        ),
+        ResponseKind::OverloadedThenComplete if index == 0 => (
+            "503 Service Unavailable",
+            json!({"type":"overloaded_error","message":"Please retry after a brief wait"}),
         ),
         _ => return None,
     };
-    let body = json!({"error":{"type":"invalid_request_error","message":message}}).to_string();
-    Some(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
+    let body = json!({"error":error}).to_string();
+    Some(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nRequest-Id: req_provider_error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
 }
 
 fn response_body(terminal: bool, empty: bool) -> String {
@@ -336,10 +359,13 @@ fn check_response(kind: ResponseKind) {
     match kind {
         ResponseKind::ChatDoneKeepAlive
         | ResponseKind::ChatTotalOnly
+        | ResponseKind::MissingModelCodeUnavailable
         | ResponseKind::ResponsesDoneKeepAlive => {
             let format = if matches!(
                 kind,
-                ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly
+                ResponseKind::ChatDoneKeepAlive
+                    | ResponseKind::ChatTotalOnly
+                    | ResponseKind::MissingModelCodeUnavailable
             ) {
                 "openai-completions"
             } else {
@@ -353,12 +379,11 @@ fn check_response(kind: ResponseKind) {
     }
     std::fs::write(path, config.to_string()).unwrap();
     let log_path = env.workspace_root().join("provider-events.jsonl");
-    let mut args = vec![
-        "--permission-mode",
-        "read-only",
-        "--print",
-        "Report the stream result",
-    ];
+    let mut args = vec!["--permission-mode", "read-only"];
+    if !matches!(kind, ResponseKind::OverloadedThenComplete) {
+        args.push("--print");
+    }
+    args.push("Report the stream result");
     if matches!(kind, ResponseKind::ChatTotalOnly) {
         args.extend(["--output-format", "json"]);
     }
@@ -370,7 +395,26 @@ fn check_response(kind: ResponseKind) {
         ],
     );
     cli.set_default_timeout(common::at_least(Duration::from_secs(45)));
-    let exit = cli.expect_eof().unwrap();
+    let is_missing_model = matches!(
+        kind,
+        ResponseKind::MissingModelUnavailable
+            | ResponseKind::MissingModelCodeUnavailable
+            | ResponseKind::MissingModelCodeOnlyUnavailable
+    );
+    if is_missing_model {
+        cli.set_default_timeout(common::at_least(Duration::from_secs(15)));
+    }
+    if matches!(kind, ResponseKind::OverloadedThenComplete) {
+        cli.expect(r"retry 1/8 .* 503")
+            .expect("a transient 503 must report its retry");
+    }
+    let exit = cli.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "stream did not complete: {error}; requests={}\n{}",
+            provider.requests.load(Ordering::SeqCst),
+            common::screen_tail(&cli, 12000)
+        )
+    });
     if matches!(
         kind,
         ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
@@ -391,6 +435,22 @@ fn check_response(kind: ResponseKind) {
         env.timeout(),
         "complete process output",
     );
+    if is_missing_model {
+        assert_ne!(exit, 0, "missing model must fail: {screen}");
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            1,
+            "never retry a configuration problem"
+        );
+        assert!(screen.contains("model_not_found"), "{screen}");
+        assert!(screen.contains("req_provider_error"), "{screen}");
+        assert!(
+            common::screen_contains(&screen, "selected model is not available"),
+            "{screen}"
+        );
+        assert!(!screen.contains("retry 1/8"), "{screen}");
+        return;
+    }
     if matches!(
         kind,
         ResponseKind::UsageAtStart
@@ -551,6 +611,7 @@ fn check_response(kind: ResponseKind) {
             | ResponseKind::StopReasonKeepAlive
             | ResponseKind::EmptyThenComplete
             | ResponseKind::EmptyThinkingThenComplete
+            | ResponseKind::OverloadedThenComplete
     ) {
         assert_eq!(exit, 0, "{screen}");
         assert!(screen.contains("STREAM_BODY_VERIFIED"), "{screen}");
@@ -562,7 +623,9 @@ fn check_response(kind: ResponseKind) {
             provider.requests.load(Ordering::SeqCst),
             if matches!(
                 kind,
-                ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
+                ResponseKind::EmptyThenComplete
+                    | ResponseKind::EmptyThinkingThenComplete
+                    | ResponseKind::OverloadedThenComplete
             ) {
                 2
             } else {
@@ -753,4 +816,24 @@ fn responses_completed_finishes_without_http_eof_and_preserves_usage() {
 #[test]
 fn reported_total_survives_print_persistence_and_resume_without_inventing_a_breakdown() {
     check_response(ResponseKind::ChatTotalOnly);
+}
+
+#[test]
+fn typed_missing_model_503_fails_once_with_the_provider_reason() {
+    check_response(ResponseKind::MissingModelUnavailable);
+}
+
+#[test]
+fn openai_missing_model_code_503_fails_once_with_the_provider_reason() {
+    check_response(ResponseKind::MissingModelCodeUnavailable);
+}
+
+#[test]
+fn code_only_missing_model_503_fails_once_with_the_provider_reason() {
+    check_response(ResponseKind::MissingModelCodeOnlyUnavailable);
+}
+
+#[test]
+fn ordinary_503_retries_visibly_and_completes() {
+    check_response(ResponseKind::OverloadedThenComplete);
 }

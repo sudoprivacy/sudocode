@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, SessionTracer};
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ProviderErrorEnvelope};
 use crate::http_transport::{
     gateway_trace_from_headers, parse_retry_after, request_id_from_headers, HttpTransport,
     RetryPolicy,
@@ -1333,18 +1333,16 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let request_id = request_id_from_headers(response.headers());
     let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_else(|_| String::new());
-    let parsed_error = serde_json::from_str::<AnthropicErrorEnvelope>(&body).ok();
+    let parsed_error = serde_json::from_str::<ProviderErrorEnvelope>(&body).ok();
     let retryable = crate::error::is_retryable_http_status(status.as_u16())
         || crate::error::is_retryable_masked_400(status, &body);
 
     Err(ApiError::Api {
         status,
-        error_type: parsed_error
-            .as_ref()
-            .map(|error| error.error.error_type.clone()),
+        error_type: parsed_error.as_ref().and_then(|error| error.error.kind()),
         message: parsed_error
             .as_ref()
-            .map(|error| error.error.message.clone()),
+            .and_then(|error| error.error.message.clone()),
         request_id,
         body,
         retryable,
@@ -1822,18 +1820,6 @@ fn strip_thought_signatures(body: &mut Map<String, Value>) {
             }
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicErrorEnvelope {
-    error: AnthropicErrorBody,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicErrorBody {
-    #[serde(rename = "type")]
-    error_type: String,
-    message: String,
 }
 
 #[cfg(test)]

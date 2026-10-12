@@ -3,6 +3,37 @@ use std::fmt::{Display, Formatter};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+/// Shared wire error for Anthropic and OpenAI-compatible responses.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ProviderErrorEnvelope {
+    pub error: ProviderErrorBody,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ProviderErrorBody {
+    #[serde(rename = "type")]
+    error_type: Option<String>,
+    #[serde(default)]
+    code: serde_json::Value,
+    pub message: Option<String>,
+}
+
+impl ProviderErrorBody {
+    /// A specific string code takes precedence over a broad error category.
+    /// Numeric codes remain HTTP wrapper statuses, not semantic error kinds.
+    pub fn kind(&self) -> Option<String> {
+        self.code
+            .as_str()
+            .filter(|code| !code.is_empty())
+            .or(self.error_type.as_deref())
+            .map(str::to_owned)
+    }
+
+    pub fn kind_from_json(error: &serde_json::Value) -> Option<String> {
+        serde_json::from_value::<Self>(error.clone()).ok()?.kind()
+    }
+}
+
 const GENERIC_FATAL_WRAPPER_MARKERS: &[&str] = &[
     "something went wrong while processing your request",
     "please try again, or use /new to start a fresh session",
@@ -179,6 +210,11 @@ impl ApiError {
     #[must_use]
     pub fn action(&self) -> ErrorAction {
         match self {
+            // A structured missing-model response requires a route/config fix,
+            // even when the gateway wraps it in a transient HTTP status.
+            Self::Api { error_type, .. } if error_type.as_deref() == Some("model_not_found") => {
+                ErrorAction::Human
+            }
             // Transport: the shared retry loop can recover these.
             Self::Http(error) if error.is_connect() || error.is_timeout() || error.is_request() => {
                 ErrorAction::Transport

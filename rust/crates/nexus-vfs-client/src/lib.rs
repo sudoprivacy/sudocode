@@ -4,8 +4,8 @@ pub mod proto {
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
 use proto::{
-    CallRequest, DeleteRequest, ReadRequest, ReaddirRequest, SetattrRequest, StatRequest,
-    StreamReadAtRequest, StreamWriteRequest, WriteRequest,
+    CallRequest, DeleteRequest, LockRequest, ReadRequest, ReaddirRequest, SetattrRequest,
+    StatRequest, StreamReadAtRequest, StreamWriteRequest, UnlockRequest, WriteRequest,
 };
 use std::io;
 use std::sync::mpsc;
@@ -41,6 +41,14 @@ const DT_DIR_SETATTR: i32 = DT_DIR as i32;
 const DT_LINK_SETATTR: i32 = 6;
 
 enum VfsOp {
+    Lock {
+        request: LockRequest,
+        resp: mpsc::SyncSender<io::Result<Option<String>>>,
+    },
+    Unlock {
+        request: UnlockRequest,
+        resp: mpsc::SyncSender<io::Result<bool>>,
+    },
     Read {
         path: String,
         auth_token: String,
@@ -239,6 +247,28 @@ impl NexusVfsClient {
                         // that as `Disconnected` -> `BrokenPipe`.
                         tokio::spawn(async move {
                             match op {
+                                VfsOp::Lock { request, resp } => {
+                                    let result =
+                                        client.lock(deadlined(request, LOCK_DEADLINE)).await;
+                                    let _ = resp.send(grpc_result(result, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(r.acquired.then_some(r.lock_id))
+                                        }
+                                    }));
+                                }
+                                VfsOp::Unlock { request, resp } => {
+                                    let result =
+                                        client.unlock(deadlined(request, LOCK_DEADLINE)).await;
+                                    let _ = resp.send(grpc_result(result, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(r.released)
+                                        }
+                                    }));
+                                }
                                 VfsOp::Read {
                                     path,
                                     auth_token,
@@ -495,6 +525,45 @@ impl NexusVfsClient {
         await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
+    /// Atomically acquire, or renew `lock_id`, through the existing lock RPC.
+    pub fn lock(
+        &self,
+        path: &str,
+        lock_id: &str,
+        ttl_ms: u64,
+        auth_token: &str,
+    ) -> io::Result<Option<String>> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::Lock {
+                request: LockRequest {
+                    path: path.to_owned(),
+                    auth_token: auth_token.to_owned(),
+                    lock_id: lock_id.to_owned(),
+                    timeout_ms: ttl_ms,
+                },
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, LOCK_DEADLINE + HANDOFF_GRACE)
+    }
+
+    pub fn unlock(&self, path: &str, lock_id: &str, auth_token: &str) -> io::Result<bool> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::Unlock {
+                request: UnlockRequest {
+                    path: path.to_owned(),
+                    auth_token: auth_token.to_owned(),
+                    lock_id: lock_id.to_owned(),
+                    force: false,
+                },
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, LOCK_DEADLINE + HANDOFF_GRACE)
+    }
+
     pub fn write(&self, path: &str, content: Vec<u8>, auth_token: &str) -> io::Result<()> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
@@ -708,6 +777,7 @@ impl NexusVfsClient {
 pub struct VfsStat {
     pub size: u64,
     pub is_directory: bool,
+    /// Native entry type already carried by the `Stat` RPC.
     pub entry_type: i32,
     pub zone_id: String,
     pub modified_at_ms: Option<i64>,
@@ -782,6 +852,7 @@ fn broken_pipe() -> io::Error {
 /// Generous on purpose: a stuck-detector, not a latency budget, so it must never
 /// fire on a slow-but-working call.
 const OP_DEADLINE: Duration = Duration::from_secs(60);
+const LOCK_DEADLINE: Duration = Duration::from_secs(5);
 
 /// How much later than a blocking tail's own `timeout_ms` its deadline sits.
 ///

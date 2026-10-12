@@ -1711,3 +1711,57 @@ fn live_cohost_session_resume() {
         first["session_id"], second["session_id"]
     );
 }
+
+/// Atomic reader claims and receipt recovery through mTLS, gRPC and Raft.
+#[test]
+#[ignore = "requires the daemon started by e2e/nexus-a2a/run-cohost.sh"]
+fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("daemon endpoint");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let first_client = dial(&endpoint);
+    let second_client = dial(&endpoint);
+    let receiver = format!("scode-receipt-{}", fresh());
+    let peer = "receipt-peer";
+    let body = "durable pending receipt through native raft";
+    send_to(&first_client, peer, &receiver, body, &auth).unwrap();
+    let first = mailbox(&first_client, &receiver, &auth);
+    let second = mailbox(&second_client, &receiver, &auth);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let pending = loop {
+        let batch = first
+            .read_unread(peer)
+            .unwrap()
+            .expect("first reader available");
+        if batch.messages().iter().any(|message| message.body == body) {
+            break batch;
+        }
+        drop(batch);
+        assert!(
+            Instant::now() < deadline,
+            "replicated delivery did not arrive"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(first.read_position(peer).unwrap(), Some(0));
+    assert!(
+        second.read_unread(peer).unwrap().is_none(),
+        "second RPC client must contend atomically"
+    );
+    thread::sleep(Duration::from_secs(35));
+    assert!(
+        second.read_unread(peer).unwrap().is_none(),
+        "reader must renew while consumer is blocked"
+    );
+    drop(pending);
+    let replay = second
+        .read_unread(peer)
+        .unwrap()
+        .expect("dropped receipt releases lock");
+    assert!(replay.messages().iter().any(|message| message.body == body));
+    replay.acknowledge().unwrap();
+    let after = first.read_unread(peer).unwrap().unwrap();
+    assert!(
+        after.messages().is_empty(),
+        "acknowledged delivery must not replay"
+    );
+}

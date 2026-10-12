@@ -18,6 +18,39 @@ use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::{DT_LINK, DT_STREAM};
 use kernel::Permission;
 
+/// An exclusive backend lock. Dropping the handle releases ownership.
+/// Renewal returning false means ownership was lost and writes must stop.
+pub trait FsLock: Send + Sync {
+    fn renew(&self) -> io::Result<bool>;
+}
+
+struct BackendLock {
+    renew: Box<dyn Fn() -> io::Result<bool> + Send + Sync>,
+    release: Box<dyn Fn() + Send + Sync>,
+}
+
+impl FsLock for BackendLock {
+    fn renew(&self) -> io::Result<bool> {
+        (self.renew)()
+    }
+}
+
+impl Drop for BackendLock {
+    fn drop(&mut self) {
+        (self.release)();
+    }
+}
+
+struct HostLock {
+    _file: std::fs::File,
+}
+
+impl FsLock for HostLock {
+    fn renew(&self) -> io::Result<bool> {
+        Ok(true)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Metadata types
 // ---------------------------------------------------------------------------
@@ -89,6 +122,13 @@ const MEMORY_SEGMENT: &str = "/memory";
 /// Every method mirrors a common `std::fs` operation. Implementations must be
 /// thread-safe so a single backend can be shared across the runtime.
 pub trait FsBackend: Send + Sync + 'static {
+    /// Try an atomic exclusive claim. Unsupported backends must fail explicitly.
+    fn try_lock(&self, _path: &str, _ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend has no atomic lock",
+        ))
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>>;
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()>;
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()>;
@@ -265,30 +305,7 @@ pub trait FsBackend: Send + Sync + 'static {
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
-        use std::io::{Read, Seek, SeekFrom};
-        use std::time::{Duration, Instant};
-
-        let deadline = Instant::now() + Duration::from_millis(block_ms);
-        let poll_interval = Duration::from_millis(100);
-
-        loop {
-            let len = match self.stat(path) {
-                Ok(meta) => meta.len,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
-                Err(e) => return Err(e),
-            };
-            if len > cursor {
-                let mut f = std::fs::File::open(path)?;
-                f.seek(SeekFrom::Start(cursor))?;
-                let mut buf = vec![0u8; (len - cursor) as usize];
-                f.read_exact(&mut buf)?;
-                return Ok((buf, len, false));
-            }
-            if block_ms == 0 || Instant::now() >= deadline {
-                return Ok((vec![], cursor, true));
-            }
-            std::thread::sleep(poll_interval.min(deadline - Instant::now()));
-        }
+        read_byte_tail(self, path, cursor, block_ms)
     }
 }
 
@@ -432,6 +449,9 @@ fn lexical_join(root: &str, path: &str) -> io::Result<String> {
 
 // Blanket impl: Arc<dyn FsBackend> delegates to the inner backend.
 impl FsBackend for Arc<dyn FsBackend> {
+    fn try_lock(&self, path: &str, ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        (**self).try_lock(path, ttl_ms)
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         (**self).read(path)
     }
@@ -508,6 +528,36 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
 }
 
+/// Byte-addressed fallback for object backends whose read returns the whole file.
+fn read_byte_tail<B: FsBackend + ?Sized>(
+    backend: &B,
+    path: &str,
+    cursor: u64,
+    block_ms: u64,
+) -> io::Result<(Vec<u8>, u64, bool)> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(block_ms);
+    loop {
+        let bytes = match backend.read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        let next = bytes.len() as u64;
+        if next > cursor {
+            let start = usize::try_from(cursor)
+                .map_err(|_| io::Error::other("cursor exceeds addressable file size"))?;
+            return Ok((bytes[start..].to_vec(), next, false));
+        }
+        if block_ms == 0 || std::time::Instant::now() >= deadline {
+            return Ok((Vec::new(), cursor, true));
+        }
+        std::thread::sleep(
+            std::time::Duration::from_millis(100)
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // StdFsBackend — zero-size, compiler inlines all methods
 // ---------------------------------------------------------------------------
@@ -557,6 +607,56 @@ fn platform_link(alias: &str, target: &str) -> io::Result<()> {
 }
 
 impl FsBackend for StdFsBackend {
+    fn tail_read(
+        &self,
+        path: &str,
+        cursor: u64,
+        block_ms: u64,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_millis(block_ms);
+        let poll_interval = Duration::from_millis(100);
+
+        loop {
+            let len = match self.stat(path) {
+                Ok(meta) => meta.len,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+                Err(e) => return Err(e),
+            };
+            if len > cursor {
+                let mut f = std::fs::File::open(path)?;
+                f.seek(SeekFrom::Start(cursor))?;
+                let length = usize::try_from(len - cursor).map_err(io::Error::other)?;
+                let mut buf = vec![0u8; length];
+                f.read_exact(&mut buf)?;
+                return Ok((buf, len, false));
+            }
+            if block_ms == 0 || Instant::now() >= deadline {
+                return Ok((vec![], cursor, true));
+            }
+            std::thread::sleep(poll_interval.min(deadline - Instant::now()));
+        }
+    }
+
+    fn try_lock(&self, path: &str, _ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Keep this inode separate from the cursor file, which is replaced by rename.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Arc::new(HostLock { _file: file }))),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         std::fs::read(path)
     }
@@ -972,6 +1072,35 @@ fn kernel_err(error: KernelError) -> io::Error {
 impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
     for KernelFsBackend<K>
 {
+    fn try_lock(&self, path: &str, ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        let path = self.to_kernel(path)?;
+        self.kernel
+            .check_fs_permission(&path, Permission::Write, &self.ctx)
+            .map_err(kernel_err)?;
+        let ttl_secs = ttl_ms / 1000 + 1;
+        let Some(id) = self
+            .kernel
+            .sys_lock(&path, "", 1, ttl_secs, &self.ctx.user_id)
+            .map_err(kernel_err)?
+        else {
+            return Ok(None);
+        };
+        let kernel = Arc::clone(&self.kernel);
+        let renew_kernel = Arc::clone(&kernel);
+        let renew_path = path.clone();
+        let renew_id = id.clone();
+        Ok(Some(Arc::new(BackendLock {
+            renew: Box::new(move || {
+                renew_kernel
+                    .sys_lock(&renew_path, &renew_id, 1, ttl_secs, "")
+                    .map(|id| id.is_some())
+                    .map_err(kernel_err)
+            }),
+            release: Box::new(move || {
+                let _ = kernel.sys_unlock(&path, &id, false);
+            }),
+        })))
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         // The message this builds names the path as the CALLER spelled it: an
         // error a user reads should name the file the way they named it.
@@ -1092,6 +1221,16 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
         let path = &self.to_kernel(path)?;
+        // Missing paths can become asynchronous model reply streams. Only a
+        // confirmed regular file uses byte cursors; otherwise preserve the
+        // kernel's stream cursor and let a missing-path read be retried.
+        if self
+            .kernel
+            .sys_stat(path, &self.ctx.zone_id)
+            .is_some_and(|entry| entry.entry_type == kernel::meta_store::DT_REG)
+        {
+            return read_byte_tail(self, path, cursor, block_ms);
+        }
         let result = self
             .kernel
             .sys_read(path, &self.ctx, block_ms, cursor)
@@ -1100,21 +1239,7 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
             Some(payload) if !payload.is_empty() => {
                 let next = result
                     .stream_next_offset
-                    .map(|n| n as u64)
-                    // A DT_STREAM reports where its next RECORD begins. A
-                    // byte-addressed entry has no record offset to report, so
-                    // the next cursor is what this read consumed — which is the
-                    // contract `StdFsBackend::tail_read` already answers by
-                    // returning the file's new length.
-                    //
-                    // Returning `cursor` unchanged here meant a reader could
-                    // never advance past a byte-addressed conversation, so every
-                    // poll re-delivered the same envelope: the re-delivery storm,
-                    // measured at 1044 turns in 60 seconds. It is not a corner
-                    // case — a conversation degrades to a DT_REG whenever its
-                    // `"wal"` stream cannot be created, which is any daemon
-                    // without federation wired.
-                    .unwrap_or_else(|| cursor + payload.len() as u64);
+                    .map_or_else(|| cursor + payload.len() as u64, |offset| offset as u64);
                 Ok((payload, next, false))
             }
             _ => Ok((vec![], cursor, true)),
@@ -1438,6 +1563,28 @@ impl NexusVfsFsBackend {
 }
 
 impl FsBackend for NexusVfsFsBackend {
+    fn try_lock(&self, path: &str, ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        let Some(id) = self.client.lock(path, "", ttl_ms, &self.auth_token)? else {
+            return Ok(None);
+        };
+        let client = Arc::clone(&self.client);
+        let token = self.auth_token.clone();
+        let path = path.to_owned();
+        let renew_client = Arc::clone(&client);
+        let renew_token = token.clone();
+        let renew_path = path.clone();
+        let renew_id = id.clone();
+        Ok(Some(Arc::new(BackendLock {
+            renew: Box::new(move || {
+                renew_client
+                    .lock(&renew_path, &renew_id, ttl_ms, &renew_token)
+                    .map(|id| id.is_some())
+            }),
+            release: Box::new(move || {
+                let _ = client.unlock(&path, &id, &token);
+            }),
+        })))
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         self.client.read(path, &self.auth_token)
     }
@@ -1632,6 +1779,12 @@ impl FsBackend for NexusVfsFsBackend {
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
+        if !self.is_append_stream(path)?
+            && self.client.stat(path, &self.auth_token)?.entry_type
+                == i32::from(kernel::meta_store::DT_REG)
+        {
+            return read_byte_tail(self, path, cursor, block_ms);
+        }
         self.client
             .stream_read_at(path, cursor, block_ms > 0, block_ms, &self.auth_token)
             .map(|result| (result.data, result.next_offset, result.eof))

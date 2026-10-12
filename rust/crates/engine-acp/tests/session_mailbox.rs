@@ -449,6 +449,49 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         );
     }
 
+    // A provider rejection is not a completed peer turn. The ACP host must
+    // retain the offset while reporting the error to its controller.
+    let failed_path =
+        a2a::conversation_transcript_path(&a2a::conversation_id("worker", "failed-peer"));
+    common::provision_stream_transcript(&kernel, &failed_path);
+    let failed_peer = runtime::mailbox::Mailbox::daemon_absolute(
+        Arc::new(KernelFsBackend::for_agent(
+            Arc::clone(&kernel),
+            "test-owner",
+            "root",
+            "failed-peer",
+            "/",
+        )),
+        "failed-peer".into(),
+    );
+    failed_peer
+        .send(runtime::agent_mailbox::MailboxEnvelope {
+            from: "failed-peer".into(),
+            to: "worker".into(),
+            body: "FAILED-ACP-DELIVERY PARITY_SCENARIO:provider_reject".into(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: runtime::agent_mailbox::kinds::MESSAGE.into(),
+            request_id: None,
+        })
+        .unwrap();
+    until(&mailbox, |message| {
+        message
+            .to_string()
+            .contains("fixture provider rejected this turn")
+    });
+    let worker = runtime::mailbox::Mailbox::daemon_absolute(Arc::new(fs), "worker".into());
+    let observation = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < observation {
+        assert_eq!(
+            worker.read_position("failed-peer").unwrap(),
+            Some(0),
+            "ACP must not acknowledge a failed turn"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
     mailbox
         .send(SessionPayload::Closed {
             reason: "controller disconnected".into(),

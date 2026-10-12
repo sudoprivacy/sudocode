@@ -840,3 +840,56 @@ fn up_arrow_after_pop_all_does_not_recall_again() {
     });
     exit(&mut sess);
 }
+
+/// A one-shot reader and two real CLI processes contend for the same agent.
+/// Dropping the unprocessed batch must hand delivery to exactly one runtime.
+#[test]
+fn pending_batch_and_two_runtimes_share_one_durable_reader() {
+    let env = TestEnv::new("a2a-atomic-reader");
+    let (mut initial, receiver) = peer_receiver(&env);
+    exit(&mut initial);
+    let marker = "ATOMIC-READER-DELIVERY";
+    inject(
+        &env,
+        &receiver,
+        "atomic-peer",
+        &format!(
+            "{marker}\n{}",
+            env.prompt(
+                "Reply only with READER-ACK. Do not call tools.",
+                "single_turn_text"
+            )
+        ),
+    );
+    let mailbox =
+        Mailbox::workspace_local(&local_pair_root_in(env.config_home()), receiver.clone());
+    let pending = mailbox
+        .read_unread("atomic-peer")
+        .unwrap()
+        .expect("offline reader claim");
+    assert_eq!(pending.messages().len(), 1);
+    assert_eq!(reader_offset(&env, &receiver, "atomic-peer"), Some(0));
+    let (mut first, _) = peer_receiver(&env);
+    let (mut second, _) = peer_receiver(&env);
+    assert!(
+        mailbox.read_unread("atomic-peer").unwrap().is_none(),
+        "concurrent read must contend atomically"
+    );
+    drop(pending);
+    let deadline = Instant::now() + common::LIVE_TURN_BUDGET;
+    while reader_offset(&env, &receiver, "atomic-peer").is_none_or(|offset| offset == 0) {
+        assert!(Instant::now() < deadline, "unacknowledged batch was lost");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let rendered = [
+        first.render(|screen| screen.contents().contains(marker)),
+        second.render(|screen| screen.contents().contains(marker)),
+    ];
+    assert_eq!(
+        rendered.iter().filter(|is_rendered| **is_rendered).count(),
+        1,
+        "exactly one of the two CLI runtimes may process the delivery"
+    );
+    exit(&mut first);
+    exit(&mut second);
+}

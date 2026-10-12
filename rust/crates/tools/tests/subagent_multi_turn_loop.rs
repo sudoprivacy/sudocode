@@ -361,3 +361,62 @@ fn max_multi_turns_cap_prevents_infinite_resume() {
 
     let _ = std::fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn failed_or_capped_delivery_stays_unread_including_a_mixed_shutdown_batch() {
+    for is_capped in [false, true] {
+        let ws = unique_workspace("receipt");
+        let mut turns = 0;
+        let result = run_multi_turn_loop_for_test(
+            "worker",
+            &ws,
+            HookAbortSignal::default(),
+            "initial".into(),
+            if is_capped { 1 } else { 2 },
+            |prompt| {
+                turns += 1;
+                if turns == 1 {
+                    send_to_agent(
+                        &ws,
+                        "worker",
+                        envelope(kinds::MESSAGE, "parent", "retain this work"),
+                    );
+                    send_to_agent(
+                        &ws,
+                        "worker",
+                        envelope(kinds::SHUTDOWN_REQUEST, "parent", "then stop"),
+                    );
+                    Ok("initial completed".into())
+                } else {
+                    assert!(prompt.contains("retain this work"));
+                    Err("provider rejected the delivery".into())
+                }
+            },
+        );
+        assert_eq!(result.is_ok(), is_capped);
+        let mailbox = Mailbox::workspace_local(&ws, "worker".into());
+        assert_eq!(mailbox.read_position("parent").unwrap(), Some(0));
+        let pending = mailbox.read_pending().unwrap();
+        assert_eq!(pending.messages().count(), 2);
+        drop(pending);
+        let mut recovery_turns = 0;
+        run_multi_turn_loop_for_test(
+            "worker",
+            &ws,
+            HookAbortSignal::default(),
+            "restart".into(),
+            3,
+            |prompt| {
+                recovery_turns += 1;
+                if recovery_turns == 2 {
+                    assert!(prompt.contains("retain this work"));
+                }
+                Ok("completed".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(recovery_turns, 2);
+        assert_eq!(mailbox.read_pending().unwrap().messages().count(), 0);
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
+}

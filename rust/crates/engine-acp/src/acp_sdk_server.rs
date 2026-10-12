@@ -994,9 +994,9 @@ fn ensure_a2a_receiver(
                     }
                 }
             }
-            // Explicit cancellation and turn errors are terminal. Restarting the
-            // host does not claim a turn it did not finish.
-            let _ = ack.send(!stop.is_aborted());
+            // Only a completed, persisted turn (including explicit cancellation)
+            // acknowledges delivery. Provider errors and shutdown stay unread.
+            let _ = ack.send(result.is_ok() && !stop.is_aborted());
         }
         stop.abort();
         let _ = tokio::task::spawn_blocking(move || receiver.join()).await;

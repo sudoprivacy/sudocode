@@ -195,6 +195,10 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
   NEXUS_A2A_MODEL_STORAGE="$(native_path "$WORK_DIR/model-cache")" \
   "${CARGO_TEST[@]}" live_mount_cohost_model -- --ignored --nocapture
 
+echo "== durable reader receipts through native Raft =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked -- --ignored --nocapture
+
 # THE PAIR, before the agent starts. The conversation must exist before the
 # spawn (the co-host arms its tail on what its chat list names at startup), and
 # it must be the AGENT<->OPERATOR conversation (a conversation is addressed by

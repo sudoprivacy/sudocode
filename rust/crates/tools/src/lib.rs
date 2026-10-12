@@ -6420,22 +6420,34 @@ where
     let mailbox = runtime::mailbox::Mailbox::workspace_local(workspace_root, agent_id.to_string());
     let mut current_prompt = initial_prompt;
     let mut last_final_text = String::new();
+    let mut pending = runtime::mailbox::PendingMessages::default();
+    let mut is_shutdown_pending = false;
 
     for _turn_index in 0..max_multi_turns {
         last_final_text = run_turn_fn(current_prompt.clone())?;
+        std::mem::take(&mut pending).acknowledge()?;
 
-        if abort_signal.is_aborted() {
+        if is_shutdown_pending || abort_signal.is_aborted() {
             return Ok(last_final_text);
         }
 
-        let new_envelopes = drain_mailbox_unread(&mailbox);
+        pending = mailbox.read_pending()?;
+        let new_envelopes: Vec<_> = pending.messages().cloned().collect();
         if !new_envelopes.is_empty() {
             let has_shutdown = new_envelopes
                 .iter()
                 .any(|env| env.kind == runtime::agent_mailbox::kinds::SHUTDOWN_REQUEST);
-            if has_shutdown {
+            if has_shutdown
+                && new_envelopes
+                    .iter()
+                    .all(|env| env.kind == runtime::agent_mailbox::kinds::SHUTDOWN_REQUEST)
+            {
+                pending.acknowledge()?;
                 return Ok(last_final_text);
             }
+            // A shutdown in a mixed batch cannot acknowledge ordinary messages
+            // before their turn succeeds. Process that batch, then stop.
+            is_shutdown_pending = has_shutdown;
             current_prompt = compose_next_turn_from_envelopes(&new_envelopes);
             continue;
         }
@@ -6443,24 +6455,6 @@ where
         return Ok(last_final_text);
     }
     Ok(last_final_text)
-}
-
-/// Drain every unread envelope across all of this agent's conversations,
-/// advancing each conversation's persistent read register. Peers are visited
-/// in the chat list's sorted order so the synthesised prompt is deterministic.
-/// A per-conversation read error is skipped rather than aborting the whole
-/// drain — one unreadable peer must not deafen the agent to the rest.
-fn drain_mailbox_unread(
-    mailbox: &runtime::mailbox::Mailbox,
-) -> Vec<runtime::agent_mailbox::MailboxEnvelope> {
-    let peers = mailbox.list_conversations().unwrap_or_default();
-    let mut envelopes = Vec::new();
-    for peer in peers {
-        if let Ok(mut unread) = mailbox.take_unread(&peer) {
-            envelopes.append(&mut unread);
-        }
-    }
-    envelopes
 }
 
 /// Run one `ConversationRuntime::run_turn` call, handling the

@@ -1508,23 +1508,30 @@ where
     /// Workspace root is the turn's scoped root (the process cwd outside
     /// ACP), matching the per-workspace `.sudocode-inbox/coordinator.jsonl`
     /// convention that every emit site uses (same root).
-    fn prepend_pending_task_notifications(&self, blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+    fn prepend_pending_task_notifications(
+        blocks: Vec<ContentBlock>,
+    ) -> Result<(Vec<ContentBlock>, crate::mailbox::PendingMessages), RuntimeError> {
         let workspace_root = crate::workspace_root::current_workspace_root_or_default();
-        let notifications =
-            crate::coordinator_notification::drain(&workspace_root).unwrap_or_default();
+        let pending =
+            crate::coordinator_notification::drain(&workspace_root).map_err(RuntimeError::new)?;
+        let mut notifications: Vec<_> = pending
+            .messages()
+            .filter(|message| message.kind == crate::agent_mailbox::kinds::TASK_NOTIFICATION)
+            .collect();
+        notifications.sort_by_key(|message| message.timestamp);
         // The interactive event bridge can already carry the same completion.
         // Consume the legacy coordinator queue without injecting it twice.
-        let notifications: Vec<_> = notifications.into_iter().filter(|notification| {
+        let notifications: Vec<_> = notifications.into_iter().map(|message| message.body.clone()).filter(|notification| {
             !blocks.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains(notification.as_str())))
         }).collect();
         if notifications.is_empty() {
-            return blocks;
+            return Ok((blocks, pending));
         }
         let prefix = crate::coordinator_notification::format_drain_batch(&notifications);
         let mut combined = Vec::with_capacity(blocks.len() + 1);
         combined.push(ContentBlock::Text { text: prefix });
         combined.extend(blocks);
-        combined
+        Ok((combined, pending))
     }
 
     /// Run a session health probe to verify the runtime is functional after compaction.
@@ -1773,6 +1780,7 @@ where
             .and_then(RuntimeObserver::hook_progress_sink)
             .is_some();
         let catalog = self.api_client.model_catalog();
+        let (blocks, pending_notifications) = Self::prepend_pending_task_notifications(blocks)?;
         let turn = self.run_turn_with_blocks_inner(blocks, prompter, observer);
         let summary = if let Some(catalog) = catalog {
             catalog.refresh_in_background();
@@ -1808,6 +1816,9 @@ where
                     RuntimeError::new(format!("failed to persist session: {error}"))
                 })?;
             }
+            pending_notifications
+                .acknowledge()
+                .map_err(RuntimeError::new)?;
         }
         summary
     }
@@ -1820,19 +1831,6 @@ where
     ) -> Result<TurnSummary, RuntimeError> {
         let blocks = self.inject_date_context(blocks);
         let blocks = self.inject_model_context(blocks);
-        // Coordinator-mode push: drain any `<task-notification>` XML
-        // blocks that background sub-agents deposited into the
-        // coordinator's inbox since the previous turn, and prepend
-        // them as an extra Text block AT THE FRONT of this turn's
-        // user message.  Wiring lives here (runtime layer) instead
-        // of at each caller because every entry point routes through
-        // `run_turn_with_blocks` — CLI REPL, one-shot `--print`,
-        // ACP stdio/WebSocket/SDK, MCP servers — and duplicating
-        // the drain across all of them was the exact anti-pattern
-        // Ethan flagged when the CLI-only wiring shipped in
-        // PR #282.  Non-coord sessions get 0 disk cost via the
-        // `is_coordinator_mode()` fast-path inside `drain()`.
-        let blocks = self.prepend_pending_task_notifications(blocks);
         let label = blocks
             .iter()
             .find_map(|b| match b {

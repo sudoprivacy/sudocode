@@ -134,12 +134,20 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     sess.expect("❯").expect("input ready");
     expect_style(&sess, "✓", ("Idx(10)", false, false));
     expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
-    expect_style(&sess, "Checking styles", ("Default", true, false));
-    expect_style(&sess, "Finished parser", ("Default", false, true));
+    let neutral = if cfg!(windows) { "Idx(15)" } else { "Default" };
+    expect_style(&sess, "Checking styles", (neutral, true, false));
+    // ConPTY drops independent dim as well as strikethrough. The Canvas
+    // integration checks both before that boundary; the PTY checks its exact output.
+    let dim = !cfg!(windows);
+    expect_style(&sess, "Finished parser", ("Default", false, dim));
     expect_style(&sess, "Review output", ("Default", false, false));
     // Reflow must not merge differently styled spans or lose their attributes.
     resize_idle_chrome(&mut sess, 30, 68);
-    expect_style(&sess, "Checking styles", ("Default", true, false));
+    expect_style(&sess, "✓", ("Idx(10)", false, false));
+    expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
+    expect_style(&sess, "Checking styles", (neutral, true, false));
+    expect_style(&sess, "Finished parser", ("Default", false, dim));
+    expect_style(&sess, "Review output", ("Default", false, false));
     exit(&mut sess);
 }
 
@@ -156,7 +164,12 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     let green = if no_color {
         "Default"
     } else {
-        palette["styles"][index]["fg"].as_str().unwrap()
+        let foreground = palette["styles"][index]["fg"].as_str().unwrap();
+        match foreground {
+            "Idx(150)" if cfg!(windows) => "Rgb(175, 215, 135)",
+            "Idx(28)" if cfg!(windows) => "Rgb(0, 135, 0)",
+            _ => foreground,
+        }
     };
     let env = TestEnv::new("info-shared-green");
     let store = env.workspace_root().join("todos.json");
@@ -176,7 +189,8 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_input_line_cleared(&sess, env.timeout(), "info input ready");
     // Neutral quantities keep terminal foreground and weight in every color
     // mode, including NO_COLOR, independent of icon/status semantic colors.
-    expect_style(&sess, "1 todos", ("Default", true, false));
+    let neutral = if cfg!(windows) { "Idx(15)" } else { "Default" };
+    expect_style(&sess, "1 todos", (neutral, true, false));
     // Both a persistent info label and the active status slot use the role.
     expect_style(&sess, "■", (green, false, false));
     let marker = common::turn_status_marker(&sess);
@@ -268,7 +282,12 @@ fn running_card_and_queued_input_keep_distinct_styles() {
         "bash_interrupt_long_running",
     );
     sess.send(&format!("{prompt}\r")).expect("start tool");
-    expect_style(&sess, "╭─", ("Idx(214)", true, false));
+    let border = if cfg!(windows) {
+        "Rgb(255, 175, 0)"
+    } else {
+        "Idx(214)"
+    };
+    expect_style(&sess, "╭─", (border, true, false));
     sess.send("StyleQueuedMarker").expect("type queued message");
     common::expect_input_line(
         &sess,
@@ -280,15 +299,16 @@ fn running_card_and_queued_input_keep_distinct_styles() {
     expect_style(
         &sess,
         "↳ queued: StyleQueuedMarker",
-        ("Default", false, true),
+        ("Default", false, !cfg!(windows)),
     );
-    expect_style(&sess, "╭─", ("Idx(214)", true, false));
+    expect_style(&sess, "╭─", (border, true, false));
     sess.resize(30, 78).expect("resize during tool");
     expect_style(
         &sess,
         "↳ queued: StyleQueuedMarker",
-        ("Default", false, true),
+        ("Default", false, !cfg!(windows)),
     );
+    expect_style(&sess, "╭─", (border, true, false));
     exit(&mut sess);
 }
 
@@ -303,8 +323,8 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         "\x1b[38;2;42;142;210mTrueColorSample\x1b[39m DefaultSample",
         "\x1b[38:2::128:64:32mColonRgbSample\x1b[0m",
         "\x1b[38:5:79mIndexedSample\x1b[0m",
-        // Backgrounds aren't supported by the pinned MixedText API. Their
-        // operands must not be mistaken for bold/italic/underline commands.
+        // Background color operands must not be mistaken for independent
+        // bold/italic/underline commands.
         "\x1b[48;2;1;3;4mNoOperandLeak\x1b[0m",
         // Neither a cursor/erase command nor an OSC payload is visible text.
         "SafePrefix\x1b[2J\x1b]0;HiddenTitle\x07SafeSuffix",
@@ -353,12 +373,8 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         ("BoldSample", true, false),
         ("IntensityResetSample", false, false),
     ] {
-        common::expect_screen(
-            &sess,
-            |_| attributes(&sess, label) == Some(("Default".into(), bold, dim)),
-            common::DEFAULT_TIMEOUT,
-            &format!("{label}: expected (Default, {bold}, {dim})"),
-        );
+        let neutral = if bold { "Idx(15)" } else { "Default" };
+        expect_style(&sess, label, (neutral, bold, dim));
     }
     expect_style(
         &sess,
@@ -366,7 +382,12 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         ("Rgb(42, 142, 210)", false, false),
     );
     expect_style(&sess, "ColonRgbSample", ("Rgb(128, 64, 32)", false, false));
-    expect_style(&sess, "IndexedSample", ("Idx(79)", false, false));
+    let indexed = if cfg!(windows) {
+        "Rgb(95, 215, 175)"
+    } else {
+        "Idx(79)"
+    };
+    expect_style(&sess, "IndexedSample", (indexed, false, false));
     expect_style(&sess, "DefaultSample", ("Default", false, false));
     expect_style(&sess, "NoOperandLeak", ("Default", false, false));
     expect_style(&sess, "SafePrefixSafeSuffix", ("Default", false, false));
@@ -378,7 +399,18 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
 
 #[test]
 fn todo_summary_scopes_every_count_and_label_in_both_themes() {
-    for (background, muted) in [("15;0", "Idx(247)"), ("0;15", "Idx(241)")] {
+    let neutral = if cfg!(windows) { "Idx(15)" } else { "Default" };
+    let windows_muted = if cfg!(windows) {
+        "Rgb(158, 158, 158)"
+    } else {
+        "Idx(247)"
+    };
+    let windows_light_muted = if cfg!(windows) {
+        "Rgb(98, 98, 98)"
+    } else {
+        "Idx(241)"
+    };
+    for (background, muted) in [("15;0", windows_muted), ("0;15", windows_light_muted)] {
         for statuses in [
             vec!["completed"],
             vec!["completed", "in_progress", "pending"],
@@ -411,10 +443,10 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                     "1 done".into(),
                     format!("{} open", statuses.len() - 1),
                 ] {
-                    expect_style(&sess, &count, ("Default", true, false));
+                    expect_style(&sess, &count, (neutral, true, false));
                 }
                 if statuses.len() > 1 {
-                    expect_style(&sess, "1 in progress", ("Default", true, false));
+                    expect_style(&sess, "1 in progress", (neutral, true, false));
                     expect_style(&sess, " in progress, ", (muted, false, false));
                 }
             }
@@ -430,10 +462,17 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
     // No API needed: resume real persisted usage through the production REPL.
     // Exercise both palettes and the warning/error -> muted transition as well
     // as the healthy-cache -> muted transition.
-    for (background, muted, hit_color, error_color) in [
+    #[cfg(windows)]
+    let palettes = [
+        ("15;0", "Rgb(158, 158, 158)", "Rgb(255, 215, 0)", "Idx(9)"),
+        ("0;15", "Rgb(98, 98, 98)", "Rgb(175, 95, 0)", "Idx(1)"),
+    ];
+    #[cfg(not(windows))]
+    let palettes = [
         ("15;0", "Idx(247)", "Idx(220)", "Idx(9)"),
         ("0;15", "Idx(241)", "Idx(130)", "Idx(1)"),
-    ] {
+    ];
+    for (background, muted, hit_color, error_color) in palettes {
         for (read, creation, hit, write) in
             [(7500, 2500, "⚡75%", "✎25%"), (9000, 1000, "⚡90%", "✎10%")]
         {

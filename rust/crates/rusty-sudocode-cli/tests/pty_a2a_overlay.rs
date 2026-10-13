@@ -61,12 +61,13 @@ fn exit(sess: &mut PtySession) {
 fn exit_with_context(sess: &mut PtySession, context: &str) {
     sess.send("\x04").expect("exit REPL");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
-    sess.expect_eof().unwrap_or_else(|error| {
-        panic!(
-            "{context} should exit cleanly: {error:?}\nPTY:\n{}",
-            sess.render(|screen| screen.contents())
-        )
+    let code = sess.expect_eof().unwrap_or_else(|error| {
+        // The method item cannot satisfy render's higher-ranked Screen lifetime.
+        #[allow(clippy::redundant_closure_for_method_calls)]
+        let screen = sess.render(|screen| screen.contents());
+        panic!("{context} should exit cleanly: {error:?}\nPTY:\n{screen}")
     });
+    assert_eq!(code, 0, "{context} should exit successfully");
 }
 
 fn expect_replay_input_ready(sess: &mut PtySession) {
@@ -537,7 +538,13 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
         let muted = if no_color {
             "Default"
         } else if sender_color == "Rgb(28, 100, 200)" {
-            "Idx(241)"
+            if cfg!(windows) {
+                "Rgb(98, 98, 98)"
+            } else {
+                "Idx(241)"
+            }
+        } else if cfg!(windows) {
+            "Rgb(158, 158, 158)"
         } else {
             "Idx(247)"
         };
@@ -646,7 +653,7 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
 }
 
 /// A queued preview leaves editing responsive, then flushes the full body once.
-/// Width changes run in pty_chrome_resize with real xterm reflow; vt100 cannot
+/// Width changes run in `pty_chrome_resize` with real xterm reflow; vt100 cannot
 /// model resized history and mistakes abandoned preview rows for live chips.
 #[test]
 fn a2a_received_during_a_turn_shows_in_pending_overlay() {

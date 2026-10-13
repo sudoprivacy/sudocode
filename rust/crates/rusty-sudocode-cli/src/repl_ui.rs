@@ -33,11 +33,13 @@ use crossterm::style::Color as TerminalColor;
 use iocraft::prelude::*;
 
 mod ansi_text;
+mod prompt_text;
 mod queued_message;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
-use ansi_text::{AnsiText, PromptTextView, RichText};
+use ansi_text::{AnsiText, RichText};
+use prompt_text::PromptTextView;
 use tasks::{TaskBrowser, TaskFocus};
 
 // ── stderr redirect ───────────────────────────────────────────────────

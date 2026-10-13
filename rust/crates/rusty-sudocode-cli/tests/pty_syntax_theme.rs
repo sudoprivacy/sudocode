@@ -209,26 +209,12 @@ fn check_cell(
     } else {
         json!({"fg":expected["fg"], "bg":expected["bg"], "bold":expected["bold"], "italic":expected["italic"], "underline":expected["underline"]})
     };
-    for color in ["fg", "bg"] {
-        assert!(
-            common::colors_equal(
-                actual[color].as_str().unwrap(),
-                wanted[color].as_str().unwrap()
-            ),
-            "Codex {color} mismatch at ({row}, {col}) {:?}: actual {}, wanted {}",
-            cell.contents(),
-            actual[color],
-            wanted[color]
-        );
-    }
-    for attribute in ["bold", "italic", "underline"] {
-        assert_eq!(
-            actual[attribute],
-            wanted[attribute],
-            "Codex {attribute} mismatch at ({row}, {col}) {:?}",
-            cell.contents()
-        );
-    }
+    assert_eq!(
+        actual,
+        wanted,
+        "Codex style mismatch at ({row}, {col}) {:?}",
+        cell.contents()
+    );
     assert!(!cell.dim(), "unexpected dim at ({row}, {col})");
 }
 

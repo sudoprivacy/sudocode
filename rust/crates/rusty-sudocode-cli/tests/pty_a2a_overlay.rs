@@ -517,17 +517,15 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
             .raw()
             .cell(u16::try_from(start).unwrap(), 16)
             .unwrap();
-        assert!(common::colors_equal(
-            &format!("{:?}", header.fgcolor()),
-            sender_color
-        ));
+        assert_eq!(format!("{:?}", header.fgcolor()), sender_color);
         assert!(!header.dim(), "peer identity must keep its blue contrast");
         let body = screen
             .raw()
             .cell(u16::try_from(start + 1).unwrap(), 2)
             .unwrap();
-        assert!(
-            common::colors_equal(&format!("{:?}", body.fgcolor()), "Default"),
+        assert_eq!(
+            format!("{:?}", body.fgcolor()),
+            "Default",
             "plain body color"
         );
         assert!(!body.bold(), "only Markdown emphasis should be bold");
@@ -543,16 +541,10 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
         } else {
             "Idx(247)"
         };
-        assert!(common::colors_equal(
-            &format!("{:?}", border.fgcolor()),
-            muted
-        ));
+        assert_eq!(format!("{:?}", border.fgcolor()), muted);
         for (row, col) in [(start, 0), (start, 3), (start + 1, 0), (end, 0)] {
             let cell = screen.raw().cell(u16::try_from(row).unwrap(), col).unwrap();
-            assert!(common::colors_equal(
-                &format!("{:?}", cell.fgcolor()),
-                muted
-            ));
+            assert_eq!(format!("{:?}", cell.fgcolor()), muted);
             assert!(!cell.dim(), "do not dim the muted frame a second time");
             assert!(!cell.bold(), "message chrome stays quiet");
         }

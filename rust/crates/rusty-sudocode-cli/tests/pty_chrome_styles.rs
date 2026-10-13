@@ -48,7 +48,7 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
     loop {
         let actual = attributes(sess, needle);
         if actual.as_ref().is_some_and(|(color, bold, dim)| {
-            common::colors_equal(color, expected.0)
+            color == expected.0
                 && *bold == expected.1
                 && ((cfg!(windows) && expected.2) || *dim == expected.2)
         }) {
@@ -193,9 +193,8 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
         &sess,
         |_| {
             ["Thinking...", "Reasoning..."].iter().any(|label| {
-                attributes(&sess, label).is_some_and(|(color, bold, dim)| {
-                    common::colors_equal(&color, green) && !bold && !dim
-                })
+                attributes(&sess, label)
+                    .is_some_and(|(color, bold, dim)| color == green && !bold && !dim)
             })
         },
         common::LIVE_TURN_BUDGET,

@@ -117,12 +117,21 @@ fn assert_style(sess: &PtySession, needle: &str, bold: bool, colored: bool) {
             .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
             .unwrap();
         assert_eq!(cell.bold(), bold, "{needle}: {}", raw.contents());
-        assert_eq!(
-            format!("{:?}", cell.fgcolor()) != "Default",
-            colored,
-            "{needle}: {}",
-            raw.contents()
-        );
+        if colored {
+            assert_ne!(format!("{:?}", cell.fgcolor()), "Default", "{needle}");
+        } else {
+            let neutral = if cfg!(windows) && bold {
+                "Idx(15)"
+            } else {
+                "Default"
+            };
+            assert_eq!(
+                format!("{:?}", cell.fgcolor()),
+                neutral,
+                "{needle}: {}",
+                raw.contents()
+            );
+        }
     });
 }
 

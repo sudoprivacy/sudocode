@@ -48,9 +48,7 @@ fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
     loop {
         let actual = attributes(sess, needle);
         if actual.as_ref().is_some_and(|(color, bold, dim)| {
-            color == expected.0
-                && *bold == expected.1
-                && ((cfg!(windows) && expected.2) || *dim == expected.2)
+            color == expected.0 && *bold == expected.1 && *dim == expected.2
         }) {
             return;
         }
@@ -349,7 +347,7 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
     sess.expect("❯").expect("input ready");
     // ConPTY can drop even independent dim. The production Canvas regression
     // checks dim and combined intensity before that boundary; check bold and
-    // reset here without expect_style's Windows dim tolerance.
+    // reset here with the neutral foreground from the Todo layout.
     #[cfg(windows)]
     for (label, bold, dim) in [
         ("BoldSample", true, false),
@@ -357,9 +355,9 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
     ] {
         common::expect_screen(
             &sess,
-            |_| attributes(&sess, label) == Some(("Idx(8)".into(), bold, dim)),
+            |_| attributes(&sess, label) == Some(("Default".into(), bold, dim)),
             common::DEFAULT_TIMEOUT,
-            &format!("{label}: expected (Idx(8), {bold}, {dim})"),
+            &format!("{label}: expected (Default, {bold}, {dim})"),
         );
     }
     expect_style(

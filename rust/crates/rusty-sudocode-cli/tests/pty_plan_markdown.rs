@@ -256,10 +256,8 @@ fn assert_requests(env: &TestEnv, plan: &str, clear: bool) {
                     .contains("The user APPROVED the plan")
         })
         .unwrap();
-    let text = result["content"]
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
+    let text = result["content"].as_str().map_or_else(
+        || {
             result["content"]
                 .as_array()
                 .unwrap()
@@ -267,7 +265,9 @@ fn assert_requests(env: &TestEnv, plan: &str, clear: bool) {
                 .filter_map(|block| block["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n")
-        });
+        },
+        str::to_owned,
+    );
     assert!(
         text.contains(plan),
         "execution must receive the reviewed file, including framing"

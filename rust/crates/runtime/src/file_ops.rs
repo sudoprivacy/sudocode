@@ -367,6 +367,13 @@ pub fn edit_file(
 
     let original_file = fs.read_to_string(&abs_str)?;
 
+    if old_string.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "old_string must not be empty; use write_file to create or replace a file",
+        ));
+    }
+
     if old_string == new_string {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -395,6 +402,26 @@ pub fn edit_file(
             "old_string not found in file",
         ));
     };
+
+    if !replace_all {
+        // Search beyond the first character, rather than the whole match, so
+        // overlapping occurrences are ambiguous too. Normalize line endings first.
+        let first = original_file
+            .find(&effective_old)
+            .expect("match checked above");
+        let next = first
+            + effective_old
+                .chars()
+                .next()
+                .expect("nonempty old_string")
+                .len_utf8();
+        if original_file[next..].contains(&effective_old) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "old_string matches more than once; include surrounding context to match exactly once, or set replace_all to true",
+            ));
+        }
+    }
 
     let updated = if replace_all {
         original_file.replace(&effective_old, &effective_new)

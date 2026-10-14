@@ -2211,14 +2211,6 @@ where
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            // Reject provider violations before persisting unmatched tool calls or dispatching.
-            if final_answer && !pending_tool_uses.is_empty() {
-                let error = RuntimeError::new(
-                    "model requested tools after the computation step limit was reached",
-                );
-                self.record_turn_failed(iterations, &error);
-                return Err(error);
-            }
             self.record_assistant_iteration(
                 iterations,
                 &assistant_message,

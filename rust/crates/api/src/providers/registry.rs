@@ -736,7 +736,8 @@ fn adjust_base_url_for_format(base_url: &str, api_format: ApiFormat) -> String {
 /// - Explicit `api`: `"openai-completions"`, `"openai-responses"`, or
 ///   `"anthropic-messages"`.
 /// - Proxy mode without `api`: consult model capabilities SSOT (same
-///   source as `try_proxy_passthrough`), falling back to OpenAI completions.
+///   source as `try_proxy_passthrough`), then use the Claude or Codex protocol
+///   for a cold catalog and OpenAI completions for other models.
 /// - Non-proxy providers: inferred from the provider name.
 fn resolve_api_format(
     auth_mode: &str,
@@ -780,8 +781,19 @@ fn resolve_api_format(
         // Measured when this fired for real: 70 requests, 1.5M prompt tokens,
         // zero cache reads and zero cache writes, every token billed at full
         // rate — against the same workload caching normally serves at 0.1x.
+        // A cold catalog also lacks the endpoint required by Codex models.
+        // Keep this fallback in the shared resolver for CLI and hosted engines.
+        let wire_id = model_id
+            .rsplit('/')
+            .next()
+            .unwrap_or(model_id)
+            .to_ascii_lowercase();
         return Ok(if runtime::config::is_anthropic_model(model_id) {
             ApiFormat::AnthropicMessages
+        } else if wire_id.starts_with("gpt-")
+            && wire_id.split('-').any(|segment| segment == "codex")
+        {
+            ApiFormat::OpenAiResponses
         } else {
             ApiFormat::OpenAiCompletions
         });

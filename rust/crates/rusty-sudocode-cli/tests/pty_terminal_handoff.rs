@@ -128,7 +128,12 @@ pathlib.Path(sys.argv[1]).write_bytes(b'selected memory\n')
     );
     common::expect_input_line_cleared(&child, env.timeout(), "initial prompt");
     child.send("/memory\r").unwrap();
-    child.expect("Select memory file to edit").unwrap();
+    common::expect_screen(
+        &child,
+        |screen| screen.contains("Select memory file to edit") && screen.contains("🔍"),
+        env.timeout(),
+        "memory picker controls ready",
+    );
     child.send("\x1b").unwrap();
     common::expect_input_line_cleared(&child, env.timeout(), "cancelled memory picker");
     assert_eq!(
@@ -136,11 +141,32 @@ pathlib.Path(sys.argv[1]).write_bytes(b'selected memory\n')
         "original agents\n"
     );
     child.send("/memory\r").unwrap();
-    child.expect("Select memory file to edit").unwrap();
+    common::expect_screen(
+        &child,
+        |screen| screen.contains("Select memory file to edit") && screen.contains("🔍"),
+        env.timeout(),
+        "memory picker controls ready",
+    );
     child.send(".nexus").unwrap();
-    child.expect(r"1 match.*filter: .nexus").unwrap();
+    common::expect_screen(
+        &child,
+        |screen| {
+            screen.contains("1 match")
+                && screen.contains("filter: .nexus")
+                && screen.lines().any(|line| line.starts_with("> "))
+        },
+        env.timeout(),
+        "memory picker filters and selects the nested memory file",
+    );
     child.send("\r").unwrap();
-    child.expect("Opened memory file at").unwrap();
+    child
+        .expect("Opened memory file at")
+        .unwrap_or_else(|error| {
+            panic!(
+                "selected memory editor did not complete: {error}\n{}",
+                common::screen_tail(&child, 5000)
+            );
+        });
     assert_eq!(
         std::fs::read_to_string(env.workspace_root().join(".nexus/sudocode/AGENTS.md")).unwrap(),
         "selected memory\n"

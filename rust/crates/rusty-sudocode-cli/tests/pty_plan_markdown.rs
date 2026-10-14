@@ -97,7 +97,46 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession) {
     );
 }
 
+fn default_terminal_styles() -> &'static [(String, String); 2] {
+    static STYLES: std::sync::OnceLock<[(String, String); 2]> = std::sync::OnceLock::new();
+    STYLES.get_or_init(|| {
+        let shell = common::resolve_sh();
+        let mut probe = PtySession::spawn(
+            &shell,
+            &[
+                "-c",
+                r"printf '\033[0m\033[39m\033[49mDefaultProbe\r\n\033[1mBoldProbe\033[0m\r\n'; read answer",
+            ],
+        )
+        .expect("spawn independent terminal style probe");
+        common::expect_screen(
+            &probe,
+            |screen| screen.contains("DefaultProbe") && screen.contains("BoldProbe"),
+            common::DEFAULT_TIMEOUT,
+            "known default and bold terminal styles",
+        );
+        let styles = probe.render(|screen| {
+            let raw = screen.raw();
+            let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+            std::array::from_fn(|index| {
+                let marker = ["DefaultProbe", "BoldProbe"][index];
+                let row = rows.iter().position(|row| row.contains(marker)).unwrap();
+                let byte = rows[row].find(marker).unwrap();
+                let col = rows[row][..byte].width();
+                let cell = raw.cell(row as u16, col as u16).unwrap();
+                assert_eq!(cell.bold(), index == 1, "known probe intensity");
+                assert!(!cell.dim(), "known probe brightness");
+                (format!("{:?}", cell.fgcolor()), format!("{:?}", cell.bgcolor()))
+            })
+        });
+        probe.send("\r").unwrap();
+        assert_eq!(probe.expect_eof().unwrap(), 0);
+        styles
+    })
+}
+
 fn assert_style(sess: &PtySession, needle: &str, bold: bool, colored: bool) {
+    let styles = default_terminal_styles();
     sess.render(|screen| {
         let raw = screen.raw();
         let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
@@ -110,9 +149,16 @@ fn assert_style(sess: &PtySession, needle: &str, bold: bool, colored: bool) {
         let cell = raw
             .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
             .unwrap();
+        let (foreground, background) = &styles[usize::from(bold)];
         assert_eq!(cell.bold(), bold, "{needle}: {}", raw.contents());
+        assert!(!cell.dim(), "{needle} must retain normal brightness");
         assert_eq!(
-            format!("{:?}", cell.fgcolor()) != "Default",
+            format!("{:?}", cell.bgcolor()),
+            *background,
+            "{needle} background"
+        );
+        assert_eq!(
+            format!("{:?}", cell.fgcolor()) != *foreground,
             colored,
             "{needle}: {}",
             raw.contents()
@@ -121,11 +167,10 @@ fn assert_style(sess: &PtySession, needle: &str, bold: bool, colored: bool) {
 }
 
 fn assert_document(sess: &PtySession, no_color: bool) {
-    let neutral_color = cfg!(windows) && !no_color;
-    assert_style(sess, "Review plan", !no_color, neutral_color);
-    assert_style(sess, "Verify bold", !no_color, neutral_color);
+    assert_style(sess, "Review plan", !no_color, false);
+    assert_style(sess, "Verify bold", !no_color, false);
     assert_style(sess, "src/main.rs", false, !no_color);
-    assert_style(sess, "Context", !no_color, neutral_color);
+    assert_style(sess, "Context", !no_color, false);
     sess.render(|screen| {
         let text = screen.raw().contents();
         let start = text
@@ -503,7 +548,7 @@ fn fuzzy_questions_share_markdown_and_remain_responsive() {
         LIVE_TURN_BUDGET,
         "Markdown fuzzy question",
     );
-    assert_style(&sess, "Verify bold", true, cfg!(windows));
+    assert_style(&sess, "Verify bold", true, false);
     assert_style(&sess, "src/main.rs", false, true);
     sess.send("Option 12").unwrap();
     common::expect_screen(

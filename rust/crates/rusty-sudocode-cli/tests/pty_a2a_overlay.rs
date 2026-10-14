@@ -436,6 +436,12 @@ fn complete_received_block(screen: &str) -> bool {
 
 fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     let env = TestEnv::new("a2a-received-style");
+    let colors = if no_color {
+        ["Default".to_owned(), "Default".to_owned()]
+    } else {
+        terminal_muted_colors()
+    };
+    let muted = &colors[usize::from(background == "15;0")];
     let vars = [
         ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
         ("NO_COLOR", if no_color { "1" } else { "" }),
@@ -458,7 +464,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     );
     inject(&env, &receiver, "mac-ai", &body);
     wait_for_screen(&sess, "complete received block", complete_received_block);
-    let live = received_block(&sess, sender_color, no_color);
+    let live = received_block(&sess, sender_color, muted);
     common::expect_turn_complete_after(
         &sess,
         &marker,
@@ -474,7 +480,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     resumed.resize(80, 52).unwrap();
     wait_for_screen(&resumed, "restored received block", complete_received_block);
     assert_eq!(
-        received_block(&resumed, sender_color, no_color),
+        received_block(&resumed, sender_color, muted),
         live,
         "live and replay must use the same layout"
     );
@@ -482,7 +488,56 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     exit(&mut resumed);
 }
 
-fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<String> {
+fn terminal_muted_colors() -> [String; 2] {
+    let mut probe = PtySession::spawn(
+        &common::resolve_sh(),
+        &[
+            "-c",
+            "printf '\\033[0m\\033[2J\\033[H\\033[38;5;241mFG241\\033[0m\\r\\n\\033[38;5;247mFG247\\033[0m\\r\\n\\033[48;5;241mBG241\\033[0m\\r\\n\\033[48;5;247mBG247\\033[0m\\r\\nPALETTE-DONE\\r\\n'; IFS= read -r release",
+        ],
+    )
+    .unwrap();
+    probe.set_default_timeout(common::DEFAULT_TIMEOUT);
+    common::expect_screen(
+        &probe,
+        |screen| screen.contains("PALETTE-DONE"),
+        BUDGET,
+        "independent terminal palette control",
+    );
+    let colors = probe.render(|screen| {
+        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        [241, 247].map(|index| {
+            let observed = ["FG", "BG"].map(|channel| {
+                let label = format!("{channel}{index}");
+                let row = rows.iter().position(|row| row.trim_end() == label).unwrap();
+                let cell = screen.raw().cell(u16::try_from(row).unwrap(), 0).unwrap();
+                let fg = format!("{:?}", cell.fgcolor());
+                let bg = format!("{:?}", cell.bgcolor());
+                assert!(!cell.bold() && !cell.dim());
+                if channel == "FG" {
+                    assert_eq!(bg, "Default");
+                    fg
+                } else {
+                    assert_eq!(fg, "Default");
+                    bg
+                }
+            });
+            assert_eq!(observed[0], observed[1], "foreground/background conversion");
+            let [fg, _] = observed;
+            fg
+        })
+    });
+    probe.send("\r").unwrap();
+    assert_eq!(probe.expect_eof().unwrap(), 0);
+    assert!(
+        colors == ["Idx(241)", "Idx(247)"]
+            || (cfg!(windows) && colors == ["Rgb(98, 98, 98)", "Rgb(158, 158, 158)"]),
+        "unexpected terminal palette conversion: {colors:?}"
+    );
+    colors
+}
+
+fn received_block(sess: &PtySession, sender_color: &str, muted: &str) -> Vec<String> {
     sess.render(|screen| {
         // Normalize ConPTY's literal trailing blanks before locating the
         // borders as well as when comparing the live and replayed frames.
@@ -519,6 +574,7 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
             .cell(u16::try_from(start).unwrap(), 16)
             .unwrap();
         assert_eq!(format!("{:?}", header.fgcolor()), sender_color);
+        assert_eq!(format!("{:?}", header.bgcolor()), "Default");
         assert!(!header.dim(), "peer identity must keep its blue contrast");
         let body = screen
             .raw()
@@ -529,29 +585,18 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
             "Default",
             "plain body color"
         );
+        assert_eq!(format!("{:?}", body.bgcolor()), "Default");
         assert!(!body.bold(), "only Markdown emphasis should be bold");
         assert!(!body.dim(), "body must retain normal brightness");
         let border = screen
             .raw()
             .cell(u16::try_from(start + 1).unwrap(), 0)
             .unwrap();
-        let muted = if no_color {
-            "Default"
-        } else if sender_color == "Rgb(28, 100, 200)" {
-            if cfg!(windows) {
-                "Rgb(98, 98, 98)"
-            } else {
-                "Idx(241)"
-            }
-        } else if cfg!(windows) {
-            "Rgb(158, 158, 158)"
-        } else {
-            "Idx(247)"
-        };
         assert_eq!(format!("{:?}", border.fgcolor()), muted);
         for (row, col) in [(start, 0), (start, 3), (start + 1, 0), (end, 0)] {
             let cell = screen.raw().cell(u16::try_from(row).unwrap(), col).unwrap();
             assert_eq!(format!("{:?}", cell.fgcolor()), muted);
+            assert_eq!(format!("{:?}", cell.bgcolor()), "Default");
             assert!(!cell.dim(), "do not dim the muted frame a second time");
             assert!(!cell.bold(), "message chrome stays quiet");
         }

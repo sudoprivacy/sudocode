@@ -47,8 +47,12 @@ fn step_budget_finishes_with_existing_results() {
         assert_eq!(requests.len(), limit as usize + 1);
         let first = &requests[0];
         let final_request = requests.last().unwrap();
-        assert!(final_request.get("tools").is_none_or(|v| v.is_null()));
-        assert!(final_request.get("tool_choice").is_none_or(|v| v.is_null()));
+        assert!(final_request
+            .get("tools")
+            .is_none_or(serde_json::Value::is_null));
+        assert!(final_request
+            .get("tool_choice")
+            .is_none_or(serde_json::Value::is_null));
         let system_text = |request: &serde_json::Value| {
             request["system"]
                 .as_array()
@@ -75,7 +79,7 @@ fn answer_before_budget_does_not_force_extra_request() {
     set_budget(&env, 5);
     let prompt = env.prompt("What is 2 + 2?", "single_turn_text");
     let mut sess = env.spawn(&["-p", &prompt]);
-    sess.set_default_timeout(Duration::from_secs(60));
+    sess.set_default_timeout(Duration::from_mins(1));
     sess.expect("The answer is 4").unwrap();
     assert_eq!(sess.expect_eof().unwrap(), 0);
     assert_eq!(env.captured_message_count(), 1);
@@ -148,7 +152,7 @@ fn multiple_tools_in_one_response_count_as_one_step() {
     assert_eq!(env.captured_message_count(), 2);
     let body: serde_json::Value =
         serde_json::from_str(env.captured_message_bodies().last().unwrap()).unwrap();
-    assert!(body.get("tools").is_none_or(|v| v.is_null()));
+    assert!(body.get("tools").is_none_or(serde_json::Value::is_null));
     assert!(body["messages"]
         .to_string()
         .contains("computation step limit (1 steps)"));
@@ -197,7 +201,7 @@ fn live_step_budget_preserves_results_across_turns() {
     ]);
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "initial prompt");
     for turn in 1..=2 {
-        let prompt = format!("Turn {turn}: you must use bash to append one line to steps.txt in each separate tool round. Command: echo step >> steps.txt. Keep doing this indefinitely, with exactly one bash call per model response. When no tools remain, summarize the completed work and remaining work. Do not finish early.");
+        let prompt = format!("Turn {turn}: append five new lines to steps.txt using five sequential bash calls. For each call run exactly this command: echo turn-{turn} >> steps.txt. Make one bash call per model response and wait for its result before the next call; do not combine calls, use a loop, or launch a background command. When tools become unavailable, summarize the completed work and the remaining lines without claiming they were written.");
         let marker = common::turn_status_marker(&sess);
         sess.send(&prompt).unwrap();
         common::expect_screen_settled(
@@ -207,13 +211,29 @@ fn live_step_budget_preserves_results_across_turns() {
             "turn pasted",
         );
         sess.send("\r").unwrap();
-        common::expect_turn_complete_after(&sess, &marker, env.timeout(), "live bounded turn");
+        common::expect_turn_complete_after(
+            &sess,
+            &marker,
+            common::LIVE_TURN_BUDGET,
+            "live bounded turn",
+        );
+        let content =
+            fs::read_to_string(env.workspace_root().join("steps.txt")).unwrap_or_else(|error| {
+                panic!(
+                    "turn {turn} produced no result: {error}\nPTY:\n{}",
+                    sess.render(|screen| screen.raw().contents())
+                )
+            });
+        let expected = if turn == 1 {
+            "turn-1\nturn-1\n"
+        } else {
+            "turn-1\nturn-1\nturn-2\nturn-2\n"
+        };
         assert_eq!(
-            fs::read_to_string(env.workspace_root().join("steps.txt"))
-                .unwrap()
-                .lines()
-                .count(),
-            turn * 2
+            content,
+            expected,
+            "each turn must stop at two real tool rounds and retain earlier results\nPTY:\n{}",
+            sess.render(|screen| screen.raw().contents())
         );
     }
     sess.send("/exit\r").unwrap();

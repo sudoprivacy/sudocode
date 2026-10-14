@@ -1109,7 +1109,7 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit_file",
-            description: "Replace text in a workspace file.",
+            description: "Replace text in a workspace file. old_string must be nonempty and match exactly once; include surrounding context to disambiguate, or set replace_all to true to replace every occurrence.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

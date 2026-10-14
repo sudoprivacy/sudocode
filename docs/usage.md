@@ -628,6 +628,14 @@ steps with the user. This final answer is an additional model request, outside
 the execution budget. Each new user turn gets a fresh budget. Already-started
 background work is not cancelled by this limit.
 
+## Editing files
+
+`edit_file` requires a nonempty `old_string`. By default it must match exactly
+once, including after LF-to-CRLF normalization. Ambiguous edits return an error
+without modifying the file. Include more surrounding context to select one
+occurrence, or set `replace_all: true` to replace every non-overlapping match.
+Use `write_file` to create a file or replace its full contents.
+
 ## Images and browser screenshots
 
 The CLI accepts PNG, JPEG, GIF, and WebP references in a user prompt:

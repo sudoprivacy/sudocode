@@ -1819,7 +1819,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         Scenario::StepBudget => match step_budget_answer(request) {
             Some(text) => final_text_sse(&text),
             None => tool_use_sse(
-                "toolu_budget",
+                &step_budget_tool_id(request),
                 "bash",
                 &[r#"{"command":"echo step >> steps.txt"}"#],
             ),
@@ -2491,7 +2491,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
             Some(text) => text_message_response("msg_budget_final", &text),
             None => tool_message_response(
                 "msg_budget_tool",
-                "toolu_budget",
+                &step_budget_tool_id(request),
                 "bash",
                 json!({"command": "echo step >> steps.txt"}),
             ),
@@ -3971,7 +3971,14 @@ pub const CODEX_DIFF_NEW: &str = r#"    let new_message = "NEW_MARKER source tex
 // The marker is returned only when the runtime supplies both the instruction and
 // a tool-free wire request. Without either, the PTY regression cannot pass.
 fn step_budget_answer(request: &MessageRequest) -> Option<String> {
-    let messages = serde_json::to_string(&request.messages).expect("serialize mock messages");
+    let messages =
+        serde_json::to_string(&request.messages.last()).expect("serialize mock messages");
+    if serde_json::to_string(&request.messages)
+        .unwrap()
+        .contains("STEP_BUDGET_VIOLATION")
+    {
+        return None;
+    }
     if messages.contains("The computation step limit (") {
         let valid = request.tools.as_ref().is_none_or(Vec::is_empty)
             && request.tool_choice.is_none()
@@ -3981,4 +3988,14 @@ fn step_budget_answer(request: &MessageRequest) -> Option<String> {
     } else {
         None
     }
+}
+
+fn step_budget_tool_id(request: &MessageRequest) -> String {
+    let count = request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, InputContentBlock::ToolUse { .. }))
+        .count();
+    format!("toolu_budget_{count}")
 }

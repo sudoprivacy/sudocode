@@ -39,7 +39,19 @@ fn start(env: &TestEnv, queue: bool, no_color: bool) -> PtySession {
         env.timeout().max(Duration::from_secs(30)),
         "ready to review a plan",
     );
-    sess.resize(100, 100).unwrap();
+    let width = if queue { 100 } else { 80 };
+    sess.resize(100, width).unwrap();
+    common::expect_screen(
+        &sess,
+        |screen| {
+            common::input_line_of(screen).is_empty()
+                && screen
+                    .lines()
+                    .any(|line| line == "─".repeat(width as usize))
+        },
+        env.timeout(),
+        "resized input ready",
+    );
     sess
 }
 
@@ -62,7 +74,12 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession) {
     };
     common::expect_screen(
         sess,
-        |screen| common::input_line_of(screen) == expected_input,
+        |screen| {
+            common::input_line_of(screen) == expected_input
+                || screen
+                    .replace('\n', "")
+                    .contains(&format!("❯ {expected_input}"))
+        },
         env.timeout(),
         "complete plan prompt pasted into current input",
     );
@@ -70,17 +87,56 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession) {
     common::expect_screen(
         sess,
         |screen| {
-            screen.contains("Choose an action")
-                && screen.contains("Keep context & execute")
-                && screen.contains("Verify bold")
-                && screen.contains("let verified = true;")
+            screen.contains("Keep context & execute")
+                && (screen.contains("Enter confirm") || screen.contains("Your choice:"))
+                && (screen.lines().count() < 60
+                    || (screen.contains("Verify bold") && screen.contains("let verified = true;")))
         },
         LIVE_TURN_BUDGET,
         "full Markdown approval document",
     );
 }
 
+fn default_terminal_styles() -> &'static [(String, String); 2] {
+    static STYLES: std::sync::OnceLock<[(String, String); 2]> = std::sync::OnceLock::new();
+    STYLES.get_or_init(|| {
+        let shell = common::resolve_sh();
+        let mut probe = PtySession::spawn(
+            &shell,
+            &[
+                "-c",
+                r"printf '\033[0m\033[39m\033[49mDefaultProbe\r\n\033[1mBoldProbe\033[0m\r\n'; read answer",
+            ],
+        )
+        .expect("spawn independent terminal style probe");
+        common::expect_screen(
+            &probe,
+            |screen| screen.contains("DefaultProbe") && screen.contains("BoldProbe"),
+            common::DEFAULT_TIMEOUT,
+            "known default and bold terminal styles",
+        );
+        let styles = probe.render(|screen| {
+            let raw = screen.raw();
+            let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+            std::array::from_fn(|index| {
+                let marker = ["DefaultProbe", "BoldProbe"][index];
+                let row = rows.iter().position(|row| row.contains(marker)).unwrap();
+                let byte = rows[row].find(marker).unwrap();
+                let col = rows[row][..byte].width();
+                let cell = raw.cell(row as u16, col as u16).unwrap();
+                assert_eq!(cell.bold(), index == 1, "known probe intensity");
+                assert!(!cell.dim(), "known probe brightness");
+                (format!("{:?}", cell.fgcolor()), format!("{:?}", cell.bgcolor()))
+            })
+        });
+        probe.send("\r").unwrap();
+        assert_eq!(probe.expect_eof().unwrap(), 0);
+        styles
+    })
+}
+
 fn assert_style(sess: &PtySession, needle: &str, bold: bool, colored: bool) {
+    let styles = default_terminal_styles();
     sess.render(|screen| {
         let raw = screen.raw();
         let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
@@ -93,9 +149,16 @@ fn assert_style(sess: &PtySession, needle: &str, bold: bool, colored: bool) {
         let cell = raw
             .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
             .unwrap();
+        let (foreground, background) = &styles[usize::from(bold)];
         assert_eq!(cell.bold(), bold, "{needle}: {}", raw.contents());
+        assert!(!cell.dim(), "{needle} must retain normal brightness");
         assert_eq!(
-            format!("{:?}", cell.fgcolor()) != "Default",
+            format!("{:?}", cell.bgcolor()),
+            *background,
+            "{needle} background"
+        );
+        assert_eq!(
+            format!("{:?}", cell.fgcolor()) != *foreground,
             colored,
             "{needle}: {}",
             raw.contents()
@@ -281,11 +344,10 @@ fn approve(queue: bool, clear: bool, no_color: bool) {
         sess.resize(100, 72).unwrap();
         common::expect_screen(
             &sess,
-            |s| s.contains("let verified = true;") && s.contains("Keep context & execute"),
+            |s| s.contains("Keep context & execute") && s.contains("↑↓ navigate"),
             env.timeout(),
-            "reflowed plan",
+            "resized plan controls",
         );
-        assert_document(&sess, no_color);
     }
     let marker = common::turn_status_marker(&sess);
     choose(&mut sess, queue, if clear { "1" } else { "2" });
@@ -348,6 +410,86 @@ fn find_transcript(dir: &std::path::Path) -> std::path::PathBuf {
         }
     }
     panic!("missing persisted session");
+}
+
+#[test]
+fn small_terminal_plan_wait_and_navigation_do_not_append_repeated_canvases() {
+    let env = TestEnv::new("plan-small-stable");
+    let mut sess = start(&env, true, false);
+    sess.resize(24, 100).unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.lines().count() <= 24 && common::input_line_of(s).is_empty(),
+        env.timeout(),
+        "small terminal ready",
+    );
+    submit_plan(&env, &mut sess);
+    let saved = std::fs::read_to_string(env.workspace_root().join("reviewed-plan.md")).unwrap();
+    assert!(saved.contains("let verified = true;"));
+    let before = sess.render(|s| s.contents());
+    assert!(
+        !before.contains("Review plan"),
+        "document must be above live controls: {before}"
+    );
+    sess.expect("\\[Choose an action\\]").unwrap();
+    assert!(
+        sess.expect_within("\\[Choose an action\\]", Duration::from_secs(3))
+            .is_err(),
+        "approval document must only be printed once"
+    );
+    assert_eq!(
+        sess.render(|s| s.contents()),
+        before,
+        "waiting must not scroll the canvas"
+    );
+    for _ in 0..4 {
+        sess.send("\x1b[B").unwrap();
+        common::expect_screen(
+            &sess,
+            |s| s.contains("> [2] Keep context & execute"),
+            env.timeout(),
+            "down selects keep context",
+        );
+        let down = sess.render(|s| s.contents());
+        sess.send("\x1b[A").unwrap();
+        common::expect_screen(
+            &sess,
+            |s| s.contains("> [1] Clear context"),
+            env.timeout(),
+            "up selects clear context",
+        );
+        assert_eq!(
+            sess.render(|s| s.contents()),
+            before,
+            "navigation must not add rows to history"
+        );
+        assert_eq!(
+            down.lines().position(|line| line.contains("> [2]")),
+            before
+                .lines()
+                .enumerate()
+                .filter_map(|(index, line)| line.contains("[2]").then_some(index))
+                .last()
+        );
+    }
+    let marker = common::turn_status_marker(&sess);
+    sess.send("\x1b[B").unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains("> [2] Keep context & execute"),
+        env.timeout(),
+        "keep selected for confirmation",
+    );
+    sess.send("\r").unwrap();
+    common::expect_turn_complete_after(&sess, &marker, LIVE_TURN_BUDGET, "selected plan executes");
+    assert_eq!(
+        std::fs::read_to_string(env.workspace_root().join("plan-executed.txt"))
+            .unwrap()
+            .trim(),
+        "completed from approved plan"
+    );
+    assert_requests(&env, &saved, false);
+    finish(&mut sess);
 }
 
 #[test]

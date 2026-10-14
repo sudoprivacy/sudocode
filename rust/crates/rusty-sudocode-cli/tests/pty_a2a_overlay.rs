@@ -934,10 +934,11 @@ fn pending_batch_and_two_runtimes_share_one_durable_reader() {
         std::thread::sleep(Duration::from_millis(50));
     }
     // The durable commit and the terminal repaint are separate events.
-    common::expect_screen_settled(
+    common::expect_screen(
         &first,
-        |screen| {
-            screen.contains(marker) || second.render(|screen| screen.contents().contains(marker))
+        |_| {
+            first.render(|screen| screen.contents().contains(marker))
+                || second.render(|screen| screen.contents().contains(marker))
         },
         BUDGET,
         "the consumed message reaches one terminal",

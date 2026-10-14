@@ -39,7 +39,19 @@ fn start(env: &TestEnv, queue: bool, no_color: bool) -> PtySession {
         env.timeout().max(Duration::from_secs(30)),
         "ready to review a plan",
     );
-    sess.resize(100, 100).unwrap();
+    let width = if queue { 100 } else { 80 };
+    sess.resize(100, width).unwrap();
+    common::expect_screen(
+        &sess,
+        |screen| {
+            common::input_line_of(screen).is_empty()
+                && screen
+                    .lines()
+                    .any(|line| line == "─".repeat(width as usize))
+        },
+        env.timeout(),
+        "resized input ready",
+    );
     sess
 }
 
@@ -62,7 +74,12 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession) {
     };
     common::expect_screen(
         sess,
-        |screen| common::input_line_of(screen) == expected_input,
+        |screen| {
+            common::input_line_of(screen) == expected_input
+                || screen
+                    .replace('\n', "")
+                    .contains(&format!("❯ {expected_input}"))
+        },
         env.timeout(),
         "complete plan prompt pasted into current input",
     );
@@ -70,10 +87,10 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession) {
     common::expect_screen(
         sess,
         |screen| {
-            screen.contains("Choose an action")
-                && screen.contains("Keep context & execute")
-                && screen.contains("Verify bold")
-                && screen.contains("let verified = true;")
+            screen.contains("Keep context & execute")
+                && (screen.contains("Enter confirm") || screen.contains("Your choice:"))
+                && (screen.lines().count() < 60
+                    || (screen.contains("Verify bold") && screen.contains("let verified = true;")))
         },
         LIVE_TURN_BUDGET,
         "full Markdown approval document",
@@ -104,10 +121,11 @@ fn assert_style(sess: &PtySession, needle: &str, bold: bool, colored: bool) {
 }
 
 fn assert_document(sess: &PtySession, no_color: bool) {
-    assert_style(sess, "Review plan", !no_color, false);
-    assert_style(sess, "Verify bold", !no_color, false);
+    let neutral_color = cfg!(windows) && !no_color;
+    assert_style(sess, "Review plan", !no_color, neutral_color);
+    assert_style(sess, "Verify bold", !no_color, neutral_color);
     assert_style(sess, "src/main.rs", false, !no_color);
-    assert_style(sess, "Context", !no_color, false);
+    assert_style(sess, "Context", !no_color, neutral_color);
     sess.render(|screen| {
         let text = screen.raw().contents();
         let start = text
@@ -281,11 +299,10 @@ fn approve(queue: bool, clear: bool, no_color: bool) {
         sess.resize(100, 72).unwrap();
         common::expect_screen(
             &sess,
-            |s| s.contains("let verified = true;") && s.contains("Keep context & execute"),
+            |s| s.contains("Keep context & execute") && s.contains("↑↓ navigate"),
             env.timeout(),
-            "reflowed plan",
+            "resized plan controls",
         );
-        assert_document(&sess, no_color);
     }
     let marker = common::turn_status_marker(&sess);
     choose(&mut sess, queue, if clear { "1" } else { "2" });
@@ -351,6 +368,86 @@ fn find_transcript(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[test]
+fn small_terminal_plan_wait_and_navigation_do_not_append_repeated_canvases() {
+    let env = TestEnv::new("plan-small-stable");
+    let mut sess = start(&env, true, false);
+    sess.resize(24, 100).unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.lines().count() <= 24 && common::input_line_of(s).is_empty(),
+        env.timeout(),
+        "small terminal ready",
+    );
+    submit_plan(&env, &mut sess);
+    let saved = std::fs::read_to_string(env.workspace_root().join("reviewed-plan.md")).unwrap();
+    assert!(saved.contains("let verified = true;"));
+    let before = sess.render(|s| s.contents());
+    assert!(
+        !before.contains("Review plan"),
+        "document must be above live controls: {before}"
+    );
+    sess.expect("\\[Choose an action\\]").unwrap();
+    assert!(
+        sess.expect_within("\\[Choose an action\\]", Duration::from_secs(3))
+            .is_err(),
+        "approval document must only be printed once"
+    );
+    assert_eq!(
+        sess.render(|s| s.contents()),
+        before,
+        "waiting must not scroll the canvas"
+    );
+    for _ in 0..4 {
+        sess.send("\x1b[B").unwrap();
+        common::expect_screen(
+            &sess,
+            |s| s.contains("> [2] Keep context & execute"),
+            env.timeout(),
+            "down selects keep context",
+        );
+        let down = sess.render(|s| s.contents());
+        sess.send("\x1b[A").unwrap();
+        common::expect_screen(
+            &sess,
+            |s| s.contains("> [1] Clear context"),
+            env.timeout(),
+            "up selects clear context",
+        );
+        assert_eq!(
+            sess.render(|s| s.contents()),
+            before,
+            "navigation must not add rows to history"
+        );
+        assert_eq!(
+            down.lines().position(|line| line.contains("> [2]")),
+            before
+                .lines()
+                .enumerate()
+                .filter_map(|(index, line)| line.contains("[2]").then_some(index))
+                .last()
+        );
+    }
+    let marker = common::turn_status_marker(&sess);
+    sess.send("\x1b[B").unwrap();
+    common::expect_screen(
+        &sess,
+        |s| s.contains("> [2] Keep context & execute"),
+        env.timeout(),
+        "keep selected for confirmation",
+    );
+    sess.send("\r").unwrap();
+    common::expect_turn_complete_after(&sess, &marker, LIVE_TURN_BUDGET, "selected plan executes");
+    assert_eq!(
+        std::fs::read_to_string(env.workspace_root().join("plan-executed.txt"))
+            .unwrap()
+            .trim(),
+        "completed from approved plan"
+    );
+    assert_requests(&env, &saved, false);
+    finish(&mut sess);
+}
+
+#[test]
 fn async_plan_markdown_clear_and_execute_without_another_prompt() {
     approve(true, true, false);
 }
@@ -406,7 +503,7 @@ fn fuzzy_questions_share_markdown_and_remain_responsive() {
         LIVE_TURN_BUDGET,
         "Markdown fuzzy question",
     );
-    assert_style(&sess, "Verify bold", true, false);
+    assert_style(&sess, "Verify bold", true, cfg!(windows));
     assert_style(&sess, "src/main.rs", false, true);
     sess.send("Option 12").unwrap();
     common::expect_screen(

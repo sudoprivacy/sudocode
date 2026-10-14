@@ -35,7 +35,7 @@ mod ansi_text;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
-use ansi_text::{AnsiText, PromptTextView, RichText};
+use ansi_text::{AnsiText, RichText};
 use tasks::{TaskBrowser, TaskFocus};
 
 // ── stderr redirect ───────────────────────────────────────────────────
@@ -866,6 +866,85 @@ fn enter_key_event_for_value(
     }
 }
 
+fn format_question_document(question: &QuestionPromptView, width: usize) -> String {
+    let mut text = String::new();
+    if let Some(title) = &question.title {
+        let title = StyledText::from_ansi(title);
+        let _ = writeln!(text, "[{}]", title.text);
+    }
+    if let Some(description) = &question.description {
+        let rendered =
+            crate::render::TerminalRenderer::new().render_prompt_text(description, width);
+        rendered.write_ansi(0..rendered.text.len(), &mut text);
+        text.push('\n');
+    }
+    if question.title.as_deref() != Some(question.prompt.as_str()) && !question.prompt.is_empty() {
+        let _ = writeln!(text, "\n{}", StyledText::from_ansi(&question.prompt).text);
+    }
+    for (index, option) in question.options.iter().enumerate() {
+        let marker = if option.recommended {
+            " (recommended)"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            text,
+            "  [{}] {}{marker}",
+            index + 1,
+            StyledText::from_ansi(&option.label).text
+        );
+        if let Some(description) = &option.description {
+            let _ = writeln!(text, "    {}", StyledText::from_ansi(description).text);
+        }
+    }
+    crate::render::layout_policy::LayoutPolicy::finish_block(&mut text);
+    text
+}
+
+fn fit_question_panel(panel: &str, width: usize, max_rows: usize) -> String {
+    let lines: Vec<_> = panel.lines().collect();
+    let selected = lines
+        .iter()
+        .position(|line| line.starts_with('>'))
+        .unwrap_or(0);
+    let start = if lines.len() > max_rows {
+        selected
+            .saturating_sub(max_rows / 2)
+            .min(lines.len().saturating_sub(max_rows))
+    } else {
+        0
+    };
+    lines
+        .iter()
+        .skip(start)
+        .take(max_rows)
+        .map(|line| {
+            if let Some(input) = line.strip_prefix("> [+] ") {
+                use unicode_segmentation::UnicodeSegmentation;
+                use unicode_width::UnicodeWidthStr;
+                let plain = StyledText::from_ansi(input).text;
+                if plain.ends_with('\u{2588}') && plain.width() > width.saturating_sub(6) {
+                    let mut start = plain.len();
+                    let mut columns = 0;
+                    for (offset, grapheme) in plain.grapheme_indices(true).rev() {
+                        columns += grapheme.width();
+                        if columns > width.saturating_sub(6) {
+                            break;
+                        }
+                        start = offset;
+                    }
+                    return crate::render::text_layout::truncate_to_width(
+                        &format!("> [+] {}", &plain[start..]),
+                        width,
+                    );
+                }
+            }
+            crate::render::text_layout::truncate_to_width(line, width)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn format_question_panel(
     question: &QuestionPromptView,
     selected_index: usize,
@@ -1595,6 +1674,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .close();
+                            let width = crate::render::query_terminal_width();
+                            let document = format_question_document(&question, width);
+                            write_iocraft_output(&stdout_for_future, &document, false);
                             let slot = if question.force_fuzzy_select
                                 || question.options.len() > DIALPAD_MAX_OPTIONS
                             {
@@ -1742,7 +1824,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // `iocraft_repl_keyboard_input_not_frozen`). Leaving idle ticks
             // untouched keeps key-event distribution alive between renders.
             let idx = frame.get();
-            let text = spinner_for_future.render_frame(idx);
+            let text = if matches!(
+                *input_slot.read(),
+                InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)
+            ) {
+                String::new()
+            } else {
+                spinner_for_future.render_frame(idx)
+            };
             if !text.is_empty() {
                 frame.set(idx.wrapping_add(1));
                 if turn_result.read().is_some() {
@@ -2345,10 +2434,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let st = spinner_text.read().clone();
     let val = input_value.read().clone();
     let current_input_slot = input_slot.read().clone();
+    let question_active = matches!(
+        current_input_slot,
+        InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)
+    );
     let submitted = *has_submitted.read();
 
     // StatusSlot: Spinner > TurnResult > Tips > Empty
-    let status_slot = if !st.is_empty() {
+    let status_slot = if question_active {
+        StatusSlot::Empty
+    } else if !st.is_empty() {
         // Reuse the existing status row and shared column layout. No additional
         // live rows can spill into scrollback as tool output grows.
         let text = tool_progress.read().as_ref().map_or(st, |text| {
@@ -2374,13 +2469,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         FooterSlot::Full
     };
 
-    // Both choice widgets share the same document presentation. Only the
-    // controls below it differ; neither picker interprets Markdown itself.
-    let question = match &current_input_slot {
-        InputSlot::DialPad(question) => Some(question),
-        InputSlot::FuzzySelect(state) => Some(&state.question),
-        InputSlot::Hint(_) | InputSlot::TextInput => None,
-    };
+    // Question documents are committed once; only the controls stay live.
     // InputSlot rendering
     let (panel_text, prompt_label) = match &current_input_slot {
         InputSlot::Hint(_) | InputSlot::TextInput => (None, crate::render::PROMPT_PREFIX),
@@ -2402,6 +2491,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let footer_text = browser.footer(&format_footer_text(&footer_slot, &perm), w);
+    let footer_text = if question_active {
+        crate::render::text_layout::truncate_to_width(&footer_text.replace('\n', " "), w)
+    } else {
+        footer_text
+    };
+    let panel_text = panel_text
+        .map(|panel| fit_question_panel(&panel, w, (term_height as usize).saturating_sub(5)));
     let task_panel = browser
         .is_panel()
         .then(|| browser.panel(w, term_height as usize));
@@ -2411,7 +2507,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Merge TodoSlot into the upper separator as a single
     // multi-line Text element so the element tree structure stays
     // identical (avoids iocraft hook-index shifts).
-    let todo_line = if task_panel.is_some() {
+    let todo_line = if task_panel.is_some() || question_active {
         String::new()
     } else {
         todo_items
@@ -2428,7 +2524,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // todo panel. A pure overlay: it never commits to scrollback (the render
     // engine commits finished tool cards; the coordinator echoes flushed
     // messages).
-    let pending_text = if task_panel.is_some() {
+    let pending_text = if task_panel.is_some() || question_active {
         String::new()
     } else {
         pending
@@ -2466,12 +2562,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             })
             Text(content: sep.clone(), color: Color::DarkGrey)
             // InputSlot
-            #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
-                AnsiText(content: format!("[{title}]"), color: Color::Cyan)
-            }))
-            #(question.and_then(|question| question.description.as_ref()).map(|description| element! {
-                PromptTextView(content: Some(description.clone()), width: w)
-            }))
             #(if let Some(panel) = task_panel.clone() {
                 Some(element! { AnsiText(content: panel) })
             } else {
@@ -2498,6 +2588,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     InputSlot::FuzzySelect(fs) if !fs.filter.is_empty() => fs.filter.clone(),
                     _ => String::new(),
                 };
+                let filter_display = crate::render::text_layout::truncate_to_width(
+                    &filter_display.replace('\n', " "), w.saturating_sub(3),
+                );
                 element! {
                     View(flex_direction: FlexDirection::Row) {
                         Text(content: prompt_label)
@@ -2818,6 +2911,50 @@ mod tests {
             enter_key_event_for_value(Some(&question), 1, ""),
             Some(InputEvent::QuestionAnswer("2".to_string()))
         );
+    }
+
+    #[test]
+    fn question_document_is_separate_from_live_controls() {
+        let mut question = question_with_options();
+        question.description = Some(runtime::PromptText::Markdown(
+            "## Review\n\n**Verify**".into(),
+        ));
+        let document = strip_ansi(&format_question_document(&question, 80));
+        assert!(document.starts_with("[Setup]\n"));
+        assert!(document.contains("Review"));
+        assert!(document.contains("Verify"));
+        assert!(!document.contains("**Verify**"));
+        assert!(document.contains("[1] Project (recommended)"));
+        assert!(document.contains("Pick one"));
+        let panel = format_question_panel(&question, 0, "");
+        assert!(!panel.contains("Review"));
+        assert!(!panel.contains("Verify"));
+    }
+
+    #[test]
+    fn question_panel_fits_short_narrow_terminals_and_keeps_selection_visible() {
+        use unicode_width::UnicodeWidthStr;
+        let mut question = question_with_options();
+        question.allow_custom_input = true;
+        question.options[1].description = Some("Long description ".repeat(30));
+        for selected in 0..=question.options.len() {
+            let panel = format_question_panel(&question, selected, &"反馈".repeat(80));
+            for rows in [1, 2, 4, 19] {
+                let fitted = fit_question_panel(&panel, 20, rows);
+                assert!(fitted.lines().count() <= rows);
+                assert!(fitted.lines().any(|line| line.starts_with('>')), "{fitted}");
+                for line in fitted.lines() {
+                    assert!(strip_ansi(line).width() <= 20, "{line}");
+                }
+            }
+        }
+        let panel = format_question_panel(
+            &question,
+            question.options.len(),
+            &format!("{}end", "反馈".repeat(80)),
+        );
+        assert!(fit_question_panel(&panel, 20, 4).contains("end\u{2588}"));
+        assert_eq!(fit_question_panel("a\nb", 20, 0), "");
     }
 
     #[test]

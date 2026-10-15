@@ -2,6 +2,7 @@
 //! prompt. Both REPLs use the same engine transition and presentation rules.
 mod common;
 
+use std::cell::RefCell;
 use std::time::Duration;
 
 use common::{TestEnv, LIVE_TURN_BUDGET};
@@ -103,51 +104,103 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession, queue: bool) {
     );
 }
 
-fn assert_style(sess: &PtySession, needle: &str, bold: bool, colored: bool) {
-    sess.render(|screen| {
-        let raw = screen.raw();
-        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
-        let row = rows
-            .iter()
-            .rposition(|row| row.contains(needle))
-            .unwrap_or_else(|| panic!("missing {needle:?}: {}", raw.contents()));
-        let byte = rows[row].find(needle).unwrap();
-        let col = rows[row][..byte].width();
-        let cell = raw
-            .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
-            .unwrap();
-        assert_eq!(cell.bold(), bold, "{needle}: {}", raw.contents());
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GlyphStyle {
+    row: u16,
+    col: u16,
+    bold: bool,
+    foreground: String,
+}
+
+struct StyledSnapshot {
+    contents: String,
+    samples: Vec<Option<GlyphStyle>>,
+}
+
+fn assert_styles(sess: &PtySession, expected: &[(&str, bool, bool)]) -> String {
+    let previous = RefCell::new(None);
+    let captured = RefCell::new(None);
+    // ConPTY can deliver a repaint in several chunks. Observe all sampled
+    // glyphs in one frame, with stable positions and styles. The spinner may
+    // keep animating outside this document, so the whole screen need not stop.
+    common::expect_screen(
+        sess,
+        |text| {
+            let snapshot = sess.render(|screen| {
+                let raw = screen.raw();
+                let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+                let samples = expected
+                    .iter()
+                    .map(|(needle, _, _)| {
+                        let row = rows.iter().rposition(|row| row.contains(needle))?;
+                        let byte = rows[row].find(needle)?;
+                        let col = rows[row][..byte].width();
+                        let row = row.try_into().ok()?;
+                        let col = col.try_into().ok()?;
+                        let cell = raw.cell(row, col)?;
+                        Some(GlyphStyle {
+                            row,
+                            col,
+                            bold: cell.bold(),
+                            foreground: format!("{:?}", cell.fgcolor()),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                StyledSnapshot {
+                    contents: raw.contents(),
+                    samples,
+                }
+            });
+            let is_complete =
+                snapshot.contents == text && snapshot.samples.iter().all(Option::is_some);
+            let are_styles_stable = previous.borrow().as_ref() == Some(&snapshot.samples);
+            previous.replace(Some(snapshot.samples.clone()));
+            captured.replace(Some(snapshot));
+            is_complete && are_styles_stable
+        },
+        common::DEFAULT_TIMEOUT,
+        "complete and settled plan text and styles",
+    );
+    let snapshot = captured.into_inner().unwrap();
+    // Assert after releasing the PTY reader's mutex. An assertion failure
+    // must not poison that mutex and obscure the original diagnostic.
+    for ((needle, bold, colored), sample) in expected.iter().zip(&snapshot.samples) {
+        let actual = sample.as_ref().unwrap();
+        assert_eq!(actual.bold, *bold, "{needle}: {}", snapshot.contents);
         assert_eq!(
-            format!("{:?}", cell.fgcolor()) != "Default",
-            colored,
+            actual.foreground != "Default",
+            *colored,
             "{needle}: {}",
-            raw.contents()
+            snapshot.contents
         );
-    });
+    }
+    snapshot.contents
 }
 
 fn assert_document(sess: &PtySession, no_color: bool) {
-    assert_style(sess, "Review plan", !no_color, false);
-    assert_style(sess, "Verify bold", !no_color, false);
-    assert_style(sess, "src/main.rs", false, !no_color);
-    assert_style(sess, "Context", !no_color, false);
-    sess.render(|screen| {
-        let text = screen.raw().contents();
-        let start = text
-            .rfind("[Choose an action]")
-            .or_else(|| text.rfind("Choose an action\n"));
-        if let Some(start) = start {
-            let document = &text[start..];
-            assert!(
-                !document.contains("**Verify bold**"),
-                "emphasis must be rendered: {document}"
-            );
-            assert!(
-                !document.contains("```rust"),
-                "fences must be rendered: {document}"
-            );
-        }
-    });
+    let text = assert_styles(
+        sess,
+        &[
+            ("Review plan", !no_color, false),
+            ("Verify bold", !no_color, false),
+            ("src/main.rs", false, !no_color),
+            ("Context", !no_color, false),
+        ],
+    );
+    let start = text
+        .rfind("[Choose an action]")
+        .or_else(|| text.rfind("Choose an action\n"));
+    if let Some(start) = start {
+        let document = &text[start..];
+        assert!(
+            !document.contains("**Verify bold**"),
+            "emphasis must be rendered: {document}"
+        );
+        assert!(
+            !document.contains("```rust"),
+            "fences must be rendered: {document}"
+        );
+    }
 }
 
 fn choose(sess: &mut PtySession, queue: bool, choice: &str) {
@@ -429,8 +482,10 @@ fn fuzzy_questions_share_markdown_and_remain_responsive() {
         LIVE_TURN_BUDGET,
         "Markdown fuzzy question",
     );
-    assert_style(&sess, "Verify bold", true, false);
-    assert_style(&sess, "src/main.rs", false, true);
+    assert_styles(
+        &sess,
+        &[("Verify bold", true, false), ("src/main.rs", false, true)],
+    );
     sess.send("Option 12").unwrap();
     common::expect_screen(
         &sess,

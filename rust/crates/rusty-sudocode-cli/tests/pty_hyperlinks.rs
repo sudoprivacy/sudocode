@@ -61,9 +61,18 @@ fn terminal_links_survive_wrapping_without_color() {
             ("STY", ""),
         ],
     );
-    session
-        .expect(r"\x1b\]8;;https://github\.com/sudoprivacy/sudocode/pull/891")
-        .unwrap();
+    let wire = session.expect("PlainAfter").unwrap();
+    // ConPTY may assign an OSC 8 id while translating console cells. The
+    // destination must survive; transport-owned parameters need not be empty.
+    assert!(
+        wire.split("\x1b]8;").skip(1).any(|sequence| {
+            sequence.split_once(';').is_some_and(|(_, target)| {
+                target.split(['\x1b', '\x07']).next()
+                    == Some("https://github.com/sudoprivacy/sudocode/pull/891")
+            })
+        }),
+        "missing native link in PTY output: {wire:?}"
+    );
     common::expect_screen(
         &session,
         |s| s.contains("LinkBodyEND.") && s.contains('❯'),

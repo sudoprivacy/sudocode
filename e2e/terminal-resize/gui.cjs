@@ -17,7 +17,7 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function run(config) {
   fs.mkdirSync(config.logRoot, { recursive: true });
-  const report = { version: 1, status: 'running', metrics: {}, samples: {}, resources: [],
+  const report = { version: 1, status: 'running', metrics: {}, samples: {}, resources: [], clicks: [],
     measurement: 'Browser input dispatch to completed PNG capture after xterm render and two animation frames; includes automation/readback, excludes physical display scanout.',
     resource_scope: 'scode process separately; summed RSS and CPU of dedicated Chromium process tree (shared RSS may be counted more than once); observer Node process excluded.' };
   const routes = {
@@ -93,6 +93,9 @@ async function run(config) {
       progress(`click:${label}`);
       const position = await reveal(label, last);
       const location = await point(position, 'start');
+      report.clicks.push({ label, target, position, location, ...await page.evaluate(() => ({
+        cols: fixture.terminal.cols, viewportY: fixture.terminal.buffer.active.viewportY, frames: fixture.frames,
+      })) });
       await page.mouse.move(0, 0);
       const before = await page.evaluate(() => { fixture.hovered.length = 0; return fixture.activated.length; });
       await page.mouse.move(location.x + 2, location.y);
@@ -203,11 +206,21 @@ async function run(config) {
     await clickLink('then choose.', null, true);
     fs.writeFileSync(path.join(config.logRoot, 'question.png'), await painted());
     await page.keyboard.press('Escape');
-    await wait(() => !fixture.viewport().includes('[1] Continue') && fixture.viewport().split('\n').some(row => row.trimEnd() === '❯'));
+    await wait(() => fixture.viewport().includes('⏹ Cancelled') && !fixture.viewport().includes('[1] Continue')
+      && fixture.viewport().split('\n').some(row => row.trimEnd() === '❯'));
     // Resize and repaint while keeping link hit testing and native selection.
     for (const cols of [48, 110, 80]) {
-      await page.evaluate(cols => fixture.resize(cols, 38), cols);
-      await sleep(150); await painted();
+      const before = await page.evaluate(cols => {
+        const before = fixture.frames;
+        fixture.resize(cols, 38);
+        return before;
+      }, cols);
+      // Terminal reflow precedes the app's resize repaint. Match the shared
+      // headless host's frame/width/quiet contract before resolving hit positions.
+      await page.waitForFunction(({ cols, before }) => fixture.frames > before
+        && fixture.viewport().split('\n').some(row => row === '─'.repeat(cols))
+        && !fixture.pending && performance.now() - fixture.lastData >= 300, { cols, before });
+      await painted();
       await clickLink('PR #891', 'https://github.com/sudoprivacy/sudocode/pull/891', true);
     }
     await page.evaluate(() => { fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });

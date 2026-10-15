@@ -24,13 +24,21 @@
   terminal.open(document.getElementById('terminal'));
   terminal.focus();
   const socket = new WebSocket(`ws://${location.host}`);
-  let parsed = 0, rendered = 0;
+  let parsed = 0, rendered = 0, frames = 0, pending = 0, lastData = performance.now();
+  terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, params => {
+    if (params.includes(2026)) frames++;
+    return false;
+  });
   terminal.onRender(() => rendered++);
-  socket.onmessage = event => terminal.write(event.data, () => parsed++);
+  socket.onmessage = event => {
+    pending++; lastData = performance.now();
+    terminal.write(event.data, () => { parsed++; pending--; });
+  };
   terminal.onData(data => socket.send(JSON.stringify({ data })));
   window.fixture = {
     terminal, activated, hovered, activationEvents,
     get parsed() { return parsed; }, get rendered() { return rendered; },
+    get frames() { return frames; }, get pending() { return pending; }, get lastData() { return lastData; },
     lines() {
       const buffer = terminal.buffer.active;
       return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i).translateToString(true));

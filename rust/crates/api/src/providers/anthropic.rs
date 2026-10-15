@@ -473,12 +473,12 @@ impl AnthropicClient {
                 .with_property("total_tokens", Value::from(response.total_tokens()))
                 .with_property(
                     "estimated_cost_usd",
-                    Value::String(format_usd(
-                        response
-                            .usage
-                            .estimated_cost_usd(&response.model)
-                            .total_cost_usd(),
-                    )),
+                    response
+                        .usage
+                        .estimated_cost_usd(&response.model)
+                        .map_or(Value::Null, |cost| {
+                            Value::String(format_usd(cost.total_cost_usd()))
+                        }),
                 ),
         );
         refusal.map_or(Ok(response), Err)
@@ -1305,7 +1305,7 @@ impl MessageStream {
                 .client_request_id
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            tracer.record_usage_with_cost(
+            tracer.record_usage_with_total(
                 request_id,
                 usage.input_tokens,
                 usage.output_tokens,
@@ -1313,6 +1313,7 @@ impl MessageStream {
                 usage.cache_read_input_tokens,
                 usage.cost_units,
                 usage.cost_currency.as_deref(),
+                usage.reported_total_tokens,
             );
         }
         self.usage_recorded = true;

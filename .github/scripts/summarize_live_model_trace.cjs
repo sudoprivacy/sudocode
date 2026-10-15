@@ -37,6 +37,7 @@ for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
         inputTokens: data.input_tokens, outputTokens: data.output_tokens,
         cacheReadTokens: data.cache_read_input_tokens,
         cacheWriteTokens: data.cache_creation_input_tokens,
+        reportedTotalTokens: data.reported_total_tokens,
       });
     } else if (event.event === 'stream_error') {
       streamErrors.set(data.request_id, {

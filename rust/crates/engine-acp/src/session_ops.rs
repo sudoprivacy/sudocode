@@ -989,6 +989,7 @@ pub(crate) fn build_prompt_usage(
         input_tokens: u64::from(per_turn.input_tokens),
         output_tokens: u64::from(per_turn.output_tokens),
         total_tokens: u64::from(per_turn.total_tokens()),
+        token_breakdown_complete: (!per_turn.has_complete_token_breakdown()).then_some(false),
         cache_read_tokens: Some(u64::from(per_turn.cache_read_input_tokens)),
         cache_write_tokens: Some(u64::from(per_turn.cache_creation_input_tokens)),
         context_window_tokens: Some(context_window),
@@ -1014,7 +1015,7 @@ pub(crate) fn record_turn_usage(engine: &SessionEngine, complete: &TurnComplete)
         return;
     };
     let turn = complete.turn_usage;
-    tracer.record_usage_with_cost(
+    tracer.record_usage_with_total(
         "prompt_turn".to_string(),
         turn.input_tokens,
         turn.output_tokens,
@@ -1022,9 +1023,10 @@ pub(crate) fn record_turn_usage(engine: &SessionEngine, complete: &TurnComplete)
         turn.cache_read_input_tokens,
         turn.cost_units,
         turn.cost_currency.map(runtime::UsageCostCurrency::as_str),
+        turn.reported_total_tokens,
     );
     let cumulative = complete.session_usage;
-    tracer.record_usage_with_cost(
+    tracer.record_usage_with_total(
         "session_summary".to_string(),
         cumulative.input_tokens,
         cumulative.output_tokens,
@@ -1034,5 +1036,6 @@ pub(crate) fn record_turn_usage(engine: &SessionEngine, complete: &TurnComplete)
         cumulative
             .cost_currency
             .map(runtime::UsageCostCurrency::as_str),
+        cumulative.reported_total_tokens,
     );
 }

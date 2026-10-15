@@ -256,6 +256,18 @@ merges those cumulative snapshots before recording the assistant message and
 returning ACP usage. Counts are never inferred from answer length. The same
 merge rule serves collected responses and the terminal renderer.
 
+A provider may report a nonzero aggregate without allocating it to input or
+output tokens. The normalized usage retains this as `reported_total_tokens`,
+through saved sessions, resumed sessions and cumulative accounting. Totals use
+the larger of the reported aggregate and known allocated counts; allocations
+are never guessed. ACP adds `_meta.sudocode.tokenBreakdownComplete: false` when
+the allocation is incomplete; complete usage retains its existing wire shape. CLI JSON
+exposes `token_breakdown_complete` alongside `total_tokens`. With an incomplete
+breakdown, context occupancy falls back to the history estimate, and estimated
+cost is unavailable (JSON `null`); an independently reported actual bill remains
+usable. [OpenAI prompt counts include cached tokens](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events), so normalization removes
+the cache breakdown from the uncached input count before aggregation.
+
 OpenAI-compatible streams finish at `[DONE]` (Chat Completions) or a terminal
 `response.*` event (Responses). A completed SSE message does not wait for the
 HTTP connection to close; usage frames before its terminal event are retained.

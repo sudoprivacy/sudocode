@@ -2235,7 +2235,7 @@ fn cost_for(usage: &TokenUsage, model: &str) -> Option<String> {
         let pricing = runtime::pricing_for_model(model)
             .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier);
         let est = usage
-            .estimate_cost_usd_with_pricing(pricing)
+            .estimate_cost_usd_with_pricing(pricing)?
             .total_cost_usd();
         (est > 0.0).then(|| format!("~{}", format_usd_compact(est)))
     }

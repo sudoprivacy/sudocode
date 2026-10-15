@@ -103,6 +103,7 @@ fn multiple_events_in_sequence() {
         output_tokens: 200,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 100,
+        reported_total_tokens: None,
         cost_units: Some(43_700),
         cost_currency: Some("sudo_point".to_string()),
     });

@@ -38,6 +38,8 @@ impl ModelPricing {
 /// Token counters accumulated for a conversation turn or session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
+    /// Provider-reported aggregate; a missing breakdown is not zero usage.
+    pub reported_total_tokens: Option<u32>,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub cache_creation_input_tokens: u32,
@@ -178,6 +180,9 @@ impl TokenUsage {
 
     /// Aggregates another TokenUsage's token counters into this one using saturating_add.
     pub fn add_assign_token_counts(&mut self, other: Self) {
+        let reported_total = (self.reported_total_tokens.is_some()
+            || other.reported_total_tokens.is_some())
+        .then(|| self.total_tokens().saturating_add(other.total_tokens()));
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
         self.cache_creation_input_tokens = self
@@ -186,14 +191,45 @@ impl TokenUsage {
         self.cache_read_input_tokens = self
             .cache_read_input_tokens
             .saturating_add(other.cache_read_input_tokens);
+        self.reported_total_tokens = reported_total;
     }
 
     #[must_use]
     pub fn total_tokens(self) -> u32 {
+        self.reported_total_tokens
+            .unwrap_or(0)
+            .max(self.known_total_tokens())
+    }
+
+    /// Sum only counters whose allocation the provider actually reported.
+    #[must_use]
+    pub fn known_total_tokens(self) -> u32 {
         self.input_tokens
-            + self.output_tokens
-            + self.cache_creation_input_tokens
-            + self.cache_read_input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
+
+    #[must_use]
+    pub fn has_complete_token_breakdown(self) -> bool {
+        self.reported_total_tokens
+            .is_none_or(|total| total == self.known_total_tokens())
+    }
+
+    /// Shared machine-readable usage for CLI output formats.
+    #[must_use]
+    pub fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "total_tokens": self.total_tokens(),
+            "reported_total_tokens": self.reported_total_tokens,
+            "token_breakdown_complete": self.has_complete_token_breakdown(),
+            "cost_units": self.cost_units,
+            "cost_currency": self.cost_currency.map(UsageCostCurrency::as_str),
+        })
     }
 
     /// Size of the prompt the provider actually processed for this response:
@@ -204,14 +240,16 @@ impl TokenUsage {
     /// `input_tokens` alone is only the cache miss and drops to a few hundred
     /// tokens per turn on caching providers.
     #[must_use]
-    pub fn context_tokens(self) -> u32 {
-        self.input_tokens
-            .saturating_add(self.cache_creation_input_tokens)
-            .saturating_add(self.cache_read_input_tokens)
+    pub fn context_tokens(self) -> Option<u32> {
+        self.has_complete_token_breakdown().then(|| {
+            self.input_tokens
+                .saturating_add(self.cache_creation_input_tokens)
+                .saturating_add(self.cache_read_input_tokens)
+        })
     }
 
     #[must_use]
-    pub fn estimate_cost_usd(self) -> UsageCostEstimate {
+    pub fn estimate_cost_usd(self) -> Option<UsageCostEstimate> {
         self.estimate_cost_usd_with_pricing(ModelPricing::default_sonnet_tier())
     }
 
@@ -233,8 +271,14 @@ impl TokenUsage {
     }
 
     #[must_use]
-    pub fn estimate_cost_usd_with_pricing(self, pricing: ModelPricing) -> UsageCostEstimate {
-        UsageCostEstimate {
+    pub fn estimate_cost_usd_with_pricing(
+        self,
+        pricing: ModelPricing,
+    ) -> Option<UsageCostEstimate> {
+        if !self.has_complete_token_breakdown() {
+            return None;
+        }
+        Some(UsageCostEstimate {
             input_cost_usd: cost_for_tokens(self.input_tokens, pricing.input_cost_per_million),
             output_cost_usd: cost_for_tokens(self.output_tokens, pricing.output_cost_per_million),
             cache_creation_cost_usd: cost_for_tokens(
@@ -245,7 +289,7 @@ impl TokenUsage {
                 self.cache_read_input_tokens,
                 pricing.cache_read_cost_per_million,
             ),
-        }
+        })
     }
 
     #[must_use]
@@ -256,9 +300,8 @@ impl TokenUsage {
     #[must_use]
     pub fn summary_lines_for_model(self, label: &str, model: Option<&str>) -> Vec<String> {
         let pricing = model.and_then(pricing_for_model);
-        let cost = pricing.map_or_else(
-            || self.estimate_cost_usd(),
-            |pricing| self.estimate_cost_usd_with_pricing(pricing),
+        let cost = self.estimate_cost_usd_with_pricing(
+            pricing.unwrap_or_else(ModelPricing::default_sonnet_tier),
         );
         let model_suffix =
             model.map_or_else(String::new, |model_name| format!(" model={model_name}"));
@@ -277,17 +320,17 @@ impl TokenUsage {
                 self.output_tokens,
                 self.cache_creation_input_tokens,
                 self.cache_read_input_tokens,
-                format_usd(cost.total_cost_usd()),
+                cost.map_or_else(|| "unavailable".into(), |cost| format_usd(cost.total_cost_usd())),
                 model_suffix,
                 pricing_suffix,
             ),
-            format!(
+            cost.map_or_else(|| "  cost breakdown: unavailable (provider omitted token allocation)".into(), |cost| format!(
                 "  cost breakdown: input={} output={} cache_write={} cache_read={}",
                 format_usd(cost.input_cost_usd),
                 format_usd(cost.output_cost_usd),
                 format_usd(cost.cache_creation_cost_usd),
                 format_usd(cost.cache_read_cost_usd),
-            ),
+            )),
         ]
     }
 }
@@ -411,7 +454,7 @@ impl UsageTracker {
         self.current_turn_cost.push(usage);
         self.current_turn_cost
             .apply_to(&mut self.current_turn_total);
-        self.context_tokens = Some(usage.context_tokens());
+        self.context_tokens = usage.context_tokens();
         self.cumulative.add_assign_token_counts(usage);
         self.cumulative_cost.push(usage);
         self.cumulative_cost.apply_to(&mut self.cumulative);
@@ -563,6 +606,7 @@ mod tests {
     fn tracks_true_cumulative_usage() {
         let mut tracker = UsageTracker::new();
         tracker.record(TokenUsage {
+            reported_total_tokens: None,
             input_tokens: 10,
             output_tokens: 4,
             cache_creation_input_tokens: 2,
@@ -571,6 +615,7 @@ mod tests {
             cost_currency: Some(UsageCostCurrency::SudoPoint),
         });
         tracker.record(TokenUsage {
+            reported_total_tokens: None,
             input_tokens: 20,
             output_tokens: 6,
             cache_creation_input_tokens: 3,
@@ -652,6 +697,7 @@ mod tests {
     fn tracker_omits_cumulative_cost_after_missing_cost() {
         let mut tracker = UsageTracker::new();
         tracker.record(TokenUsage {
+            reported_total_tokens: None,
             input_tokens: 10,
             output_tokens: 4,
             cache_creation_input_tokens: 2,
@@ -676,6 +722,7 @@ mod tests {
     fn tracker_preserves_zero_cost() {
         let mut tracker = UsageTracker::new();
         tracker.record(TokenUsage {
+            reported_total_tokens: None,
             input_tokens: 10,
             output_tokens: 4,
             cache_creation_input_tokens: 0,
@@ -711,7 +758,7 @@ mod tests {
             ..TokenUsage::default()
         };
 
-        let cost = usage.estimate_cost_usd();
+        let cost = usage.estimate_cost_usd().expect("complete allocation");
         assert_eq!(format_usd(cost.input_cost_usd), "$15.0000");
         assert_eq!(format_usd(cost.output_cost_usd), "$37.5000");
         let lines = usage.summary_lines_for_model("usage", Some("claude-sonnet-4-20250514"));
@@ -732,8 +779,12 @@ mod tests {
 
         let haiku = pricing_for_model("claude-haiku-4-5-20251001").expect("haiku pricing");
         let opus = pricing_for_model("claude-opus-4-6").expect("opus pricing");
-        let haiku_cost = usage.estimate_cost_usd_with_pricing(haiku);
-        let opus_cost = usage.estimate_cost_usd_with_pricing(opus);
+        let haiku_cost = usage
+            .estimate_cost_usd_with_pricing(haiku)
+            .expect("complete allocation");
+        let opus_cost = usage
+            .estimate_cost_usd_with_pricing(opus)
+            .expect("complete allocation");
         assert_eq!(format_usd(haiku_cost.total_cost_usd()), "$3.5000");
         assert_eq!(format_usd(opus_cost.total_cost_usd()), "$52.5000");
     }
@@ -760,6 +811,7 @@ mod tests {
                 text: "done".to_string(),
             }],
             usage: Some(TokenUsage {
+                reported_total_tokens: None,
                 input_tokens: 5,
                 output_tokens: 2,
                 cache_creation_input_tokens: 1,
@@ -784,6 +836,7 @@ mod tests {
             removed_message_count: 2,
             summary: "summarized earlier work".to_string(),
             usage: Some(TokenUsage {
+                reported_total_tokens: None,
                 input_tokens: 10,
                 output_tokens: 4,
                 cache_creation_input_tokens: 1,
@@ -799,6 +852,7 @@ mod tests {
                 text: "done".to_string(),
             }],
             usage: Some(TokenUsage {
+                reported_total_tokens: None,
                 input_tokens: 5,
                 output_tokens: 2,
                 cache_creation_input_tokens: 1,

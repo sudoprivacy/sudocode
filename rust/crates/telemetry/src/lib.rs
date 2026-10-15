@@ -269,6 +269,8 @@ pub enum TelemetryEvent {
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        reported_total_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_units: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_currency: Option<String>,
@@ -685,6 +687,7 @@ fn extract_event_info(event: &TelemetryEvent) -> (String, String, Map<String, Va
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
+            reported_total_tokens,
             cost_units,
             cost_currency,
         } => {
@@ -701,6 +704,9 @@ fn extract_event_info(event: &TelemetryEvent) -> (String, String, Map<String, Va
                 "cache_read_input_tokens".to_string(),
                 Value::from(*cache_read_input_tokens),
             );
+            if let Some(total) = reported_total_tokens {
+                attrs.insert("reported_total_tokens".to_string(), Value::from(*total));
+            }
             if let Some(cost_units) = cost_units {
                 attrs.insert("cost_units".to_string(), Value::from(*cost_units));
             }
@@ -958,6 +964,30 @@ impl SessionTracer {
         cost_units: Option<u64>,
         cost_currency: Option<&str>,
     ) {
+        self.record_usage_with_total(
+            request_id,
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+            cost_units,
+            cost_currency,
+            None,
+        );
+    }
+
+    /// Preserve a provider aggregate even when its token allocation is unavailable.
+    pub fn record_usage_with_total(
+        &self,
+        request_id: impl Into<String>,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_creation_input_tokens: u32,
+        cache_read_input_tokens: u32,
+        cost_units: Option<u64>,
+        cost_currency: Option<&str>,
+        reported_total_tokens: Option<u32>,
+    ) {
         self.sink.record(TelemetryEvent::HttpResponseUsage {
             session_id: self.session_id.clone(),
             request_id: request_id.into(),
@@ -966,6 +996,7 @@ impl SessionTracer {
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
+            reported_total_tokens,
             cost_units,
             cost_currency: cost_currency.map(ToOwned::to_owned),
         });
@@ -1212,6 +1243,7 @@ mod tests {
             output_tokens: 200,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 100,
+            reported_total_tokens: None,
             cost_units: Some(43_700),
             cost_currency: Some("sudo_point".to_string()),
         };

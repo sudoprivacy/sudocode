@@ -270,7 +270,7 @@ impl OpenAiCompatClient {
         }
         if has_usage {
             if let Some(tracer) = self.session_tracer() {
-                tracer.record_usage_with_cost(
+                tracer.record_usage_with_total(
                     normalized
                         .request_id
                         .clone()
@@ -281,6 +281,7 @@ impl OpenAiCompatClient {
                     normalized.usage.cache_read_input_tokens,
                     normalized.usage.cost_units,
                     normalized.usage.cost_currency.as_deref(),
+                    normalized.usage.reported_total_tokens,
                 );
             }
         }
@@ -568,7 +569,7 @@ impl MessageStream {
         let Some(tracer) = &self.session_tracer else {
             return;
         };
-        tracer.record_usage_with_cost(
+        tracer.record_usage_with_total(
             self.request_id
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string()),
@@ -578,6 +579,7 @@ impl MessageStream {
             usage.cache_read_input_tokens,
             usage.cost_units,
             usage.cost_currency.as_deref(),
+            usage.reported_total_tokens,
         );
     }
 }
@@ -980,14 +982,7 @@ impl ChatStreamState {
                     ),
                     stop_sequence: None,
                 },
-                usage: self.usage.clone().unwrap_or(Usage {
-                    input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                    output_tokens: 0,
-                    cost_units: None,
-                    cost_currency: None,
-                }),
+                usage: self.usage.clone().unwrap_or(Usage::default()),
             }));
             events.push(StreamEvent::MessageStop(MessageStopEvent {}));
         }
@@ -1055,14 +1050,7 @@ impl ChatStreamState {
                     .unwrap_or_else(|| self.model.clone()),
                 stop_reason: None,
                 stop_sequence: None,
-                usage: Usage {
-                    input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                    output_tokens: 0,
-                    cost_units: None,
-                    cost_currency: None,
-                },
+                usage: Usage::default(),
                 request_id: None,
                 gateway_request_id: None,
             },
@@ -1434,15 +1422,11 @@ impl ResponsesStreamState {
             "response.completed" | "response.incomplete" | "response.failed" => {
                 let resp = json.get("response").unwrap_or(&json);
                 if let Some(u) = resp.get("usage") {
-                    self.usage = Some(Usage {
-                        input_tokens: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
-                            as u32,
-                        output_tokens: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0)
-                            as u32,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        ..Usage::default()
-                    });
+                    let usage: OpenAiUsage =
+                        serde_json::from_value(u.clone()).map_err(|error| {
+                            ApiError::json_deserialize("OpenAI", &self.model, &u.to_string(), error)
+                        })?;
+                    self.usage = Some(usage.to_api_usage());
                 }
                 runtime::compaction_scope::record_completed_response()
                     .map_err(|error| ApiError::Configuration(error.to_string()))?;
@@ -1645,6 +1629,14 @@ struct ResponseToolFunction {
 #[derive(Debug, Default, Deserialize)]
 struct OpenAiUsage {
     #[serde(default)]
+    total_tokens: Option<u32>,
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
+    #[serde(default, deserialize_with = "null_to_default")]
+    input_tokens_details: PromptTokensDetails,
+    #[serde(default)]
     prompt_tokens: u32,
     #[serde(default)]
     completion_tokens: u32,
@@ -1680,11 +1672,21 @@ impl OpenAiUsage {
     }
 
     fn to_api_usage(&self) -> Usage {
+        let input = self.prompt_tokens.max(self.input_tokens);
+        let cached = self
+            .prompt_tokens_details
+            .cached_tokens
+            .max(self.input_tokens_details.cached_tokens);
+        let written = self
+            .prompt_tokens_details
+            .cache_write_tokens
+            .max(self.input_tokens_details.cache_write_tokens);
         Usage {
-            input_tokens: self.prompt_tokens,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: self.prompt_tokens_details.cached_tokens,
-            output_tokens: self.completion_tokens,
+            reported_total_tokens: self.total_tokens.filter(|total| *total > 0),
+            input_tokens: input.saturating_sub(cached).saturating_sub(written),
+            cache_creation_input_tokens: written,
+            cache_read_input_tokens: cached,
+            output_tokens: self.completion_tokens.max(self.output_tokens),
             cost_units: self.effective_cost_units(),
             cost_currency: self.effective_cost_currency(),
         }
@@ -1693,6 +1695,8 @@ impl OpenAiUsage {
 
 #[derive(Debug, Default, Deserialize)]
 struct PromptTokensDetails {
+    #[serde(default)]
+    cache_write_tokens: u32,
     #[serde(default)]
     cached_tokens: u32,
 }
@@ -2557,17 +2561,10 @@ fn normalize_response(
             .finish_reason
             .map(|value| normalize_finish_reason(&value)),
         stop_sequence: None,
-        usage: response.usage.as_ref().map_or(
-            Usage {
-                input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 0,
-                cost_units: None,
-                cost_currency: None,
-            },
-            OpenAiUsage::to_api_usage,
-        ),
+        usage: response
+            .usage
+            .as_ref()
+            .map_or(Usage::default(), OpenAiUsage::to_api_usage),
         request_id: None,
         gateway_request_id: None,
     })
@@ -3016,16 +3013,20 @@ mod tests {
             usage: Some(super::OpenAiUsage {
                 prompt_tokens: 10,
                 completion_tokens: 4,
-                prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+                prompt_tokens_details: super::PromptTokensDetails {
+                    cached_tokens: 3,
+                    ..Default::default()
+                },
                 cost_units: None,
                 cost_currency: None,
                 quota: Some(698),
+                ..Default::default()
             }),
         };
 
         let normalized = normalize_response("sudorouter-model", response).expect("normalized");
 
-        assert_eq!(normalized.usage.input_tokens, 10);
+        assert_eq!(normalized.usage.input_tokens, 7);
         assert_eq!(normalized.usage.output_tokens, 4);
         assert_eq!(normalized.usage.cache_read_input_tokens, 3);
         assert_eq!(normalized.usage.cost_units, Some(698));
@@ -3040,10 +3041,14 @@ mod tests {
         let usage = super::OpenAiUsage {
             prompt_tokens: 10,
             completion_tokens: 4,
-            prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+            prompt_tokens_details: super::PromptTokensDetails {
+                cached_tokens: 3,
+                ..Default::default()
+            },
             cost_units: Some(43_700),
             cost_currency: None,
             quota: Some(698),
+            ..Default::default()
         }
         .to_api_usage();
 
@@ -3071,10 +3076,14 @@ mod tests {
         let usage = super::OpenAiUsage {
             prompt_tokens: 10,
             completion_tokens: 4,
-            prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+            prompt_tokens_details: super::PromptTokensDetails {
+                cached_tokens: 3,
+                ..Default::default()
+            },
             cost_units: None,
             cost_currency: Some("custom_point".to_string()),
             quota: Some(698),
+            ..Default::default()
         }
         .to_api_usage();
 
@@ -3109,10 +3118,14 @@ mod tests {
                 usage: Some(super::OpenAiUsage {
                     prompt_tokens: 10,
                     completion_tokens: 4,
-                    prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+                    prompt_tokens_details: super::PromptTokensDetails {
+                        cached_tokens: 3,
+                        ..Default::default()
+                    },
                     cost_units: None,
                     cost_currency: None,
                     quota: Some(698),
+                    ..Default::default()
                 }),
             })
             .expect("usage chunk");

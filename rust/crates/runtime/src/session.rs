@@ -2016,6 +2016,12 @@ fn message_record(message: &ConversationMessage) -> JsonValue {
 
 fn usage_to_json(usage: TokenUsage) -> JsonValue {
     let mut object = BTreeMap::new();
+    if let Some(total) = usage.reported_total_tokens {
+        object.insert(
+            "reported_total_tokens".into(),
+            JsonValue::Number(i64::from(total)),
+        );
+    }
     object.insert(
         "input_tokens".to_string(),
         JsonValue::Number(i64::from(usage.input_tokens)),
@@ -2049,6 +2055,11 @@ fn usage_from_json(value: &JsonValue) -> Result<TokenUsage, SessionError> {
         .as_object()
         .ok_or_else(|| SessionError::Format("usage must be an object".to_string()))?;
     Ok(TokenUsage {
+        reported_total_tokens: object
+            .get("reported_total_tokens")
+            .filter(|value| !matches!(value, JsonValue::Null))
+            .map(|_| required_u32(object, "reported_total_tokens"))
+            .transpose()?,
         input_tokens: required_u32(object, "input_tokens")?,
         output_tokens: required_u32(object, "output_tokens")?,
         cache_creation_input_tokens: required_u32(object, "cache_creation_input_tokens")?,
@@ -2535,6 +2546,7 @@ mod tests {
                     },
                 ],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 10,
                     output_tokens: 4,
                     cache_creation_input_tokens: 1,
@@ -2774,6 +2786,7 @@ mod tests {
             "summarized earlier work",
             4,
             Some(TokenUsage {
+                reported_total_tokens: None,
                 input_tokens: 10,
                 output_tokens: 4,
                 cache_creation_input_tokens: 1,

@@ -5081,14 +5081,13 @@ impl LiveCli {
                 "report": event.report,
             })
         });
-        let estimated_cost = format_usd(
-            tc.turn_usage
-                .estimate_cost_usd_with_pricing(
-                    pricing_for_model(&model)
-                        .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier),
-                )
-                .total_cost_usd(),
-        );
+        let estimated_cost = tc
+            .turn_usage
+            .estimate_cost_usd_with_pricing(
+                pricing_for_model(&model)
+                    .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier),
+            )
+            .map(|cost| format_usd(cost.total_cost_usd()));
         self.out_println(
             json!({
                 "message": outcome.final_text,
@@ -5099,12 +5098,7 @@ impl LiveCli {
                 "tool_uses": outcome.tool_uses,
                 "tool_results": outcome.tool_results,
                 "prompt_cache_events": outcome.prompt_cache_events,
-                "usage": {
-                    "input_tokens": tc.turn_usage.input_tokens,
-                    "output_tokens": tc.turn_usage.output_tokens,
-                    "cache_creation_input_tokens": tc.turn_usage.cache_creation_input_tokens,
-                    "cache_read_input_tokens": tc.turn_usage.cache_read_input_tokens,
-                },
+                "usage": tc.turn_usage.to_json(),
                 "estimated_cost": estimated_cost,
             })
             .to_string(),

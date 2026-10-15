@@ -273,6 +273,18 @@ terminal foreground, inline code and file links use the syntax theme's green,
 and web links are blue and underlined. Inline code omits literal backticks;
 fenced code has no extra frame or background. Amber remains the UI brand accent.
 
+Markdown web links use terminal-native OSC 8 hyperlinks. Supported terminals
+show the label (for example `[PR #891](https://github.com/sudoprivacy/sudocode/pull/891)`);
+unknown terminals and multiplexers also retain the destination. Pipes and dumb
+terminals keep readable text. `NO_COLOR` removes color and text styling while
+preserving supported links. Only bounded HTTP(S) destinations become hyperlinks;
+file references keep their existing path display. The terminal owns click gestures,
+selection and copying: ordinary selection copies visible text, not the hidden URL.
+
+Links share the structured text and layout implementation across scrollback,
+resumed history and interactive Markdown prompts. They do not add model tools,
+network lookups, system-prompt instructions or mouse capture.
+
 Plan approval and model question descriptions use the same Markdown renderer
 as assistant answers and transcript replay. Both choice widgets and the legacy
 REPL preserve headings, lists, code, tables, and links. Plain configuration and

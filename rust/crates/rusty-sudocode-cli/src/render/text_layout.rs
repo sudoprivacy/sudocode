@@ -62,14 +62,14 @@ fn wrap_line_with_indent(
         let cells = grapheme_width(grapheme, col);
         if grapheme == "\t" {
             // Expand even tabs wider than the viewport without overflowing it.
-            let style = source.spans(start..start + 1).next().unwrap().0;
+            let (style, _, link) = source.rich_spans(start..start + 1).next().unwrap();
             for _ in 0..cells {
                 if col >= width {
                     rows.push((std::mem::take(&mut row), col));
                     row.push(crossterm::style::ContentStyle::default(), &padding);
                     col = indent;
                 }
-                row.push(style, " ");
+                row.push_link(style, " ", link);
                 col += 1;
             }
         } else {
@@ -78,8 +78,8 @@ fn wrap_line_with_indent(
                 row.push(crossterm::style::ContentStyle::default(), &padding);
                 col = indent;
             }
-            for (style, part) in source.spans(start..start + grapheme.len()) {
-                row.push(style, part);
+            for (style, part, link) in source.rich_spans(start..start + grapheme.len()) {
+                row.push_link(style, part, link);
             }
             col += cells;
         }

@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use common::TestEnv;
 use serde_json::Value;
 
-const BUDGET: Duration = Duration::from_secs(120);
+const BUDGET: Duration = common::LIVE_TURN_BUDGET;
 
 fn requests(directory: &Path) -> Vec<Value> {
     std::fs::read_dir(directory)

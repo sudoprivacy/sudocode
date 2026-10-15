@@ -60,7 +60,6 @@ fn up_arrow_navigates_history_on_empty_buffer() {
     let root = env.workspace_root().to_path_buf();
     fs::write(root.join("AGENTS.md"), "# Rules\n").expect("write AGENTS.md");
 
-    let prompt = env.prompt("say OK", "single_turn_text");
     let mut sess = env.spawn_with_env(&["--permission-mode", "read-only"], &[("EDITOR", "true")]);
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
 
@@ -69,23 +68,7 @@ fn up_arrow_navigates_history_on_empty_buffer() {
         panic!("REPL prompt: {e}\nPTY screen:\n{screen}");
     });
 
-    // Submit a prompt so history has an entry.
-    sess.send(&prompt).expect("type prompt");
-    wait_for_input_line(&mut sess, &prompt, "seed prompt should render");
-    sess.send("\r").expect("submit prompt");
-
-    // A redraw of the typed prompt also contains ❯. Wait for the response and
-    // the cleared input before attempting history recall.
-    sess.expect(if env.is_mock() {
-        "The answer is 4"
-    } else {
-        "turn 1"
-    })
-    .unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("seed turn should complete: {e}\nPTY screen:\n{screen}");
-    });
-    common::expect_input_line_cleared(&sess, Duration::from_secs(15), "next prompt ready");
+    let prompt = seed_history(&env, &mut sess, "say OK");
 
     // On empty prompt, press ↑ — should show previous input from history.
     sess.send("\x1b[A").expect("send Up arrow on empty buffer");
@@ -262,7 +245,7 @@ fn press_arrow(sess: &mut PtySession, keys: &str, label: &str) {
 
 /// Submit one prompt so the history has an entry, and leave the session at a
 /// fresh empty prompt.
-fn seed_history(env: &common::TestEnv, sess: &mut PtySession, text: &str) {
+fn seed_history(env: &common::TestEnv, sess: &mut PtySession, text: &str) -> String {
     let prompt = if env.is_mock() {
         env.prompt(text, "single_turn_text")
     } else {
@@ -282,6 +265,7 @@ fn seed_history(env: &common::TestEnv, sess: &mut PtySession, text: &str) {
         "history seed completed",
     );
     common::expect_input_line_cleared(sess, common::DEFAULT_TIMEOUT, "history input ready");
+    prompt
 }
 
 /// Up on a non-empty buffer must move to the start *before* it recalls, and

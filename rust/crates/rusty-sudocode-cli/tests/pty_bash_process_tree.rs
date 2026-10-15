@@ -114,7 +114,7 @@ fn run_bash_tree_workflow(is_cancel: bool) {
     session.send(&format!("{prompt}\r")).expect("start tool");
     let started = root.join("started.json");
     assert!(
-        wait_for(|| started.exists(), Duration::from_secs(90)),
+        wait_for(|| started.exists(), common::LIVE_TURN_BUDGET),
         "real grandchild did not start: {}",
         common::screen_tail(&session, 4000)
     );
@@ -174,7 +174,7 @@ fn run_bash_tree_workflow(is_cancel: bool) {
                 fs::read_to_string(root.join("recovered.txt"))
                     .is_ok_and(|text| text.trim() == run_id)
             },
-            Duration::from_secs(90),
+            common::LIVE_TURN_BUDGET,
         ),
         "next turn did not write the recovered run ID: {}",
         common::screen_tail(&session, 4000)
@@ -182,7 +182,7 @@ fn run_bash_tree_workflow(is_cancel: bool) {
     common::expect_turn_complete_after(
         &session,
         &marker,
-        Duration::from_secs(90),
+        common::LIVE_TURN_BUDGET,
         "recovery turn completed",
     );
     common::expect_input_line_cleared(&session, Duration::from_secs(90), "ready to exit");

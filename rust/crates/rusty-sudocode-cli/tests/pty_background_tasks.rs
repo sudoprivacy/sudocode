@@ -52,13 +52,10 @@ fn expect_input_ready(session: &PtySession, budget: Duration, context: &str) {
 }
 
 fn expect_parent_complete(session: &PtySession, before: &str) {
-    common::expect_screen(
+    common::expect_turn_complete_after(
         session,
-        |_| {
-            let after = common::turn_status_marker(session);
-            !after.is_empty() && after != before
-        },
-        Duration::from_secs(180),
+        before,
+        common::LIVE_TURN_BUDGET,
         "background launch turn completed",
     );
     expect_input_ready(session, common::DEFAULT_TIMEOUT, "parent returned to input");
@@ -113,6 +110,10 @@ fn shell(id: &str, command: &str, description: &str) -> Value {
 }
 
 fn screen(session: &PtySession, text: &str) -> String {
+    screen_with_budget(session, text, Duration::from_secs(90))
+}
+
+fn screen_with_budget(session: &PtySession, text: &str, budget: Duration) -> String {
     common::expect_screen(
         session,
         |s| {
@@ -120,7 +121,7 @@ fn screen(session: &PtySession, text: &str) -> String {
                 .map_or(s, |(_, panel)| panel)
                 .contains(text)
         },
-        Duration::from_secs(90),
+        budget,
         text,
     )
 }
@@ -215,7 +216,8 @@ fn inspecting_running_task_does_not_acknowledge_its_future_result() {
             "Inspect before completion",
         )],
     );
-    screen(&session, "1 terminal · ↓ to view");
+    // This transition includes a complete model tool call, before any local UI action.
+    screen_with_budget(&session, "1 terminal · ↓ to view", common::LIVE_TURN_BUDGET);
     expect_parent_complete(&session, &before);
     open(&mut session);
     screen(&session, "  PEEK_RUNNING");
@@ -246,7 +248,7 @@ fn start_agent(env: &TestEnv, automatic: bool) -> PtySession {
     common::expect_turn_complete_after(
         &session,
         &before,
-        Duration::from_secs(180),
+        common::LIVE_TURN_BUDGET,
         "agent handed off",
     );
     session
@@ -492,7 +494,7 @@ fn exiting_during_a_foreground_tool_reaps_both_process_groups() {
             json!({"id":"foreground","name":"Bash","input":{"command":"touch foreground-ready; while [ ! -f foreground-release ]; do sleep 0.1; done; echo leaked > foreground-leaked.txt","description":"Foreground cleanup fixture"}}),
         ],
     );
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + common::LIVE_TURN_BUDGET;
     while !env.workspace_root().join("foreground-ready").exists() {
         assert!(
             Instant::now() < deadline,

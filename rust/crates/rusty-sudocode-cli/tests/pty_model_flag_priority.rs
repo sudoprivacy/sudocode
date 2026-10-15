@@ -15,7 +15,7 @@ use pty_expect::PtySession;
 use runtime::{ContentBlock, MessageRole, Session, SessionStore};
 use serde_json::{json, Value};
 
-const BUDGET: Duration = Duration::from_secs(120);
+const BUDGET: Duration = common::LIVE_TURN_BUDGET;
 
 fn setup(label: &str, model: &str) -> TestEnv {
     let env = TestEnv::new(label);

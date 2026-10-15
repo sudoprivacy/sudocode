@@ -14,6 +14,8 @@ const clean = (value, limit = 2048) => {
 const report = { traceFiles: 0, malformedLines: 0, requests: [] };
 const responses = new Map();
 const refusals = new Map();
+const usages = new Map();
+const streamErrors = new Map();
 for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
   if (!fs.existsSync(file)) continue;
   report.traceFiles++;
@@ -30,6 +32,18 @@ for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
         }
       }
       responses.set(data.request_id, { status: data.status, ids });
+    } else if (event.event === 'response_usage') {
+      usages.set(data.request_id, {
+        inputTokens: data.input_tokens, outputTokens: data.output_tokens,
+        cacheReadTokens: data.cache_read_input_tokens,
+        cacheWriteTokens: data.cache_creation_input_tokens,
+      });
+    } else if (event.event === 'stream_error') {
+      streamErrors.set(data.request_id, {
+        chunksRead: data.chunks_read, eventsRead: data.sse_events_read,
+        usageSeen: data.usage_seen, streamFinished: data.stream_finished,
+        message: clean(data.error_message),
+      });
     } else if (event.event === 'provider_refusal') {
       refusals.set(data.request_id, {
         model: clean(data.model, 256), category: clean(data.category, 256),
@@ -77,6 +91,8 @@ for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
 for (const request of report.requests) {
   request.response = responses.get(request.requestId);
   request.refusal = refusals.get(request.requestId);
+  request.usage = usages.get(request.requestId);
+  request.streamError = streamErrors.get(request.requestId);
 }
 fs.mkdirSync(path.dirname(output), { recursive: true });
 fs.writeFileSync(output, JSON.stringify(report, null, 2) + '\n');

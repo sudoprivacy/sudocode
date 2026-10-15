@@ -698,7 +698,11 @@ Output contracts (schema version 1):
   `permission_denials`, and observed current-run `usage`. `num_turns` counts
   user turns (one for a started invocation), whereas `model_round_trips` counts
   provider calls, including those following tool results. Unknown usage/cost
-  is omitted; usage never includes earlier resumed turns.
+  is omitted; usage never includes earlier resumed turns. Usage includes
+  `total_tokens` and `token_breakdown_complete`; `reported_total_tokens` is
+  included when the provider supplies an aggregate. When allocation is
+  incomplete, the total survives and the breakdown is marked incomplete.
+  Missing cost fields stay omitted rather than becoming a zero bill.
   Execution errors include the CLI's machine-readable `kind` alongside `error`.
 - `stream-json`: flushed JSON lines: `system` initialization, complete
   `assistant.message.content` (text and tool_use blocks), `user` tool_result

@@ -219,17 +219,24 @@ impl TokenUsage {
     /// Shared machine-readable usage for CLI output formats.
     #[must_use]
     pub fn to_json(self) -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_creation_input_tokens": self.cache_creation_input_tokens,
             "cache_read_input_tokens": self.cache_read_input_tokens,
             "total_tokens": self.total_tokens(),
-            "reported_total_tokens": self.reported_total_tokens,
             "token_breakdown_complete": self.has_complete_token_breakdown(),
-            "cost_units": self.cost_units,
-            "cost_currency": self.cost_currency.map(UsageCostCurrency::as_str),
-        })
+        });
+        if let Some(total) = self.reported_total_tokens {
+            value["reported_total_tokens"] = serde_json::json!(total);
+        }
+        if let Some(units) = self.cost_units {
+            value["cost_units"] = serde_json::json!(units);
+        }
+        if let Some(currency) = self.cost_currency {
+            value["cost_currency"] = serde_json::json!(currency.as_str());
+        }
+        value
     }
 
     /// Size of the prompt the provider actually processed for this response:

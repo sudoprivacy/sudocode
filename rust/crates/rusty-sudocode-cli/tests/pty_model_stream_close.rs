@@ -384,7 +384,10 @@ fn check_response(kind: ResponseKind) {
         args.push("--print");
     }
     args.push("Report the stream result");
-    if matches!(kind, ResponseKind::ChatTotalOnly) {
+    if matches!(
+        kind,
+        ResponseKind::ChatTotalOnly | ResponseKind::UsageAtStart
+    ) {
         args.extend(["--output-format", "json"]);
     }
     let mut cli = env.spawn_with_env(
@@ -500,6 +503,14 @@ fn check_response(kind: ResponseKind) {
                 common::screen_contains(&screen, "\"token_breakdown_complete\":false"),
                 "{screen}"
             );
+            assert!(
+                !common::screen_contains(&screen, "\"cost_units\":null"),
+                "unknown bills stay omitted"
+            );
+            assert!(
+                !common::screen_contains(&screen, "\"cost_currency\":null"),
+                "unknown currencies stay omitted"
+            );
             assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
             let events: Vec<Value> = std::fs::read_to_string(&log_path)
                 .unwrap()
@@ -581,6 +592,14 @@ fn check_response(kind: ResponseKind) {
             }
         );
         if matches!(kind, ResponseKind::UsageAtStart) {
+            assert!(
+                common::screen_contains(&screen, "\"cost_units\":17"),
+                "{screen}"
+            );
+            assert!(
+                common::screen_contains(&screen, "\"cost_currency\":\"sudo_point\""),
+                "{screen}"
+            );
             assert_eq!(usage.cache_creation_input_tokens, 3);
             assert_eq!(usage.cache_read_input_tokens, 5);
             assert_eq!(usage.cost_units, Some(17));

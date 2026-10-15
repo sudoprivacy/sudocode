@@ -2,7 +2,7 @@
 mod common;
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use runtime::{ContentBlock, MessageRole, Session, SessionStore};
 
@@ -90,7 +90,11 @@ fn assert_file_roundtrip(env: &common::TestEnv, nonce: &str, format: &str) {
 #[test]
 fn interactive_file_reads_updated_contents_after_resume() {
     let env = common::TestEnv::new("relative-file-resume");
-    let budget = Duration::from_secs(120);
+    let budget = if env.is_live() {
+        common::LIVE_TURN_BUDGET
+    } else {
+        env.timeout()
+    };
     for resume in [false, true] {
         let nonce = format!(
             "RESUMED_FILE_{}",
@@ -253,6 +257,11 @@ fn print_completes_tool_roundtrip_in_each_output_format() {
             ],
             &[("SUDOCODE_DUMP_REQUESTS", requests)],
         );
+        // Reading a file includes a request, tool execution and a continuation.
+        // Use the shared whole-turn budget, rather than one exchange's timeout.
+        if env.is_live() {
+            child.set_default_timeout(common::LIVE_TURN_BUDGET);
+        }
         child.expect(&nonce).unwrap_or_else(|error| {
             panic!("{format}: {error}; {}", common::screen_tail(&child, 6000))
         });

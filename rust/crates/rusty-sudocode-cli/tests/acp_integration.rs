@@ -6865,8 +6865,7 @@ async fn zone_scope_env_shapes_cli_subprocess_file_authorization() {
         workspace.create();
         workspace.write_sudocode_json(&server.base_url());
         let canonical = fs::canonicalize(&workspace.root).expect("canonicalize root");
-        let ws_vfs =
-            runtime::vfs_path_for_host_path(&canonical).expect("workspace VFS prefix");
+        let ws_vfs = runtime::vfs_path_for_host_path(&canonical).expect("workspace VFS prefix");
         let scope = scope_json_for(&format!("{ws_vfs}/generated"));
 
         let mut client = spawn_stdio_client_danger_zone_env(&workspace, "zone-scope-e2e", &scope);
@@ -6899,8 +6898,7 @@ async fn zone_scope_env_shapes_cli_subprocess_file_authorization() {
         workspace.create();
         workspace.write_sudocode_json(&server.base_url());
         let canonical = fs::canonicalize(&workspace.root).expect("canonicalize root");
-        let ws_vfs =
-            runtime::vfs_path_for_host_path(&canonical).expect("workspace VFS prefix");
+        let ws_vfs = runtime::vfs_path_for_host_path(&canonical).expect("workspace VFS prefix");
         let scope = scope_json_for(&format!("{ws_vfs}/allowed"));
 
         let mut client = spawn_stdio_client_danger_zone_env(&workspace, "zone-scope-e2e", &scope);
@@ -6922,7 +6920,10 @@ async fn zone_scope_env_shapes_cli_subprocess_file_authorization() {
             !workspace.root.join("generated/denied.txt").exists(),
             "out-of-scope write must not land on disk"
         );
-        let tool_text = tools.iter().map(|tool| tool.to_string()).collect::<String>();
+        let tool_text = tools
+            .iter()
+            .map(|tool| tool.to_string())
+            .collect::<String>();
         assert!(
             format!("{text}{tool_text}").contains("is outside runtime scope"),
             "the refusal must be the zone layer's OutOfScope, not the tool \

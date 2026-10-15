@@ -156,9 +156,7 @@ impl HostZoneContext {
     #[must_use]
     pub fn trusted_for_in_process_kernel(&self) -> Self {
         let mut elevated = self.clone();
-        if self.zone_id.is_some()
-            && matches!(self.source, ContextSource::UnverifiedDelegationRef)
-        {
+        if self.zone_id.is_some() && matches!(self.source, ContextSource::UnverifiedDelegationRef) {
             elevated.source = ContextSource::TrustedLocal;
         }
         elevated

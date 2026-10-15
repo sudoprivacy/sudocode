@@ -40,7 +40,7 @@ const DT_DIR: u32 = 1;
 /// naming the second rather than casting at the call site keeps the cast off the
 /// path where a wrong entry type is a silent mis-provision (`DT_LINK = 3` and
 /// `DT_PIPE = 3` once cost this project a chat-list index that was a pipe).
-const DT_DIR_SETATTR: i32 = DT_DIR as i32;
+const DT_DIR_SETATTR: i32 = DT_DIR.cast_signed();
 
 /// DT_LINK entry-type code for `Setattr`.
 ///
@@ -107,7 +107,10 @@ enum VfsOp {
     /// directory differ only by the `entry_type` the kernel dispatches on, and a
     /// second arm would be the same request assembled a second way.
     EnsureEntry {
-        request: SetattrRequest,
+        // Boxed: this is the widest variant by far (SetattrRequest is a whole
+        // prost message), and every queued VfsOp pays its largest variant's
+        // size — boxed, the queue messages sit near the second-largest arm.
+        request: Box<SetattrRequest>,
         resp: mpsc::SyncSender<io::Result<bool>>,
     },
     /// `Stat` — the TYPED RPC, not the generic Call surface.
@@ -439,7 +442,7 @@ impl NexusVfsClient {
                                     }));
                                 }
                                 VfsOp::EnsureEntry { request, resp } => {
-                                    let r = client.setattr(deadlined(request, OP_DEADLINE)).await;
+                                    let r = client.setattr(deadlined(*request, OP_DEADLINE)).await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
@@ -726,7 +729,10 @@ impl NexusVfsClient {
     pub fn setattr(&self, request: SetattrRequest) -> io::Result<bool> {
         let (resp, rx) = mpsc::sync_channel(1);
         self.tx
-            .send(VfsOp::EnsureEntry { request, resp })
+            .send(VfsOp::EnsureEntry {
+                request: Box::new(request),
+                resp,
+            })
             .map_err(|_| broken_pipe())?;
         await_reply(&rx, OP_DEADLINE + HANDOFF_GRACE)
     }

@@ -20,7 +20,7 @@ use std::time::Duration;
 use api::{
     AuthMode, ContentBlockDelta, InputMessage, MessageRequest, MessageResponse, MessageStream,
     OutputContentBlock, PromptCache, PromptCacheRecord, ProviderClient, ResolvedProvider,
-    StreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
+    StreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition, Usage,
 };
 use async_trait::async_trait;
 use runtime::{
@@ -299,6 +299,7 @@ impl EngineApiClient {
             prefetched_next,
             saw_stop: false,
             has_content: false,
+            usage: Usage::default(),
             done: false,
             client: self.client.clone(),
             session_id: self.session_id.clone(),
@@ -384,6 +385,7 @@ impl EngineApiClient {
                         &mut state.pending_tool,
                         &mut state.saw_stop,
                         &mut state.has_content,
+                        &mut state.usage,
                     );
 
                     if let Some(event) = state.buffer.pop_front() {
@@ -644,6 +646,7 @@ fn runtime_error_from_api(
 }
 
 struct StreamState {
+    usage: Usage,
     provider_stream: MessageStream,
     pending_tool: Option<(String, String, String, Option<String>)>,
     buffer: VecDeque<AssistantEvent>,
@@ -674,9 +677,12 @@ fn process_provider_event(
     pending_tool: &mut Option<(String, String, String, Option<String>)>,
     saw_stop: &mut bool,
     has_content: &mut bool,
+    usage: &mut Usage,
 ) {
     match event {
         StreamEvent::MessageStart(start) => {
+            usage.merge_snapshot(start.message.usage);
+            buffer.push_back(AssistantEvent::Usage(usage.token_usage()));
             if !start.message.model.is_empty() {
                 buffer.push_back(AssistantEvent::Model(start.message.model.clone()));
             }
@@ -737,7 +743,8 @@ fn process_provider_event(
             }
         }
         StreamEvent::MessageDelta(delta) => {
-            buffer.push_back(AssistantEvent::Usage(delta.usage.token_usage()));
+            usage.merge_snapshot(delta.usage);
+            buffer.push_back(AssistantEvent::Usage(usage.token_usage()));
         }
         StreamEvent::MessageStop(_) => {
             *saw_stop = true;

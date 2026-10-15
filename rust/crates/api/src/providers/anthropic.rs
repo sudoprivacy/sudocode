@@ -1228,8 +1228,15 @@ impl MessageStream {
 
     fn observe_event(&mut self, event: &StreamEvent) {
         match event {
+            StreamEvent::MessageStart(start) => {
+                self.latest_usage
+                    .get_or_insert_with(Usage::default)
+                    .merge_snapshot(start.message.usage.clone());
+            }
             StreamEvent::MessageDelta(MessageDeltaEvent { usage, delta, .. }) => {
-                self.latest_usage = Some(usage.clone());
+                self.latest_usage
+                    .get_or_insert_with(Usage::default)
+                    .merge_snapshot(usage.clone());
                 // Content is complete, but finish the protocol before releasing
                 // the response. Closing here made completion depend on packet
                 // boundaries and could drop a separately framed message_stop.

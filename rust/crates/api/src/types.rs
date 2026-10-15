@@ -421,6 +421,31 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Merge fields from a cumulative provider snapshot. A zero-filled field
+    /// leaves the last reported count intact; costs may explicitly be zero.
+    /// Anthropic splits input/cache counts at `message_start` and output at
+    /// `message_delta`. Collecting and incremental consumers use the same rule.
+    pub fn merge_snapshot(&mut self, incoming: Self) {
+        if incoming.input_tokens > 0 {
+            self.input_tokens = incoming.input_tokens;
+        }
+        if incoming.output_tokens > 0 {
+            self.output_tokens = incoming.output_tokens;
+        }
+        if incoming.cache_creation_input_tokens > 0 {
+            self.cache_creation_input_tokens = incoming.cache_creation_input_tokens;
+        }
+        if incoming.cache_read_input_tokens > 0 {
+            self.cache_read_input_tokens = incoming.cache_read_input_tokens;
+        }
+        if incoming.cost_units.is_some() {
+            self.cost_units = incoming.cost_units;
+        }
+        if incoming.cost_currency.is_some() {
+            self.cost_currency = incoming.cost_currency;
+        }
+    }
+
     #[must_use]
     pub const fn total_tokens(&self) -> u32 {
         self.input_tokens

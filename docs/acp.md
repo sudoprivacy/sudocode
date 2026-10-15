@@ -248,6 +248,18 @@ Rules:
 - The `initialize` response advertises `_meta.sudocode.sessionMemory: true`
   so clients can feature-detect.
 
+### Model turn usage
+
+The prompt response reports provider token usage when available. Input, output,
+cache and cost fields may arrive in separate stream frames; the shared engine
+merges those cumulative snapshots before recording the assistant message and
+returning ACP usage. Counts are never inferred from answer length. The same
+merge rule serves collected responses and the terminal renderer.
+
+OpenAI-compatible streams finish at `[DONE]` (Chat Completions) or a terminal
+`response.*` event (Responses). A completed SSE message does not wait for the
+HTTP connection to close; usage frames before its terminal event are retained.
+
 ### Slash commands
 
 A `session/prompt` whose text starts with `/` is a slash command, not a model

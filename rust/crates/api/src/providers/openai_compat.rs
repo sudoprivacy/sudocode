@@ -500,6 +500,10 @@ impl MessageStream {
                                 self.sse_events_read += 1;
                                 self.pending.extend(state.ingest_chunk(parsed)?);
                             }
+                            // [DONE] terminates SSE independently of HTTP EOF.
+                            // The preceding usage-only chunk must be consumed
+                            // before the final normalized events are emitted.
+                            self.done = parser.done;
                         }
                         (
                             MessageStreamParser::Responses(parser),
@@ -509,6 +513,7 @@ impl MessageStream {
                                 self.sse_events_read += 1;
                                 self.pending.extend(state.ingest_frame(&frame)?);
                             }
+                            self.done = state.stop_reason.is_some();
                         }
                         _ => unreachable!("message stream parser/state mismatch"),
                     }
@@ -639,6 +644,7 @@ struct OpenAiSseParser {
     buffer: Vec<u8>,
     provider: String,
     model: String,
+    done: bool,
 }
 
 impl OpenAiSseParser {
@@ -647,6 +653,7 @@ impl OpenAiSseParser {
             buffer: Vec::new(),
             provider: provider.into(),
             model: model.into(),
+            done: false,
         }
     }
 
@@ -664,6 +671,14 @@ impl OpenAiSseParser {
         let mut events = Vec::new();
 
         while let Some(frame) = next_sse_frame(&mut self.buffer) {
+            if frame
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .any(|data| data.trim() == "[DONE]")
+            {
+                self.done = true;
+                break;
+            }
             if let Some(event) = parse_sse_frame(&frame, &self.provider, &self.model)? {
                 if let Some(usage) = &event.usage {
                     runtime::compaction_scope::record_usage(usage.to_api_usage().token_usage());
@@ -824,7 +839,9 @@ impl ChatStreamState {
         }
 
         if let Some(usage) = chunk.usage {
-            self.usage = Some(usage.to_api_usage());
+            self.usage
+                .get_or_insert_with(Usage::default)
+                .merge_snapshot(usage.to_api_usage());
         }
 
         for choice in chunk.choices {

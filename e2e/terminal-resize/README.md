@@ -75,3 +75,47 @@ The
 initial budgets are local regression limits and need hosted calibration before
 claiming reliable CI protection. A failed run is investigated; reruns do not
 replace its original evidence.
+
+## Painted terminal and hyperlink acceptance
+
+`pty_hyperlinks::browser_terminal_links_and_interaction` launches the real CLI
+in an OS PTY and connects it to the pinned **browser** xterm renderer in Chromium.
+It clicks named links and checks their destinations, resizes history, reviews a
+linked model question, and sends real browser mouse down/move/up events across
+wrapped Chinese, combining characters and emoji. No programmatic selection API
+stands in for dragging. Selection must contain only visible text, must not open
+a link, and must survive output arriving while old history is selected.
+The workload includes dense links, long URLs, query semicolons, and rejected
+oversized/non-web targets. Static and streamed copies use the same document.
+
+Install with `npm ci --prefix e2e/terminal-resize`, then run
+`npx playwright install chromium` in that directory. From `rust/`:
+
+```sh
+SCODE_TEST_BACKEND=mock cargo test -p rusty-sudocode-cli --test pty_hyperlinks -- --ignored --nocapture
+```
+
+Headless Chromium still runs the DOM layout, renderer, rasterization and native
+xterm selection. `SCODE_GUI_HEADED=1` additionally displays its window. Reports
+and screenshots are retained under `SCODE_TERMINAL_LOG_DIR`. Input timing starts
+before browser keyboard dispatch and ends after xterm parses the expected cells,
+two animation frames and a PNG capture. Each typed character must change pixels.
+This is a conservative rendering/readback measurement, including automation and
+capture overhead; it does not measure physical keyboard/display scanout latency.
+Parsed-cell latency is retained separately rather than renamed as paint latency.
+
+Process accounting records scode separately from the dedicated Chromium process
+tree, including browser, renderer and GPU process. Browser CPU comes from CDP;
+RSS comes from OS accounting. Browser RSS sums processes (shared pages can be
+counted multiple times), and peaks are phase samples. The Node observer is
+outside that resource scope. Raw per-process samples make that distinction
+inspectable; these values must not be compared to scode's standalone RSS budget.
+
+`gui-benchmark.py` uses the core gate's paired evaluator: five A/A calibration
+pairs followed by seven alternating A/B pairs. `gui-policy.json` owns the
+additional browser budgets; the original `performance-policy.json` budgets and
+fixed baseline are unchanged. Both binaries receive identical gestures and
+workloads; only candidate hyperlink assertions differ. The browser workflow
+compares releases built from the PR base and candidate in separate target dirs,
+and uploads failures as well as successful evidence. The existing required
+`render performance` check continues comparing the original workloads.

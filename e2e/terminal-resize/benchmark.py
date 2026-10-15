@@ -63,10 +63,10 @@ def confidence_lower(differences):
                      for _ in range(4000)], 0.05)
 
 
-def assess(controls, comparisons, policy, cases):
+def assess(controls, comparisons, policy, cases, metrics_for_case=expected_metrics):
     rows, failures = [], []
     for case in cases:
-        for metric in sorted(expected_metrics(policy["cases"][case])):
+        for metric in sorted(metrics_for_case(policy["cases"][case])):
             budget = policy["metrics"][metric]
             calibration = [(left["metrics"][metric], right["metrics"][metric])
                            for left, right in controls[case]]
@@ -134,7 +134,7 @@ def main():
               "base_sha256": digest(args.base), "candidate_sha256": digest(args.candidate),
               "driver_sha256": digest(args.driver), "samples": [], "status": "running"}
     report["harness_sha256"] = {name: digest(Path(__file__).with_name(name))
-                                for name in ["benchmark.py", "host.cjs", "run.cjs", "performance.cjs"]}
+                                for name in ["benchmark.py", "host.cjs", "run.cjs", "performance.cjs", "resources.cjs"]}
     controls, comparisons = {case: [] for case in cases}, {case: [] for case in cases}
     metadata = None
 

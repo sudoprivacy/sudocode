@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "cases": {
+    "browser": {
+      "kind": "browser"
+    }
+  },
+  "metrics": {
+    "input_history_frame_p95_ms": {
+      "limit": 150,
+      "relative": 0.2,
+      "absolute": 10
+    },
+    "input_history_parsed_p95_ms": {
+      "limit": 50,
+      "relative": 0.2,
+      "absolute": 5
+    },
+    "input_wait_frame_p95_ms": {
+      "limit": 150,
+      "relative": 0.2,
+      "absolute": 10
+    },
+    "input_wait_parsed_p95_ms": {
+      "limit": 50,
+      "relative": 0.2,
+      "absolute": 5
+    },
+    "input_stream_frame_p95_ms": {
+      "limit": 150,
+      "relative": 0.2,
+      "absolute": 10
+    },
+    "input_stream_parsed_p95_ms": {
+      "limit": 50,
+      "relative": 0.2,
+      "absolute": 5
+    },
+    "drag_frame_p95_ms": {
+      "limit": 150,
+      "relative": 0.2,
+      "absolute": 20
+    },
+    "scode_cpu_ms": {
+      "limit": 2000,
+      "relative": 0.2,
+      "absolute": 50
+    },
+    "terminal_cpu_ms": {
+      "limit": 15000,
+      "relative": 0.2,
+      "absolute": 250
+    },
+    "scode_rss_peak_mib": {
+      "limit": 80,
+      "relative": 0.15,
+      "absolute": 3
+    },
+    "terminal_rss_peak_mib": {
+      "limit": 768,
+      "relative": 0.15,
+      "absolute": 20
+    },
+    "scode_rss_growth_mib": {
+      "limit": 16,
+      "relative": 0.2,
+      "absolute": 3
+    },
+    "terminal_rss_growth_mib": {
+      "limit": 128,
+      "relative": 0.2,
+      "absolute": 16
+    },
+    "wire_kib": {
+      "limit": 1000,
+      "relative": 0.2,
+      "absolute": 8
+    }
+  }
+}

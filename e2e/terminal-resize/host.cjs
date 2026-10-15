@@ -25,15 +25,7 @@ function createHost(config) {
     pty: load('node-pty/package.json').version,
     xterm: load('@xterm/headless/package.json').version, backend: config.backend };
   console.log(JSON.stringify(metadata));
-  const env = { ...process.env, SUDO_CODE_CONFIG_HOME: config.configHome,
-    HOME: path.join(config.root, 'home'), TERM: 'xterm-256color', COLORTERM: 'truecolor',
-    COLORFGBG: '15;0', SUDOCODE_INTERRUPT_QUEUE_MODE: 'queue',
-    SUDOCODE_TODO_STORE: config.todos, SUDOCODE_MAX_TOOL_USE_CONCURRENCY: '10',
-    ...config.env };
-  for (const key of ['ELECTRON_RUN_AS_NODE', 'NO_COLOR', 'SCODE_GLOBAL_CONFIG_DIR', 'SCODE_PROJECT_CONFIG_DIR'])
-    delete env[key];
-  const child = load('node-pty').spawn(config.binary, config.args, { cwd: config.root, env,
-    ...initial, useConpty: true, useConptyDll: config.backend === 'bundled' });
+  const child = launch(config, initial, load);
   const wire = [], presentations = new Set(), parsed = new Set();
   const state = { pending: 0, lastData: Date.now(), exited: false, exitCode: undefined,
     bytes: 0, frames: 0 };
@@ -115,4 +107,18 @@ function createHost(config) {
     onParsed: observer => subscribe(parsed, observer) };
 }
 
-module.exports = { createHost };
+
+function launch(config, initial, load = name => require(name)) {
+  const env = { ...process.env, SUDO_CODE_CONFIG_HOME: config.configHome,
+    HOME: path.join(config.root, 'home'), TERM: 'xterm-256color', COLORTERM: 'truecolor',
+    COLORFGBG: '15;0', SUDOCODE_INTERRUPT_QUEUE_MODE: 'queue',
+    SUDOCODE_TODO_STORE: config.todos, SUDOCODE_MAX_TOOL_USE_CONCURRENCY: '10',
+    ...config.env };
+  for (const key of ['ELECTRON_RUN_AS_NODE', 'NO_COLOR', 'SCODE_GLOBAL_CONFIG_DIR', 'SCODE_PROJECT_CONFIG_DIR'])
+    delete env[key];
+  const child = load('node-pty').spawn(config.binary, config.args, { cwd: config.root, env,
+    ...initial, useConpty: true, useConptyDll: config.backend === 'bundled' });
+  return child;
+}
+
+module.exports = { createHost, launch };

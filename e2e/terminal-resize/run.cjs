@@ -4,6 +4,10 @@ const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const { createHost } = require('./host.cjs');
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (config.scenario === 'browser-links') {
+  // CommonJS module return leaves the headless observer uninitialized.
+  return require('./gui.cjs').run(config).then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });
+}
 const initial = config.scenario === 'parallel' ? { cols: 100, rows: 80 }
   : config.scenario === 'a2a' ? { cols: 100, rows: 50 } : { cols: 120, rows: 24 };
 const host = createHost({ ...initial, ...config });

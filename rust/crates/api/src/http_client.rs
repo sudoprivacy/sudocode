@@ -263,12 +263,16 @@ pub fn build_http_client_with_opts(
 /// first outbound request instead of at construction time.
 #[must_use]
 pub fn build_http_client_or_default() -> reqwest::Client {
-    build_http_client().unwrap_or_else(|_| {
-        // Proxy config was malformed — drop the proxy but keep the timeout
-        // protection so a dead connection still cannot hang the session.
-        build_http_client_with_opts(&ProxyConfig::default(), &TimeoutConfig::from_env())
-            .unwrap_or_else(|_| reqwest::Client::new())
-    })
+    configured_http_client().0
+}
+
+/// Build once from a single timeout snapshot, retaining it for stream liveness.
+pub(crate) fn configured_http_client() -> (reqwest::Client, TimeoutConfig) {
+    let timeout = TimeoutConfig::from_env();
+    let client = build_http_client_with_opts(&ProxyConfig::from_env(), &timeout)
+        .or_else(|_| build_http_client_with_opts(&ProxyConfig::default(), &timeout))
+        .unwrap_or_else(|_| reqwest::Client::new());
+    (client, timeout)
 }
 
 /// Build a `reqwest::Client` from an explicit [`ProxyConfig`]. Used by tests

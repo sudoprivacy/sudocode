@@ -9,6 +9,7 @@ mod nexus_transport;
 pub use nexus_transport::ModelAccess;
 mod prompt_cache;
 mod providers;
+mod request_scope;
 mod sse;
 mod stream_collect;
 mod stream_diagnostics;

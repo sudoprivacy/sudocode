@@ -516,6 +516,7 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     env:
+      SUDOCODE_API_READ_TIMEOUT: &live_idle_seconds '90'
       SCODE_LIVE_MODEL: &live_model gpt-6-luna
       SCODE_NATIVE_MODEL: &native_model claude-sonnet-4-6
       SCODE_LOG_PATH: ${{ github.workspace }}/scode-acp-live-trace.jsonl
@@ -596,6 +597,7 @@ jobs:
           SUDO_CODE_CONFIG_HOME: ${{ runner.temp }}/scode-process-tree-config
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           SCODE_TEST_BACKEND: live
+          SUDOCODE_API_READ_TIMEOUT: *live_idle_seconds
           SCODE_LIVE_MODEL: *live_model
           SCODE_LIVE_AUTH_PROFILE: sudorouter
           SCODE_LOG_PATH: ${{ runner.temp }}/scode-live-model-trace.jsonl

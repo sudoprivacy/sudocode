@@ -104,3 +104,17 @@ sees, and whether the resolved endpoint responds to a credential probe. When a
 named account is selected (see [Named accounts](#named-accounts--per-project-selection)),
 it also prints an **Account** line, e.g.
 `account=clientA base_url=https://alt.example.com/v1 auth_profile=clientA`.
+
+## Provider connection timeouts
+
+`SUDOCODE_API_READ_TIMEOUT` sets the idle timeout in whole seconds (default
+300; `0` disables it). Streaming requests apply this same setting to both
+socket reads and normalized provider events. SSE comments and heartbeats
+do not count as model progress. The event timer runs only while waiting
+for the next event; executing a tool does not consume that idle interval.
+
+A stalled or disconnected stream can be replayed once before any provider
+event has been delivered. This uses the original request and shares the
+HTTP retry budget. After an event has been delivered, a transport failure
+is surfaced without automatic replay, preserving partial output and usage.
+Compaction retains its own global retry and usage budget.

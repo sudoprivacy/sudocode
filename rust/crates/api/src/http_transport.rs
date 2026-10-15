@@ -12,7 +12,8 @@ use serde_json::{Map, Value};
 use telemetry::{AnalyticsEvent, SessionTracer};
 
 use crate::error::ApiError;
-use crate::http_client::build_http_client_or_default;
+use crate::http_client::{configured_http_client, TimeoutConfig};
+use crate::request_scope::{RequestScope, TransportState};
 
 /// Callback interface for surfacing HTTP retry attempts to the UI layer.
 /// Implementors bridge the transport retry loop to spinners, progress bars,
@@ -92,7 +93,7 @@ impl RetryPolicy {
     /// `Retry-After` delay when present. The base is the larger of the
     /// exponential backoff and the `Retry-After` value (capped at
     /// `max_backoff`), with additive jitter on top.
-    fn delay_for_attempt(
+    pub(crate) fn delay_for_attempt(
         &self,
         attempt: u32,
         retry_after: Option<Duration>,
@@ -113,6 +114,7 @@ impl RetryPolicy {
 #[derive(Clone)]
 pub struct HttpTransport {
     inner: reqwest::Client,
+    timeout: TimeoutConfig,
     nexus: Option<crate::nexus_transport::NexusTransport>,
     session_tracer: Option<SessionTracer>,
     retry_notifier: Option<std::sync::Arc<dyn RetryNotifier>>,
@@ -137,8 +139,10 @@ impl Default for HttpTransport {
 impl HttpTransport {
     #[must_use]
     pub fn new() -> Self {
+        let (inner, timeout) = configured_http_client();
         Self {
-            inner: build_http_client_or_default(),
+            inner,
+            timeout,
             nexus: None,
             session_tracer: None,
             retry_notifier: None,
@@ -217,6 +221,7 @@ impl HttpTransport {
         };
         let path = extract_path(url);
         let mut attempts = 0u32;
+        let request_scope = RequestScope::current();
         let mut last_error: Option<ApiError>;
 
         // Use external trace_id if provided, otherwise generate a new request_id
@@ -227,12 +232,30 @@ impl HttpTransport {
         loop {
             attempts += 1;
             let start_timestamp_ms = current_timestamp_ms();
+            let observed_attempt = if let Some(scope) = &request_scope {
+                scope.begin_attempt(
+                    RetryPolicy {
+                        max_retries,
+                        ..retry_policy.clone()
+                    },
+                    TransportState {
+                        request_id: request_id.clone(),
+                        path: path.clone(),
+                        started_ms: start_timestamp_ms,
+                        idle_timeout: self.timeout.read_timeout,
+                        tracer: self.session_tracer.clone(),
+                        notifier: self.retry_notifier.clone(),
+                    },
+                )?
+            } else {
+                attempts
+            };
 
             // Log started.
             if let Some(tracer) = &self.session_tracer {
                 tracer.record_http_request_started(
                     &request_id,
-                    attempts,
+                    observed_attempt,
                     "POST",
                     &path,
                     Map::new(),
@@ -311,7 +334,7 @@ impl HttpTransport {
                                 tracer.record_http_request_succeeded(
                                     telemetry::HttpRequestAttempt {
                                         request_id: &request_id,
-                                        attempt: attempts,
+                                        attempt: observed_attempt,
                                         method: "POST",
                                         path: &path,
                                         start_timestamp_ms,
@@ -328,12 +351,12 @@ impl HttpTransport {
                         }
                         Err(error)
                             if error.is_retryable()
-                                && attempts <= max_retries + 1
+                                && attempts <= max_retries.saturating_add(1)
                                 && !compaction_active =>
                         {
                             self.record_failure(
                                 &request_id,
-                                attempts,
+                                observed_attempt,
                                 &path,
                                 &error,
                                 start_timestamp_ms,
@@ -343,7 +366,7 @@ impl HttpTransport {
                         Err(error) => {
                             self.record_failure(
                                 &request_id,
-                                attempts,
+                                observed_attempt,
                                 &path,
                                 &error,
                                 start_timestamp_ms,
@@ -354,24 +377,40 @@ impl HttpTransport {
                 }
                 Err(error)
                     if error.is_retryable()
-                        && attempts <= max_retries + 1
+                        && attempts <= max_retries.saturating_add(1)
                         && !compaction_active =>
                 {
-                    self.record_failure(&request_id, attempts, &path, &error, start_timestamp_ms);
+                    self.record_failure(
+                        &request_id,
+                        observed_attempt,
+                        &path,
+                        &error,
+                        start_timestamp_ms,
+                    );
                     last_error = Some(error);
                 }
                 Err(error) => {
-                    self.record_failure(&request_id, attempts, &path, &error, start_timestamp_ms);
+                    self.record_failure(
+                        &request_id,
+                        observed_attempt,
+                        &path,
+                        &error,
+                        start_timestamp_ms,
+                    );
                     return Err(error);
                 }
             }
 
-            if attempts > max_retries {
+            if attempts > max_retries
+                || request_scope
+                    .as_ref()
+                    .is_some_and(|scope| !scope.has_attempts_left())
+            {
                 break;
             }
 
             let retry_after = last_error.as_ref().and_then(ApiError::retry_after);
-            let delay = retry_policy.delay_for_attempt(attempts, retry_after)?;
+            let delay = retry_policy.delay_for_attempt(observed_attempt, retry_after)?;
             // Surface retry attempts to the user so they know scode
             // isn't hung — it's waiting for the provider to recover.
             if let Some(ref error) = last_error {
@@ -392,7 +431,7 @@ impl HttpTransport {
                 // indicator once the notifier stopped being installed, which is
                 // what let that regression go unnoticed.
                 if let Some(ref notifier) = self.retry_notifier {
-                    notifier.on_retry(attempts, max_retries, &reason);
+                    notifier.on_retry(observed_attempt, max_retries, &reason);
                 }
             }
             tokio::time::sleep(delay).await;
@@ -402,7 +441,9 @@ impl HttpTransport {
         }
 
         Err(ApiError::RetriesExhausted {
-            attempts,
+            attempts: request_scope
+                .as_ref()
+                .map_or(attempts, RequestScope::attempts),
             last_error: Box::new(last_error.expect("retry loop must capture an error")),
         })
     }

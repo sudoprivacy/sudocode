@@ -1,5 +1,7 @@
 //! Step budgets stop execution through the real CLI and shared provider builder.
 mod common;
+#[path = "support/wire_requests.rs"]
+mod wire_requests;
 
 use common::TestEnv;
 use serde_json::json;
@@ -193,15 +195,45 @@ fn live_step_budget_preserves_results_across_turns() {
         return;
     }
     set_budget(&env, 2);
-    let mut sess = env.spawn(&[
-        "--permission-mode",
-        "danger-full-access",
-        "--allowedTools",
-        "bash",
-    ]);
+    // Each next command needs a fresh ticket from the preceding real result.
+    // The requested five steps are finite; the host must stop them after two.
+    fs::write(env.workspace_root().join("step.cjs"), r#"
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const [turn, ticket] = process.argv.slice(2);
+if (!['1', '2'].includes(turn)) throw new Error('invalid turn');
+const path = `step-state-${turn}.json`;
+const state = fs.existsSync(path) ? JSON.parse(fs.readFileSync(path, 'utf8')) : {step: 0, ticket: 'start'};
+if (ticket !== state.ticket || state.step >= 5) throw new Error('stale ticket or completed task');
+fs.appendFileSync('steps.txt', `turn-${turn}\n`);
+state.step++;
+state.ticket = crypto.randomBytes(12).toString('hex');
+fs.writeFileSync(path, JSON.stringify(state));
+console.log(`Completed ${state.step} of 5 steps for turn ${turn}.`);
+console.log(state.step === 5 ? 'DONE' : `NEXT_COMMAND: node step.cjs ${turn} ${state.ticket}`);
+"#).unwrap();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let captured = std::env::var_os("SCODE_LIVE_ARTIFACTS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| env.workspace_root().join("requests"))
+        .join(format!("step-budget-{stamp}"));
+    fs::create_dir_all(&captured).unwrap();
+    let mut sess = env.spawn_with_env(
+        &[
+            "--permission-mode",
+            "danger-full-access",
+            "--allowedTools",
+            "bash",
+        ],
+        &[("SUDOCODE_DUMP_REQUESTS", captured.to_str().unwrap())],
+    );
+    let mut previous_requests = 0;
     common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "initial prompt");
     for turn in 1..=2 {
-        let prompt = format!("Turn {turn}: append five new lines to steps.txt using five sequential bash calls. For each call run exactly this command: echo turn-{turn} >> steps.txt. Make one bash call per model response and wait for its result before the next call; do not combine calls, use a loop, or launch a background command. When tools become unavailable, summarize the completed work and the remaining lines without claiming they were written.");
+        let prompt = format!("Turn {turn}: complete the five-step fixture in this same user turn. Start by running exactly `node step.cjs {turn} start` with Bash. Read its stdout and immediately execute the returned NEXT_COMMAND verbatim; repeat until DONE. Each command needs the fresh ticket from the previous result, so wait for the result before issuing the next command. Do not wait for another user message. Do not read or edit the script/state, combine commands, use loops, or run in the background. If the host removes tools before DONE, report the actual completed steps and remaining work honestly.");
         let marker = common::turn_status_marker(&sess);
         sess.send(&prompt).unwrap();
         common::expect_screen_settled(
@@ -235,6 +267,83 @@ fn live_step_budget_preserves_results_across_turns() {
             "each turn must stop at two real tool rounds and retain earlier results\nPTY:\n{}",
             sess.render(|screen| screen.raw().contents())
         );
+        let mut paths: Vec<_> = fs::read_dir(&captured)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| wire_requests::is_inference_request_dump(path))
+            .collect();
+        paths.sort();
+        let requests: Vec<serde_json::Value> = paths
+            .iter()
+            .map(|path| serde_json::from_slice(&fs::read(path).unwrap()).unwrap())
+            .collect();
+        let current = &requests[previous_requests..];
+        assert!(
+            current.len() >= 3,
+            "two tool rounds and a final-answer request must be captured"
+        );
+        let tool_calls = |request: &serde_json::Value| -> std::collections::BTreeMap<_, _> {
+            wire_requests::request_tool_blocks(request)
+                .into_iter()
+                .filter(|block| block["type"] == "tool_use")
+                .map(|block| (block["id"].to_string(), block))
+                .collect()
+        };
+        // Count executed tool rounds, not transport attempts. A legitimate retry
+        // can repeat a snapshot without consuming another execution step.
+        for request in current {
+            let prior_calls = tool_calls(request);
+            let has_tools = request["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty());
+            if has_tools {
+                assert!(prior_calls.len() < turn * 2, "tools offered after the cap");
+            } else {
+                assert_eq!(
+                    prior_calls.len(),
+                    turn * 2,
+                    "tools withdrawn before two completed rounds in this turn"
+                );
+                assert!(request
+                    .get("tool_choice")
+                    .is_none_or(serde_json::Value::is_null));
+            }
+        }
+        assert!(
+            current[0]["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "each user turn gets tools again"
+        );
+        let final_request = current.last().unwrap();
+        assert!(
+            final_request
+                .get("tools")
+                .is_none_or(|tools| tools.is_null() || tools.as_array().is_some_and(Vec::is_empty)),
+            "final answer must not offer tools"
+        );
+        let calls = tool_calls(final_request);
+        assert_eq!(
+            calls.len(),
+            turn * 2,
+            "each turn adds exactly two real tool calls"
+        );
+        for call in calls.values() {
+            assert!(matches!(call["name"].as_str(), Some("bash" | "Bash")));
+            let words = shell_words::split(call["input"]["command"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                words.len(),
+                4,
+                "one fixture command, no compound shell or loop"
+            );
+            assert_eq!(&words[..2], ["node", "step.cjs"]);
+            assert!(matches!(words[2].as_str(), "1" | "2"));
+            assert!(
+                words[3] == "start"
+                    || (words[3].len() == 24 && words[3].bytes().all(|b| b.is_ascii_hexdigit()))
+            );
+        }
+        previous_requests = requests.len();
     }
     sess.send("/exit\r").unwrap();
     assert_eq!(sess.expect_eof().unwrap(), 0);

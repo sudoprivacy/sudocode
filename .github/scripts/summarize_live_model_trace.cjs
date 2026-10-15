@@ -79,10 +79,10 @@ for (const file of [3, 2, 1, 0].map(n => n ? `${input}.${n}` : input)) {
       for (const item of Array.isArray(body.input) ? body.input : []) {
         if (item.type === 'function_call') captureCall(item.name, item.arguments);
       }
-      let origin;
-      try { origin = new URL(data.url).origin; } catch {}
+      let origin, route;
+      try { const url = new URL(data.url); origin = url.origin; route = url.pathname; } catch {}
       report.requests.push({ requestId: clean(data.request_id, 256),
-        sessionId: clean(event.session_id, 256), origin: clean(origin),
+        sessionId: clean(event.session_id, 256), origin: clean(origin), route: clean(route, 256),
         model: clean(body.model, 256), messageCount: body.messages?.length ?? 0,
         environment, assistantTools });
     }

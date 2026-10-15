@@ -519,6 +519,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+      - name: Inspect the provider's real usage contract
+        working-directory: .
+        env:
+          PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+          PROXY_BASE_URL: https://api.sudorouter.ai/v1
+          SCODE_LIVE_MODEL: gpt-6-luna
+        run: node .github/scripts/probe_live_usage.cjs "${{ runner.temp }}/provider-usage-contract.json"
       - name: Run live API smoke tests
         working-directory: rust
         env:
@@ -553,7 +560,9 @@ jobs:
         if: always()
         with:
           name: acp-live-model-evidence
-          path: ${{ runner.temp }}/scode-acp-live-evidence.json
+          path: |
+            ${{ runner.temp }}/scode-acp-live-evidence.json
+            ${{ runner.temp }}/provider-usage-contract.json
           retention-days: 7
 
   live-bash-process-tree:

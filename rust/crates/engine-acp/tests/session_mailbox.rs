@@ -7,10 +7,38 @@ use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
 use a2a::session_io::SessionMailbox;
 use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::{Kernel, OperationContext};
+use runtime::zone_context::ENV_NEXUS_RESOURCE_SCOPE;
 use runtime::{FsBackend, KernelFsBackend};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// A planted descriptor whose resource scope admits the daemon mail world —
+/// the `/agents` chat-list indexes and the flat `/conversations` transcript
+/// store they point into — so the fail-closed zone contract lets an external
+/// peer mailbox drive the delivery this suite asserts.
+fn planted(name: &str) -> AgentDescriptor {
+    let mut descriptor = AgentDescriptor {
+        pid: format!("pid-{name}"),
+        name: name.to_string(),
+        owner_id: "test-owner".to_string(),
+        zone_id: "root".to_string(),
+        ..AgentDescriptor::default()
+    };
+    descriptor.labels.insert(
+        ENV_NEXUS_RESOURCE_SCOPE.to_string(),
+        json!({
+            "schema_version": 1,
+            "zone_id": "root",
+            "rules": [
+                {"capability": "zone.data.read", "resource_prefixes": ["/agents", "/conversations"]},
+                {"capability": "zone.data.write", "resource_prefixes": ["/agents", "/conversations"]}
+            ]
+        })
+        .to_string(),
+    );
+    descriptor
+}
 
 fn call(kernel: &Kernel, method: &str, payload: Value) -> Value {
     let ctx = OperationContext::new("test-owner", "root", false, Some("operator"), false);
@@ -505,11 +533,9 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         a2a::conversation_transcript_path(&a2a::conversation_id("failed-worker", "failed-peer"));
     common::provision_stream_transcript(&kernel, &failed_path);
     let failed_peer = runtime::mailbox::Mailbox::daemon_absolute(
-        Arc::new(KernelFsBackend::for_agent(
+        Arc::new(KernelFsBackend::for_agent_descriptor(
             Arc::clone(&kernel),
-            "test-owner",
-            "root",
-            "failed-peer",
+            &planted("failed-peer"),
             "/",
         )),
         "failed-peer".into(),
@@ -551,18 +577,21 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         })
         .unwrap();
     for pid in [&started["session_id"], &failed_start["session_id"]] {
-        let process_path = format!("/proc/{}", pid.as_str().unwrap());
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let state = call(&kernel, "get_session_v1", json!({"session_id":pid}));
-            let view =
-                kernel::kernel::syscall::KernelSyscall::sys_stat(&*kernel, &process_path, "root");
-            if state["state"] == "terminated" && view.is_none() {
+            // The branch pin (nexus-vfs feat/contract-zone, v0.8.5 at cdff812e)
+            // predates the main line's procfs view cleanup that main adopted
+            // with v0.8.11 — on this line a terminated session keeps its /proc
+            // view, so only termination is asserted here. Restore the
+            // `sys_stat("/proc/{pid}")` removal half when the pin rejoins the
+            // main line.
+            if state["state"] == "terminated" {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "channel closure must terminate the runtime and remove its procfs view: {state}"
+                "channel closure must terminate the runtime: {state}"
             );
             std::thread::sleep(Duration::from_millis(10));
         }

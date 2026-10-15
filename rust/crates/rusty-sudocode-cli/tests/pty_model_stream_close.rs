@@ -29,6 +29,9 @@ enum ResponseKind {
     RefusedJson,
     RefusedAfterText,
     RefusedTail,
+    UsageAtStart,
+    ChatDoneKeepAlive,
+    ResponsesDoneKeepAlive,
 }
 
 impl ResponseKind {
@@ -92,7 +95,7 @@ impl StreamProvider {
                 }
                 let mut body = vec![0; length];
                 input.read_exact(&mut body).unwrap();
-                if !first.starts_with("POST /v1/messages ") {
+                if !first.starts_with("POST ") {
                     let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}");
                     continue;
                 }
@@ -113,6 +116,31 @@ impl StreamProvider {
                 let mut body = refusal_body(kind).unwrap_or_else(|| {
                     response_body(!matches!(kind, ResponseKind::Interrupted), empty)
                 });
+                match kind {
+                    ResponseKind::UsageAtStart => {
+                        body = body.replace(
+                            "\"input_tokens\":12,\"output_tokens\":0",
+                            "\"input_tokens\":12,\"output_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"cost_units\":17,\"cost_currency\":\"sudo_point\"",
+                        ).replace("\"output_tokens\":8", "\"output_tokens\":0");
+                    }
+                    ResponseKind::ChatDoneKeepAlive => {
+                        body = concat!(
+                            "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{\"content\":\"STREAM_BODY_VERIFIED\"}}]}\n\n",
+                            "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                            "data: {\"id\":\"chat\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\n",
+                            "data: [DONE]\n\n",
+                        ).into();
+                    }
+                    ResponseKind::ResponsesDoneKeepAlive => {
+                        body = concat!(
+                            "event: response.created\ndata: {\"id\":\"response\",\"model\":\"sonnet\"}\n\n",
+                            "event: response.output_text.delta\ndata: {\"delta\":\"STREAM_BODY_VERIFIED\"}\n\n",
+                            "event: response.output_text.done\ndata: {}\n\n",
+                            "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}}\n\n",
+                        ).into();
+                    }
+                    _ => {}
+                }
                 if empty
                     && matches!(
                         kind,
@@ -138,6 +166,8 @@ impl StreamProvider {
                     ResponseKind::Interrupted
                         | ResponseKind::Complete
                         | ResponseKind::StopReasonKeepAlive
+                        | ResponseKind::ChatDoneKeepAlive
+                        | ResponseKind::ResponsesDoneKeepAlive
                 ) {
                     128
                 } else {
@@ -163,7 +193,12 @@ impl StreamProvider {
                     continue;
                 }
                 let _ = socket.write_all(response.as_bytes());
-                if matches!(kind, ResponseKind::StopReasonKeepAlive) {
+                if matches!(
+                    kind,
+                    ResponseKind::StopReasonKeepAlive
+                        | ResponseKind::ChatDoneKeepAlive
+                        | ResponseKind::ResponsesDoneKeepAlive
+                ) {
                     // No terminal event or HTTP EOF: only the client's bounded
                     // logical-stop recovery can let the user finish this turn.
                     socket
@@ -275,6 +310,19 @@ fn check_response(kind: ResponseKind) {
     let path = env.config_home().join("sudocode.json");
     let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
+    match kind {
+        ResponseKind::ChatDoneKeepAlive | ResponseKind::ResponsesDoneKeepAlive => {
+            let format = if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+                "openai-completions"
+            } else {
+                "openai-responses"
+            };
+            config["models"]["sonnet"] = json!({"alias":"sonnet", "providers":{"api-key":{
+                "provider":"anthropic", "model":"sonnet", "api":format
+            }}});
+        }
+        _ => {}
+    }
     std::fs::write(path, config.to_string()).unwrap();
     let log_path = env.workspace_root().join("provider-events.jsonl");
     let mut cli = env.spawn_with_env(
@@ -284,7 +332,10 @@ fn check_response(kind: ResponseKind) {
             "--print",
             "Report the stream result",
         ],
-        &[("SCODE_LOG_PATH", log_path.to_str().unwrap())],
+        &[
+            ("SCODE_LOG_PATH", log_path.to_str().unwrap()),
+            ("SUDOCODE_API_READ_TIMEOUT", "2"),
+        ],
     );
     cli.set_default_timeout(common::at_least(Duration::from_secs(45)));
     let exit = cli.expect_eof().unwrap();
@@ -308,6 +359,55 @@ fn check_response(kind: ResponseKind) {
         env.timeout(),
         "complete process output",
     );
+    if matches!(
+        kind,
+        ResponseKind::UsageAtStart
+            | ResponseKind::ChatDoneKeepAlive
+            | ResponseKind::ResponsesDoneKeepAlive
+    ) {
+        assert_eq!(exit, 0, "{screen}");
+        let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
+        let path = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.message_count > 0)
+            .unwrap()
+            .path;
+        let session = runtime::Session::load_from_path(path).unwrap();
+        let usage = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == runtime::MessageRole::Assistant)
+            .unwrap()
+            .usage
+            .expect("persist the provider's actual usage");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(
+            usage.output_tokens,
+            if matches!(kind, ResponseKind::UsageAtStart) {
+                7
+            } else {
+                8
+            }
+        );
+        if matches!(kind, ResponseKind::UsageAtStart) {
+            assert_eq!(usage.cache_creation_input_tokens, 3);
+            assert_eq!(usage.cache_read_input_tokens, 5);
+            assert_eq!(usage.cost_units, Some(17));
+            assert_eq!(
+                usage.cost_currency,
+                Some(runtime::UsageCostCurrency::SudoPoint)
+            );
+        }
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            1,
+            "never regenerate a completed response"
+        );
+        return;
+    }
     if matches!(
         kind,
         ResponseKind::Complete
@@ -498,4 +598,19 @@ fn explicit_refusal_after_partial_text_cannot_succeed() {
 #[test]
 fn explicit_refusal_in_unterminated_tail_is_not_retried_as_truncation() {
     check_response(ResponseKind::RefusedTail);
+}
+
+#[test]
+fn initial_usage_survives_a_zero_filled_terminal_snapshot() {
+    check_response(ResponseKind::UsageAtStart);
+}
+
+#[test]
+fn chat_done_finishes_without_http_eof_and_preserves_usage() {
+    check_response(ResponseKind::ChatDoneKeepAlive);
+}
+
+#[test]
+fn responses_completed_finishes_without_http_eof_and_preserves_usage() {
+    check_response(ResponseKind::ResponsesDoneKeepAlive);
 }

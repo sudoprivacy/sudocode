@@ -100,7 +100,7 @@ impl ResponseAccumulator {
                 }
                 // Anthropic reports `input_tokens`, `cache_creation_input_tokens`
                 // and `cache_read_input_tokens` here and nowhere else.
-                merge_usage(&mut self.usage, start.message.usage);
+                self.usage.merge_snapshot(start.message.usage);
                 if start.message.stop_reason.is_some() {
                     self.stop_reason = start.message.stop_reason;
                 }
@@ -133,7 +133,7 @@ impl ResponseAccumulator {
                 if event.delta.stop_sequence.is_some() {
                     self.stop_sequence = event.delta.stop_sequence;
                 }
-                merge_usage(&mut self.usage, event.usage);
+                self.usage.merge_snapshot(event.usage);
             }
         }
     }
@@ -264,35 +264,6 @@ fn parse_tool_input(raw: &str) -> Result<Value, serde_json::Error> {
         return Ok(Value::Object(serde_json::Map::new()));
     }
     serde_json::from_str(raw)
-}
-
-/// Merge a usage report into the running total, field by field.
-///
-/// Overwrite-if-non-zero rather than assignment. Providers spread usage across
-/// `message_start` (input and cache tokens) and `message_delta` (output
-/// tokens), and each event reports a cumulative snapshot of the fields it knows
-/// about while leaving the rest at zero. Plain assignment therefore keeps only
-/// whichever event came last — which is how the prompt-cache counters went
-/// missing from every collected response.
-fn merge_usage(total: &mut Usage, incoming: Usage) {
-    if incoming.input_tokens > 0 {
-        total.input_tokens = incoming.input_tokens;
-    }
-    if incoming.output_tokens > 0 {
-        total.output_tokens = incoming.output_tokens;
-    }
-    if incoming.cache_creation_input_tokens > 0 {
-        total.cache_creation_input_tokens = incoming.cache_creation_input_tokens;
-    }
-    if incoming.cache_read_input_tokens > 0 {
-        total.cache_read_input_tokens = incoming.cache_read_input_tokens;
-    }
-    if incoming.cost_units.is_some() {
-        total.cost_units = incoming.cost_units;
-    }
-    if incoming.cost_currency.is_some() {
-        total.cost_currency = incoming.cost_currency;
-    }
 }
 
 #[cfg(test)]

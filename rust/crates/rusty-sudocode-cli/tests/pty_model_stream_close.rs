@@ -3,7 +3,7 @@ mod common;
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -49,6 +49,17 @@ struct StreamProvider {
     requests: Arc<AtomicUsize>,
     terminal_connection_state: Arc<AtomicUsize>,
     worker: Option<thread::JoinHandle<()>>,
+}
+
+fn peer_closed(socket: &TcpStream) -> bool {
+    match socket.peek(&mut [0]) {
+        Ok(0) => true,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        _ => false,
+    }
 }
 
 impl StreamProvider {
@@ -180,44 +191,38 @@ impl StreamProvider {
                     socket
                         .set_read_timeout(Some(Duration::from_millis(250)))
                         .unwrap();
-                    let closed = match socket.peek(&mut [0]) {
-                        Ok(0) => true,
-                        Err(error) => !matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ),
-                        _ => false,
-                    };
+                    let closed = peer_closed(&socket);
                     terminal_state.store(if closed { 2 } else { 1 }, Ordering::SeqCst);
                     let _ = socket.write_all(response[split..].as_bytes());
                     continue;
                 }
-                let _ = socket.write_all(response.as_bytes());
+                if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+                    let split = response
+                        .find("data: {\"id\":\"chat\",\"choices\":[],\"usage\"")
+                        .unwrap();
+                    socket.write_all(response[..split].as_bytes()).unwrap();
+                    // Observe that the client stays connected after the
+                    // logical stop, before sending the separate usage tail.
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(250)))
+                        .unwrap();
+                    let closed = peer_closed(&socket);
+                    terminal_state.store(if closed { 2 } else { 1 }, Ordering::SeqCst);
+                    let _ = socket.write_all(response[split..].as_bytes());
+                } else {
+                    let _ = socket.write_all(response.as_bytes());
+                }
                 if matches!(
                     kind,
                     ResponseKind::StopReasonKeepAlive
                         | ResponseKind::ChatDoneKeepAlive
                         | ResponseKind::ResponsesDoneKeepAlive
                 ) {
-                    // No terminal event or HTTP EOF: only the client's bounded
-                    // logical-stop recovery can let the user finish this turn.
+                    // Keep the HTTP body open after a logical/protocol stop.
                     socket
                         .set_read_timeout(Some(Duration::from_millis(100)))
                         .unwrap();
-                    while !stop.load(Ordering::SeqCst) {
-                        match socket.peek(&mut [0]) {
-                            Ok(0) => break,
-                            Err(error)
-                                if !matches!(
-                                    error.kind(),
-                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                                ) =>
-                            {
-                                break
-                            }
-                            _ => {}
-                        }
-                    }
+                    while !stop.load(Ordering::SeqCst) && !peer_closed(&socket) {}
                 }
             }
         });
@@ -399,6 +404,13 @@ fn check_response(kind: ResponseKind) {
             assert_eq!(
                 usage.cost_currency,
                 Some(runtime::UsageCostCurrency::SudoPoint)
+            );
+        }
+        if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+            assert_eq!(
+                provider.terminal_connection_state.load(Ordering::SeqCst),
+                1,
+                "read the independently framed usage tail after finish_reason"
             );
         }
         assert_eq!(

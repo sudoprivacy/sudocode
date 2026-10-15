@@ -1,6 +1,6 @@
 mod adapter;
 
-pub(super) use adapter::{AnsiText, RichText, ui_color};
+pub(super) use adapter::{ui_color, AnsiText, RichText};
 
 #[cfg(test)]
 use crate::render::styled_text::StyledText;
@@ -132,7 +132,10 @@ mod tests {
                     40,
                     width,
                 );
-                let text = StyledText::from_ansi(&overlay);
+                let canvas = element! { AnsiText(content: overlay) }.render(Some(width));
+                let mut wire = Vec::new();
+                canvas.write_ansi(&mut wire).unwrap();
+                let text = StyledText::from_ansi(std::str::from_utf8(&wire).unwrap());
                 let spans = contents(&text);
                 assert!(text.text.starts_with("↳ queued: "));
                 assert!(!spans.is_empty());
@@ -159,7 +162,11 @@ mod tests {
             active_form: "Finishing parser".into(),
         }];
         let panel = super::super::render_todo_panel(&todos, 40);
-        let text = StyledText::from_ansi(&format!("{panel}\nPlainSample"));
+        let canvas =
+            element! { AnsiText(content: format!("{panel}\nPlainSample")) }.render(Some(100));
+        let mut wire = Vec::new();
+        canvas.write_ansi(&mut wire).unwrap();
+        let text = StyledText::from_ansi(std::str::from_utf8(&wire).unwrap());
         let spans = contents(&text);
         let label = spans
             .iter()

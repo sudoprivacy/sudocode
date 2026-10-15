@@ -5,6 +5,9 @@
 
 mod common;
 
+#[path = "support/terminal_palette.rs"]
+mod terminal_palette;
+
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -439,7 +442,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     let colors = if no_color {
         ["Default".to_owned(), "Default".to_owned()]
     } else {
-        terminal_muted_colors()
+        [241, 247].map(|index| terminal_palette::expected_color(&format!("Idx({index})")))
     };
     let muted = &colors[usize::from(background == "15;0")];
     let vars = [
@@ -486,55 +489,6 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     );
     expect_replay_input_ready(&mut resumed);
     exit(&mut resumed);
-}
-
-fn terminal_muted_colors() -> [String; 2] {
-    let mut probe = PtySession::spawn(
-        &common::resolve_sh(),
-        &[
-            "-c",
-            "printf '\\033[0m\\033[2J\\033[H\\033[38;5;241mFG241\\033[0m\\r\\n\\033[38;5;247mFG247\\033[0m\\r\\n\\033[48;5;241mBG241\\033[0m\\r\\n\\033[48;5;247mBG247\\033[0m\\r\\nPALETTE-DONE\\r\\n'; IFS= read -r release",
-        ],
-    )
-    .unwrap();
-    probe.set_default_timeout(common::DEFAULT_TIMEOUT);
-    common::expect_screen(
-        &probe,
-        |screen| screen.contains("PALETTE-DONE"),
-        BUDGET,
-        "independent terminal palette control",
-    );
-    let colors = probe.render(|screen| {
-        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
-        [241, 247].map(|index| {
-            let observed = ["FG", "BG"].map(|channel| {
-                let label = format!("{channel}{index}");
-                let row = rows.iter().position(|row| row.trim_end() == label).unwrap();
-                let cell = screen.raw().cell(u16::try_from(row).unwrap(), 0).unwrap();
-                let fg = format!("{:?}", cell.fgcolor());
-                let bg = format!("{:?}", cell.bgcolor());
-                assert!(!cell.bold() && !cell.dim());
-                if channel == "FG" {
-                    assert_eq!(bg, "Default");
-                    fg
-                } else {
-                    assert_eq!(fg, "Default");
-                    bg
-                }
-            });
-            assert_eq!(observed[0], observed[1], "foreground/background conversion");
-            let [fg, _] = observed;
-            fg
-        })
-    });
-    probe.send("\r").unwrap();
-    assert_eq!(probe.expect_eof().unwrap(), 0);
-    assert!(
-        colors == ["Idx(241)", "Idx(247)"]
-            || (cfg!(windows) && colors == ["Rgb(98, 98, 98)", "Rgb(158, 158, 158)"]),
-        "unexpected terminal palette conversion: {colors:?}"
-    );
-    colors
 }
 
 fn received_block(sess: &PtySession, sender_color: &str, muted: &str) -> Vec<String> {

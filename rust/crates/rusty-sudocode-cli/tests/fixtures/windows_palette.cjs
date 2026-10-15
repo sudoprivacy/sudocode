@@ -48,14 +48,8 @@ async function run() {
     assert(!text.includes('rgb:') && !text.includes('ffff/'), `color reply leaked into UI\n${text}`);
     assert.deepEqual(queries, [], 'Windows must not solicit OSC 10/11 replies');
     const label = mutedLabel();
-    // Older system ConPTY expands indexed colors; newer hosts retain the index.
-    if (config.backend === 'system' && label?.isFgRGB()) {
-      assert.equal(label.getFgColor(), config.expectedMuted === 241 ? 0x626262 : 0x9e9e9e,
-        'COLORFGBG theme selection after system ConPTY palette conversion');
-    } else {
-      assert(label?.isFgPalette(), `Todo label must use the fallback palette\n${text}`);
-      assert.equal(label.getFgColor(), config.expectedMuted, 'COLORFGBG theme selection');
-    }
+    assert(label?.isFgPalette(), `Todo label must use the fallback palette\n${text}`);
+    assert.equal(label.getFgColor(), config.expectedMuted, 'COLORFGBG theme selection');
     child.write('\x15/exit');
     await settle(text => exactInput(text, '/exit'));
     child.write('\r');

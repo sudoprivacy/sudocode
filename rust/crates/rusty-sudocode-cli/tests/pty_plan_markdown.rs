@@ -332,7 +332,7 @@ fn assert_requests(env: &TestEnv, plan: &str, clear: bool) {
 fn approve(queue: bool, clear: bool, no_color: bool) {
     let env = TestEnv::new("plan-markdown");
     let mut sess = start(&env, queue, no_color);
-    submit_plan(&env, &mut sess, queue);
+    submit_plan(&env, &mut sess);
     let saved = std::fs::read_to_string(env.workspace_root().join("reviewed-plan.md"))
         .expect("the complete source must already be persisted while approval is pending");
     for section in ["## Context", "## Constraints", "## Acceptance Criteria"] {
@@ -436,7 +436,7 @@ fn no_color_keeps_markdown_structure_and_keep_context_executes() {
 fn rejection_keeps_the_saved_draft_without_executing() {
     let env = TestEnv::new("plan-reject");
     let mut sess = start(&env, true, false);
-    submit_plan(&env, &mut sess, true);
+    submit_plan(&env, &mut sess);
     let marker = common::turn_status_marker(&sess);
     choose(&mut sess, true, "4");
     common::expect_turn_complete_after(&sess, &marker, LIVE_TURN_BUDGET, "rejection completes");
@@ -449,7 +449,7 @@ fn rejection_keeps_the_saved_draft_without_executing() {
 fn a_changed_file_cannot_execute_under_a_stale_approval() {
     let env = TestEnv::new("plan-stale");
     let mut sess = start(&env, true, false);
-    submit_plan(&env, &mut sess, true);
+    submit_plan(&env, &mut sess);
     std::fs::write(
         env.workspace_root().join("reviewed-plan.md"),
         "# Replacement draft\n",

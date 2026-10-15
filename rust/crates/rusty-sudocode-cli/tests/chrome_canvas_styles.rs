@@ -1,16 +1,9 @@
-//! Optional production formatter-to-Canvas boundary checks; not `ConPTY` acceptance.
+//! Production ANSI adapter-to-Canvas boundary checks; not `ConPTY` acceptance.
 
 #[path = "../src/render"]
 mod render {
-    #[path = "ansi_codes.rs"]
-    mod ansi_codes;
-    pub use ansi_codes::{BOLD, DIM, RESET};
     #[path = "styled_text.rs"]
     pub(crate) mod styled_text;
-    // Include the production truncator without exercising unrelated wrapping helpers.
-    #[allow(dead_code)]
-    #[path = "text_layout.rs"]
-    pub(crate) mod text_layout;
 }
 
 #[path = "../src/repl_ui"]
@@ -21,8 +14,6 @@ mod repl_ui {
         mod adapter;
         pub(super) use adapter::{AnsiText, RichText};
     }
-    #[path = "chrome_labels.rs"]
-    mod chrome_labels;
 
     use crate::render::styled_text::StyledText;
     use crossterm::style::{Attribute, Color as TerminalColor};
@@ -53,139 +44,42 @@ mod repl_ui {
     }
 
     #[test]
-    fn queued_labels_reach_canvas_with_dim_and_reset() {
+    fn initial_style_and_resets_reach_ansi_text_canvas() {
         for width in [100, 68, 78] {
-            for display in [
-                "❯ HumanQueuedMarker\nIgnoredSecondLine",
-                "Message from peer: PeerQueuedMarker\nIgnoredSecondLine",
-            ] {
-                let label = chrome_labels::queued_label(display);
-                assert_eq!(
-                    label,
-                    format!(
-                        "\x1b[2m↳ queued: {}\x1b[0m",
-                        display.lines().next().unwrap()
-                    )
-                );
-                let content = crate::render::text_layout::truncate_to_width(&label, width);
-                let canvas = element! {
-                    ansi_text::AnsiText(content: format!("{content}\nPlainAfter"))
-                }
-                .render(Some(width));
-                let mut wire = Vec::new();
-                canvas.write_ansi(&mut wire).unwrap();
-                let rendered = StyledText::from_ansi(std::str::from_utf8(&wire).unwrap());
-                assert_eq!(
-                    rendered.text.replace("\r\n", "\n").trim_end(),
-                    format!("↳ queued: {}\nPlainAfter", display.lines().next().unwrap())
-                );
-                assert_style(&rendered, "↳ queued: ", None, false, true, false);
-                assert_style(
-                    &rendered,
-                    display.lines().next().unwrap(),
-                    None,
-                    false,
-                    true,
-                    false,
-                );
-                assert_style(&rendered, "PlainAfter", None, false, false, false);
-            }
-        }
-    }
-
-    #[test]
-    fn truncated_queued_labels_keep_dim_and_reset_at_each_width() {
-        for width in [100, 68, 78] {
-            let label = chrome_labels::queued_label(&format!("QueueMarker {}", "x".repeat(120)));
-            let content = crate::render::text_layout::truncate_to_width(&label, width);
-            assert_eq!(crate::render::text_layout::display_width(&content), width);
-            let expected = StyledText::from_ansi(&content).text;
-            assert!(expected.ends_with('…'));
             let canvas = element! {
-                ansi_text::AnsiText(content: format!("{content}\nPlainAfter"))
+                ansi_text::AnsiText(
+                    content: "\x1b[1;2mBothMarker\x1b[22mIntensityReset\x1b[0mPlainAfter",
+                    initial_style: crossterm::style::ContentStyle {
+                        foreground_color: Some(TerminalColor::DarkGrey),
+                        ..crossterm::style::ContentStyle::default()
+                    },
+                )
             }
             .render(Some(width));
             let mut wire = Vec::new();
             canvas.write_ansi(&mut wire).unwrap();
             let rendered = StyledText::from_ansi(std::str::from_utf8(&wire).unwrap());
             assert_eq!(
-                rendered.text.replace("\r\n", "\n").trim_end(),
-                format!("{expected}\nPlainAfter")
+                rendered.text.trim_end(),
+                "BothMarkerIntensityResetPlainAfter"
             );
-            assert_style(&rendered, "↳ queued: QueueMarker", None, false, true, false);
+            assert_style(
+                &rendered,
+                "BothMarker",
+                Some(TerminalColor::DarkGrey),
+                true,
+                true,
+                false,
+            );
+            assert_style(
+                &rendered,
+                "IntensityReset",
+                Some(TerminalColor::DarkGrey),
+                false,
+                false,
+                false,
+            );
             assert_style(&rendered, "PlainAfter", None, false, false, false);
-        }
-    }
-
-    #[test]
-    fn todo_labels_and_icons_reach_canvas_without_style_leaks() {
-        for width in [100, 68, 78] {
-            let mut lines = Vec::new();
-            for (status, content, active_form, expected) in [
-                (
-                    runtime::TodoStatus::Completed,
-                    "CompletedMarker",
-                    "UnusedCompletedActiveForm",
-                    "  \x1b[32m✓\x1b[0m \x1b[2m\x1b[9mCompletedMarker\x1b[29m\x1b[0m",
-                ),
-                (
-                    runtime::TodoStatus::InProgress,
-                    "UnusedProgressContent",
-                    "ProgressMarker",
-                    "  \x1b[36m■\x1b[0m \x1b[1mProgressMarker\x1b[0m",
-                ),
-                (
-                    runtime::TodoStatus::Pending,
-                    "PendingMarker",
-                    "UnusedPendingActiveForm",
-                    "  □ PendingMarker",
-                ),
-            ] {
-                let todo = runtime::Todo {
-                    status,
-                    content: content.into(),
-                    active_form: active_form.into(),
-                };
-                let line = chrome_labels::todo_item(&todo, "\x1b[32m", "\x1b[36m");
-                assert_eq!(line, expected);
-                lines.push(format!("{line} PlainAfter{content}"));
-            }
-            let canvas =
-                element! { ansi_text::AnsiText(content: lines.join("\n")) }.render(Some(width));
-            let mut wire = Vec::new();
-            canvas.write_ansi(&mut wire).unwrap();
-            let rendered = StyledText::from_ansi(std::str::from_utf8(&wire).unwrap());
-            assert_eq!(rendered.text.replace("\r\n", "\n").trim_end(), "  ✓ CompletedMarker PlainAfterCompletedMarker\n  ■ ProgressMarker PlainAfterUnusedProgressContent\n  □ PendingMarker PlainAfterPendingMarker");
-            assert_style(
-                &rendered,
-                "✓",
-                Some(TerminalColor::DarkGreen),
-                false,
-                false,
-                false,
-            );
-            assert_style(
-                &rendered,
-                "■",
-                Some(TerminalColor::DarkCyan),
-                false,
-                false,
-                false,
-            );
-            assert_style(&rendered, "□", None, false, false, false);
-            assert_style(&rendered, "CompletedMarker", None, false, true, true);
-            assert_style(&rendered, "ProgressMarker", None, true, false, false);
-            assert_style(&rendered, "PendingMarker", None, false, false, false);
-            for suffix in ["CompletedMarker", "UnusedProgressContent", "PendingMarker"] {
-                assert_style(
-                    &rendered,
-                    &format!("PlainAfter{suffix}"),
-                    None,
-                    false,
-                    false,
-                    false,
-                );
-            }
         }
     }
 

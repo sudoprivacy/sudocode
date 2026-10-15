@@ -47,4 +47,3 @@ pub(super) fn PromptTextView(
         }
     }
 }
-

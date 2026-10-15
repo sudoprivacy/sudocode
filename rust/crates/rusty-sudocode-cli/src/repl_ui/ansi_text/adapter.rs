@@ -79,4 +79,3 @@ pub(in crate::repl_ui) fn ui_color(color: TerminalColor) -> Option<Color> {
         TerminalColor::AnsiValue(n) => Color::AnsiValue(n),
     })
 }
-

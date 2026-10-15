@@ -1,6 +1,8 @@
 //! Exercise the production REPL's style bridge through a real terminal, not
 //! just formatter strings: the old Text path kept the words but lost SGR.
 mod common;
+#[path = "support/terminal_palette.rs"]
+mod terminal_palette;
 
 use std::time::{Duration, Instant};
 
@@ -44,11 +46,12 @@ fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
 }
 
 fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
+    let expected_color = terminal_palette::expected_color(expected.0);
     let deadline = Instant::now() + common::at_least(Duration::from_secs(30));
     loop {
         let actual = attributes(sess, needle);
         if actual.as_ref().is_some_and(|(color, bold, dim)| {
-            color == expected.0 && *bold == expected.1 && *dim == expected.2
+            color == &expected_color && *bold == expected.1 && *dim == expected.2
         }) {
             return;
         }

@@ -9,6 +9,8 @@
 //! SCODE_TEST_BACKEND=live cargo test --test pty_spinner_token_counter  # real API
 //! ```
 mod common;
+#[path = "support/terminal_palette.rs"]
+mod terminal_palette;
 
 use std::time::Duration;
 
@@ -97,6 +99,7 @@ fn live_spinner_shows_token_counter_during_streaming() {
 #[test]
 fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
     use std::time::Instant;
+    let warning = terminal_palette::expected_color("Idx(220)");
     let env = TestEnv::new_mock("spinner-activity");
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "read-only"],
@@ -137,7 +140,7 @@ fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
                 saw_initial_wait = true;
             }
             if line.contains("↓ 9 tokens") || line.contains("↓ 11 tokens") {
-                if color == "Idx(220)" {
+                if color == warning {
                     saw_stall = true;
                 } else {
                     assert_eq!(color, "Rgb(166, 227, 161)");

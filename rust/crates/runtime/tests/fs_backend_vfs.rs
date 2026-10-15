@@ -1021,3 +1021,196 @@ fn a_path_outside_all_mounts_reads_a_transparent_error() {
         "unmounted path must read as a transparent mounts error, got: {err}",
     );
 }
+
+/// The denied principal: a permission provider that refuses everything, so a
+/// metadata probe must surface `PermissionDenied` rather than a silent
+/// `Ok(false)`.
+struct DenyAllMetadata;
+
+impl PermissionProvider for DenyAllMetadata {
+    fn check(
+        &self,
+        _path: &str,
+        _route: Option<&kernel::core::vfs_router::RouteResult>,
+        _permission: Permission,
+        _ctx: &OperationContext,
+    ) -> Result<(), KernelError> {
+        Err(KernelError::PermissionDenied(
+            "denied principal may not probe metadata".to_string(),
+        ))
+    }
+}
+
+/// `exists` / `is_append_stream` are metadata probes over `sys_stat`, which
+/// carries only a routing zone — no principal — so the kernel's policy must
+/// be consulted at the owning filesystem boundary, with the caller's full
+/// identity (the same check `stat` performs). A denied principal gets
+/// `PermissionDenied`; an allowed one reaches the provider (the count proves
+/// it) and gets a real answer.
+///
+/// The backend is built with `for_agent_descriptor` on purpose: its context
+/// is NOT `is_system`, and the kernel short-circuits system contexts before
+/// the provider — a system-context backend would make both the denial and
+/// the count unreachable.
+#[test]
+fn denied_principals_cannot_probe_metadata_through_exists_or_is_append_stream() {
+    let kernel = kernel_with_backend("tenant-zone");
+
+    let mut descriptor = AgentDescriptor {
+        pid: "pid-zone-metadata".to_string(),
+        name: "agent-zone-metadata".to_string(),
+        owner_id: "test-owner".to_string(),
+        zone_id: "tenant-zone".to_string(),
+        ..AgentDescriptor::default()
+    };
+    descriptor.labels.insert(
+        ENV_NEXUS_RESOURCE_SCOPE.to_string(),
+        serde_json::json!({
+            "schema_version": 1,
+            "zone_id": "tenant-zone",
+            "rules": [
+                {"capability": "zone.data.read", "resource_prefixes": ["/ws"]},
+                {"capability": "zone.data.write", "resource_prefixes": ["/ws"]}
+            ]
+        })
+        .to_string(),
+    );
+
+    kernel.set_permission_provider(Arc::new(Box::new(DenyAllMetadata)));
+    let denied_backend =
+        KernelFsBackend::for_agent_descriptor(Arc::clone(&kernel), &descriptor, "/ws");
+    for probe_label in ["exists", "is_append_stream"] {
+        let probe = if probe_label == "exists" {
+            denied_backend.exists("/ws/allowed.txt")
+        } else {
+            denied_backend.is_append_stream("/ws/allowed.txt")
+        };
+        let error = probe.expect_err("a denied principal must not probe metadata");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{probe_label}: got {error}"
+        );
+    }
+
+    let permission_checks = Arc::new(AtomicUsize::new(0));
+    kernel.set_permission_provider(Arc::new(Box::new(CountingAllow(Arc::clone(
+        &permission_checks,
+    )))));
+    let allowed_backend =
+        KernelFsBackend::for_agent_descriptor(Arc::clone(&kernel), &descriptor, "/ws");
+    allowed_backend
+        .exists("/ws/allowed.txt")
+        .expect("an allowed principal gets a real existence answer");
+    allowed_backend
+        .is_append_stream("/ws/allowed.txt")
+        .expect("an allowed principal gets a real stream answer");
+    assert!(
+        permission_checks.load(Ordering::Relaxed) > 0,
+        "the metadata probes reached the kernel's permission provider"
+    );
+}
+
+/// The elevation mapping that lets a host-injected env shape an in-process
+/// kernel's authorization (review finding 1: a standalone-local exception is
+/// limited to genuinely absent hosted metadata). The env shapes the context
+/// exactly four ways:
+///
+/// * a valid zone with a scope → `TrustedLocal`, enforced to that scope;
+/// * a valid zone with no scope → `TrustedLocal`, unscoped — parity with a
+///   planted descriptor that carries no labels (the host said "no limit");
+/// * an invalid zone id, or hosted metadata without one → the denying shape
+///   stays, never widened back into root semantics;
+/// * a scope label that will not parse → `DelegationInvalid`, fail-closed.
+///
+/// The genuinely-absent (`Absent`) entry is covered end to end by the
+/// no-env control group of the subprocess scope test in
+/// `rusty-sudocode-cli/tests/acp_integration.rs` — it cannot be built from
+/// the public constructors without mutating process-global env.
+#[test]
+fn trusted_for_in_process_kernel_maps_host_env_fail_closed_or_scoped() {
+    let scope = serde_json::json!({
+        "schema_version": 1,
+        "zone_id": "tenant-zone",
+        "rules": [
+            {"capability": "zone.data.read", "resource_prefixes": ["/ws"]},
+            {"capability": "zone.data.write", "resource_prefixes": ["/ws"]}
+        ]
+    })
+    .to_string();
+
+    // Valid zone + scope: elevated to trusted-local and enforced to it.
+    let scoped = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        Some("https://nexus.example/v2".to_string()),
+        Some("dlg-short-lived".to_string()),
+        Some(&scope),
+        ContextSource::UnverifiedDelegationRef,
+    )
+    .trusted_for_in_process_kernel();
+    assert_eq!(scoped.source(), &ContextSource::TrustedLocal);
+    assert!(scoped.authorize_path("/ws/in-scope.txt").is_ok());
+    assert!(matches!(
+        scoped.authorize_path("/outside.txt"),
+        Err(runtime::zone_context::ZoneAuthError::OutOfScope(_))
+    ));
+
+    // Valid zone, host injected no scope: unscoped, like a label-less
+    // planted descriptor — the host's explicit "no limit".
+    let unscoped = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        None,
+        None,
+        None,
+        ContextSource::UnverifiedDelegationRef,
+    )
+    .trusted_for_in_process_kernel();
+    assert_eq!(unscoped.source(), &ContextSource::TrustedLocal);
+    assert!(unscoped.authorize_path("/anywhere.txt").is_ok());
+
+    // An invalid zone id leaves no usable zone: the denying shape survives
+    // elevation. (A partial hosted env — metadata without a zone id —
+    // produces this same zone-less unverified shape in `from_host_env`.)
+    let zone_less = HostZoneContext::from_parts_with_scope(
+        "INVALID ZONE",
+        None,
+        None,
+        None,
+        ContextSource::UnverifiedDelegationRef,
+    )
+    .trusted_for_in_process_kernel();
+    assert_eq!(zone_less.source(), &ContextSource::UnverifiedDelegationRef);
+    assert!(matches!(
+        zone_less.authorize_path("/ws/x.txt"),
+        Err(runtime::zone_context::ZoneAuthError::NoZoneContext(_))
+    ));
+
+    // A scope label that will not parse is hosted metadata that failed to
+    // authorize anything: DelegationInvalid, never widened.
+    let broken_scope = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        None,
+        None,
+        Some("not a scope json"),
+        ContextSource::UnverifiedDelegationRef,
+    )
+    .trusted_for_in_process_kernel();
+    assert_eq!(broken_scope.source(), &ContextSource::TrustedLocal);
+    assert!(matches!(
+        broken_scope.authorize_path("/ws/x.txt"),
+        Err(runtime::zone_context::ZoneAuthError::DelegationInvalid)
+    ));
+
+    // Elevation is idempotent on an already-trusted context.
+    let trusted = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        None,
+        None,
+        Some(&scope),
+        ContextSource::TrustedLocal,
+    );
+    assert_eq!(
+        trusted.trusted_for_in_process_kernel().source(),
+        &ContextSource::TrustedLocal
+    );
+}

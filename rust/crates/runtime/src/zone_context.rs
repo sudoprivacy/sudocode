@@ -8,10 +8,14 @@
 //!    [`NEXUS_ZONE_ID`] / [`NEXUS_V2_BASE_URL`] / [`NEXUS_DELEGATION_REF`] are set
 //!    by the moss runner manifest.
 //!
-//! Neither source proves that the service validated the referenced delegation,
-//! so both are [`ContextSource::UnverifiedDelegationRef`] and can only cause an
-//! early denial. Only an authenticated system/NoAuth in-process kernel context
-//! is [`ContextSource::TrustedLocal`]. [`ResourceRef`] targets are
+//! Neither source is a credential a remote VFS server can verify, so consumed
+//! remotely both stay [`ContextSource::UnverifiedDelegationRef`] and can only
+//! cause an early denial. In-process is a different question: a descriptor the
+//! trusted `ManagedAgentService` planted, and — elevated via
+//! [`HostZoneContext::trusted_for_in_process_kernel`] — the host-injected env
+//! of a subprocess (its injector is the process's parent, the same position
+//! the service is in for a planted descriptor) are authority by construction
+//! and become [`ContextSource::TrustedLocal`]. [`ResourceRef`] targets are
 //! re-validated on every use (R6.3): the zone-id shape comes from the
 //! `sudo-contracts` owner validators (R6.1 — derived Rust artifact of the
 //! nexus owner schemas, never a hand-rewritten regex), and a [`ResourceRef`] may
@@ -77,6 +81,9 @@ impl HostZoneContext {
     /// Subprocess path (R6.2): the zone arrives via host-injected env.
     /// A malformed id is rejected (recorded without a usable zone while the
     /// attempted host source remains visible) — never coerced or guessed.
+    /// A `NEXUS_ZONE_ID` that is absent while other hosted metadata is
+    /// present is still hosted metadata, not a genuinely absent one: it
+    /// yields a denying context rather than the standalone-local `Absent`.
     #[must_use]
     pub fn from_host_env() -> Self {
         match std::env::var(ENV_NEXUS_ZONE_ID) {
@@ -92,8 +99,9 @@ impl HostZoneContext {
             },
             Ok(invalid) => {
                 // Payload/host data does not shape-shift into authority: an
-                // invalid id downgrades to Absent (legacy root semantics),
-                // never into a "closest guess".
+                // invalid id leaves no usable zone and the context denies
+                // (never coerced into a "closest guess", never widened back
+                // to root semantics).
                 tracing::debug!(zone_id = %invalid, "invalid NEXUS_ZONE_ID ignored");
                 Self {
                     zone_id: None,
@@ -104,15 +112,56 @@ impl HostZoneContext {
                     source: ContextSource::UnverifiedDelegationRef,
                 }
             }
-            Err(_) => Self {
-                zone_id: None,
-                nexus_v2_base_url: None,
-                delegation_ref: None,
-                resource_scope: None,
-                resource_scope_present: false,
-                source: ContextSource::Absent,
-            },
+            Err(_) => {
+                // Only a genuinely absent hosted env keeps the standalone
+                // local (`Absent`) shape. A partial one — delegation ref,
+                // base URL or resource scope without a zone id — must not
+                // widen into the root exception, so it stays a denying
+                // context.
+                let any_hosted = std::env::var(ENV_NEXUS_V2_BASE_URL).is_ok()
+                    || std::env::var(ENV_NEXUS_DELEGATION_REF).is_ok()
+                    || std::env::var(ENV_NEXUS_RESOURCE_SCOPE).is_ok();
+                Self {
+                    zone_id: None,
+                    nexus_v2_base_url: None,
+                    delegation_ref: None,
+                    resource_scope: None,
+                    resource_scope_present: std::env::var(ENV_NEXUS_RESOURCE_SCOPE).is_ok(),
+                    source: if any_hosted {
+                        ContextSource::UnverifiedDelegationRef
+                    } else {
+                        ContextSource::Absent
+                    },
+                }
+            }
         }
+    }
+
+    /// Elevate a host-env context into the in-process kernel's trusted shape.
+    ///
+    /// Same trust reasoning as [`Self::from_planted_descriptor`]: a context
+    /// the trusted host constructed in-process is authority by construction,
+    /// and a subprocess's env is exactly that — whoever injected it is the
+    /// process's parent, the position the `ManagedAgentService` is in when
+    /// it plants a descriptor. Distinct from the remote case, where the same
+    /// metadata stays [`ContextSource::UnverifiedDelegationRef`] because the
+    /// VFS server cannot verify it.
+    ///
+    /// Mapping: `Absent` (genuinely absent hosted metadata) stays `Absent` —
+    /// the standalone-local exception's only entry; a valid env zone becomes
+    /// [`ContextSource::TrustedLocal`] (enforced to its scope when one is
+    /// present, unscoped when the host injected none); an invalid id or
+    /// partial hosted metadata keeps its denying shape — never widened back
+    /// to root.
+    #[must_use]
+    pub fn trusted_for_in_process_kernel(&self) -> Self {
+        let mut elevated = self.clone();
+        if self.zone_id.is_some()
+            && matches!(self.source, ContextSource::UnverifiedDelegationRef)
+        {
+            elevated.source = ContextSource::TrustedLocal;
+        }
+        elevated
     }
 
     /// Explicit constructor used by trusted host adapters and integration

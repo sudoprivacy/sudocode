@@ -6774,6 +6774,188 @@ async fn acp_completions_sync_and_nested_do_not_auto_publish() {
         assert_eq!(
             replay["result"]["settled"], 1,
             "only the root's direct spawn is registered: {replay}"
+
+// ---------------------------------------------------------------------------
+// Zone-contract subprocess scope (review acceptance: "real subprocess
+// scope-denial coverage")
+// ---------------------------------------------------------------------------
+
+/// Like [`spawn_stdio_client_danger`] but injects the subprocess runner env
+/// (`NEXUS_ZONE_ID` + `NEXUS_RESOURCE_SCOPE`) after `isolate_env`'s
+/// `env_clear`, standing in for the zone metadata a moss runner manifest
+/// would plant. `danger-full-access` keeps the tool layer out of the way so
+/// a denial can only come from the zone contract.
+fn spawn_stdio_client_danger_zone_env(
+    workspace: &TestWorkspace,
+    zone_id: &str,
+    resource_scope: &str,
+) -> AcpTestClient {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    cmd.current_dir(&workspace.root);
+    isolate_env(&mut cmd, workspace);
+    cmd.args([
+        "--auth",
+        "api-key",
+        "--model",
+        "sonnet",
+        "--permission-mode",
+        "danger-full-access",
+        "acp",
+    ])
+    .env("NEXUS_ZONE_ID", zone_id)
+    .env("NEXUS_RESOURCE_SCOPE", resource_scope)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn scode acp stdio (danger+zone)");
+    let stdin = child.stdin.take().expect("stdin should be piped");
+    let stdout = child.stdout.take().expect("stdout should be piped");
+
+    AcpTestClient {
+        transport: Transport::Stdio {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        },
+        next_id: 1,
+        last_available_commands: None,
+        raw_lines: Vec::new(),
+    }
+}
+
+/// The host-injected runner env must shape the CLI's file authorization
+/// (review finding 1): a real subprocess with a scoped zone writes inside
+/// its scope and is refused outside it, while the same operation in a
+/// genuinely env-less subprocess succeeds — the standalone-local exception
+/// is limited to that absence, and the refusal is attributable to the zone
+/// layer (the `ZoneAuthError::OutOfScope` message), not the tool layer.
+///
+/// The scope prefix is computed over the CANONICALIZED workspace root: the
+/// child canonicalizes the session cwd (`canonical_session_cwd`) before
+/// booting its kernel, and `path_is_within` is a plain string prefix match —
+/// an un-canonicalized `/tmp`-style path would diverge on macOS
+/// (`/private/tmp`) and 8.3-short-name Windows temp dirs.
+///
+/// Mock scenarios are fixed to write `generated/output.txt` /
+/// `generated/denied.txt`, so in-scope vs out-of-scope is chosen by the
+/// prefix the scope grants: `…/generated` includes the writes; `…/allowed`
+/// excludes them.
+#[tokio::test]
+async fn zone_scope_env_shapes_cli_subprocess_file_authorization() {
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+
+    let scope_json_for = |granted_prefix: &str| {
+        serde_json::json!({
+            "schema_version": 1,
+            "zone_id": "zone-scope-e2e",
+            "rules": [
+                {"capability": "zone.data.read", "resource_prefixes": [granted_prefix]},
+                {"capability": "zone.data.write", "resource_prefixes": [granted_prefix]}
+            ]
+        })
+        .to_string()
+    };
+
+    // Group 1 — in scope: the write under the granted prefix succeeds.
+    {
+        let workspace = TestWorkspace::new("zone-in-scope");
+        workspace.create();
+        workspace.write_sudocode_json(&server.base_url());
+        let canonical = fs::canonicalize(&workspace.root).expect("canonicalize root");
+        let ws_vfs =
+            runtime::vfs_path_for_host_path(&canonical).expect("workspace VFS prefix");
+        let scope = scope_json_for(&format!("{ws_vfs}/generated"));
+
+        let mut client = spawn_stdio_client_danger_zone_env(&workspace, "zone-scope-e2e", &scope);
+        scenario_initialize(&mut client).await;
+        let session = scenario_session_new(&mut client, &workspace.root).await;
+        let (text, tools) = run_scenario_collect_text(
+            &mut client,
+            &session,
+            "write_file_allowed",
+            Duration::from_secs(30),
+            "zone in-scope write",
+        )
+        .await;
+        assert!(
+            text.contains("write_file succeeded"),
+            "in-scope write must succeed: text {text:?} tools {tools:?}"
+        );
+        assert!(
+            workspace.root.join("generated/output.txt").is_file(),
+            "in-scope write must land on disk"
+        );
+        client.shutdown().await;
+        workspace.cleanup();
+    }
+
+    // Group 2 — out of scope: the identical write shape is refused, nothing
+    // lands, and the refusal reason is the zone layer's OutOfScope.
+    {
+        let workspace = TestWorkspace::new("zone-out-of-scope");
+        workspace.create();
+        workspace.write_sudocode_json(&server.base_url());
+        let canonical = fs::canonicalize(&workspace.root).expect("canonicalize root");
+        let ws_vfs =
+            runtime::vfs_path_for_host_path(&canonical).expect("workspace VFS prefix");
+        let scope = scope_json_for(&format!("{ws_vfs}/allowed"));
+
+        let mut client = spawn_stdio_client_danger_zone_env(&workspace, "zone-scope-e2e", &scope);
+        scenario_initialize(&mut client).await;
+        let session = scenario_session_new(&mut client, &workspace.root).await;
+        let (text, tools) = run_scenario_collect_text(
+            &mut client,
+            &session,
+            "write_file_denied",
+            Duration::from_secs(30),
+            "zone out-of-scope write",
+        )
+        .await;
+        assert!(
+            text.contains("write_file denied as expected"),
+            "out-of-scope write must be denied: text {text:?} tools {tools:?}"
+        );
+        assert!(
+            !workspace.root.join("generated/denied.txt").exists(),
+            "out-of-scope write must not land on disk"
+        );
+        let tool_text = tools.iter().map(|tool| tool.to_string()).collect::<String>();
+        assert!(
+            format!("{text}{tool_text}").contains("is outside runtime scope"),
+            "the refusal must be the zone layer's OutOfScope, not the tool \
+             layer's: text {text:?} tools {tool_text:?}"
+        );
+        client.shutdown().await;
+        workspace.cleanup();
+    }
+
+    // Group 3 — control, genuinely env-less: the same write the zone refused
+    // succeeds, proving the refusal came from the env-shaped authorization
+    // and not the tool layer or the mock. The mock's closing text is fixed
+    // ("denied as expected") regardless of the real outcome, so only the
+    // file on disk is the evidence here.
+    {
+        let workspace = TestWorkspace::new("zone-env-absent");
+        workspace.create();
+        workspace.write_sudocode_json(&server.base_url());
+
+        let mut client = spawn_stdio_client_danger(&workspace);
+        scenario_initialize(&mut client).await;
+        let session = scenario_session_new(&mut client, &workspace.root).await;
+        let _ = run_scenario_collect_text(
+            &mut client,
+            &session,
+            "write_file_denied",
+            Duration::from_secs(30),
+            "env-less control write",
+        )
+        .await;
+        assert!(
+            workspace.root.join("generated/denied.txt").is_file(),
+            "env-less control write must land on disk"
         );
         client.shutdown().await;
         workspace.cleanup();

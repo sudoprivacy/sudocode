@@ -978,12 +978,40 @@ impl KernelFsAccess for Kernel {
 
 impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     pub fn new(kernel: Arc<K>, ctx: OperationContext, workspace_root: impl Into<String>) -> Self {
-        let source = if ctx.is_system {
-            ContextSource::TrustedLocal
+        // A standalone-local (root, unscoped) exception applies only when
+        // hosted metadata is genuinely absent. When the host injected a zone
+        // (the subprocess runner env), that env shapes authorization instead:
+        // elevated to trusted-local for the in-process kernel (the env's
+        // injector is this process's parent — the position the
+        // ManagedAgentService is in for a planted descriptor), enforced to
+        // its scope when one is present, and a partial or invalid hosted env
+        // keeps its fail-closed shape rather than widening into root.
+        //
+        // Two zones on purpose when env is present: `zone_context.zone_id`
+        // (the env zone) governs the zone contract (ResourceRef/scope
+        // matching), while `ctx.zone_id` ("root") governs kernel routing
+        // (the mounts live there) — a denial fires in `authorize_target`,
+        // before any syscall, so the two layers never conflict.
+        let zone_context = if ctx.is_system {
+            let env_ctx = crate::zone_context::host_zone_once().trusted_for_in_process_kernel();
+            if matches!(env_ctx.source(), ContextSource::Absent) {
+                HostZoneContext::from_trusted_parts(
+                    &ctx.zone_id,
+                    None,
+                    None,
+                    ContextSource::TrustedLocal,
+                )
+            } else {
+                env_ctx
+            }
         } else {
-            ContextSource::UnverifiedDelegationRef
+            HostZoneContext::from_trusted_parts(
+                &ctx.zone_id,
+                None,
+                None,
+                ContextSource::UnverifiedDelegationRef,
+            )
         };
-        let zone_context = HostZoneContext::from_trusted_parts(&ctx.zone_id, None, None, source);
         Self {
             kernel,
             ctx,
@@ -1396,7 +1424,12 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
-        Ok(self.is_stream_entry(&self.to_kernel(path)?))
+        let vfs = &self.to_kernel(path)?;
+        // `sys_stat` carries only a routing zone — no principal — so the
+        // metadata probe must pass the kernel's policy here, with the
+        // caller's full identity, exactly like `stat`.
+        self.authorize(vfs, Permission::Read)?;
+        Ok(self.is_stream_entry(vfs))
     }
 
     fn tail_read(
@@ -1588,12 +1621,6 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
             });
         }
         Ok(visible)
-    }
-
-    fn exists(&self, path: &str) -> io::Result<bool> {
-        self.authorize_target(path, ResourceAccessKind::Read)?;
-        let path = &self.to_kernel(path)?;
-        Ok(self.kernel.sys_stat(path, &self.ctx.zone_id).is_some())
     }
 
     fn create_dir_all(&self, path: &str) -> io::Result<()> {

@@ -89,6 +89,9 @@ pub fn boot_session_fs(
     // not the fail-closed unverified-delegation source `for_agent` carries —
     // that constructor is for kernel-side agents whose authority must come
     // from a planted descriptor, and would refuse every CLI file operation.
+    // When the host injected hosted metadata (the subprocess runner env),
+    // `KernelFsBackend::new` lets that env shape the authorization instead —
+    // the root exception above is only for a genuinely absent hosted env.
     let ctx = OperationContext::new(agent_name, ZONE, true, Some(agent_name), true);
     Ok(Arc::new(
         KernelFsBackend::new(kernel, ctx, workspace_root)

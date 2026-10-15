@@ -6,9 +6,10 @@ use serde_json::{json, Map, Value};
 
 use crate::error::{ApiError, ProviderErrorBody, ProviderErrorEnvelope};
 use crate::http_transport::{
-    parse_retry_after, request_id_from_headers, HttpTransport, RetryPolicy,
+    parse_retry_after, request_id_from_headers, HttpRequestResult, HttpTransport, RetryPolicy,
 };
 use crate::stream_collect::ResponseAccumulator;
+use crate::stream_diagnostics::StreamProgress;
 use crate::types::{
     is_reserved_request_body_key, ContentBlockDelta, ContentBlockDeltaEvent,
     ContentBlockStartEvent, ContentBlockStopEvent, InputContentBlock, InputMessage, MessageDelta,
@@ -223,7 +224,9 @@ impl OpenAiCompatClient {
                 .await?;
             return collect_response_stream(&mut stream, &request).await;
         }
-        let response = self.send_request(&request, trace_id).await?;
+        let result = self.send_request(&request, trace_id).await?;
+        let client_request_id = result.request_id;
+        let response = result.response;
         let request_id = request_id_from_headers(response.headers());
         let body = response.text().await.map_err(ApiError::from)?;
         // Some backends return {"error":{"message":"...","type":"...","code":...}}
@@ -268,10 +271,7 @@ impl OpenAiCompatClient {
         if has_usage {
             if let Some(tracer) = self.session_tracer() {
                 tracer.record_usage_with_total(
-                    normalized
-                        .request_id
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
+                    client_request_id,
                     normalized.usage.input_tokens,
                     normalized.usage.output_tokens,
                     normalized.usage.cache_creation_input_tokens,
@@ -291,12 +291,14 @@ impl OpenAiCompatClient {
         trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
         preflight_message_request(request)?;
-        let response = self
+        let result = self
             .send_request(&request.clone().with_streaming(), trace_id)
             .await?;
+        let response = result.response;
         Ok(match self.api_format {
             ApiFormat::OpenAiCompletions => MessageStream::chat(
                 request_id_from_headers(response.headers()),
+                result.request_id,
                 response,
                 self.config.provider_name,
                 request.model.clone(),
@@ -304,6 +306,7 @@ impl OpenAiCompatClient {
             ),
             ApiFormat::OpenAiResponses => MessageStream::responses(
                 request_id_from_headers(response.headers()),
+                result.request_id,
                 response,
                 request.model.clone(),
                 self.session_tracer().cloned(),
@@ -317,7 +320,7 @@ impl OpenAiCompatClient {
         &self,
         request: &MessageRequest,
         trace_id: Option<&str>,
-    ) -> Result<reqwest::Response, ApiError> {
+    ) -> Result<HttpRequestResult, ApiError> {
         match self.api_format {
             ApiFormat::OpenAiCompletions => check_request_body_size(request, self.config())?,
             ApiFormat::OpenAiResponses => {
@@ -369,7 +372,6 @@ impl OpenAiCompatClient {
                 trace_id,
             )
             .await
-            .map(|result| result.response)
     }
 }
 
@@ -409,6 +411,7 @@ impl Provider for OpenAiCompatClient {
 #[derive(Debug)]
 pub struct MessageStream {
     request_id: Option<String>,
+    client_request_id: String,
     response: reqwest::Response,
     parser: MessageStreamParser,
     pending: VecDeque<StreamEvent>,
@@ -416,22 +419,26 @@ pub struct MessageStream {
     usage_recorded: bool,
     session_tracer: Option<telemetry::SessionTracer>,
     state: MessageStreamState,
-    /// Number of HTTP chunks successfully read from the stream.
-    chunks_read: u64,
-    /// Number of SSE events successfully parsed from the stream.
-    sse_events_read: u64,
+    progress: StreamProgress,
 }
 
 impl MessageStream {
     fn chat(
         request_id: Option<String>,
+        client_request_id: String,
         response: reqwest::Response,
         provider: impl Into<String>,
         model: String,
         session_tracer: Option<telemetry::SessionTracer>,
     ) -> Self {
+        let progress = StreamProgress::new(
+            session_tracer.clone(),
+            Some(client_request_id.clone()),
+            model.clone(),
+        );
         Self {
             request_id,
+            client_request_id,
             response,
             parser: MessageStreamParser::Chat(OpenAiSseParser::with_context(
                 provider,
@@ -442,19 +449,25 @@ impl MessageStream {
             usage_recorded: false,
             session_tracer,
             state: MessageStreamState::Chat(ChatStreamState::new(model)),
-            chunks_read: 0,
-            sse_events_read: 0,
+            progress,
         }
     }
 
     fn responses(
         request_id: Option<String>,
+        client_request_id: String,
         response: reqwest::Response,
         model: String,
         session_tracer: Option<telemetry::SessionTracer>,
     ) -> Self {
+        let progress = StreamProgress::new(
+            session_tracer.clone(),
+            Some(client_request_id.clone()),
+            model.clone(),
+        );
         Self {
             request_id,
+            client_request_id,
             response,
             parser: MessageStreamParser::Responses(ResponsesSseParser::new()),
             pending: VecDeque::new(),
@@ -462,8 +475,7 @@ impl MessageStream {
             usage_recorded: false,
             session_tracer,
             state: MessageStreamState::Responses(ResponsesStreamState::new(model)),
-            chunks_read: 0,
-            sse_events_read: 0,
+            progress,
         }
     }
 
@@ -475,6 +487,7 @@ impl MessageStream {
     pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, ApiError> {
         loop {
             if let Some(event) = self.pending.pop_front() {
+                self.progress.observe_event(&event);
                 return Ok(Some(event));
             }
 
@@ -482,6 +495,7 @@ impl MessageStream {
                 self.pending.extend(self.state.finish()?);
                 self.record_usage_once();
                 if let Some(event) = self.pending.pop_front() {
+                    self.progress.observe_event(&event);
                     return Ok(Some(event));
                 }
                 return Ok(None);
@@ -489,11 +503,11 @@ impl MessageStream {
 
             match self.response.chunk().await {
                 Ok(Some(chunk)) => {
-                    self.chunks_read += 1;
+                    self.progress.observe_chunk(chunk.len());
                     match (&mut self.parser, &mut self.state) {
                         (MessageStreamParser::Chat(parser), MessageStreamState::Chat(state)) => {
                             for parsed in parser.push(&chunk)? {
-                                self.sse_events_read += 1;
+                                self.progress.sse_events_read += 1;
                                 self.pending.extend(state.ingest_chunk(parsed)?);
                             }
                             // [DONE] terminates SSE independently of HTTP EOF.
@@ -506,13 +520,18 @@ impl MessageStream {
                             MessageStreamState::Responses(state),
                         ) => {
                             for frame in parser.push(&chunk) {
-                                self.sse_events_read += 1;
+                                self.progress.sse_events_read += 1;
                                 self.pending.extend(state.ingest_frame(&frame)?);
                             }
                             self.done = state.stop_reason.is_some();
                         }
                         _ => unreachable!("message stream parser/state mismatch"),
                     }
+                    let pending = match &self.parser {
+                        MessageStreamParser::Chat(parser) => &parser.buffer,
+                        MessageStreamParser::Responses(parser) => &parser.buffer,
+                    };
+                    self.progress.parsed_chunk(pending);
                 }
                 Ok(None) => {
                     // Flush any trailing non-SSE body (HTML error page, bare
@@ -521,7 +540,7 @@ impl MessageStream {
                         (&mut self.parser, &mut self.state)
                     {
                         for parsed in parser.finish()? {
-                            self.sse_events_read += 1;
+                            self.progress.sse_events_read += 1;
                             self.pending.extend(state.ingest_chunk(parsed)?);
                         }
                     }
@@ -531,13 +550,10 @@ impl MessageStream {
                     if let Some(tracer) = &self.session_tracer {
                         let error_chain = format_error_chain(&error);
                         tracer.record_stream_error(telemetry::StreamErrorTelemetry {
-                            request_id: self
-                                .request_id
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string()),
+                            request_id: self.client_request_id.clone(),
                             model: self.state.model().to_string(),
-                            chunks_read: self.chunks_read,
-                            sse_events_read: self.sse_events_read,
+                            chunks_read: self.progress.chunks_read,
+                            sse_events_read: self.progress.sse_events_read,
                             usage_seen: self.state.usage().is_some(),
                             stream_finished: self.state.is_finished(),
                             error_message: error.to_string(),
@@ -567,9 +583,7 @@ impl MessageStream {
             return;
         };
         tracer.record_usage_with_total(
-            self.request_id
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
+            self.client_request_id.clone(),
             usage.input_tokens,
             usage.output_tokens,
             usage.cache_creation_input_tokens,

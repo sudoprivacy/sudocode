@@ -11,6 +11,7 @@ mod prompt_cache;
 mod providers;
 mod sse;
 mod stream_collect;
+mod stream_diagnostics;
 mod types;
 
 pub use client::{

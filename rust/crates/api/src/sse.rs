@@ -51,6 +51,10 @@ impl SseParser {
         Ok(events)
     }
 
+    pub(crate) fn pending_bytes(&self) -> &[u8] {
+        &self.buffer
+    }
+
     pub fn finish(&mut self) -> Result<Vec<StreamEvent>, ApiError> {
         if self.buffer.is_empty() {
             return Ok(Vec::new());

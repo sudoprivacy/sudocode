@@ -22,6 +22,7 @@ use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use super::registry::{self, model_token_limit};
 use super::{anthropic_missing_credentials, Provider, ProviderFuture};
 use crate::sse::SseParser;
+use crate::stream_diagnostics::StreamProgress;
 use crate::types::{
     MessageDeltaEvent, MessageRequest, MessageResponse, MessageStopEvent, StreamEvent, Usage,
 };
@@ -493,6 +494,11 @@ impl AnthropicClient {
         let result = self
             .send_request(&request.clone().with_streaming(), trace_id)
             .await?;
+        let progress = StreamProgress::new(
+            self.session_tracer().cloned(),
+            Some(result.request_id.clone()),
+            request.model.clone(),
+        );
         Ok(MessageStream {
             request_id: request_id_from_headers(result.response.headers()),
             gateway_request_id: gateway_trace_from_headers(result.response.headers()),
@@ -512,6 +518,7 @@ impl AnthropicClient {
             session_tracer: self.session_tracer().cloned(),
             cache_diagnosis_buf: String::new(),
             cache_diagnosis_done: false,
+            progress,
         })
     }
 
@@ -1071,6 +1078,7 @@ pub struct MessageStream {
     cache_diagnosis_buf: String,
     /// Set once that frame has been read (or given up on).
     cache_diagnosis_done: bool,
+    progress: StreamProgress,
 }
 
 impl MessageStream {
@@ -1133,6 +1141,7 @@ impl MessageStream {
             };
             match chunk {
                 Ok(Some(chunk)) => {
+                    self.progress.observe_chunk(chunk.len());
                     self.scan_chunk_for_cache_diagnosis(&chunk);
                     let events = self
                         .parser
@@ -1141,6 +1150,9 @@ impl MessageStream {
                     for event in &events {
                         crate::client::record_compaction_stream_event(event)?;
                     }
+                    self.progress.sse_events_read +=
+                        u64::try_from(events.len()).unwrap_or(u64::MAX);
+                    self.progress.parsed_chunk(self.parser.pending_bytes());
                     self.pending.extend(events);
                 }
                 Ok(None) => {
@@ -1227,6 +1239,7 @@ impl MessageStream {
     }
 
     fn observe_event(&mut self, event: &StreamEvent) {
+        self.progress.observe_event(event);
         match event {
             StreamEvent::MessageStart(start) => {
                 self.latest_usage

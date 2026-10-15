@@ -46,8 +46,8 @@ fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
     })
 }
 
-fn terminal_colors() -> &'static (BTreeMap<u8, String>, String) {
-    static COLORS: OnceLock<(BTreeMap<u8, String>, String)> = OnceLock::new();
+fn terminal_colors() -> &'static (BTreeMap<u8, String>, String, bool) {
+    static COLORS: OnceLock<(BTreeMap<u8, String>, String, bool)> = OnceLock::new();
     COLORS.get_or_init(|| {
         let indices = [28_u8, 79, 130, 150, 214, 220, 241, 247];
         let mut command = String::from("printf '\\033[0m\\033[2J\\033[H");
@@ -60,7 +60,17 @@ fn terminal_colors() -> &'static (BTreeMap<u8, String>, String) {
                 .unwrap();
             }
         }
-        command.push_str("\\033[0;1mBOLD\\033[0m\\r\\nPALETTE-DONE\\r\\n'; IFS= read -r release");
+        command.push_str("\\033[0;1mBOLD\\033[0m\\r\\n");
+        for (label, sgr) in [
+            ("PlainControl", "0"),
+            ("DimControl", "0;2"),
+            ("Reset22Control", "22"),
+            ("DimStrikeControl", "0;2;9"),
+            ("Reset0Control", "0"),
+        ] {
+            write!(command, "\\033[{sgr}m{label}\\r\\n").unwrap();
+        }
+        command.push_str("PALETTE-DONE\\r\\n'; IFS= read -r release");
         let mut probe = PtySession::spawn(&common::resolve_sh(), &["-c", &command]).unwrap();
         probe.set_default_timeout(common::DEFAULT_TIMEOUT);
         common::expect_screen(
@@ -129,9 +139,46 @@ fn terminal_colors() -> &'static (BTreeMap<u8, String>, String) {
             );
             (indexed, bold_default)
         });
+        let dim = terminal_dim(&probe);
         probe.send("\r").unwrap();
         assert_eq!(probe.expect_eof().unwrap(), 0);
-        colors
+        (colors.0, colors.1, dim)
+    })
+}
+
+fn terminal_dim(probe: &PtySession) -> bool {
+    probe.render(|screen| {
+        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        let [plain, dim, reset22, dim_strike, reset0] = [
+            "PlainControl",
+            "DimControl",
+            "Reset22Control",
+            "DimStrikeControl",
+            "Reset0Control",
+        ]
+        .map(|label| {
+            let row = rows.iter().position(|row| row.trim_end() == label).unwrap();
+            let cell = screen.raw().cell(u16::try_from(row).unwrap(), 0).unwrap();
+            assert_eq!(
+                format!("{:?}", cell.fgcolor()),
+                "Default",
+                "{label}: foreground"
+            );
+            assert_eq!(
+                format!("{:?}", cell.bgcolor()),
+                "Default",
+                "{label}: background"
+            );
+            assert!(!cell.bold(), "{label}: bold");
+            cell.dim()
+        });
+        assert!(!plain, "PlainControl: dim");
+        assert!(!reset22, "Reset22Control: dim");
+        assert!(!reset0, "Reset0Control: dim");
+        assert_eq!(dim, dim_strike, "dim with and without strikethrough");
+        #[cfg(not(windows))]
+        assert!(dim, "DimControl: dim must survive the terminal");
+        dim
     })
 }
 
@@ -228,9 +275,8 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
     let neutral = terminal_colors().1.as_str();
     expect_style(&sess, "Checking styles", (neutral, true, false));
-    // ConPTY drops independent dim as well as strikethrough. The Canvas
-    // integration checks both before that boundary; the PTY checks its exact output.
-    let dim = !cfg!(windows);
+    // ConPTY dim support is host-dependent; match the independent control exactly.
+    let dim = terminal_colors().2;
     expect_style(&sess, "Finished parser", ("Default", false, dim));
     expect_style(&sess, "Review output", ("Default", false, false));
     // Reflow must not merge differently styled spans or lose their attributes.
@@ -387,14 +433,14 @@ fn running_card_and_queued_input_keep_distinct_styles() {
     expect_style(
         &sess,
         "↳ queued: StyleQueuedMarker",
-        ("Default", false, !cfg!(windows)),
+        ("Default", false, terminal_colors().2),
     );
     expect_style(&sess, "╭─", (border, true, false));
     sess.resize(30, 78).expect("resize during tool");
     expect_style(
         &sess,
         "↳ queued: StyleQueuedMarker",
-        ("Default", false, !cfg!(windows)),
+        ("Default", false, terminal_colors().2),
     );
     expect_style(&sess, "╭─", (border, true, false));
     exit(&mut sess);
@@ -453,12 +499,12 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         );
     }
     sess.expect("❯").expect("input ready");
-    // ConPTY can drop even independent dim. The production Canvas regression
-    // checks dim and combined intensity before that boundary; check bold and
-    // reset here with the neutral foreground from the Todo layout.
+    // ConPTY dim support is host-dependent; check its exact observed intensity
+    // and reset with the neutral foreground from the Todo layout.
     #[cfg(windows)]
     for (label, bold, dim) in [
         ("BoldSample", true, false),
+        ("DimSample", false, terminal_colors().2),
         ("IntensityResetSample", false, false),
     ] {
         let neutral = if bold {

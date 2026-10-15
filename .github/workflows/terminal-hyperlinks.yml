@@ -67,3 +67,14 @@ jobs:
             ${{ runner.temp }}/browser-results
             ${{ runner.temp }}/browser-driver.jsonl
           if-no-files-found: error
+      - name: Preserve binaries for failed-measurement diagnosis
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-terminal-binaries
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/browser-base/release/scode
+            ${{ runner.temp }}/browser-candidate/release/scode
+            ${{ runner.temp }}/browser-candidate/release/deps/pty_hyperlinks-*
+          if-no-files-found: warn

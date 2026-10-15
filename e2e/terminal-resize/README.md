@@ -104,9 +104,14 @@ This is a conservative rendering/readback measurement, including automation and
 capture overhead; it does not measure physical keyboard/display scanout latency.
 Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
 on the same clock, accepting only the event containing the expected input text.
-It excludes polling delay; the driver also retains that delay and raw event
-timestamps for diagnosis. Input checks read only the live viewport, so scanning
-old scrollback cannot become part of the observer's latency.
+Each phase first samples 20 keys without screenshots, then repeats 20 keys with
+pixel evidence. PNG readback can delay the next WebSocket dispatch, so parsed
+latency must come from the independent burst. Both releases receive the same
+deterministic inter-key delays outside timed regions, retained in the report.
+Event completion uses a promise instead of frame polling. Raw key, PTY output,
+WebSocket receive and write-callback timestamps remain available for diagnosis;
+cross-process time origins are diagnostic only. Input checks read only the live
+viewport, so scanning old scrollback cannot become part of observer latency.
 
 Process accounting records scode separately from the dedicated Chromium process
 tree, including browser, renderer and GPU process. Browser CPU comes from CDP;

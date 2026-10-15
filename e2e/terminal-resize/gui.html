@@ -23,7 +23,7 @@
   terminal.unicode.activeVersion = '11';
   terminal.open(document.getElementById('terminal'));
   terminal.focus();
-  let input;
+  let input, inputReady, finishInput;
   const lines = (start = 0) => {
     const buffer = terminal.buffer.active;
     return Array.from({ length: buffer.length - start }, (_, i) => buffer.getLine(start + i).translateToString(true));
@@ -37,7 +37,7 @@
     if (event.target === terminal.textarea && event.key === 'x' && input && input.keydown === undefined) input.keydown = at;
   }, { capture: true });
   const socket = new WebSocket(`ws://${location.host}`);
-  let parsed = 0, rendered = 0, frames = 0, pending = 0, lastData = performance.now();
+  let parsed = 0, rendered = 0, frames = 0, pending = 0, chunks = 0, lastData = performance.now();
   terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, params => {
     if (params.includes(2026)) frames++;
     return false;
@@ -46,11 +46,22 @@
   terminal.onWriteParsed(() => {
     const at = performance.now();
     if (input?.keydown !== undefined && input.parsed === undefined
-      && viewport().split('\n').some(row => row.trimEnd() === `❯ ${input.draft}`)) input.parsed = at;
+      && viewport().split('\n').some(row => row.trimEnd() === `❯ ${input.draft}`)) {
+      input.parsed = at;
+      finishInput(input);
+    }
   });
   socket.onmessage = event => {
-    pending++; lastData = performance.now();
-    terminal.write(event.data, () => { parsed++; pending--; });
+    const received = performance.now(), chunk = chunks++;
+    pending++; lastData = received;
+    terminal.write(event.data, () => {
+      const callback = performance.now();
+      parsed++; pending--;
+      if (input?.keydown !== undefined && input.callback === undefined
+        && viewport().split('\n').some(row => row.trimEnd() === `❯ ${input.draft}`)) {
+        Object.assign(input, { received, callback, chunk });
+      }
+    });
   };
   terminal.onData(data => {
     if (data === 'x' && input?.keydown !== undefined && input.sent === undefined) input.sent = performance.now();
@@ -61,7 +72,15 @@
     get parsed() { return parsed; }, get rendered() { return rendered; },
     get frames() { return frames; }, get pending() { return pending; }, get lastData() { return lastData; },
     lines, viewport,
-    armInput(draft) { input = { draft }; },
+    armInput(draft) { input = { draft }; inputReady = new Promise(resolve => { finishInput = resolve; }); },
+    async waitForInput() {
+      let timer;
+      try {
+        return await Promise.race([inputReady, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Input was not parsed within 30 seconds')), 30000);
+        })]);
+      } finally { clearTimeout(timer); }
+    },
     get input() { return input; },
     async frame() { await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); },
     resize(cols, rows) { terminal.resize(cols, rows); socket.send(JSON.stringify({ cols, rows })); },

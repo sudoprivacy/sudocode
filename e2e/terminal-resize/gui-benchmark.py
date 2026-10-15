@@ -91,7 +91,7 @@ def main():
         save()
     lines = [f"Browser terminal: **{report['status']}**", "",
              "Frame/drag latency includes browser dispatch and PNG readback after rendered frames; not physical display latency.",
-             "Parsed latency is browser keydown to onWriteParsed containing the expected draft; polling time is retained separately.",
+             "Parsed latency uses an independent burst without screenshots, from browser keydown to onWriteParsed containing the expected draft. Transport timestamps are retained separately.",
              "Browser RSS sums its dedicated process tree; shared pages may be counted more than once.", "",
              "| Metric | Baseline | Candidate | Result |", "| --- | ---: | ---: | --- |"]
     for row in report.get("metrics", []):

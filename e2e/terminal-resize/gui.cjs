@@ -14,11 +14,15 @@ const { launch } = require('./host.cjs');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const p95 = values => [...values].sort((a, b) => a - b)[Math.ceil(values.length * .95) - 1];
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+// PNG readback ends near a compositor frame boundary. Sweep input dispatch
+// across frame phases instead of phase-locking every key to the previous PNG.
+// Both releases receive this same deterministic schedule outside timed regions.
+const inputDelaysMs = [0, 7, 19, 31, 3, 13, 23, 5, 17, 29, 11, 2, 37, 9, 21, 4, 15, 27, 1, 33];
 
 async function run(config) {
   fs.mkdirSync(config.logRoot, { recursive: true });
-  const report = { version: 1, status: 'running', metrics: {}, samples: {}, resources: [], clicks: [], input: [], input_timing: {},
-    measurement: 'Frame latency: browser input dispatch to completed PNG capture after xterm render and two animation frames, including automation/readback. Parsed latency: browser keydown to onWriteParsed containing the expected draft, on the same browser clock. Neither measures physical display scanout.',
+  const report = { version: 1, status: 'running', metrics: {}, samples: {}, resources: [], clicks: [], input: [], input_timing: {}, wire_events: [],
+    measurement: 'Frame latency: browser input dispatch to completed PNG capture after xterm render and two animation frames, including automation/readback. Parsed latency: an independent burst without screenshots, from browser keydown to onWriteParsed containing the expected draft, on the same browser clock. Neither measures physical display scanout.',
     resource_scope: 'scode process separately; summed RSS and CPU of dedicated Chromium process tree (shared RSS may be counted more than once); observer Node process excluded.' };
   const routes = {
     '/': ['text/html', path.join(__dirname, 'gui.html')],
@@ -37,12 +41,17 @@ async function run(config) {
   const wire = [], processCpu = new Map();
   websocket.on('connection', socket => {
     child = launch({ ...config, env: { TERM_PROGRAM: 'vscode', TMUX: '', STY: '', ...config.env } }, { cols: config.cols, rows: config.rows });
-    child.onData(data => { wireBytes += Buffer.byteLength(data); wire.push(data); if (socket.readyState === 1) socket.send(data); });
+    child.onData(data => {
+      const bytes = Buffer.byteLength(data);
+      report.wire_events.push({ at: performance.now(), offset: wireBytes, bytes });
+      wireBytes += bytes; wire.push(data);
+      if (socket.readyState === 1) socket.send(data);
+    });
     child.onExit(event => { exitCode = event.exitCode; });
     socket.on('message', raw => {
       const message = JSON.parse(raw);
       if (typeof message.data === 'string') {
-        report.input.push({ text: message.data.slice(0, 80), length: message.data.length });
+        report.input.push({ at: performance.now(), text: message.data.slice(0, 80), length: message.data.length });
         child.write(message.data);
       }
       else child.resize(message.cols, message.rows);
@@ -52,10 +61,12 @@ async function run(config) {
     browser = await chromium.launch({ headless: process.env.SCODE_GUI_HEADED !== '1' });
     cdp = await browser.newBrowserCDPSession();
     page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, deviceScaleFactor: 1 });
-    report.environment = { platform: process.platform, arch: process.arch, node: process.versions.node, cols: config.cols, rows: config.rows, deviceScaleFactor: 1 };
+    report.environment = { platform: process.platform, arch: process.arch, node: process.versions.node, cols: config.cols, rows: config.rows, deviceScaleFactor: 1, inputDelaysMs };
     report.browser = await browser.version();
     report.xterm = require('@xterm/xterm/package.json').version;
     await page.goto(`http://127.0.0.1:${server.address().port}/?options=${encodeURIComponent(JSON.stringify({ cols: config.cols, rows: config.rows }))}`);
+    report.observer_time_origin = performance.timeOrigin;
+    report.browser_time_origin = await page.evaluate(() => performance.timeOrigin);
     const wait = predicate => page.waitForFunction(predicate, null, { timeout: 30000, polling: 'raf' });
     await wait(() => window.fixture?.viewport().includes('❯'));
     await wait(() => fixture.lines().join('\n').includes('LinkBodyEND.'));
@@ -181,28 +192,35 @@ async function run(config) {
       await page.locator('.xterm-helper-textarea').focus();
       await wait(() => document.hasFocus() && document.activeElement === fixture.terminal.textarea);
       const samples = [], parseSamples = [];
-      const timing = report.input_timing[phase] = [];
-      let draft = '', previous = await painted();
-      for (let i = 0; i < 20; i++) {
-        draft += 'x';
-        await page.evaluate(draft => fixture.armInput(draft), draft);
-        const began = performance.now();
-        await page.keyboard.type('x');
-        await page.waitForFunction(() => fixture.input?.parsed !== undefined);
-        const observed = performance.now() - began;
-        const events = await page.evaluate(() => fixture.input);
-        assert(events.sent >= events.keydown && events.parsed >= events.sent, 'input event ordering');
-        timing.push({ ...events, polled_ms: observed });
-        parseSamples.push(events.parsed - events.keydown);
-        const next = await painted();
-        samples.push(performance.now() - began);
-        assert.notEqual(hash(previous), hash(next), 'input changed cells but no pixels');
-        previous = next;
+      // Readback can delay the next WebSocket message. Sample parsed input in
+      // its own burst, then repeat the same keys with pixel evidence.
+      for (const capture of [false, true]) {
+        const timing = report.input_timing[`${phase}_${capture ? 'painted' : 'parsed'}`] = [];
+        await page.evaluate(() => fixture.frame());
+        let draft = '', previous = capture ? await painted() : null;
+        for (const delay of inputDelaysMs) {
+          draft += 'x';
+          await page.evaluate(draft => fixture.armInput(draft), draft);
+          if (delay) await sleep(delay);
+          const began = performance.now();
+          await page.keyboard.type('x');
+          const events = await page.evaluate(() => fixture.waitForInput());
+          assert(events.sent >= events.keydown && events.parsed >= events.sent, 'input event ordering');
+          timing.push({ ...events, observed_ms: performance.now() - began });
+          if (capture) {
+            const next = await painted();
+            samples.push(performance.now() - began);
+            assert.notEqual(hash(previous), hash(next), 'input changed cells but no pixels');
+            previous = next;
+          } else {
+            parseSamples.push(events.parsed - events.keydown);
+          }
+        }
+        await page.keyboard.press('Control+u');
+        await wait(() => fixture.viewport().split('\n').some(row => row.trimEnd() === '❯'));
       }
       report.samples[`input_${phase}_frame_ms`] = samples;
       report.samples[`input_${phase}_parsed_ms`] = parseSamples;
-      await page.keyboard.press('Control+u');
-      await wait(() => fixture.viewport().split('\n').some(row => row.trimEnd() === '❯'));
     }
     await keys('history');
     await resources('history');

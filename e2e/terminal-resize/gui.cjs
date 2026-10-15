@@ -17,8 +17,8 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function run(config) {
   fs.mkdirSync(config.logRoot, { recursive: true });
-  const report = { version: 1, status: 'running', metrics: {}, samples: {}, resources: [], clicks: [], input: [],
-    measurement: 'Browser input dispatch to completed PNG capture after xterm render and two animation frames; includes automation/readback, excludes physical display scanout.',
+  const report = { version: 1, status: 'running', metrics: {}, samples: {}, resources: [], clicks: [], input: [], input_timing: {},
+    measurement: 'Frame latency: browser input dispatch to completed PNG capture after xterm render and two animation frames, including automation/readback. Parsed latency: browser keydown to onWriteParsed containing the expected draft, on the same browser clock. Neither measures physical display scanout.',
     resource_scope: 'scode process separately; summed RSS and CPU of dedicated Chromium process tree (shared RSS may be counted more than once); observer Node process excluded.' };
   const routes = {
     '/': ['text/html', path.join(__dirname, 'gui.html')],
@@ -181,13 +181,19 @@ async function run(config) {
       await page.locator('.xterm-helper-textarea').focus();
       await wait(() => document.hasFocus() && document.activeElement === fixture.terminal.textarea);
       const samples = [], parseSamples = [];
+      const timing = report.input_timing[phase] = [];
       let draft = '', previous = await painted();
       for (let i = 0; i < 20; i++) {
         draft += 'x';
+        await page.evaluate(draft => fixture.armInput(draft), draft);
         const began = performance.now();
         await page.keyboard.type('x');
-        await page.waitForFunction(draft => fixture.viewport().split('\n').some(row => row.trimEnd() === `❯ ${draft}`), draft);
-        parseSamples.push(performance.now() - began);
+        await page.waitForFunction(() => fixture.input?.parsed !== undefined);
+        const observed = performance.now() - began;
+        const events = await page.evaluate(() => fixture.input);
+        assert(events.sent >= events.keydown && events.parsed >= events.sent, 'input event ordering');
+        timing.push({ ...events, polled_ms: observed });
+        parseSamples.push(events.parsed - events.keydown);
         const next = await painted();
         samples.push(performance.now() - began);
         assert.notEqual(hash(previous), hash(next), 'input changed cells but no pixels');
@@ -271,6 +277,7 @@ async function run(config) {
   } finally {
     if (page) {
       report.keyboard = await page.evaluate(() => window.fixture?.keyboard).catch(() => []);
+      report.pending_input = await page.evaluate(() => window.fixture?.input).catch(() => null);
       fs.writeFileSync(path.join(config.logRoot, 'terminal.txt'), await page.evaluate(() => window.fixture?.lines().join('\n') || '').catch(() => ''));
       await page.screenshot({ path: path.join(config.logRoot, 'final.png') }).catch(() => {});
     }

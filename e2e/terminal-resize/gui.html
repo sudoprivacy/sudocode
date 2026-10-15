@@ -23,10 +23,19 @@
   terminal.unicode.activeVersion = '11';
   terminal.open(document.getElementById('terminal'));
   terminal.focus();
-  terminal.textarea.addEventListener('keydown', event => keyboard.push({
-    key: event.key, ctrl: event.ctrlKey, meta: event.metaKey, alt: event.altKey,
-    focused: document.hasFocus() && document.activeElement === terminal.textarea,
-  }));
+  let input;
+  const lines = (start = 0) => {
+    const buffer = terminal.buffer.active;
+    return Array.from({ length: buffer.length - start }, (_, i) => buffer.getLine(start + i).translateToString(true));
+  };
+  const viewport = () => lines(terminal.buffer.active.baseY).join('\n');
+  // Observe capture at the window before xterm consumes the textarea event.
+  window.addEventListener('keydown', event => {
+    const at = performance.now();
+    keyboard.push({ at, key: event.key, ctrl: event.ctrlKey, meta: event.metaKey, alt: event.altKey,
+      focused: document.hasFocus() && document.activeElement === terminal.textarea });
+    if (event.target === terminal.textarea && event.key === 'x' && input && input.keydown === undefined) input.keydown = at;
+  }, { capture: true });
   const socket = new WebSocket(`ws://${location.host}`);
   let parsed = 0, rendered = 0, frames = 0, pending = 0, lastData = performance.now();
   terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, params => {
@@ -34,20 +43,26 @@
     return false;
   });
   terminal.onRender(() => rendered++);
+  terminal.onWriteParsed(() => {
+    const at = performance.now();
+    if (input?.keydown !== undefined && input.parsed === undefined
+      && viewport().split('\n').some(row => row.trimEnd() === `❯ ${input.draft}`)) input.parsed = at;
+  });
   socket.onmessage = event => {
     pending++; lastData = performance.now();
     terminal.write(event.data, () => { parsed++; pending--; });
   };
-  terminal.onData(data => socket.send(JSON.stringify({ data })));
+  terminal.onData(data => {
+    if (data === 'x' && input?.keydown !== undefined && input.sent === undefined) input.sent = performance.now();
+    socket.send(JSON.stringify({ data }));
+  });
   window.fixture = {
     terminal, activated, hovered, activationEvents, keyboard,
     get parsed() { return parsed; }, get rendered() { return rendered; },
     get frames() { return frames; }, get pending() { return pending; }, get lastData() { return lastData; },
-    lines() {
-      const buffer = terminal.buffer.active;
-      return Array.from({ length: buffer.length }, (_, i) => buffer.getLine(i).translateToString(true));
-    },
-    viewport() { return this.lines().slice(terminal.buffer.active.baseY).join('\n'); },
+    lines, viewport,
+    armInput(draft) { input = { draft }; },
+    get input() { return input; },
     async frame() { await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); },
     resize(cols, rows) { terminal.resize(cols, rows); socket.send(JSON.stringify({ cols, rows })); },
     locate(label, last = false) {

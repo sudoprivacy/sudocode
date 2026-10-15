@@ -102,7 +102,11 @@ before browser keyboard dispatch and ends after xterm parses the expected cells,
 two animation frames and a PNG capture. Each typed character must change pixels.
 This is a conservative rendering/readback measurement, including automation and
 capture overhead; it does not measure physical keyboard/display scanout latency.
-Parsed-cell latency is retained separately rather than renamed as paint latency.
+Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
+on the same clock, accepting only the event containing the expected input text.
+It excludes polling delay; the driver also retains that delay and raw event
+timestamps for diagnosis. Input checks read only the live viewport, so scanning
+old scrollback cannot become part of the observer's latency.
 
 Process accounting records scode separately from the dedicated Chromium process
 tree, including browser, renderer and GPU process. Browser CPU comes from CDP;

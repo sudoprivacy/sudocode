@@ -65,8 +65,12 @@
     },
     point(position, edge = 'start') {
       const rect = document.querySelector('.xterm-screen').getBoundingClientRect();
+      const row = position.row - terminal.buffer.active.viewportY;
+      if (row < 0 || row >= terminal.rows || !Number.isFinite(position[edge])) {
+        throw new Error(`Target outside viewport: ${JSON.stringify(position)}, top ${terminal.buffer.active.viewportY}`);
+      }
       return { x: rect.x + (position[edge] + (edge === 'start' ? 0.15 : -0.05)) * rect.width / terminal.cols,
-        y: rect.y + (position.row - terminal.buffer.active.viewportY + 0.5) * rect.height / terminal.rows };
+        y: rect.y + (row + 0.5) * rect.height / terminal.rows };
     },
   };
 </script>

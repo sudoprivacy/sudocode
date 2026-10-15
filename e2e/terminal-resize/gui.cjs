@@ -83,10 +83,21 @@ async function run(config) {
     assert.equal(wireBytes, idleBytes, 'idle terminal output');
     report.idle_bytes = wireBytes - idleBytes;
     async function reveal(label, last = false) {
-      const position = await page.evaluate(({ label, last }) => fixture.locate(label, last), { label, last });
-      await page.evaluate(position => fixture.terminal.scrollToLine(Math.max(0, position.row - 2)), position);
-      await painted();
-      return position;
+      // Reflow can leave xterm's scrollbar and buffer offsets out of sync.
+      // Navigation must expose the target before any hit position is computed;
+      // never retry a click or relax its destination assertion.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const position = await page.evaluate(({ label, last }) => fixture.locate(label, last), { label, last });
+        await page.evaluate(position => fixture.terminal.scrollToLine(Math.max(0, position.row - 2)), position);
+        await painted();
+        const visible = await page.evaluate(({ label, last }) => {
+          const position = fixture.locate(label, last);
+          const top = fixture.terminal.buffer.active.viewportY;
+          return position.row >= top && position.row < top + fixture.terminal.rows ? position : null;
+        }, { label, last });
+        if (visible) return visible;
+      }
+      throw new Error(`Navigation did not expose ${label}`);
     }
     async function point(position, edge) { return page.evaluate(({ position, edge }) => fixture.point(position, edge), { position, edge }); }
     async function clickLink(label, target, last = false) {

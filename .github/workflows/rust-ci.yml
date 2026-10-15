@@ -71,6 +71,10 @@ on:
         description: 'Run release rendering calibration before enabling the required gate'
         type: boolean
         default: false
+      live_api_only:
+        description: 'Run the genuine ACP/provider smoke job only; normal PR gates remain unchanged'
+        type: boolean
+        default: false
 
 concurrency:
   group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -95,7 +99,7 @@ jobs:
       profile: core
 
   release-mirror:
-    if: &standard_ci ${{ !inputs.render_performance }}
+    if: &standard_ci ${{ !inputs.render_performance && !inputs.live_api_only }}
     name: release mirror recovery
     runs-on: ubuntu-latest
     defaults:
@@ -583,7 +587,7 @@ jobs:
   live-bash-process-tree:
     name: Live Bash process tree (${{ matrix.os }})
     if: >-
-      !inputs.render_performance &&
+      !inputs.render_performance && !inputs.live_api_only &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     strategy:

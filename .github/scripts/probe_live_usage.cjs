@@ -1,6 +1,17 @@
 // Record only usage fields from a real provider; never response text or auth.
 const fs = require('node:fs');
 
+function numericFields(value) {
+  const result = {};
+  for (const [key, field] of Object.entries(value ?? {})) {
+    if (typeof field === 'number') result[key] = field;
+    else if (field && typeof field === 'object' && !Array.isArray(field)) {
+      result[key] = numericFields(field);
+    }
+  }
+  return result;
+}
+
 async function main() {
   const token = process.env.PROXY_AUTH_TOKEN;
   if (!token) throw new Error('PROXY_AUTH_TOKEN is required');
@@ -38,11 +49,9 @@ async function main() {
           try { frame = JSON.parse(data); } catch { continue; }
           const usage = frame.usage ?? frame.message?.usage ?? frame.response?.usage;
           if (usage) {
-            const counts = {};
-            for (const [key, value] of Object.entries(usage)) {
-              if (typeof value === 'number') counts[key] = value;
-            }
-            item.usage.push({ event: frame.type, keys: Object.keys(usage), counts });
+            item.usage.push({ event: frame.type, keys: Object.keys(usage),
+              source: usage.billing_usage?.source, semantic: usage.billing_usage?.semantic,
+              counts: numericFields(usage) });
           }
           if (['message_stop', 'response.completed', 'response.failed'].includes(frame.type)) {
             done = true; break;

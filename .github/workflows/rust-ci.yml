@@ -512,7 +512,7 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     env:
-      SCODE_LOG_PATH: ${{ runner.temp }}/scode-acp-live-trace.jsonl
+      SCODE_LOG_PATH: ${{ github.workspace }}/scode-acp-live-trace.jsonl
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -548,7 +548,7 @@ jobs:
         working-directory: .
         env:
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
-        run: node .github/scripts/summarize_live_model_trace.cjs "${{ runner.temp }}/scode-acp-live-trace.jsonl" "${{ runner.temp }}/scode-acp-live-evidence.json"
+        run: node .github/scripts/summarize_live_model_trace.cjs "$SCODE_LOG_PATH" "${{ runner.temp }}/scode-acp-live-evidence.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

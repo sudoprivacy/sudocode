@@ -671,28 +671,27 @@ impl OpenAiSseParser {
         let mut events = Vec::new();
 
         while let Some(frame) = next_sse_frame(&mut self.buffer) {
-            if frame
-                .lines()
-                .filter_map(|line| line.strip_prefix("data:"))
-                .any(|data| data.trim() == "[DONE]")
+            let event = match parse_sse_frame(&frame, &self.provider, &self.model)? {
+                ChatSseFrame::Chunk(event) => event,
+                ChatSseFrame::Done => {
+                    self.done = true;
+                    self.buffer.clear();
+                    break;
+                }
+                ChatSseFrame::Ignored => continue,
+            };
+            if let Some(usage) = &event.usage {
+                runtime::compaction_scope::record_usage(usage.to_api_usage().token_usage());
+            }
+            if event
+                .choices
+                .iter()
+                .any(|choice| choice.finish_reason.is_some())
             {
-                self.done = true;
-                break;
+                runtime::compaction_scope::record_completed_response()
+                    .map_err(|error| ApiError::Configuration(error.to_string()))?;
             }
-            if let Some(event) = parse_sse_frame(&frame, &self.provider, &self.model)? {
-                if let Some(usage) = &event.usage {
-                    runtime::compaction_scope::record_usage(usage.to_api_usage().token_usage());
-                }
-                if event
-                    .choices
-                    .iter()
-                    .any(|choice| choice.finish_reason.is_some())
-                {
-                    runtime::compaction_scope::record_completed_response()
-                        .map_err(|error| ApiError::Configuration(error.to_string()))?;
-                }
-                events.push(event);
-            }
+            events.push(event);
         }
 
         Ok(events)
@@ -717,15 +716,23 @@ impl OpenAiSseParser {
         // truncation, not a malformed model payload: surface it as a retryable
         // IncompleteStream instead of a JSON error that blames the model.
         match parse_sse_frame(&tail, &self.provider, &self.model) {
-            Ok(Some(event)) => Ok(vec![event]),
+            Ok(ChatSseFrame::Chunk(event)) => Ok(vec![event]),
+            Ok(ChatSseFrame::Done) => {
+                self.done = true;
+                Ok(Vec::new())
+            }
             // An unframed body that does not parse as JSON at all was cut off
             // mid-object. Nothing else sees these bytes — `push` holds whole
             // bodies for this method — so returning empty would drop a
             // truncation silently and report a successful empty turn.
-            Ok(None) if crate::sse::unframed_body_was_truncated(tail.trim()) => Err(
-                ApiError::incomplete_stream(&self.provider, &self.model, &tail),
-            ),
-            Ok(None) => Ok(Vec::new()),
+            Ok(ChatSseFrame::Ignored) if crate::sse::unframed_body_was_truncated(tail.trim()) => {
+                Err(ApiError::incomplete_stream(
+                    &self.provider,
+                    &self.model,
+                    &tail,
+                ))
+            }
+            Ok(ChatSseFrame::Ignored) => Ok(Vec::new()),
             // An error envelope is a real answer about a real problem — keep it
             // rather than marking it a retryable truncation and re-uploading the
             // conversation to be told the same thing. Reachable for any JSON
@@ -2611,14 +2618,16 @@ fn next_sse_frame(buffer: &mut Vec<u8>) -> Option<String> {
     Some(String::from_utf8_lossy(&frame[..frame_len]).into_owned())
 }
 
-fn parse_sse_frame(
-    frame: &str,
-    provider: &str,
-    model: &str,
-) -> Result<Option<ChatCompletionChunk>, ApiError> {
+enum ChatSseFrame {
+    Chunk(ChatCompletionChunk),
+    Done,
+    Ignored,
+}
+
+fn parse_sse_frame(frame: &str, provider: &str, model: &str) -> Result<ChatSseFrame, ApiError> {
     let trimmed = frame.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Ok(ChatSseFrame::Ignored);
     }
 
     let mut data_lines = Vec::new();
@@ -2645,11 +2654,11 @@ fn parse_sse_frame(
                 return Err(error);
             }
         }
-        return Ok(None);
+        return Ok(ChatSseFrame::Ignored);
     }
     let payload = data_lines.join("\n");
     if payload == "[DONE]" {
-        return Ok(None);
+        return Ok(ChatSseFrame::Done);
     }
     // Some backends embed an error object in a data: frame instead of using an
     // HTTP error status. Surface the error message directly rather than letting
@@ -2683,7 +2692,7 @@ fn parse_sse_frame(
         }
     }
     serde_json::from_str::<ChatCompletionChunk>(&payload)
-        .map(Some)
+        .map(ChatSseFrame::Chunk)
         .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))
 }
 

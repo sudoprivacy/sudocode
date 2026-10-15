@@ -7353,6 +7353,7 @@ mod tests {
                                 thought_signature: None,
                             },
                             AssistantEvent::Usage(TokenUsage {
+                                reported_total_tokens: None,
                                 input_tokens: 100,
                                 output_tokens: 50,
                                 cache_creation_input_tokens: 10,
@@ -7373,6 +7374,7 @@ mod tests {
                         Ok(events_to_stream(vec![
                             AssistantEvent::TextDelta("Done!".to_string()),
                             AssistantEvent::Usage(TokenUsage {
+                                reported_total_tokens: None,
                                 input_tokens: 200,
                                 output_tokens: 30,
                                 cache_creation_input_tokens: 5,
@@ -7448,6 +7450,7 @@ mod tests {
                     text: "first".to_string(),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 100,
                     output_tokens: 50,
                     cache_creation_input_tokens: 10,
@@ -7484,6 +7487,7 @@ mod tests {
                 text: "free".to_string(),
             }],
             Some(TokenUsage {
+                reported_total_tokens: None,
                 input_tokens: 100,
                 output_tokens: 50,
                 cache_creation_input_tokens: 10,

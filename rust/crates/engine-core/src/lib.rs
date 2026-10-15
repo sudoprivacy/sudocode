@@ -101,7 +101,7 @@ pub use engine_events::{
     EngineCommand, EngineEvent, EngineState, PromptContext, RequestId, TurnComplete,
 };
 // Cost fields accepted by the session tracer exposed through EngineApiClient.
-pub use telemetry::UsageCost;
+pub use telemetry::{UsageCost, UsageTokens};
 
 // --- Config / provider / error surface (the renderer's `api::` SSOT) ---------
 //

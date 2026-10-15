@@ -611,6 +611,7 @@ pub(crate) fn build_prompt_usage(
         input_tokens: u64::from(per_turn.input_tokens),
         output_tokens: u64::from(per_turn.output_tokens),
         total_tokens: u64::from(per_turn.total_tokens()),
+        token_breakdown_complete: (!per_turn.has_complete_token_breakdown()).then_some(false),
         cache_read_tokens: Some(u64::from(per_turn.cache_read_input_tokens)),
         cache_write_tokens: Some(u64::from(per_turn.cache_creation_input_tokens)),
         context_window_tokens: Some(context_window),
@@ -636,24 +637,30 @@ pub(crate) fn record_turn_usage(engine: &SessionEngine, complete: &TurnComplete)
         return;
     };
     let turn = complete.turn_usage;
-    tracer.record_usage_with_cost(
+    tracer.record_usage_snapshot(
         "prompt_turn".to_string(),
-        turn.input_tokens,
-        turn.output_tokens,
-        turn.cache_creation_input_tokens,
-        turn.cache_read_input_tokens,
+        engine_core::UsageTokens {
+            input_tokens: turn.input_tokens,
+            output_tokens: turn.output_tokens,
+            cache_creation_input_tokens: turn.cache_creation_input_tokens,
+            cache_read_input_tokens: turn.cache_read_input_tokens,
+            reported_total_tokens: turn.reported_total_tokens,
+        },
         engine_core::UsageCost {
             units: turn.cost_units,
             currency: turn.cost_currency.map(runtime::UsageCostCurrency::as_str),
         },
     );
     let cumulative = complete.session_usage;
-    tracer.record_usage_with_cost(
+    tracer.record_usage_snapshot(
         "session_summary".to_string(),
-        cumulative.input_tokens,
-        cumulative.output_tokens,
-        cumulative.cache_creation_input_tokens,
-        cumulative.cache_read_input_tokens,
+        engine_core::UsageTokens {
+            input_tokens: cumulative.input_tokens,
+            output_tokens: cumulative.output_tokens,
+            cache_creation_input_tokens: cumulative.cache_creation_input_tokens,
+            cache_read_input_tokens: cumulative.cache_read_input_tokens,
+            reported_total_tokens: cumulative.reported_total_tokens,
+        },
         engine_core::UsageCost {
             units: cumulative.cost_units,
             currency: cumulative

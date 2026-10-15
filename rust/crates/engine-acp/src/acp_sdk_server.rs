@@ -478,6 +478,7 @@ pub struct PromptUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+    pub token_breakdown_complete: Option<bool>,
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
     pub context_window_tokens: Option<u64>,
@@ -1132,6 +1133,9 @@ fn non_empty_string_meta(
 
 fn sudocode_meta_from_prompt_usage(u: &PromptUsage) -> Map<String, serde_json::Value> {
     let mut sudocode_meta = Map::new();
+    if let Some(is_complete) = u.token_breakdown_complete {
+        sudocode_meta.insert("tokenBreakdownComplete".to_string(), json!(is_complete));
+    }
     sudocode_meta.insert(
         "contextWindowTokens".to_string(),
         json!(u.context_window_tokens),
@@ -1217,6 +1221,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 4,
             total_tokens: 14,
+            token_breakdown_complete: None,
             cache_read_tokens: Some(3),
             cache_write_tokens: Some(0),
             context_window_tokens: Some(200_000),

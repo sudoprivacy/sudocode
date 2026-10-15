@@ -269,6 +269,8 @@ pub enum TelemetryEvent {
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        reported_total_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_units: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_currency: Option<String>,
@@ -629,6 +631,16 @@ pub struct HttpRequestAttempt<'a> {
     pub start_timestamp_ms: u64,
 }
 
+/// Provider token counters, including an optional independently reported aggregate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UsageTokens {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_creation_input_tokens: u32,
+    pub cache_read_input_tokens: u32,
+    pub reported_total_tokens: Option<u32>,
+}
+
 /// Optional provider cost fields; either field may be absent independently.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UsageCost<'a> {
@@ -826,14 +838,35 @@ impl SessionTracer {
         cache_read_input_tokens: u32,
         cost: UsageCost<'_>,
     ) {
+        self.record_usage_snapshot(
+            request_id,
+            UsageTokens {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                reported_total_tokens: None,
+            },
+            cost,
+        );
+    }
+
+    /// Preserve a provider aggregate even when its token allocation is unavailable.
+    pub fn record_usage_snapshot(
+        &self,
+        request_id: impl Into<String>,
+        tokens: UsageTokens,
+        cost: UsageCost<'_>,
+    ) {
         self.sink.record(TelemetryEvent::HttpResponseUsage {
             session_id: self.session_id.clone(),
             request_id: request_id.into(),
             timestamp_ms: current_timestamp_ms(),
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
+            input_tokens: tokens.input_tokens,
+            output_tokens: tokens.output_tokens,
+            cache_creation_input_tokens: tokens.cache_creation_input_tokens,
+            cache_read_input_tokens: tokens.cache_read_input_tokens,
+            reported_total_tokens: tokens.reported_total_tokens,
             cost_units: cost.units,
             cost_currency: cost.currency.map(ToOwned::to_owned),
         });
@@ -1082,6 +1115,7 @@ mod tests {
             output_tokens: 200,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 100,
+            reported_total_tokens: None,
             cost_units: Some(43_700),
             cost_currency: Some("sudo_point".to_string()),
         };

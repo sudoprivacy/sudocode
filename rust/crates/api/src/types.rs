@@ -406,6 +406,12 @@ pub enum OutputContentBlock {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    #[serde(
+        default,
+        alias = "total_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reported_total_tokens: Option<u32>,
     #[serde(default)]
     pub input_tokens: u32,
     #[serde(default)]
@@ -426,6 +432,9 @@ impl Usage {
     /// Anthropic splits input/cache counts at `message_start` and output at
     /// `message_delta`. Collecting and incremental consumers use the same rule.
     pub fn merge_snapshot(&mut self, incoming: Self) {
+        if let Some(total) = incoming.reported_total_tokens {
+            self.reported_total_tokens = Some(self.reported_total_tokens.unwrap_or(0).max(total));
+        }
         if incoming.input_tokens > 0 {
             self.input_tokens = incoming.input_tokens;
         }
@@ -447,16 +456,14 @@ impl Usage {
     }
 
     #[must_use]
-    pub const fn total_tokens(&self) -> u32 {
-        self.input_tokens
-            + self.output_tokens
-            + self.cache_creation_input_tokens
-            + self.cache_read_input_tokens
+    pub fn total_tokens(&self) -> u32 {
+        self.token_usage().total_tokens()
     }
 
     #[must_use]
     pub fn token_usage(&self) -> TokenUsage {
         TokenUsage {
+            reported_total_tokens: self.reported_total_tokens,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cache_creation_input_tokens: self.cache_creation_input_tokens,
@@ -467,11 +474,10 @@ impl Usage {
     }
 
     #[must_use]
-    pub fn estimated_cost_usd(&self, model: &str) -> UsageCostEstimate {
+    pub fn estimated_cost_usd(&self, model: &str) -> Option<UsageCostEstimate> {
         let usage = self.token_usage();
-        pricing_for_model(model).map_or_else(
-            || usage.estimate_cost_usd(),
-            |pricing| usage.estimate_cost_usd_with_pricing(pricing),
+        usage.estimate_cost_usd_with_pricing(
+            pricing_for_model(model).unwrap_or_else(runtime::ModelPricing::default_sonnet_tier),
         )
     }
 }
@@ -612,7 +618,10 @@ mod tests {
             gateway_request_id: None,
         };
 
-        let cost = response.usage.estimated_cost_usd(&response.model);
+        let cost = response
+            .usage
+            .estimated_cost_usd(&response.model)
+            .expect("complete token allocation");
         assert_eq!(format_usd(cost.total_cost_usd()), "$54.6750");
         assert_eq!(response.total_tokens(), 1_800_000);
     }

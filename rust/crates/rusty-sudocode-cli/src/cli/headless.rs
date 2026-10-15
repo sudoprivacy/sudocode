@@ -414,9 +414,7 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                         result["result"] = json!(messages.final_text);
                         result["model_round_trips"] = json!(tc.iterations);
                         if usage_observed {
-                            result["usage"] = json!({"input_tokens":tc.turn_usage.input_tokens, "output_tokens":tc.turn_usage.output_tokens,
-                            "cache_read_input_tokens":tc.turn_usage.cache_read_input_tokens,
-                            "cache_creation_input_tokens":tc.turn_usage.cache_creation_input_tokens});
+                            result["usage"] = tc.turn_usage.to_json();
                         }
                         if needs_input {
                             stage = "needs_input";

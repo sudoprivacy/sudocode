@@ -1819,6 +1819,7 @@ mod tests {
                     text: "two ".repeat(200),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 10,
                     output_tokens: 4,
                     cache_creation_input_tokens: 1,
@@ -1833,6 +1834,7 @@ mod tests {
                     text: "four ".repeat(200),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 20,
                     output_tokens: 6,
                     cache_creation_input_tokens: 3,
@@ -1880,6 +1882,7 @@ mod tests {
                     text: "I will inspect the compact flow.".to_string(),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 10,
                     output_tokens: 4,
                     cache_creation_input_tokens: 1,
@@ -1894,6 +1897,7 @@ mod tests {
                     text: "Next: preserve prior summary context during auto compact.".to_string(),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 20,
                     output_tokens: 6,
                     cache_creation_input_tokens: 3,
@@ -1917,6 +1921,7 @@ mod tests {
                     text: "Working on regression coverage now.".to_string(),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 30,
                     output_tokens: 8,
                     cache_creation_input_tokens: 4,
@@ -2707,6 +2712,7 @@ mod tests {
                     text: "two ".repeat(200),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 10,
                     output_tokens: 5,
                     cache_creation_input_tokens: 1,
@@ -2726,6 +2732,7 @@ mod tests {
                     text: "six ".repeat(200),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 20,
                     output_tokens: 8,
                     cache_creation_input_tokens: 3,

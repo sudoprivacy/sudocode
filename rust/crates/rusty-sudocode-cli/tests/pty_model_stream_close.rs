@@ -31,6 +31,7 @@ enum ResponseKind {
     RefusedTail,
     UsageAtStart,
     ChatDoneKeepAlive,
+    ChatTotalOnly,
     ResponsesDoneKeepAlive,
 }
 
@@ -134,20 +135,32 @@ impl StreamProvider {
                             "\"input_tokens\":12,\"output_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"cost_units\":17,\"cost_currency\":\"sudo_point\"",
                         ).replace("\"output_tokens\":8", "\"output_tokens\":0");
                     }
-                    ResponseKind::ChatDoneKeepAlive => {
+                    ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly => {
                         body = concat!(
                             "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{\"content\":\"STREAM_BODY_VERIFIED\"}}]}\n\n",
                             "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
                             "data: {\"id\":\"chat\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\n",
                             "data: [DONE]\n\n",
                         ).into();
+                        if matches!(kind, ResponseKind::ChatTotalOnly) && index == 0 {
+                            body = body.replace(
+                                "\"prompt_tokens\":12,\"completion_tokens\":8",
+                                "\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":25",
+                            );
+                        }
+                        if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+                            body = body.replace(
+                                "\"prompt_tokens\":12,\"completion_tokens\":8",
+                                "\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":5}",
+                            );
+                        }
                     }
                     ResponseKind::ResponsesDoneKeepAlive => {
                         body = concat!(
                             "event: response.created\ndata: {\"id\":\"response\",\"model\":\"sonnet\"}\n\n",
                             "event: response.output_text.delta\ndata: {\"delta\":\"STREAM_BODY_VERIFIED\"}\n\n",
                             "event: response.output_text.done\ndata: {}\n\n",
-                            "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}}\n\n",
+                            "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":5}}}}\n\n",
                         ).into();
                     }
                     _ => {}
@@ -178,6 +191,7 @@ impl StreamProvider {
                         | ResponseKind::Complete
                         | ResponseKind::StopReasonKeepAlive
                         | ResponseKind::ChatDoneKeepAlive
+                        | ResponseKind::ChatTotalOnly
                         | ResponseKind::ResponsesDoneKeepAlive
                 ) {
                     128
@@ -196,7 +210,10 @@ impl StreamProvider {
                     let _ = socket.write_all(response[split..].as_bytes());
                     continue;
                 }
-                if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+                if matches!(
+                    kind,
+                    ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly
+                ) {
                     let split = response
                         .find("data: {\"id\":\"chat\",\"choices\":[],\"usage\"")
                         .unwrap();
@@ -216,6 +233,7 @@ impl StreamProvider {
                     kind,
                     ResponseKind::StopReasonKeepAlive
                         | ResponseKind::ChatDoneKeepAlive
+                        | ResponseKind::ChatTotalOnly
                         | ResponseKind::ResponsesDoneKeepAlive
                 ) {
                     // Keep the HTTP body open after a logical/protocol stop.
@@ -316,8 +334,13 @@ fn check_response(kind: ResponseKind) {
     let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
     match kind {
-        ResponseKind::ChatDoneKeepAlive | ResponseKind::ResponsesDoneKeepAlive => {
-            let format = if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+        ResponseKind::ChatDoneKeepAlive
+        | ResponseKind::ChatTotalOnly
+        | ResponseKind::ResponsesDoneKeepAlive => {
+            let format = if matches!(
+                kind,
+                ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly
+            ) {
                 "openai-completions"
             } else {
                 "openai-responses"
@@ -330,13 +353,17 @@ fn check_response(kind: ResponseKind) {
     }
     std::fs::write(path, config.to_string()).unwrap();
     let log_path = env.workspace_root().join("provider-events.jsonl");
+    let mut args = vec![
+        "--permission-mode",
+        "read-only",
+        "--print",
+        "Report the stream result",
+    ];
+    if matches!(kind, ResponseKind::ChatTotalOnly) {
+        args.extend(["--output-format", "json"]);
+    }
     let mut cli = env.spawn_with_env(
-        &[
-            "--permission-mode",
-            "read-only",
-            "--print",
-            "Report the stream result",
-        ],
+        &args,
         &[
             ("SCODE_LOG_PATH", log_path.to_str().unwrap()),
             ("SUDOCODE_API_READ_TIMEOUT", "2"),
@@ -368,6 +395,7 @@ fn check_response(kind: ResponseKind) {
         kind,
         ResponseKind::UsageAtStart
             | ResponseKind::ChatDoneKeepAlive
+            | ResponseKind::ChatTotalOnly
             | ResponseKind::ResponsesDoneKeepAlive
     ) {
         assert_eq!(exit, 0, "{screen}");
@@ -379,7 +407,7 @@ fn check_response(kind: ResponseKind) {
             .find(|session| session.message_count > 0)
             .unwrap()
             .path;
-        let session = runtime::Session::load_from_path(path).unwrap();
+        let session = runtime::Session::load_from_path(&path).unwrap();
         let usage = session
             .messages
             .iter()
@@ -388,7 +416,102 @@ fn check_response(kind: ResponseKind) {
             .unwrap()
             .usage
             .expect("persist the provider's actual usage");
-        assert_eq!(usage.input_tokens, 12);
+        if matches!(kind, ResponseKind::ChatTotalOnly) {
+            assert_eq!(usage.input_tokens, 0, "never infer input allocation");
+            assert_eq!(usage.output_tokens, 0, "never infer output allocation");
+            assert_eq!(
+                usage.total_tokens(),
+                25,
+                "retain the provider's actual total"
+            );
+            assert_eq!(usage.reported_total_tokens, Some(25));
+            assert!(!usage.has_complete_token_breakdown());
+            assert!(runtime::UsageTracker::from_session(&session)
+                .current_context_usage()
+                .is_none());
+            assert!(usage
+                .estimate_cost_usd_with_pricing(runtime::ModelPricing::default_sonnet_tier())
+                .is_none());
+            assert!(
+                common::screen_contains(&screen, "\"total_tokens\":25"),
+                "{screen}"
+            );
+            assert!(
+                common::screen_contains(&screen, "\"token_breakdown_complete\":false"),
+                "{screen}"
+            );
+            assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+            let events: Vec<Value> = std::fs::read_to_string(&log_path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(events.iter().any(|event| event["event"] == "response_usage"
+                && event["attributes"]["reported_total_tokens"] == 25));
+
+            // A second real CLI process must restore the total-only receipt,
+            // add a fully allocated response, and recover its context anchor.
+            let mut resumed =
+                env.spawn_with_env(&["--permission-mode", "read-only", "--resume"], &[]);
+            common::expect_input_line_cleared(&resumed, env.timeout(), "resumed usage prompt");
+            resumed.send("Continue the stream result").unwrap();
+            common::expect_input_line(
+                &resumed,
+                "Continue the stream result",
+                env.timeout(),
+                "resume input",
+            );
+            resumed.send("\r").unwrap();
+            common::expect_screen(
+                &resumed,
+                |_| {
+                    runtime::Session::load_from_path(&path).is_ok_and(|session| {
+                        session
+                            .messages
+                            .iter()
+                            .filter(|message| message.role == runtime::MessageRole::Assistant)
+                            .count()
+                            == 2
+                    })
+                },
+                env.timeout(),
+                "persist the resumed response",
+            );
+            common::expect_input_line_cleared(&resumed, env.timeout(), "resumed turn complete");
+            resumed.send("/exit").unwrap();
+            common::expect_input_line(&resumed, "/exit", env.timeout(), "exit input");
+            resumed.send("\r").unwrap();
+            assert_eq!(resumed.expect_eof().unwrap(), 0);
+            let restored = runtime::Session::load_from_path(&path).unwrap();
+            assert_eq!(
+                restored
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == runtime::MessageRole::Assistant)
+                    .count(),
+                2,
+                "resume must update the original transcript"
+            );
+            let tracker = runtime::UsageTracker::from_session(&restored);
+            assert_eq!(tracker.cumulative_usage().total_tokens(), 45);
+            assert_eq!(tracker.cumulative_usage().known_total_tokens(), 20);
+            assert!(!tracker.cumulative_usage().has_complete_token_breakdown());
+            assert_eq!(tracker.current_context_usage(), Some(12));
+            assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+            return;
+        }
+        if matches!(
+            kind,
+            ResponseKind::ChatDoneKeepAlive | ResponseKind::ResponsesDoneKeepAlive
+        ) {
+            assert_eq!(usage.input_tokens, 7, "cached input is counted separately");
+            assert_eq!(usage.cache_read_input_tokens, 5);
+            assert_eq!(usage.context_tokens(), Some(12));
+            assert_eq!(usage.total_tokens(), 20, "never double-count cached tokens");
+            assert!(usage.has_complete_token_breakdown());
+        } else {
+            assert_eq!(usage.input_tokens, 12);
+        }
         assert_eq!(
             usage.output_tokens,
             if matches!(kind, ResponseKind::UsageAtStart) {
@@ -625,4 +748,9 @@ fn chat_done_finishes_without_http_eof_and_preserves_usage() {
 #[test]
 fn responses_completed_finishes_without_http_eof_and_preserves_usage() {
     check_response(ResponseKind::ResponsesDoneKeepAlive);
+}
+
+#[test]
+fn reported_total_survives_print_persistence_and_resume_without_inventing_a_breakdown() {
+    check_response(ResponseKind::ChatTotalOnly);
 }

@@ -17,7 +17,7 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function run(config) {
   fs.mkdirSync(config.logRoot, { recursive: true });
-  const report = { version: 1, status: 'running', metrics: {}, samples: {}, resources: [], clicks: [],
+  const report = { version: 1, status: 'running', metrics: {}, samples: {}, resources: [], clicks: [], input: [],
     measurement: 'Browser input dispatch to completed PNG capture after xterm render and two animation frames; includes automation/readback, excludes physical display scanout.',
     resource_scope: 'scode process separately; summed RSS and CPU of dedicated Chromium process tree (shared RSS may be counted more than once); observer Node process excluded.' };
   const routes = {
@@ -41,7 +41,10 @@ async function run(config) {
     child.onExit(event => { exitCode = event.exitCode; });
     socket.on('message', raw => {
       const message = JSON.parse(raw);
-      if (typeof message.data === 'string') child.write(message.data);
+      if (typeof message.data === 'string') {
+        report.input.push({ text: message.data.slice(0, 80), length: message.data.length });
+        child.write(message.data);
+      }
       else child.resize(message.cols, message.rows);
     });
   });
@@ -56,6 +59,12 @@ async function run(config) {
     const wait = predicate => page.waitForFunction(predicate, null, { timeout: 30000, polling: 'raf' });
     await wait(() => window.fixture?.viewport().includes('❯'));
     await wait(() => fixture.lines().join('\n').includes('LinkBodyEND.'));
+    // Replayed history can contain a prompt before the live input slot exists.
+    // Start idle/interaction measurements only after a complete, quiet UI frame.
+    await page.waitForFunction(cols => fixture.frames > 0 && !fixture.pending
+      && fixture.viewport().split('\n').some(row => row === '─'.repeat(cols))
+      && fixture.viewport().includes('/exit to quit')
+      && performance.now() - fixture.lastData >= 300, config.cols);
     const screen = page.locator('.xterm-screen');
     const painted = async () => {
       await page.evaluate(() => fixture.frame());
@@ -168,6 +177,9 @@ async function run(config) {
     await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
     async function keys(phase) {
       progress(`typing:${phase}`);
+      await page.bringToFront();
+      await page.locator('.xterm-helper-textarea').focus();
+      await wait(() => document.hasFocus() && document.activeElement === fixture.terminal.textarea);
       const samples = [], parseSamples = [];
       let draft = '', previous = await painted();
       for (let i = 0; i < 20; i++) {
@@ -258,6 +270,7 @@ async function run(config) {
     report.status = 'failed'; report.error = String(error.stack || error); throw error;
   } finally {
     if (page) {
+      report.keyboard = await page.evaluate(() => window.fixture?.keyboard).catch(() => []);
       fs.writeFileSync(path.join(config.logRoot, 'terminal.txt'), await page.evaluate(() => window.fixture?.lines().join('\n') || '').catch(() => ''));
       await page.screenshot({ path: path.join(config.logRoot, 'final.png') }).catch(() => {});
     }

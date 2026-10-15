@@ -7,7 +7,7 @@
 <script src="/unicode.js"></script>
 <script>
   const options = JSON.parse(new URLSearchParams(location.search).get('options'));
-  const activated = [], hovered = [], activationEvents = [];
+  const activated = [], hovered = [], activationEvents = [], keyboard = [];
   const terminal = new Terminal({ ...options, allowProposedApi: true, scrollback: 10000,
     fontFamily: 'monospace', fontSize: 14, cursorBlink: false,
     linkHandler: {
@@ -23,6 +23,10 @@
   terminal.unicode.activeVersion = '11';
   terminal.open(document.getElementById('terminal'));
   terminal.focus();
+  terminal.textarea.addEventListener('keydown', event => keyboard.push({
+    key: event.key, ctrl: event.ctrlKey, meta: event.metaKey, alt: event.altKey,
+    focused: document.hasFocus() && document.activeElement === terminal.textarea,
+  }));
   const socket = new WebSocket(`ws://${location.host}`);
   let parsed = 0, rendered = 0, frames = 0, pending = 0, lastData = performance.now();
   terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, params => {
@@ -36,7 +40,7 @@
   };
   terminal.onData(data => socket.send(JSON.stringify({ data })));
   window.fixture = {
-    terminal, activated, hovered, activationEvents,
+    terminal, activated, hovered, activationEvents, keyboard,
     get parsed() { return parsed; }, get rendered() { return rendered; },
     get frames() { return frames; }, get pending() { return pending; }, get lastData() { return lastData; },
     lines() {

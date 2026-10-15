@@ -462,6 +462,7 @@ fn check_response(kind: ResponseKind) {
             | ResponseKind::ResponsesDoneKeepAlive
     ) {
         assert_eq!(exit, 0, "{screen}");
+        assert_progress_trace(&log_path);
         let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
         let path = store
             .list_sessions()
@@ -701,6 +702,48 @@ fn check_response(kind: ResponseKind) {
             "{screen}"
         );
     }
+}
+
+fn assert_progress_trace(log_path: &std::path::Path) {
+    let events: Vec<Value> = std::fs::read_to_string(log_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let request_id = events
+        .iter()
+        .find(|event| event["event"] == "request_debug")
+        .unwrap()["attributes"]["request_id"]
+        .as_str()
+        .unwrap();
+    let rows: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "response_stream_progress")
+        .map(|event| &event["attributes"])
+        .collect();
+    assert!(
+        rows.len() >= 3,
+        "headers, bytes and completion must be observable"
+    );
+    assert_eq!(rows[0]["bytes_read"], 0);
+    assert_eq!(rows[0]["finished"], false);
+    let last = rows.last().unwrap();
+    assert_eq!(last["finished"], true);
+    assert!(last["bytes_read"].as_u64().unwrap() > 0);
+    assert!(last["normalized_events"].as_u64().unwrap() > 0);
+    for row in rows {
+        assert_eq!(
+            row["request_id"], request_id,
+            "transport, progress and usage share the client ID"
+        );
+        assert!(row.get("body").is_none() && row.get("content").is_none());
+        assert!(
+            !row.to_string().contains("STREAM_BODY_VERIFIED"),
+            "progress is metadata only"
+        );
+    }
+    assert!(events.iter().any(|event| event["event"] == "response_usage"
+        && event["attributes"]["request_id"] == request_id));
 }
 
 fn assert_refusal_screen(screen: &str) {

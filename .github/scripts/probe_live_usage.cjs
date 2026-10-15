@@ -1,5 +1,5 @@
-// Record only usage fields from a real provider; never response text or auth.
-const fs = require('node:fs');
+// Record usage and scrubbed provider errors; exclude generated content and credentials.
+const { clean, writeEvidence } = require('./live_model_evidence.cjs');
 
 function numericFields(value) {
   const result = {};
@@ -16,9 +16,13 @@ async function main() {
   const token = process.env.PROXY_AUTH_TOKEN;
   if (!token) throw new Error('PROXY_AUTH_TOKEN is required');
   const base = process.env.PROXY_BASE_URL.replace(/\/$/, '');
-  const model = process.env.SCODE_LIVE_MODEL;
+  const models = [...new Set([process.env.SCODE_LIVE_MODEL, process.env.SCODE_NATIVE_MODEL].filter(Boolean))];
+  const errorDetails = body => {
+    const error = body?.error ?? body;
+    return { type: clean(error?.type), code: typeof error?.code === 'number' ? error.code : clean(error?.code), message: clean(error?.message ?? error?.msg) };
+  };
   const report = [];
-  for (const route of ['chat/completions', 'messages']) {
+  for (const model of models) for (const route of ['chat/completions', 'messages']) {
     const item = { route, model, usage: [] };
     report.push(item);
     try {
@@ -33,7 +37,11 @@ async function main() {
       });
       item.status = response.status;
       item.gatewayRequestId = response.headers.get('x-oneapi-request-id');
-      if (!response.ok) { await response.body.cancel(); continue; }
+      if (!response.ok) {
+        try { item.providerError = errorDetails(await response.json()); }
+        catch { item.errorBodyFormat = 'non-json'; }
+        continue;
+      }
       const decoder = new TextDecoder();
       let buffer = '', done = false;
       for await (const chunk of response.body) {
@@ -64,7 +72,6 @@ async function main() {
       item.error = error.name;
     }
   }
-  fs.writeFileSync(process.argv[2], JSON.stringify(report, null, 2) + '\n');
-  console.log(JSON.stringify(report));
+  console.log(writeEvidence(process.argv[2], report));
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

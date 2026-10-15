@@ -654,7 +654,7 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
     assert_eq!(
         agent_starts.len(),
         3,
-        "expected exactly 3 Agent tool_call starts, got {}",
+        "expected exactly 3 Agent tool_call starts, got {}; provider reply: {text_output}",
         agent_starts.len()
     );
     assert!(

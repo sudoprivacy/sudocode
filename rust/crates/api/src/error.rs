@@ -120,6 +120,22 @@ pub enum ApiError {
         attempts: u32,
         last_error: Box<ApiError>,
     },
+    /// Idle waiting for provider events; heartbeat bytes are not progress.
+    StreamStalled {
+        provider: String,
+        model: String,
+        idle_timeout: Duration,
+        request_id: Option<String>,
+    },
+    /// Once events have escaped, automatic replay could repeat user-visible
+    /// output, usage or tool execution. Preserve the underlying failure.
+    PartialStream {
+        source: Box<ApiError>,
+        request_id: Option<String>,
+    },
+    RequestAttemptsExhausted {
+        attempts: u32,
+    },
     InvalidSseFrame(&'static str),
     /// The response stream ended in the middle of an SSE frame — the trailing
     /// bytes are a partial `data:` payload that cannot be parsed. This is a
@@ -219,7 +235,9 @@ impl ApiError {
             Self::Http(error) if error.is_connect() || error.is_timeout() || error.is_request() => {
                 ErrorAction::Transport
             }
-            Self::IncompleteStream { .. } => ErrorAction::Transport,
+            Self::IncompleteStream { .. }
+            | Self::StreamStalled { .. }
+            | Self::RequestAttemptsExhausted { .. } => ErrorAction::Transport,
             Self::Api { retryable, .. } if *retryable => ErrorAction::Transport,
             Self::RetriesExhausted { last_error, .. } => last_error.action(),
 
@@ -234,7 +252,8 @@ impl ApiError {
 
             // Human: only a person can supply credentials / fix config / shrink
             // a request that is too large to ever fit.
-            Self::MissingCredentials { .. }
+            Self::PartialStream { .. }
+            | Self::MissingCredentials { .. }
             | Self::ExpiredOAuthToken
             | Self::Auth(_)
             | Self::InvalidApiKeyEnv(_)
@@ -338,6 +357,9 @@ impl ApiError {
             | Self::ProviderRefusal { .. } => ErrorCategory::Structured,
             // Transport failures: retryable, safe_failure_class = "provider_transport".
             Self::IncompleteStream { .. }
+            | Self::StreamStalled { .. }
+            | Self::PartialStream { .. }
+            | Self::RequestAttemptsExhausted { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. } => ErrorCategory::Transport,
             // Credential / auth errors: safe_failure_class = "provider_auth".
@@ -367,7 +389,9 @@ impl ApiError {
     #[must_use]
     pub fn request_id(&self) -> Option<&str> {
         match self {
-            Self::Api { request_id, .. } => request_id.as_deref(),
+            Self::Api { request_id, .. }
+            | Self::StreamStalled { request_id, .. }
+            | Self::PartialStream { request_id, .. } => request_id.as_deref(),
             Self::RetriesExhausted { last_error, .. } => last_error.request_id(),
             _ => None,
         }
@@ -538,6 +562,12 @@ impl Display for ApiError {
                 f,
                 "failed to parse {provider} response for model {model}: {source}; first 200 chars of body: {body_snippet}"
             ),
+            Self::StreamStalled { provider, model, idle_timeout, .. } => write!(f,
+                "{provider} stream for {model} produced no provider events for {} seconds", idle_timeout.as_secs()),
+            Self::PartialStream { source, .. } => write!(f,
+                "stream failed after provider events; automatic replay disabled: {source}"),
+            Self::RequestAttemptsExhausted { attempts } => write!(f,
+                "request attempt budget exhausted after {attempts} HTTP attempts"),
             Self::IncompleteStream {
                 provider,
                 model,

@@ -490,7 +490,8 @@ impl AnthropicClient {
         request: &MessageRequest,
         trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
-        self.preflight_message_request(request).await?;
+        crate::request_scope::RequestScope::preflight(self.preflight_message_request(request))
+            .await?;
         let result = self
             .send_request(&request.clone().with_streaming(), trace_id)
             .await?;

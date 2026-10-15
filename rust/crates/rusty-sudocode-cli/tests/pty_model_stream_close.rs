@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -37,9 +37,39 @@ enum ResponseKind {
     ChatDoneKeepAlive,
     ChatTotalOnly,
     ResponsesDoneKeepAlive,
+    NativeHeartbeat,
+    ChatHeartbeat,
+    ResponsesHeartbeat,
+    AlwaysHeartbeat,
+    HeartbeatAfterOverload,
+    ToolThenHeartbeat,
+    NativePartial,
+    ChatPartial,
+    ResponsesPartial,
+    NativeSlow,
+    ChatSlow,
+    ResponsesSlow,
+    FiniteHeartbeat,
 }
 
 impl ResponseKind {
+    const fn api_format(self) -> Option<&'static str> {
+        match self {
+            Self::ChatDoneKeepAlive
+            | Self::ChatTotalOnly
+            | Self::MissingModelCodeUnavailable
+            | Self::ChatHeartbeat
+            | Self::HeartbeatAfterOverload
+            | Self::ChatPartial
+            | Self::ChatSlow => Some("openai-completions"),
+            Self::ResponsesDoneKeepAlive
+            | Self::ResponsesHeartbeat
+            | Self::ResponsesPartial
+            | Self::ResponsesSlow => Some("openai-responses"),
+            _ => None,
+        }
+    }
+
     const fn is_refused(self) -> bool {
         matches!(
             self,
@@ -53,6 +83,7 @@ struct StreamProvider {
     stopped: Arc<AtomicBool>,
     requests: Arc<AtomicUsize>,
     terminal_connection_state: Arc<AtomicUsize>,
+    bodies: Arc<Mutex<Vec<Value>>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -79,6 +110,8 @@ impl StreamProvider {
         let terminal_state = terminal_connection_state.clone();
         let stop = stopped.clone();
         let count = requests.clone();
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let captured = bodies.clone();
         let worker = thread::spawn(move || {
             'connections: while !stop.load(Ordering::SeqCst) {
                 let Ok((mut socket, _)) = listener.accept() else {
@@ -118,6 +151,10 @@ impl StreamProvider {
                 let index = count.fetch_add(1, Ordering::SeqCst);
                 let request: Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(request["stream"], true);
+                captured.lock().unwrap().push(request.clone());
+                if liveness_response(&mut socket, kind, index, &stop) {
+                    continue;
+                }
                 if let Some(response) = error_response(kind, index) {
                     let _ = socket.write_all(response.as_bytes());
                     continue;
@@ -253,6 +290,7 @@ impl StreamProvider {
             stopped,
             requests,
             terminal_connection_state,
+            bodies,
             worker: Some(worker),
         }
     }
@@ -345,6 +383,18 @@ fn refusal_body(kind: ResponseKind) -> Option<String> {
     Some(body)
 }
 
+fn configure_peer(env: &TestEnv, provider: &StreamProvider, kind: ResponseKind) {
+    let path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
+    if let Some(format) = kind.api_format() {
+        config["models"]["sonnet"] = json!({"alias":"sonnet", "providers":{"api-key":{
+            "provider":"anthropic", "model":"sonnet", "api":format
+        }}});
+    }
+    std::fs::write(path, config.to_string()).unwrap();
+}
+
 // render takes a closure over screens with different lifetimes.
 #[allow(clippy::redundant_closure_for_method_calls)]
 fn check_response(kind: ResponseKind) {
@@ -353,31 +403,7 @@ fn check_response(kind: ResponseKind) {
         return;
     } // the peer must produce the specified protocol fault
     let provider = StreamProvider::new(kind);
-    let path = env.config_home().join("sudocode.json");
-    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
-    match kind {
-        ResponseKind::ChatDoneKeepAlive
-        | ResponseKind::ChatTotalOnly
-        | ResponseKind::MissingModelCodeUnavailable
-        | ResponseKind::ResponsesDoneKeepAlive => {
-            let format = if matches!(
-                kind,
-                ResponseKind::ChatDoneKeepAlive
-                    | ResponseKind::ChatTotalOnly
-                    | ResponseKind::MissingModelCodeUnavailable
-            ) {
-                "openai-completions"
-            } else {
-                "openai-responses"
-            };
-            config["models"]["sonnet"] = json!({"alias":"sonnet", "providers":{"api-key":{
-                "provider":"anthropic", "model":"sonnet", "api":format
-            }}});
-        }
-        _ => {}
-    }
-    std::fs::write(path, config.to_string()).unwrap();
+    configure_peer(&env, &provider, kind);
     let log_path = env.workspace_root().join("provider-events.jsonl");
     let mut args = vec!["--permission-mode", "read-only"];
     if !matches!(kind, ResponseKind::OverloadedThenComplete) {
@@ -898,4 +924,309 @@ fn code_only_missing_model_503_fails_once_with_the_provider_reason() {
 #[test]
 fn ordinary_503_retries_visibly_and_completes() {
     check_response(ResponseKind::OverloadedThenComplete);
+}
+
+fn liveness_response(
+    socket: &mut TcpStream,
+    kind: ResponseKind,
+    index: usize,
+    stop: &AtomicBool,
+) -> bool {
+    let is_live = matches!(
+        kind,
+        ResponseKind::NativeHeartbeat
+            | ResponseKind::ChatHeartbeat
+            | ResponseKind::ResponsesHeartbeat
+            | ResponseKind::AlwaysHeartbeat
+            | ResponseKind::HeartbeatAfterOverload
+            | ResponseKind::ToolThenHeartbeat
+            | ResponseKind::NativePartial
+            | ResponseKind::ChatPartial
+            | ResponseKind::ResponsesPartial
+            | ResponseKind::NativeSlow
+            | ResponseKind::ChatSlow
+            | ResponseKind::ResponsesSlow
+            | ResponseKind::FiniteHeartbeat
+    );
+    if !is_live {
+        return false;
+    }
+    if matches!(kind, ResponseKind::HeartbeatAfterOverload) && index == 0 {
+        let body = r#"{"error":{"type":"overloaded_error","message":"temporarily overloaded"}}"#;
+        let _ = write!(socket, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        return true;
+    }
+    let tool_turn = matches!(kind, ResponseKind::ToolThenHeartbeat) && index == 0;
+    let partial = matches!(
+        kind,
+        ResponseKind::NativePartial | ResponseKind::ChatPartial | ResponseKind::ResponsesPartial
+    );
+    let slow = matches!(
+        kind,
+        ResponseKind::NativeSlow | ResponseKind::ChatSlow | ResponseKind::ResponsesSlow
+    );
+    let heartbeat = matches!(
+        kind,
+        ResponseKind::AlwaysHeartbeat | ResponseKind::FiniteHeartbeat
+    ) || (matches!(
+        kind,
+        ResponseKind::HeartbeatAfterOverload | ResponseKind::ToolThenHeartbeat
+    ) && index == 1)
+        || (matches!(
+            kind,
+            ResponseKind::NativeHeartbeat
+                | ResponseKind::ChatHeartbeat
+                | ResponseKind::ResponsesHeartbeat
+        ) && index == 0);
+    let mut prefix = String::new();
+    let mut tail: String;
+    let mut deltas = Vec::new();
+    match kind.api_format() {
+        Some("openai-completions") => {
+            for text in ["STREAM_", "BODY_", "VERIFIED"] {
+                deltas.push(format!(
+                    "data: {}\n\n",
+                    json!({"id":"chat","choices":[{"delta":{"content":text}}]})
+                ));
+            }
+            tail = "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"chat\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\ndata: [DONE]\n\n".into();
+        }
+        Some("openai-responses") => {
+            prefix =
+                "event: response.created\ndata: {\"id\":\"live\",\"model\":\"sonnet\"}\n\n".into();
+            for text in ["STREAM_", "BODY_", "VERIFIED"] {
+                deltas.push(format!(
+                    "event: response.output_text.delta\ndata: {}\n\n",
+                    json!({"delta":text})
+                ));
+            }
+            tail = "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}}\n\n".into();
+        }
+        _ => {
+            prefix = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"live\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"sonnet\",\"content\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".into();
+            for text in ["STREAM_", "BODY_", "VERIFIED"] {
+                deltas.push(format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}})));
+            }
+            tail = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":8}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".into();
+        }
+    }
+    if tool_turn {
+        prefix = prefix[..prefix.find("event: content_block_start").unwrap()].to_owned();
+        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"once\",\"name\":\"bash\",\"input\":{}}}\n\n");
+        prefix.push_str(&format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json!({"command":"sleep 3; echo once >> once.txt"}).to_string()}})));
+        tail = tail.replace("end_turn", "tool_use");
+        deltas.clear();
+    }
+    let body = format!("{prefix}{}{tail}", deltas.join(""));
+    let length = if heartbeat || partial {
+        1_000_000
+    } else {
+        body.len()
+    };
+    if write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n").is_err() { return true; }
+    if !heartbeat {
+        let _ = socket.write_all(prefix.as_bytes());
+        for delta in &deltas {
+            if slow {
+                thread::sleep(Duration::from_millis(900));
+            }
+            if socket.write_all(delta.as_bytes()).is_err() {
+                return true;
+            }
+        }
+        if !partial {
+            let _ = socket.write_all(tail.as_bytes());
+        }
+    }
+    if heartbeat || partial {
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let started = std::time::Instant::now();
+        while !stop.load(Ordering::SeqCst) && !peer_closed(socket) {
+            if matches!(kind, ResponseKind::FiniteHeartbeat)
+                && started.elapsed() >= Duration::from_secs(3)
+            {
+                let _ = socket.write_all(body.as_bytes());
+                break;
+            }
+            if socket.write_all(b": ping\n\n").is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    true
+}
+
+fn check_liveness(
+    kind: ResponseKind,
+    read_timeout: &str,
+    expected_requests: usize,
+    is_success: bool,
+) {
+    let env = TestEnv::new_mock("stream-liveness");
+    let provider = StreamProvider::new(kind);
+    configure_peer(&env, &provider, kind);
+    let log = env.workspace_root().join("stream-events.jsonl");
+    let is_tool = matches!(kind, ResponseKind::ToolThenHeartbeat);
+    let interactive = matches!(
+        kind,
+        ResponseKind::NativeHeartbeat
+            | ResponseKind::ChatHeartbeat
+            | ResponseKind::ResponsesHeartbeat
+            | ResponseKind::HeartbeatAfterOverload
+            | ResponseKind::NativePartial
+            | ResponseKind::ChatPartial
+            | ResponseKind::ResponsesPartial
+    );
+    let mut args = vec![
+        "--permission-mode",
+        if is_tool {
+            "danger-full-access"
+        } else {
+            "read-only"
+        },
+    ];
+    if !interactive {
+        args.push("--print");
+    }
+    args.push("Report the stream result");
+    let mut cli = env.spawn_with_env(
+        &args,
+        &[
+            ("SUDOCODE_API_READ_TIMEOUT", read_timeout),
+            ("SCODE_LOG_PATH", log.to_str().unwrap()),
+        ],
+    );
+    cli.set_default_timeout(common::at_least(Duration::from_secs(30)));
+    let code = cli.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "stream liveness: {error}; requests={}\n{}",
+            provider.requests.load(Ordering::SeqCst),
+            common::screen_tail(&cli, 6000)
+        )
+    });
+    assert_eq!(code == 0, is_success, "{}", common::screen_tail(&cli, 6000));
+    assert_eq!(provider.requests.load(Ordering::SeqCst), expected_requests);
+    let screen = common::expect_screen(
+        &cli,
+        |s| {
+            common::screen_contains(
+                s,
+                if is_success {
+                    "STREAM_BODY_VERIFIED"
+                } else if interactive {
+                    "automatic replay disabled"
+                } else {
+                    "runtime_error:"
+                },
+            )
+        },
+        common::DEFAULT_TIMEOUT,
+        "complete liveness result",
+    );
+    let bodies = provider.bodies.lock().unwrap();
+    if expected_requests > 1 {
+        let first = usize::from(is_tool);
+        assert!(
+            bodies[first..].iter().all(|body| body == &bodies[first]),
+            "safe replay must preserve the request bytes"
+        );
+    }
+    if is_tool {
+        assert_eq!(
+            std::fs::read_to_string(env.workspace_root().join("once.txt")).unwrap(),
+            "once\n",
+            "completed tools are never executed twice"
+        );
+        assert!(bodies[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"))));
+    }
+    if matches!(
+        kind,
+        ResponseKind::NativePartial | ResponseKind::ChatPartial | ResponseKind::ResponsesPartial
+    ) {
+        assert!(common::screen_contains(
+            &screen,
+            "automatic replay disabled"
+        ));
+        assert_eq!(
+            screen.matches("STREAM_BODY_VERIFIED").count(),
+            1,
+            "partial output is not repeated"
+        );
+    }
+    if matches!(kind, ResponseKind::HeartbeatAfterOverload) {
+        assert!(
+            common::screen_contains(&screen, "retry 2/8"),
+            "one shared retry sequence: {screen}"
+        );
+        let attempts: Vec<_> = std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event["event"] == "request_started")
+            .map(|event| event["attributes"]["attempt"].as_u64().unwrap())
+            .collect();
+        assert_eq!(attempts, [1, 2, 3]);
+    }
+}
+
+#[test]
+fn heartbeat_only_streams_replay_before_the_first_provider_event() {
+    for kind in [
+        ResponseKind::NativeHeartbeat,
+        ResponseKind::ChatHeartbeat,
+        ResponseKind::ResponsesHeartbeat,
+    ] {
+        check_liveness(kind, "2", 2, true);
+    }
+}
+
+#[test]
+fn partial_provider_output_is_not_replayed() {
+    for kind in [
+        ResponseKind::NativePartial,
+        ResponseKind::ChatPartial,
+        ResponseKind::ResponsesPartial,
+    ] {
+        check_liveness(kind, "2", 1, false);
+    }
+}
+
+#[test]
+fn active_provider_events_outlive_the_idle_timeout() {
+    for kind in [
+        ResponseKind::NativeSlow,
+        ResponseKind::ChatSlow,
+        ResponseKind::ResponsesSlow,
+    ] {
+        check_liveness(kind, "2", 1, true);
+    }
+}
+
+#[test]
+fn completed_tool_survives_an_empty_continuation_replay() {
+    check_liveness(ResponseKind::ToolThenHeartbeat, "2", 3, true);
+}
+
+#[test]
+fn http_retries_and_stream_replay_share_one_attempt_sequence() {
+    check_liveness(ResponseKind::HeartbeatAfterOverload, "2", 3, true);
+}
+
+#[test]
+fn empty_stream_replay_is_bounded_once() {
+    check_liveness(ResponseKind::AlwaysHeartbeat, "2", 2, false);
+}
+
+#[test]
+fn zero_read_timeout_preserves_a_long_empty_wait() {
+    check_liveness(ResponseKind::FiniteHeartbeat, "0", 1, true);
 }

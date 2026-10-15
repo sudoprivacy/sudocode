@@ -2046,7 +2046,13 @@ fn automatic_compaction_continues_after_a_long_summary() {
         "typed turn landed",
     );
     cli.send("\r").unwrap();
-    cli.expect("ALPHA_CONTEXT_OK").unwrap();
+    cli.expect("ALPHA_CONTEXT_OK").unwrap_or_else(|error| {
+        panic!(
+            "compacted task did not continue: {error}; provider_requests={}\n{}",
+            provider.requests.lock().unwrap().len(),
+            common::screen_tail(&cli, 8000)
+        )
+    });
     cli.send("/exit\r").unwrap();
     assert_eq!(cli.expect_eof().unwrap(), 0);
     let restored = Session::load_from_path(&path).unwrap();

@@ -7226,6 +7226,11 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
         )
         .await;
     assert!(loaded.get("result").is_some(), "{loaded}");
+    assert_eq!(
+        fs::read(&transcript).unwrap(),
+        before_transcript,
+        "loading must project the interrupted result without rewriting history"
+    );
     let (_, continued) = competitor
         .send_request(
             "session/prompt",
@@ -7236,6 +7241,37 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
         )
         .await;
     assert_eq!(continued["result"]["stopReason"], "end_turn", "{continued}");
+    let repaired_transcript = fs::read(&transcript).unwrap();
+    assert!(
+        String::from_utf8_lossy(&repaired_transcript)
+            .contains("Side effects may already have occurred"),
+        "the new owner must persist the interrupted tool's uncertain outcome"
+    );
+    assert!(
+        server
+            .captured_requests()
+            .await
+            .last()
+            .unwrap()
+            .raw_body
+            .contains("Side effects may already have occurred"),
+        "the resumed model must receive the persisted uncertainty about prior effects"
+    );
+    competitor.shutdown().await;
+    let mut competitor = spawn_stdio_client_danger(&workspace);
+    initialize_with_completions(&mut competitor).await;
+    let (_, loaded_again) = competitor
+        .send_request(
+            "session/load",
+            json!({"sessionId":sid, "cwd":workspace.root, "mcpServers":[]}),
+        )
+        .await;
+    assert!(loaded_again.get("result").is_some(), "{loaded_again}");
+    assert_eq!(
+        fs::read(&transcript).unwrap(),
+        repaired_transcript,
+        "a further process restart must retain the repair without rewriting history"
+    );
     competitor.shutdown().await;
 
     // Unreleased, non-locking v1 records require explicit offline handling.

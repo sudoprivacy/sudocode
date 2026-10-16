@@ -2809,45 +2809,6 @@ mod tests {
     }
 
     #[test]
-    fn load_keeps_repairs_read_only_until_the_active_writer_persists_them() {
-        let path = temp_session_path("interrupted-recovery");
-        let mut session = Session::new().with_persistence_path(path.clone());
-        session
-            .push_message(ConversationMessage::assistant(vec![
-                ContentBlock::ToolUse {
-                    id: "external-effect".into(),
-                    name: "bash".into(),
-                    input: "{}".into(),
-                    thought_signature: None,
-                },
-            ]))
-            .unwrap();
-        let original = fs::read(&path).unwrap();
-        let mut loaded = Session::load_from_path(&path).unwrap();
-        assert_eq!(
-            fs::read(&path).unwrap(),
-            original,
-            "inspection cannot rewrite durable history"
-        );
-        assert!(loaded
-            .repair_orphan_tool_uses()
-            .unwrap_err()
-            .to_string()
-            .contains("session_writer_busy"));
-        assert_eq!(fs::read(&path).unwrap(), original);
-        drop(session);
-        assert_eq!(loaded.repair_orphan_tool_uses().unwrap(), 1);
-        assert_eq!(loaded.repair_orphan_tool_uses().unwrap(), 0);
-        assert!(fs::read_to_string(&path)
-            .unwrap()
-            .contains("Side effects may already have occurred"));
-        let mut again = Session::load_from_path(&path).unwrap();
-        assert_eq!(again.repair_orphan_tool_uses().unwrap(), 0);
-        assert_eq!(again.messages, loaded.messages);
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
     fn sanitize_leaves_well_formed_history_unchanged() {
         // A complete tool_use → tool_result pair must not gain a duplicate.
         let mut session = Session::new();

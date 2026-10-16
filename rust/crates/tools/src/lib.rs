@@ -9465,28 +9465,11 @@ fn run_in_process_group(
 fn shell_run_to_bash_output(result: ShellRunResult, timeout_ms: u64) -> runtime::BashCommandOutput {
     let stdout_text = String::from_utf8_lossy(&result.stdout).into_owned();
     let stderr_text = String::from_utf8_lossy(&result.stderr).into_owned();
-    let stdio_empty = result.stdout.is_empty() && result.stderr.is_empty();
 
     match result.outcome {
-        ShellOutcome::Completed(status) => runtime::BashCommandOutput {
-            exit_code: status.code(),
-            stdout: stdout_text,
-            stderr: stderr_text,
-            raw_output_path: None,
-            interrupted: false,
-            is_image: None,
-            background_task_id: None,
-            backgrounded_by_user: None,
-            assistant_auto_backgrounded: None,
-            dangerously_disable_sandbox: None,
-            return_code_interpretation: status
-                .code()
-                .filter(|code| *code != 0)
-                .map(|code| format!("exit_code:{code}")),
-            no_output_expected: Some(stdio_empty),
-            structured_content: None,
-            sandbox_status: None,
-        },
+        ShellOutcome::Completed(status) => {
+            runtime::BashCommandOutput::completed(status, stdout_text, stderr_text)
+        }
         ShellOutcome::Interrupted => runtime::BashCommandOutput {
             exit_code: None,
             stdout: stdout_text,

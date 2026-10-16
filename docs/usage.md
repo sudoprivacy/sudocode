@@ -339,6 +339,10 @@ Failures retain `returnCodeInterpretation`; interrupted runs include
 `rawOutputPath`, but do not claim a completed exit code. Signal termination
 also has no numeric exit code and is described in `returnCodeInterpretation`.
 
+Windows console-control exits are treated as interruptions even if the child
+exits before the parent's cancellation notification arrives. Partial output is
+preserved; an interrupted tool does not become a successful result.
+
 Empty optional fields and routine sandbox capability flags are omitted. The
 public Rust result type accepts omitted stderr and interruption fields as an
 empty string and `false`, respectively. On failure, an available sandbox

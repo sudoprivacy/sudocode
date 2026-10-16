@@ -128,15 +128,25 @@ fn kernel_with_backend(zone_id: &str) -> Arc<Kernel> {
     kernel
 }
 
+/// A planted descriptor for `name` in `zone` — the test-side stand-in for
+/// what the ManagedAgentService plants for a real managed agent, so backends
+/// built from it carry the trusted-local zone source a planted descriptor
+/// grants.
+fn desc_for(name: &str, zone: &str) -> AgentDescriptor {
+    AgentDescriptor {
+        pid: format!("pid-{name}"),
+        name: name.to_string(),
+        owner_id: "test-owner".to_string(),
+        zone_id: zone.to_string(),
+        ..AgentDescriptor::default()
+    }
+}
+
 /// A `KernelFsBackend` rooted at `/ws`, over the given kernel. The context
 /// names agent-x: the agents-base subtrees (`managed_root`) are keyed by the
 /// context's agent identity, and a context without one roots nothing.
 fn vfs_backend(kernel: &Arc<Kernel>) -> KernelFsBackend<Kernel> {
-    KernelFsBackend::new(
-        Arc::clone(kernel),
-        OperationContext::new("system", "root", true, Some("agent-x"), true),
-        "/ws",
-    )
+    KernelFsBackend::for_agent_descriptor(Arc::clone(kernel), &desc_for("agent-x", "root"), "/ws")
 }
 
 #[test]
@@ -147,11 +157,9 @@ fn p1a_resource_targets_require_the_same_delegated_zone_for_cohost_and_subproces
         Arc::new(Box::new(CountingAllow(Arc::clone(&permission_checks))));
     kernel.set_permission_provider(provider);
 
-    let without_delegation = KernelFsBackend::for_agent(
+    let without_delegation = KernelFsBackend::new(
         Arc::clone(&kernel),
-        "test-owner",
-        "tenant-zone",
-        "agent-x",
+        runtime::agent_operation_context("test-owner", "tenant-zone", "agent-x"),
         "/ws",
     );
     let denied = without_delegation.write("/ws/denied.txt", b"denied");

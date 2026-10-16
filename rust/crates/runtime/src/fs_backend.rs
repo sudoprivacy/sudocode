@@ -977,41 +977,21 @@ impl KernelFsAccess for Kernel {
 }
 
 impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
+    /// Build a backend whose zone authority is unverified by construction.
+    ///
+    /// `new` is the raw seam: whatever the caller claims in `ctx`, nothing
+    /// here elevates it to zone trust, so every operation stays behind the
+    /// fail-closed `UnverifiedDelegationRef` gate. Trusted zone sources have
+    /// their own constructors — [`Self::for_agent_descriptor`] (planted
+    /// descriptor) and [`Self::for_standalone_session`] (standalone-local /
+    /// host env).
     pub fn new(kernel: Arc<K>, ctx: OperationContext, workspace_root: impl Into<String>) -> Self {
-        // A standalone-local (root, unscoped) exception applies only when
-        // hosted metadata is genuinely absent. When the host injected a zone
-        // (the subprocess runner env), that env shapes authorization instead:
-        // elevated to trusted-local for the in-process kernel (the env's
-        // injector is this process's parent — the position the
-        // ManagedAgentService is in for a planted descriptor), enforced to
-        // its scope when one is present, and a partial or invalid hosted env
-        // keeps its fail-closed shape rather than widening into root.
-        //
-        // Two zones on purpose when env is present: `zone_context.zone_id`
-        // (the env zone) governs the zone contract (ResourceRef/scope
-        // matching), while `ctx.zone_id` ("root") governs kernel routing
-        // (the mounts live there) — a denial fires in `authorize_target`,
-        // before any syscall, so the two layers never conflict.
-        let zone_context = if ctx.is_system {
-            let env_ctx = crate::zone_context::host_zone_once().trusted_for_in_process_kernel();
-            if matches!(env_ctx.source(), ContextSource::Absent) {
-                HostZoneContext::from_trusted_parts(
-                    &ctx.zone_id,
-                    None,
-                    None,
-                    ContextSource::TrustedLocal,
-                )
-            } else {
-                env_ctx
-            }
-        } else {
-            HostZoneContext::from_trusted_parts(
-                &ctx.zone_id,
-                None,
-                None,
-                ContextSource::UnverifiedDelegationRef,
-            )
-        };
+        let zone_context = HostZoneContext::from_trusted_parts(
+            &ctx.zone_id,
+            None,
+            None,
+            ContextSource::UnverifiedDelegationRef,
+        );
         Self {
             kernel,
             ctx,
@@ -1021,23 +1001,54 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
         }
     }
 
-    /// Build a backend for a managed agent from its descriptor identity.
-    /// The [`OperationContext`] is the agent's own (owner / zone / name);
-    /// `workspace_root` is the absolute VFS path relative tool paths
-    /// resolve against (typically the agent's procfs workspace subtree).
-    /// File tools are not system operations: the host's permission provider
-    /// must authorize this agent's access.
-    /// Constructing the context here keeps `kernel`-crate types off the
-    /// `tools`-crate factory that calls this.
-    pub fn for_agent(
+    /// Build the backend a standalone CLI session drives.
+    ///
+    /// The context is the session's own agent identity — `is_admin=false`,
+    /// `is_system=false`, subject=`agent` — exactly the shape main's
+    /// `for_agent` gave the CLI: file tools are not system operations, and
+    /// the kernel's permission gates and any audit row attribute the
+    /// session's writes to the agent it names.
+    ///
+    /// The zone context is trusted-local by construction: a standalone
+    /// session acts for itself on a host the user booted. A standalone-local
+    /// (root, unscoped) exception applies only when hosted metadata is
+    /// genuinely absent. When the host injected a zone (the subprocess
+    /// runner env), that env shapes authorization instead: elevated to
+    /// trusted-local for the in-process kernel (the env's injector is this
+    /// process's parent — the position the ManagedAgentService is in for a
+    /// planted descriptor), enforced to its scope when one is present, and a
+    /// partial or invalid hosted env keeps its fail-closed shape rather than
+    /// widening into root.
+    ///
+    /// Two zones on purpose when env is present: `zone_context.zone_id`
+    /// (the env zone) governs the zone contract (ResourceRef/scope
+    /// matching), while `ctx.zone_id` ("root") governs kernel routing
+    /// (the mounts live there) — a denial fires in `authorize_target`,
+    /// before any syscall, so the two layers never conflict.
+    pub fn for_standalone_session(
         kernel: Arc<K>,
-        owner_id: &str,
-        zone_id: &str,
         agent_name: &str,
         workspace_root: impl Into<String>,
     ) -> Self {
-        let ctx = crate::agent_operation_context(owner_id, zone_id, agent_name);
-        Self::new(kernel, ctx, workspace_root)
+        let ctx = crate::agent_operation_context(agent_name, "root", agent_name);
+        let env_ctx = crate::zone_context::host_zone_once().trusted_for_in_process_kernel();
+        let zone_context = if matches!(env_ctx.source(), ContextSource::Absent) {
+            HostZoneContext::from_trusted_parts(
+                &ctx.zone_id,
+                None,
+                None,
+                ContextSource::TrustedLocal,
+            )
+        } else {
+            env_ctx
+        };
+        Self {
+            kernel,
+            ctx,
+            zone_context: Some(zone_context),
+            workspace_root: workspace_root.into(),
+            host_root: None,
+        }
     }
 
     /// Build the co-host backend from the complete planted descriptor so its

@@ -11,6 +11,8 @@
 
 use std::path::Path;
 
+mod common;
+
 use engine_host::HostContext;
 
 /// One temp root per test, under a config home that is not the developer's.
@@ -314,11 +316,9 @@ fn a_backend_roots_every_concern_it_imposes_a_namespace_for() {
     use std::sync::Arc;
 
     let kernel = Arc::new(kernel::kernel::Kernel::new());
-    let cohost: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let cohost: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "owner",
-        "root",
-        "scode-agent",
+        &common::make_desc("7", "scode-agent", "unused"),
         "/proc/7/workspace".to_string(),
     ));
     // Every concern the backend roots, asserted where the one match answers

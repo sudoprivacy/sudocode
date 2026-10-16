@@ -41,7 +41,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kernel::kernel::Kernel;
-use kernel::kernel::OperationContext;
 use runtime::{FsBackend, KernelFsBackend};
 
 /// Zone a standalone session's mounts live in.
@@ -84,17 +83,11 @@ pub fn boot_session_fs(
     }
     // Host spelling: a CLI session's files are host files, so the paths its
     // tools report are the ones its user typed and its `bash` tool can open.
-    // The context is SYSTEM: a standalone session acts for itself on a host
-    // the user booted, so its zone context is trusted-local (`is_system`),
-    // not the fail-closed unverified-delegation source `for_agent` carries —
-    // that constructor is for kernel-side agents whose authority must come
-    // from a planted descriptor, and would refuse every CLI file operation.
-    // When the host injected hosted metadata (the subprocess runner env),
-    // `KernelFsBackend::new` lets that env shape the authorization instead —
-    // the root exception above is only for a genuinely absent hosted env.
-    let ctx = OperationContext::new(agent_name, ZONE, true, Some(agent_name), true);
+    // The session's context is its own agent identity (not system); its zone
+    // context is trusted-local via `for_standalone_session` — host-env
+    // metadata, when present, shapes the authorization there.
     Ok(Arc::new(
-        KernelFsBackend::new(kernel, ctx, workspace_root)
+        KernelFsBackend::for_standalone_session(kernel, agent_name, workspace_root)
             .with_host_root(workspace.to_string_lossy().into_owned()),
     ))
 }

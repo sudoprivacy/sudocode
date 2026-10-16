@@ -1578,12 +1578,41 @@ fn plan_fixture_response(request: &MessageRequest, scenario: Scenario) -> Messag
         }
         return text_message_response("msg_plan_execution_draft", "Plan remains a draft.");
     }
+    let source_requested = request.messages.iter().flat_map(|message| &message.content).any(|block| {
+        matches!(block, InputContentBlock::Text { text }
+            if text.split_whitespace().any(|token| token == "PARITY_SCENARIO:plan_execution_roundtrip")
+                && text.contains("plan-source.md"))
+    });
+    let content = if source_requested {
+        let Some((result, failed)) = results.get("read_file") else {
+            return tool_message_response(
+                "msg_plan_execution_read",
+                "toolu_plan_execution_read",
+                "read_file",
+                json!({"path":"plan-source.md"}),
+            );
+        };
+        assert!(!failed, "plan source read must succeed: {result}");
+        let source: Value = serde_json::from_str(result).expect("plan source read result JSON");
+        assert_eq!(source["type"], "text", "plan source must be text");
+        let content = source["file"]["content"]
+            .as_str()
+            .expect("plan source read must return file content");
+        assert!(!content.is_empty(), "plan source must not be empty");
+        content.to_string()
+    } else {
+        PLAN_REVIEW_MARKDOWN.to_string()
+    };
     tool_message_response(
         "msg_plan_execution_review",
         "toolu_plan_execution_review",
         "write_plan",
         json!({
-            "content": PLAN_REVIEW_MARKDOWN, "context":"Review context marker", "constraints":"Only write the approved artifact.",
+            "content": content, "context":"Review context marker", "constraints": if source_requested {
+                "Only write the approved artifact. Write exactly completed from approved plan followed by one newline to plan-executed.txt; add no other text."
+            } else {
+                "Only write the approved artifact."
+            },
             "acceptance":"The artifact contains the approved text."
         }),
     )

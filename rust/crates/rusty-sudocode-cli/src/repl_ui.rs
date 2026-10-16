@@ -32,10 +32,13 @@ use commands::suggest_slash_commands;
 use iocraft::prelude::*;
 
 mod ansi_text;
+mod chrome_labels;
+mod prompt_text;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
-use ansi_text::{AnsiText, PromptTextView, RichText};
+use ansi_text::{AnsiText, RichText};
+use prompt_text::PromptTextView;
 use tasks::{TaskBrowser, TaskFocus};
 
 // ── stderr redirect ───────────────────────────────────────────────────
@@ -1263,9 +1266,8 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: u
     for (item, card_lines) in items.iter().zip(cards) {
         match item {
             PendingItem::QueuedMessage { display, .. } => {
-                let first = display.lines().next().unwrap_or("");
                 lines.push(crate::render::text_layout::truncate_to_width(
-                    &format!("{DIM}↳ queued: {first}{RESET}"),
+                    &chrome_labels::queued_label(display),
                     term_width,
                 ));
             }
@@ -1306,7 +1308,7 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: u
 /// - Truncation: dynamic based on terminal height (CC: `min(10, max(3, rows - 14))`)
 /// - Priority order: in_progress > pending > completed; hidden summary
 fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
-    use crate::render::{ansi_fg, theme, BOLD, DIM, RESET};
+    use crate::render::{ansi_fg, theme, DIM, RESET};
 
     if todos.is_empty() {
         return String::new();
@@ -1364,25 +1366,7 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
     let hidden = &sorted[display_count..];
 
     for todo in visible {
-        // While in progress, show the present-continuous `activeForm`; otherwise
-        // the imperative `content`.
-        let label = if todo.status == runtime::TodoStatus::InProgress {
-            todo.active_form.as_str()
-        } else {
-            todo.content.as_str()
-        };
-        let (icon, label_fmt) = match todo.status {
-            runtime::TodoStatus::Completed => (
-                format!("{success}\u{2713}{RESET}"),
-                format!("{DIM}\x1b[9m{label}\x1b[29m{RESET}"),
-            ),
-            runtime::TodoStatus::InProgress => (
-                format!("{info}\u{25a0}{RESET}"),
-                format!("{BOLD}{label}{RESET}"),
-            ),
-            runtime::TodoStatus::Pending => ("\u{25a1}".to_string(), label.to_string()),
-        };
-        lines.push(format!("  {icon} {label_fmt}"));
+        lines.push(chrome_labels::todo_item(todo, &success, &info));
     }
 
     if !hidden.is_empty() {

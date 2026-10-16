@@ -158,12 +158,8 @@ pub fn ansi_bold_fg(color: Color) -> String {
     format!("\x1b[1m{}", ansi_fg(color))
 }
 
-/// ANSI reset.
-pub const RESET: &str = "\x1b[0m";
-/// ANSI dim.
-pub const DIM: &str = "\x1b[2m";
-/// ANSI bold.
-pub const BOLD: &str = "\x1b[1m";
+mod ansi_codes;
+pub use ansi_codes::{BOLD, DIM, RESET};
 
 /// The REPL prompt glyph (`❯`). Single source of truth: the live input line,
 /// the resumed-history echo, and any other prompt reprint all reference this so

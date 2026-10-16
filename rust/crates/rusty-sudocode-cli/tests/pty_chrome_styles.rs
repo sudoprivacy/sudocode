@@ -2,6 +2,9 @@
 //! just formatter strings: the old Text path kept the words but lost SGR.
 mod common;
 
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -40,6 +43,142 @@ fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
         let (_, row, col) = positions.iter().find(|(byte, _, _)| *byte == start)?;
         let cell = screen.raw().cell(*row, *col)?;
         Some((format!("{:?}", cell.fgcolor()), cell.bold(), cell.dim()))
+    })
+}
+
+fn terminal_colors() -> &'static (BTreeMap<u8, String>, String, bool) {
+    static COLORS: OnceLock<(BTreeMap<u8, String>, String, bool)> = OnceLock::new();
+    COLORS.get_or_init(|| {
+        let indices = [28_u8, 79, 130, 150, 214, 220, 241, 247];
+        let mut command = String::from("printf '\\033[0m\\033[2J\\033[H");
+        for index in indices {
+            for (channel, sgr) in [("FG", 38), ("BG", 48)] {
+                write!(
+                    command,
+                    "\\033[{sgr};5;{index}m{channel}{index}\\033[0m\\r\\n"
+                )
+                .unwrap();
+            }
+        }
+        command.push_str("\\033[0;1mBOLD\\033[0m\\r\\n");
+        for (label, sgr) in [
+            ("PlainControl", "0"),
+            ("DimControl", "0;2"),
+            ("Reset22Control", "22"),
+            ("DimStrikeControl", "0;2;9"),
+            ("Reset0Control", "0"),
+        ] {
+            write!(command, "\\033[{sgr}m{label}\\r\\n").unwrap();
+        }
+        command.push_str("PALETTE-DONE\\r\\n'; IFS= read -r release");
+        let mut probe = PtySession::spawn(&common::resolve_sh(), &["-c", &command]).unwrap();
+        probe.set_default_timeout(common::DEFAULT_TIMEOUT);
+        common::expect_screen(
+            &probe,
+            |screen| screen.contains("PALETTE-DONE"),
+            common::at_least(Duration::from_secs(30)),
+            "independent terminal palette control",
+        );
+        let colors = probe.render(|screen| {
+            let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+            let indexed = indices
+                .into_iter()
+                .map(|index| {
+                    let observed = ["FG", "BG"].map(|channel| {
+                        let label = format!("{channel}{index}");
+                        let row = rows.iter().position(|row| row.trim_end() == label).unwrap();
+                        let cell = screen.raw().cell(u16::try_from(row).unwrap(), 0).unwrap();
+                        let fg = format!("{:?}", cell.fgcolor());
+                        let bg = format!("{:?}", cell.bgcolor());
+                        assert!(!cell.bold() && !cell.dim(), "{label}: intensity");
+                        let color = if channel == "FG" {
+                            assert_eq!(bg, "Default", "{label}: opposite channel");
+                            fg
+                        } else {
+                            assert_eq!(fg, "Default", "{label}: opposite channel");
+                            bg
+                        };
+                        let rgb = if index >= 232 {
+                            let value = 8 + (index - 232) * 10;
+                            format!("Rgb({value}, {value}, {value})")
+                        } else {
+                            let cube = index - 16;
+                            let levels = [0, 95, 135, 175, 215, 255];
+                            format!(
+                                "Rgb({}, {}, {})",
+                                levels[usize::from(cube / 36)],
+                                levels[usize::from(cube / 6 % 6)],
+                                levels[usize::from(cube % 6)]
+                            )
+                        };
+                        assert!(
+                            color == format!("Idx({index})") || (cfg!(windows) && color == rgb),
+                            "{label}: unexpected terminal palette conversion: {color}"
+                        );
+                        color
+                    });
+                    assert_eq!(
+                        observed[0], observed[1],
+                        "index {index}: foreground/background conversion"
+                    );
+                    let [fg, _] = observed;
+                    (index, fg)
+                })
+                .collect();
+            let row = rows
+                .iter()
+                .position(|row| row.trim_end() == "BOLD")
+                .unwrap();
+            let cell = screen.raw().cell(u16::try_from(row).unwrap(), 0).unwrap();
+            let bold_default = format!("{:?}", cell.fgcolor());
+            assert!(cell.bold() && !cell.dim());
+            assert_eq!(format!("{:?}", cell.bgcolor()), "Default");
+            assert!(
+                bold_default == "Default" || (cfg!(windows) && bold_default == "Idx(15)"),
+                "unexpected bold-default foreground: {bold_default}"
+            );
+            (indexed, bold_default)
+        });
+        let dim = terminal_dim(&probe);
+        probe.send("\r").unwrap();
+        assert_eq!(probe.expect_eof().unwrap(), 0);
+        (colors.0, colors.1, dim)
+    })
+}
+
+fn terminal_dim(probe: &PtySession) -> bool {
+    probe.render(|screen| {
+        let rows: Vec<_> = screen.raw().rows(0, screen.raw().size().1).collect();
+        let [plain, dim, reset22, dim_strike, reset0] = [
+            "PlainControl",
+            "DimControl",
+            "Reset22Control",
+            "DimStrikeControl",
+            "Reset0Control",
+        ]
+        .map(|label| {
+            let row = rows.iter().position(|row| row.trim_end() == label).unwrap();
+            let cell = screen.raw().cell(u16::try_from(row).unwrap(), 0).unwrap();
+            assert_eq!(
+                format!("{:?}", cell.fgcolor()),
+                "Default",
+                "{label}: foreground"
+            );
+            assert_eq!(
+                format!("{:?}", cell.bgcolor()),
+                "Default",
+                "{label}: background"
+            );
+            assert!(!cell.bold(), "{label}: bold");
+            cell.dim()
+        });
+        assert!(!plain, "PlainControl: dim");
+        assert!(!reset22, "Reset22Control: dim");
+        assert!(!reset0, "Reset0Control: dim");
+        assert_eq!(dim, dim_strike, "dim with and without strikethrough");
+        #[cfg(not(windows))]
+        assert!(dim, "DimControl: dim must survive the terminal");
+        dim
     })
 }
 
@@ -126,7 +265,7 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
             ("COLORFGBG", "15;0"),
         ],
     );
-    sess.resize(40, 100).expect("resize");
+    resize_idle_chrome(&mut sess, 40, 100);
     // ConPTY drops strikethrough; application-side tests cover it on Windows.
     #[cfg(not(windows))]
     sess.expect(r"\x1b\[9mFinished parser")
@@ -134,12 +273,19 @@ fn seeded_todo_chrome_preserves_colors_and_weights() {
     sess.expect("❯").expect("input ready");
     expect_style(&sess, "✓", ("Idx(10)", false, false));
     expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
-    expect_style(&sess, "Checking styles", ("Default", true, false));
-    expect_style(&sess, "Finished parser", ("Default", false, true));
+    let neutral = terminal_colors().1.as_str();
+    expect_style(&sess, "Checking styles", (neutral, true, false));
+    // ConPTY dim support is host-dependent; match the independent control exactly.
+    let dim = terminal_colors().2;
+    expect_style(&sess, "Finished parser", ("Default", false, dim));
     expect_style(&sess, "Review output", ("Default", false, false));
     // Reflow must not merge differently styled spans or lose their attributes.
     resize_idle_chrome(&mut sess, 30, 68);
-    expect_style(&sess, "Checking styles", ("Default", true, false));
+    expect_style(&sess, "✓", ("Idx(10)", false, false));
+    expect_style(&sess, "■", ("Rgb(166, 227, 161)", false, false));
+    expect_style(&sess, "Checking styles", (neutral, true, false));
+    expect_style(&sess, "Finished parser", ("Default", false, dim));
+    expect_style(&sess, "Review output", ("Default", false, false));
     exit(&mut sess);
 }
 
@@ -156,7 +302,12 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     let green = if no_color {
         "Default"
     } else {
-        palette["styles"][index]["fg"].as_str().unwrap()
+        let foreground = palette["styles"][index]["fg"].as_str().unwrap();
+        match foreground {
+            "Idx(150)" if !truecolor => &terminal_colors().0[&150],
+            "Idx(28)" if !truecolor => &terminal_colors().0[&28],
+            _ => foreground,
+        }
     };
     let env = TestEnv::new("info-shared-green");
     let store = env.workspace_root().join("todos.json");
@@ -172,11 +323,12 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
             ("COLORFGBG", if light { "0;15" } else { "15;0" }),
         ],
     );
-    sess.resize(50, 100).unwrap();
+    resize_idle_chrome(&mut sess, 50, 100);
     common::expect_input_line_cleared(&sess, env.timeout(), "info input ready");
     // Neutral quantities keep terminal foreground and weight in every color
     // mode, including NO_COLOR, independent of icon/status semantic colors.
-    expect_style(&sess, "1 todos", ("Default", true, false));
+    let neutral = terminal_colors().1.as_str();
+    expect_style(&sess, "1 todos", (neutral, true, false));
     // Both a persistent info label and the active status slot use the role.
     expect_style(&sess, "■", (green, false, false));
     let marker = common::turn_status_marker(&sess);
@@ -261,14 +413,15 @@ fn running_card_and_queued_input_keep_distinct_styles() {
             ("COLORFGBG", "15;0"),
         ],
     );
-    sess.resize(40, 100).expect("resize");
+    resize_idle_chrome(&mut sess, 40, 100);
     sess.expect("❯").expect("input ready");
     let prompt = env.prompt(
         "Run exactly this bash command, nothing else: printf 'interrupt-start'; sleep 30",
         "bash_interrupt_long_running",
     );
     sess.send(&format!("{prompt}\r")).expect("start tool");
-    expect_style(&sess, "╭─", ("Idx(214)", true, false));
+    let border = terminal_colors().0[&214].as_str();
+    expect_style(&sess, "╭─", (border, true, false));
     sess.send("StyleQueuedMarker").expect("type queued message");
     common::expect_input_line(
         &sess,
@@ -280,15 +433,16 @@ fn running_card_and_queued_input_keep_distinct_styles() {
     expect_style(
         &sess,
         "↳ queued: StyleQueuedMarker",
-        ("Default", false, true),
+        ("Default", false, terminal_colors().2),
     );
-    expect_style(&sess, "╭─", ("Idx(214)", true, false));
+    expect_style(&sess, "╭─", (border, true, false));
     sess.resize(30, 78).expect("resize during tool");
     expect_style(
         &sess,
         "↳ queued: StyleQueuedMarker",
-        ("Default", false, true),
+        ("Default", false, terminal_colors().2),
     );
+    expect_style(&sess, "╭─", (border, true, false));
     exit(&mut sess);
 }
 
@@ -303,8 +457,8 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         "\x1b[38;2;42;142;210mTrueColorSample\x1b[39m DefaultSample",
         "\x1b[38:2::128:64:32mColonRgbSample\x1b[0m",
         "\x1b[38:5:79mIndexedSample\x1b[0m",
-        // Backgrounds aren't supported by the pinned MixedText API. Their
-        // operands must not be mistaken for bold/italic/underline commands.
+        // Background color operands must not be mistaken for independent
+        // bold/italic/underline commands.
         "\x1b[48;2;1;3;4mNoOperandLeak\x1b[0m",
         // Neither a cursor/erase command nor an OSC payload is visible text.
         "SafePrefix\x1b[2J\x1b]0;HiddenTitle\x07SafeSuffix",
@@ -329,7 +483,7 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
             ("COLORFGBG", "15;0"),
         ],
     );
-    sess.resize(40, 100).expect("resize");
+    resize_idle_chrome(&mut sess, 40, 100);
     // The screen model cannot represent bold and dim simultaneously; keep
     // that bridge regression on the wire even though summaries no longer dim.
     #[cfg(not(windows))]
@@ -345,20 +499,20 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         );
     }
     sess.expect("❯").expect("input ready");
-    // ConPTY can drop even independent dim. The production Canvas regression
-    // checks dim and combined intensity before that boundary; check bold and
-    // reset here with the neutral foreground from the Todo layout.
+    // ConPTY dim support is host-dependent; check its exact observed intensity
+    // and reset with the neutral foreground from the Todo layout.
     #[cfg(windows)]
     for (label, bold, dim) in [
         ("BoldSample", true, false),
+        ("DimSample", false, terminal_colors().2),
         ("IntensityResetSample", false, false),
     ] {
-        common::expect_screen(
-            &sess,
-            |_| attributes(&sess, label) == Some(("Default".into(), bold, dim)),
-            common::DEFAULT_TIMEOUT,
-            &format!("{label}: expected (Default, {bold}, {dim})"),
-        );
+        let neutral = if bold {
+            terminal_colors().1.as_str()
+        } else {
+            "Default"
+        };
+        expect_style(&sess, label, (neutral, bold, dim));
     }
     expect_style(
         &sess,
@@ -366,7 +520,8 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
         ("Rgb(42, 142, 210)", false, false),
     );
     expect_style(&sess, "ColonRgbSample", ("Rgb(128, 64, 32)", false, false));
-    expect_style(&sess, "IndexedSample", ("Idx(79)", false, false));
+    let indexed = terminal_colors().0[&79].as_str();
+    expect_style(&sess, "IndexedSample", (indexed, false, false));
     expect_style(&sess, "DefaultSample", ("Default", false, false));
     expect_style(&sess, "NoOperandLeak", ("Default", false, false));
     expect_style(&sess, "SafePrefixSafeSuffix", ("Default", false, false));
@@ -378,7 +533,11 @@ fn todo_rich_text_preserves_extended_colors_without_replaying_controls() {
 
 #[test]
 fn todo_summary_scopes_every_count_and_label_in_both_themes() {
-    for (background, muted) in [("15;0", "Idx(247)"), ("0;15", "Idx(241)")] {
+    let neutral = terminal_colors().1.as_str();
+    for (background, muted) in [
+        ("15;0", terminal_colors().0[&247].as_str()),
+        ("0;15", terminal_colors().0[&241].as_str()),
+    ] {
         for statuses in [
             vec!["completed"],
             vec!["completed", "in_progress", "pending"],
@@ -399,7 +558,7 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                     ("COLORFGBG", background),
                 ],
             );
-            sess.resize(40, 100).unwrap();
+            resize_idle_chrome(&mut sess, 40, 100);
             sess.expect("❯").expect("input ready");
             for (rows, width) in [(40, 100), (40, 60), (12, 60), (40, 100)] {
                 resize_idle_chrome(&mut sess, rows, width);
@@ -411,10 +570,10 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                     "1 done".into(),
                     format!("{} open", statuses.len() - 1),
                 ] {
-                    expect_style(&sess, &count, ("Default", true, false));
+                    expect_style(&sess, &count, (neutral, true, false));
                 }
                 if statuses.len() > 1 {
-                    expect_style(&sess, "1 in progress", ("Default", true, false));
+                    expect_style(&sess, "1 in progress", (neutral, true, false));
                     expect_style(&sess, " in progress, ", (muted, false, false));
                 }
             }
@@ -430,10 +589,21 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
     // No API needed: resume real persisted usage through the production REPL.
     // Exercise both palettes and the warning/error -> muted transition as well
     // as the healthy-cache -> muted transition.
-    for (background, muted, hit_color, error_color) in [
-        ("15;0", "Idx(247)", "Idx(220)", "Idx(9)"),
-        ("0;15", "Idx(241)", "Idx(130)", "Idx(1)"),
-    ] {
+    let palettes = [
+        (
+            "15;0",
+            terminal_colors().0[&247].as_str(),
+            terminal_colors().0[&220].as_str(),
+            "Idx(9)",
+        ),
+        (
+            "0;15",
+            terminal_colors().0[&241].as_str(),
+            terminal_colors().0[&130].as_str(),
+            "Idx(1)",
+        ),
+    ];
+    for (background, muted, hit_color, error_color) in palettes {
         for (read, creation, hit, write) in
             [(7500, 2500, "⚡75%", "✎25%"), (9000, 1000, "⚡90%", "✎10%")]
         {
@@ -476,7 +646,7 @@ fn resumed_status_uses_muted_without_dim_and_scopes_cache_colors() {
                     ("COLORFGBG", background),
                 ],
             );
-            sess.resize(40, 240).unwrap();
+            resize_idle_chrome(&mut sess, 40, 240);
             for width in [240, 100] {
                 resize_idle_chrome(&mut sess, 40, width);
                 for label in [

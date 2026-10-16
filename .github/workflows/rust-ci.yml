@@ -8,6 +8,9 @@ on:
       native_acceptance:
         type: boolean
         default: false
+      mailbox_acceptance:
+        type: boolean
+        default: false
       inventory_only:
         type: boolean
         default: false
@@ -37,6 +40,38 @@ jobs:
         with:
           name: router-channel-diagnostics
           path: ${{ runner.temp }}/router-channels.json
+          retention-days: 7
+  mailbox-acceptance:
+    if: inputs.mailbox_acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      SCODE_LOG_PATH: ${{ github.workspace }}/mailbox-live-trace.jsonl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 67c1486ccabd99fa22550f598ffb9be4e032a2fb
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Exercise the original real controller mailbox scenario
+        working-directory: rust
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+          ANTHROPIC_BASE_URL: https://api.sudorouter.ai
+          SUDOCODE_TEST_MODEL: gpt-6-luna
+        run: cargo test --locked -p engine-acp --features mailbox --test session_mailbox_live -- --ignored --nocapture
+      - name: Retain redacted provider evidence
+        if: always()
+        env:
+          PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+        run: node .github/scripts/summarize_live_model_trace.cjs "$SCODE_LOG_PATH" "${{ runner.temp }}/mailbox-live-evidence.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: combined67c-mailbox-acceptance
+          path: ${{ runner.temp }}/mailbox-live-evidence.json
           retention-days: 7
   native-acceptance:
     if: inputs.native_acceptance

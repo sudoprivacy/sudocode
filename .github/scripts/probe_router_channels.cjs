@@ -82,6 +82,19 @@ async function main() {
   report.metadata.token = { status: usage.status, unlimitedQuota: usageData.unlimited_quota,
     modelLimitsEnabled: usageData.model_limits_enabled, modelLimits: usageData.model_limits };
   report.logsBefore = await logs();
+  const channels = await get('/api/channel/?p=1&page_size=100');
+  const channelRows = Array.isArray(channels.body.data) ? channels.body.data : channels.body.data?.items ?? [];
+  report.metadata.channels = { status: channels.status, success: channels.body.success,
+    message: clean(channels.body.message ?? channels.body.msg),
+    total: channels.body.data?.total,
+    sonnet: channelRows.filter(row => /sonnet/i.test(row.models ?? '')).map(row => ({
+      id: row.id, name: clean(row.name), status: row.status, group: clean(row.group),
+      models: clean(row.models),
+    })) };
+  if (process.argv.includes('--inventory-only')) {
+    console.log(writeEvidence(process.argv[2], report));
+    return;
+  }
   await probe();
   for (const alternative of ['claude-sonnet-4-5-20250929', 'claude-sonnet-5-5']) {
     if (report.metadata.models.sonnet.some(row => row.id === alternative)) await probe(undefined, alternative);

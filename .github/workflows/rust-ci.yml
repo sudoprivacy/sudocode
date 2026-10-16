@@ -16,7 +16,7 @@ on:
         default: ''
       runner:
         type: choice
-        options: [ubuntu-latest, macos-latest, windows-latest]
+        options: [ubuntu-latest, ubuntu-24.04, macos-latest, windows-latest]
         default: ubuntu-latest
 permissions:
   contents: read

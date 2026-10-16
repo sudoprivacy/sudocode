@@ -518,7 +518,9 @@ jobs:
     env:
       SUDOCODE_API_READ_TIMEOUT: &live_idle_seconds '90'
       SCODE_LIVE_MODEL: &live_model gpt-6-luna
-      SCODE_NATIVE_MODEL: &native_model claude-sonnet-4-6
+      # Keep protocol acceptance on a dated, verified native route. The model
+      # compatibility workflow independently records catalog-wide availability.
+      SCODE_NATIVE_MODEL: &native_model claude-sonnet-4-5-20250929
       SCODE_LOG_PATH: ${{ github.workspace }}/scode-acp-live-trace.jsonl
     steps:
       - uses: actions/checkout@v4
@@ -553,7 +555,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           ANTHROPIC_BASE_URL: https://api.sudorouter.ai
-          SUDOCODE_TEST_MODEL: gpt-6-luna
+          SUDOCODE_TEST_MODEL: *live_model
         run: cargo test --locked -p engine-acp --features mailbox --test session_mailbox_live -- --ignored --nocapture
       - name: Summarize ACP model routing and usage
         if: always()

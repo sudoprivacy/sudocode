@@ -173,11 +173,16 @@ fn relative_paths_resolve_against_the_agent_workspace() {
     assert_eq!(read.file.content, "- ship it");
 }
 
+fn canonical_workspace_mount() -> std::path::PathBuf {
+    let directory = runtime::test_support::temp_dir_path("scode-canonical-workspace");
+    std::fs::create_dir_all(&directory).unwrap();
+    directory.canonicalize().unwrap()
+}
+
 #[test]
 fn local_workspace_paths_and_virtual_paths_share_one_authorized_object() {
     let kernel = kernel_with_root_backend();
-    let directory = tempfile::tempdir().unwrap();
-    let mount = directory.path().canonicalize().unwrap();
+    let mount = canonical_workspace_mount();
     let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
     let path = mount.join("project.txt").to_string_lossy().into_owned();
     assert_eq!(fs.working_root().unwrap(), mount.to_string_lossy());
@@ -202,14 +207,14 @@ fn local_workspace_paths_and_virtual_paths_share_one_authorized_object() {
     fs.rename(&path, "renamed.txt").unwrap();
     assert!(!fs.exists(&path).unwrap());
     assert_eq!(fs.read("renamed.txt").unwrap(), b"same bytes");
+    std::fs::remove_dir(mount).unwrap();
 }
 
 #[test]
 fn local_workspace_keeps_managed_state_in_its_durable_namespace() {
     use runtime::ManagedRoot;
     let kernel = kernel_with_root_backend();
-    let directory = tempfile::tempdir().unwrap();
-    let mount = directory.path().canonicalize().unwrap();
+    let mount = canonical_workspace_mount();
     let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
     let memory = fs.managed_root(ManagedRoot::Memory).unwrap();
     assert_eq!(memory, "/agents/agent-x/memory");
@@ -234,14 +239,14 @@ fn local_workspace_keeps_managed_state_in_its_durable_namespace() {
             .unwrap(),
         "/sessions/original-id"
     );
+    std::fs::remove_dir(mount).unwrap();
 }
 
 #[test]
 fn local_workspace_spelling_preserves_authorization_and_rejects_path_escape() {
     let kernel = kernel_with_root_backend();
     let policy = install_file_policy(&kernel);
-    let directory = tempfile::tempdir().unwrap();
-    let mount = directory.path().canonicalize().unwrap();
+    let mount = canonical_workspace_mount();
     let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
     fs.write("secret.txt", b"private").unwrap();
     policy.deny("/ws/secret.txt");
@@ -289,6 +294,7 @@ fn local_workspace_spelling_preserves_authorization_and_rejects_path_escape() {
     assert!(vfs_backend(&kernel)
         .with_local_workspace("relative/project")
         .is_err());
+    std::fs::remove_dir(mount).unwrap();
 }
 
 #[test]

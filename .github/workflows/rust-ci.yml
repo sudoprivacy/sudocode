@@ -11,6 +11,9 @@ on:
       inventory_only:
         type: boolean
         default: false
+      specific_channels:
+        type: string
+        default: ''
       runner:
         type: choice
         options: [ubuntu-latest, macos-latest]
@@ -27,6 +30,7 @@ jobs:
       - name: Inspect existing key routing without exposing credentials
         env:
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+          SCODE_PROBE_CHANNELS: ${{ inputs.specific_channels }}
         run: node .github/scripts/probe_router_channels.cjs "${{ runner.temp }}/router-channels.json" ${{ inputs.inventory_only && '--inventory-only' || '' }}
       - uses: actions/upload-artifact@v4
         if: always()

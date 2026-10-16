@@ -95,6 +95,17 @@ async function main() {
     console.log(writeEvidence(process.argv[2], report));
     return;
   }
+  const specified = process.env.SCODE_PROBE_CHANNELS ?? '';
+  if (specified) {
+    if (!/^\d+(,\d+)*$/.test(specified)) throw new Error('Channel IDs must be comma-separated positive integers');
+    for (const id of [...new Set(specified.split(',').map(Number))]) {
+      if (!Number.isSafeInteger(id) || id <= 0) throw new Error('Invalid channel ID');
+      await probe(id);
+    }
+    report.logsAfter = await logs();
+    console.log(writeEvidence(process.argv[2], report));
+    return;
+  }
   await probe();
   for (const alternative of ['claude-sonnet-4-5-20250929', 'claude-sonnet-5-5']) {
     if (report.metadata.models.sonnet.some(row => row.id === alternative)) await probe(undefined, alternative);

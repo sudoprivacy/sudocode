@@ -1047,13 +1047,7 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
         desc: &AgentDescriptor,
         workspace_root: impl Into<String>,
     ) -> Self {
-        let ctx = OperationContext::new(
-            &desc.owner_id,
-            &desc.zone_id,
-            false,
-            Some(&desc.name),
-            false,
-        );
+        let ctx = crate::agent_operation_context(&desc.owner_id, &desc.zone_id, &desc.name);
         Self {
             kernel,
             ctx,

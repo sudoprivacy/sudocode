@@ -12,6 +12,7 @@ mod code_theme;
 mod color_math;
 mod color_theme;
 pub(crate) mod diff_colors;
+mod hyperlink;
 pub(crate) mod layout_policy;
 pub(crate) mod left_frame;
 pub(crate) mod output;
@@ -653,6 +654,7 @@ impl RenderState {
 pub struct TerminalRenderer {
     color_theme: ColorTheme,
     color_support: ColorSupport,
+    link_display: hyperlink::LinkDisplay,
 }
 
 impl Default for TerminalRenderer {
@@ -660,6 +662,7 @@ impl Default for TerminalRenderer {
         Self {
             color_theme: ColorTheme::default(),
             color_support: ColorSupport::detect(),
+            link_display: hyperlink::LinkDisplay::detect(),
         }
     }
 }
@@ -743,7 +746,11 @@ impl TerminalRenderer {
         }
 
         if self.color_support == ColorSupport::NoColor {
-            styled_text::StyledText::from_ansi(&output).text
+            let mut text = styled_text::StyledText::from_ansi(&output);
+            text.clear_styles();
+            output.clear();
+            text.write_ansi(0..text.text.len(), &mut output);
+            output
         } else {
             output
         }
@@ -998,25 +1005,32 @@ impl TerminalRenderer {
             }
             return format!("{} ({target})", link.text);
         }
-        let mut rendered = String::new();
+        let target = self
+            .link_display
+            .enabled()
+            .then(|| hyperlink::destination(destination))
+            .flatten();
+        let mut rendered = styled_text::StyledText::default();
         let foreground = self.color_support.color(self.color_theme.link);
         for (style, text) in label.spans(0..label.text.len()) {
-            let _ = write!(
-                rendered,
-                "{}",
-                style.with(foreground).underlined().apply(text)
-            );
+            rendered.push_link(style.with(foreground).underlined(), text, target.as_ref());
         }
         // Keep the destination usable in terminals without hyperlink support.
-        if label.text != *destination {
-            let target = destination.as_str().with(foreground).underlined();
+        if label.text != *destination
+            && (target.is_none() || self.link_display.show_destination() || label.text.is_empty())
+        {
+            let style = ContentStyle::default().with(foreground).underlined();
             if label.text.is_empty() {
-                let _ = write!(rendered, "{target}");
+                rendered.push_link(style, destination, target.as_ref());
             } else {
-                let _ = write!(rendered, " ({target})");
+                rendered.push(ContentStyle::default(), " (");
+                rendered.push_link(style, destination, target.as_ref());
+                rendered.push(ContentStyle::default(), ")");
             }
         }
-        rendered
+        let mut output = String::new();
+        rendered.write_ansi(0..rendered.text.len(), &mut output);
+        output
     }
 
     fn start_heading(state: &mut RenderState, level: u8, output: &mut String) {
@@ -1524,7 +1538,7 @@ impl ResponseGlyphState {
 
         let mut out = String::with_capacity(rendered.len() + 64);
 
-        self.parser.advance(&mut self.decoder, rendered.as_bytes());
+        self.decoder.advance(&mut self.parser, rendered);
         let text = std::mem::take(&mut self.decoder.output);
         let mut offset = 0;
         for line in text.text.split_inclusive(['\n', '\r']) {

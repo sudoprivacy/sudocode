@@ -2,7 +2,10 @@
   "dependencies": {
     "@xterm/addon-unicode11": "0.10.0-beta.301",
     "@xterm/headless": "6.1.0-beta.303",
-    "node-pty": "1.2.0-beta.15"
+    "@xterm/xterm": "6.1.0-beta.304",
+    "node-pty": "1.2.0-beta.15",
+    "playwright": "1.64.1",
+    "ws": "8.22.0"
   },
   "name": "scode-terminal-resize",
   "private": true

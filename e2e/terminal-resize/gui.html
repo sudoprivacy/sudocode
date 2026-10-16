@@ -1,0 +1,114 @@
+<!doctype html>
+<meta charset="utf-8">
+<link rel="stylesheet" href="/xterm.css">
+<style>body { margin: 0; background: #111; } #terminal { padding: 8px; }</style>
+<div id="terminal"></div>
+<script src="/xterm.js"></script>
+<script src="/unicode.js"></script>
+<script>
+  const options = JSON.parse(new URLSearchParams(location.search).get('options'));
+  const activated = [], hovered = [], activationEvents = [], keyboard = [];
+  const terminal = new Terminal({ ...options, allowProposedApi: true, scrollback: 10000,
+    fontFamily: 'monospace', fontSize: 14, cursorBlink: false,
+    linkHandler: {
+      // Match terminal-host conventions: plain dragging selects; Ctrl/Cmd-click opens.
+      activate: (event, target) => {
+        activationEvents.push({ target, ctrl: event.ctrlKey, meta: event.metaKey });
+        if (event.ctrlKey || event.metaKey) activated.push(target);
+      },
+      hover: (_event, target) => hovered.push(target),
+    },
+  });
+  terminal.loadAddon(new Unicode11Addon.Unicode11Addon());
+  terminal.unicode.activeVersion = '11';
+  terminal.open(document.getElementById('terminal'));
+  terminal.focus();
+  let input, inputReady, finishInput;
+  const lines = (start = 0) => {
+    const buffer = terminal.buffer.active;
+    return Array.from({ length: buffer.length - start }, (_, i) => buffer.getLine(start + i).translateToString(true));
+  };
+  const viewport = () => lines(terminal.buffer.active.baseY).join('\n');
+  // Observe capture at the window before xterm consumes the textarea event.
+  window.addEventListener('keydown', event => {
+    const at = performance.now();
+    keyboard.push({ at, key: event.key, ctrl: event.ctrlKey, meta: event.metaKey, alt: event.altKey,
+      focused: document.hasFocus() && document.activeElement === terminal.textarea });
+    if (event.target === terminal.textarea && event.key === 'x' && input && input.keydown === undefined) input.keydown = at;
+  }, { capture: true });
+  const socket = new WebSocket(`ws://${location.host}`);
+  let parsed = 0, rendered = 0, frames = 0, pending = 0, chunks = 0, lastData = performance.now();
+  terminal.parser.registerCsiHandler({ prefix: '?', final: 'l' }, params => {
+    if (params.includes(2026)) frames++;
+    return false;
+  });
+  terminal.onRender(() => rendered++);
+  terminal.onWriteParsed(() => {
+    const at = performance.now();
+    if (input?.keydown !== undefined && input.parsed === undefined
+      && viewport().split('\n').some(row => row.trimEnd() === `❯ ${input.draft}`)) {
+      input.parsed = at;
+      finishInput(input);
+    }
+  });
+  socket.onmessage = event => {
+    const received = performance.now(), chunk = chunks++;
+    pending++; lastData = received;
+    terminal.write(event.data, () => {
+      const callback = performance.now();
+      parsed++; pending--;
+      if (input?.keydown !== undefined && input.callback === undefined
+        && viewport().split('\n').some(row => row.trimEnd() === `❯ ${input.draft}`)) {
+        Object.assign(input, { received, callback, chunk });
+      }
+    });
+  };
+  terminal.onData(data => {
+    if (data === 'x' && input?.keydown !== undefined && input.sent === undefined) input.sent = performance.now();
+    socket.send(JSON.stringify({ data }));
+  });
+  window.fixture = {
+    terminal, activated, hovered, activationEvents, keyboard,
+    get parsed() { return parsed; }, get rendered() { return rendered; },
+    get frames() { return frames; }, get pending() { return pending; }, get lastData() { return lastData; },
+    lines, viewport,
+    armInput(draft) { input = { draft }; inputReady = new Promise(resolve => { finishInput = resolve; }); },
+    async waitForInput() {
+      let timer;
+      try {
+        return await Promise.race([inputReady, new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Input was not parsed within 30 seconds')), 30000);
+        })]);
+      } finally { clearTimeout(timer); }
+    },
+    get input() { return input; },
+    async frame() { await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); },
+    resize(cols, rows) { terminal.resize(cols, rows); socket.send(JSON.stringify({ cols, rows })); },
+    locate(label, last = false) {
+      const buffer = terminal.buffer.active;
+      const rows = this.lines();
+      const index = last ? rows.findLastIndex(line => line.includes(label)) : rows.findIndex(line => line.includes(label));
+      if (index < 0) throw new Error(`Missing ${label}`);
+      let text = '', start, end;
+      for (let column = 0; column < terminal.cols; column++) {
+        const cell = buffer.getLine(index).getCell(column);
+        if (!cell || cell.getWidth() === 0) continue;
+        const before = text.length;
+        text += cell.getChars() || ' ';
+        const position = text.indexOf(label);
+        if (start === undefined && before === rows[index].indexOf(label)) start = column;
+        if (position >= 0) { end = column + cell.getWidth(); break; }
+      }
+      return { row: index, start, end };
+    },
+    point(position, edge = 'start') {
+      const rect = document.querySelector('.xterm-screen').getBoundingClientRect();
+      const row = position.row - terminal.buffer.active.viewportY;
+      if (row < 0 || row >= terminal.rows || !Number.isFinite(position[edge])) {
+        throw new Error(`Target outside viewport: ${JSON.stringify(position)}, top ${terminal.buffer.active.viewportY}`);
+      }
+      return { x: rect.x + (position[edge] + (edge === 'start' ? 0.15 : -0.05)) * rect.width / terminal.cols,
+        y: rect.y + (row + 0.5) * rect.height / terminal.rows };
+    },
+  };
+</script>

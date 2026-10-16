@@ -26,8 +26,8 @@ async function logs() {
   return { status, success: body.success, rows: selected };
 }
 
-async function probe(channel) {
-  const item = { channel: channel ?? 'automatic', maxTokens: 64000, thinkingBudget: 32000 };
+async function probe(channel, probeModel = model) {
+  const item = { model: probeModel, channel: channel ?? 'automatic', maxTokens: 64000, thinkingBudget: 32000 };
   report.probes.push(item);
   try {
     const routedToken = channel === undefined ? token : `${token}-${channel}`;
@@ -37,7 +37,7 @@ async function probe(channel) {
         authorization: `Bearer ${routedToken}`, 'x-api-key': routedToken,
         'anthropic-version': '2023-06-01', 'content-type': 'application/json',
       },
-      body: JSON.stringify({ model, max_tokens: 64000, thinking: { type: 'enabled', budget_tokens: 32000 },
+      body: JSON.stringify({ model: probeModel, max_tokens: 64000, thinking: { type: 'enabled', budget_tokens: 32000 },
         messages: [{ role: 'user', content: 'Reply exactly: pong' }], stream: true }),
     });
     item.status = response.status;
@@ -83,6 +83,9 @@ async function main() {
     modelLimitsEnabled: usageData.model_limits_enabled, modelLimits: usageData.model_limits };
   report.logsBefore = await logs();
   await probe();
+  for (const alternative of ['claude-sonnet-4-5-20250929', 'claude-sonnet-5-5']) {
+    if (report.metadata.models.sonnet.some(row => row.id === alternative)) await probe(undefined, alternative);
+  }
   report.logsAfterAutomatic = await logs();
   const candidates = [...new Set([...report.logsAfterAutomatic.rows, ...report.logsBefore.rows]
     .map(row => row.channel).filter(id => Number.isSafeInteger(id) && id > 0))].slice(0, 6);

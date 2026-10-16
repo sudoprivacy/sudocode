@@ -238,7 +238,7 @@ Incoming peer messages appear in a separate `Message from <peer>` frame with
 muted content and a blue peer name. This presentation does not alter the
 message envelope or content supplied to the model.
 
-Queued messages are dimmed, and Todo
+Queued messages use muted labels and normal-intensity bodies, and Todo
 items distinguish active and completed states. This uses the same palette as
 the transcript; it does not introduce a new color theme. Completed Todo labels
 retain their dim strikethrough. Todo summaries use one muted foreground for all
@@ -250,6 +250,14 @@ Per-turn status uses the same
 theme-selected muted foreground without an additional dim attribute; cache
 health indicators keep their semantic colors. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
+
+Tips and footer text use the theme's readable muted foreground without an
+additional dim attribute; separators use its border role. The input draft
+retains the terminal foreground. A slot's initial color is decoded as text
+state, not applied again as a fallback to every span: ANSI foreground/full
+resets restore the terminal default instead of silently inheriting a parent
+color. The same structured spans feed the live UI and transcript adapters.
+No-color chrome does not force a palette color.
 
 Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
 themes, including inline code, Bash command previews, language grammars, and
@@ -298,6 +306,8 @@ the viewport, resize clears only the live UI from its retained start position,
 without clearing the preceding conversation or purging terminal scrollback.
 
 While a turn is running, messages you submit wait in the staging area.
+Each queued preview uses a muted label and normal-intensity message text;
+narrow windows shorten the label and clip the preview, not the queued text.
 Press ↑ on an empty input to bring all queued human messages back for editing,
 joined in their original submit order. Their staging entries disappear;
 peer/A2A messages remain queued. The cursor starts at the end of the recalled
@@ -336,6 +346,10 @@ Failures retain `returnCodeInterpretation`; interrupted runs include
 `interrupted: true`. Background launches retain `backgroundTaskId` and
 `rawOutputPath`, but do not claim a completed exit code. Signal termination
 also has no numeric exit code and is described in `returnCodeInterpretation`.
+
+Windows console-control exits are treated as interruptions even if the child
+exits before the parent's cancellation notification arrives. Partial output is
+preserved; an interrupted tool does not become a successful result.
 
 Empty optional fields and routine sandbox capability flags are omitted. The
 public Rust result type accepts omitted stderr and interruption fields as an

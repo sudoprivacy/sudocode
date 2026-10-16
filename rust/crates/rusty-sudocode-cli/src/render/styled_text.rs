@@ -13,15 +13,23 @@ pub(crate) struct StyledText {
 
 impl StyledText {
     pub(crate) fn from_ansi(input: &str) -> Self {
+        Self::from_ansi_with_style(input, ContentStyle::default())
+    }
+
+    /// An initial style is content state, not a fallback applied after decoding.
+    /// SGR 0 and 39 therefore restore the terminal default, even when the slot
+    /// starts in a semantic label color.
+    pub(crate) fn from_ansi_with_style(input: &str, initial_style: ContentStyle) -> Self {
         if !input
             .bytes()
             .any(|byte| byte == 0x1b || (byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t')))
         {
             let mut text = Self::default();
-            text.push(ContentStyle::default(), input);
+            text.push(initial_style, input);
             return text;
         }
         let mut decoder = AnsiDecoder::new();
+        decoder.style = initial_style;
         vte::Parser::new().advance(&mut decoder, input.as_bytes());
         decoder.output
     }

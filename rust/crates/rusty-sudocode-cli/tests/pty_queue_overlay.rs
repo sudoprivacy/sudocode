@@ -1,5 +1,5 @@
 //! PTY probe for the queue overlay: an input submitted WHILE a turn is running
-//! must land in the transient queue overlay (a DIM `↳ queued:` line above the
+//! must land in the transient queue overlay (a labelled `↳ queued:` line above the
 //! prompt), NOT be echoed into scrollback as `❯ ...` — echoing it there is what
 //! made a queued input look like it was sent (the confusing UX this fixes). The
 //! coordinator defers the `❯` echo until the item actually flushes at the turn
@@ -45,8 +45,16 @@ fn input_submitted_during_a_turn_shows_in_the_queue_overlay() {
     // The marker must appear in the queue overlay as a `↳ queued:` line — it is
     // held there, not committed to scrollback. Seeing this proves the overlay
     // renders the coordinator's queue.
-    sess.expect(&format!("↳ queued: {MARKER}"))
-        .expect("queued input should render in the queue overlay, not scrollback");
+    common::expect_screen(
+        &sess,
+        |screen| {
+            screen
+                .lines()
+                .any(|line| line.contains("↳ queued:") && line.contains(MARKER))
+        },
+        common::DEFAULT_TIMEOUT,
+        "queued input should render together with its label above the prompt",
+    );
 
     sess.send("/exit\r").expect("send /exit");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));

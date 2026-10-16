@@ -86,15 +86,11 @@ async function main() {
   report.metadata.token = { status: usage.status, unlimitedQuota: usageData.unlimited_quota,
     modelLimitsEnabled: usageData.model_limits_enabled, modelLimits: usageData.model_limits };
   report.logsBefore = await logs();
-  const channels = await get('/api/channel/?p=1&page_size=100');
-  const channelRows = Array.isArray(channels.body.data) ? channels.body.data : channels.body.data?.items ?? [];
-  report.metadata.channels = { status: channels.status, success: channels.body.success,
-    message: clean(channels.body.message ?? channels.body.msg),
-    total: channels.body.data?.total,
-    sonnet: channelRows.filter(row => /sonnet/i.test(row.models ?? '')).map(row => ({
-      id: row.id, name: clean(row.name), status: row.status, group: clean(row.group),
-      models: clean(row.models),
-    })) };
+  // The model key's management-inventory request returned 401. Keep future
+  // probes on its authorized model/usage/log endpoints; administration needs
+  // its own valid credential.
+  report.metadata.channels = { notRequested: 'requires a separate valid administrator credential',
+    previousObservedStatus: 401 };
   if (process.argv.includes('--inventory-only')) {
     console.log(writeEvidence(process.argv[2], report));
     return;

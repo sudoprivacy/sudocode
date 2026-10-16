@@ -105,6 +105,26 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
     assert!(result.stdout.contains("file-tool-bytes"));
     assert!(result.stdout.contains("skill-script-ok"));
     assert_eq!(fs.read("from-shell.txt").unwrap(), b"shell-bytes");
+    // Use the actual canonicalized cohost mount and the absolute spellings a
+    // native command can return. All aliases must reach the same VFS object.
+    let native_file = cwd.join("from-shell.txt");
+    let native_paths = vec![native_file.to_string_lossy().into_owned()];
+    #[cfg(windows)]
+    let native_paths = {
+        let ordinary = native_paths[0]
+            .strip_prefix(r"\\?\")
+            .expect("canonicalized Windows cohost workspace")
+            .to_string();
+        vec![
+            native_paths[0].clone(),
+            ordinary.clone(),
+            ordinary.replace('\\', "/"),
+        ]
+    };
+    for path in native_paths {
+        assert_eq!(fs.read(&path).unwrap(), b"shell-bytes", "{path}");
+        assert_eq!(fs.normalize(&path).unwrap(), native_file.to_string_lossy());
+    }
     let memory = fs.managed_root(ManagedRoot::Memory).unwrap();
     assert_eq!(memory, "/agents/same-agent/memory");
     assert_eq!(fs.managed_root(ManagedRoot::Sessions).unwrap(), "/sessions");

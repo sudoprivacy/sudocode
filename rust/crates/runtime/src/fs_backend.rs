@@ -386,10 +386,7 @@ fn host_absolute_as_vfs(path: &str) -> io::Result<Option<String>> {
     // Windows accepts either separator spelling for the extended-length
     // prefix. Recognize it before the POSIX-root branch, or //?/C:/file
     // becomes /?/C:/file and misses the mounted /C drive.
-    let bare = path
-        .strip_prefix(r"\\?\")
-        .or_else(|| path.strip_prefix("//?/"))
-        .unwrap_or(path);
+    let bare = strip_host_verbatim_prefix(path).unwrap_or(path);
     if bare == path && path.starts_with('/') {
         return Ok(Some(path.to_string()));
     }
@@ -1041,10 +1038,15 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     /// mapped by [`vfs_path_for_host_path`]'s rule.
     fn to_kernel(&self, path: &str) -> io::Result<String> {
         if let KernelPathView::LocalWorkspace(mount) = &self.path_view {
-            if std::path::Path::new(path).starts_with(mount) {
-                let normalized = host_lexical_join(&mount.to_string_lossy(), path);
+            // Compare equivalent native prefixes before resolving `..`, so an
+            // escaping caller still fails the workspace boundary below.
+            let mount = native_path_for_matching(mount);
+            let caller = native_path_for_matching(std::path::Path::new(path));
+            if caller.starts_with(mount.as_ref()) {
+                let normalized =
+                    host_lexical_join(&mount.to_string_lossy(), &caller.to_string_lossy());
                 let relative = std::path::Path::new(&normalized)
-                    .strip_prefix(mount)
+                    .strip_prefix(mount.as_ref())
                     .map_err(|_| {
                         io::Error::new(
                             io::ErrorKind::PermissionDenied,
@@ -1625,6 +1627,36 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
             KernelPathView::Virtual => format!("{}/{}", dir.trim_end_matches(['/', '\\']), name),
         }
     }
+}
+
+/// Recognize the extended-length marker consistently in native and VFS views.
+fn strip_host_verbatim_prefix(path: &str) -> Option<&str> {
+    path.strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix("//?/"))
+}
+
+/// Compare native Windows path aliases without changing stored host spelling,
+/// consulting the host filesystem, or reinterpreting a VFS namespace.
+pub(crate) fn native_path_for_matching(
+    path: &std::path::Path,
+) -> std::borrow::Cow<'_, std::path::Path> {
+    if cfg!(windows) {
+        if let Some(bare) = path.to_str().and_then(strip_host_verbatim_prefix) {
+            let ordinary = match bare
+                .strip_prefix(r"UNC\")
+                .or_else(|| bare.strip_prefix("UNC/"))
+            {
+                Some(share) => format!(r"\\{}", share.replace('/', r"\")),
+                None => bare.replace('/', r"\"),
+            };
+            let ordinary = std::path::PathBuf::from(ordinary);
+            // Volume/device prefixes have no equivalent ordinary absolute path.
+            if ordinary.is_absolute() {
+                return std::borrow::Cow::Owned(ordinary);
+            }
+        }
+    }
+    std::borrow::Cow::Borrowed(path)
 }
 
 /// Resolve `path` against `root` in HOST spelling, touching no filesystem.

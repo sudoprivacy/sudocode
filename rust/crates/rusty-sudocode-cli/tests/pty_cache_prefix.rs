@@ -6,7 +6,7 @@ mod request_evidence;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -19,13 +19,23 @@ use std::fmt::Write as _;
 
 const COMPACT: &str = "Create a concise checkpoint";
 const WAIT: Duration = Duration::from_secs(30);
+const DIAGNOSTIC_SSE: usize = 1;
+const DIAGNOSTIC_JSON: usize = 2;
+const DIAGNOSTIC_BETA: &str = "cache-diagnosis-2026-04-07";
+
+#[derive(Clone)]
+struct CapturedRequest {
+    body: Value,
+    beta: Vec<String>,
+}
 
 struct Capture {
     url: String,
-    requests: Arc<Mutex<Vec<Value>>>,
+    requests: Arc<Mutex<Vec<CapturedRequest>>>,
     retry_next: Arc<AtomicBool>,
     pressure_next: Arc<AtomicBool>,
     thinking_blocks: Arc<AtomicBool>,
+    diagnostic_shape: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -40,6 +50,8 @@ impl Capture {
         let pressure_next = Arc::new(AtomicBool::new(false));
         let thinking_blocks = Arc::new(AtomicBool::new(false));
         let thinking = Arc::clone(&thinking_blocks);
+        let diagnostic_shape = Arc::new(AtomicUsize::new(0));
+        let shape = Arc::clone(&diagnostic_shape);
         let stop = Arc::new(AtomicBool::new(false));
         let (captured, retry, pressure, stopped) = (
             Arc::clone(&requests),
@@ -50,7 +62,9 @@ impl Capture {
         let worker = thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((socket, _)) => serve(socket, &captured, &retry, &pressure, &thinking),
+                    Ok((socket, _)) => {
+                        serve(socket, &captured, &retry, &pressure, &thinking, &shape)
+                    }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -64,13 +78,19 @@ impl Capture {
             retry_next,
             pressure_next,
             thinking_blocks,
+            diagnostic_shape,
             stop,
             thread: Some(worker),
         }
     }
 
     fn bodies(&self) -> Vec<Value> {
-        self.requests.lock().unwrap().clone()
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.body.clone())
+            .collect()
     }
 }
 
@@ -81,13 +101,14 @@ impl Drop for Capture {
     }
 }
 
-fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>)> {
+fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>, Vec<String>)> {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let mut first = String::new();
     if reader.read_line(&mut first).unwrap_or(0) == 0 {
         return None;
     }
     let mut length = 0;
+    let mut beta = Vec::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap() == 0 {
@@ -100,25 +121,29 @@ fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>)> {
             if key.eq_ignore_ascii_case("content-length") {
                 length = value.trim().parse().unwrap();
             }
+            if key.eq_ignore_ascii_case("anthropic-beta") {
+                beta.push(value.trim().to_string());
+            }
         }
     }
     let mut bytes = vec![0; length];
     reader.read_exact(&mut bytes).unwrap();
-    Some((first, bytes))
+    Some((first, bytes, beta))
 }
 
 fn serve(
     mut socket: TcpStream,
-    captured: &Mutex<Vec<Value>>,
+    captured: &Mutex<Vec<CapturedRequest>>,
     retry: &AtomicBool,
     pressure: &AtomicBool,
     thinking: &AtomicBool,
+    diagnostic_shape: &AtomicUsize,
 ) {
     socket.set_nonblocking(false).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let Some((first, bytes)) = read_request(&socket) else {
+    let Some((first, bytes, beta)) = read_request(&socket) else {
         return;
     };
     if !first.starts_with("POST ") || first.contains("count_tokens") {
@@ -133,7 +158,10 @@ fn serve(
     let request: Value = serde_json::from_slice(&bytes).unwrap();
     let number = {
         let mut all = captured.lock().unwrap();
-        all.push(request.clone());
+        all.push(CapturedRequest {
+            body: request.clone(),
+            beta,
+        });
         all.len()
     };
     if retry.swap(false, Ordering::Relaxed) {
@@ -149,6 +177,19 @@ fn serve(
     let usage = json!({"input_tokens": if pressure.swap(false, Ordering::Relaxed) { 990_000 } else { 2_000 },"output_tokens":100});
     let tool_use = content["type"] == "tool_use";
     let stop_reason = if tool_use { "tool_use" } else { "end_turn" };
+    let shape = diagnostic_shape.load(Ordering::Relaxed);
+    let diagnostics = json!({"marker":"缓存诊断 → café", "comparison":"fixture-only"});
+    if shape == DIAGNOSTIC_JSON {
+        let body = json!({"type":"message", "id":format!("reply_{number}"),
+            "role":"assistant", "model":request["model"], "content":[content],
+            "stop_reason":stop_reason, "usage":usage, "diagnostics":diagnostics});
+        respond_fragmented(
+            &mut socket,
+            "application/json",
+            &serde_json::to_string_pretty(&body).unwrap(),
+        );
+        return;
+    }
     let start = if tool_use {
         json!({"type":"tool_use","id":content["id"],"name":content["name"],"input":{}})
     } else {
@@ -187,6 +228,9 @@ fn serve(
         ),
         ("message_stop", json!({"type":"message_stop"})),
     ];
+    if shape == DIAGNOSTIC_SSE {
+        events[0].1["message"]["diagnostics"] = diagnostics;
+    }
     if block_index > 0 {
         let mut prefix = Vec::new();
         for (index, block) in thinking_fixture(number).into_iter().enumerate() {
@@ -213,9 +257,35 @@ fn serve(
     }
     let mut body = String::new();
     for (event, data) in events {
-        write!(body, "event: {event}\ndata: {data}\n\n").unwrap();
+        if shape == DIAGNOSTIC_SSE {
+            // Legal multi-line SSE data, JSON whitespace and CRLF framing.
+            write!(body, "event: {event}\r\n").unwrap();
+            for line in serde_json::to_string_pretty(&data).unwrap().lines() {
+                write!(body, "data: {line}\r\n").unwrap();
+            }
+            body.push_str("\r\n");
+        } else {
+            write!(body, "event: {event}\ndata: {data}\n\n").unwrap();
+        }
     }
-    respond(&mut socket, "200 OK", "text/event-stream", &body);
+    if shape == DIAGNOSTIC_SSE {
+        respond_fragmented(&mut socket, "text/event-stream", &body);
+    } else {
+        respond(&mut socket, "200 OK", "text/event-stream", &body);
+    }
+}
+
+fn respond_fragmented(socket: &mut TcpStream, mime: &str, body: &str) {
+    socket.set_nodelay(true).unwrap();
+    write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
+    // HTTP chunks deliberately split UTF-8 codepoints as well as SSE/JSON.
+    for bytes in body.as_bytes().chunks(2) {
+        write!(socket, "{:x}\r\n", bytes.len()).unwrap();
+        socket.write_all(bytes).unwrap();
+        socket.write_all(b"\r\n").unwrap();
+        socket.flush().unwrap();
+    }
+    socket.write_all(b"0\r\n\r\n").unwrap();
 }
 
 fn thinking_fixture(number: usize) -> Vec<Value> {
@@ -460,7 +530,13 @@ fn fixture(env: &TestEnv, capture: &Capture) -> std::path::PathBuf {
 }
 
 fn spawn(env: &TestEnv, path: &std::path::Path) -> PtySession {
+    spawn_with_env(env, path, &[])
+}
+
+fn spawn_with_env(env: &TestEnv, path: &std::path::Path, extra: &[(&str, &str)]) -> PtySession {
     let log = env.workspace_root().join("cache-prefix-requests.jsonl");
+    let mut variables = vec![("SCODE_LOG_PATH", log.to_str().unwrap())];
+    variables.extend_from_slice(extra);
     let cli = env.spawn_with_env(
         &[
             "--resume",
@@ -468,10 +544,128 @@ fn spawn(env: &TestEnv, path: &std::path::Path) -> PtySession {
             "--permission-mode",
             "danger-full-access",
         ],
-        &[("SCODE_LOG_PATH", log.to_str().unwrap())],
+        &variables,
     );
     common::expect_input_line_cleared(&cli, WAIT, "resume ready");
     cli
+}
+
+#[test]
+fn cache_diagnostics_survive_resume_without_crossing_session_boundaries() {
+    for shape in [DIAGNOSTIC_SSE, DIAGNOSTIC_JSON] {
+        let env = TestEnv::new_mock("cache-diagnosis-resume");
+        let capture = Capture::new();
+        capture.diagnostic_shape.store(shape, Ordering::Relaxed);
+        let path = fixture(&env, &capture);
+        let dump = env.workspace_root().join("diagnosis-dumps");
+        let dump = dump.to_str().unwrap();
+        let run = |path: &std::path::Path, enabled| {
+            let mut cli = spawn_with_env(
+                &env,
+                path,
+                &[
+                    (
+                        "SUDOCODE_CACHE_DIAGNOSTICS",
+                        if enabled { "1" } else { "0" },
+                    ),
+                    ("SUDOCODE_DUMP_REQUESTS", dump),
+                ],
+            );
+            turn(&mut cli, "Continue the recorded decisions.");
+            exit(&mut cli);
+        };
+        run(&path, false);
+        let cache_root = env.config_home().join("cache/prompt-cache");
+        let diagnosis_paths = || {
+            std::fs::read_dir(&cache_root)
+                .unwrap()
+                .map(|entry| entry.unwrap().path().join("cache-diagnostics.json"))
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            diagnosis_paths().is_empty(),
+            "disabled diagnostics must not write state"
+        );
+        run(&path, true);
+        run(&path, true); // A fresh process, not merely another request.
+        let other_path = env.workspace_root().join("independent.jsonl");
+        Session::new()
+            .with_workspace_root(env.workspace_root())
+            .save_to_path(&other_path)
+            .unwrap();
+        run(&other_path, true);
+        run(&path, false);
+        run(&path, true);
+        let requests = capture.requests.lock().unwrap().clone();
+        assert_eq!(
+            requests.len(),
+            6,
+            "diagnostics must not add or retry requests"
+        );
+        for index in [0, 4] {
+            assert!(requests[index].body.get("diagnostics").is_none());
+            assert!(requests[index]
+                .beta
+                .iter()
+                .all(|header| !header.contains(DIAGNOSTIC_BETA)));
+        }
+        for (index, previous) in [
+            (1, Value::Null),
+            (2, json!("reply_2")),
+            (3, Value::Null),
+            (5, json!("reply_3")),
+        ] {
+            assert_eq!(
+                requests[index].body["diagnostics"],
+                json!({"previous_message_id":previous})
+            );
+            assert_eq!(
+                requests[index].beta.len(),
+                1,
+                "beta values must be merged, not duplicate headers"
+            );
+            assert_eq!(
+                requests[index].beta[0]
+                    .split(',')
+                    .filter(|value| value.trim() == DIAGNOSTIC_BETA)
+                    .count(),
+                1
+            );
+        }
+        fixed_prefix(&requests[1].body, &requests[2].body);
+        history_prefix(&requests[1].body, &requests[2].body);
+        let mut ids: Vec<_> = diagnosis_paths()
+            .iter()
+            .map(|path| {
+                serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()
+                    ["message_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["reply_4", "reply_6"]);
+        let diagnoses: Vec<_> = std::fs::read_dir(dump)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .ends_with("-cache-diagnosis.json")
+            })
+            .map(|path| serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap())
+            .collect();
+        assert_eq!(diagnoses.len(), 4);
+        for diagnosis in diagnoses {
+            assert_eq!(
+                diagnosis["diagnostics"]["marker"], "缓存诊断 → café",
+                "UTF-8 must survive arbitrary HTTP chunks"
+            );
+        }
+    }
 }
 
 fn turn(cli: &mut PtySession, text: &str) {

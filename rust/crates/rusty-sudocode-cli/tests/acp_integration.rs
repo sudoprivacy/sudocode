@@ -6774,6 +6774,11 @@ async fn acp_completions_sync_and_nested_do_not_auto_publish() {
         assert_eq!(
             replay["result"]["settled"], 1,
             "only the root's direct spawn is registered: {replay}"
+        );
+        client.shutdown().await;
+        workspace.cleanup();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Zone-contract subprocess scope (review acceptance: "real subprocess

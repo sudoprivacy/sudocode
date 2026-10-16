@@ -26,29 +26,36 @@ command-group = { path = "vendor/command-group", version = "5.0.1" }
 # tagging nexus-vfs first — which the manifest now says, instead of leaving a
 # script to discover it.
 #
+# TEMPORARY branch form: the pin below rides `feat/contract-zone` while that
+# line waits for its v0.8.16 tag and published daemon. Switching the spelling
+# back to that tag (and re-digesting runtime-artifacts.json against it) is part
+# of the same change; do not add more pins in the branch form.
+#
 # `default-features = false` on all of them: the kernel's runtime defaults
 # (mimalloc, the connector stack, py-hook adapters) are daemon concerns that would
 # bloat a standalone CLI. Per-crate features that only one member needs live here
 # too, so a member's line stays `{ workspace = true }` and the pin has no second
 # place to disagree with itself.
-a2a = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.5", default-features = false }
-backends = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.5", default-features = false, features = ["driver-local-connector"] }
-contracts = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.5", default-features = false }
-kernel = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.5", default-features = false }
-lib = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.5", default-features = false, features = ["runtime-bridge"] }
-managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.5", default-features = false }
-llm-mount = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.5", default-features = false }
+a2a = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone", default-features = false }
+backends = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone", default-features = false, features = ["driver-local-connector"] }
+contracts = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone", default-features = false }
+kernel = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone", default-features = false }
+lib = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone", default-features = false, features = ["runtime-bridge"] }
+managed-agent = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone", default-features = false }
+llm-mount = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone", default-features = false }
+nexus-rebac = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone", default-features = false }
+transport = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone", default-features = false }
 # The daemon `nexusd-cohost` IS, entered at `run_with_services` so the co-host
 # picks its service set without forking the composition root. Same pin as the
 # kernel above, necessarily: this crate and the agent runtime it hosts have to
 # agree on what `Kernel` is.
-nexus-cluster = { git = "https://github.com/nexi-lab/nexus-vfs", tag = "v0.8.5" }
+nexus-cluster = { git = "https://github.com/nexi-lab/nexus-vfs", branch = "feat/contract-zone" }
 
 agent-client-protocol = { version = "0.11", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 agent-client-protocol-schema = { version = "0.12", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 agent-client-protocol-tokio = "0.11"
 axum = { version = "0.8", features = ["ws"] }
-pty-expect = { git = "https://github.com/sudoprivacy/pty-expect", tag = "v0.1.1" }
+pty-expect = { git = "https://github.com/sudoprivacy/pty-expect", tag = "v0.1.2" }
 serde_json = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 

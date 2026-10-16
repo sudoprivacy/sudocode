@@ -8,12 +8,16 @@ on:
       native_acceptance:
         type: boolean
         default: false
+      runner:
+        type: choice
+        options: [ubuntu-latest, macos-latest]
+        default: ubuntu-latest
 permissions:
   contents: read
 jobs:
   router-diagnostics:
     if: inputs.routing
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +33,7 @@ jobs:
           retention-days: 7
   native-acceptance:
     if: inputs.native_acceptance
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 25
     strategy:
       fail-fast: false

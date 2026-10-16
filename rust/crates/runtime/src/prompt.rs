@@ -42,6 +42,9 @@ impl From<ConfigError> for PromptBuildError {
 /// Marker separating static prompt scaffolding from dynamic runtime context.
 pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__";
 
+/// Filesystem description shared by hosted parent and child prompts.
+pub const NEXUS_FILESYSTEM_PLATFORM: &str = "Nexus filesystem";
+
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
 

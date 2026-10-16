@@ -110,7 +110,7 @@ fn assert_request_context(directory: &std::path::Path, process_id: &str) {
             continue;
         }
         assert!(system.contains(&format!("/proc/{}/workspace", process_id)));
-        assert!(system.contains("Nexus virtual filesystem (POSIX paths)"));
+        assert!(system.contains("Nexus filesystem"));
         assert!(
             system.contains("/agents/stock-worker/memory"),
             "memory must use the agent's VFS namespace"

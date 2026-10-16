@@ -6729,7 +6729,7 @@ fn build_agent_system_prompt(
         &cwd,
         runtime::today_local(),
         if cohost {
-            "Nexus virtual filesystem (POSIX paths)"
+            runtime::NEXUS_FILESYSTEM_PLATFORM
         } else {
             std::env::consts::OS
         },
@@ -6745,11 +6745,10 @@ fn build_agent_system_prompt(
     if let Some(section) = commands::render_cli_packages_prompt_section(&shell_root) {
         prompt.append_dynamic_section(section);
     }
-    if cohost {
-        prompt.append_dynamic_section(runtime::spawn_task::cohost_shell_prompt_section(
-            &cwd.to_string_lossy(),
-            &shell_root,
-        ));
+    if let Some(section) =
+        runtime::spawn_task::cohost_shell_prompt_section(&cwd.to_string_lossy(), &shell_root)
+    {
+        prompt.append_dynamic_section(section);
     }
     if subagent_type == "fork" {
         // Fork subagent gets the parent's default system prompt (via

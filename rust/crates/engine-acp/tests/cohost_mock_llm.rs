@@ -323,7 +323,7 @@ fn run_cohost_turn(
             "host instructions leaked"
         );
         assert!(system.contains(&workspace), "workspace missing");
-        assert!(system.contains("Nexus virtual filesystem (POSIX paths)"));
+        assert!(system.contains("Nexus filesystem"));
         assert!(
             system.contains(&format!("/agents/{agent_id}/memory")),
             "memory uses wrong namespace"

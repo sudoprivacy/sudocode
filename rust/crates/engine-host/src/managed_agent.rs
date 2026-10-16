@@ -148,7 +148,6 @@ where
     // engine is shared: the two hosts' shapes sit next to each other in
     // `runtime_build`, so the difference between them is readable in one place
     // instead of assembled here and inferred there.
-    let is_local_workspace = local_directory.is_some();
     let host = HostContext::for_cohost_agent(fs, &desc.name, Arc::clone(&mailbox), local_directory)
         .map_err(|e| format!("co-host: create the agent's host-side directory: {e}"))?;
 
@@ -170,11 +169,11 @@ where
     // the wrapper instead of the sender.
     let mut system_prompt = SystemPrompt::default();
     system_prompt.append_dynamic_section(cohost_a2a_prompt_section(&desc.name));
-    if !is_local_workspace {
-        system_prompt.append_dynamic_section(cohost_shell_prompt_section(
-            &workspace_root,
-            &host.shell_root,
-        ));
+    if let Some(section) = cohost_shell_prompt_section(
+        &host.fs.working_root().map_err(|error| error.to_string())?,
+        &host.shell_root,
+    ) {
+        system_prompt.append_dynamic_section(section);
     }
 
     let config = RuntimeConfig {

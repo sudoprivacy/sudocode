@@ -1,10 +1,18 @@
 name: Rust CI - read-only router diagnostics
 on:
   workflow_dispatch:
+    inputs:
+      routing:
+        type: boolean
+        default: true
+      native_acceptance:
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   router-diagnostics:
+    if: inputs.routing
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -18,4 +26,39 @@ jobs:
         with:
           name: router-channel-diagnostics
           path: ${{ runner.temp }}/router-channels.json
+          retention-days: 7
+  native-acceptance:
+    if: inputs.native_acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [claude-sonnet-4-5-20250929, claude-sonnet-5-5]
+    env:
+      SUDOCODE_API_READ_TIMEOUT: '90'
+      SCODE_LIVE_MODEL: ${{ matrix.model }}
+      SCODE_LOG_PATH: ${{ github.workspace }}/native-live-trace.jsonl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: Run the original native ACP subagent scenario
+        working-directory: rust
+        env:
+          PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+          PROXY_BASE_URL: https://api.sudorouter.ai/v1
+        run: cargo test --locked -p rusty-sudocode-cli --test acp_live_smoke live_subagent_smoke_stdio -- --test-threads=1
+      - name: Retain routing and usage evidence without model content
+        if: always()
+        env:
+          PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+        run: node .github/scripts/summarize_live_model_trace.cjs "$SCODE_LOG_PATH" "${{ runner.temp }}/native-live-evidence.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-acceptance-${{ matrix.model }}
+          path: ${{ runner.temp }}/native-live-evidence.json
           retention-days: 7

@@ -24,6 +24,7 @@ uuid = { version = "1", features = ["v4"] }
 zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 
 [build-dependencies]
+serde_json.workspace = true
 prost-build = "0.13"
 protoc-bin-vendored = "3"
 toml = "0.8"

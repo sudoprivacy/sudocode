@@ -87,13 +87,9 @@ fn platform() -> Result<(&'static str, &'static str)> {
 }
 
 fn manifest() -> Result<Manifest> {
-    let mut manifest: Manifest = serde_json::from_str(
+    let manifest: Manifest = serde_json::from_str(
         include_str!("../runtime-artifacts.json").trim_start_matches('\u{feff}'),
     )?;
-    manifest.versions.insert(
-        "nexusd-cluster".into(),
-        env!("NEXUS_RUNTIME_VERSION").into(),
-    );
     Ok(manifest)
 }
 

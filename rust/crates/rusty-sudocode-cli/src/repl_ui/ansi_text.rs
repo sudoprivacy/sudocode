@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_overlay_preserves_dim_without_bold_or_color() {
+    fn queued_overlay_keeps_the_message_readable_without_leaking_label_style() {
         for is_human in [true, false] {
             for width in [100, 78] {
                 let overlay = super::super::render_pending_overlay(
@@ -246,9 +246,14 @@ mod tests {
                 assert!(text.text.starts_with("↳ queued: "));
                 assert!(!spans.is_empty());
                 for span in spans {
-                    assert_eq!(span.color, None);
+                    let label_color = (span.text.starts_with('↳')
+                        && crate::render::ColorSupport::detect()
+                            != crate::render::ColorSupport::NoColor)
+                        .then(|| ui_color(crate::render::theme().muted))
+                        .flatten();
+                    assert_eq!(span.color, label_color);
                     assert_eq!(span.weight, Weight::Normal);
-                    assert!(span.dim);
+                    assert!(!span.dim);
                     assert!(!span.strikethrough);
                 }
             }

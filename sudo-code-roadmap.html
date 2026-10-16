@@ -1739,6 +1739,14 @@ attach/detach, and pipe-composition stay intact. The bright-line
 against alternate-screen / <code>ratatui</code> is the next
 sub-section and applies to every entry below.</p>
 
+<p>Queued-message readability uses a muted label and normal-intensity body,
+without dimming the complete preview. Narrow terminals shorten the label before
+clipping the body; preview clipping never edits the underlying queued message.
+The existing PendingSlot retains arrival ordering with running tools. Real PTY
+coverage exercises dark, light and no-color output, narrow/restore resizing,
+Unicode input and recall of the complete message. Slot budgeting and terminal
+history ownership remain separate layout responsibilities.</p>
+
 <h4>Architecture context</h4>
 
 <table>

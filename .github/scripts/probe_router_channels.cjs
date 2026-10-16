@@ -19,9 +19,13 @@ async function get(path) {
 async function logs() {
   const { status, body } = await get('/api/log/token');
   const rows = Array.isArray(body.data) ? body.data : [];
-  const selected = rows.filter(row => /claude.*sonnet/i.test(row.model_name ?? '')).map(row => ({
+  const selected = rows.filter(row => /claude/i.test(row.model_name ?? '')).map(row => ({
     model: clean(row.model_name), channel: row.channel, group: clean(row.group),
     type: row.type, createdAt: row.created_at, requestId: clean(row.request_id),
+    failure: row.type === 5 ? {
+      quota: /额度不足|余额不足|预扣费|insufficient|quota/i.test(row.content ?? ''),
+      amounts: [...(row.content ?? '').matchAll(/[¥￥$＄]\s*(-?\d+(?:\.\d+)?)/g)].map(match => match[1]),
+    } : undefined,
   }));
   return { status, success: body.success, rows: selected };
 }

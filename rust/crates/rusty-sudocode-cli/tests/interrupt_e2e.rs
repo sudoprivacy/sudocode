@@ -22,6 +22,47 @@ use serde_json::Value;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Deterministic OS-status coverage complements the real console-signal journey
+/// below: whether the parent's notification wins that race is scheduler-dependent.
+#[cfg(windows)]
+#[test]
+fn native_console_control_status_is_not_an_ordinary_exit() {
+    for code in [0, 7, -1_073_741_510] {
+        let script = format!("echo preserved-stdout&echo preserved-stderr 1>&2&exit /b {code}");
+        let process = Command::new("cmd.exe")
+            .args(["/D", "/C", &script])
+            .output()
+            .expect("run a real native process");
+        assert_eq!(process.status.code(), Some(code));
+        let stdout = String::from_utf8(process.stdout).unwrap();
+        let stderr = String::from_utf8(process.stderr).unwrap();
+        let result =
+            runtime::BashCommandOutput::completed(process.status, stdout.clone(), stderr.clone());
+        assert_eq!(result.stdout, stdout, "preserve output before termination");
+        if code == -1_073_741_510 {
+            assert!(result.interrupted);
+            assert_eq!(result.exit_code, None);
+            assert_eq!(
+                result.return_code_interpretation.as_deref(),
+                Some("interrupted")
+            );
+            assert_eq!(
+                result.stderr,
+                format!("{stderr}Command interrupted by user")
+            );
+            assert!(result.model_output().get("exit_code").is_none());
+        } else {
+            assert!(!result.interrupted, "ordinary errors are not cancellation");
+            assert_eq!(result.exit_code, Some(code));
+            assert_eq!(result.stderr, stderr);
+            assert_eq!(
+                result.return_code_interpretation,
+                (code != 0).then(|| format!("exit_code:{code}"))
+            );
+        }
+    }
+}
+
 #[test]
 fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime should build");

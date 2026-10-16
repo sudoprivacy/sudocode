@@ -1,14 +1,18 @@
 //! nexus-vfs gRPC client (P1a zone-aware, SW-20260915-002 step-08).
-//!
-//! Lint note: the generated protobuf surface (`pub mod proto`) carries
-//! non-idiomatic doc wording by construction; `doc_markdown` is allowed at
-//! the crate level so the derived client matches the workspace `-D warnings`
-//! gate without editing generated code.
-#![allow(clippy::doc_markdown)]
-// Generated prost structs (e.g. RenameResponse) legitimately pack bool flags.
-#![allow(clippy::struct_excessive_bools)]
 
 pub mod proto {
+    // The generated surface, not ours to reword: prost/tonic doc phrasing
+    // trips `doc_markdown`, the derived structs legitimately pack bool flags
+    // (`struct_excessive_bools`), and the client trait's
+    // `Result<_, tonic::Status>` returns trip `result_large_err` on newer
+    // toolchains. All three are scoped to this module so the hand-written
+    // client below stays under the workspace's full lint set.
+    #![allow(
+        clippy::doc_markdown,
+        clippy::struct_excessive_bools,
+        clippy::result_large_err
+    )]
+
     tonic::include_proto!("nexus.grpc.vfs");
 }
 
@@ -28,23 +32,23 @@ pub struct StreamReadResult {
     pub timed_out: bool,
 }
 
-/// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
-/// `Setattr` when provisioning a mailbox DT_STREAM.
+/// `DT_STREAM` entry-type code (mirrors the kernel `entry_type`), passed to
+/// `Setattr` when provisioning a mailbox `DT_STREAM`.
 const DT_STREAM: i32 = 4;
 
-/// DT_DIR entry-type code, for reading `Readdir` results back.
+/// `DT_DIR` entry-type code, for reading `Readdir` results back.
 const DT_DIR: u32 = 1;
 
-/// The same DT_DIR code as `Setattr` takes it. `Readdir` reports entry types as
+/// The same `DT_DIR` code as `Setattr` takes it. `Readdir` reports entry types as
 /// `u32` and `Setattr` accepts them as `i32`, so the one value needs both spellings;
 /// naming the second rather than casting at the call site keeps the cast off the
 /// path where a wrong entry type is a silent mis-provision (`DT_LINK = 3` and
 /// `DT_PIPE = 3` once cost this project a chat-list index that was a pipe).
 const DT_DIR_SETATTR: i32 = DT_DIR.cast_signed();
 
-/// DT_LINK entry-type code for `Setattr`.
+/// `DT_LINK` entry-type code for `Setattr`.
 ///
-/// **6, not 3.** 3 is DT_PIPE's discriminant, and the A2A chat-list index was once
+/// **6, not 3.** 3 is `DT_PIPE`'s discriminant, and the A2A chat-list index was once
 /// written with it: the syscall dispatches on the integer, so there was no compile
 /// error and no runtime error — the index was simply a pipe, while every
 /// path-composition test stayed green.

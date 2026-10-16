@@ -380,7 +380,6 @@ pub enum ZoneAuthError {
     InvalidPath(String),
     CrossZoneRef { own: String, asked: String },
     NoZoneContext(String),
-    MissingDelegation(String),
     OutOfScope(String),
     ScopeRequired,
     DelegationInvalid,
@@ -396,9 +395,6 @@ impl std::fmt::Display for ZoneAuthError {
             }
             Self::NoZoneContext(z) => {
                 write!(f, "zone-less runtime cannot authorize ref to {z}")
-            }
-            Self::MissingDelegation(z) => {
-                write!(f, "runtime in zone {z} has no short-lived delegation")
             }
             Self::OutOfScope(path) => write!(f, "resource path {path:?} is outside runtime scope"),
             Self::ScopeRequired => write!(f, "runtime resource scope is required"),

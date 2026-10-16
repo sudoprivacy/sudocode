@@ -1831,6 +1831,14 @@ impl NexusVfsFsBackend {
         }
     }
 
+    /// Build a remote backend whose zone authority is the (unverified) host
+    /// environment.
+    ///
+    /// Env/descriptor metadata cannot authorize a remote operation by itself:
+    /// nothing here is a credential the VFS server verifies, so every
+    /// operation fails closed before any RPC leaves the process. A remote
+    /// backend that performs IO needs a transport the server itself
+    /// authenticates — see [`Self::from_arc_mtls`].
     pub fn from_arc(
         client: std::sync::Arc<nexus_vfs_client::NexusVfsClient>,
         auth_token: String,

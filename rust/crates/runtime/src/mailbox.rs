@@ -366,6 +366,11 @@ impl Mailbox {
     /// backend with a convention by hand at each call site is how they end up
     /// mismatched — a `LocalJsonl` convention over a VFS backend writes lines
     /// nothing tails, and the mistake is silent.
+    ///
+    /// The underlying [`NexusVfsFsBackend::from_arc`] context is unverified
+    /// env metadata, not a server-verifiable credential: every operation
+    /// through this mailbox fails closed before any RPC. A mailbox that
+    /// performs IO needs the mTLS pairing — [`Self::over_nexus_mtls`].
     #[must_use]
     pub fn over_nexus(
         client: Arc<nexus_vfs_client::NexusVfsClient>,

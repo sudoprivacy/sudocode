@@ -145,19 +145,32 @@ authon_mint() {
 # Nothing is installed system-wide; the cache lives under TMPDIR.
 grpcurl_bin() {
   if command -v grpcurl >/dev/null 2>&1; then command -v grpcurl; return; fi
-  local cache="${GRPCURL_CACHE:-${TMPDIR:-/tmp}/scode-grpcurl}/grpcurl"
+  local exe=""
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) exe=".exe" ;;
+  esac
+  local cache="${GRPCURL_CACHE:-${TMPDIR:-/tmp}/scode-grpcurl}/grpcurl${exe}"
   if [ -x "$cache" ]; then printf '%s' "$cache"; return; fi
   local version="1.9.3" os suffix
   case "$(uname -s)" in
     Linux) os=linux; suffix=tar.gz ;;
     Darwin) os=osx; suffix=tar.gz ;;
-    *) echo "!! no grpcurl and no prebuilt tarball for $(uname -s) — install grpcurl and retry" >&2; return 1 ;;
+    MINGW*|MSYS*|CYGWIN*) os=windows; suffix=zip ;;
+    *) echo "!! no grpcurl and no prebuilt binary for $(uname -s) — install grpcurl and retry" >&2; return 1 ;;
   esac
   local arch; arch="$(uname -m)"; [ "$arch" = x86_64 ] || [ "$arch" = arm64 ] || arch=x86_64
   mkdir -p "$(dirname "$cache")"
   local url="https://github.com/fullstorydev/grpcurl/releases/download/v${version}/grpcurl_${version}_${os}_${arch}.${suffix}"
-  curl -fsSL --retry 3 -o "$cache.tgz" "$url" || { echo "!! could not fetch $url" >&2; return 1; }
-  tar -xzf "$cache.tgz" -C "$(dirname "$cache")" grpcurl && rm -f "$cache.tgz"
+  curl -fsSL --retry 3 -o "$cache.dl" "$url" || { echo "!! could not fetch $url" >&2; return 1; }
+  if [ "$suffix" = zip ]; then
+    # git bash ships GNU tar (no zip); PowerShell's Expand-Archive is always
+    # there and takes Windows paths, hence the cygpath round-trip.
+    powershell -NoProfile -Command "Expand-Archive -LiteralPath '$(cygpath -w "$cache.dl")' -DestinationPath '$(cygpath -w "$(dirname "$cache")")' -Force" \
+      || { echo "!! could not unzip $cache.dl" >&2; return 1; }
+    rm -f "$cache.dl"
+  else
+    tar -xzf "$cache.dl" -C "$(dirname "$cache")" grpcurl && rm -f "$cache.dl"
+  fi
   chmod +x "$cache"
   printf '%s' "$cache"
 }

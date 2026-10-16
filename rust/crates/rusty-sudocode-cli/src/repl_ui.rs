@@ -32,6 +32,7 @@ use commands::suggest_slash_commands;
 use iocraft::prelude::*;
 
 mod ansi_text;
+mod queued_message;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
@@ -1225,6 +1226,8 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: u
         return String::new();
     }
     let max_lines = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
+    let support = crate::render::ColorSupport::detect();
+    let theme = crate::render::theme();
 
     // Messages are one line each and always shown; reserve their space first so
     // tool cards (multi-line) can never crowd a queued message out.
@@ -1263,11 +1266,7 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: u
     for (item, card_lines) in items.iter().zip(cards) {
         match item {
             PendingItem::QueuedMessage { display, .. } => {
-                let first = display.lines().next().unwrap_or("");
-                lines.push(crate::render::text_layout::truncate_to_width(
-                    &format!("{DIM}↳ queued: {first}{RESET}"),
-                    term_width,
-                ));
+                lines.push(queued_message::render(display, term_width, support, theme));
             }
             PendingItem::Tool(_) => {
                 let card_lines = card_lines.expect("tool card projection");

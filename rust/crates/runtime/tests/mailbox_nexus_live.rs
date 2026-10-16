@@ -1359,7 +1359,7 @@ fn live_cohost_subagent_context() {
     std::fs::write(&host_instructions, &host_marker).unwrap();
 
     // No `owner_id` / `zone_id`: the harness dials with a session credential
-    // (front-door minted, owner SAN'd), and v0.8.5's session-caller path takes
+    // (front-door minted, owner SAN'd), and v0.8.18's session-caller path takes
     // the owner from the credential and the zone from the root default — a
     // named zone would need an explicit grant the session cert by design
     // carries none of.
@@ -1472,7 +1472,7 @@ fn live_cohost_model_workflow() {
         quote.as_bytes()
     );
     // No `owner_id` / `zone_id`: the harness dials with a session credential
-    // (front-door minted, owner SAN'd), and v0.8.5's session-caller path takes
+    // (front-door minted, owner SAN'd), and v0.8.18's session-caller path takes
     // the owner from the credential and the zone from the root default — a
     // named zone would need an explicit grant the session cert by design
     // carries none of.
@@ -1656,7 +1656,7 @@ fn live_cohost_session_resume() {
     let mb = mailbox(&client, &user, "");
     mb.ensure_conversation(&agent).unwrap();
     // No `owner_id` / `zone_id`: the harness dials with a session credential
-    // (front-door minted, owner SAN'd), and v0.8.5's session-caller path takes
+    // (front-door minted, owner SAN'd), and v0.8.18's session-caller path takes
     // the owner from the credential and the zone from the root default.
     let mut request = json!({"agent_id":agent,"model":model});
     let rpc = |method: &str, payload: &Value| -> Result<Value, String> {

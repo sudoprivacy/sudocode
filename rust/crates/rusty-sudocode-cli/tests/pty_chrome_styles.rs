@@ -212,7 +212,9 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             expect_style(&sess, label, (color, bold, false));
         }
         let marker = common::turn_status_marker(&sess);
-        sess.send("1").unwrap();
+        // A sole option is already selected; digit shortcuts are enabled only
+        // for multi-option DialPad questions. Enter confirms the visible row.
+        sess.send("\r").unwrap();
         common::expect_turn_complete_after(
             &sess,
             &marker,

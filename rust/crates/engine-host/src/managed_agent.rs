@@ -4,7 +4,7 @@
 //! `ConversationRuntime` the CLI builds, through the same
 //! [`crate::build_engine_runtime`], and differs only in the values it puts in
 //! its [`HostContext`]: a kernel-backed filesystem instead of local disk, the
-//! agent's procfs workspace instead of a working directory, and a mailbox that
+//! descriptor's project mounts, and a mailbox that
 //! is the agent's own identity.
 //!
 //! It lives in `engine-host` because that is where hosts live, and because the
@@ -109,14 +109,34 @@ where
     // File tools reach the kernel, not local disk. That reach is the whole
     // reason to co-host: a write here passes the hooks, the audit trail and the
     // permission checks that a `std::fs` write never sees.
-    let workspace_root = format!("/proc/{}/workspace", desc.pid);
-    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let primary_repo = desc
+        .repos
+        .iter()
+        .find(|repo| repo.alias == "workspace")
+        .or_else(|| desc.repos.first());
+    let context = runtime::agent_operation_context(&desc.owner_id, &desc.zone_id, &desc.name);
+    let local_directory = primary_repo
+        .map(|repo| kernel.local_workspace_directory(&repo.mount_path, &context))
+        .transpose()
+        .map_err(|error| format!("co-host: resolve project directory: {error:?}"))?
+        .flatten();
+    let workspace_root = local_directory.as_ref().and(primary_repo).map_or_else(
+        || format!("/proc/{}/workspace", desc.pid),
+        |repo| repo.mount_path.clone(),
+    );
+    let fs = KernelFsBackend::for_agent(
         Arc::clone(kernel),
         &desc.owner_id,
         &desc.zone_id,
         &desc.name,
         workspace_root.clone(),
-    ));
+    );
+    let fs: Arc<dyn FsBackend> = Arc::new(match &local_directory {
+        Some(directory) => fs
+            .with_local_workspace(directory)
+            .map_err(|error| format!("co-host: bind project directory: {error}"))?,
+        None => fs,
+    });
 
     // The agent's conversations, over the SAME backend as its file tools. An
     // absolute A2A path bypasses the workspace root, so one backend serves both
@@ -128,7 +148,8 @@ where
     // engine is shared: the two hosts' shapes sit next to each other in
     // `runtime_build`, so the difference between them is readable in one place
     // instead of assembled here and inferred there.
-    let host = HostContext::for_cohost_agent(fs, &desc.name, Arc::clone(&mailbox))
+    let is_local_workspace = local_directory.is_some();
+    let host = HostContext::for_cohost_agent(fs, &desc.name, Arc::clone(&mailbox), local_directory)
         .map_err(|e| format!("co-host: create the agent's host-side directory: {e}"))?;
 
     // Kernel authorization and a user's tool approval are separate checks.
@@ -149,13 +170,12 @@ where
     // the wrapper instead of the sender.
     let mut system_prompt = SystemPrompt::default();
     system_prompt.append_dynamic_section(cohost_a2a_prompt_section(&desc.name));
-    // The second: a co-hosted agent's files and its shell are in different
-    // places, and a model not told that reads an unrelated directory and
-    // concludes its workspace is empty.
-    system_prompt.append_dynamic_section(cohost_shell_prompt_section(
-        &workspace_root,
-        &host.shell_root,
-    ));
+    if !is_local_workspace {
+        system_prompt.append_dynamic_section(cohost_shell_prompt_section(
+            &workspace_root,
+            &host.shell_root,
+        ));
+    }
 
     let config = RuntimeConfig {
         model,

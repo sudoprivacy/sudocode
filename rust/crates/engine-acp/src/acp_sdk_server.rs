@@ -978,6 +978,21 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     meta
 }
 
+/// The running host owns both path spellings. Clients must not derive its
+/// native directory from a control-plane or procfs path.
+fn session_response_meta(
+    registry: &SessionRegistry,
+    session_id: &str,
+    mut sudocode: Map<String, serde_json::Value>,
+) -> Option<Map<String, serde_json::Value>> {
+    if let Some(engine) = registry.engine(session_id) {
+        if let (Ok(file_root), Some(shell_root)) = (engine.workspace_root(), registry.cwd(session_id)) {
+            sudocode.insert("workspace".into(), json!({ "fileRoot": file_root, "shellRoot": shell_root }));
+        }
+    }
+    (!sudocode.is_empty()).then(|| Map::from_iter([("sudocode".into(), sudocode)]))
+}
+
 /// `_meta.sudocode` key: replace the built-in static system-prompt blocks.
 pub const SYSTEM_PROMPT_META_KEY: &str = "systemPrompt";
 /// `_meta.sudocode` key: append a trailing dynamic system-prompt block.
@@ -2144,14 +2159,14 @@ pub(crate) async fn run_acp_on_transport(
                                     responder.respond_with_error(acp_error_to_sdk(&error))?;
                                     return Ok(());
                                 }
-                                let mut response = NewSessionResponse::new(session_id.clone());
+                                let mut sudocode = Map::new();
                                 if tasks_enabled {
-                                    response = response.meta(Map::from_iter([(
-                                        "sudocode".into(),
-                                        json!({"storageRef": storage_ref}),
-                                    )]));
+                                    sudocode.insert("storageRef".into(), json!(storage_ref));
                                 }
-                                responder.respond(response)?;
+                                responder.respond(
+                                    NewSessionResponse::new(session_id.clone())
+                                        .meta(session_response_meta(&registry, &session_id, sudocode)),
+                                )?;
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
                                 );
@@ -2488,14 +2503,15 @@ pub(crate) async fn run_acp_on_transport(
                                     responder.respond_with_error(acp_error_to_sdk(&error))?;
                                     return Ok(());
                                 }
-                                let mut response = LoadSessionResponse::new();
+                                let mut sudocode = Map::new();
                                 if completions_enabled {
-                                    response = response.meta(Map::from_iter([(
-                                        "sudocode".into(),
-                                        json!({"contextRef":context, "storageRef": storage_ref}),
-                                    )]));
+                                    sudocode.insert("contextRef".into(), json!(context));
+                                    sudocode.insert("storageRef".into(), json!(storage_ref));
                                 }
-                                responder.respond(response)?;
+                                responder.respond(
+                                    LoadSessionResponse::new()
+                                        .meta(session_response_meta(&registry, &session_id, sudocode)),
+                                )?;
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
                                 );

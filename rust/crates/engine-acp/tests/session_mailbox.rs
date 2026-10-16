@@ -103,6 +103,19 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     assert!(created.get("error").is_none(), "{created}");
     let sid = created["result"]["sessionId"].as_str().unwrap();
     assert_eq!(started["durable_session_id"], sid);
+    assert_eq!(
+        created["result"]["_meta"]["sudocode"]["workspace"]["fileRoot"],
+        format!(
+            "/proc/{}/workspace",
+            started["session_id"].as_str().unwrap()
+        )
+    );
+    assert!(
+        created["result"]["_meta"]["sudocode"]["workspace"]["shellRoot"]
+            .as_str()
+            .unwrap()
+            .contains("worker")
+    );
     let fs = KernelFsBackend::for_agent(
         Arc::clone(&kernel),
         "test-owner",

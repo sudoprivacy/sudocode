@@ -392,6 +392,9 @@ pub struct Session {
     pub mode: SessionMode,
     prompt_snapshot: Option<SessionPromptSnapshot>,
     prompt_snapshot_dirty: bool,
+    /// Repairs projected during a read-only load, awaiting the active writer.
+    /// This bookkeeping is never serialized into the durable transcript.
+    pending_tool_repairs: usize,
     persistence: Option<SessionPersistence>,
 }
 
@@ -475,6 +478,7 @@ impl Session {
             mode: SessionMode::Interactive,
             prompt_snapshot: None,
             prompt_snapshot_dirty: false,
+            pending_tool_repairs: 0,
             persistence: None,
         }
     }
@@ -935,7 +939,7 @@ impl Session {
         };
         // Recover interrupted calls without changing existing result records:
         // local consumers such as /undo still need their structured payloads.
-        session.sanitize_orphan_tool_uses();
+        session.pending_tool_repairs = session.sanitize_orphan_tool_uses();
         Ok(session)
     }
 
@@ -943,15 +947,18 @@ impl Session {
     /// Persist the repair without rewriting existing tool result records.
     pub fn repair_orphan_tool_uses(&mut self) -> Result<usize, SessionError> {
         let repairs = ToolHistoryRepairs::plan(&self.messages);
-        if repairs.missing.is_empty() {
+        if repairs.missing.is_empty() && self.pending_tool_repairs == 0 {
             return Ok(0);
         }
-        let original = self.messages.clone();
-        let repaired = repairs.apply_missing(&mut self.messages);
+        let original = (!repairs.missing.is_empty()).then(|| self.messages.clone());
+        let repaired = self.pending_tool_repairs + repairs.apply_missing(&mut self.messages);
         if let Err(error) = self.rewrite_persisted() {
-            self.messages = original;
+            if let Some(original) = original {
+                self.messages = original;
+            }
             return Err(error);
         }
+        self.pending_tool_repairs = 0;
         Ok(repaired)
     }
 
@@ -1073,6 +1080,7 @@ impl Session {
             mode: self.mode,
             prompt_snapshot: self.prompt_snapshot.clone(),
             prompt_snapshot_dirty: false,
+            pending_tool_repairs: 0,
             persistence: None,
         }
     }
@@ -1236,6 +1244,7 @@ impl Session {
             mode,
             prompt_snapshot,
             prompt_snapshot_dirty: false,
+            pending_tool_repairs: 0,
             persistence: None,
         })
     }
@@ -1401,6 +1410,7 @@ impl Session {
             mode,
             prompt_snapshot,
             prompt_snapshot_dirty: false,
+            pending_tool_repairs: 0,
             persistence: None,
         })
     }
@@ -2342,7 +2352,7 @@ impl ToolHistoryRepairs {
         }
         self.missing.push((before, pending.drain(..).map(|(id, name)| {
             ConversationMessage::tool_result(id, name,
-                "[Tool call was interrupted before it returned — no result was produced. Treated as cancelled.]", true)
+                "[Tool execution was interrupted before a final result was received. Side effects may already have occurred. Inspect the current state before retrying.]", true)
         }).collect()));
     }
 
@@ -2786,14 +2796,48 @@ mod tests {
         assert_eq!(session.messages[3].role, MessageRole::User);
         assert!(matches!(
             &session.messages[2].blocks[0],
-            ContentBlock::ToolResult { tool_use_id, is_error, .. }
+            ContentBlock::ToolResult { tool_use_id, is_error, output, .. }
                 if tool_use_id == "second" && *is_error
+                    && output.contains("Side effects may already have occurred")
+                    && output.contains("before retrying")
         ));
         let persisted = fs::read_to_string(&path).expect("repair persisted");
         assert!(persisted.contains("\"tool_use_id\":\"second\""));
         let restored = Session::load_from_path(&path).expect("reload repaired session");
         assert_eq!(restored.messages, session.messages);
         fs::remove_file(&path).expect("remove test session");
+    }
+
+    #[test]
+    fn load_keeps_repairs_read_only_until_the_active_writer_persists_them() {
+        let path = temp_session_path("interrupted-recovery");
+        let mut session = Session::new().with_persistence_path(path.clone());
+        session
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: "external-effect".into(),
+                    name: "bash".into(),
+                    input: "{}".into(),
+                    thought_signature: None,
+                },
+            ]))
+            .unwrap();
+        let original = fs::read(&path).unwrap();
+        let mut loaded = Session::load_from_path(&path).unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            original,
+            "inspection cannot rewrite durable history"
+        );
+        assert_eq!(loaded.repair_orphan_tool_uses().unwrap(), 1);
+        assert_eq!(loaded.repair_orphan_tool_uses().unwrap(), 0);
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("Side effects may already have occurred"));
+        let mut again = Session::load_from_path(&path).unwrap();
+        assert_eq!(again.repair_orphan_tool_uses().unwrap(), 0);
+        assert_eq!(again.messages, loaded.messages);
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

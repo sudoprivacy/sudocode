@@ -177,6 +177,18 @@ impl SessionEngine {
         self.lock_session().cwd.clone()
     }
 
+    fn build_async_runtime() -> Result<tokio::runtime::Runtime, String> {
+        // The caller drives the turn on its own thread. Network and transport
+        // tasks need a bounded pool; one CPU-sized pool per hosted Session
+        // otherwise multiplies the machine's core count by its Session count.
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("scode-engine")
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed to create engine tokio runtime: {error}"))
+    }
+
     /// Adopt a session prepared by a host, retaining its filesystem and writer
     /// lease. This is the same engine used by the CLI and every ACP transport.
     #[allow(clippy::too_many_arguments)]
@@ -230,7 +242,7 @@ impl SessionEngine {
                 prompt_overrides,
                 memory,
             }),
-            tokio_runtime: Some(tokio::runtime::Runtime::new().map_err(|e| e.to_string())?),
+            tokio_runtime: Some(Self::build_async_runtime()?),
             allowed_tools,
             permission_mode: std::sync::Mutex::new(permission_mode),
             reasoning_effort: None,
@@ -316,10 +328,7 @@ impl SessionEngine {
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
             compaction_abort_signal: session.abort_signal.clone(),
             session: std::sync::Mutex::new(session),
-            tokio_runtime: Some(
-                tokio::runtime::Runtime::new()
-                    .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
-            ),
+            tokio_runtime: Some(Self::build_async_runtime()?),
             allowed_tools,
             permission_mode: std::sync::Mutex::new(permission_mode),
             reasoning_effort,
@@ -402,10 +411,7 @@ impl SessionEngine {
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
             compaction_abort_signal: session.abort_signal.clone(),
             session: std::sync::Mutex::new(session),
-            tokio_runtime: Some(
-                tokio::runtime::Runtime::new()
-                    .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
-            ),
+            tokio_runtime: Some(Self::build_async_runtime()?),
             allowed_tools,
             permission_mode: std::sync::Mutex::new(permission_mode),
             reasoning_effort,
@@ -1327,6 +1333,8 @@ pub fn billing_account_for_model(model: &str, auth_override: Option<AuthMode>) -
 /// rare, non-hot-path management ops (export / status / slash / undo), so the
 /// clones cost nothing on the critical path.
 pub trait SessionLifecycle: Send + Sync + 'static {
+    /// File-tool root without cloning the conversation history.
+    fn workspace_root(&self) -> Result<String, String>;
     /// A clone of the current session (for export / status / read inspection).
     fn session_snapshot(&self) -> runtime::Session;
     /// The active session's handle (id + persistence path). Owned clone so a
@@ -1429,6 +1437,14 @@ pub trait SessionLifecycle: Send + Sync + 'static {
 }
 
 impl SessionLifecycle for SessionEngine {
+    fn workspace_root(&self) -> Result<String, String> {
+        self.lock_session()
+            .host
+            .fs
+            .working_root()
+            .map_err(|error| error.to_string())
+    }
+
     fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
         self.lock_session().runtime.api_client().model_catalog()
     }

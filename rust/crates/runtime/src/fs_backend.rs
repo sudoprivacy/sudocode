@@ -881,28 +881,24 @@ impl FsBackend for StdFsBackend {
 // KernelFsBackend — in-process kernel syscalls for nexusd
 // ---------------------------------------------------------------------------
 
+enum KernelPathView {
+    Virtual,
+    HostRoot(String),
+    LocalWorkspace(std::path::PathBuf),
+}
+
 /// Kernel-backed filesystem for in-process execution inside nexusd.
-///
-/// Forwards every operation through the [`KernelConvenience`] trait so managed
-/// agents read/write the VFS trie via `sys_read` / `sys_write` /
-/// `sys_stat` / `sys_readdir` instead of touching the host
-/// filesystem.
+/// Operations retain the caller's identity and pass through the kernel policy.
 pub struct KernelFsBackend<K: KernelConvenience> {
     kernel: Arc<K>,
     ctx: OperationContext,
     /// Absolute VFS path that relative tool paths resolve against and that
     /// `glob` / `grep` default to (e.g. `/proc/{pid}/workspace`).
     workspace_root: String,
-    /// The same directory as the HOST spells it, when the host has its own
-    /// spelling for these files.
-    ///
-    /// `None` for a co-hosted agent: its world IS the VFS, so a VFS path is the
-    /// only name its files have and the name it should report. `Some` for a CLI
-    /// session, whose files are also host files -- the path its user typed and
-    /// the only one its `bash` tool can open. Set, this backend answers in host
-    /// spelling and converts on the way to each syscall
-    /// ([`Self::to_kernel`]), so one file has one name across every tool.
-    host_root: Option<String>,
+    /// The tool-facing spelling. CLI files retain their host paths and state
+    /// directories. A local workspace projects only its project directory;
+    /// managed session streams, memory, and messaging keep their VFS paths.
+    path_view: KernelPathView,
 }
 
 /// Permission capability needed by the in-process filesystem adapter.
@@ -916,6 +912,14 @@ pub trait KernelFsAccess {
         permission: Permission,
         ctx: &OperationContext,
     ) -> Result<(), KernelError>;
+
+    /// Resolve an authorized, reference-backed project directory for native
+    /// execution. `None` means the route has no local filesystem view.
+    fn local_workspace_directory(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+    ) -> Result<Option<std::path::PathBuf>, KernelError>;
 }
 
 impl KernelFsAccess for Kernel {
@@ -928,6 +932,48 @@ impl KernelFsAccess for Kernel {
         let route = self.vfs_router_arc().route(path, &ctx.zone_id);
         self.check_permission_with_route(path, route.as_ref(), permission, ctx)
     }
+
+    fn local_workspace_directory(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+    ) -> Result<Option<std::path::PathBuf>, KernelError> {
+        self.check_fs_permission(path, Permission::Read, ctx)?;
+        self.check_fs_permission(path, Permission::Write, ctx)?;
+        let Some(route) = self.vfs_router_arc().route(path, &ctx.zone_id) else {
+            return Ok(None);
+        };
+        let Some(backend) = route.backend else {
+            return Ok(None);
+        };
+        let Some(physical) = backend.resolve_physical_path(&route.backend_path) else {
+            return Ok(None);
+        };
+        let root = backend
+            .resolve_physical_path("")
+            .and_then(|path| path.canonicalize().ok())
+            .ok_or_else(|| KernelError::IOError("workspace backend has no local root".into()))?;
+        let ancestor = physical
+            .ancestors()
+            .find(|path| path.exists())
+            .and_then(|path| path.canonicalize().ok())
+            .ok_or_else(|| KernelError::IOError("workspace has no existing parent".into()))?;
+        if !ancestor.starts_with(&root) {
+            return Err(KernelError::PermissionDenied(
+                "workspace directory escapes its backend root".into(),
+            ));
+        }
+        self.mkdir(path, ctx, true, true)?;
+        let physical = physical
+            .canonicalize()
+            .map_err(|error| KernelError::IOError(format!("workspace directory: {error}")))?;
+        if !physical.starts_with(&root) || !physical.is_dir() {
+            return Err(KernelError::PermissionDenied(
+                "workspace directory escapes its backend root".into(),
+            ));
+        }
+        Ok(Some(physical))
+    }
 }
 
 impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
@@ -936,7 +982,7 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
             kernel,
             ctx,
             workspace_root: workspace_root.into(),
-            host_root: None,
+            path_view: KernelPathView::Virtual,
         }
     }
 
@@ -963,8 +1009,27 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     /// directory this backend's `workspace_root` mounts.
     #[must_use]
     pub fn with_host_root(mut self, host_root: impl Into<String>) -> Self {
-        self.host_root = Some(host_root.into());
+        self.path_view = KernelPathView::HostRoot(host_root.into());
         self
+    }
+
+    /// Expose a reference-backed project in the same spelling native commands
+    /// use. Other VFS namespaces retain their paths and authorization.
+    pub fn with_local_workspace(
+        mut self,
+        mount: impl Into<std::path::PathBuf>,
+    ) -> io::Result<Self> {
+        let mount = mount.into();
+        if !mount.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a local workspace requires an absolute path",
+            ));
+        }
+        self.path_view = KernelPathView::LocalWorkspace(std::path::PathBuf::from(
+            host_lexical_join(&mount.to_string_lossy(), "."),
+        ));
+        Ok(self)
     }
 
     /// The VFS path a caller's `path` names.
@@ -975,6 +1040,23 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     /// resolve against the workspace root; a host-absolute path (`C:\a\b`) is
     /// mapped by [`vfs_path_for_host_path`]'s rule.
     fn to_kernel(&self, path: &str) -> io::Result<String> {
+        if let KernelPathView::LocalWorkspace(mount) = &self.path_view {
+            if std::path::Path::new(path).starts_with(mount) {
+                let normalized = host_lexical_join(&mount.to_string_lossy(), path);
+                let relative = std::path::Path::new(&normalized)
+                    .strip_prefix(mount)
+                    .map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "path escapes the local workspace",
+                        )
+                    })?;
+                return lexical_join(
+                    &self.workspace_root,
+                    &relative.to_string_lossy().replace('\\', "/"),
+                );
+            }
+        }
         lexical_join(&self.workspace_root, path)
     }
 
@@ -1020,14 +1102,23 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     /// a path the kernel stored rather than one the caller passed: `read_link`
     /// reads back a `DT_LINK` target, which was converted on the way in.
     ///
-    /// Asymmetric with the forward direction on purpose. Reading `C:\a\b` as
+    /// CLI drive conversion is asymmetric with the forward direction. Reading `C:\a\b` as
     /// drive-absolute is safe on any platform (no unix path looks like that), so
     /// the forward rule is platform-independent and a unix test proves the
     /// Windows branch. The reverse is not: `/C/a` is this mapping's output on
     /// Windows and an ordinary path on unix, so undoing it anywhere else would
     /// corrupt a perfectly good path.
     fn to_host(&self, vfs: &str) -> String {
-        if self.host_root.is_none() {
+        if let KernelPathView::LocalWorkspace(mount) = &self.path_view {
+            if let Ok(relative) = std::path::Path::new(vfs).strip_prefix(&self.workspace_root) {
+                if relative.as_os_str().is_empty() {
+                    return mount.to_string_lossy().into_owned();
+                }
+                return mount.join(relative).to_string_lossy().into_owned();
+            }
+            return vfs.to_string();
+        }
+        if matches!(&self.path_view, KernelPathView::Virtual) {
             return vfs.to_string();
         }
         #[cfg(windows)]
@@ -1274,10 +1365,10 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
         // transcripts, sub-agents and memory belong where its own tooling looks
         // (`scode --resume`, `.sudocode-agents`, the project memory dir), and
         // they outlive a VFS that exists only while the session does.
-        if self.host_root.is_some() {
+        if matches!(&self.path_view, KernelPathView::HostRoot(_)) {
             return None;
         }
-        match concern {
+        let root = match concern {
             // Flat and session-id-keyed: no `.scode`, no `workspace_hash`,
             // because isolation here is policy plus `owner`, not path.
             ManagedRoot::Sessions => Some(contracts::SESSIONS_BASE.to_string()),
@@ -1291,7 +1382,8 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
             // own: a todo list is one small file, and a directory per file is a
             // namespace nobody browses.
             ManagedRoot::Todos => self.agent_subtree(""),
-        }
+        };
+        root.map(|path| self.to_host(&path))
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
@@ -1498,10 +1590,10 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
     }
 
     fn working_root(&self) -> io::Result<String> {
-        Ok(self
-            .host_root
-            .clone()
-            .unwrap_or_else(|| self.workspace_root.clone()))
+        Ok(match &self.path_view {
+            KernelPathView::HostRoot(root) => root.clone(),
+            _ => self.to_host(&self.workspace_root),
+        })
     }
 
     /// Absolute, lexically clean, in this backend's spelling.
@@ -1511,21 +1603,26 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
     /// `normalize_allow_missing` is the trait's default, which is this: the
     /// resolution is lexical either way, so a missing leaf is not special.
     fn normalize(&self, path: &str) -> io::Result<String> {
-        match &self.host_root {
-            Some(root) => Ok(host_lexical_join(root, path)),
-            None => lexical_join(&self.workspace_root, path),
+        match &self.path_view {
+            KernelPathView::LocalWorkspace(_) => {
+                self.to_kernel(path).map(|path| self.to_host(&path))
+            }
+            KernelPathView::HostRoot(root) => Ok(host_lexical_join(root, path)),
+            KernelPathView::Virtual => lexical_join(&self.workspace_root, path),
         }
     }
 
     fn join_path(&self, dir: &str, name: &str) -> String {
-        match self.host_root {
+        match &self.path_view {
             // Host separators, for the same reason `StdFsBackend` uses them:
             // the composed path is handed back to the user and to `bash`.
-            Some(_) => std::path::Path::new(dir)
-                .join(name)
-                .to_string_lossy()
-                .into_owned(),
-            None => format!("{}/{}", dir.trim_end_matches(['/', '\\']), name),
+            KernelPathView::HostRoot(_) | KernelPathView::LocalWorkspace(_) => {
+                std::path::Path::new(dir)
+                    .join(name)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+            KernelPathView::Virtual => format!("{}/{}", dir.trim_end_matches(['/', '\\']), name),
         }
     }
 }

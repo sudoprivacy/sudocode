@@ -174,6 +174,94 @@ fn relative_paths_resolve_against_the_agent_workspace() {
 }
 
 #[test]
+fn local_workspace_paths_and_virtual_paths_share_one_authorized_object() {
+    let kernel = kernel_with_root_backend();
+    let mount = std::env::temp_dir().join("scode-nexus-view");
+    let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
+    let path = mount.join("project.txt").to_string_lossy().into_owned();
+    assert_eq!(fs.working_root().unwrap(), mount.to_string_lossy());
+    assert_eq!(fs.normalize("project.txt").unwrap(), path);
+    assert_eq!(fs.normalize(&path).unwrap(), path);
+    write_file(&fs, "project.txt", "shared bytes").unwrap();
+    assert_eq!(fs.read(&path).unwrap(), b"shared bytes");
+    assert_eq!(
+        vfs_backend(&kernel).read("/ws/project.txt").unwrap(),
+        b"shared bytes"
+    );
+    edit_file(&fs, &path, "shared", "same", false).unwrap();
+    assert_eq!(fs.read("/ws/project.txt").unwrap(), b"same bytes");
+    let glob = glob_search(&fs, "**/*.txt", None).unwrap();
+    assert_eq!(glob.filenames.len(), 1);
+    assert_eq!(fs.normalize(&glob.filenames[0]).unwrap(), path);
+    let mut input = grep_input("same bytes", "");
+    input.path = None;
+    let grep = grep_search(&fs, &input).unwrap();
+    assert_eq!(grep.filenames.len(), 1);
+    assert_eq!(fs.normalize(&grep.filenames[0]).unwrap(), path);
+    fs.rename(&path, "renamed.txt").unwrap();
+    assert!(!fs.exists(&path).unwrap());
+    assert_eq!(fs.read("renamed.txt").unwrap(), b"same bytes");
+}
+
+#[test]
+fn local_workspace_keeps_managed_state_in_its_durable_namespace() {
+    use runtime::ManagedRoot;
+    let kernel = kernel_with_root_backend();
+    let mount = std::env::temp_dir().join("scode-nexus-state-view");
+    let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
+    let memory = fs.managed_root(ManagedRoot::Memory).unwrap();
+    assert_eq!(memory, "/agents/agent-x/memory");
+    fs.create_dir_all(&memory).unwrap();
+    fs.write(&fs.join_path(&memory, "MEMORY.md"), b"agent memory")
+        .unwrap();
+    assert_eq!(
+        vfs_backend(&kernel)
+            .read("/agents/agent-x/memory/MEMORY.md")
+            .unwrap(),
+        b"agent memory"
+    );
+    assert_eq!(fs.managed_root(ManagedRoot::Sessions).unwrap(), "/sessions");
+    fs.create_dir_all("/sessions/original-id").unwrap();
+    let index = "/agents/agent-x/sessions/original-id".to_string();
+    let target = "/sessions/original-id".to_string();
+    fs.link(&index, &target).unwrap();
+    assert_eq!(fs.read_link(&index).unwrap(), target);
+    assert_eq!(
+        vfs_backend(&kernel)
+            .read_link("/agents/agent-x/sessions/original-id")
+            .unwrap(),
+        "/sessions/original-id"
+    );
+}
+
+#[test]
+fn local_workspace_spelling_preserves_authorization_and_rejects_path_escape() {
+    let kernel = kernel_with_root_backend();
+    let policy = install_file_policy(&kernel);
+    let mount = std::env::temp_dir().join("scode-nexus-policy-view");
+    let fs = vfs_backend(&kernel).with_local_workspace(&mount).unwrap();
+    fs.write("secret.txt", b"private").unwrap();
+    policy.deny("/ws/secret.txt");
+    let secret = mount.join("secret.txt").to_string_lossy().into_owned();
+    assert_eq!(
+        fs.read(&secret).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        fs.read("secret.txt").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let escape = format!("{}/../outside.txt", mount.display());
+    assert_eq!(
+        fs.write(&escape, b"refused").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(vfs_backend(&kernel)
+        .with_local_workspace("relative/project")
+        .is_err());
+}
+
+#[test]
 fn oversized_tool_output_offloads_onto_the_vfs() {
     // Proof that the offload path is fully backend-agnostic and needs NOTHING
     // new from nexus: point a session's persistence + FsBackend at the VFS, run

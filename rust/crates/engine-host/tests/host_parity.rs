@@ -1,11 +1,12 @@
-//! The complete list of ways the two hosts differ.
+//! Explicit differences between CLI and VFS-only hosted workspaces.
 //!
 //! Everything below the host is shared: one engine, one tool set, one prompt
 //! assembly, one `FsBackend` trait, one session store. What is left over is what
 //! a host INJECTS — and this file is that list, asserted for both hosts side by
 //! side.
 //!
-//! Adding a sixth difference means editing this test, which is the point. A
+//! Reference-backed hosted projects are exercised in `cohost_local_workspace`.
+//! Adding another difference means editing this test. A
 //! divergence nobody had to declare is how two hosts drift apart while every
 //! suite stays green: each gap found in the storage sweep lived in exactly such
 //! a place — a `None` the CLI takes and the co-host does not, or a value only
@@ -60,11 +61,12 @@ fn cohost() -> HostContext {
         Arc::clone(&fs),
         COHOST_AGENT.to_string(),
     ));
-    HostContext::for_cohost_agent(fs, COHOST_AGENT, mailbox).expect("build the co-host context")
+    HostContext::for_cohost_agent(fs, COHOST_AGENT, mailbox, None)
+        .expect("build the co-host context")
 }
 
 #[test]
-fn the_two_hosts_differ_in_exactly_these_ways() {
+fn cli_and_vfs_only_hosts_keep_explicit_paths_and_managed_roots() {
     let dir = sandbox("differences");
     let workspace = dir.path().join("project");
     std::fs::create_dir_all(&workspace).expect("workspace");

@@ -9544,7 +9544,7 @@ fn run_in_process_group(
     // `kill()` then takes down the entire descendant tree in one shot — the old
     // single-process kill could leave grandchildren running that kept inherited stdout
     // pipes open, hanging the drain forever.
-    let mut child = process.group_spawn()?;
+    let mut child = runtime::shell_process_group(process.group()).spawn()?;
 
     let started = Instant::now();
     let outcome = loop {

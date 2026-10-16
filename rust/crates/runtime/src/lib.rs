@@ -96,8 +96,8 @@ pub mod workspace_root;
 pub use bash::{
     clear_bash_progress_callback, execute_bash, execute_bash_with_abort,
     execute_bash_with_progress, execute_bash_with_tasks, launch_background_command,
-    set_bash_progress_callback, BashCommandInput, BashCommandOutput, BashProgress,
-    BashProgressCallback, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
+    set_bash_progress_callback, shell_process_group, BashCommandInput, BashCommandOutput,
+    BashProgress, BashProgressCallback, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};

@@ -17,6 +17,18 @@ use crate::sandbox::{
 use crate::workspace_root::current_workspace_root;
 use crate::ConfigLoader;
 
+/// Keep shell lifetime under the engine's cancellation and process-tree control.
+pub fn shell_process_group<T>(
+    mut group: command_group::builder::CommandGroupBuilder<'_, T>,
+) -> command_group::builder::CommandGroupBuilder<'_, T> {
+    // A Windows Job Object controls lifetime but does not isolate console signals.
+    // Let the parent's handler cancel the engine before killing its shell tree.
+    #[cfg(windows)]
+    group.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
+    group.kill_on_drop(true);
+    group
+}
+
 /// Default foreground subprocess timeout for tool-backed command execution.
 ///
 /// Tool schemas still allow callers to provide a larger or smaller per-call
@@ -364,7 +376,7 @@ async fn execute_bash_async(
 
     command.kill_on_drop(true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = command.group().kill_on_drop(true).spawn()?;
+    let mut child = shell_process_group(command.group()).spawn()?;
     let mut stdout_pipe = child.inner().stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.inner().stderr.take().expect("stderr piped");
     let timeout_sleep = tokio::time::sleep(Duration::from_millis(timeout_ms));
@@ -523,7 +535,7 @@ async fn execute_bash_streaming(
     command.kill_on_drop(true);
 
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = command.group().kill_on_drop(true).spawn()?;
+    let mut child = shell_process_group(command.group()).spawn()?;
 
     let stdout = child.inner().stdout.take().expect("stdout piped");
     let stderr = child.inner().stderr.take().expect("stderr piped");
@@ -766,11 +778,11 @@ pub fn launch_background_command(
     let journal = tasks
         .prepare_terminal(&id, shell)
         .map_err(io::Error::other)?;
-    let child = command
+    command
         .stdin(Stdio::null())
         .stdout(stdout)
-        .stderr(Stdio::from(output))
-        .group_spawn();
+        .stderr(Stdio::from(output));
+    let child = shell_process_group(command.group()).spawn();
     let child = match child {
         Ok(child) => child,
         Err(error) => {

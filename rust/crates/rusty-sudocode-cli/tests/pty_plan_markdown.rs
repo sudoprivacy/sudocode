@@ -45,6 +45,20 @@ fn start(env: &TestEnv, queue: bool, no_color: bool) -> PtySession {
     sess
 }
 
+fn plan_document_visible(screen: &str) -> bool {
+    // PTY reads can stop in the middle of an inline repaint. Wait for every
+    // section whose cells we inspect, not just a later body line and choice.
+    // A persistently missing section still fails the original screen budget.
+    ["Context", "Constraints", "Acceptance Criteria"]
+        .iter()
+        .all(|heading| screen.lines().any(|line| line.trim() == *heading))
+        && screen.contains("Review plan")
+        && screen.contains("Verify bold")
+        && screen.contains("let verified = true;")
+        && screen.contains("Choose an action")
+        && screen.contains("Keep context & execute")
+}
+
 fn submit_plan(env: &TestEnv, sess: &mut PtySession, queue: bool) {
     let prompt = if env.is_live() {
         env.prompt(&format!(
@@ -92,12 +106,7 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession, queue: bool) {
     sess.send("\r").unwrap();
     common::expect_screen(
         sess,
-        |screen| {
-            screen.contains("Choose an action")
-                && screen.contains("Keep context & execute")
-                && screen.contains("Verify bold")
-                && screen.contains("let verified = true;")
-        },
+        plan_document_visible,
         LIVE_TURN_BUDGET,
         "full Markdown approval document",
     );
@@ -302,12 +311,7 @@ fn approve(queue: bool, clear: bool, no_color: bool) {
     assert_document(&sess, no_color);
     if queue {
         sess.resize(100, 72).unwrap();
-        common::expect_screen(
-            &sess,
-            |s| s.contains("let verified = true;") && s.contains("Keep context & execute"),
-            env.timeout(),
-            "reflowed plan",
-        );
+        common::expect_screen(&sess, plan_document_visible, env.timeout(), "reflowed plan");
         assert_document(&sess, no_color);
     }
     let marker = common::turn_status_marker(&sess);

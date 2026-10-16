@@ -577,21 +577,18 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         })
         .unwrap();
     for pid in [&started["session_id"], &failed_start["session_id"]] {
+        let process_path = format!("/proc/{}", pid.as_str().unwrap());
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let state = call(&kernel, "get_session_v1", json!({"session_id":pid}));
-            // The branch pin (nexus-vfs feat/contract-zone, v0.8.5 at cdff812e)
-            // predates the main line's procfs view cleanup that main adopted
-            // with v0.8.11 — on this line a terminated session keeps its /proc
-            // view, so only termination is asserted here. Restore the
-            // `sys_stat("/proc/{pid}")` removal half when the pin rejoins the
-            // main line.
-            if state["state"] == "terminated" {
+            let view =
+                kernel::kernel::syscall::KernelSyscall::sys_stat(&*kernel, &process_path, "root");
+            if state["state"] == "terminated" && view.is_none() {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "channel closure must terminate the runtime: {state}"
+                "channel closure must terminate the runtime and remove its procfs view: {state}"
             );
             std::thread::sleep(Duration::from_millis(10));
         }

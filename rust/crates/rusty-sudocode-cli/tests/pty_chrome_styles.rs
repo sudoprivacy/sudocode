@@ -289,6 +289,25 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
     expect_style(&sess, "╭─", (border, !no_color, false));
+    sess.send("\x1b[A").expect("recall queued message");
+    common::expect_input_line(
+        &sess,
+        queued,
+        common::DEFAULT_TIMEOUT,
+        "recall the complete message",
+    );
+    common::expect_screen(
+        &sess,
+        |screen| {
+            !screen
+                .lines()
+                .any(|line| line.contains("queued:") && line.contains("StyleQueuedMarker"))
+        },
+        common::DEFAULT_TIMEOUT,
+        "recall removes the queue preview",
+    );
+    sess.send("\r").expect("requeue the recalled message");
+    expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     sess.resize(30, 78).expect("resize during tool");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
@@ -314,16 +333,9 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
         common::DEFAULT_TIMEOUT,
         "preview clipping must not truncate the actual queue",
     );
-    common::expect_screen(
-        &sess,
-        |screen| {
-            !screen
-                .lines()
-                .any(|line| line.contains("queued:") && line.contains("StyleQueuedMarker"))
-        },
-        common::DEFAULT_TIMEOUT,
-        "recall removes the queue preview",
-    );
+    // The pinned terminal-host tests own resize/history assertions. This PTY
+    // adapter answers DSR with a fixed 1;1, not the actual cursor, so historical
+    // frames after extreme resize are not an oracle for the active queue.
     sess.send("\x15").expect("clear recalled draft");
     // The running spinner deliberately never settles. Observe the editor,
     // rather than using the helper for a globally settled, idle screen.

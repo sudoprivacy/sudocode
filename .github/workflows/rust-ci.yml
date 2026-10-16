@@ -2,6 +2,12 @@ name: Rust CI - read-only router diagnostics
 on:
   workflow_dispatch:
     inputs:
+      review_acceptance:
+        type: boolean
+        default: false
+      review_pr:
+        type: string
+        default: '958'
       routing:
         type: boolean
         default: true
@@ -123,4 +129,42 @@ jobs:
         with:
           name: native-acceptance-${{ inputs.native_model }}
           path: ${{ runner.temp }}/native-live-evidence.json
+          retention-days: 7
+
+  review-acceptance:
+    if: inputs.review_acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: diagnostic
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.native_ref }}
+          path: source
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install the same pinned Claude CLI as the formal review
+        run: npm install --global @anthropic-ai/claude-code@2.1.301
+      - name: Review the exact current PR with read-only tools
+        working-directory: source
+        env:
+          PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          SCODE_REVIEW_REF: ${{ inputs.native_ref }}
+          SCODE_REVIEW_PR: ${{ inputs.review_pr }}
+          SCODE_REVIEW_MODEL: ${{ vars.SUDOROUTER_NATIVE_MODEL || 'claude-sonnet-4-6' }}
+          SCODE_REVIEW_CHANNEL: ${{ vars.SUDOROUTER_NATIVE_CHANNEL }}
+        run: node ../diagnostic/.github/scripts/review_company_native.cjs "${{ runner.temp }}/company-native-review.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: company-native-review
+          path: ${{ runner.temp }}/company-native-review.json
+          if-no-files-found: warn
           retention-days: 7

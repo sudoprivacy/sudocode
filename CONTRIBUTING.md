@@ -499,6 +499,19 @@ The scoped-context cases verify config roots, CLI package discovery, layered
 memory, and memory write permissions through the real CLI.
 Mock usage numbers are fixtures, not evidence of real provider cache hits.
 
+`SUDOCODE_CACHE_DIAGNOSTICS=1` opts into the provider's diagnosis beta. Its
+previous-message ID belongs to one client/session and is restored from
+`cache/prompt-cache/<session-id>/cache-diagnostics.json` on restart. The existing
+SSE decoder captures diagnostic metadata across HTTP chunks, JSON whitespace and
+whole-JSON responses; it does not run a second parser. With diagnostics disabled,
+no diagnostic fields, beta or diagnostic-state I/O are added. State persistence
+is best effort and cannot fail or retry a provider request. Set
+`SUDOCODE_DUMP_REQUESTS` to keep diagnoses next to request dumps; these opt-in
+dumps can contain conversation data and must not be published as raw evidence.
+The PTY prefix suite tests correlation and unchanged wire prefixes, not real
+cache availability. Neither a correct diagnosis chain nor identical client
+prefixes establish a live cache hit or an upstream account/cache-shard identity.
+
 ## Running the CLI locally
 
 For the canonical CLI surface, run `cargo run --bin scode -- --help`.

@@ -40,6 +40,19 @@ workspace. `SCODE_CONPTY_BACKEND=system` runs the strict system-host diagnostic;
 it currently exposes history loss on Windows build 26300 even in static controls
 without application redraw. CI uses VS Code's bundled ConPTY.
 
+The shared-budget workflow folds Todo/status/footer details around a long draft,
+restores them on growth, hides an undersized editor without losing its middle
+cursor, rejects invisible edits, and submits every retained draft byte through
+the real shell. It checks all 70 saved history lines at each stage. This is
+layout/data preservation acceptance, not a claim that extreme-size degradation
+is free of unreachable old UI; the normal-size workflow separately checks
+duplicate-free resize.
+After extreme-size recovery, editor/picker checks locate the current InputSlot
+between the last pair of input separators. They must not confuse a retained
+obsolete frame with the current editor. History preservation still checks the
+entire buffer; the separate normal-size workflow keeps its strict single-chrome
+assertions.
+
 ## Release performance gate
 
 `pty_render_performance` reuses TestEnv, the protocol fixture and this terminal

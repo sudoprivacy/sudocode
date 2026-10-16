@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const { createHost } = require('./host.cjs');
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-const initial = config.scenario === 'parallel' ? { cols: 100, rows: 80 }
+const initial = config.scenario === 'budget' ? { cols: 80, rows: 18 }
+  : config.scenario === 'parallel' ? { cols: 100, rows: 80 }
   : config.scenario === 'a2a' ? { cols: 100, rows: 50 } : { cols: 120, rows: 24 };
 const host = createHost({ ...initial, ...config });
 const { child, terminal, state, sleep, snapshot, viewport, settle, frame, resize, close } = host;
@@ -79,12 +80,74 @@ async function parallelTools() {
     && text.includes('ctx '));
   console.log('SCODE_XTERM_PARALLEL_TOOLS_PASS');
 }
+function inputSlot() {
+  // Tiny resizes can move an obsolete live frame into retained scrollback.
+  // Locate the current editor between the last two input separators rather
+  // than treating every old prompt visible after growth as an active editor.
+  const rows = viewport().split('\n');
+  const separator = '─'.repeat(terminal.cols);
+  const end = rows.findLastIndex(row => row === separator);
+  const start = rows.slice(0, end).findLastIndex(row => row === separator);
+  if (start < 0 || end < 0 || !rows[start + 1]?.startsWith('❯')) return null;
+  return rows.slice(start + 1, end).join('\n');
+}
+async function sharedBudget() {
+  const payload = `DraftHead${'_keep_'.repeat(120)}DraftTail`;
+  const command = `! echo ${payload} > draft.txt`;
+  const history = label => {
+    const text = snapshot();
+    for (let i = 0; i < 70; i++)
+      assert.equal(text.split('\n').filter(row => row.trim() === `Budget history line ${i}`).length,
+        1, `${label}: history ${i} lost or duplicated\n${text}`);
+    assert.equal(text.split('BudgetHistorySentinel').length - 1, 1, label);
+  };
+  await settle(() => viewport().includes('BudgetTask2') && viewport().includes('❯'));
+  child.write(`\x1b[200~${command}\x1b[201~`);
+  await settle(() => viewport().includes('compact') && inputSlot()?.includes('draft.txt'));
+  assert(viewport().includes('3 todos'), viewport());
+  assert(!viewport().includes('BudgetTask'), viewport());
+  assert.equal(viewport().split('❯').length - 1, 1, viewport());
+  history('folded');
+  let started = Date.now();
+  resize(80, 40);
+  await settle(() => viewport().includes('BudgetTask2') && inputSlot()?.includes('DraftHead')
+    && inputSlot()?.includes('draft.txt') && !viewport().includes('compact'), started);
+  history('grown');
+  // Move and edit in one burst before hiding the same editor.
+  // Existing Up navigation reaches the start of this single logical line.
+  // Then probe same-batch Home/middle insertion with the normal editor.
+  child.write('\x1b[A\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[CX');
+  await settle(() => inputSlot()?.includes('! echXo'));
+  child.write('\x7f');
+  await settle(() => inputSlot()?.includes('❯ ! echo') && inputSlot()?.includes('DraftHead') && !inputSlot()?.includes('! echXo'));
+  started = Date.now();
+  resize(12, 8);
+  await settle(() => viewport().includes('Enlarge') && viewport().includes('terminal'), started);
+  child.write('MustNotAppear');
+  await sleep(150);
+  started = Date.now();
+  resize(80, 40);
+  await settle(() => inputSlot()?.includes('❯ ! echo') && inputSlot()?.includes('DraftHead') && viewport().includes('BudgetTask2'), started);
+  assert(!snapshot().includes('MustNotAppear'), snapshot());
+  child.write('Z');
+  await settle(() => inputSlot()?.includes('! echZo'));
+  child.write('\x7f');
+  await settle(() => inputSlot()?.includes('❯ ! echo') && inputSlot()?.includes('DraftHead') && !inputSlot()?.includes('! echZo'));
+  child.write('\r');
+  const file = path.join(config.root, 'draft.txt');
+  await settle(() => fs.existsSync(file) && snapshot().includes('(no output)')
+    && inputSlot()?.trimEnd() === '❯');
+  assert.equal(fs.readFileSync(file, 'utf8').trim(), payload, 'all draft bytes must survive');
+  history('submitted');
+  console.log('SCODE_XTERM_SHARED_BUDGET_PASS');
+}
 async function run() {
   try {
     fs.mkdirSync(config.logRoot, { recursive: true });
     if (config.scenario === 'performance') {
       await require('./performance.cjs').run(host, config);
-
+    } else if (config.scenario === 'budget') {
+      await sharedBudget();
     } else if (config.scenario === 'a2a') {
       await queuedPeer();
     } else if (config.scenario === 'parallel') {

@@ -46,6 +46,50 @@ fn clear_and_typing_share_one_input_sequence() {
     }
 }
 
+#[test]
+fn logical_line_navigation_and_typing_share_one_input_sequence() {
+    let env = TestEnv::new("input-batch-navigation");
+    let mut session = start(&env);
+    let draft = format!("BatchHead{}BatchTail", "_keep_".repeat(32));
+    session.send(&draft).unwrap();
+    common::expect_screen_settled(
+        &session,
+        |screen| {
+            common::input_and_footer_of(screen)
+                .is_some_and(|input| input.contains("BatchHead") && input.contains("BatchTail"))
+        },
+        env.timeout(),
+        "wrapped draft",
+    );
+    // Up's logical-line jump must apply before Home/right/edit in the same
+    // burst, not via a parent cursor request that waits for another render.
+    session
+        .send("\x1b[A\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[CX")
+        .unwrap();
+    common::expect_screen_settled(
+        &session,
+        |screen| {
+            common::input_and_footer_of(screen).is_some_and(|input| input.contains("BatchXHead"))
+        },
+        env.timeout(),
+        "logical start and middle insertion",
+    );
+    // The symmetric Down jump also belongs to the editor's event-time cursor.
+    session.send("\x7f\x1b[B\x1b[D\x1b[D\x1b[D\x1b[DZ").unwrap();
+    common::expect_screen_settled(
+        &session,
+        |screen| {
+            common::input_and_footer_of(screen).is_some_and(|input| input.contains("BatchZTail"))
+        },
+        env.timeout(),
+        "logical end and middle insertion",
+    );
+    exit(&mut session, &env);
+    if env.is_mock() {
+        assert_eq!(env.captured_message_count(), 0);
+    }
+}
+
 fn transcripts(root: &Path, paths: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(root).expect("session directory") {
         let path = entry.unwrap().path();

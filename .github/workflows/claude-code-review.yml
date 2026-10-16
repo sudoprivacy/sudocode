@@ -6,6 +6,9 @@ on:
     branches: [main]
     paths:
       - rust/**
+      - .github/**
+      - CLAUDE.md
+      - CONTRIBUTING.md
 
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
@@ -30,7 +33,7 @@ jobs:
       ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.SUDOROUTER_NATIVE_MODEL || 'claude-sonnet-4-6' }}
       ANTHROPIC_DEFAULT_OPUS_MODEL: claude-opus-4-6
       # The action stops at the first result, before background agents return.
-      # Keep the plugin's parallel review fan-out synchronous (upstream #1499).
+      # Keep all review fan-out synchronous (upstream #1499).
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1'
 
     steps:
@@ -40,6 +43,12 @@ jobs:
           fetch-depth: 1
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - name: Verify current ready head
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.info(await require('./.github/scripts/assert_claude_review_context.cjs')({ github, context }));
+
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
@@ -48,10 +57,21 @@ jobs:
           # The job's read-only token also works when this workflow is edited;
           # App-token exchange otherwise skips those PRs before reviewing them.
           github_token: ${{ github.token }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          claude_args: '--model sonnet'
+          prompt: |
+            Repository: ${{ github.repository }}
+            Pull request: ${{ github.event.pull_request.number }}
+            Required commit: ${{ github.event.pull_request.head.sha }}
+            Read and follow .github/prompts/code-review.md for this current-commit CI review.
+          claude_args: >-
+            --model sonnet
+            --allowedTools "Read,Glob,Grep,Agent,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(git show:*),Bash(git diff:*),Bash(git rev-parse:*),Bash(git ls-files:*),Bash(rg:*),Bash(cat:*)"
+
+      - name: Verify reviewed head is still current
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.info(await require('./.github/scripts/assert_claude_review_context.cjs')({ github, context }));
 
       # A review that never reached a model is an INFRASTRUCTURE failure, and it must
       # not read like a finding about the diff. Unannotated, this job fails with

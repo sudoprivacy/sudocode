@@ -76,9 +76,28 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
     assert!(!prompt.contains("Your files and your shell are in different places"));
     let fs = snapshot.fs_handle();
     fs.write("from-file-tool.txt", b"file-tool-bytes").unwrap();
+    fs.write(
+        ".nexus/sudocode/skills/shared-workspace/scripts/run.sh",
+        b"#!/bin/sh\nprintf skill-script-ok\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            skill.join("scripts/run.sh"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+    let execute_skill = if cfg!(unix) {
+        "./.nexus/sudocode/skills/shared-workspace/scripts/run.sh"
+    } else {
+        "sh .nexus/sudocode/skills/shared-workspace/scripts/run.sh"
+    };
     let _scope = WorkspaceRootScope::enter(&cwd);
     let result = runtime::execute_bash(serde_json::from_value(serde_json::json!({
-        "command": "cat from-file-tool.txt; printf shell-bytes > from-shell.txt; sh .nexus/sudocode/skills/shared-workspace/scripts/run.sh",
+        "command": format!("cat from-file-tool.txt; printf shell-bytes > from-shell.txt; {execute_skill}"),
         "dangerouslyDisableSandbox": true,
         "timeout": 10000,
     })).unwrap()).unwrap();

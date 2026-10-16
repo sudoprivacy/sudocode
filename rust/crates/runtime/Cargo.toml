@@ -70,6 +70,15 @@ walkdir = "2"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["poll", "process", "signal"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Exercise the shipped VFS host and its error envelopes over real mTLS gRPC.
+transport = { workspace = true }
+nexus-rebac = { workspace = true }
+tonic-host = { package = "tonic", version = "0.14", default-features = false }
+# In-memory CA/leaf minting for those mTLS transport tests — the same crate,
+# version and feature set nexus-vfs's own transport test suite uses.
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+
 [target.'cfg(unix)'.dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 

@@ -14,6 +14,8 @@
 //! the claim is checked rather than asserted.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1221,4 +1223,621 @@ fn trusted_for_in_process_kernel_maps_host_env_fail_closed_or_scoped() {
         trusted.trusted_for_in_process_kernel().source(),
         &ContextSource::TrustedLocal
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Restored from main: the shipped-host authorization suite. The branch's
+// dependency detour dropped it along with the linux dev-dependencies it
+// rides; both return here. Constructions that main spelled as
+// `for_agent(..)` ride the planted descriptor (`desc_for`) instead — the
+// constructor this line keeps — and the real-transport tests below reach the
+// spawned host over mTLS where main used plaintext `from_arc` (that
+// constructor now fails closed before any RPC by design).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+struct FilePolicy {
+    denied: Mutex<HashSet<String>>,
+    revoke_after_read: Mutex<HashSet<String>>,
+    read_denied: Mutex<HashSet<String>>,
+    agent: Mutex<Option<String>>,
+    broken: Mutex<Option<String>>,
+    calls: Mutex<Vec<(String, Permission, OperationContext, Option<String>)>>,
+}
+
+impl FilePolicy {
+    fn deny(&self, path: &str) {
+        self.denied.lock().unwrap().insert(path.to_string());
+    }
+}
+
+impl PermissionProvider for FilePolicy {
+    fn check(
+        &self,
+        path: &str,
+        route: Option<&kernel::vfs_router::RouteResult>,
+        permission: Permission,
+        ctx: &OperationContext,
+    ) -> Result<(), KernelError> {
+        self.calls.lock().unwrap().push((
+            path.to_string(),
+            permission,
+            ctx.clone(),
+            route.map(|route| route.zone_id.clone()),
+        ));
+        if self.broken.lock().unwrap().as_deref() == Some(path) {
+            return Err(KernelError::IOError("policy store unavailable".into()));
+        }
+        let agent = self.agent.lock().unwrap();
+        let wrong_subject = agent.as_deref().is_some_and(|agent| {
+            ctx.subject_type != "agent" || ctx.subject_id.as_deref() != Some(agent)
+        });
+        if wrong_subject
+            || self.denied.lock().unwrap().contains(path)
+            || (permission == Permission::Read && self.read_denied.lock().unwrap().contains(path))
+        {
+            return Err(KernelError::PermissionDenied(path.to_string()));
+        }
+        if permission == Permission::Read && self.revoke_after_read.lock().unwrap().remove(path) {
+            self.deny(path);
+        }
+        Ok(())
+    }
+}
+
+fn install_file_policy(kernel: &Kernel) -> Arc<FilePolicy> {
+    let policy = Arc::new(FilePolicy::default());
+    let provider: Box<dyn PermissionProvider> = Box::new(SharedFilePolicy(Arc::clone(&policy)));
+    kernel.set_permission_provider(Arc::new(provider));
+    policy
+}
+
+struct SharedFilePolicy(Arc<FilePolicy>);
+
+impl PermissionProvider for SharedFilePolicy {
+    fn check(
+        &self,
+        path: &str,
+        route: Option<&kernel::vfs_router::RouteResult>,
+        permission: Permission,
+        ctx: &OperationContext,
+    ) -> Result<(), KernelError> {
+        self.0.check(path, route, permission, ctx)
+    }
+}
+
+#[test]
+fn metadata_operations_observe_read_denial() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.write("secret.txt", b"secret").unwrap();
+    fs.link("secret-link", "/ws/secret.txt").unwrap();
+    let policy = install_file_policy(&kernel);
+    policy.deny("/ws/secret.txt");
+    policy.deny("/ws/secret-link");
+    policy.deny("/ws");
+
+    let results = [
+        fs.stat("secret.txt").map(|_| ()),
+        fs.exists("secret.txt").map(|_| ()),
+        fs.readdir("/ws").map(|_| ()),
+        fs.symlink_metadata("secret-link").map(|_| ()),
+        fs.read_link("secret-link").map(|_| ()),
+        fs.is_append_stream("secret.txt").map(|_| ()),
+    ];
+    for result in results {
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+    assert!(fs.exists("missing.txt").is_ok_and(|exists| !exists));
+}
+
+#[test]
+fn discovery_filters_children_and_rechecks_revocation() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.create_dir_all("nested").unwrap();
+    fs.create_dir_all("private").unwrap();
+    for path in [
+        "visible.txt",
+        "secret.txt",
+        "nested/visible.txt",
+        "private/secret.txt",
+    ] {
+        fs.write(path, b"needle").unwrap();
+    }
+    let policy = install_file_policy(&kernel);
+    policy.deny("/ws/secret.txt");
+    policy.deny("/ws/private");
+
+    let mut names: Vec<_> = fs
+        .readdir("/ws")
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["nested", "visible.txt"]);
+    let glob = glob_search(&fs, "**/*.txt", None).unwrap();
+    assert_eq!(glob.num_files, 2);
+    assert!(glob.filenames.iter().all(|path| !path.contains("secret")));
+    let grep = grep_search(&fs, &grep_input("needle", "/ws")).unwrap();
+    assert_eq!(grep.num_files, 2);
+
+    policy.deny("/ws/visible.txt");
+    assert_eq!(glob_search(&fs, "**/*.txt", None).unwrap().num_files, 1);
+    assert_eq!(
+        grep_search(&fs, &grep_input("needle", "/ws"))
+            .unwrap()
+            .num_files,
+        1
+    );
+    policy.deny("/ws");
+    assert_eq!(
+        glob_search(&fs, "**/*.txt", None).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        grep_search(&fs, &grep_input("needle", "/ws"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
+fn discovery_reports_policy_failure() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.write("visible.txt", b"needle").unwrap();
+    let policy = install_file_policy(&kernel);
+    *policy.broken.lock().unwrap() = Some("/ws/visible.txt".into());
+    let error = fs.readdir("/ws").unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert!(error.to_string().contains("policy store unavailable"));
+}
+
+#[test]
+fn metadata_policy_receives_agent_subject_and_owning_zone() {
+    let kernel = kernel_with_root_backend();
+    let fs = KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &desc_for("agent-x", "lookup-zone"),
+        "/ws",
+    );
+    fs.write("/ws/file.txt", b"root mount").unwrap();
+    let policy = install_file_policy(&kernel);
+    fs.stat("/ws/file.txt").unwrap();
+    let calls = policy.calls.lock().unwrap();
+    let (path, permission, ctx, zone) = calls.last().expect("metadata must consult the policy");
+    assert_eq!(path, "/ws/file.txt");
+    assert_eq!(*permission, Permission::Read);
+    assert_eq!(ctx.user_id, "test-owner");
+    assert_eq!(ctx.agent_id.as_deref(), Some("agent-x"));
+    assert_eq!(ctx.subject_type, "agent");
+    assert_eq!(ctx.subject_id.as_deref(), Some("agent-x"));
+    assert!(!ctx.is_system && !ctx.is_admin);
+    assert_eq!(ctx.zone_id, "lookup-zone");
+    assert_eq!(zone.as_deref(), Some("root"));
+}
+
+#[test]
+fn typed_entry_creation_checks_write_before_mutating_metadata() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.create_dir_all("/ws").unwrap();
+    let policy = install_file_policy(&kernel);
+    for path in ["/ws/denied-dir", "/ws/denied-link", "/ws/denied-log"] {
+        policy.deny(path);
+    }
+    let results = [
+        fs.create_dir_all("denied-dir"),
+        fs.link("denied-link", "/ws/target"),
+        fs.create_append_log("denied-log", 0),
+    ];
+    for result in results {
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+    for path in ["/ws/denied-dir", "/ws/denied-link", "/ws/denied-log"] {
+        assert!(kernel.sys_stat(path, "root").is_none());
+    }
+}
+
+#[test]
+fn agents_with_one_owner_keep_separate_subjects() {
+    let kernel = kernel_with_root_backend();
+    let alice = vfs_backend(&kernel);
+    let bob = KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &desc_for("agent-y", "root"),
+        "/ws",
+    );
+    alice.create_dir_all("/ws").unwrap();
+    alice.write("shared-owner.txt", b"agent-x grant").unwrap();
+    let policy = install_file_policy(&kernel);
+    *policy.agent.lock().unwrap() = Some("agent-x".into());
+    assert_eq!(alice.read("shared-owner.txt").unwrap(), b"agent-x grant");
+    assert!(alice.exists("shared-owner.txt").unwrap());
+    for result in [
+        bob.read("shared-owner.txt").map(|_| ()),
+        bob.stat("shared-owner.txt").map(|_| ()),
+        bob.readdir("/ws").map(|_| ()),
+    ] {
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+    }
+    *policy.agent.lock().unwrap() = Some("agent-y".into());
+    assert!(bob.exists("shared-owner.txt").unwrap());
+    assert_eq!(
+        alice.read("shared-owner.txt").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
+fn glob_drops_a_path_revoked_after_directory_discovery() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.create_dir_all("/ws").unwrap();
+    fs.write("revoked.txt", b"needle").unwrap();
+    let policy = install_file_policy(&kernel);
+    policy
+        .revoke_after_read
+        .lock()
+        .unwrap()
+        .insert("/ws/revoked.txt".into());
+    assert!(glob_search(&fs, "**/*.txt", None)
+        .unwrap()
+        .filenames
+        .is_empty());
+}
+
+#[test]
+fn glob_stats_each_file_once_after_directory_discovery() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.create_dir_all("/ws").unwrap();
+    for i in 0..20 {
+        fs.write(&format!("file-{i}.txt"), b"needle").unwrap();
+    }
+    let policy = install_file_policy(&kernel);
+    assert_eq!(glob_search(&fs, "**/*.txt", None).unwrap().num_files, 20);
+    let calls = policy.calls.lock().unwrap();
+    for i in 0..20 {
+        let path = format!("/ws/file-{i}.txt");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(checked, permission, _, _)| checked == &path
+                    && *permission == Permission::Read)
+                .count(),
+            2,
+            "one listing admission and one stat for {path}"
+        );
+    }
+}
+
+// ── real-transport coverage (linux): mTLS gRPC round-trips ──────────────────
+//
+// main reached the spawned host over plaintext TCP with `from_arc`. That
+// constructor now fails closed before any RPC — env metadata is not a
+// credential the server can verify — so the transport here is mTLS, the one
+// remote path production uses, minted in memory with rcgen. The bearer token
+// still rides every request and the server still resolves it after the
+// handshake, so AgentAuth's admission and error envelopes stay under test
+// exactly as before.
+
+#[cfg(target_os = "linux")]
+mod mtls {
+    //! One throwaway CA, one server leaf carrying the fixed cluster server
+    //! name as its DNS SAN, one client leaf — the material both ends of a
+    //! test VFS gRPC pair need.
+    use lib::transport_primitives::TlsConfig;
+
+    pub struct Material {
+        pub server: TlsConfig,
+        pub client: TlsConfig,
+    }
+
+    pub fn mint() -> Material {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DistinguishedName, DnType,
+            ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
+            PKCS_ECDSA_P256_SHA256,
+        };
+
+        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let mut ca_dn = DistinguishedName::new();
+        ca_dn.push(DnType::CommonName, "scode-vfs-test-ca");
+        ca_params.distinguished_name = ca_dn;
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let ca_pem = ca.pem();
+        let ca_key_pem = ca_key.serialize_pem();
+
+        let leaf = |cn: &str, dns_san: Option<&str>| {
+            let issuer =
+                Issuer::from_ca_cert_pem(&ca_pem, KeyPair::from_pem(&ca_key_pem).unwrap()).unwrap();
+            let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+            let mut params = CertificateParams::default();
+            let mut dn = DistinguishedName::new();
+            dn.push(DnType::CommonName, cn);
+            params.distinguished_name = dn;
+            if let Some(name) = dns_san {
+                params.subject_alt_names =
+                    vec![SanType::DnsName(name.try_into().expect("DNS SAN"))];
+            }
+            params.extended_key_usages = vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth,
+            ];
+            params.key_usages = vec![
+                KeyUsagePurpose::DigitalSignature,
+                KeyUsagePurpose::KeyEncipherment,
+            ];
+            params.is_ca = IsCa::NoCa;
+            let cert = params.signed_by(&key, &issuer).unwrap();
+            (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
+        };
+
+        let (server_cert, server_key) = leaf(
+            "scode-vfs-test-server",
+            Some(TlsConfig::CLUSTER_SERVER_NAME),
+        );
+        let (client_cert, client_key) = leaf("scode-vfs-test-client", None);
+        let ca_bytes = ca_pem.into_bytes();
+        Material {
+            server: TlsConfig {
+                cert_pem: server_cert,
+                key_pem: server_key,
+                ca_pem: ca_bytes.clone(),
+            },
+            client: TlsConfig {
+                cert_pem: client_cert,
+                key_pem: client_key,
+                ca_pem: ca_bytes,
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct AgentAuth;
+
+#[cfg(target_os = "linux")]
+impl transport::auth::AuthProvider for AgentAuth {
+    fn resolve(
+        &self,
+        credentials: &transport::auth::AuthCredentials<'_>,
+    ) -> Result<OperationContext, tonic_host::Status> {
+        if credentials.token != "agent-key" {
+            return Err(match credentials.token {
+                "denied-key" => tonic_host::Status::permission_denied("agent access denied"),
+                "unavailable-key" => tonic_host::Status::internal("credential store unavailable"),
+                _ => tonic_host::Status::unauthenticated("invalid agent key"),
+            });
+        }
+        let mut ctx = OperationContext::new("test-owner", "root", false, Some("agent-x"), false);
+        ctx.subject_type = "agent".into();
+        ctx.subject_id = Some("agent-x".into());
+        Ok(ctx)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn remote_backend(
+    kernel: &Arc<Kernel>,
+) -> (
+    runtime::NexusVfsFsBackend,
+    transport::grpc::VfsGrpcHandle,
+    Arc<nexus_vfs_client::NexusVfsClient>,
+) {
+    let tls = mtls::mint();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let host = transport::grpc::spawn(
+        Arc::clone(kernel),
+        transport::grpc::VfsGrpcConfig {
+            bind_addr: addr,
+            tls: Some(tls.server),
+            max_message_bytes: 64 * 1024 * 1024,
+            server_version: "test".into(),
+        },
+        Arc::new(AgentAuth),
+    )
+    .unwrap();
+    let client = Arc::new(
+        nexus_vfs_client::NexusVfsClient::connect_tls(
+            &format!("https://{addr}"),
+            tls.client.ca_pem.clone(),
+            tls.client.cert_pem.clone(),
+            tls.client.key_pem.clone(),
+            lib::transport_primitives::TlsConfig::CLUSTER_SERVER_NAME,
+        )
+        .unwrap(),
+    );
+    let fs =
+        runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), "agent-key".into(), "root");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match fs.stat("/ws/ready.txt") {
+            Ok(_) => break,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            Err(error) => panic!("VFS host did not become ready: {error}"),
+        }
+    }
+    (fs, host, client)
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn remote_existence_preserves_admission_and_policy_errors() {
+    let kernel = kernel_with_root_backend();
+    let local = vfs_backend(&kernel);
+    local.create_dir_all("/ws").unwrap();
+    local.write("ready.txt", b"ready").unwrap();
+    install_file_policy(&kernel);
+    let (remote, _host, client) = remote_backend(&kernel);
+    assert!(remote.exists("/ws/ready.txt").unwrap());
+    assert!(!remote.exists("/ws/missing.txt").unwrap());
+    let unverified = runtime::NexusVfsFsBackend::from_arc_mtls(
+        Arc::clone(&client),
+        "invalid-key".into(),
+        "root",
+    );
+    assert_eq!(
+        unverified.exists("/ws/ready.txt").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let denied =
+        runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), "denied-key".into(), "root");
+    assert_eq!(
+        denied.exists("/ws/ready.txt").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    let unavailable = runtime::NexusVfsFsBackend::from_arc_mtls(
+        Arc::clone(&client),
+        "unavailable-key".into(),
+        "root",
+    );
+    assert_eq!(
+        unavailable.exists("/ws/ready.txt").unwrap_err().kind(),
+        io::ErrorKind::Other
+    );
+    // A rejected request cannot poison the credential used by the shared channel.
+    assert!(!remote.exists("/ws/missing.txt").unwrap());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn rebac_grants_to_agents_do_not_transfer_from_their_owner() {
+    use lib::types::ReBACTuple;
+    use nexus_rebac::{
+        InMemoryReBACTupleStore, ReBACGraphCache, ReBACTupleStore, RebacPermissionProvider,
+    };
+
+    let kernel = kernel_with_root_backend();
+    let alice = vfs_backend(&kernel);
+    let bob = KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &desc_for("agent-y", "root"),
+        "/ws",
+    );
+    alice.create_dir_all("/ws").unwrap();
+    alice.write("agent.txt", b"needle").unwrap();
+    alice.write("owner.txt", b"owner secret").unwrap();
+    let store = Arc::new(InMemoryReBACTupleStore::new());
+    let grant = |path: &str, subject_type: &str, subject: &str| {
+        let tuple = ReBACTuple {
+            object_type: "file".into(),
+            object_id: path.into(),
+            relation: "reader".into(),
+            subject_type: subject_type.into(),
+            subject_id: subject.into(),
+            subject_relation: None,
+        };
+        let key = nexus_rebac::tuple_key::encode("root", &tuple).unwrap();
+        store.put(&key, b"").unwrap();
+        key
+    };
+    grant("/ws", "agent", "agent-x");
+    let agent_grant = grant("/ws/agent.txt", "agent", "agent-x");
+    grant("/ws/owner.txt", "user", "test-owner");
+    let provider: Box<dyn PermissionProvider> = Box::new(RebacPermissionProvider::new(Arc::new(
+        ReBACGraphCache::new(store.clone()),
+    )));
+    kernel.set_permission_provider(Arc::new(provider));
+    assert_eq!(alice.read("agent.txt").unwrap(), b"needle");
+    assert_eq!(alice.stat("agent.txt").unwrap().len, 6);
+    assert_eq!(
+        alice
+            .readdir("/ws")
+            .unwrap()
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["agent.txt"]
+    );
+    assert_eq!(glob_search(&alice, "**/*.txt", None).unwrap().num_files, 1);
+    assert_eq!(
+        grep_search(&alice, &grep_input("needle", "/ws"))
+            .unwrap()
+            .num_files,
+        1
+    );
+    assert_eq!(
+        alice.read("owner.txt").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        bob.stat("agent.txt").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        bob.readdir("/ws").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(store.delete(&agent_grant).unwrap());
+    assert_eq!(
+        alice.read("agent.txt").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        alice.exists("agent.txt").unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(glob_search(&alice, "**/*.txt", None).unwrap().num_files, 0);
+    assert_eq!(
+        grep_search(&alice, &grep_input("needle", "/ws"))
+            .unwrap()
+            .num_files,
+        0
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn remote_append_preserves_data_when_read_is_denied_or_unavailable() {
+    let kernel = kernel_with_root_backend();
+    let local = vfs_backend(&kernel);
+    local.create_dir_all("/ws").unwrap();
+    local.write("ready.txt", b"original").unwrap();
+    let policy = install_file_policy(&kernel);
+    let (remote, _host, _client) = remote_backend(&kernel);
+    policy
+        .read_denied
+        .lock()
+        .unwrap()
+        .insert("/ws/ready.txt".into());
+    assert_eq!(
+        remote
+            .append("/ws/ready.txt", b"replacement")
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    policy.read_denied.lock().unwrap().clear();
+    assert_eq!(remote.read("/ws/ready.txt").unwrap(), b"original");
+    *policy.broken.lock().unwrap() = Some("/ws/ready.txt".into());
+    assert!(remote.append("/ws/ready.txt", b"replacement").is_err());
+    *policy.broken.lock().unwrap() = None;
+    assert_eq!(remote.read("/ws/ready.txt").unwrap(), b"original");
+    remote.append("/ws/new.txt", b"new").unwrap();
+    assert_eq!(remote.read("/ws/new.txt").unwrap(), b"new");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn remote_stat_preserves_modification_time() {
+    let kernel = kernel_with_root_backend();
+    let local = vfs_backend(&kernel);
+    local.create_dir_all("/ws").unwrap();
+    local.write("ready.txt", b"ready").unwrap();
+    install_file_policy(&kernel);
+    let expected = local.stat("ready.txt").unwrap().modified;
+    assert!(expected.is_some());
+    let (remote, _host, _client) = remote_backend(&kernel);
+    assert_eq!(remote.stat("/ws/ready.txt").unwrap().modified, expected);
 }

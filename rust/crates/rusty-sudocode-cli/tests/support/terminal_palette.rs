@@ -1,7 +1,7 @@
 //! Independent ANSI controls through the same native PTY as the application.
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use pty_expect::PtySession;
 
@@ -13,18 +13,24 @@ pub fn expected_color(expected: &str) -> String {
         .and_then(|s| s.strip_suffix(')'))
         .and_then(|s| s.parse::<u8>().ok())
     {
-        Some(index) if index >= 16 => indexed(index).to_owned(),
+        Some(index) if index >= 16 => indexed(index),
         _ => expected.to_owned(),
     }
 }
 
-pub fn indexed(index: u8) -> &'static str {
-    static COLORS: OnceLock<BTreeMap<u8, String>> = OnceLock::new();
-    &COLORS.get_or_init(probe)[&index]
+fn indexed(index: u8) -> String {
+    static COLORS: OnceLock<Mutex<BTreeMap<u8, String>>> = OnceLock::new();
+    let mut colors = COLORS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("terminal palette control cache");
+    colors.entry(index).or_insert_with(|| probe(index)).clone()
 }
 
-fn probe() -> BTreeMap<u8, String> {
-    let indices = [28_u8, 79, 130, 150, 214, 220, 241, 247];
+fn probe(index: u8) -> String {
+    // Measure the requested index instead of maintaining a second palette list
+    // that can omit valid colors used by new terminal journeys.
+    let indices = [index];
     let mut command = String::from("printf '\\033[0m\\033[2J\\033[H");
     for index in indices {
         for (channel, sgr) in [("FG", 38), ("BG", 48)] {
@@ -43,7 +49,7 @@ fn probe() -> BTreeMap<u8, String> {
         crate::common::DEFAULT_TIMEOUT,
         "independent terminal palette control",
     );
-    let colors = session.render(|screen| {
+    let colors: BTreeMap<_, _> = session.render(|screen| {
         let raw = screen.raw();
         let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
         indices
@@ -96,5 +102,5 @@ fn probe() -> BTreeMap<u8, String> {
     });
     session.send("\r").unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
-    colors
+    colors[&index].clone()
 }

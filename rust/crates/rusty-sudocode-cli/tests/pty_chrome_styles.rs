@@ -248,17 +248,16 @@ fn no_color_info_uses_the_default_foreground() {
     info_uses_shared_green(false, true, true);
 }
 
-#[test]
-fn running_card_and_queued_input_keep_distinct_styles() {
+fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
     let env = TestEnv::new("chrome-running-styles");
     let mut sess = env.spawn_with_env(
         &["--permission-mode", "danger-full-access"],
         &[
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-            ("NO_COLOR", ""),
+            ("NO_COLOR", if no_color { "1" } else { "" }),
             ("TERM", "xterm-256color"),
             ("COLORTERM", "truecolor"),
-            ("COLORFGBG", "15;0"),
+            ("COLORFGBG", if light { "0;15" } else { "15;0" }),
         ],
     );
     sess.resize(40, 100).expect("resize");
@@ -268,28 +267,88 @@ fn running_card_and_queued_input_keep_distinct_styles() {
         "bash_interrupt_long_running",
     );
     sess.send(&format!("{prompt}\r")).expect("start tool");
-    expect_style(&sess, "╭─", ("Idx(214)", true, false));
-    sess.send("StyleQueuedMarker").expect("type queued message");
+    let border = if no_color {
+        "Default"
+    } else if light {
+        "Idx(94)"
+    } else {
+        "Idx(214)"
+    };
+    let label = if no_color {
+        "Default"
+    } else if light {
+        "Idx(241)"
+    } else {
+        "Idx(247)"
+    };
+    expect_style(&sess, "╭─", (border, !no_color, false));
+    let queued = "StyleQueuedMarker 待办 日本語";
+    sess.send(queued).expect("type queued message");
+    common::expect_input_line(&sess, queued, common::DEFAULT_TIMEOUT, "queued draft");
+    sess.send("\r").expect("queue draft");
+    expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
+    expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
+    expect_style(&sess, "╭─", (border, !no_color, false));
+    sess.resize(30, 78).expect("resize during tool");
+    expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
+    expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
+    sess.resize(40, 16).expect("narrow queue preview");
+    expect_style(&sess, "↳ StyleQueued", (label, false, false));
+    expect_style(&sess, "StyleQueued", ("Default", false, false));
+    common::expect_screen(
+        &sess,
+        |screen| {
+            screen
+                .lines()
+                .any(|line| line.contains("↳ StyleQueued") && line.contains('…'))
+        },
+        common::DEFAULT_TIMEOUT,
+        "narrow queue must clip to one row",
+    );
+    sess.resize(40, 100).expect("restore queue width");
+    expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
+    sess.send("\x1b[A").expect("recall complete queued message");
     common::expect_input_line(
         &sess,
-        "StyleQueuedMarker",
+        queued,
         common::DEFAULT_TIMEOUT,
-        "queued draft",
+        "preview clipping must not truncate the actual queue",
     );
-    sess.send("\r").expect("queue draft");
-    expect_style(
+    common::expect_screen(
         &sess,
-        "↳ queued: StyleQueuedMarker",
-        ("Default", false, true),
+        |screen| {
+            !screen
+                .lines()
+                .any(|line| line.contains("queued:") && line.contains("StyleQueuedMarker"))
+        },
+        common::DEFAULT_TIMEOUT,
+        "recall removes the queue preview",
     );
-    expect_style(&sess, "╭─", ("Idx(214)", true, false));
-    sess.resize(30, 78).expect("resize during tool");
-    expect_style(
+    sess.send("\x15").expect("clear recalled draft");
+    // The running spinner deliberately never settles. Observe the editor,
+    // rather than using the helper for a globally settled, idle screen.
+    common::expect_screen(
         &sess,
-        "↳ queued: StyleQueuedMarker",
-        ("Default", false, true),
+        |screen| screen.contains('❯') && common::input_line_of(screen).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "clear recalled draft while the tool is still active",
     );
     exit(&mut sess);
+}
+
+#[test]
+fn running_card_and_queued_input_keep_distinct_styles() {
+    running_card_and_queued_input_styles(false, false);
+}
+
+#[test]
+fn light_queued_input_keeps_readable_body_after_narrow_resize() {
+    running_card_and_queued_input_styles(true, false);
+}
+
+#[test]
+fn no_color_queued_input_keeps_normal_intensity_after_narrow_resize() {
+    running_card_and_queued_input_styles(false, true);
 }
 
 #[test]

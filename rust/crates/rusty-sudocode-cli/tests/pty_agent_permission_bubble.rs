@@ -12,6 +12,8 @@ use common::TestEnv;
 use serde_json::Value;
 
 const BUDGET: Duration = common::LIVE_TURN_BUDGET;
+const INVOICE_AGENT: &str = "invoice-bash-fixture";
+const INVOICE_SYSTEM_MARKER: &str = "InvoiceBashFixture";
 
 fn requests(directory: &Path) -> Vec<Value> {
     std::fs::read_dir(directory)
@@ -67,6 +69,18 @@ print(result)
 "#,
     )
     .unwrap();
+    // Constrain the execution fixture through the same custom-agent tool pool
+    // the product uses. Windows models may otherwise choose PowerShell while
+    // this journey deliberately verifies a Bash command and its approval.
+    let agents_dir = env.workspace_root().join(".sudocode/agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join(format!("{INVOICE_AGENT}.md")),
+        format!(
+            "---\nname: {INVOICE_AGENT}\ndescription: Execute one approved invoice Bash command.\ntools: [bash]\n---\n{INVOICE_SYSTEM_MARKER}: run the supplied Bash command once and report its actual output.\n"
+        ),
+    )
+    .unwrap();
     let captured = std::env::var_os("SCODE_LIVE_ARTIFACTS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| env.workspace_root().join("requests"))
@@ -95,7 +109,7 @@ print(result)
     let command = format!("'{python}' '{script}'");
     let command_words = shell_words::split(&command).unwrap();
     let child_prompt = format!("Run exactly this Bash command once, with no other commands or retries: {command}. Report its actual output.");
-    let mut prompt = format!("Call one Agent with model={model}, run_in_background=false, and this exact child prompt: {}. Wait for the child and report its output.", serde_json::to_string(&child_prompt).unwrap());
+    let mut prompt = format!("Call one Agent with subagent_type={INVOICE_AGENT}, model={model}, run_in_background=false, and this exact child prompt: {}. Wait for the child and report its output.", serde_json::to_string(&child_prompt).unwrap());
     if verify_report {
         prompt.push_str(" The Agent tool already saves its report at the outputFile path in its returned result. After it completes, have a second read-only Explore Agent read that exact outputFile and return the actual invoice output. It must only read that report, without running commands or creating another report. Report that verified output.");
     }
@@ -158,18 +172,37 @@ print(result)
     let mut report_reads = BTreeSet::new();
     let mut fixture_reads = BTreeMap::new();
     let mut results = BTreeMap::new();
+    let mut restricted_child_requests = 0;
     for request in requests(&captured) {
         assert_eq!(
             request["model"], model,
             "parent or child used a different model"
         );
+        let mut system = request["system"].to_string();
+        for message in request["messages"].as_array().into_iter().flatten() {
+            if message["role"] == "system" {
+                system.push_str(&message["content"].to_string());
+            }
+        }
+        if system.contains(INVOICE_SYSTEM_MARKER) {
+            let offered: BTreeSet<_> = request["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool["name"].as_str().or(tool["function"]["name"].as_str()))
+                .map(tools::canonicalize_tool_name)
+                .collect();
+            assert_eq!(offered, BTreeSet::from(["bash".to_string()]));
+            restricted_child_requests += 1;
+        }
         for block in wire_requests::request_tool_blocks(&request) {
             if block["type"] == "tool_use" {
-                match block["name"].as_str() {
-                    Some("Agent" | "agent_spawn") => {
+                let name = tools::canonicalize_tool_name(block["name"].as_str().unwrap());
+                match name.as_str() {
+                    "agent_spawn" => {
                         agents.insert(block["id"].to_string());
                     }
-                    Some("Bash" | "bash") => {
+                    "bash" => {
                         let actual = block["input"]["command"]
                             .as_str()
                             .expect("child Bash command must be a string");
@@ -180,7 +213,7 @@ print(result)
                         );
                         child_commands.insert(block["id"].to_string());
                     }
-                    Some("Read" | "read_file") => {
+                    "read_file" => {
                         // A parent may inspect its completed child's report through
                         // a read-only agent, or inspect the supplied script and data.
                         // None of those reads is another invoice execution.
@@ -235,6 +268,10 @@ print(result)
             }
         }
     }
+    assert!(
+        restricted_child_requests > 0,
+        "invoice child did not use its fixture tool pool"
+    );
     assert!(!agents.is_empty(), "the parent omitted its child");
     assert_eq!(
         child_commands.len(),

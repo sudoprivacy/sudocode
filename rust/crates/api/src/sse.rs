@@ -9,12 +9,45 @@ pub struct SseParser {
     buffer: Vec<u8>,
     provider: Option<String>,
     model: Option<String>,
+    capture_message_metadata: bool,
+    message_metadata: Option<MessageMetadata>,
+}
+
+/// Provider diagnostics do not belong in the shared response/event contract.
+/// Capture only this optional metadata at the existing JSON decode boundary.
+#[derive(Debug)]
+pub(crate) struct MessageMetadata {
+    pub id: Option<String>,
+    pub diagnostics: Option<serde_json::Value>,
+}
+
+impl MessageMetadata {
+    #[must_use]
+    pub(crate) fn from_message(message: &serde_json::Value) -> Self {
+        Self {
+            id: message
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            diagnostics: message.get("diagnostics").cloned(),
+        }
+    }
 }
 
 impl SseParser {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub(crate) fn with_message_metadata(mut self, enabled: bool) -> Self {
+        self.capture_message_metadata = enabled;
+        self
+    }
+
+    pub(crate) fn take_message_metadata(&mut self) -> Option<MessageMetadata> {
+        self.message_metadata.take()
     }
 
     /// Attach the provider name and model to this parser so that JSON
@@ -80,7 +113,12 @@ impl SseParser {
                     &tail,
                 ))
             }
-            Ok(None) => Ok(non_sse_message_events(tail.trim()).unwrap_or_default()),
+            Ok(None) => Ok(non_sse_message_events(
+                tail.trim(),
+                self.capture_message_metadata
+                    .then_some(&mut self.message_metadata),
+            )
+            .unwrap_or_default()),
             // An error envelope the upstream sent instead of a stream is a real
             // answer about a real problem — keep it. Rewriting it as a
             // truncation would mark a `400 invalid_request` retryable and
@@ -104,10 +142,16 @@ impl SseParser {
         }
     }
 
-    fn parse_frame_with_context(&self, frame: &str) -> Result<Option<StreamEvent>, ApiError> {
+    fn parse_frame_with_context(&mut self, frame: &str) -> Result<Option<StreamEvent>, ApiError> {
         let provider = self.provider.as_deref().unwrap_or("unknown");
         let model = self.model.as_deref().unwrap_or("unknown");
-        parse_frame_with_provider(frame, provider, model)
+        parse_frame_with_metadata(
+            frame,
+            provider,
+            model,
+            self.capture_message_metadata
+                .then_some(&mut self.message_metadata),
+        )
     }
 
     fn next_frame(&mut self) -> Option<String> {
@@ -176,7 +220,10 @@ pub(crate) fn unframed_body_was_truncated(trimmed: &str) -> bool {
 /// from it need no special case), then `message_delta` for the stop reason and
 /// usage, then `message_stop` — so a consumer counting a completed message
 /// sees one.
-fn non_sse_message_events(trimmed: &str) -> Option<Vec<StreamEvent>> {
+fn non_sse_message_events(
+    trimmed: &str,
+    metadata: Option<&mut Option<MessageMetadata>>,
+) -> Option<Vec<StreamEvent>> {
     let raw = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
     // Require the discriminator rather than relying on a permissive
     // deserialize: every field of `MessageResponse` except `content` has a
@@ -185,7 +232,13 @@ fn non_sse_message_events(trimmed: &str) -> Option<Vec<StreamEvent>> {
     if raw.get("type").and_then(serde_json::Value::as_str) != Some("message") {
         return None;
     }
+    let observed = metadata
+        .as_ref()
+        .map(|_| MessageMetadata::from_message(&raw));
     let message = serde_json::from_value::<MessageResponse>(raw).ok()?;
+    if let Some(destination) = metadata {
+        *destination = observed;
+    }
     if runtime::compaction_scope::is_active() && message.stop_reason.is_none() {
         if message.usage != crate::types::Usage::default() {
             runtime::compaction_scope::record_usage(message.usage.token_usage());
@@ -237,6 +290,15 @@ pub(crate) fn parse_frame_with_provider(
     frame: &str,
     provider: &str,
     model: &str,
+) -> Result<Option<StreamEvent>, ApiError> {
+    parse_frame_with_metadata(frame, provider, model, None)
+}
+
+fn parse_frame_with_metadata(
+    frame: &str,
+    provider: &str,
+    model: &str,
+    metadata: Option<&mut Option<MessageMetadata>>,
 ) -> Result<Option<StreamEvent>, ApiError> {
     let trimmed = frame.trim();
     if trimmed.is_empty() {
@@ -297,9 +359,15 @@ pub(crate) fn parse_frame_with_provider(
             return Err(error);
         }
     }
-    serde_json::from_value::<StreamEvent>(raw)
-        .map(Some)
-        .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))
+    let observed = metadata.as_ref().and_then(|_| {
+        (raw["type"] == "message_start").then(|| MessageMetadata::from_message(&raw["message"]))
+    });
+    let event = serde_json::from_value::<StreamEvent>(raw)
+        .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))?;
+    if let (Some(destination), Some(observed)) = (metadata, observed) {
+        *destination = Some(observed);
+    }
+    Ok(Some(event))
 }
 
 /// Recognize the protocol's stop reason, never prose that merely mentions a refusal.

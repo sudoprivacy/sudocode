@@ -163,7 +163,10 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
                 ("COLORFGBG", background),
             ],
         );
-        sess.resize(40, 120).unwrap();
+        // The shared input-line observer samples one physical row. Keep this
+        // JSON fixture on one row, then inspect the actual question at an
+        // ordinary width; wrapping is not the style-reset contract.
+        sess.resize(40, 600).unwrap();
         settle_chrome(&sess);
         let input = serde_json::json!({
             "title": "InheritedTitle \u{1b}[31mRedTitle\u{1b}[39mDefaultTitle \u{1b}[1mBoldTitle\u{1b}[0mPlainTitle",
@@ -191,6 +194,13 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             |screen| screen.contains("Choose style answer") && screen.contains("[1] Accept style"),
             common::LIVE_TURN_BUDGET,
             "real question overlay",
+        );
+        sess.resize(40, 120).unwrap();
+        common::expect_screen(
+            &sess,
+            |screen| screen.contains("Choose style answer") && screen.contains("[1] Accept style"),
+            common::DEFAULT_TIMEOUT,
+            "question at ordinary terminal width",
         );
         for (label, color, bold) in [
             ("InheritedTitle", "Idx(14)", false),

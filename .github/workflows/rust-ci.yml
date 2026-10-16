@@ -17,6 +17,12 @@ on:
       specific_channels:
         type: string
         default: ''
+      native_ref:
+        type: string
+        default: 04a10ee99c3b4a316e887d763763c26919899557
+      native_model:
+        type: string
+        default: claude-sonnet-4-6
       runner:
         type: choice
         options: [ubuntu-latest, ubuntu-24.04, macos-latest, windows-latest]
@@ -77,16 +83,14 @@ jobs:
     if: inputs.native_acceptance
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        model: [claude-sonnet-4-5-20250929, claude-sonnet-5-5]
     env:
       SUDOCODE_API_READ_TIMEOUT: '90'
-      SCODE_LIVE_MODEL: ${{ matrix.model }}
+      SCODE_LIVE_MODEL: ${{ inputs.native_model }}
       SCODE_LOG_PATH: ${{ github.workspace }}/native-live-trace.jsonl
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.native_ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -96,7 +100,19 @@ jobs:
         env:
           PROXY_AUTH_TOKEN: ${{ secrets.SUDOROUTER_CI_API_KEY }}
           PROXY_BASE_URL: https://api.sudorouter.ai/v1
-        run: cargo test --locked -p rusty-sudocode-cli --test acp_live_smoke live_subagent_smoke_stdio -- --test-threads=1
+          SCODE_NATIVE_CHANNEL: ${{ inputs.specific_channels }}
+        shell: bash
+        run: |
+          node - <<'JS'
+          const { spawnSync } = require('node:child_process');
+          const channel = process.env.SCODE_NATIVE_CHANNEL;
+          if (channel && !/^[1-9][0-9]*$/.test(channel)) throw new Error('One documented channel ID required');
+          const env = { ...process.env };
+          if (channel) env.PROXY_AUTH_TOKEN += `-${channel}`;
+          const result = spawnSync('cargo', ['test', '--locked', '-p', 'rusty-sudocode-cli', '--test', 'acp_live_smoke', 'live_subagent_smoke_stdio', '--', '--test-threads=1'], { env, stdio: 'inherit' });
+          if (result.error) throw result.error;
+          process.exit(result.status ?? 1);
+          JS
       - name: Retain routing and usage evidence without model content
         if: always()
         env:
@@ -105,6 +121,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-acceptance-${{ matrix.model }}
+          name: native-acceptance-${{ inputs.native_model }}
           path: ${{ runner.temp }}/native-live-evidence.json
           retention-days: 7

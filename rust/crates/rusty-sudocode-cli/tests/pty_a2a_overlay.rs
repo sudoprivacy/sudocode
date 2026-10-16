@@ -619,13 +619,19 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
     // `↳ queued: HUMAN-EDIT-MARKER` (no `❯` in the chip display).
     sess.send(&format!("{HUMAN_MARKER}\r"))
         .expect("queue human marker during turn");
-    sess.expect(&format!("\u{21b3} queued: {HUMAN_MARKER}"))
-        .expect("human message should appear as a queued overlay chip");
+    wait_for_screen(
+        &sess,
+        "human message should appear as a queued overlay chip",
+        |screen| has_chip(screen, HUMAN_MARKER),
+    );
 
     // Then a peer a2a lands AFTER it — now the queue tail is the peer item.
     inject(&env, &receiver, "mac-ai", "A2A-SKIP-MARKER");
-    sess.expect("\u{21b3} queued: Message from mac-ai")
-        .expect("a2a should be queued behind the human message");
+    wait_for_screen(
+        &sess,
+        "a2a should be queued behind the human message",
+        |screen| has_chip(screen, "Message from mac-ai"),
+    );
 
     wait_for_screen(&sess, "both chips must be queued before recall", |screen| {
         has_chip(screen, HUMAN_MARKER)

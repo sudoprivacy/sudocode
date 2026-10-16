@@ -1,4 +1,5 @@
 //! Zone context for the sudocode runtime (P1a, SW-20260915-002 §8.11).
+//! Design record: sudo-code-roadmap.html § Goal 4 → "Contract-zone P1a".
 //!
 //! One rule above all (R6.2): a client payload zone is NEVER authority. The
 //! execution-zone metadata may arrive from

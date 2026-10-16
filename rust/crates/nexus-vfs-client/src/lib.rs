@@ -1,4 +1,5 @@
 //! nexus-vfs gRPC client (P1a zone-aware, SW-20260915-002 step-08).
+//! Design record: sudo-code-roadmap.html § Goal 4 → "Contract-zone P1a".
 
 pub mod proto {
     // The generated surface, not ours to reword: prost/tonic doc phrasing

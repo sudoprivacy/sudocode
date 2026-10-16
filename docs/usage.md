@@ -298,6 +298,8 @@ the viewport, resize clears only the live UI from its retained start position,
 without clearing the preceding conversation or purging terminal scrollback.
 
 While a turn is running, messages you submit wait in the staging area.
+Each queued preview uses a muted label and normal-intensity message text;
+narrow windows shorten the label and clip the preview, not the queued text.
 Press ↑ on an empty input to bring all queued human messages back for editing,
 joined in their original submit order. Their staging entries disappear;
 peer/A2A messages remain queued. The cursor starts at the end of the recalled

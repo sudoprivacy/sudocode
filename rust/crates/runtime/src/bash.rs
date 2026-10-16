@@ -115,6 +115,40 @@ pub struct BashCommandOutput {
 }
 
 impl BashCommandOutput {
+    /// Project a completed native process, including a Windows console-control
+    /// exit that can race the parent's cancellation notification.
+    #[must_use]
+    pub fn completed(status: std::process::ExitStatus, stdout: String, mut stderr: String) -> Self {
+        let interrupted = native_control_exit(status);
+        let return_code_interpretation = if interrupted {
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str("Command interrupted by user");
+            Some("interrupted".to_owned())
+        } else {
+            describe_exit_status(status)
+        };
+        let no_output_expected =
+            Some(!interrupted && stdout.trim().is_empty() && stderr.trim().is_empty());
+        Self {
+            stdout,
+            stderr,
+            exit_code: status.code().filter(|_| !interrupted),
+            raw_output_path: None,
+            interrupted,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation,
+            no_output_expected,
+            structured_content: None,
+            sandbox_status: None,
+        }
+    }
+
     /// Common background launch result for every supported terminal shell.
     #[must_use]
     pub fn background(id: String, output_path: String) -> Self {
@@ -183,6 +217,19 @@ impl BashCommandOutput {
         }
         value
     }
+}
+
+#[cfg(windows)]
+fn native_control_exit(status: std::process::ExitStatus) -> bool {
+    // NTSTATUS 0xC000013A, not an ordinary shell exit code or a timeout.
+    // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55
+    const STATUS_CONTROL_C_EXIT: i32 = -1_073_741_510;
+    status.code() == Some(STATUS_CONTROL_C_EXIT)
+}
+
+#[cfg(not(windows))]
+fn native_control_exit(_status: std::process::ExitStatus) -> bool {
+    false
 }
 
 fn describe_exit_status(status: std::process::ExitStatus) -> Option<String> {
@@ -429,25 +476,10 @@ async fn execute_bash_async(
         &String::from_utf8_lossy(&output.stderr),
         MAX_OUTPUT_BYTES_SAFETY,
     );
-    let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = describe_exit_status(output.status);
-
-    Ok(BashCommandOutput {
-        exit_code: output.status.code(),
-        stdout,
-        stderr,
-        raw_output_path: None,
-        interrupted: false,
-        is_image: None,
-        background_task_id: None,
-        backgrounded_by_user: None,
-        assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-        return_code_interpretation,
-        no_output_expected,
-        structured_content: None,
-        sandbox_status: Some(sandbox_status),
-    })
+    let mut result = BashCommandOutput::completed(output.status, stdout, stderr);
+    result.dangerously_disable_sandbox = input.dangerously_disable_sandbox;
+    result.sandbox_status = Some(sandbox_status);
+    Ok(result)
 }
 
 /// One line read off a child's stdout or stderr by [`pump_lines`].
@@ -655,25 +687,10 @@ async fn execute_bash_streaming(
 
     let stdout = truncate_output(&stdout_buf, MAX_OUTPUT_BYTES_SAFETY);
     let stderr = truncate_output(&stderr_buf, MAX_OUTPUT_BYTES_SAFETY);
-    let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = describe_exit_status(status);
-
-    Ok(BashCommandOutput {
-        exit_code: status.code(),
-        stdout,
-        stderr,
-        raw_output_path: None,
-        interrupted: false,
-        is_image: None,
-        background_task_id: None,
-        backgrounded_by_user: None,
-        assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-        return_code_interpretation,
-        no_output_expected,
-        structured_content: None,
-        sandbox_status: Some(sandbox_status),
-    })
+    let mut result = BashCommandOutput::completed(status, stdout, stderr);
+    result.dangerously_disable_sandbox = input.dangerously_disable_sandbox;
+    result.sandbox_status = Some(sandbox_status);
+    Ok(result)
 }
 
 pub(crate) fn interrupted_bash_output(

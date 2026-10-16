@@ -101,7 +101,7 @@ fn contents(text: &StyledText) -> Vec<MixedTextContent> {
 }
 
 // iocraft and the CLI use different crossterm versions. Convert at the UI boundary.
-fn ui_color(color: TerminalColor) -> Option<Color> {
+pub(super) fn ui_color(color: TerminalColor) -> Option<Color> {
     Some(match color {
         TerminalColor::Reset => return None,
         TerminalColor::Black => Color::Black,

@@ -9,7 +9,7 @@ use glob::Pattern;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
-use crate::fs_backend::FsBackend;
+use crate::fs_backend::{native_path_for_matching, FsBackend};
 
 /// Maximum file size that can be read (10 MB).
 const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
@@ -456,10 +456,15 @@ pub fn glob_search(
     // patterns regardless of host; it matches backslash-separated entries
     // internally.
     let search_pattern = if is_absolute_path(pattern) {
-        pattern.replace('\\', "/")
+        pattern.to_string()
     } else {
-        format!("{}/{}", base_dir.trim_end_matches(['/', '\\']), pattern).replace('\\', "/")
+        format!("{}/{}", base_dir.trim_end_matches(['/', '\\']), pattern)
     };
+    // A Windows extended-length prefix is path metadata, not a `?` glob.
+    // Use the same native alias rule as filesystem routing before matching.
+    let search_pattern = native_path_for_matching(Path::new(&search_pattern))
+        .to_string_lossy()
+        .replace('\\', "/");
 
     // The `glob` crate does not support brace expansion ({a,b,c}). Expand
     // into multiple patterns so `Assets/**/*.{cs,uxml,uss}` works.

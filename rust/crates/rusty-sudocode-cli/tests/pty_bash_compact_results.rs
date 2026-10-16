@@ -86,9 +86,15 @@ fn compact_bash_results_reach_model_and_survive_resume() {
         return;
     }
     let prompt = env.prompt("Exercise shell result statuses", "bash_compact_results");
-    let mut cli = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
-    cli.expect("compact bash results verified")
-        .expect("all tool steps complete");
+    let sent = shell_roundtrip(&env, &prompt, "compact bash results verified");
+    assert_shell_statuses(&sent);
+}
+
+/// Drive shell results through the terminal, provider request, saved transcript
+/// and cold resume. Assertions below use only these observed wire results.
+fn shell_roundtrip(env: &TestEnv, prompt: &str, answer_marker: &str) -> BTreeMap<String, String> {
+    let mut cli = env.spawn(&["--permission-mode", "danger-full-access", prompt]);
+    cli.expect(answer_marker).expect("all tool steps complete");
     assert_eq!(cli.expect_eof().unwrap(), 0);
     let requests: Vec<Value> = env
         .captured_message_bodies()
@@ -96,7 +102,6 @@ fn compact_bash_results_reach_model_and_survive_resume() {
         .map(|body| serde_json::from_str(body).unwrap())
         .collect();
     let sent = results(requests.last().unwrap());
-    assert_shell_statuses(&sent);
     let path = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
         .expect("saved transcript");
     let saved = runtime::Session::load_from_path(&path).unwrap();
@@ -123,13 +128,11 @@ fn compact_bash_results_reach_model_and_survive_resume() {
     resumed.expect("❯").expect("resumed prompt");
     let budget = std::time::Duration::from_secs(15);
     common::expect_input_line_cleared(&resumed, budget, "resume ready");
-    let marker = common::turn_status_marker(&resumed);
+    let turn_marker = common::turn_status_marker(&resumed);
     let request_count = env.captured_message_count();
     resumed.send(&format!("{prompt}\r")).unwrap();
-    resumed
-        .expect("compact bash results verified")
-        .expect("resume completes");
-    common::expect_turn_complete_after(&resumed, &marker, budget, "resumed turn");
+    resumed.expect(answer_marker).expect("resume completes");
+    common::expect_turn_complete_after(&resumed, &turn_marker, budget, "resumed turn");
     common::expect_input_line_cleared(&resumed, budget, "ready to exit");
     assert!(
         env.captured_message_count() > request_count,
@@ -144,6 +147,76 @@ fn compact_bash_results_reach_model_and_survive_resume() {
         sent,
         "resume preserves every result byte-for-byte"
     );
+    sent
+}
+
+#[test]
+fn native_shell_statuses_reach_model_and_survive_resume() {
+    let env = TestEnv::new("native-shell-results");
+    if !env.is_mock() {
+        return;
+    }
+    let shells: &[&str] = if cfg!(windows) {
+        &["bash", "PowerShell"]
+    } else {
+        &["bash"]
+    };
+    let mut calls = Vec::new();
+    let mut expected = Vec::new();
+    for &shell in shells {
+        let codes: &[i32] = if shell == "PowerShell" {
+            &[0, 7, -1_073_741_510]
+        } else {
+            &[0, 7]
+        };
+        for &code in codes {
+            let id = format!("native_{}_{code}", shell.to_ascii_lowercase());
+            let stdout = format!("preserved-stdout:{id}");
+            let stderr = format!("preserved-stderr:{id}");
+            let command = if shell == "PowerShell" {
+                format!("[Console]::Out.WriteLine('{stdout}'); [Console]::Error.WriteLine('{stderr}'); exit {code}")
+            } else {
+                format!("printf '{stdout}\\n'; printf '{stderr}\\n' >&2; exit {code}")
+            };
+            calls.push(serde_json::json!({
+                "id": id, "name": shell, "input": {"command": command},
+            }));
+            expected.push((id, code, stdout, stderr));
+        }
+    }
+    let prompt = env.prompt(
+        "Run the supplied shell commands and report their observed statuses.",
+        &format!("tool_concurrency TOOL_BATCH:{}", serde_json::json!(calls)),
+    );
+    let sent = shell_roundtrip(&env, &prompt, "Concurrency batch done.");
+    assert_eq!(sent.len(), expected.len(), "every real shell must report");
+    for (id, code, stdout, stderr) in expected {
+        let result: Value = serde_json::from_str(&sent[&id]).unwrap();
+        assert_eq!(result["stdout"].as_str().unwrap().trim_end(), stdout);
+        let observed_stderr = result["stderr"].as_str().unwrap();
+        if code == -1_073_741_510 {
+            assert_eq!(result["interrupted"], true, "{id}: {result}");
+            assert!(result["exit_code"].is_null(), "{id}: {result}");
+            assert_eq!(result["returnCodeInterpretation"], "interrupted");
+            assert_eq!(
+                observed_stderr.lines().collect::<Vec<_>>(),
+                vec![stderr.as_str(), "Command interrupted by user"],
+                "native cancellation preserves the actual stderr",
+            );
+        } else {
+            assert_ne!(result["interrupted"], true, "{id}: {result}");
+            assert_eq!(result["exit_code"], code, "{id}: {result}");
+            assert_eq!(observed_stderr.trim_end(), stderr);
+            assert_eq!(
+                result["returnCodeInterpretation"],
+                if code == 0 {
+                    Value::Null
+                } else {
+                    serde_json::json!(format!("exit_code:{code}"))
+                },
+            );
+        }
+    }
 }
 
 #[cfg(unix)]

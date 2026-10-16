@@ -1,6 +1,7 @@
 // Retain the review outcome and tool access evidence without raw SDK messages.
 const fs = require('node:fs');
 const { clean, writeEvidence } = require('./live_model_evidence.cjs');
+const validateReview = require('./validate_claude_review.cjs');
 
 const [input, output] = process.argv.slice(2);
 if (!output) throw new Error('Usage: summarize_claude_review.cjs INPUT OUTPUT');
@@ -65,13 +66,7 @@ const report = {
   permissionDenials: denials,
 };
 writeEvidence(output, report);
-if (subagents.started_in_background > 0 || tools.some(value =>
-  ['Agent', 'Task'].includes(value.name) && value.runInBackground)) {
-  throw new Error('Review launched background agents; the action can exit before their results. Require synchronous review');
-}
-if (inputError || !result || result.is_error !== false || !Number.isSafeInteger(result.num_turns)
-    || result.num_turns <= 1 || !text?.trim()) {
-  throw new Error('Review has no successful multi-turn execution and final result; inspect retained evidence');
-}
+report.validation = validateReview(report, process.env.REVIEW_HEAD_SHA);
+writeEvidence(output, report);
 if (denials.length) console.log(`::warning::Review encountered ${denials.length} tool permission denials; inspect retained tool access evidence`);
 console.log(`Review evidence: ${result.num_turns} turns, ${tools.length} tool calls, ${denials.length} permission denials`);

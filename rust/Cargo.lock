@@ -3856,8 +3856,8 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 
 [[package]]
 name = "pty-expect"
-version = "0.1.2"
-source = "git+https://github.com/sudoprivacy/pty-expect?tag=v0.1.2#b44fb5a2ca4f3f72234701cd01d94cd352e485da"
+version = "0.1.4"
+source = "git+https://github.com/sudoprivacy/pty-expect?rev=78aeef007475f8ea3202c679d156ae6e2f1f8cf4#78aeef007475f8ea3202c679d156ae6e2f1f8cf4"
 dependencies = [
  "portable-pty",
  "regex",

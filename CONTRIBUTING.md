@@ -449,7 +449,11 @@ rest of the catalog is usable.
 
 Review runs follow the current ready PR head and cancel superseded runs. They
 use the job-scoped read-only GitHub token so workflow edits can receive a real
-review. Missing execution records and incomplete model runs fail the job.
+review. The workflow checks the live PR and checkout before and after execution;
+the repository-owned [review instructions](.github/prompts/code-review.md) define
+the independent reviews to run. Prior comments never substitute for reviewing
+the current commit. Missing execution records, skipped fan-out and incomplete
+model runs fail the job, with the sanitized execution evidence retained.
 
 ## Measuring prompt-cache behaviour
 

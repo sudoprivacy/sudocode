@@ -1751,6 +1751,23 @@ attach/detach, and pipe-composition stay intact. The bright-line
 against alternate-screen / <code>ratatui</code> is the next
 sub-section and applies to every entry below.</p>
 
+<p>Queued-message readability uses a muted label and normal-intensity body,
+without dimming the complete preview. Narrow terminals shorten the label before
+clipping the body; preview clipping never edits the underlying queued message.
+The existing PendingSlot retains arrival ordering with running tools. Real PTY
+coverage exercises dark, light and no-color output, narrow/restore resizing,
+Unicode input and recall of the complete message. Slot budgeting and terminal
+history ownership remain separate layout responsibilities.</p>
+
+<p>Chrome semantic roles stay in the shared <code>ColorTheme</code>: Tips and
+Footer use muted at normal intensity, separators use border, and input remains
+terminal-default. A slot's initial style enters the existing ANSI decoder as
+content state; the UI adapter only converts decoded spans. Explicit foreground
+or full resets restore terminal-default instead of being recolored by a parent
+fallback. This does not add another palette or change amber activity accents.
+Real CLI regressions cover dark/light/no-color chrome, resize and neutral
+drafts, and explicit foreground/full resets inside a real question overlay.</p>
+
 <h4>Architecture context</h4>
 
 <table>

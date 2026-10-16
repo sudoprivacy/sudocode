@@ -29,9 +29,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use commands::suggest_slash_commands;
+use crossterm::style::Color as TerminalColor;
 use iocraft::prelude::*;
 
 mod ansi_text;
+mod queued_message;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
@@ -1225,6 +1227,8 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: u
         return String::new();
     }
     let max_lines = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
+    let support = crate::render::ColorSupport::detect();
+    let theme = crate::render::theme();
 
     // Messages are one line each and always shown; reserve their space first so
     // tool cards (multi-line) can never crowd a queued message out.
@@ -1263,11 +1267,7 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: u
     for (item, card_lines) in items.iter().zip(cards) {
         match item {
             PendingItem::QueuedMessage { display, .. } => {
-                let first = display.lines().next().unwrap_or("");
-                lines.push(crate::render::text_layout::truncate_to_width(
-                    &format!("{DIM}↳ queued: {first}{RESET}"),
-                    term_width,
-                ));
+                lines.push(queued_message::render(display, term_width, support, theme));
             }
             PendingItem::Tool(_) => {
                 let card_lines = card_lines.expect("tool card projection");
@@ -2438,6 +2438,23 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .unwrap_or_default()
     };
 
+    // Slots choose their semantic initial style. The decoder owns explicit
+    // resets; the UI adapter must not repaint reset spans with a parent color.
+    let chrome_has_color =
+        crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
+    let chrome_theme = crate::render::theme();
+    let chrome_style = |color| crossterm::style::ContentStyle {
+        foreground_color: chrome_has_color.then_some(color),
+        ..crossterm::style::ContentStyle::default()
+    };
+    let chrome_muted = chrome_style(chrome_theme.muted);
+    let chrome_border = chrome_has_color
+        .then_some(chrome_theme.border)
+        .and_then(ansi_text::ui_color);
+    // Keep question presentation unchanged here; finer selection roles are a
+    // separate design step, not a reason to retain the reset bug.
+    let question_style = chrome_style(TerminalColor::Cyan);
+
     element! {
         View(flex_direction: FlexDirection::Column) {
             // PendingSlot: tools + queued messages, arrival order. Rendered only
@@ -2454,7 +2471,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(match &status_slot {
                 StatusSlot::Spinner(s) => Some(AnyElement::from(element! { AnsiText(content: s.clone()) })),
                 StatusSlot::TurnResult(s) => Some(AnyElement::from(element! { RichText(content: s.clone()) })),
-                StatusSlot::Tips => Some(AnyElement::from(element! { AnsiText(content: tips_text.clone(), color: Color::DarkGrey) })),
+                StatusSlot::Tips => Some(AnyElement::from(element! { AnsiText(content: tips_text.clone(), initial_style: chrome_muted) })),
                 StatusSlot::Empty => None,
             })
             // Each slot owns its semantic styles. The separator's grey must
@@ -2464,10 +2481,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             } else {
                 Some(element! { AnsiText(content: todo_line) })
             })
-            Text(content: sep.clone(), color: Color::DarkGrey)
+            Text(content: sep.clone(), color: chrome_border)
             // InputSlot
             #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
-                AnsiText(content: format!("[{title}]"), color: Color::Cyan)
+                AnsiText(content: format!("[{title}]"), initial_style: question_style)
             }))
             #(question.and_then(|question| question.description.as_ref()).map(|description| element! {
                 PromptTextView(content: Some(description.clone()), width: w)
@@ -2475,14 +2492,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(if let Some(panel) = task_panel.clone() {
                 Some(element! { AnsiText(content: panel) })
             } else {
-                panel_text.map(|panel| element! { AnsiText(content: panel, color: Color::Cyan) })
+                panel_text.map(|panel| element! { AnsiText(content: panel, initial_style: question_style) })
             })
             #(if task_panel.is_some() {
                 element! { View(flex_direction: FlexDirection::Row) {} }
             } else if let InputSlot::Hint(ref hint_text) = current_input_slot {
                 element! {
                     View(flex_direction: FlexDirection::Row) {
-                        AnsiText(content: hint_text.clone(), color: Color::DarkGrey)
+                        AnsiText(content: hint_text.clone(), initial_style: chrome_muted)
                     }
                 }
             } else if matches!(current_input_slot, InputSlot::DialPad(_)) {
@@ -2559,9 +2576,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             })
             // Separator
-            Text(content: sep, color: Color::DarkGrey)
+            Text(content: sep, color: chrome_border)
             // FooterSlot
-            AnsiText(content: footer_text, color: Color::DarkGrey)
+            AnsiText(content: footer_text, initial_style: chrome_muted)
         }
     }
 }

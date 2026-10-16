@@ -986,11 +986,17 @@ fn session_response_meta(
     mut sudocode: Map<String, serde_json::Value>,
 ) -> Option<Map<String, serde_json::Value>> {
     if let Some(engine) = registry.engine(session_id) {
-        if let (Ok(file_root), Some(shell_root)) = (engine.workspace_root(), registry.cwd(session_id)) {
-            sudocode.insert("workspace".into(), json!({ "fileRoot": file_root, "shellRoot": shell_root }));
+        if let (Ok(file_root), Some(shell_root)) =
+            (engine.workspace_root(), registry.cwd(session_id))
+        {
+            sudocode.insert(
+                "workspace".into(),
+                json!({ "fileRoot": file_root, "shellRoot": shell_root }),
+            );
         }
     }
-    (!sudocode.is_empty()).then(|| Map::from_iter([("sudocode".into(), sudocode)]))
+    (!sudocode.is_empty())
+        .then(|| Map::from_iter([("sudocode".into(), serde_json::Value::Object(sudocode))]))
 }
 
 /// `_meta.sudocode` key: replace the built-in static system-prompt blocks.
@@ -2164,8 +2170,9 @@ pub(crate) async fn run_acp_on_transport(
                                     sudocode.insert("storageRef".into(), json!(storage_ref));
                                 }
                                 responder.respond(
-                                    NewSessionResponse::new(session_id.clone())
-                                        .meta(session_response_meta(&registry, &session_id, sudocode)),
+                                    NewSessionResponse::new(session_id.clone()).meta(
+                                        session_response_meta(&registry, &session_id, sudocode),
+                                    ),
                                 )?;
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
@@ -2508,10 +2515,9 @@ pub(crate) async fn run_acp_on_transport(
                                     sudocode.insert("contextRef".into(), json!(context));
                                     sudocode.insert("storageRef".into(), json!(storage_ref));
                                 }
-                                responder.respond(
-                                    LoadSessionResponse::new()
-                                        .meta(session_response_meta(&registry, &session_id, sudocode)),
-                                )?;
+                                responder.respond(LoadSessionResponse::new().meta(
+                                    session_response_meta(&registry, &session_id, sudocode),
+                                ))?;
                                 let _ = cx_notify.send_notification(
                                     available_commands_notification(&session_id, commands),
                                 );

@@ -2829,6 +2829,13 @@ mod tests {
             original,
             "inspection cannot rewrite durable history"
         );
+        assert!(loaded
+            .repair_orphan_tool_uses()
+            .unwrap_err()
+            .to_string()
+            .contains("session_writer_busy"));
+        assert_eq!(fs::read(&path).unwrap(), original);
+        drop(session);
         assert_eq!(loaded.repair_orphan_tool_uses().unwrap(), 1);
         assert_eq!(loaded.repair_orphan_tool_uses().unwrap(), 0);
         assert!(fs::read_to_string(&path)

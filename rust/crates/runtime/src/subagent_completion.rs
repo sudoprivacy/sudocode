@@ -343,8 +343,11 @@ impl CompletionJournal {
         let result = f(&mut next)?;
         let watermark = next.watermark;
         next.watermark = state.watermark;
-        if serde_json::to_vec(&next).map_err(|e| e.to_string())?
-            == serde_json::to_vec(&*state).map_err(|e| e.to_string())?
+        // The first write establishes the durable storage identity even when
+        // the new session has not started any tasks yet.
+        if state.watermark != 0
+            && serde_json::to_vec(&next).map_err(|e| e.to_string())?
+                == serde_json::to_vec(&*state).map_err(|e| e.to_string())?
         {
             return Ok(result);
         }

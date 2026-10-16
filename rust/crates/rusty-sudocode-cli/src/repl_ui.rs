@@ -2448,7 +2448,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ..crossterm::style::ContentStyle::default()
     };
     let chrome_muted = chrome_style(chrome_theme.muted);
-    let chrome_border = chrome_style(chrome_theme.border);
+    let chrome_border = chrome_has_color
+        .then_some(chrome_theme.border)
+        .and_then(ansi_text::ui_color);
     // Keep question presentation unchanged here; finer selection roles are a
     // separate design step, not a reason to retain the reset bug.
     let question_style = chrome_style(TerminalColor::Cyan);
@@ -2479,7 +2481,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             } else {
                 Some(element! { AnsiText(content: todo_line) })
             })
-            AnsiText(content: sep.clone(), initial_style: chrome_border)
+            Text(content: sep.clone(), color: chrome_border)
             // InputSlot
             #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
                 AnsiText(content: format!("[{title}]"), initial_style: question_style)
@@ -2574,7 +2576,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             })
             // Separator
-            AnsiText(content: sep, initial_style: chrome_border)
+            Text(content: sep, color: chrome_border)
             // FooterSlot
             AnsiText(content: footer_text, initial_style: chrome_muted)
         }

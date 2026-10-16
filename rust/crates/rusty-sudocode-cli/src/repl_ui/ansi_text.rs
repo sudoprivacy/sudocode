@@ -3,18 +3,19 @@
 //! Foregrounds, backgrounds and attributes use the same spans as scrollback.
 
 use crate::render::styled_text::StyledText;
-use crossterm::style::{Attribute, Color as TerminalColor};
+use crossterm::style::{Attribute, Color as TerminalColor, ContentStyle};
 use iocraft::prelude::*;
 
 #[derive(Default, Props)]
 pub(super) struct AnsiTextProps {
     pub content: String,
-    pub color: Option<Color>,
+    pub initial_style: ContentStyle,
 }
 
 #[component]
 pub(super) fn AnsiText(props: &AnsiTextProps) -> impl Into<AnyElement<'static>> {
-    element! { MixedText(contents: contents(&StyledText::from_ansi(&props.content), props.color)) }
+    let text = StyledText::from_ansi_with_style(&props.content, props.initial_style);
+    element! { MixedText(contents: contents(&text)) }
 }
 
 #[derive(Default, Props)]
@@ -24,7 +25,7 @@ pub(super) struct RichTextProps {
 
 #[component]
 pub(super) fn RichText(props: &RichTextProps) -> impl Into<AnyElement<'static>> {
-    element! { MixedText(contents: contents(&props.content, None)) }
+    element! { MixedText(contents: contents(&props.content)) }
 }
 
 #[derive(Default, Props)]
@@ -72,13 +73,13 @@ pub(super) fn PromptTextView(
     }
 }
 
-fn contents(text: &StyledText, default_color: Option<Color>) -> Vec<MixedTextContent> {
+fn contents(text: &StyledText) -> Vec<MixedTextContent> {
     text.spans(0..text.text.len())
         .map(|(style, text)| {
             let has = |attr| style.attributes.has(attr);
             let mut span = MixedTextContent::default();
             span.text = text.replace('\t', " ").replace('\r', "");
-            span.color = style.foreground_color.and_then(ui_color).or(default_color);
+            span.color = style.foreground_color.and_then(ui_color);
             span.background_color = style.background_color.and_then(ui_color);
             span.weight = if has(Attribute::Bold) {
                 Weight::Bold
@@ -132,10 +133,14 @@ mod tests {
     fn rich_text_preserves_bold_and_dim_and_resets_both() {
         for intensity in ["1;2", "2;1"] {
             for reset in ["22", "0"] {
-                let text = StyledText::from_ansi(&format!(
-                    "\x1b[{intensity}mBoldDimSample\x1b[{reset}mPlainSample"
-                ));
-                let spans = contents(&text, Some(Color::DarkGrey));
+                let text = StyledText::from_ansi_with_style(
+                    &format!("\x1b[{intensity}mBoldDimSample\x1b[{reset}mPlainSample"),
+                    ContentStyle {
+                        foreground_color: Some(TerminalColor::DarkGrey),
+                        ..ContentStyle::default()
+                    },
+                );
+                let spans = contents(&text);
                 assert_eq!(spans.len(), 2);
                 assert_eq!(spans[0].text, "BoldDimSample");
                 assert_eq!(spans[0].color, Some(Color::DarkGrey));
@@ -143,7 +148,7 @@ mod tests {
                 assert!(spans[0].dim);
                 assert!(!spans[0].strikethrough);
                 assert_eq!(spans[1].text, "PlainSample");
-                assert_eq!(spans[1].color, Some(Color::DarkGrey));
+                assert_eq!(spans[1].color, (reset == "22").then_some(Color::DarkGrey));
                 assert_eq!(spans[1].weight, Weight::Normal);
                 assert!(!spans[1].dim);
                 assert!(!spans[1].strikethrough);
@@ -192,7 +197,7 @@ mod tests {
                 renderer.render_markdown_with_width("PlainBefore ~~ThemeStrike~~ PlainAfter", 100);
             let text = StyledText::from_ansi(&rendered);
             assert_eq!(text.text.trim_end(), "PlainBefore ThemeStrike PlainAfter");
-            let spans = contents(&text, None);
+            let spans = contents(&text);
             if support == ColorSupport::NoColor {
                 assert!(!rendered.contains('\x1b'));
             } else {
@@ -242,7 +247,7 @@ mod tests {
                     width,
                 );
                 let text = StyledText::from_ansi(&overlay);
-                let spans = contents(&text, None);
+                let spans = contents(&text);
                 assert!(text.text.starts_with("↳ queued: "));
                 assert!(!spans.is_empty());
                 for span in spans {
@@ -269,18 +274,18 @@ mod tests {
         }];
         let panel = super::super::render_todo_panel(&todos, 40);
         let text = StyledText::from_ansi(&format!("{panel}\nPlainSample"));
-        let spans = contents(&text, Some(Color::DarkGrey));
+        let spans = contents(&text);
         let label = spans
             .iter()
             .find(|span| span.text == "Finished parser")
             .unwrap();
-        assert_eq!(label.color, Some(Color::DarkGrey));
+        assert_eq!(label.color, None);
         assert_eq!(label.weight, Weight::Normal);
         assert!(label.dim);
         assert!(label.strikethrough);
         let plain = spans.last().unwrap();
         assert!(plain.text.ends_with("PlainSample"));
-        assert_eq!(plain.color, Some(Color::DarkGrey));
+        assert_eq!(plain.color, None);
         assert_eq!(plain.weight, Weight::Normal);
         assert!(!plain.dim);
         assert!(!plain.strikethrough);

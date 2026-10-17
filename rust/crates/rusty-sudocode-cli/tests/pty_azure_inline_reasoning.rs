@@ -1,5 +1,5 @@
 //! Real CLI -> local file tool -> compatible reasoning -> persisted answer.
-//! Live acceptance also runs `pty_model_compat` against deepseek-v3.2-azure.
+//! Live acceptance verifies the configured Azure provider separately.
 mod common;
 
 use std::fmt::Write as _;
@@ -41,6 +41,18 @@ impl Provider {
                             .set_read_timeout(Some(Duration::from_secs(5)))
                             .unwrap();
                         let (path, request) = read_request(&mut socket);
+                        if let Some(mut capture) = request.clone() {
+                            if !path.ends_with("/count_tokens") {
+                                capture["_fixture_path"] = json!(path);
+                                captured.lock().unwrap().push(capture);
+                            }
+                        }
+                        if case == "model-not-found" && path.ends_with("/chat/completions") {
+                            let body = json!({"error":{"type":"invalid_request_error",
+                                "code":"model_not_found","message":"fixture model has no available channel"}}).to_string();
+                            write!(socket,"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                            continue;
+                        }
                         let (mime, body) = if path.contains("models") {
                             (
                                 "application/json",
@@ -58,9 +70,6 @@ impl Provider {
                                             blocks.iter().any(|b| b["type"] == "tool_result")
                                         })
                                 });
-                            let mut capture = request.clone();
-                            capture["_fixture_path"] = json!(path);
-                            captured.lock().unwrap().push(capture);
                             if has_result {
                                 assert!(
                                     request.to_string().contains(&nonce),
@@ -361,17 +370,16 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
             "deepseek-v3.2-azure"
         };
         let provider = Provider::new(model, case, &nonce);
-        let path = env.config_home().join("sudocode.json");
-        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
-        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
-        config["models"]["claude-sonnet"]["providers"]["api-key"]["api"] =
-            json!(if case == "anthropic-error" {
+        configure_provider(
+            &env,
+            &provider,
+            model,
+            if case == "anthropic-error" {
                 "anthropic-messages"
             } else {
                 "openai-completions"
-            });
-        std::fs::write(path, config.to_string()).unwrap();
+            },
+        );
         let mut cli = env.spawn(&[
             "-p",
             "Read fixture.txt and report its contents.",
@@ -460,6 +468,45 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
     }
 }
 
+fn configure_provider(env: &common::TestEnv, provider: &Provider, model: &str, api: &str) {
+    let path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["api"] = json!(api);
+    std::fs::write(path, config.to_string()).unwrap();
+}
+
+#[test]
+fn missing_provider_model_exits_without_replaying_or_fabricating_an_answer() {
+    let env = common::TestEnv::new_mock("azure-missing-model");
+    let model = "deepseek-v3.2-azure";
+    let provider = Provider::new(model, "model-not-found", "UNUSED_MODEL_ANSWER");
+    configure_provider(&env, &provider, model, "openai-completions");
+    let mut cli = env.spawn(&[
+        "-p",
+        "Read fixture.txt and report its contents.",
+        "--permission-mode",
+        "read-only",
+        "--output-format",
+        "json",
+    ]);
+    let code = cli.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "provider refusal did not terminate: {error}\n{}",
+            common::screen_tail(&cli, 6000)
+        )
+    });
+    let screen = common::screen_tail(&cli, 6000);
+    assert_ne!(code, 0, "{screen}");
+    assert!(screen.contains("model_not_found"), "{screen}");
+    assert!(!screen.contains("UNUSED_MODEL_ANSWER"), "{screen}");
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "an unavailable model is not replayable");
+    assert_eq!(requests[0]["model"], model);
+    assert_eq!(requests[0]["_fixture_path"], "/chat/completions");
+}
+
 #[test]
 fn azure_live_file_roundtrip_has_a_final_answer() {
     let env = common::TestEnv::new("azure-live-file");
@@ -483,9 +530,16 @@ fn azure_live_file_roundtrip_has_a_final_answer() {
         "--output-format",
         "json",
     ]);
-    cli.set_default_timeout(Duration::from_secs(120));
-    cli.expect(&nonce).unwrap();
-    assert_eq!(cli.expect_eof().unwrap(), 0);
+    // Wait once for the whole read/model/answer journey. The stored tool result
+    // and final answer below verify the file contents independently of the PTY.
+    cli.set_default_timeout(Duration::from_mins(5));
+    let code = cli.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "live file workflow did not finish: {error}\n{}",
+            common::screen_tail(&cli, 6000)
+        )
+    });
+    assert_eq!(code, 0, "{}", common::screen_tail(&cli, 6000));
     let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
     let sessions = store.list_sessions().unwrap();
     assert_eq!(sessions.len(), 1);

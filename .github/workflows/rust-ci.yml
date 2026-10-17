@@ -554,6 +554,7 @@ jobs:
 
   live-api-smoke:
     name: Live API smoke test
+    timeout-minutes: 30
     # Also runnable on demand against any branch. Restricting it to pushes on
     # main meant a break in this job could only ever be discovered *after* a
     # merge, and a fix for one could not be verified before merging it — which
@@ -571,6 +572,7 @@ jobs:
       SCODE_LIVE_MODEL: &live_model gpt-6-luna
       # The native credential selects a verified provider independently of GPT.
       SCODE_NATIVE_MODEL: &native_model ${{ vars.SUDOROUTER_NATIVE_MODEL || 'claude-sonnet-4-6' }}
+      SCODE_AZURE_MODEL: &azure_model ${{ vars.SUDOROUTER_AZURE_MODEL || 'deepseek-v3.2-azure' }}
       SCODE_LOG_PATH: ${{ github.workspace }}/scode-acp-live-trace.jsonl
     steps:
       - uses: actions/checkout@v4
@@ -585,6 +587,12 @@ jobs:
           NATIVE_PROXY_AUTH_TOKEN: &native_key ${{ vars.SUDOROUTER_NATIVE_CHANNEL && format('{0}-{1}', secrets.SUDOROUTER_CI_API_KEY, vars.SUDOROUTER_NATIVE_CHANNEL) || secrets.SUDOROUTER_CI_API_KEY }}
           PROXY_BASE_URL: https://api.sudorouter.ai/v1
         run: node .github/scripts/probe_live_usage.cjs "${{ runner.temp }}/provider-usage-contract.json"
+      - name: Save provider evidence before model acceptance
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-provider-contract
+          path: ${{ runner.temp }}/provider-usage-contract.json
+          retention-days: 7
       - name: Run live API smoke tests
         working-directory: rust
         env:
@@ -624,6 +632,20 @@ jobs:
             ${{ runner.temp }}/provider-usage-contract.json
           retention-days: 7
 
+  provider-probe-contract:
+    name: Live provider probe contract
+    if: ${{ !inputs.render_performance }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test .github/scripts/probe_live_usage.test.cjs
+
   live-bash-process-tree:
     name: Live Bash process tree (${{ matrix.os }})
     if: >-
@@ -653,6 +675,7 @@ jobs:
           SCODE_TEST_BACKEND: live
           SUDOCODE_API_READ_TIMEOUT: *live_idle_seconds
           SCODE_LIVE_MODEL: gpt-5.4-mini
+          SCODE_AZURE_MODEL: *azure_model
           SCODE_LIVE_AUTH_PROFILE: sudorouter
           SCODE_LOG_PATH: ${{ runner.temp }}/scode-live-model-trace.jsonl
           SCODE_LIVE_ARTIFACTS: ${{ runner.temp }}/scode-live-requests
@@ -674,7 +697,7 @@ jobs:
           cargo test -p rusty-sudocode-cli --test pty_step_budget live_step_budget_preserves_results_across_turns -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_edit_uniqueness live_model_recovers_with_unique_context -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_headless -- --test-threads=1 --nocapture
-          SCODE_LIVE_MODEL=deepseek-v3.2-azure cargo test -p rusty-sudocode-cli --test pty_azure_inline_reasoning azure_live_file_roundtrip_has_a_final_answer -- --test-threads=1 --nocapture
+          SCODE_LIVE_MODEL="$SCODE_AZURE_MODEL" cargo test -p rusty-sudocode-cli --test pty_azure_inline_reasoning azure_live_file_roundtrip_has_a_final_answer -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_model_flag_priority configured_model_reads_updated_file_after_resume -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_a2a_overlay queued_and_offline_messages_survive_receiver_restart -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_a2a_overlay pending_batch_and_two_runtimes_share_one_durable_reader -- --test-threads=1 --nocapture

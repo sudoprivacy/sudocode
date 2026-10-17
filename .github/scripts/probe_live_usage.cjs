@@ -20,12 +20,30 @@ async function main() {
     throw new Error('NATIVE_PROXY_AUTH_TOKEN is required when SCODE_NATIVE_MODEL is set');
   }
   const base = process.env.PROXY_BASE_URL.replace(/\/$/, '');
-  const models = [...new Set([process.env.SCODE_LIVE_MODEL, process.env.SCODE_NATIVE_MODEL].filter(Boolean))];
+  const models = [...new Set([process.env.SCODE_LIVE_MODEL, process.env.SCODE_NATIVE_MODEL,
+    process.env.SCODE_AZURE_MODEL].filter(Boolean))];
   const errorDetails = body => {
     const error = body?.error ?? body;
     return { type: clean(error?.type), code: typeof error?.code === 'number' ? error.code : clean(error?.code), message: clean(error?.message ?? error?.msg) };
   };
   const report = [];
+  const catalog = { route: 'models' };
+  report.push(catalog);
+  try {
+    const response = await fetch(`${base}/models`, {
+      signal: AbortSignal.timeout(15000),
+      headers: { authorization: `Bearer ${token}` },
+    });
+    catalog.status = response.status;
+    const body = await response.json();
+    if (response.ok) {
+      catalog.models = (body.data ?? []).map(model => clean(model.id, 256)).filter(Boolean).sort();
+    } else {
+      catalog.providerError = errorDetails(body);
+    }
+  } catch (error) {
+    catalog.error = error.name;
+  }
   for (const model of models) for (const route of ['chat/completions', 'messages']) {
     const modelToken = model === process.env.SCODE_NATIVE_MODEL ? nativeToken : token;
     const item = { route, model, usage: [] };

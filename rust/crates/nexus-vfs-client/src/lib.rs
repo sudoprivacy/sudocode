@@ -1,4 +1,19 @@
+//! nexus-vfs gRPC client (P1a zone-aware, SW-20260915-002 step-08).
+//! Design record: sudo-code-roadmap.html § Goal 4 → "Contract-zone P1a".
+
 pub mod proto {
+    // The generated surface, not ours to reword: prost/tonic doc phrasing
+    // trips `doc_markdown`, the derived structs legitimately pack bool flags
+    // (`struct_excessive_bools`), and the client trait's
+    // `Result<_, tonic::Status>` returns trip `result_large_err` on newer
+    // toolchains. All three are scoped to this module so the hand-written
+    // client below stays under the workspace's full lint set.
+    #![allow(
+        clippy::doc_markdown,
+        clippy::struct_excessive_bools,
+        clippy::result_large_err
+    )]
+
     tonic::include_proto!("nexus.grpc.vfs");
 }
 
@@ -18,23 +33,23 @@ pub struct StreamReadResult {
     pub timed_out: bool,
 }
 
-/// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
-/// `Setattr` when provisioning a mailbox DT_STREAM.
+/// `DT_STREAM` entry-type code (mirrors the kernel `entry_type`), passed to
+/// `Setattr` when provisioning a mailbox `DT_STREAM`.
 const DT_STREAM: i32 = 4;
 
-/// DT_DIR entry-type code, for reading `Readdir` results back.
+/// `DT_DIR` entry-type code, for reading `Readdir` results back.
 const DT_DIR: u32 = 1;
 
-/// The same DT_DIR code as `Setattr` takes it. `Readdir` reports entry types as
+/// The same `DT_DIR` code as `Setattr` takes it. `Readdir` reports entry types as
 /// `u32` and `Setattr` accepts them as `i32`, so the one value needs both spellings;
 /// naming the second rather than casting at the call site keeps the cast off the
 /// path where a wrong entry type is a silent mis-provision (`DT_LINK = 3` and
 /// `DT_PIPE = 3` once cost this project a chat-list index that was a pipe).
-const DT_DIR_SETATTR: i32 = DT_DIR as i32;
+const DT_DIR_SETATTR: i32 = DT_DIR.cast_signed();
 
-/// DT_LINK entry-type code for `Setattr`.
+/// `DT_LINK` entry-type code for `Setattr`.
 ///
-/// **6, not 3.** 3 is DT_PIPE's discriminant, and the A2A chat-list index was once
+/// **6, not 3.** 3 is `DT_PIPE`'s discriminant, and the A2A chat-list index was once
 /// written with it: the syscall dispatches on the integer, so there was no compile
 /// error and no runtime error — the index was simply a pipe, while every
 /// path-composition test stayed green.
@@ -97,7 +112,10 @@ enum VfsOp {
     /// directory differ only by the `entry_type` the kernel dispatches on, and a
     /// second arm would be the same request assembled a second way.
     EnsureEntry {
-        request: SetattrRequest,
+        // Boxed: this is the widest variant by far (SetattrRequest is a whole
+        // prost message), and every queued VfsOp pays its largest variant's
+        // size — boxed, the queue messages sit near the second-largest arm.
+        request: Box<SetattrRequest>,
         resp: mpsc::SyncSender<io::Result<bool>>,
     },
     /// `Stat` — the TYPED RPC, not the generic Call surface.
@@ -171,6 +189,7 @@ impl NexusVfsClient {
         )
     }
 
+    #[allow(clippy::too_many_lines)]
     fn connect_inner(endpoint: &str, tls: Option<TlsMaterial>) -> io::Result<Self> {
         // tonic's `Channel::from_shared` requires a URI scheme; accept a bare
         // `host:port` for ergonomics and supply the scheme the transport
@@ -428,7 +447,7 @@ impl NexusVfsClient {
                                     }));
                                 }
                                 VfsOp::EnsureEntry { request, resp } => {
-                                    let r = client.setattr(deadlined(request, OP_DEADLINE)).await;
+                                    let r = client.setattr(deadlined(*request, OP_DEADLINE)).await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
@@ -715,7 +734,10 @@ impl NexusVfsClient {
     pub fn setattr(&self, request: SetattrRequest) -> io::Result<bool> {
         let (resp, rx) = mpsc::sync_channel(1);
         self.tx
-            .send(VfsOp::EnsureEntry { request, resp })
+            .send(VfsOp::EnsureEntry {
+                request: Box::new(request),
+                resp,
+            })
             .map_err(|_| broken_pipe())?;
         await_reply(&rx, OP_DEADLINE + HANDOFF_GRACE)
     }

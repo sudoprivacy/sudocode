@@ -458,6 +458,10 @@ impl From<JsonError> for SessionError {
 impl Session {
     #[must_use]
     pub fn new() -> Self {
+        // P1a (§8.11 R6.2/R6.4)：subprocess 侧唯一可信 zone 来源是 host 注入
+        // 的 runner env（moss runner manifest），由 `KernelFsBackend::new` 在
+        // 构造文件系统时经 `host_zone_once` 消费；无 env（本地 standalone）→
+        // Absent，root 语义保持不变。
         let now = current_time_millis();
         Self {
             version: SESSION_VERSION,

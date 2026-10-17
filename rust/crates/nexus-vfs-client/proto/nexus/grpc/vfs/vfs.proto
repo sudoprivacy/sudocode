@@ -22,6 +22,9 @@ service NexusVFSService {
   // Typed RPCs for content operations — native bytes, no JSON/base64.
   rpc Read(ReadRequest) returns (ReadResponse);
   rpc Write(WriteRequest) returns (WriteResponse);
+  // Native permissions on local reference storage. Older servers return
+  // UNIMPLEMENTED; an unsupported backend must never acknowledge a fake mode.
+  rpc Chmod(ChmodRequest) returns (ChmodResponse);
   rpc Delete(DeleteRequest) returns (DeleteResponse);
 
   // Health check with server metadata.
@@ -147,6 +150,17 @@ message WriteResponse {
   bool is_error = 3;
   bytes error_payload = 4;
   uint64 gen = 5;
+}
+
+message ChmodRequest {
+  string path = 1;
+  uint32 mode = 2;        // Permission bits only (0000..0777).
+  string auth_token = 3;
+}
+
+message ChmodResponse {
+  bool is_error = 1;
+  bytes error_payload = 2;
 }
 
 message DeleteRequest {

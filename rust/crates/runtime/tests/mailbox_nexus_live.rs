@@ -54,8 +54,12 @@ use runtime::agent_mailbox::MailboxEnvelope;
 /// blocking tail. Production had already moved to `Mailbox`, so the tests were
 /// exercising the copy: green here proved nothing about what ships. They now
 /// drive the same code the running agent does.
+///
+/// The harness dials mTLS with a minted CA-signed bundle (see
+/// `e2e/nexus-a2a/lib.sh`), so the transport itself is the server-verified
+/// credential — the same construction production's standalone session uses.
 fn mailbox(client: &Arc<NexusVfsClient>, agent: &str, auth: &str) -> Mailbox {
-    Mailbox::over_nexus(Arc::clone(client), agent, auth)
+    Mailbox::over_nexus_mtls(Arc::clone(client), agent, auth, "root")
 }
 
 /// The client every test here dials with: mTLS when the harness points at an
@@ -773,8 +777,9 @@ fn live_spawn_cohost() {
     let client = Arc::new(model_operator());
 
     // String-only params -> rpc_codec is plain JSON, so a raw JSON payload works.
-    let payload =
-        format!(r#"{{"agent_id":"{agent}","model":"{model}","owner_id":"root","zone_id":"root"}}"#);
+    // No `owner_id` / `zone_id`: dial with a session credential, whose owner
+    // SAN supplies the owner and whose omitted zone takes the root default.
+    let payload = format!(r#"{{"agent_id":"{agent}","model":"{model}"}}"#);
     let resp = client
         .call("managed_agent.start_session_v1", payload.as_bytes(), "")
         .expect("start_session_v1 call");
@@ -1133,10 +1138,11 @@ fn live_directory_unions_local_and_nexus_peers() {
         },
         Member {
             label: "nexus",
-            mailbox: Arc::new(Mailbox::over_nexus(
+            mailbox: Arc::new(Mailbox::over_nexus_mtls(
                 Arc::clone(&client),
                 me.clone(),
                 auth.clone(),
+                "root",
             )),
         },
     ]);
@@ -1352,7 +1358,12 @@ fn live_cohost_subagent_context() {
     );
     std::fs::write(&host_instructions, &host_marker).unwrap();
 
-    let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
+    // No `owner_id` / `zone_id`: the harness dials with a session credential
+    // (front-door minted, owner SAN'd), and v0.8.18's session-caller path takes
+    // the owner from the credential and the zone from the root default — a
+    // named zone would need an explicit grant the session cert by design
+    // carries none of.
+    let payload = json!({"agent_id":agent,"model":model});
     let started: Value = serde_json::from_slice(
         &operator
             .call(
@@ -1460,7 +1471,12 @@ fn live_cohost_model_workflow() {
         operator.read(&format!("{data}/quote.txt"), "").unwrap(),
         quote.as_bytes()
     );
-    let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
+    // No `owner_id` / `zone_id`: the harness dials with a session credential
+    // (front-door minted, owner SAN'd), and v0.8.18's session-caller path takes
+    // the owner from the credential and the zone from the root default — a
+    // named zone would need an explicit grant the session cert by design
+    // carries none of.
+    let payload = json!({"agent_id":agent,"model":model});
     println!("LIVE COHOST: starting managed session");
     let started: Value = serde_json::from_slice(
         &operator
@@ -1639,7 +1655,10 @@ fn live_cohost_session_resume() {
 
     let mb = mailbox(&client, &user, "");
     mb.ensure_conversation(&agent).unwrap();
-    let mut request = json!({"agent_id":agent,"owner_id":"root","zone_id":"root","model":model});
+    // No `owner_id` / `zone_id`: the harness dials with a session credential
+    // (front-door minted, owner SAN'd), and v0.8.18's session-caller path takes
+    // the owner from the credential and the zone from the root default.
+    let mut request = json!({"agent_id":agent,"model":model});
     let rpc = |method: &str, payload: &Value| -> Result<Value, String> {
         let bytes = operator
             .call(method, payload.to_string().as_bytes(), "")
@@ -1740,12 +1759,18 @@ fn live_cohost_session_resume() {
         "",
     )
     .unwrap();
+    // The restored history carries the first turn's `send` tool result, so on
+    // the rebased line the scenario's mock calls `send` again: the reply the
+    // operator's mailbox must see is the "PONG" body the scenario sends. Poll
+    // the operator transcript from the start — the full replay is what resume
+    // is for.
+    let mut op_cursor = 0u64;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let (received, next) = mb
-            .poll_conversation(&agent, cursor, DELIVERY_WAIT_MS)
+            .poll_conversation(&agent, op_cursor, DELIVERY_WAIT_MS)
             .unwrap();
-        cursor = next;
+        op_cursor = next;
         if received
             .iter()
             .any(|m| m.from == agent && m.kind != "session" && m.body.contains("PONG"))

@@ -2093,6 +2093,41 @@ The <a href="https://s.shareone.vip/s/nexus-integration-architecture">Nexus inte
 owns transport and runtime service boundaries. This section tracks implementation
 and acceptance against those references.</p>
 
+<h3 id="contract-zone-p1a">Contract-zone P1a — runtime zone context</h3>
+
+<p id="contract-zone-p1a-sources">External ticket anchor: SW-20260915-002 §8.11 (P1a).
+The zone context is the runtime's answer to "what may this process touch":
+every file operation through a kernel backend passes a ResourceRef
+authorization before any syscall, and the authority behind that check has
+exactly three trusted sources.</p>
+
+<ul>
+<li><strong>Planted descriptor</strong> (<code>for_agent_descriptor</code>):
+the ManagedAgentService plants the agent's descriptor; its zone id passes the
+owner validator, and its delegation reference and resource scope ride every
+authorization. This is the co-hosted agent's backend, and the subject its
+ReBAC evaluation carries is the agent, not its owner.</li>
+<li><strong>Host environment</strong> (<code>host_zone_once</code>): the
+subprocess runner injects zone metadata through the environment; the
+in-process kernel treats its injector — this process's parent — as the trust
+position, enforces the injected scope, and keeps a partial or invalid
+injection fail-closed rather than widening it into root.</li>
+<li><strong>Standalone-local</strong> (<code>for_standalone_session</code>):
+a CLI session acts for itself on a host the user booted; agent-identity
+context (not system), trusted-local zone defaulting to the legacy root
+namespace.</li>
+</ul>
+
+<p id="contract-zone-p1a-fail-closed">Everything else fails closed. The raw
+<code>KernelFsBackend::new</code> seam and the <code>from_arc</code> /
+<code>over_nexus</code> remote constructors refuse every operation before any
+RPC leaves the process — env or descriptor metadata is not a credential the
+VFS server can verify. The remote paths that perform IO are the mTLS ones,
+where the transport itself is the server-verified authorization. Status:
+landed on the contract-zone line with the fail-closed authorization suite
+restored; the dependency rides nexus-vfs <code>feat/contract-zone</code>
+until its v0.8.16 tag.</p>
+
 <h3 id="agent-runtime-tasks">Implementation and acceptance tasks</h3>
 
 <table>

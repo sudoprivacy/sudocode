@@ -1047,7 +1047,7 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
             ctx,
             zone_context: Some(zone_context),
             workspace_root: workspace_root.into(),
-            host_root: None,
+            path_view: KernelPathView::Virtual,
         }
     }
 
@@ -1064,7 +1064,7 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
             ctx,
             zone_context: Some(HostZoneContext::from_planted_descriptor(desc)),
             workspace_root: workspace_root.into(),
-            host_root: None,
+            path_view: KernelPathView::Virtual,
         }
     }
 

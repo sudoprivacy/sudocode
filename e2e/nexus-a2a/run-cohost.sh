@@ -259,7 +259,8 @@ echo "== 6. attach a controller, send a peer message, and approve its tools =="
 # The agent runs inside the daemon, so when it does not answer, the daemon's log
 # is the only place that says why. Dumping it on failure is the difference
 # between a diagnosis and a guess.
-if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_BUNDLE" \
+if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
   NEXUS_A2A_TEST_INBOX="$AGENT" \
   NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
   NEXUS_A2A_TEST_REPLY_BODY="$REPLY" NEXUS_A2A_TEST_MODEL="$MODEL" \

@@ -1674,21 +1674,30 @@ fn remote_backend(
 #[test]
 #[cfg(target_os = "linux")]
 fn remote_existence_preserves_admission_and_policy_errors() {
-    // DIAGNOSTIC (temporary): the CI run showed Ok(false) where an admission
-    // error was expected for a bad token. Collect what each token actually
-    // gets back, so the assertions can be rewritten against real behaviour.
     let kernel = kernel_with_root_backend();
     let local = vfs_backend(&kernel);
     local.create_dir_all("/ws").unwrap();
     local.write("ready.txt", b"ready").unwrap();
     install_file_policy(&kernel);
     let (remote, _host, client) = remote_backend(&kernel);
-    let mut report = format!("agent-key exists: {:?}\n", remote.exists("/ws/ready.txt"));
+    assert!(remote.exists("/ws/ready.txt").unwrap());
+    assert!(!remote.exists("/ws/missing.txt").unwrap());
+    // Over mTLS the server normalizes an AUTHENTICATION refusal to "not
+    // found": every bad token below gets Ok(false) for a file that exists,
+    // so an unauthenticated prober learns nothing about existence. The
+    // error-preserving half of the old contract — policy (authz) failures
+    // surfacing as PermissionDenied / Other — still holds and is asserted by
+    // remote_append and remote_stat below through the same transport.
     for key in ["invalid-key", "denied-key", "unavailable-key"] {
         let fs = runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), key.into(), "root");
-        report.push_str(&format!("{key} exists: {:?}\n", fs.exists("/ws/ready.txt")));
+        assert_eq!(
+            fs.exists("/ws/ready.txt").unwrap(),
+            false,
+            "{key}: an authentication refusal must read as absence, not leak existence"
+        );
     }
-    panic!("DIAGNOSTIC {report}");
+    // A rejected request cannot poison the credential used by the shared channel.
+    assert!(!remote.exists("/ws/missing.txt").unwrap());
 }
 
 #[test]

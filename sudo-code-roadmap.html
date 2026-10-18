@@ -2093,6 +2093,113 @@ The <a href="https://s.shareone.vip/s/nexus-integration-architecture">Nexus inte
 owns transport and runtime service boundaries. This section tracks implementation
 and acceptance against those references.</p>
 
+<h3 id="shared-sid-implementation">Shared SID: append history, restore a context chain</h3>
+
+<p><b>CCB validation.</b> The official
+<a href="https://code.claude.com/docs/en/sessions#branch-a-session">Claude Code session guide</a>
+allows two terminals to resume and append one transcript. The behavioral reference
+<code>claude-code-best/src/utils/sessionStorage.ts</code> appends entries with
+<code>uuid</code> and <code>parentUuid</code>; <code>loadTranscriptFile</code> and
+<code>buildConversationChain</code> restore the newest leaf's ancestry.
+<code>conversationRecovery.ts</code> uses that chain. Its
+<code>services/compact</code> code records compaction boundaries and retained segments.
+The consequence is precise: both continuations survive in durable history; each
+running instance continues its own context. Interleaving file writes does not
+mean inserting another instance's half-finished tool batch into a model request.
+This is source and documentation evidence; a dual-terminal run of installed CC
+remains a separate acceptance check.</p>
+
+<p>The durable object and authorization contract lives in the
+<a href="docs/design/agent-context-storage-matrix.html#shared-session-context">storage matrix</a>.
+The <a href="https://s.shareone.vip/md/sudo-cloud-plan">cloud architecture</a>
+places managed execution behind Moss and the user's cohost service; local and
+cohost hosts share the runtime implementation described here.</p>
+
+<pre class="mermaid">flowchart LR
+  R1["Runtime 1 · PID on its host"] --> S["/sessions/S/transcript · append history"]
+  R2["Runtime 2 · PID on its host"] --> S
+  S --> G["Message IDs and parent references"]
+  G --> C1["Context: root → user 1 → assistant 1 → tool result 1"]
+  G --> C2["Context: root → user 2 → assistant 2 → tool result 2"]
+  C1 --> K1["Compaction boundary for context 1"]
+  C2 --> K2["Compaction boundary for context 2"]</pre>
+
+<table>
+<thead><tr><th>Boundary</th><th>Implementation decision</th><th>Acceptance</th></tr></thead>
+<tbody>
+<tr><td>Session records</td><td><code>runtime::session</code> owns stable message IDs,
+parent references, incremental assistant updates and replay. Updates address a
+message ID; tool results retain their tool-call ID and originating assistant.
+Legacy records receive deterministic identities on read. New runtime handles and
+OS PIDs remain outside durable messages.</td><td>Two processes resume the same
+prefix, interleave user, assistant and streaming tool records, and preserve both
+chains. Repeating a delivery preserves its original record identity.</td></tr>
+<tr><td>Append transaction</td><td>One runtime persistence component commits complete
+records through <code>FsBackend</code>. Native files serialize record commits with
+OS-released locks; Nexus uses its existing framed stream append. Stream bootstrap
+and the non-stream read/concatenate/write fallback require explicit backend
+acceptance before admitting concurrent writers. Ordinary token delivery keeps
+incremental writes and avoids a full-transcript read on each append.</td><td>Real
+native processes and real daemon clients append records larger than an OS write
+buffer without lost or interleaved bytes. Crash during bootstrap or append keeps
+earlier committed records readable. Replicated append obeys Nexus's Raft commit
+contract; an expiring advisory lease alone does not establish atomic replacement.</td></tr>
+<tr><td>Compaction and maintenance</td><td>Compaction records a boundary and the
+specific source ancestry it summarized. Billing receipts and metadata use
+incremental records. An instance commits a new context projection while retaining
+the other context's durable messages and attachments. Restore and compaction use
+the same history interpreter.</td><td>Compact A while B appends and while B has a
+live tool call; restore both leaves and match every call/result and attachment.
+Exercise cancellation, stale candidates, crash and restart.</td></tr>
+<tr><td>Tool recovery</td><td>Interrupted-call repair is a projection of the chosen
+context, and a durable repair targets that specific call. Opening another context
+does not establish that a live call in its sibling has ended.</td><td>Resume while
+the sibling tool is still running; receive its real result once and preserve its
+association. Recover an actually interrupted call without repeating its effects.</td></tr>
+<tr><td>Completion delivery</td><td>Separate transcript append from completion
+ownership. The completion protocol binds active traces, context revisions,
+terminal sources, reservations and acknowledgements to the originating context.
+Opening a second context preserves the first context's active trace. Deletion
+uses the shared durable storage identity and is coordinated with every admitted
+writer. Completion ownership and cache behavior stay behind the existing engine
+boundary.</td><td>Two active prompts and independent task completions; reconnect
+and ACK retries; deletion racing with append; crash recovery with one sibling
+still alive. Verify the existing completion protocol's delivery guarantees.</td></tr>
+<tr><td>Agent links and runtime routing</td><td><code>SessionStore</code> verifies
+the caller's authorized Agent link and target access. The service supplies the
+current execution identity and repository context. <code>agent_list</code>
+discovers Agent identities and their available runtime handles through the existing
+registry; <code>send</code> distinguishes a durable Agent destination from a host
+plus PID destination. Start-request idempotency deduplicates retries of that
+request. SID and the request ID do not collapse distinct executions.</td><td>Same
+SID linked by A and B under permitted zones; denied C access; two live runtimes
+for A; explicit runtime delivery and offline Agent delivery. Run the same workflow
+through standalone, cohost and Moss.</td></tr>
+</tbody>
+</table>
+
+<h4>Source audit and delivery tasks · 2026-10-18</h4>
+<p>Audited main <code>bea57f49</code>. Shared SID is the agreed target and requires
+the changes above. <code>engine-host/managed_session.rs</code> still holds a
+session-lifetime lease. <code>runtime/session_writer.rs</code> adds another lifetime
+lock on native storage. <code>session.rs</code> updates assistants by array index,
+replays <code>session_meta</code> as complete replacement, and persists maintenance
+as snapshots. <code>subagent_completion.rs</code> has a session-wide
+<code>active_trace</code> and treats a newly opened journal as recovery from its
+previous writer. <code>SessionStore::validate_loaded_session</code> compares the
+entire hosted identity, including the original Agent name.</p>
+
+<ol>
+<li>Implement and accept the shared record/replay layer and backend append
+transactions, including the legacy-reader and older-live-writer boundary.</li>
+<li>Move snapshot, maintenance, streaming update and repair consumers onto that
+layer; accept cross-context compaction and restore.</li>
+<li>Align completion ownership, Agent-link authorization and the two host adapters;
+remove the session-lifetime exclusions together after their replacement passes.</li>
+<li>Accept real concurrent CLI processes, independent cohost runtimes, and
+browser/desktop → Moss → pod execution before publishing concurrency support.</li>
+</ol>
+
 <h3 id="agent-runtime-tasks">Implementation and acceptance tasks</h3>
 
 <table>
@@ -2105,7 +2212,8 @@ standalone; transport and physical placement remain behind their common interfac
 <tr><td>Define execution placement at spawn</td><td><code>agent_spawn</code> creates an
 in-process child task. <code>ManagedAgentService.start_session_v1</code> creates
 an independent managed runtime with a new PID. <code>AgentRegistry</code> is a
-node-local PID map, and the cohost writer lease is per durable session.</td><td>Define
+node-local PID map. The <a href="#shared-sid-implementation">shared SID tasks</a>
+replace the existing session-wide writer exclusions.</td><td>Define
 the owning box and delivery role for one Agent, preserving Agent→PID one-to-many.
 Race starts from two boxes and verify the resulting ownership before exposing Move.</td></tr>
 <tr><td>Fence execution and message consumption</td><td>The reader register currently

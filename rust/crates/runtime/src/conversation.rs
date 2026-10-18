@@ -1913,6 +1913,23 @@ where
         // (the status line's `+Ns`/`Σs`) and stamped onto the turn's last
         // assistant message so it persists and re-sums on resume.
         let turn_started_at = std::time::Instant::now();
+        // Match CC's resume sentinel: an unanswered prompt or tool result must
+        // not merge with a new user turn. Append it only at this outer turn
+        // boundary, never between a tool result and its in-flight continuation.
+        if self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role != MessageRole::System)
+            .is_some_and(|message| matches!(message.role, MessageRole::User | MessageRole::Tool))
+        {
+            self.session
+                .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+                    text: "No response requested.".into(),
+                }]))
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+        }
         self.session
             .push_user_blocks(prepared_blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;

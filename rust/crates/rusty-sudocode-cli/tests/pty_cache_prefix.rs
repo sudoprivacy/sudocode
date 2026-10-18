@@ -419,6 +419,139 @@ fn thinking_blocks_survive_turns_and_resume_without_merging_or_dropping() {
     }
 }
 
+fn unanswered_turn_fixture(
+    env: &TestEnv,
+    capture: &Capture,
+    tail: &str,
+) -> (std::path::PathBuf, Vec<ConversationMessage>) {
+    let path = fixture(env, capture);
+    let mut original = Session::load_from_path(&path).unwrap();
+    original
+        .push_user_text("Inspect the OLD_TASK profile.")
+        .unwrap();
+    if tail != "user" {
+        original
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: Some("old-tool-signature".into()),
+                },
+                ContentBlock::Text {
+                    text: "OLD_TASK\ncourse\nInspecting the old profile.".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "old-profile-call".into(),
+                    name: "PowerShell".into(),
+                    input: r#"{"command":"echo OLD_TASK"}"#.into(),
+                    thought_signature: None,
+                },
+            ]))
+            .unwrap();
+        original
+            .push_message(ConversationMessage::tool_result(
+                "old-profile-call",
+                "PowerShell",
+                r#"{"stdout":"OLD_TASK done","exit_code":0}"#,
+                false,
+            ))
+            .unwrap();
+    }
+    if tail == "complete" {
+        original
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "The old task is complete.".into(),
+            }]))
+            .unwrap();
+    }
+    original.save_to_path(&path).unwrap();
+    (path, original.messages)
+}
+
+#[test]
+fn resumed_unanswered_turns_end_before_new_requests_without_rewriting_history() {
+    for (mode, tail) in [
+        ("off", "tool"),
+        ("queue", "tool"),
+        ("off", "user"),
+        ("off", "complete"),
+    ] {
+        let env = TestEnv::new_mock("unanswered-turn-boundary");
+        let capture = Capture::new();
+        let (path, original_messages) = unanswered_turn_fixture(&env, &capture, tail);
+        let expected_sentinels = usize::from(tail != "complete");
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "Start a different task: NEW_TASK first.");
+        turn(&mut cli, "Continue NEW_TASK with the previous answer.");
+        exit(&mut cli);
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "Recall NEW_TASK after restarting.");
+        exit(&mut cli);
+        let requests = capture.bodies();
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            let messages = request["messages"].as_array().unwrap();
+            let sentinels: Vec<_> = messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| {
+                    message["role"] == "assistant"
+                        && message["content"].as_array().is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block["type"] == "text" && block["text"] == "No response requested."
+                            })
+                        })
+                })
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(
+                sentinels.len(),
+                expected_sentinels,
+                "{mode}/{tail}: missing or duplicated turn boundary"
+            );
+            if let Some(&index) = sentinels.first() {
+                assert_eq!(messages[index - 1]["role"], "user");
+                assert_eq!(messages[index + 1]["role"], "user");
+                assert!(messages[index + 1]["content"]
+                    .to_string()
+                    .contains("NEW_TASK first"));
+                if tail == "tool" {
+                    assert_eq!(
+                        messages[index - 1]["content"][0]["tool_use_id"],
+                        "old-profile-call"
+                    );
+                    assert!(messages[index - 1]["content"]
+                        .to_string()
+                        .contains("OLD_TASK done"));
+                }
+            }
+        }
+        for pair in requests.windows(2) {
+            fixed_prefix(&pair[0], &pair[1]);
+            history_prefix(&pair[0], &pair[1]);
+        }
+        let persisted = Session::load_from_path(&path).unwrap();
+        assert_eq!(
+            &persisted.messages[..original_messages.len()],
+            &original_messages,
+            "old signed history or tool results changed"
+        );
+        assert_eq!(
+            persisted
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == runtime::MessageRole::Assistant
+                        && message.blocks
+                            == vec![ContentBlock::Text {
+                                text: "No response requested.".into(),
+                            }]
+                })
+                .count(),
+            expected_sentinels
+        );
+    }
+}
+
 fn repair_archives(path: &std::path::Path) -> Vec<std::path::PathBuf> {
     let prefix = format!(
         "{}.before-thinking-repair-",

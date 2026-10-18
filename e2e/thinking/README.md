@@ -81,6 +81,51 @@ session. The original file stays unchanged and its SHA-256 is recorded and
 checked. `--history-messages 8` limits the copy to the first eight messages.
 No personal conversation fixture is committed to this repository.
 
+### Unanswered turns and old-task contamination
+
+When a saved history ends with a user prompt or a completed tool result, the
+next user request must start a new turn. CC 2.1.301's actual resume request
+inserts an assistant `No response requested.` sentinel in this case. Its local
+`src/utils/conversationRecovery.ts` implements the same rule. The
+[Messages API reference](https://platform.claude.com/docs/en/api/typescript/messages/create)
+explains that consecutive user messages are combined into a single turn.
+
+An Opus 4.8 control kept the same 23 historical messages, tools, system prompt,
+adaptive thinking, effort and route. Without the sentinel, two requests added
+old profile/build claims after the correct file answer. Adding only the sentinel
+made both intervening requests return exactly the requested answer. Native CC
+also completed the imported-history Read journey correctly. Replacing static
+agent guidance or changing high to xhigh alone did not fix the old-task prose.
+These controls locate a continuation defect; they do not establish the first
+historical `course` token's origin. All four sentinel controls produced zero
+new standalone labels.
+
+The shared runtime appends the sentinel before a new external turn when the
+previous turn is unanswered. It preserves existing history, including tool
+results and signed thinking, and leaves in-flight tool continuations alone.
+The portable PTY regression
+`resumed_unanswered_turns_end_before_new_requests_without_rewriting_history`
+resumes a tool tail in both renderers, starts and continues a new task, exits,
+resumes again, and verifies the exact old history and stable wire prefix. It
+also covers a plain unanswered user prompt and a completed turn that needs no
+sentinel. It runs in the ordinary workspace CI suite.
+
+The fixed executable passed this funded Read/answer/restart workflow with the
+same old history on Opus 4.8, both through a controlled route and through normal
+gateway routing. Both runs made three successful API requests, replayed signed
+thinking, returned exact answers, and generated no standalone labels or old-task
+prose. All four later requests had positive cache reads. The previous messages
+remained an exact prefix after removing cache markers; system, tools, thinking,
+effort and routing identity stayed unchanged. The new regression fails against
+the pre-fix executable and passes all four cases against the fixed executable.
+
+A separate 117-message history with 164 old standalone labels still produced
+new `course` text when the new request was only `continue`: both controls without
+the sentinel and one of two controls with it reproduced the label. These were
+raw provider response captures; none of the proposed tools were executed. The
+sentinel therefore fixes the demonstrated new-task contamination without
+establishing that a heavily polluted history can safely continue unchanged.
+
 The copied history redacts API keys from every proxy profile in the selected
 config, including inactive profiles. Startup records the replacement count.
 The recording proxy also rejects bodies containing any of those keys before

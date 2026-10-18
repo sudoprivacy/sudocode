@@ -319,6 +319,34 @@ These protocol changes do not establish the
 original cause of the historical course output. Strict signature-prefix
 recovery and newer per-message effort remain separate follow-up work.</p>
 
+<h4>Unanswered turn boundaries (2026-10-19)</h4>
+<p><strong>CCB validation:</strong> native CC 2.1.301 restored the same 23-message
+history and inserted an assistant <code>No response requested.</code> after its
+last tool result. Local CC <code>src/utils/conversationRecovery.ts</code> documents
+the resume sentinel. The Anthropic Messages API combines consecutive user
+messages into one turn. In a controlled A/B/B/A sequence, adding only this
+sentinel stopped Opus 4.8 from adding old profile/build claims after a fresh
+Read result; removing it restored those claims. Static prompt replacement and
+xhigh effort alone did not fix that behavior.</p>
+<p>The shared runtime closes unanswered user/tool tails before accepting a new
+external turn, appending to existing history without rewriting signatures or
+tool results. Existing tool-loop continuations and completed turns retain their
+behavior. A portable PTY journey covers both renderers, a new task and follow-up,
+restart, durable history, sentinel uniqueness, and the request prefix.</p>
+<p><strong>Verification:</strong> the regression fails against the old executable
+and passes against the fix. All 21 cache-prefix PTY journeys passed. Real Opus
+4.8 completed the same polluted-history Read/answer/restart journey on both a
+controlled route and normal gateway routing: six successful requests, signed
+thinking replay, exact answers without old-task prose, positive cache reads on
+all four later requests, and unchanged system/tool/message prefixes.</p>
+<p>This finding explains new-task contamination in the 23-message history. None
+of those four controls generated a new standalone course/card/court line.
+A separate 117-message history with 164 old labels still generated course on
+one of two <code>continue</code> controls with the sentinel, so this change does
+not establish recovery from every polluted history. Proposed tools were never
+executed in that response-only experiment. The initial historical label remains
+unresolved.</p>
+
 <h4>Rejected thinking replay recovery (2026-10-19)</h4>
 <p><strong>CCB validation:</strong> read <code>src/utils/messages.ts</code>
 (<code>stripSignatureBlocks</code> and orphaned thinking normalization),

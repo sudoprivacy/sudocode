@@ -203,6 +203,18 @@ def run(binary, root):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--scode', required=True, type=Path)
+    parser.add_argument('--artifacts', type=Path,
+                        help='Copy service runtime logs here when acceptance fails')
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='scode-services-') as temporary:
-        run(options.scode.resolve(), Path(temporary))
+        root = Path(temporary)
+        try:
+            run(options.scode.resolve(), root)
+        except BaseException:
+            if options.artifacts:
+                for log in root.rglob('runtime*.log'):
+                    destination = options.artifacts / log.relative_to(root)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(log, destination)
+                print(f'Service failure logs: {options.artifacts}', flush=True)
+            raise

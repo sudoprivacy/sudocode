@@ -38,4 +38,13 @@ jobs:
           set -euo pipefail
           SUFFIX=''
           if [ "$RUNNER_OS" = 'Windows' ]; then SUFFIX='.exe'; fi
-          python e2e/shared-services/run.py --scode "rust/target/debug/scode${SUFFIX}"
+          python e2e/shared-services/run.py --scode "rust/target/debug/scode${SUFFIX}" \
+            --artifacts "${{ runner.temp }}/scode-services-evidence"
+      - name: Preserve service startup failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-services-failure-${{ matrix.os }}
+          path: ${{ runner.temp }}/scode-services-evidence
+          if-no-files-found: ignore
+          retention-days: 7

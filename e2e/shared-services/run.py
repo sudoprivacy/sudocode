@@ -2,6 +2,7 @@
 import argparse
 import base64
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 import json
 import os
 import shutil
@@ -66,6 +67,27 @@ class Rpc:
         self.child.wait(timeout=45)
 
 
+@contextmanager
+def retiring_service_lock(root):
+    """Model a retiring owner with the same real OS lifetime lock as the daemon."""
+    with (root / 'run/service.lock').open('a+b') as lock:
+        lock.seek(0)
+        if os.name == 'nt':
+            import msvcrt
+            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            if os.name == 'nt':
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def run(binary, root):
     unrelated = root / 'unrelated-identity' / 'identity.json'
     unrelated.parent.mkdir()
@@ -78,8 +100,14 @@ def run(binary, root):
         assert not a.request('service.checkInstalled')['installed']
         a.request('service.install', timeout=600)
         with ThreadPoolExecutor(2) as workers:
-            first = workers.submit(a.request, 'service.start')
-            second = workers.submit(b.request, 'service.start')
+            # A shutdown response can precede release of the daemon's lock. A
+            # losing launcher is not a future owner: both real frontend start
+            # requests must recover when that retiring owner releases the lock.
+            with retiring_service_lock(root):
+                first = workers.submit(a.request, 'service.start')
+                second = workers.submit(b.request, 'service.start')
+                time.sleep(4)
+                assert not first.done() and not second.done(), 'Startup ignored the lifetime owner'
             first, second = first.result(), second.result()
         assert first['nexusPid'] == second['nexusPid'] and first['instance'] == second['instance']
         assert first['zone_id'], 'Readiness must name the serving zone'
@@ -87,6 +115,7 @@ def run(binary, root):
         assert all(zone['zone_id'] != 'foreign-fixture-zone' for zone in identity['zones'])
         assert unrelated.read_text(encoding='utf-8') == unrelated_body
         print('PASS: concurrent clients share one authenticated ready service', flush=True)
+        print('PASS: concurrent start requests survive a retiring lifetime-lock owner', flush=True)
         plugins = a.request('service.checkInstalled')['plugins']
         assert len(plugins) >= 2, 'Vault and local connector must be present'
         log = (root / 'run/runtime.log').read_text(encoding='utf-8')

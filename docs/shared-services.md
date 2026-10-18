@@ -24,6 +24,12 @@ connection token. Closing a frontend closes its process channel; the shared
 service continues serving its other clients. An explicit shutdown drains requests
 and releases the Nexus child. Managed runtimes keep the service in use.
 
+Startup observes the same lifetime lock while a previous owner drains. A daemon
+that loses the lock race exits rather than queueing to become an unexpected
+future service. Its frontend reaps it and keeps observing ownership within the
+original startup deadline; a vacant lock permits another launch. Authenticated
+discovery, not a process exit or lock acquisition alone, establishes readiness.
+
 `data/` holds durable Nexus and Vault content. `identity/` holds the service's
 transport peer and zone membership identity, scoped to the same managed root.
 `run/` holds discovery, locks and
@@ -71,7 +77,8 @@ CLI on Linux, Windows and both macOS architectures. Its
 [process harness](../e2e/shared-services/run.py) verifies signed runtime loading,
 concurrent discovery, broker authentication, Vault versions, typed links, session
 waits, runtime ownership and durable recovery after restart and installation
-repair.
+repair. A controlled real OS-lock handoff also checks that concurrent frontend
+start requests recover after a retiring owner releases its lifetime lock.
 
 ```sh
 cargo build --manifest-path rust/Cargo.toml -p rusty-sudocode-cli

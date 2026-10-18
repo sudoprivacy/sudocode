@@ -155,11 +155,7 @@ fn is_serving(http: &reqwest::blocking::Client, discovery: &Discovery) -> bool {
     })
 }
 
-fn ensure_runtime(root: &Path, http: &reqwest::blocking::Client) -> Result<Discovery> {
-    if let Some(discovery) = read_discovery(root).filter(|discovery| is_serving(http, discovery)) {
-        return Ok(discovery);
-    }
-    install(root)?;
+fn spawn_runtime(root: &Path) -> Result<Child> {
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["service", "daemon"])
@@ -173,7 +169,15 @@ fn ensure_runtime(root: &Path, http: &reqwest::blocking::Client) -> Result<Disco
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let mut child = command.spawn()?;
+    Ok(command.spawn()?)
+}
+
+fn ensure_runtime(root: &Path, http: &reqwest::blocking::Client) -> Result<Discovery> {
+    if let Some(discovery) = read_discovery(root).filter(|discovery| is_serving(http, discovery)) {
+        return Ok(discovery);
+    }
+    install(root)?;
+    let mut child: Option<Child> = None;
     let deadline = Instant::now() + Duration::from_secs(40);
     loop {
         if let Some(discovery) =
@@ -181,32 +185,44 @@ fn ensure_runtime(root: &Path, http: &reqwest::blocking::Client) -> Result<Disco
         {
             return Ok(discovery);
         }
-        // A concurrent launcher may exit after losing the singleton lock.
-        // Readiness remains owned by the authenticated discovery response.
-        if let Some(status) = child.try_wait()? {
+        // Losing a launch race does not transfer our start request to an owner
+        // that may already be draining. Reap that launcher and observe the
+        // lifetime lock again; only authenticated discovery establishes readiness.
+        if let Some(status) = child.as_mut().map(Child::try_wait).transpose()?.flatten() {
             if !status.success() {
                 return Err(format!(
                     "Sudocode service startup failed ({status}); inspect the service runtime log"
                 )
                 .into());
             }
+            child = None;
         }
         if Instant::now() >= deadline {
-            // Distinguish a lost launcher from an owner still starting/draining.
-            // Probe only after the readiness deadline, without changing startup.
             let lock = lock_file(root, "service.lock")?;
             let owner = match lock.try_lock_exclusive() {
                 Ok(()) => "vacant",
                 Err(error) if is_lock_contention(&error) => "held",
                 Err(error) => return Err(error.into()),
             };
-            let launcher = child
-                .try_wait()?
-                .map_or_else(|| "running".to_owned(), |status| status.to_string());
+            let launcher = child.as_ref().map_or("none", |_| "running");
             return Err(format!(
                 "Sudocode service did not become ready (launcher: {launcher}, service lock: {owner}); inspect the service runtime log"
             )
             .into());
+        }
+        if child.is_none() {
+            let lock = lock_file(root, "service.lock")?;
+            match lock.try_lock_exclusive() {
+                Ok(()) => {
+                    // Do not queue extra daemons behind an active lifetime lock.
+                    // Another starter can win after this probe; its loser exits
+                    // and is reaped above, without extending the start deadline.
+                    drop(lock);
+                    child = Some(spawn_runtime(root)?);
+                }
+                Err(error) if is_lock_contention(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }

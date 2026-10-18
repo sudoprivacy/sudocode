@@ -299,7 +299,13 @@ use `extraBody`.
 
 ### Anthropic thinking and prompt-cache continuity
 
-The model-capability table owns the Anthropic thinking mode. Opus 5.5
+The model-capability table owns the Anthropic thinking mode. Opus 4.8 uses
+`thinking: {"type": "adaptive", "display": "summarized"}` when thinking is
+enabled, with reasoning effort under `output_config.effort`. Turning thinking
+off omits the thinking configuration. Manual `budget_tokens` are unsupported
+on this model. See the [thinking configuration table](https://platform.claude.com/docs/en/build-with-claude/thinking#configuring-thinking).
+
+Opus 5.5
 requires adaptive thinking; scode sends `thinking.type: "adaptive"` and maps
 the session's reasoning effort to `output_config.effort`, not the OpenAI
 top-level `reasoning_effort` field. An unset effort uses the provider's

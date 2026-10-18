@@ -36,6 +36,8 @@ const BUNDLED_CAPABILITIES: &str = include_str!("model-capabilities.bundled.json
 pub enum AnthropicThinkingMode {
     #[default]
     Budgeted,
+    /// Adaptive thinking when enabled; omitting it turns reasoning off.
+    Adaptive,
     /// The model rejects manual budgets and disabled thinking. The setting can
     /// request/omit readable summaries, but cannot turn off model reasoning.
     AdaptiveAlways,

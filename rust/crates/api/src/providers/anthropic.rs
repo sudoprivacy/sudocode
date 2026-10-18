@@ -1466,26 +1466,19 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
         // budget is large enough to host a thinking budget; otherwise fall back
         // to no thinking (a model whose max output is <= 1024 cannot think).
         //
-        // Do not migrate budgeted models wholesale to adaptive.
-        // Anthropic's own guidance deprecates `budget_tokens` in favour of
-        // adaptive on 4.6+ models, so this block reads like stale code — but
-        // that guidance describes the first-party API, and we do not talk to
-        // it. Every request here goes out over a proxy route, and on that route
-        // adaptive was measured to bill `thinking_tokens` as usual while
-        // returning an empty string as the visible text. Paying for reasoning
-        // and rendering nothing is strictly worse than not thinking at all,
-        // which is exactly what a documentation-driven cleanup would ship.
-        // `thinking_budget_is_explicit_not_adaptive` pins the wire shape so the
-        // swap cannot land silently; if you are here to make adaptive work,
-        // verify end-to-end that non-empty text comes back on the proxy route
-        // first, and change the test in the same commit as the code.
-        if runtime::model_capabilities::anthropic_thinking_mode(&request.model)
-            == runtime::model_capabilities::AnthropicThinkingMode::AdaptiveAlways
+        // Select the wire contract per model. Opus 4.8 rejects manual budgets;
+        // Opus 5.5 additionally rejects disabled thinking. Legacy budgeted
+        // models retain their validated route behavior: do not switch those
+        // without live acceptance of readable output and tool continuations.
+        let thinking_mode = runtime::model_capabilities::anthropic_thinking_mode(&request.model);
+        if thinking_mode == runtime::model_capabilities::AnthropicThinkingMode::AdaptiveAlways
+            || (thinking_mode == runtime::model_capabilities::AnthropicThinkingMode::Adaptive
+                && request.thinking_enabled)
         {
-            // This model rejects budget_tokens and disabled thinking. Visibility
-            // is explicit because its default is omitted; signatures must still
-            // round-trip in either display mode. Neither mode nor effort depends
-            // on max_tokens: compaction must share the ordinary turn's prefix.
+            // Adaptive models reject budget_tokens. Always-on models use display
+            // to hide summaries; optional models omit thinking when disabled.
+            // Mode and effort stay independent of the output cap so compaction
+            // can reuse the ordinary turn's prefix.
             object.insert(
                 "thinking".into(),
                 serde_json::json!({

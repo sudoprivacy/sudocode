@@ -22,6 +22,8 @@ python e2e/thinking/run.py C:/path/to/scode.exe --profile sudorouter --model cla
 python e2e/thinking/run.py C:/path/to/scode.exe --profile sudorouter --model claude-sonnet-4-6 --effort high --check-context --artifacts C:/path/to/artifacts
 # Require a nonempty thinking summary and preserve its text and signature:
 python e2e/thinking/run.py C:/path/to/scode.exe --profile sudorouter --model claude-sonnet-4-6 --thinking-display summarized --effort high --check-context --artifacts C:/path/to/artifacts
+# Verify Opus 4.8's native thinking configuration through the same real journey:
+python e2e/thinking/run.py C:/path/to/scode.exe --model claude-opus-4-8 --preserve-thinking --thinking-display summarized --effort high --check-context --artifacts C:/path/to/artifacts
 ```
 
 Credentials come from the named proxy profile in
@@ -38,6 +40,12 @@ or `high`. The startup output records both controls. It caps each response at
 2048 tokens and permits at most five message requests. The expected journey
 uses three requests. This validates signed-block preservation with that
 explicit profile; it does not test the CLI's default thinking configuration.
+
+`--preserve-thinking` instead passes the selected effort to the CLI, checks its
+actual thinking and effort fields, and forwards those fields unchanged. This
+detects the Opus 4.8 regression where the CLI sent an unsupported manual budget.
+The 2048-token response cap and five-request limit still apply. Normal runs use
+gateway routing; `--upstream-channel` is only for a controlled route comparison.
 
 `--check-context` adds a fresh random nonce to the fixture's `AGENTS.md`,
 checks that the CLI sends it in system context, and requires its exact value

@@ -41,6 +41,11 @@ parser.add_argument(
     help="Recorded adaptive thinking effort",
 )
 parser.add_argument(
+    "--preserve-thinking",
+    action="store_true",
+    help="Validate the CLI's thinking/effort fields and forward them unchanged",
+)
+parser.add_argument(
     "--check-context",
     action="store_true",
     help="Require the exact project instruction nonce in both answers",
@@ -239,9 +244,19 @@ class Proxy(BaseHTTPRequestHandler):
                     session_id
                 ), "CLI did not preserve the selected diagnostic session id"
             body["max_tokens"] = 2048
-            # Preserve the selected thinking profile throughout the tool journey.
-            body["thinking"] = {"type": "adaptive", "display": args.thinking_display}
-            body["output_config"] = {"effort": args.effort}
+            expected_thinking = {"type": "adaptive", "display": args.thinking_display}
+            if args.preserve_thinking:
+                if body.get("thinking") != expected_thinking or (
+                    body.get("output_config", {}).get("effort") != args.effort
+                ):
+                    errors.append(
+                        "CLI thinking/effort fields differ from the required native profile"
+                    )
+                    self.send_error(400, "native thinking configuration check failed")
+                    return
+            else:
+                body["thinking"] = expected_thinking
+                body["output_config"] = {"effort": args.effort}
             if args.drop_global_cache_scope:
                 system = body.get("system")
                 if isinstance(system, list) and system:
@@ -406,6 +421,8 @@ command = [
     "--resume",
     str(session),
 ]
+if args.preserve_thinking:
+    command.extend(["--reasoning-effort", args.effort])
 proc = None
 raw_pty = []
 
@@ -483,6 +500,7 @@ try:
                 "profile": args.profile,
                 "model": args.model,
                 "thinking_control": "adaptive-" + args.thinking_display,
+                "preserve_cli_thinking": args.preserve_thinking,
                 "effort": args.effort,
                 "check_context": args.check_context,
                 "session_id": session_id,
@@ -516,12 +534,16 @@ try:
             ),
             flush=True,
         )
-    read_prompt = "Read values.txt with the Read tool. Return only READ_DONE <code from file> sum=<a+b>."
+    fixture_path = json.dumps(fixture.as_posix())
+    read_prompt = (
+        f"Read {fixture_path} with the Read tool. "
+        "Return only READ_DONE <code from file> sum=<a+b>."
+    )
     read_expected = f"READ_DONE {code} sum={a + b}"
     resume_expected = f"RESUME_DONE {code} value={a + b - 17}"
     if context_nonce:
         read_prompt = (
-            "Read values.txt with the Read tool. Return only READ_DONE "
+            f"Read {fixture_path} with the Read tool. Return only READ_DONE "
             "<code from file> sum=<a+b> context=<diagnostic_nonce from project instructions>."
         )
         read_expected += f" context={context_nonce}"

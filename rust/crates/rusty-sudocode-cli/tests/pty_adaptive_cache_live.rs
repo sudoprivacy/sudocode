@@ -1,5 +1,5 @@
-//! Real Opus 5.5 acceptance; mock payload assertions live in pty_cache_prefix.
-//! SCODE_TEST_BACKEND=live SCODE_LIVE_MODEL=claude-opus-5-5
+//! Real adaptive Opus acceptance; mock payload assertions live in pty_cache_prefix.
+//! SCODE_TEST_BACKEND=live SCODE_LIVE_MODEL=claude-opus-4-8
 //! SCODE_LIVE_AUTH_PROFILE=<account> cargo test --test pty_adaptive_cache_live -- --nocapture
 //! Set SCODE_ADAPTIVE_DISPLAY=omitted for the hidden-summary acceptance arm.
 mod common;
@@ -131,8 +131,13 @@ fn without_cache_markers(mut value: Value) -> Value {
 #[test]
 fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
     let env = common::TestEnv::new("adaptive-cache-live");
-    if env.is_mock() || common::live_model() != "claude-opus-5-5" {
-        eprintln!("SKIP: requires live backend and SCODE_LIVE_MODEL=claude-opus-5-5");
+    if env.is_mock()
+        || !matches!(
+            common::live_model().as_str(),
+            "claude-opus-4-8" | "claude-opus-5-5"
+        )
+    {
+        eprintln!("SKIP: requires live backend and Opus 4.8 or 5.5");
         return;
     }
     let display =

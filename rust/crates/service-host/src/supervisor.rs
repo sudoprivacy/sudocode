@@ -192,9 +192,21 @@ fn ensure_runtime(root: &Path, http: &reqwest::blocking::Client) -> Result<Disco
             }
         }
         if Instant::now() >= deadline {
-            return Err(
-                "Sudocode service did not become ready; inspect the service runtime log".into(),
-            );
+            // Distinguish a lost launcher from an owner still starting/draining.
+            // Probe only after the readiness deadline, without changing startup.
+            let lock = lock_file(root, "service.lock")?;
+            let owner = match lock.try_lock_exclusive() {
+                Ok(()) => "vacant",
+                Err(error) if is_lock_contention(&error) => "held",
+                Err(error) => return Err(error.into()),
+            };
+            let launcher = child
+                .try_wait()?
+                .map_or_else(|| "running".to_owned(), |status| status.to_string());
+            return Err(format!(
+                "Sudocode service did not become ready (launcher: {launcher}, service lock: {owner}); inspect the service runtime log"
+            )
+            .into());
         }
         std::thread::sleep(Duration::from_millis(100));
     }

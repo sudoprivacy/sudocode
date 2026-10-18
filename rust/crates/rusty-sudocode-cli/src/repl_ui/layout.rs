@@ -56,7 +56,10 @@ pub(super) fn ansi_with_style(
     text: impl AsRef<str>,
     initial_style: crossterm::style::ContentStyle,
 ) -> Arc<StyledText> {
-    Arc::new(StyledText::from_ansi_with_style(text.as_ref(), initial_style))
+    Arc::new(StyledText::from_ansi_with_style(
+        text.as_ref(),
+        initial_style,
+    ))
 }
 
 pub(super) struct Slot {

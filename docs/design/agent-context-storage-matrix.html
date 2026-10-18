@@ -535,8 +535,10 @@ available execution, work and awaiting input.</p>
 <p id="shared-session-context"><b>Shared session history and context.</b> Authorized
 Agent indexes can reference the same SID, and several runtimes can append its
 durable history. Messages retain stable identities, parent relationships and
-tool-call associations. Each runtime continues its selected context chain;
-resume selects a durable continuation. Compaction changes that context's view
+tool-call associations. Each runtime continues its selected context chain.
+A new runtime resumes from the most recently completed turn; another runtime's
+in-flight turn and tool results remain on that runtime's branch. Opening a
+sibling does not repair or consume its unfinished calls. Compaction changes that context's view
 while preserving the other continuations and their referenced content. The
 <a href="../../sudo-code-roadmap.html#shared-sid-implementation">implementation and acceptance tasks</a>
 describe the shared runtime layer and host adoption.</p>

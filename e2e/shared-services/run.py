@@ -7,6 +7,7 @@ import os
 import shutil
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -66,6 +67,37 @@ class Rpc:
         self.child.wait(timeout=45)
 
 
+def exercise_retiring_supervisor(client, root):
+    if sys.platform != 'linux':
+        return
+    import fcntl
+
+    # Represent a supervisor that still owns the native lifetime lock while
+    # retiring. Observe the real losing launcher exit before releasing it.
+    with (root / 'run/service.lock').open('a+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        starting = client.submit('service.start')
+        deadline = time.monotonic() + 15
+        children = set()
+        try:
+            while not children:
+                for path in Path(f'/proc/{client.child.pid}/task').glob('*/children'):
+                    try:
+                        children.update(int(pid) for pid in path.read_text().split())
+                    except FileNotFoundError:
+                        pass
+                assert time.monotonic() < deadline, 'Service launcher was not observed'
+                time.sleep(0.001)
+            while any(Path(f'/proc/{pid}').exists() for pid in children):
+                assert time.monotonic() < deadline, 'Losing service launcher did not exit'
+                time.sleep(0.005)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+    recovered = starting.result(60)
+    assert recovered['nexusPid'] and recovered['instance']
+    print('PASS: a losing launcher recovers after the previous supervisor retires', flush=True)
+
+
 def run(binary, root):
     unrelated = root / 'unrelated-identity' / 'identity.json'
     unrelated.parent.mkdir()
@@ -77,6 +109,7 @@ def run(binary, root):
     try:
         assert not a.request('service.checkInstalled')['installed']
         a.request('service.install', timeout=600)
+        exercise_retiring_supervisor(a, root)
         with ThreadPoolExecutor(2) as workers:
             first = workers.submit(a.request, 'service.start')
             second = workers.submit(b.request, 'service.start')

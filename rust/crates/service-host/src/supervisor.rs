@@ -181,6 +181,11 @@ fn ensure_runtime(root: &Path, http: &reqwest::blocking::Client) -> Result<Disco
         {
             return Ok(discovery);
         }
+        if Instant::now() >= deadline {
+            return Err(
+                "Sudocode service did not become ready; inspect the service runtime log".into(),
+            );
+        }
         // A concurrent launcher may exit after losing the singleton lock.
         // Readiness remains owned by the authenticated discovery response.
         if let Some(status) = child.try_wait()? {
@@ -190,11 +195,18 @@ fn ensure_runtime(root: &Path, http: &reqwest::blocking::Client) -> Result<Disco
                 )
                 .into());
             }
-        }
-        if Instant::now() >= deadline {
-            return Err(
-                "Sudocode service did not become ready; inspect the service runtime log".into(),
-            );
+            // The winning supervisor may be retiring or may have failed before
+            // publishing discovery. Once its lifetime lock is free, launch a
+            // replacement instead of waiting for readiness from an exited owner.
+            let lock = lock_file(root, "service.lock")?;
+            match lock.try_lock_exclusive() {
+                Ok(()) => {
+                    drop(lock);
+                    child = command.spawn()?;
+                }
+                Err(error) if is_lock_contention(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }

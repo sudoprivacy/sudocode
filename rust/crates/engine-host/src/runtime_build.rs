@@ -798,7 +798,8 @@ pub(crate) fn build_runtime_with_plugin_state(
         Directory::new(members)
     };
     tool_executor.set_directory(std::sync::Arc::new(directory));
-    let runtime = ConversationRuntime::new_with_features(
+    let session_tracer = client.session_tracer().cloned();
+    let mut runtime = ConversationRuntime::new_with_features(
         session,
         client,
         tool_executor,
@@ -808,6 +809,11 @@ pub(crate) fn build_runtime_with_plugin_state(
     )
     .with_session_known_date(runtime::today_local())
     .with_session_known_model(config.model.clone());
+    // Runtime maintenance and provider requests must share the session's
+    // existing local trace sink, including signed-history recovery notices.
+    if let Some(tracer) = session_tracer {
+        runtime = runtime.with_session_tracer(tracer);
+    }
     // Live plugin-hook progress rides the seam: the observer (the seam's
     // `engine-core` adapter) installs its `HookProgressSink` as the runtime's
     // `hook_progress_reporter` at the start of each turn, so no reporter is

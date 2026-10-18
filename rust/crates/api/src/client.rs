@@ -118,6 +118,32 @@ impl ProviderClient {
                 // carries; the reserved list covers the ones it omits when
                 // unset (e.g. `stream` when false).
                 for (key, value) in &resolved.extra_body {
+                    if key == "betas" {
+                        let mut betas: Vec<String> = serde_json::from_value(value.clone())
+                            .map_err(|_| {
+                                ApiError::Configuration(
+                                    "Anthropic extraBody.betas must be an array of strings".into(),
+                                )
+                            })?;
+                        if betas.iter().any(|beta| {
+                            beta.is_empty()
+                                || !beta
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                        }) {
+                            return Err(ApiError::Configuration(
+                                "Anthropic extraBody.betas contains an invalid beta name".into(),
+                            ));
+                        }
+                        let profile = client.request_profile().clone();
+                        if profile.betas.iter().any(|beta| beta == "oauth-2025-04-20")
+                            && !betas.iter().any(|beta| beta == "oauth-2025-04-20")
+                        {
+                            betas.push("oauth-2025-04-20".into());
+                        }
+                        client = client.with_request_profile(profile.with_betas(betas));
+                        continue;
+                    }
                     if crate::types::is_reserved_request_body_key(key) {
                         continue;
                     }

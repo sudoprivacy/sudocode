@@ -357,6 +357,10 @@ impl AnthropicClient {
 
     #[must_use]
     pub fn with_extra_body_param(mut self, key: impl Into<String>, value: Value) -> Self {
+        let key = key.into();
+        if key == "thinking" && value.get("block_binding").is_some() {
+            self.request_profile = self.request_profile.with_beta(THINKING_BINDING_BETA);
+        }
         self.request_profile = self.request_profile.with_extra_body(key, value);
         self
     }
@@ -444,13 +448,25 @@ impl AnthropicClient {
             ApiError::json_deserialize("Anthropic", &request.model, &body, error)
         })?;
         let refusal = crate::sse::refusal_from_response(&raw, "Anthropic", &request.model);
-        let metadata =
-            cache_diagnostics_enabled().then(|| crate::sse::MessageMetadata::from_message(&raw));
+        let metadata = (cache_diagnostics_enabled()
+            || self
+                .request_profile
+                .betas
+                .iter()
+                .any(|beta| beta == THINKING_BINDING_BETA))
+        .then(|| crate::sse::MessageMetadata::from_message(&raw));
         let mut response = serde_json::from_value::<MessageResponse>(raw).map_err(|error| {
             ApiError::json_deserialize("Anthropic", &request.model, &body, error)
         })?;
         if let Some(metadata) = metadata {
-            self.cache_diagnostics.observe(metadata);
+            record_thinking_transformations(
+                &metadata,
+                self.session_tracer(),
+                Some(&result.request_id),
+            );
+            if cache_diagnostics_enabled() {
+                self.cache_diagnostics.observe(metadata);
+            }
         }
         if response.request_id.is_none() {
             response.request_id = request_id;
@@ -518,7 +534,14 @@ impl AnthropicClient {
             response: result.response,
             parser: SseParser::new()
                 .with_context("Anthropic", request.model.clone())
-                .with_message_metadata(cache_diagnostics_enabled()),
+                .with_message_metadata(
+                    cache_diagnostics_enabled()
+                        || self
+                            .request_profile
+                            .betas
+                            .iter()
+                            .any(|beta| beta == THINKING_BINDING_BETA),
+                ),
             pending: VecDeque::new(),
             done: false,
             logically_complete: false,
@@ -1215,10 +1238,15 @@ impl MessageStream {
     }
 
     fn observe_message_metadata(&mut self) {
-        if let (Some(diagnostics), Some(metadata)) =
-            (&self.cache_diagnostics, self.parser.take_message_metadata())
-        {
-            diagnostics.observe(metadata);
+        if let Some(metadata) = self.parser.take_message_metadata() {
+            record_thinking_transformations(
+                &metadata,
+                self.session_tracer.as_ref(),
+                self.client_request_id.as_deref(),
+            );
+            if let Some(diagnostics) = &self.cache_diagnostics {
+                diagnostics.observe(metadata);
+            }
         }
     }
 
@@ -1479,11 +1507,23 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
             // to hide summaries; optional models omit thinking when disabled.
             // Mode and effort stay independent of the output cap so compaction
             // can reuse the ordinary turn's prefix.
-            object.insert(
-                "thinking".into(),
-                serde_json::json!({
-                    "type": "adaptive",
-                    "display": if request.thinking_enabled { "summarized" } else { "omitted" },
+            let thinking = object
+                .entry("thinking")
+                .or_insert_with(|| serde_json::json!({}));
+            if !thinking.is_object() {
+                *thinking = serde_json::json!({});
+            }
+            let thinking = thinking
+                .as_object_mut()
+                .expect("thinking object initialized");
+            thinking.remove("budget_tokens");
+            thinking.insert("type".into(), serde_json::json!("adaptive"));
+            thinking.insert(
+                "display".into(),
+                serde_json::json!(if request.thinking_enabled {
+                    "summarized"
+                } else {
+                    "omitted"
                 }),
             );
         } else if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
@@ -1542,6 +1582,51 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
 
 /// Beta that turns on Anthropic's server-side cache diagnosis.
 const CACHE_DIAGNOSIS_BETA: &str = "cache-diagnosis-2026-04-07";
+const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+
+/// Record acknowledgment and bounded enum/path metadata, never provider blocks.
+fn record_thinking_transformations(
+    metadata: &crate::sse::MessageMetadata,
+    tracer: Option<&SessionTracer>,
+    request_id: Option<&str>,
+) {
+    let (Some(tracer), Some(transformations)) = (
+        tracer,
+        metadata
+            .input_transformations
+            .as_ref()
+            .and_then(Value::as_array),
+    ) else {
+        return;
+    };
+    let safe: Vec<Value> = transformations
+        .iter()
+        .take(128)
+        .map(|entry| {
+            let mut safe = serde_json::Map::new();
+            for key in ["type", "reason", "path"] {
+                if let Some(value) = entry.get(key).and_then(Value::as_str).filter(|value| {
+                    value.len() <= 160
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'))
+                }) {
+                    safe.insert(key.into(), Value::String(value.into()));
+                }
+            }
+            Value::Object(safe)
+        })
+        .collect();
+    tracer.record(
+        "thinking_input_transformations",
+        serde_json::json!({
+            "request_id":request_id, "count":transformations.len(), "transformations":safe
+        })
+        .as_object()
+        .expect("metadata object")
+        .clone(),
+    );
+}
 
 /// Whether to ask the API where the prompt cache broke
 /// (`SUDOCODE_CACHE_DIAGNOSTICS=1`).

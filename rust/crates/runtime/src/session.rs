@@ -860,6 +860,31 @@ impl Session {
         path: impl AsRef<Path>,
         expected_revision: Option<&str>,
     ) -> Result<(), SessionError> {
+        self.save_replacement_to_path_checked(original, path.as_ref(), expected_revision, "compact")
+    }
+
+    /// Preserve rejected signed history before installing a thinking-only repair.
+    pub fn save_thinking_repaired_to_path_checked(
+        &self,
+        original: &Session,
+        path: impl AsRef<Path>,
+        expected_revision: Option<&str>,
+    ) -> Result<(), SessionError> {
+        self.save_replacement_to_path_checked(
+            original,
+            path.as_ref(),
+            expected_revision,
+            "thinking-repair",
+        )
+    }
+
+    fn save_replacement_to_path_checked(
+        &self,
+        original: &Session,
+        path: &Path,
+        expected_revision: Option<&str>,
+        purpose: &str,
+    ) -> Result<(), SessionError> {
         let path = path.as_ref();
         let writer = self.writer_for(path)?;
         let _write = writer
@@ -878,7 +903,7 @@ impl Session {
             return Err(SessionError::SourceChanged);
         }
         let archive = format!(
-            "{}.before-compact-{}",
+            "{}.before-{purpose}-{}",
             path.display(),
             current_time_millis()
         );

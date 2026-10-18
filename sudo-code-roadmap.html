@@ -319,6 +319,50 @@ These protocol changes do not establish the
 original cause of the historical course output. Strict signature-prefix
 recovery and newer per-message effort remain separate follow-up work.</p>
 
+<h4>Rejected thinking replay recovery (2026-10-19)</h4>
+<p><strong>CCB validation:</strong> read <code>src/utils/messages.ts</code>
+(<code>stripSignatureBlocks</code> and orphaned thinking normalization),
+<code>src/query.ts</code> (partial-response cleanup), and
+<code>src/services/api/claude.ts</code> (signed block replay). The installed
+official CC 2.1.301 was driven through ConPTY: after a specific HTTP 400
+invalid-thinking-signature response, it retries once with old thinking removed.
+The original tool calls, results and ordinary text remain. Healthy requests
+retain signed empty thinking. Official preserved-thinking documentation confirms
+that editing system, tools or earlier messages can invalidate later signatures.</p>
+<p><strong>Implementation:</strong> classify only explicit HTTP 400 thinking
+signature or encrypted-data rejection, before streamed output escapes. Archive
+the original durable transcript byte-for-byte and atomically replace only its
+thinking blocks, guarded by the source revision. Preserve message usage and
+tool pairs. Retry within the same iteration once per turn, report a maintenance
+notice through engine-core, and retain newly produced thinking on later turns.
+Preserve explicit <code>thinking.block_binding</code> while selecting adaptive
+thinking. The existing SSE metadata decoder records bounded, sanitized
+<code>input_transformations</code> acknowledgments. Runtime maintenance shares
+the provider's existing local trace sink. Explicit per-model
+<code>extraBody.betas</code> selects supported headers without changing defaults
+or dropping required OAuth authentication. Opus 4.5 exposes its supported
+low/medium/high effort ladder.</p>
+<p><strong>Verification:</strong> all 20 cache-prefix PTY journeys passed,
+including both renderers, exact original-history archives, bounded refusal,
+unrelated 400 errors, a concurrent transcript append, invalid beta configuration,
+and model-switch effort restoration. Real Opus 5.5 read fresh file data, solved
+a congruence problem, exited, resumed with a changed system prefix, received
+an actual HTTP 400 signature rejection, archived/repaired once, recalled the
+result after the file became unavailable, and resumed again with new signatures.
+All five successful responses acknowledged the binding beta. Real Opus 4.8
+again completed the eight-file, compaction and restart journey: 12 requests,
+positive cache reads on all 11 later requests, complete prefix reuse where
+unchanged, and no standalone course/card/court lines in assistant text.</p>
+<p><strong>Retained failures:</strong> the first live binding attempt was
+rejected because the Bedrock bridge refused two legacy default beta headers.
+An explicit beta list fixed that route configuration. A simple low-effort
+fixture produced no signed thinking, so the test required a harder task rather
+than accepting an unexercised repair. A later completed journey exposed a test
+oracle reading an absent numeric failure-status field; it now checks the actual
+400/signature/prefix error evidence. These findings do not establish the first
+historical course seed. Current CC's per-message effort remains a separate
+compatibility gap on the tested bridge.</p>
+
 <h4>PTY test principles</h4>
 
 <ol>

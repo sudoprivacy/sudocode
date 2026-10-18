@@ -658,6 +658,8 @@ fn runtime_error_from_api(
     let message = user_visible_error(session_id, account, model, error);
     if error.is_context_window_failure() {
         RuntimeError::context_window_blocked(message)
+    } else if error.is_thinking_replay_rejected() {
+        RuntimeError::thinking_replay_rejected(message)
     } else {
         RuntimeError::new(message).retryable(error.is_retryable())
     }

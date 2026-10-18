@@ -4,6 +4,7 @@ mod common;
 #[path = "support/request_evidence.rs"]
 mod request_evidence;
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -36,6 +37,8 @@ struct Capture {
     pressure_next: Arc<AtomicBool>,
     thinking_blocks: Arc<AtomicBool>,
     diagnostic_shape: Arc<AtomicUsize>,
+    rejections: Arc<Mutex<VecDeque<String>>>,
+    external_append: Arc<Mutex<Option<(std::path::PathBuf, String)>>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -52,6 +55,10 @@ impl Capture {
         let thinking = Arc::clone(&thinking_blocks);
         let diagnostic_shape = Arc::new(AtomicUsize::new(0));
         let shape = Arc::clone(&diagnostic_shape);
+        let rejections = Arc::new(Mutex::new(VecDeque::new()));
+        let failures = Arc::clone(&rejections);
+        let external_append = Arc::new(Mutex::new(None));
+        let append = Arc::clone(&external_append);
         let stop = Arc::new(AtomicBool::new(false));
         let (captured, retry, pressure, stopped) = (
             Arc::clone(&requests),
@@ -62,9 +69,9 @@ impl Capture {
         let worker = thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((socket, _)) => {
-                        serve(socket, &captured, &retry, &pressure, &thinking, &shape)
-                    }
+                    Ok((socket, _)) => serve(
+                        socket, &captured, &retry, &pressure, &thinking, &shape, &failures, &append,
+                    ),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -79,6 +86,8 @@ impl Capture {
             pressure_next,
             thinking_blocks,
             diagnostic_shape,
+            rejections,
+            external_append,
             stop,
             thread: Some(worker),
         }
@@ -138,6 +147,8 @@ fn serve(
     pressure: &AtomicBool,
     thinking: &AtomicBool,
     diagnostic_shape: &AtomicUsize,
+    rejections: &Mutex<VecDeque<String>>,
+    external_append: &Mutex<Option<(std::path::PathBuf, String)>>,
 ) {
     socket.set_nonblocking(false).unwrap();
     socket
@@ -156,6 +167,9 @@ fn serve(
         return;
     }
     let request: Value = serde_json::from_slice(&bytes).unwrap();
+    let binding = beta
+        .iter()
+        .any(|header| header.contains("thinking-binding-controls-2026-08-01"));
     let number = {
         let mut all = captured.lock().unwrap();
         all.push(CapturedRequest {
@@ -173,6 +187,26 @@ fn serve(
         );
         return;
     }
+    if let Some(message) = rejections.lock().unwrap().pop_front() {
+        if let Some((path, record)) = external_append.lock().unwrap().take() {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(record.as_bytes())
+                .unwrap();
+        }
+        respond(
+            &mut socket,
+            "400 Bad Request",
+            "application/json",
+            &json!({
+                "type":"error", "error":{"type":"invalid_request_error", "message":message}
+            })
+            .to_string(),
+        );
+        return;
+    }
     let content = response_content(&request, number);
     let usage = json!({"input_tokens": if pressure.swap(false, Ordering::Relaxed) { 990_000 } else { 2_000 },"output_tokens":100});
     let tool_use = content["type"] == "tool_use";
@@ -180,9 +214,12 @@ fn serve(
     let shape = diagnostic_shape.load(Ordering::Relaxed);
     let diagnostics = json!({"marker":"缓存诊断 → café", "comparison":"fixture-only"});
     if shape == DIAGNOSTIC_JSON {
-        let body = json!({"type":"message", "id":format!("reply_{number}"),
+        let mut body = json!({"type":"message", "id":format!("reply_{number}"),
             "role":"assistant", "model":request["model"], "content":[content],
             "stop_reason":stop_reason, "usage":usage, "diagnostics":diagnostics});
+        if binding {
+            body["input_transformations"] = json!([]);
+        }
         respond_fragmented(
             &mut socket,
             "application/json",
@@ -230,6 +267,15 @@ fn serve(
         ),
         ("message_stop", json!({"type":"message_stop"})),
     ];
+    if binding {
+        events[0].1["message"]["input_transformations"] = json!([]);
+        if number == 4 {
+            events[4].1["input_transformations"] = json!([{
+                "type":"thinking_dropped", "reason":"model_binding_mismatch",
+                "path":"messages.1.content.0", "signature":"never-log-provider-blocks"
+            }]);
+        }
+    }
     if shape == DIAGNOSTIC_SSE {
         events[0].1["message"]["diagnostics"] = diagnostics;
     }
@@ -371,6 +417,240 @@ fn thinking_blocks_survive_turns_and_resume_without_merging_or_dropping() {
             "unsigned legacy thinking must not invalidate the resumed request"
         );
     }
+}
+
+fn repair_archives(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let prefix = format!(
+        "{}.before-thinking-repair-",
+        path.file_name().unwrap().to_str().unwrap()
+    );
+    std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
+        .collect()
+}
+
+fn without_thinking(mut messages: Value) -> Value {
+    for message in messages.as_array_mut().unwrap() {
+        if message["role"] == "assistant" {
+            message["content"].as_array_mut().unwrap().retain(|block| {
+                block["type"] != "thinking" && block["type"] != "redacted_thinking"
+            });
+        }
+    }
+    messages
+}
+
+#[test]
+fn rejected_thinking_is_archived_once_and_new_signatures_survive_resume() {
+    for mode in ["off", "queue"] {
+        let env = TestEnv::new_mock("thinking-repair-resume");
+        let capture = Capture::new();
+        capture.thinking_blocks.store(true, Ordering::Relaxed);
+        let path = fixture(&env, &capture);
+        let config_path = env.config_home().join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] =
+            json!("claude-opus-5-5");
+        config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":["thinking-binding-controls-2026-08-01"],"thinking":{"block_binding":{"prefix_mismatch_behavior":"error"}}});
+        std::fs::write(config_path, config.to_string()).unwrap();
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "discover CronList");
+        assert_eq!(capture.bodies().len(), 2);
+        let before = Session::load_from_path(&path).unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+        capture.rejections.lock().unwrap().push_back("Invalid `signature` in `thinking` block. The block is bound to a different conversation.".into());
+        turn(
+            &mut cli,
+            "Keep the discovered tool result after signature repair.",
+        );
+        assert_eq!(
+            capture.bodies().len(),
+            4,
+            "one rejection and exactly one repaired request"
+        );
+        let requests = capture.bodies();
+        assert!(requests
+            .iter()
+            .all(|body| body["thinking"]["block_binding"]["prefix_mismatch_behavior"] == "error"));
+        assert!(capture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.beta == ["thinking-binding-controls-2026-08-01"]));
+        fixed_prefix(&requests[2], &requests[3]);
+        assert_eq!(
+            without_thinking(without_cache_markers(requests[2]["messages"].clone())),
+            without_cache_markers(requests[3]["messages"].clone())
+        );
+        let archives = repair_archives(&path);
+        assert_eq!(archives.len(), 1);
+        let archived_bytes = std::fs::read(&archives[0]).unwrap();
+        assert!(
+            archived_bytes.starts_with(&before_bytes),
+            "archive retains the original durable bytes and appended prompt"
+        );
+        let archived = Session::load_from_path(&archives[0]).unwrap();
+        assert_eq!(
+            &archived.messages[..before.messages.len()],
+            before.messages.as_slice()
+        );
+        let repaired = Session::load_from_path(&path).unwrap();
+        for (old, new) in before.messages.iter().zip(&repaired.messages) {
+            let mut expected = old.clone();
+            if expected.role == runtime::MessageRole::Assistant {
+                expected.blocks.retain(|block| {
+                    !matches!(
+                        block,
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                    )
+                });
+            }
+            assert_eq!(
+                &expected, new,
+                "text, tool records and usage stay unchanged"
+            );
+        }
+        turn(
+            &mut cli,
+            "Keep the new signed response on the next request.",
+        );
+        assert_thinking_replayed(capture.bodies().last().unwrap(), 4);
+        exit(&mut cli);
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "Keep the new signed response after restart.");
+        assert_thinking_replayed(capture.bodies().last().unwrap(), 4);
+        assert_eq!(repair_archives(&path).len(), 1);
+        exit(&mut cli);
+        let log = std::fs::read_to_string(env.workspace_root().join("cache-prefix-requests.jsonl"))
+            .unwrap();
+        let events: Vec<Value> = log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event"] == "thinking_history_repaired")
+                .count(),
+            1
+        );
+        let acks: Vec<_> = events
+            .iter()
+            .filter(|e| e["event"] == "thinking_input_transformations")
+            .collect();
+        assert!((5..=6).contains(&acks.len()));
+        let final_updates: Vec<_> = acks
+            .iter()
+            .filter(|e| e["attributes"]["count"] == 1)
+            .collect();
+        assert_eq!(final_updates.len(), 1);
+        assert_eq!(
+            final_updates[0]["attributes"]["transformations"],
+            json!([{
+                "type":"thinking_dropped", "reason":"model_binding_mismatch",
+                "path":"messages.1.content.0"
+            }])
+        );
+        assert!(!log.contains("never-log-provider-blocks"));
+    }
+}
+
+#[test]
+fn thinking_repair_is_bounded_and_unrelated_bad_requests_preserve_history() {
+    for (message, attempts, archives) in [
+        (
+            "Invalid `signature` in `thinking` block. recovery-test-rejection",
+            2,
+            1,
+        ),
+        ("invalid max_tokens recovery-test-rejection", 1, 0),
+    ] {
+        let env = TestEnv::new_mock("thinking-repair-bounded");
+        let capture = Capture::new();
+        let path = fixture(&env, &capture);
+        capture
+            .rejections
+            .lock()
+            .unwrap()
+            .extend([message.to_string(), message.to_string()]);
+        let mut cli = spawn(&env, &path);
+        cli.send("Continue despite the deliberately rejected request.\r")
+            .unwrap();
+        cli.expect("recovery-test-rejection").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "rejected request completed");
+        assert_eq!(capture.bodies().len(), attempts);
+        assert_eq!(repair_archives(&path).len(), archives);
+        exit(&mut cli);
+    }
+}
+
+#[test]
+fn thinking_repair_preserves_a_concurrent_transcript_append() {
+    let env = TestEnv::new_mock("thinking-repair-concurrent");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let record = json!({"type":"message","message":{
+        "role":"user", "blocks":[{"type":"text","text":"EXTERNAL_APPEND_MUST_SURVIVE"}]
+    }})
+    .to_string()
+        + "\n";
+    *capture.external_append.lock().unwrap() = Some((path.clone(), record));
+    capture
+        .rejections
+        .lock()
+        .unwrap()
+        .push_back("Invalid `signature` in `thinking` block.".into());
+    let mut cli = spawn(&env, &path);
+    cli.send("Continue while another writer appends history.\r")
+        .unwrap();
+    cli.expect("Thinking repair preserved history").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "concurrent edit preserved");
+    assert_eq!(capture.bodies().len(), 1);
+    assert!(repair_archives(&path).is_empty());
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("EXTERNAL_APPEND_MUST_SURVIVE"));
+    let session = Session::load_from_path(&path).unwrap();
+    assert!(session.messages.iter().flat_map(|message| &message.blocks).any(|block|
+        matches!(block,ContentBlock::Thinking {signature:Some(signature),..} if signature == "signed-prefix-0")));
+    drop(cli);
+}
+
+#[test]
+fn invalid_beta_configuration_sends_no_request_and_can_be_corrected() {
+    let env = TestEnv::new_mock("thinking-beta-configuration");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    for (betas, error) in [
+        (json!([42]), "must be an array of strings"),
+        (json!(["invalid beta"]), "invalid beta name"),
+    ] {
+        config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":betas});
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        let mut cli = env.spawn(&["--resume", path.to_str().unwrap()]);
+        cli.expect(error).unwrap();
+        assert_ne!(cli.expect_eof().unwrap(), 0);
+        assert!(capture.bodies().is_empty());
+    }
+    config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":[]});
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "Continue after correcting the beta list.");
+    exit(&mut cli);
+    assert_eq!(capture.bodies().len(), 1);
+    assert!(capture.requests.lock().unwrap()[0].beta.is_empty());
 }
 
 #[test]
@@ -646,7 +926,7 @@ fn model_picker_selects_effort_and_cancel_keeps_the_original_choice() {
         let config_path = env.config_home().join("sudocode.json");
         let mut config: Value =
             serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-        for model in ["claude-opus-4-8", "claude-sonnet-4-6"] {
+        for model in ["claude-opus-4-8", "claude-sonnet-4-6", "claude-opus-4-5"] {
             let mut entry = config["models"]["claude-sonnet"].clone();
             entry["alias"] = json!(model);
             entry["providers"]["api-key"]["model"] = json!(model);
@@ -693,6 +973,16 @@ fn model_picker_selects_effort_and_cancel_keeps_the_original_choice() {
             "Continue with a model that does not support xhigh.",
         );
         assert_eq!(capture.bodies()[3]["output_config"]["effort"], "high");
+        cli.send("/model claude-opus-4-5\r").unwrap();
+        cli.expect("Model updated").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "Opus 4.5 selected");
+        turn(&mut cli, "Continue with Opus 4.5's effort ladder.");
+        assert_eq!(capture.bodies()[4]["output_config"]["effort"], "high");
+        cli.send("/model claude-opus-4-8\r").unwrap();
+        cli.expect("Model updated").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "Opus 4.8 restored");
+        turn(&mut cli, "Restore the original effort preference.");
+        assert_eq!(capture.bodies()[5]["output_config"]["effort"], "xhigh");
         exit(&mut cli);
     }
 }

@@ -19,6 +19,7 @@ pub struct SseParser {
 pub(crate) struct MessageMetadata {
     pub id: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
+    pub input_transformations: Option<serde_json::Value>,
 }
 
 impl MessageMetadata {
@@ -30,6 +31,7 @@ impl MessageMetadata {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             diagnostics: message.get("diagnostics").cloned(),
+            input_transformations: message.get("input_transformations").cloned(),
         }
     }
 }
@@ -363,12 +365,26 @@ fn parse_frame_with_metadata(
             return Err(error);
         }
     }
-    let observed = metadata.as_ref().and_then(|_| {
-        (raw["type"] == "message_start").then(|| MessageMetadata::from_message(&raw["message"]))
+    let observed = metadata.as_ref().and_then(|_| match raw["type"].as_str() {
+        Some("message_start") => Some(MessageMetadata::from_message(&raw["message"])),
+        // A server fallback can update transformations at the end of a stream.
+        Some("message_delta") if raw.get("input_transformations").is_some() => {
+            Some(MessageMetadata::from_message(&raw))
+        }
+        _ => None,
     });
     let event = serde_json::from_value::<StreamEvent>(raw)
         .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))?;
-    if let (Some(destination), Some(observed)) = (metadata, observed) {
+    if let (Some(destination), Some(mut observed)) = (metadata, observed) {
+        // One HTTP chunk may contain both start and final metadata. Retain the
+        // message identity and cache diagnostics while accepting the final list.
+        if let Some(previous) = destination.take() {
+            observed.id = observed.id.or(previous.id);
+            observed.diagnostics = observed.diagnostics.or(previous.diagnostics);
+            observed.input_transformations = observed
+                .input_transformations
+                .or(previous.input_transformations);
+        }
         *destination = Some(observed);
     }
     Ok(Some(event))

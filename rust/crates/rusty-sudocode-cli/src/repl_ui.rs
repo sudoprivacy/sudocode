@@ -2572,14 +2572,25 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         )),
         StatusSlot::Empty => None,
     };
+    let separator_wrap = if prose_preview.is_some() {
+        TextWrap::NoWrap
+    } else {
+        TextWrap::Wrap
+    };
 
     element! {
         View(flex_direction: FlexDirection::Column, width: preview_width) {
             // A fixed parent keeps TextInput's identity through preview handoff.
-            View(flex_direction: FlexDirection::Column, width: preview_width,
-                height: preview_height) {
-                #(preview_text.map(|text| element! { RichText(content: text, wrap: TextWrap::NoWrap, width: preview_width) }))
-            }
+            #(if prose_preview.is_some() {
+                Some(element! {
+                    View(flex_direction: FlexDirection::Column, width: preview_width,
+                        height: preview_height) {
+                        #(preview_text.map(|text| element! { RichText(content: text, wrap: TextWrap::NoWrap, width: preview_width) }))
+                    }
+                })
+            } else {
+                None
+            })
             // PendingSlot: tools + queued messages, arrival order. Rendered only
             // when non-empty — an empty `Text` is not zero-height in iocraft
             // (its measure clamps to `height.max(1)`), so an always-present slot
@@ -2609,7 +2620,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             })
             // Generated at terminal width; keep Taffy's min-content pass from
             // measuring one separator character per row inside a fixed width.
-            Text(content: sep.clone(), color: chrome_border, wrap: TextWrap::NoWrap)
+            Text(content: sep.clone(), color: chrome_border, wrap: separator_wrap)
             // InputSlot
             #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
                 AnsiText(content: format!("[{title}]"), initial_style: question_style, width: preview_width)
@@ -2704,7 +2715,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             })
             // Separator
-            Text(content: sep, color: chrome_border, wrap: TextWrap::NoWrap)
+            Text(content: sep, color: chrome_border, wrap: separator_wrap)
             // FooterSlot
             AnsiText(content: footer_text, initial_style: chrome_muted, width: preview_width)
         }

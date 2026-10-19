@@ -4,7 +4,7 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 
 exports.run = async function run(host, config) {
-  const { child, terminal, snapshot, viewport, settle, frame, resize, resizeFrame, onPresentation } = host;
+  const { child, terminal, snapshot, viewport, settle, frame, resize, onPresentation } = host;
   const hasSavedHistory = ['prose_resize', 'prose_finish_resize'].includes(config.scenario);
 function proseRows() {
   const lines = snapshot().split('\n');
@@ -37,31 +37,48 @@ function checkProseHistory() {
         1, `history ${i} was lost or duplicated\n${text}`);
   }
 }
+let draft = 'DraftSurvivesProse';
+function inputAtWidth(cols) {
+  const lines = viewport().split('\n');
+  const input = lines.findIndex(line => line.startsWith(`❯ ${draft}`));
+  const separator = '─'.repeat(cols);
+  return input > 0 && lines[input - 1] === separator && lines[input + 1] === separator;
+}
+async function resizeWithInput(cols, rows, suffix) {
+  // ConPTY can repaint its old buffer before the application consumes Resize.
+  // A fresh edit with adjacent separators proves the application presented the
+  // new geometry; a wrapped old separator alone cannot acknowledge a resize.
+  const before = host.state.frames;
+  resize(cols, rows);
+  draft += suffix;
+  child.write(suffix);
+  await frame(() => host.state.frames > before && inputAtWidth(cols));
+}
 async function prosePreview() {
   await settle(text => text.includes('❯'));
   child.write(config.prompt + '\r');
   await frame(() => viewport().replace(/\s/g, '').includes('ProseDone.')
     && fs.existsSync(path.join(config.root, 'prose-ready')));
-  child.write('DraftSurvivesProse');
-  await frame(() => viewport().includes('❯ DraftSurvivesProse'));
+  child.write(draft);
+  await frame(() => inputAtWidth(config.cols));
   if (config.scenario === 'prose_finish_resize') {
-    await resizeFrame(40, 12, () => viewport().includes('❯ DraftSurvivesProse'));
+    await resizeWithInput(40, 12, 't');
     // Finalization is deliberately released before the restored viewport has
     // presented, exercising history and live-frame placement in one update.
     resize(120, 40);
     fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
     const expected = 'ProseStart中文é💻ordinarytextwithboldwords,inlinecode,andalink(https://example.com).Moreordinaryprosewrapsacrossseveralrowswhiletheinputstaysavailable.ProseDone.'.normalize('NFC');
-    await settle(() => viewport().includes('turn 2') && viewport().includes('❯ DraftSurvivesProse')
+    await settle(() => viewport().includes('turn 2') && inputAtWidth(120)
       && viewport().replace(/\s/g, '').normalize('NFC').includes(expected));
     checkProseHistory();
     child.write('\x15');
-    await frame(() => !viewport().includes('DraftSurvivesProse'));
+    await frame(() => !viewport().includes(draft));
     console.log('SCODE_XTERM_PROSE_PASS');
     return;
   }
   if (config.scenario === 'prose_resize') {
-    for (const [cols, rows] of [[60,40], [40,12], [120,40], [48,40], [120,40]]) {
-      await resizeFrame(cols, rows, () => viewport().includes('❯ DraftSurvivesProse'));
+    for (const [cols, rows, suffix] of [[60,40,'a'], [40,12,'b'], [120,40,'c'], [48,40,'d'], [120,40,'e']]) {
+      await resizeWithInput(cols, rows, suffix);
       // Preview may be clipped in a tiny window; durable earlier history must survive.
       for (let i = 0; i < 70; i++)
         assert(snapshot().includes(`Earlier history line ${i}`), `lost history ${i}`);
@@ -75,7 +92,7 @@ async function prosePreview() {
   const stopWatching = onPresentation(() => handoffFrames.push(proseRows()));
   fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
   await settle(() => viewport().includes(`turn ${hasSavedHistory ? 2 : 1}`)
-    && viewport().includes('❯ DraftSurvivesProse'));
+    && inputAtWidth(config.cols));
   stopWatching();
   const after = proseRows();
   assert.deepEqual(after, before, 'preview/history physical rows changed');
@@ -85,7 +102,7 @@ async function prosePreview() {
   fs.writeFileSync(path.join(config.logRoot, 'handoff.json'), JSON.stringify({ before, after,
     frames: handoffFrames.length, cols: config.cols, scenario: config.scenario }, null, 2));
   child.write('\x15');
-  await frame(() => !viewport().includes('DraftSurvivesProse'));
+  await frame(() => !viewport().includes(draft));
   console.log('SCODE_XTERM_PROSE_PASS');
 }
   await prosePreview();

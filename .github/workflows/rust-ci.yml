@@ -6,17 +6,12 @@ permissions:
   actions: read
 jobs:
   diagnose:
-    name: Compare Linux glyph-storage memory with fixed workloads
+    name: Compare compact glyph ownership against the same Linux reference
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
-          persist-credentials: false
-      - uses: actions/checkout@v4
-        with:
-          ref: 82a99dd262c746a1872ccfaf0ea46d7fe4bd6754
-          path: fixed
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
@@ -26,11 +21,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci --prefix e2e/terminal-resize
-      - name: Freeze the unchanged reference release
-        run: |
-          set -euo pipefail
-          cargo build --release --locked --manifest-path fixed/rust/Cargo.toml --target-dir "$RUNNER_TEMP/build/fixed" -p rusty-sudocode-cli
-          cp "$RUNNER_TEMP/build/fixed/release/scode" "$RUNNER_TEMP/scode-fixed"
       - name: Pin and freeze the ASCII storage prototype
         run: |
           set -euo pipefail
@@ -39,22 +29,53 @@ jobs:
           p=Path('rust/crates/rusty-sudocode-cli/Cargo.toml')
           source=p.read_text()
           assert 'e04d0675960b4df36399450af513b48a78a59f92' in source
-          p.write_text(source.replace('e04d0675960b4df36399450af513b48a78a59f92','09df13bc83c753b7a21c1e04d0e10a0130acc642'))
+          p.write_text(source.replace('e04d0675960b4df36399450af513b48a78a59f92','7db114406ac704fb90d2e3edbe3d0b4034a36e7e'))
           PY
           cargo build --release --manifest-path rust/Cargo.toml --target-dir "$RUNNER_TEMP/build/prototype" -p rusty-sudocode-cli
           cp "$RUNNER_TEMP/build/prototype/release/scode" "$RUNNER_TEMP/scode-prototype"
-          "$RUNNER_TEMP/scode-fixed" version --output-format json
           "$RUNNER_TEMP/scode-prototype" version --output-format json
-          sha256sum "$RUNNER_TEMP/scode-fixed" "$RUNNER_TEMP/scode-prototype"
+          sha256sum "$RUNNER_TEMP/scode-prototype"
       - name: Compile the unchanged workload driver after freezing production artifacts
         run: |
           cargo test --release --locked --manifest-path rust/Cargo.toml --target-dir "$RUNNER_TEMP/build/prototype" -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/driver.jsonl"
+      - name: Wait for the immutable reference artifact from the first probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in {1..60}; do
+            if gh api repos/sudoprivacy/sudocode/actions/runs/39337925146/artifacts --jq '.artifacts | any(.name == "linux-ascii-cell-pilot")' | rg -q '^true$'; then
+              exit 0
+            fi
+            sleep 15
+          done
+          exit 1
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39337925146
+          name: linux-ascii-cell-pilot
+          path: reference-artifact
+      - name: Verify the reused fixed reference and record both binary hashes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, os, shutil, subprocess
+          sources=list(Path('reference-artifact').rglob('scode-fixed'))
+          assert len(sources)==1,sources
+          target=Path(os.environ['RUNNER_TEMP'])/'scode-fixed'
+          shutil.copy2(sources[0],target)
+          target.chmod(target.stat().st_mode | 0o111)
+          version=json.loads(subprocess.check_output([str(target),'version','--output-format','json'],text=True))
+          assert version['git_sha'].startswith('82a99dd2'),version
+          print(json.dumps(version))
+          PY
+          sha256sum "$RUNNER_TEMP/scode-fixed" "$RUNNER_TEMP/scode-prototype"
       - name: Run unmodified long and capped paragraphs in paired order
         run: python3 .github/diagnostics/ascii_pilot.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: linux-ascii-cell-pilot
+          name: linux-arc-cell-pilot
           path: |
             ${{ runner.temp }}/ascii-cell-pilot
             ${{ runner.temp }}/scode-fixed

@@ -92,7 +92,7 @@ pub(super) struct TerminalSource {
     shell: ShellKind,
     pub(super) owner_instance: String,
     pub(super) state: String,
-    backgrounded: bool,
+    pub(super) backgrounded: bool,
     pub(super) snapshot: Option<TerminalSnapshot>,
     pub(super) collected: bool,
     pub(super) collected_in: Option<String>,
@@ -357,7 +357,14 @@ impl CompletionJournal {
             };
             let mut output = snapshot.output.clone();
             loop {
-                payload.message = format!("<task-notification><task-id>{}</task-id><status>{}</status><result>{}</result></task-notification>", escape(&payload.task_id), payload.status, escape(&output));
+                // The controller forwards this message verbatim to the model;
+                // envelope-only metadata cannot inform the continuation.
+                let metadata =
+                    serde_json::to_string(&payload.terminal).map_err(|e| e.to_string())?;
+                payload.message = format!(
+                    "<task-notification><task-id>{}</task-id><status>{}</status><terminal>{}</terminal><result>{}</result></task-notification>",
+                    escape(&payload.task_id), payload.status, escape(&metadata), escape(&output)
+                );
                 if serde_json::to_vec(&payload)
                     .map_err(|e| e.to_string())?
                     .len()

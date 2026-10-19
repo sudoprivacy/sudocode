@@ -170,6 +170,10 @@ fn run_background_verification(workflow: Workflow) {
                     .contains(&evidence),
                 "{children:?}"
             );
+            let transcript = children[0]["sessionFile"]
+                .as_str()
+                .expect("completed child exposes its saved transcript");
+            assert!(fs::read_to_string(transcript).unwrap().contains(&evidence));
             break;
         }
         assert!(

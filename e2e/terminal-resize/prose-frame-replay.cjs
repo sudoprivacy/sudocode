@@ -20,7 +20,8 @@ const host = createHost({ binary: python,
     while (end >= 0 && end < lines.length - 1 && !lines[end].includes('ProseDone.')) end++;
     const rows = start >= 0 ? lines.slice(start, end + 1) : [];
     const joined = rows.join('').replace(/\s/g, '').normalize('NFC');
-    const expected = 'ProseStart中文é💻ordinarytextwithboldwords,inlinecode,andalink(https://example.com).Moreordinaryprosewrapsacrossseveralrowswhiletheinputstaysavailable.ProseDone.'.normalize('NFC');
+    const sourceExpected = 'ProseStart中文é💻ordinarytextwithboldwords,inlinecode,andalink(https://example.com).Moreordinaryprosewrapsacrossseveralrowswhiletheinputstaysavailable.ProseDone.'.normalize('NFC');
+    const expected = variant === 'bmp_body' ? sourceExpected.replace('💻', 'ab') : sourceExpected;
     const viewportStart = start - host.terminal.buffer.active.baseY;
     const result = { name, start: viewportStart, rows, complete: joined.includes(expected),
       visible: viewportStart >= 0 && end - host.terminal.buffer.active.baseY < host.terminal.rows,

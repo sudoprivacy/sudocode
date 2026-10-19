@@ -46,23 +46,32 @@ function inputAtWidth(cols) {
   const separator = '─'.repeat(cols);
   return input > 0 && lines[input - 1] === separator && lines[input + 1] === separator;
 }
+async function presentInput(cols, edit) {
+  // Parsed canvas cells can precede the synchronized frame's closing marker.
+  // A completed older frame must not acknowledge the next draft edit.
+  let isPresented = false;
+  const stopWatching = onPresentation(() => { isPresented = inputAtWidth(cols); });
+  try {
+    edit();
+    await frame(() => isPresented && inputAtWidth(cols));
+  } finally { stopWatching(); }
+}
 async function resizeWithInput(cols, rows, suffix) {
   // ConPTY can repaint its old buffer before the application consumes Resize.
   // A fresh edit with adjacent separators proves the application presented the
   // new geometry; a wrapped old separator alone cannot acknowledge a resize.
-  const before = host.state.frames;
-  resize(cols, rows);
-  draft += suffix;
-  child.write(suffix);
-  await frame(() => host.state.frames > before && inputAtWidth(cols));
+  await presentInput(cols, () => {
+    resize(cols, rows);
+    draft += suffix;
+    child.write(suffix);
+  });
 }
 async function prosePreview() {
   await settle(text => text.includes('❯'));
   child.write(config.prompt + '\r');
   await frame(() => viewport().replace(/\s/g, '').includes('ProseDone.')
     && fs.existsSync(path.join(config.root, 'prose-ready')));
-  child.write(draft);
-  await frame(() => inputAtWidth(config.cols));
+  await presentInput(config.cols, () => child.write(draft));
   if (config.scenario === 'prose_finish_resize') {
     await resizeWithInput(40, 12, 't');
     // Finalization is deliberately released before the restored viewport has

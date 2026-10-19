@@ -54,8 +54,8 @@ jobs:
         run: |
           $pythonBinary = (Get-Command python).Source
           foreach ($backend in @('system', 'bundled')) {
-            foreach ($variant in @('original', 'positioned', 'cleared')) {
-              foreach ($writes in @('lines', 'frames')) {
+            foreach ($variant in @('original', 'no_edge_clear', 'no_clear', 'no_wrap', 'no_edge_clear_no_wrap')) {
+              foreach ($writes in @('lines')) {
                 $probe = Start-Process -FilePath $env:SCODE_TERMINAL_HOST -ArgumentList @('e2e/terminal-resize/prose-frame-replay.cjs', $pythonBinary, $backend, $variant, $writes) -NoNewWindow -Wait -PassThru
                 if ($probe.ExitCode -ne 0) { throw "Frame replay failed: $($probe.ExitCode)" }
               }

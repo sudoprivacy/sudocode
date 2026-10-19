@@ -17,9 +17,21 @@ async function run(binary, label, backend, mode, cols, round) {
   let ready = false;
   let release;
   const server = http.createServer((request, response) => {
+    if (request.method === 'GET') {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ data: [{ id: 'claude-sonnet-4-6', type: 'model', display_name: 'Diagnostic Sonnet', created_at: '2026-01-01T00:00:00Z' }], has_more: false }));
+      return;
+    }
+    if (request.url.includes('count_tokens')) {
+      request.resume();
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ input_tokens: 10 }));
+      return;
+    }
     const chunks = [];
     request.on('data', chunk => chunks.push(chunk));
     request.on('end', async () => {
+      if (!chunks.length) { response.writeHead(400); response.end(); return; }
       const body = JSON.parse(Buffer.concat(chunks).toString());
       requests.push(body);
       response.writeHead(200, { 'content-type': 'text/event-stream' });

@@ -2607,7 +2607,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             } else {
                 Some(element! { AnsiText(content: todo_line, width: preview_width) })
             })
-            Text(content: sep.clone(), color: chrome_border)
+            // Generated at terminal width; keep Taffy's min-content pass from
+            // measuring one separator character per row inside a fixed width.
+            Text(content: sep.clone(), color: chrome_border, wrap: TextWrap::NoWrap)
             // InputSlot
             #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
                 AnsiText(content: format!("[{title}]"), initial_style: question_style, width: preview_width)
@@ -2702,7 +2704,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             })
             // Separator
-            Text(content: sep, color: chrome_border)
+            Text(content: sep, color: chrome_border, wrap: TextWrap::NoWrap)
             // FooterSlot
             AnsiText(content: footer_text, initial_style: chrome_muted, width: preview_width)
         }

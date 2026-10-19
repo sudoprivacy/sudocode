@@ -79,7 +79,7 @@ impl ProsePreview {
                     self.source.push_str(&delta);
                     if !delta.is_ascii() && has_ambiguous_width(&self.source) {
                         // Keep the safe prefix visible instead of removing it
-                        // when an arriving emoji changes width semantics.
+                        // when an arriving grapheme changes width semantics.
                         self.source.truncate(previous_len);
                         self.is_frozen = true;
                         return;
@@ -172,7 +172,7 @@ impl ProsePreview {
 }
 
 fn is_prose(source: &str) -> bool {
-    // Some terminals count emoji sequences as individual scalar widths.
+    // Some terminals count grapheme sequences as individual scalar widths.
     // A history write can then wrap where the live canvas clips. Until that
     // capability is negotiated, use the complete-block path for such text.
     has_prose_structure(source) && !has_ambiguous_width(source)
@@ -203,10 +203,15 @@ fn has_prose_lines(source: &str) -> bool {
 fn has_ambiguous_width(source: &str) -> bool {
     !source.is_ascii()
         && source.graphemes(true).any(|grapheme| {
-            grapheme.width()
-                != grapheme
-                    .chars()
-                    .map(|ch| ch.width().unwrap_or(0))
-                    .sum::<usize>()
+            let width = grapheme.width();
+            // Legacy Windows console hosts can miscount combining sequences
+            // even when their Unicode scalar widths sum to the grapheme width.
+            // Preserve their original text through the complete-block path.
+            (cfg!(windows) && width > 0 && grapheme.chars().nth(1).is_some())
+                || width
+                    != grapheme
+                        .chars()
+                        .map(|ch| ch.width().unwrap_or(0))
+                        .sum::<usize>()
         })
 }

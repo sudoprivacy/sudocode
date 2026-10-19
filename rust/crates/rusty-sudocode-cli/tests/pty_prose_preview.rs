@@ -34,6 +34,17 @@ fn gated_prompt(env: &TestEnv, document: &str) -> String {
     common::terminal_host::prose_prompt(env, document, serde_json::json!({}))
 }
 
+fn streamable_document() -> String {
+    // Legacy Windows hosts need the complete-block path for decomposed accents.
+    // Keep all handoff assertions on eligible prose and test exact fallback
+    // preservation separately, including the original decomposed code points.
+    if cfg!(windows) {
+        mock_anthropic_service::PROSE_PREVIEW_DOC.replace("e\u{301}", "é")
+    } else {
+        mock_anthropic_service::PROSE_PREVIEW_DOC.to_string()
+    }
+}
+
 fn finish(session: &mut PtySession) {
     session.send("\x15/exit").unwrap();
     common::expect_input_line(session, "/exit", common::DEFAULT_TIMEOUT, "exit input");
@@ -84,10 +95,7 @@ fn handoff_preserves_body_rows_and_draft_at_wide_and_narrow_widths() {
         let mut session = start(&env, cols);
         let marker = common::turn_status_marker(&session);
         session
-            .send(&format!(
-                "{}\r",
-                gated_prompt(&env, mock_anthropic_service::PROSE_PREVIEW_DOC)
-            ))
+            .send(&format!("{}\r", gated_prompt(&env, &streamable_document())))
             .unwrap();
         common::expect_screen(
             &session,
@@ -131,10 +139,7 @@ fn preview_continues_after_a_stable_paragraph() {
     let env = TestEnv::new_mock("prose-after-block");
     let mut session = start(&env, 120);
     let marker = common::turn_status_marker(&session);
-    let document = format!(
-        "Stable paragraph.\n\n{}",
-        mock_anthropic_service::PROSE_PREVIEW_DOC
-    );
+    let document = format!("Stable paragraph.\n\n{}", streamable_document());
     session
         .send(&format!("{}\r", gated_prompt(&env, &document)))
         .unwrap();
@@ -160,33 +165,55 @@ fn preview_continues_after_a_stable_paragraph() {
 }
 
 #[test]
-fn ambiguous_emoji_width_uses_complete_block_fallback() {
-    let env = TestEnv::new_mock("prose-emoji-fallback");
-    let mut session = start(&env, 120);
-    let marker = common::turn_status_marker(&session);
-    let document = "WidthStart 👩🏽‍💻 ordinary words WidthDone";
-    session
-        .send(&format!("{}\r", gated_prompt(&env, document)))
-        .unwrap();
-    let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-    while !env.workspace_root().join("prose-ready").exists() {
-        assert!(std::time::Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
+fn ambiguous_grapheme_width_uses_complete_block_fallback() {
+    let mut documents = vec!["WidthStart 👩🏽‍💻 ordinary words WidthDone".to_string()];
+    if cfg!(windows) {
+        documents.push(format!(
+            "WidthStart 中文 e\u{301} {} WidthDone",
+            "ordinary words ".repeat(14)
+        ));
+        documents.push(mock_anthropic_service::PROSE_PREVIEW_DOC.to_string());
     }
-    std::thread::sleep(Duration::from_millis(160));
-    session.render(|screen| assert!(!screen.contents().contains("WidthDone")));
-    std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
-    common::expect_turn_complete_after(
-        &session,
-        &marker,
-        common::DEFAULT_TIMEOUT,
-        "emoji canonical flush",
-    );
-    session.render(|screen| {
-        assert_eq!(screen.contents().matches("WidthStart").count(), 1);
-        assert!(screen.contents().contains("👩🏽‍💻 ordinary words WidthDone"));
-    });
-    finish(&mut session);
+    for document in documents {
+        let env = TestEnv::new_mock("prose-emoji-fallback");
+        let mut session = start(&env, 120);
+        let marker = common::turn_status_marker(&session);
+        let (start, end) = if document.starts_with("WidthStart") {
+            ("WidthStart", "WidthDone")
+        } else {
+            ("ProseStart", "ProseDone.")
+        };
+        session
+            .send(&format!("{}\r", gated_prompt(&env, &document)))
+            .unwrap();
+        let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+        while !env.workspace_root().join("prose-ready").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(160));
+        session.render(|screen| assert!(!screen.contents().contains(end)));
+        std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
+        common::expect_turn_complete_after(
+            &session,
+            &marker,
+            common::DEFAULT_TIMEOUT,
+            "ambiguous grapheme canonical flush",
+        );
+        session.render(|screen| {
+            assert_eq!(screen.contents().matches(start).count(), 1);
+            assert!(screen.contents().contains(end));
+            if document.starts_with("WidthStart") {
+                assert!(screen
+                    .contents()
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains(&document.split_whitespace().collect::<String>()));
+            }
+        });
+        finish(&mut session);
+        assert_persisted_text(&env, &document);
+    }
 }
 
 #[test]
@@ -194,10 +221,7 @@ fn cancel_commits_visible_partial_prose_once() {
     let env = TestEnv::new_mock("prose-cancel");
     let mut session = start(&env, 120);
     session
-        .send(&format!(
-            "{}\r",
-            gated_prompt(&env, mock_anthropic_service::PROSE_PREVIEW_DOC)
-        ))
+        .send(&format!("{}\r", gated_prompt(&env, &streamable_document())))
         .unwrap();
     common::expect_screen(
         &session,
@@ -247,10 +271,7 @@ fn tiny_resize_keeps_input_and_complete_final_text() {
     let mut session = start(&env, 120);
     let marker = common::turn_status_marker(&session);
     session
-        .send(&format!(
-            "{}\r",
-            gated_prompt(&env, mock_anthropic_service::PROSE_PREVIEW_DOC)
-        ))
+        .send(&format!("{}\r", gated_prompt(&env, &streamable_document())))
         .unwrap();
     common::expect_screen(
         &session,
@@ -338,22 +359,25 @@ fn source_above_preview_limit_is_committed_completely() {
             "final tail above cap",
         );
         finish(&mut session);
-        // Inspect the actual persisted assistant message, not the echoed prompt.
-        let sessions = env.workspace_root().join(".scode/sessions");
-        let mut is_complete = false;
-        for entry in walk_session_files(&sessions) {
-            if let Ok(saved) = runtime::Session::load_from_path(&entry) {
-                is_complete |= saved.messages.iter().any(|message| {
-                    message.blocks.iter().any(|block|
-                    matches!(block, runtime::ContentBlock::Text { text } if text == &document))
-                });
-            }
-        }
-        assert!(
-            is_complete,
-            "persisted session must retain every byte above the preview cap"
-        );
+        assert_persisted_text(&env, &document);
     }
+}
+
+fn assert_persisted_text(env: &TestEnv, document: &str) {
+    // Inspect the actual persisted assistant message, not the echoed prompt.
+    let sessions = env.workspace_root().join(".scode/sessions");
+    let is_complete = walk_session_files(&sessions).into_iter().any(|entry| {
+        runtime::Session::load_from_path(&entry).is_ok_and(|saved| {
+            saved.messages.iter().any(|message| {
+                message.blocks.iter().any(|block|
+                    matches!(block, runtime::ContentBlock::Text { text } if text == document))
+            })
+        })
+    });
+    assert!(
+        is_complete,
+        "persisted session must retain the exact original text"
+    );
 }
 
 fn walk_session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -420,7 +444,7 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
         ("prose_finish_resize", 120),
     ] {
         let env = TestEnv::new_mock(scenario);
-        let prompt = gated_prompt(&env, mock_anthropic_service::PROSE_PREVIEW_DOC);
+        let prompt = gated_prompt(&env, &streamable_document());
         let mut args = vec![
             "--auth",
             "api-key",

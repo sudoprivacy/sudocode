@@ -167,6 +167,111 @@ fn undersized_picker_cannot_confirm_an_unseen_selection() {
 }
 
 #[test]
+fn resize_and_confirm_burst_keeps_the_unseen_picker_open() {
+    let env = TestEnv::new("chrome-budget-resize-confirm-burst");
+    let mut sess = env.spawn_with_env(&[], &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")]);
+    common::expect_screen(&sess, |s| s.contains('❯'), common::DEFAULT_TIMEOUT, "input");
+    sess.send("/model\r").unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains("Select model"),
+        common::DEFAULT_TIMEOUT,
+        "picker before resize",
+    );
+    for _ in 0..3 {
+        sess.resize(6, 80).unwrap();
+        // No paint, sleep or polling between resize and confirmation: admission
+        // must use the new geometry even when events arrive in the same batch.
+        sess.send("\r").unwrap();
+        common::expect_screen_settled(
+            &sess,
+            |s| s.contains("Enlarge terminal to review"),
+            common::DEFAULT_TIMEOUT,
+            "warning after resize/confirm burst",
+        );
+        sess.resize(40, 80).unwrap();
+        common::expect_screen_settled(
+            &sess,
+            |s| {
+                common::input_and_footer_of(s).is_some_and(|area| {
+                    area.contains("Select model") && !area.contains("Enlarge terminal to review")
+                })
+            },
+            common::DEFAULT_TIMEOUT,
+            "unconfirmed picker after immediate resize/Enter",
+        );
+    }
+    sess.send("\x1b").unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains('❯') && !s.contains("Select model"),
+        common::DEFAULT_TIMEOUT,
+        "cancel picker",
+    );
+    exit(&mut sess);
+    if env.is_mock() {
+        assert_eq!(env.captured_message_count(), 0);
+    }
+}
+
+#[test]
+fn resize_and_typing_burst_cannot_edit_an_unreviewable_draft() {
+    let env = TestEnv::new("chrome-budget-resize-typing-burst");
+    let mut sess = env.spawn_with_env(&[], &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")]);
+    common::expect_screen(&sess, |s| s.contains('❯'), common::DEFAULT_TIMEOUT, "input");
+    sess.send("DraftHeadTail").unwrap();
+    common::expect_input_line(&sess, "DraftHeadTail", common::DEFAULT_TIMEOUT, "draft");
+    sess.send("\x1b[H\x1b[C\x1b[C\x1b[C\x1b[C\x1b[CX").unwrap();
+    common::expect_input_line(
+        &sess,
+        "DraftXHeadTail",
+        common::DEFAULT_TIMEOUT,
+        "cursor probe",
+    );
+    sess.send("\x7f").unwrap();
+    common::expect_input_line(
+        &sess,
+        "DraftHeadTail",
+        common::DEFAULT_TIMEOUT,
+        "remove probe",
+    );
+    sess.resize(8, 12).unwrap();
+    // Deliberately do not wait for the warning before this input burst.
+    sess.send("MustNotAppear").unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains("Enlarge") && s.contains("terminal"),
+        common::DEFAULT_TIMEOUT,
+        "warning after resize/typing burst",
+    );
+    sess.resize(24, 80).unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| common::input_line_of(s) == "DraftHeadTail",
+        common::DEFAULT_TIMEOUT,
+        "draft unchanged after immediate resize/typing",
+    );
+    sess.send("Kept").unwrap();
+    common::expect_input_line(
+        &sess,
+        "DraftKeptHeadTail",
+        common::DEFAULT_TIMEOUT,
+        "cursor preserved after immediate resize/typing",
+    );
+    sess.send_ctrl('u').unwrap();
+    common::expect_screen_settled(
+        &sess,
+        |s| s.contains('❯') && common::input_line_of(s).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "cleared draft",
+    );
+    exit(&mut sess);
+    if env.is_mock() {
+        assert_eq!(env.captured_message_count(), 0);
+    }
+}
+
+#[test]
 fn too_narrow_input_preserves_draft_and_middle_cursor() {
     let env = TestEnv::new("chrome-budget-narrow");
     let mut sess = env.spawn_with_env(&[], &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")]);

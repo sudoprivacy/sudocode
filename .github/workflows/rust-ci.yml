@@ -32,12 +32,17 @@ jobs:
         run: npm ci --prefix e2e/terminal-resize
       - name: Record binary provenance
         run: |
-          binaries/main/scode.exe version --output-format json
-          binaries/candidate/scode.exe version --output-format json
-          Get-FileHash binaries/main/scode.exe
-          Get-FileHash binaries/candidate/scode.exe
+          $mainBinary = Get-ChildItem binaries/main -Recurse -Filter scode.exe | Select-Object -First 1
+          $candidateBinary = Get-ChildItem binaries/candidate -Recurse -Filter scode.exe | Select-Object -First 1
+          if (!$mainBinary -or !$candidateBinary) { throw 'Missing release artifact' }
+          & $mainBinary.FullName version --output-format json
+          & $candidateBinary.FullName version --output-format json
+          Get-FileHash $mainBinary.FullName
+          Get-FileHash $candidateBinary.FullName
+          "SCODE_DIAG_BASE=$($mainBinary.FullName)" >> $env:GITHUB_ENV
+          "SCODE_DIAG_CANDIDATE=$($candidateBinary.FullName)" >> $env:GITHUB_ENV
       - name: Compare raw and pasted Unicode through both native ConPTY backends
-        run: node e2e/terminal-resize/prose-input-diagnostic.cjs binaries/main/scode.exe binaries/candidate/scode.exe
+        run: node e2e/terminal-resize/prose-input-diagnostic.cjs "$env:SCODE_DIAG_BASE" "$env:SCODE_DIAG_CANDIDATE"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

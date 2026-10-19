@@ -6,11 +6,10 @@ use pty_expect::PtySession;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-fn start(env: &TestEnv, flag: &str, cols: u16) -> PtySession {
+fn start(env: &TestEnv, cols: u16) -> PtySession {
     let mut session = env.spawn_with_env(
         &["--permission-mode", "read-only"],
         &[
-            ("SUDOCODE_EXPERIMENT_PROSE_PREVIEW", flag),
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
             ("COLORFGBG", "15;0"),
             ("TERM", "xterm-256color"),
@@ -78,7 +77,7 @@ fn expect_finalized_with_draft(session: &PtySession, marker: &str, draft: &str) 
 fn handoff_preserves_body_rows_and_draft_at_wide_and_narrow_widths() {
     for cols in [120, 48] {
         let env = TestEnv::new_mock("prose-handoff");
-        let mut session = start(&env, "1", cols);
+        let mut session = start(&env, cols);
         let marker = common::turn_status_marker(&session);
         session
             .send(&format!(
@@ -124,43 +123,9 @@ fn handoff_preserves_body_rows_and_draft_at_wide_and_narrow_widths() {
 }
 
 #[test]
-fn disabled_preview_waits_for_finalization() {
-    let env = TestEnv::new_mock("prose-disabled");
-    let mut session = start(&env, "0", 120);
-    let marker = common::turn_status_marker(&session);
-    session
-        .send(&format!(
-            "{}\r",
-            gated_prompt(&env, mock_anthropic_service::PROSE_PREVIEW_DOC)
-        ))
-        .unwrap();
-    let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-    while !env.workspace_root().join("prose-ready").exists() {
-        assert!(std::time::Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    std::thread::sleep(Duration::from_millis(160));
-    session.render(|screen| {
-        assert!(
-            !screen.contents().contains("ProseStart"),
-            "disabled preview must use baseline output"
-        );
-    });
-    std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
-    common::expect_turn_complete_after(
-        &session,
-        &marker,
-        common::DEFAULT_TIMEOUT,
-        "baseline flush",
-    );
-    session.render(|screen| assert_eq!(screen.contents().matches("ProseStart").count(), 1));
-    finish(&mut session);
-}
-
-#[test]
 fn preview_continues_after_a_stable_paragraph() {
     let env = TestEnv::new_mock("prose-after-block");
-    let mut session = start(&env, "1", 120);
+    let mut session = start(&env, 120);
     let marker = common::turn_status_marker(&session);
     let document = format!(
         "Stable paragraph.\n\n{}",
@@ -193,7 +158,7 @@ fn preview_continues_after_a_stable_paragraph() {
 #[test]
 fn ambiguous_emoji_width_uses_complete_block_fallback() {
     let env = TestEnv::new_mock("prose-emoji-fallback");
-    let mut session = start(&env, "1", 120);
+    let mut session = start(&env, 120);
     let marker = common::turn_status_marker(&session);
     let document = "WidthStart 👩🏽‍💻 ordinary words WidthDone";
     session
@@ -223,7 +188,7 @@ fn ambiguous_emoji_width_uses_complete_block_fallback() {
 #[test]
 fn cancel_commits_visible_partial_prose_once() {
     let env = TestEnv::new_mock("prose-cancel");
-    let mut session = start(&env, "1", 120);
+    let mut session = start(&env, 120);
     session
         .send(&format!(
             "{}\r",
@@ -275,7 +240,7 @@ fn cancel_commits_visible_partial_prose_once() {
 #[test]
 fn tiny_resize_keeps_input_and_complete_final_text() {
     let env = TestEnv::new_mock("prose-resize");
-    let mut session = start(&env, "1", 120);
+    let mut session = start(&env, 120);
     let marker = common::turn_status_marker(&session);
     session
         .send(&format!(
@@ -327,7 +292,7 @@ fn tiny_resize_keeps_input_and_complete_final_text() {
 #[test]
 fn source_above_preview_limit_is_committed_completely() {
     let env = TestEnv::new_mock("prose-cap");
-    let mut session = start(&env, "1", 120);
+    let mut session = start(&env, 120);
     let marker = common::turn_status_marker(&session);
     let document = format!("CapStart {} CapDone", "ordinary prose words ".repeat(600));
     let prompt = gated_prompt(&env, &document);
@@ -395,7 +360,7 @@ fn walk_session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 #[test]
 fn live_prose_is_visible_and_input_remains_usable() {
     let env = TestEnv::new("prose-live");
-    let mut session = start(&env, "1", 120);
+    let mut session = start(&env, 120);
     let marker = common::turn_status_marker(&session);
     let prompt = env.prompt("Reply with one ordinary paragraph of about 150 words beginning with LiveProseStart and ending with LiveProseDone. Do not use tools, lists, headings or code fences.", "prose_preview");
     session.send(&format!("{prompt}\r")).unwrap();
@@ -476,7 +441,6 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
             scenario,
             serde_json::json!({
                 "cols": cols, "rows": 40, "prompt": prompt,
-                "env": {"SUDOCODE_EXPERIMENT_PROSE_PREVIEW": "1"},
             }),
         );
         common::terminal_host::assert_success(&output);

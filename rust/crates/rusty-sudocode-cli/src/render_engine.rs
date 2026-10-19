@@ -98,8 +98,7 @@ enum OutputBlock {
 
 impl EngineEventRenderer {
     pub(crate) fn new(spinner: Option<SpinnerRef>, output_writer: Option<OutputSender>) -> Self {
-        let is_preview_enabled = output_writer.is_some()
-            && runtime::experiments::is_enabled(runtime::experiments::Experiment::ProsePreview);
+        let is_preview_enabled = output_writer.is_some();
         Self {
             markdown: MarkdownStreamState::default(),
             thinking_pending: String::new(),

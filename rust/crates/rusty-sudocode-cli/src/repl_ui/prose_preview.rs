@@ -46,7 +46,7 @@ impl ProsePreview {
     pub(crate) fn update(&mut self, update: PreviewUpdate) {
         match update {
             PreviewUpdate::Append { delta, position } => {
-                // Hold the last complete bounded preview once this prototype's
+                // Hold the last complete bounded preview once the preview's
                 // limit is reached. Never split a delta's grapheme sequence or
                 // discard canonical source: MarkdownStreamState retains it.
                 if self.is_frozen {
@@ -137,20 +137,15 @@ impl ProsePreview {
 }
 
 fn is_prose(source: &str) -> bool {
-    if source.trim().is_empty() || source.contains('|') {
-        return false;
-    }
     // Some terminals count emoji sequences as individual scalar widths.
     // A history write can then wrap where the live canvas clips. Until that
     // capability is negotiated, use the complete-block path for such text.
-    if has_ambiguous_width(source) {
-        return false;
-    }
-    has_prose_lines(source)
+    has_prose_structure(source) && !has_ambiguous_width(source)
 }
 
 /// Only prose gets an extra boundary before asynchronous progress output.
 /// Fences and other structured blocks keep the original stream parser state.
+#[inline]
 pub(crate) fn has_prose_structure(source: &str) -> bool {
     !source.trim().is_empty() && !source.contains('|') && has_prose_lines(source)
 }

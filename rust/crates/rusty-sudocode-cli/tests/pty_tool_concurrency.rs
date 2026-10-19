@@ -591,7 +591,6 @@ fn prose_preview_preserves_open_fences_during_tool_completion() {
         let mut sess = env.spawn_with_env(
             &["--permission-mode", "danger-full-access"],
             &[
-                ("SUDOCODE_EXPERIMENT_PROSE_PREVIEW", "1"),
                 ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
                 ("TERM", "xterm-256color"),
                 ("COLORTERM", "truecolor"),

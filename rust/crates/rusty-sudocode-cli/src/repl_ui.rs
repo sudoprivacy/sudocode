@@ -1432,7 +1432,7 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
     tasks: Arc<Mutex<TaskBrowser>>,
-    prose_preview: Option<Arc<Mutex<ProsePreview>>>,
+    prose_preview: Arc<Mutex<ProsePreview>>,
     output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
     terminal_handoff: Arc<Mutex<Option<TerminalHandoff>>>,
     ui_rx: Arc<Mutex<Receiver<UiCommand>>>,
@@ -1573,13 +1573,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 loop {
                     let (text, terminated) = match rx.try_recv() {
                         Ok(OutputMsg::AssistantUpdate { committed, preview }) => {
-                            if let Some(state) = &prose_preview_for_future {
-                                state
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .update(preview);
-                                is_preview_changed = true;
-                            }
+                            prose_preview_for_future
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .update(preview);
+                            is_preview_changed = true;
                             // use_output queues history for the same presentation
                             // as the newly rendered preview, never an empty frame.
                             (committed, false)
@@ -1644,10 +1642,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             input_value.set(String::new());
                         }
                         Ok(UiCommand::ClearQuestion) => {
-                            let is_preview_draft = prose_preview_for_future.is_some()
-                                && matches!(*input_slot.read(), InputSlot::TextInput);
+                            let is_plain_input = matches!(*input_slot.read(), InputSlot::TextInput);
                             input_slot.set(InputSlot::TextInput);
-                            if !is_preview_draft {
+                            if !is_plain_input {
                                 input_value.set(String::new());
                             }
                         }
@@ -2494,7 +2491,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Keep question presentation unchanged here; finer selection roles are a
     // separate design step, not a reason to retain the reset bug.
     let question_style = chrome_style(TerminalColor::Cyan);
-    let status_rows = if prose_preview.is_some() {
+    let status_rows = {
         let rows = match &status_slot {
             StatusSlot::Spinner(text) => chrome_rows(text, w),
             StatusSlot::TurnResult(text) => chrome_rows(&text.text, w),
@@ -2508,11 +2505,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         } else {
             0
         }
-    } else {
-        0
     };
-    let preview_text = prose_preview.as_ref().and_then(|state| {
-        let mut state = state
+    let preview_text = (|| {
+        let mut state = prose_preview
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !state.is_active() || task_panel.is_some() {
@@ -2529,8 +2524,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             + chrome_rows(&footer_text, w)
             + panel_text.as_ref().map_or(0, |text| chrome_rows(text, w))
             + 2; // separators
-                 // The terminal backend reserves a blank anchor row; leave another
-                 // row for concurrent chrome changes. Optional panels never displace input.
+
+        // The terminal backend reserves a blank anchor row; leave another
+        // row for concurrent chrome changes. Optional panels never displace input.
         let mut remaining = (term_height as usize).saturating_sub(base_rows + 2);
         if chrome_rows(&pending_text, w) + chrome_rows(&todo_line, w) > remaining {
             todo_line.clear();
@@ -2541,56 +2537,34 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         remaining =
             remaining.saturating_sub(chrome_rows(&pending_text, w) + chrome_rows(&todo_line, w));
         state.layout(w, remaining)
-    });
+    })();
     let preview_rows = preview_text
         .as_ref()
         .map_or(0, |text| text.text.lines().count());
-    let preview_width = if prose_preview.is_some() {
-        Size::Length(u32::from(term_width))
-    } else {
-        Size::Auto
-    };
-    let preview_height = if prose_preview.is_some() {
-        Size::Length(u32::try_from(preview_rows).unwrap_or(0))
-    } else {
-        Size::Auto
-    };
-    let status_height = if prose_preview.is_some() {
-        Size::Length(u32::try_from(status_rows).unwrap_or(0))
-    } else {
-        Size::Auto
-    };
+    let slot_width = Size::Length(u32::from(term_width));
+    let preview_height = Size::Length(u32::try_from(preview_rows).unwrap_or(0));
+    let status_height = Size::Length(u32::try_from(status_rows).unwrap_or(0));
     let status_element = match &status_slot {
         StatusSlot::Spinner(s) => Some(AnyElement::from(
-            element! { AnsiText(content: s.clone(), width: preview_width) },
+            element! { AnsiText(content: s.clone(), width: slot_width) },
         )),
         StatusSlot::TurnResult(s) => Some(AnyElement::from(
-            element! { RichText(content: s.clone(), width: preview_width) },
+            element! { RichText(content: s.clone(), width: slot_width) },
         )),
         StatusSlot::Tips => Some(AnyElement::from(
-            element! { AnsiText(content: tips_text.clone(), initial_style: chrome_muted, width: preview_width) },
+            element! { AnsiText(content: tips_text.clone(), initial_style: chrome_muted, width: slot_width) },
         )),
         StatusSlot::Empty => None,
     };
-    let separator_wrap = if prose_preview.is_some() {
-        TextWrap::NoWrap
-    } else {
-        TextWrap::Wrap
-    };
+    let separator_wrap = TextWrap::NoWrap;
 
     element! {
-        View(flex_direction: FlexDirection::Column, width: preview_width) {
+        View(flex_direction: FlexDirection::Column, width: slot_width) {
             // A fixed parent keeps TextInput's identity through preview handoff.
-            #(if prose_preview.is_some() {
-                Some(element! {
-                    View(flex_direction: FlexDirection::Column, width: preview_width,
-                        height: preview_height) {
-                        #(preview_text.map(|text| element! { RichText(content: text, wrap: TextWrap::NoWrap, width: preview_width) }))
-                    }
-                })
-            } else {
-                None
-            })
+            View(flex_direction: FlexDirection::Column, width: slot_width,
+                height: preview_height) {
+                #(preview_text.map(|text| element! { RichText(content: text, wrap: TextWrap::NoWrap, width: slot_width) }))
+            }
             // PendingSlot: tools + queued messages, arrival order. Rendered only
             // when non-empty — an empty `Text` is not zero-height in iocraft
             // (its measure clamps to `height.max(1)`), so an always-present slot
@@ -2599,39 +2573,33 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(if pending_text.is_empty() {
                 None
             } else {
-                Some(element! { AnsiText(content: pending_text, width: preview_width) })
+                Some(element! { AnsiText(content: pending_text, width: slot_width) })
             })
             // StatusSlot
-            #(if prose_preview.is_some() {
-                Some(AnyElement::from(element! {
-                    View(flex_direction: FlexDirection::Column, width: preview_width, height: status_height) {
-                        #(status_element)
-                    }
-                }))
-            } else {
-                status_element
-            })
+            View(flex_direction: FlexDirection::Column, width: slot_width, height: status_height) {
+                #(status_element)
+            }
             // Each slot owns its semantic styles. The separator's grey must
             // not become a fallback for neutral Todo quantities or labels.
             #(if todo_line.is_empty() {
                 None
             } else {
-                Some(element! { AnsiText(content: todo_line, width: preview_width) })
+                Some(element! { AnsiText(content: todo_line, width: slot_width) })
             })
             // Generated at terminal width; keep Taffy's min-content pass from
             // measuring one separator character per row inside a fixed width.
             Text(content: sep.clone(), color: chrome_border, wrap: separator_wrap)
             // InputSlot
             #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
-                AnsiText(content: format!("[{title}]"), initial_style: question_style, width: preview_width)
+                AnsiText(content: format!("[{title}]"), initial_style: question_style, width: slot_width)
             }))
             #(question.and_then(|question| question.description.as_ref()).map(|description| element! {
-                PromptTextView(content: Some(description.clone()), width: w, layout_width: preview_width)
+                PromptTextView(content: Some(description.clone()), width: w, layout_width: slot_width)
             }))
             #(if let Some(panel) = task_panel.clone() {
-                Some(element! { AnsiText(content: panel, width: preview_width) })
+                Some(element! { AnsiText(content: panel, width: slot_width) })
             } else {
-                panel_text.map(|panel| element! { AnsiText(content: panel, initial_style: question_style, width: preview_width) })
+                panel_text.map(|panel| element! { AnsiText(content: panel, initial_style: question_style, width: slot_width) })
             })
             #(if task_panel.is_some() {
                 element! { View(flex_direction: FlexDirection::Row) {} }
@@ -2717,7 +2685,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Separator
             Text(content: sep, color: chrome_border, wrap: separator_wrap)
             // FooterSlot
-            AnsiText(content: footer_text, initial_style: chrome_muted, width: preview_width)
+            AnsiText(content: footer_text, initial_style: chrome_muted, width: slot_width)
         }
     }
 }
@@ -2752,8 +2720,7 @@ pub fn spawn_repl_ui(
 
     let ctx = ReplContext {
         tasks: Arc::new(Mutex::new(TaskBrowser::default())),
-        prose_preview: runtime::experiments::is_enabled(runtime::experiments::Experiment::ProsePreview)
-            .then(|| Arc::new(Mutex::new(ProsePreview::default()))),
+        prose_preview: Arc::new(Mutex::new(ProsePreview::default())),
         output_rx: Arc::new(Mutex::new(output_rx)),
         terminal_handoff: Arc::new(Mutex::new(None)),
         ui_rx: Arc::new(Mutex::new(ui_rx)),

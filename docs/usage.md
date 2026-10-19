@@ -180,9 +180,8 @@ Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
-The `prosePreview` experiment shows an unfinished ordinary paragraph above
-the live status area. Enable it with `SUDOCODE_EXPERIMENT_PROSE_PREVIEW=1`
-or `experimental.prosePreview: true`; it is off by default. Finalized text
+Unfinished ordinary paragraphs stream above the live status area by default.
+Finalized text
 moves into native scrollback in the same presentation as preview removal,
 and a draft typed during the response stays available. The preview keeps
 at most 8 KiB of source and fits around the input; longer paragraphs freeze

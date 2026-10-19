@@ -2,6 +2,7 @@
 
 #[path = "../src/render"]
 mod render {
+    pub const RESET: &str = "\x1b[0m";
     #[path = "styled_text.rs"]
     pub(crate) mod styled_text;
 }
@@ -86,9 +87,10 @@ mod repl_ui {
     #[test]
     fn combined_intensity_and_both_reset_forms_reach_rich_text_canvas() {
         for width in [100, 68, 78] {
-            let content = std::sync::Arc::new(StyledText::from_ansi(
-                "\x1b[48;2;1;3;4mNoOperandLeak\x1b[0mPlainAfter",
-            ));
+            let source = StyledText::from_ansi("\x1b[48;2;1;3;4mNoOperandLeak\x1b[0mPlainAfter");
+            let mut ansi = String::new();
+            source.write_ansi(0..source.text.len(), &mut ansi);
+            let content = std::sync::Arc::new(StyledText::from_ansi(&ansi));
             let canvas = element! { ansi_text::RichText(content) }.render(Some(width));
             let mut wire = Vec::new();
             canvas.write_ansi(&mut wire).unwrap();

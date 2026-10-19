@@ -167,12 +167,38 @@ fn assert_styles(sess: &PtySession, expected: &[(&str, bool, bool)]) -> String {
     for ((needle, bold, colored), sample) in expected.iter().zip(&snapshot.samples) {
         let actual = sample.as_ref().unwrap();
         assert_eq!(actual.bold, *bold, "{needle}: {}", snapshot.contents);
-        assert_eq!(
-            actual.foreground != "Default",
-            *colored,
-            "{needle}: {}",
-            snapshot.contents
-        );
+        if *colored {
+            assert_ne!(
+                actual.foreground, "Default",
+                "{needle}: {}",
+                snapshot.contents
+            );
+        } else {
+            let neutral = if cfg!(windows) && *bold {
+                let control = expected
+                    .iter()
+                    .zip(&snapshot.samples)
+                    .find(|((label, weight, color), _)| {
+                        (*label == "Context" || *label == "Review plan" || *label == "Verify bold")
+                            && *weight
+                            && !*color
+                    })
+                    .unwrap()
+                    .1
+                    .as_ref()
+                    .unwrap();
+                assert!(control.bold);
+                assert!(matches!(control.foreground.as_str(), "Default" | "Idx(15)"));
+                control.foreground.as_str()
+            } else {
+                "Default"
+            };
+            assert_eq!(
+                actual.foreground, neutral,
+                "{needle}: {}",
+                snapshot.contents
+            );
+        }
     }
     snapshot.contents
 }

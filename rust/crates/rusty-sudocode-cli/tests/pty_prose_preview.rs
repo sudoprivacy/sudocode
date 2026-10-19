@@ -6,6 +6,10 @@ use pty_expect::PtySession;
 use std::fmt::Write as _;
 use std::time::Duration;
 
+// The runner's system ConPTY input path loses non-BMP draft characters.
+// The required native suite extends this draft with emoji on the pinned host.
+const HANDOFF_DRAFT: &str = "draft界";
+
 fn start(env: &TestEnv, cols: u16) -> PtySession {
     let mut session = env.spawn_with_env(
         &["--permission-mode", "read-only"],
@@ -96,16 +100,16 @@ fn handoff_preserves_body_rows_and_draft_at_wide_and_narrow_widths() {
             common::DEFAULT_TIMEOUT,
             "complete source visible before EOF",
         );
-        session.send("draft界👩🏽‍💻").unwrap();
+        session.send(HANDOFF_DRAFT).unwrap();
         common::expect_input_line(
             &session,
-            "draft界👩🏽‍💻",
+            HANDOFF_DRAFT,
             common::DEFAULT_TIMEOUT,
             "draft during stream",
         );
         let before = body_rows(&session);
         std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
-        expect_finalized_with_draft(&session, &marker, "draft界👩🏽‍💻");
+        expect_finalized_with_draft(&session, &marker, HANDOFF_DRAFT);
         let after = body_rows(&session);
         assert_eq!(
             before, after,
@@ -114,7 +118,7 @@ fn handoff_preserves_body_rows_and_draft_at_wide_and_narrow_widths() {
         session.render(|screen| assert_eq!(screen.contents().matches("ProseStart").count(), 1));
         common::expect_input_line(
             &session,
-            "draft界👩🏽‍💻",
+            HANDOFF_DRAFT,
             common::DEFAULT_TIMEOUT,
             "draft survives handoff",
         );
@@ -461,6 +465,7 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
             "todos": env.workspace_root().join("todos.json"), "logRoot": log_root,
             "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
             "cols": cols, "rows": 40, "prompt": prompt,
+            "draft": format!("{HANDOFF_DRAFT}👩🏽‍💻"),
         });
         let script =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/terminal/prose.cjs");

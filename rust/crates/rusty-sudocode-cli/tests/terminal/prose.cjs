@@ -37,7 +37,9 @@ function checkProseHistory() {
         1, `history ${i} was lost or duplicated\n${text}`);
   }
 }
-let draft = 'DraftSurvivesProse';
+assert.equal(typeof config.draft, 'string', 'the native fixture must provide its Unicode draft');
+assert(config.draft.includes('👩🏽‍💻'), 'the native handoff must cover a non-BMP emoji sequence');
+let draft = config.draft;
 function inputAtWidth(cols) {
   const lines = viewport().split('\n');
   const input = lines.findIndex(line => line.startsWith(`❯ ${draft}`));

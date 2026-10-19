@@ -6,78 +6,72 @@ permissions:
   actions: read
 jobs:
   diagnose:
-    name: Compare compact glyph ownership against the same Linux reference
+    name: Measure compact glyph ownership using frozen production artifacts
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: npm ci --prefix e2e/terminal-resize
-      - name: Pin and freeze the ASCII storage prototype
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('rust/crates/rusty-sudocode-cli/Cargo.toml')
-          source=p.read_text()
-          assert 'e04d0675960b4df36399450af513b48a78a59f92' in source
-          p.write_text(source.replace('e04d0675960b4df36399450af513b48a78a59f92','7db114406ac704fb90d2e3edbe3d0b4034a36e7e'))
-          PY
-          cargo build --release --manifest-path rust/Cargo.toml --target-dir "$RUNNER_TEMP/build/prototype" -p rusty-sudocode-cli
-          cp "$RUNNER_TEMP/build/prototype/release/scode" "$RUNNER_TEMP/scode-prototype"
-          "$RUNNER_TEMP/scode-prototype" version --output-format json
-          sha256sum "$RUNNER_TEMP/scode-prototype"
-      - name: Compile the unchanged workload driver after freezing production artifacts
-        run: |
-          cargo test --release --locked --manifest-path rust/Cargo.toml --target-dir "$RUNNER_TEMP/build/prototype" -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/driver.jsonl"
-      - name: Wait for the immutable reference artifact from the first probe
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for attempt in {1..60}; do
-            if gh api repos/sudoprivacy/sudocode/actions/runs/39337925146/artifacts --jq '.artifacts | any(.name == "linux-ascii-cell-pilot")' | rg -q '^true$'; then
-              exit 0
-            fi
-            sleep 15
-          done
-          exit 1
       - uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
           run-id: 39337925146
           name: linux-ascii-cell-pilot
           path: reference-artifact
-      - name: Verify the reused fixed reference and record both binary hashes
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39339403496
+          name: linux-arc-cell-pilot
+          path: prototype-artifact
+      - name: Verify immutable production provenance
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import json, os, shutil, subprocess
-          sources=list(Path('reference-artifact').rglob('scode-fixed'))
-          assert len(sources)==1,sources
-          target=Path(os.environ['RUNNER_TEMP'])/'scode-fixed'
-          shutil.copy2(sources[0],target)
-          target.chmod(target.stat().st_mode | 0o111)
-          version=json.loads(subprocess.check_output([str(target),'version','--output-format','json'],text=True))
-          assert len(version['git_sha']) >= 7 and '82a99dd262c746a1872ccfaf0ea46d7fe4bd6754'.startswith(version['git_sha']),version
-          print(json.dumps(version))
+          import hashlib, json, os, shutil, subprocess
+          roots=[('reference-artifact','scode-fixed','82a99dd262c746a1872ccfaf0ea46d7fe4bd6754'),('prototype-artifact','scode-prototype','bcc952ec563ec7a1f428e37e6d49a8aea295f6b3')]
+          for folder,name,expected in roots:
+              sources=list(Path(folder).rglob(name))
+              assert len(sources)==1,sources
+              target=Path(os.environ['RUNNER_TEMP'])/name
+              shutil.copy2(sources[0],target)
+              target.chmod(target.stat().st_mode | 0o111)
+              version=json.loads(subprocess.check_output([str(target),'version','--output-format','json'],text=True))
+              assert len(version['git_sha']) >= 7 and expected.startswith(version['git_sha']),version
+              print(json.dumps({'name':name,'version':version,'sha256':hashlib.sha256(target.read_bytes()).hexdigest()}))
           PY
-          sha256sum "$RUNNER_TEMP/scode-fixed" "$RUNNER_TEMP/scode-prototype"
-      - name: Run unmodified long and capped paragraphs in paired order
+      - run: npm ci --prefix e2e/terminal-resize
+      - name: Compile the unchanged trusted workload driver
+        run: |
+          cargo test --release --locked --manifest-path rust/Cargo.toml -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/driver.jsonl"
+          python3 - <<'PY'
+          from pathlib import Path
+          import json, os, shutil
+          messages=[json.loads(line) for line in Path(os.environ['RUNNER_TEMP'],'driver.jsonl').read_text().splitlines()]
+          drivers=[x['executable'] for x in messages if x.get('reason')=='compiler-artifact' and x.get('executable') and x['target']['name']=='pty_render_performance']
+          assert len(drivers)==1,drivers
+          shutil.copy2(drivers[0],Path(os.environ['RUNNER_TEMP'])/'driver-pilot')
+          PY
+      - name: Run original long and capped workloads in paired order
         run: python3 .github/diagnostics/ascii_pilot.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: linux-arc-cell-pilot
+          name: linux-arc-cell-pilot-validated
           path: |
             ${{ runner.temp }}/ascii-cell-pilot
             ${{ runner.temp }}/scode-fixed
             ${{ runner.temp }}/scode-prototype
+            ${{ runner.temp }}/driver-pilot
           if-no-files-found: error

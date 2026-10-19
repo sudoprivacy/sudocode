@@ -1,5 +1,5 @@
 //! Disposable prose in the live frame. Final text remains owned by the stream renderer.
-//! Source and layout are bounded; only a new source or width reparses Markdown.
+//! Source and layout are bounded; unchanged source, width and position reuse cached rows.
 
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
@@ -17,15 +17,33 @@ pub(crate) struct PreviewPosition {
     pub(crate) gap: &'static str,
 }
 
+/// Oversized provider packets never allocate an unbounded preview copy.
+pub(crate) enum PreviewDelta {
+    Text(String),
+    Exceeded,
+}
+
+impl PreviewDelta {
+    pub(crate) fn from_source(source: &str) -> Self {
+        if source.len() <= MAX_SOURCE_BYTES {
+            Self::Text(source.to_string())
+        } else {
+            Self::Exceeded
+        }
+    }
+}
+
 pub(crate) enum PreviewUpdate {
     Append {
-        delta: String,
+        delta: PreviewDelta,
         position: PreviewPosition,
     },
     Reset {
         source: String,
         position: PreviewPosition,
+        is_frozen: bool,
     },
+    Reposition(PreviewPosition),
     Clear,
 }
 
@@ -52,6 +70,10 @@ impl ProsePreview {
                 if self.is_frozen {
                     return;
                 }
+                let PreviewDelta::Text(delta) = delta else {
+                    self.is_frozen = true;
+                    return;
+                };
                 if self.source.len().saturating_add(delta.len()) <= MAX_SOURCE_BYTES {
                     let previous_len = self.source.len();
                     self.source.push_str(&delta);
@@ -68,10 +90,23 @@ impl ProsePreview {
                     self.is_frozen = true;
                 }
             }
-            PreviewUpdate::Reset { source, position } => {
+            PreviewUpdate::Reset {
+                source,
+                position,
+                is_frozen,
+            } => {
                 self.clear();
+                self.is_frozen = is_frozen;
                 if source.len() <= MAX_SOURCE_BYTES {
                     self.source = source;
+                    self.position = Some(position);
+                    self.is_dirty = true;
+                }
+            }
+            PreviewUpdate::Reposition(position) => {
+                // A tool/notice changes where prose is displayed, not the
+                // provider's source or its frozen preview prefix.
+                if self.position != Some(position) {
                     self.position = Some(position);
                     self.is_dirty = true;
                 }
@@ -143,10 +178,9 @@ fn is_prose(source: &str) -> bool {
     has_prose_structure(source) && !has_ambiguous_width(source)
 }
 
-/// Only prose gets an extra boundary before asynchronous progress output.
-/// Fences and other structured blocks keep the original stream parser state.
+/// Conservative shape gate for live prose; the stream parser owns final blocks.
 #[inline]
-pub(crate) fn has_prose_structure(source: &str) -> bool {
+fn has_prose_structure(source: &str) -> bool {
     !source.trim().is_empty() && !source.contains('|') && has_prose_lines(source)
 }
 

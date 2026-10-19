@@ -25,7 +25,7 @@ use crate::render::{
     SpinnerRef, TerminalRenderer, DIM, RESET,
 };
 use crate::repl_ui::prose_preview::{
-    has_prose_structure, PreviewPosition, PreviewUpdate, MAX_SOURCE_BYTES,
+    PreviewDelta, PreviewPosition, PreviewUpdate, MAX_SOURCE_BYTES,
 };
 use crate::repl_ui::OutputSender;
 
@@ -299,30 +299,19 @@ impl EngineEventRenderer {
             return self.render_event(event);
         }
         let delta = match &event {
-            EngineEvent::TextDelta { text } if !text.is_empty() => Some(text.clone()),
+            EngineEvent::TextDelta { text } if !text.is_empty() => {
+                Some(PreviewDelta::from_source(text))
+            }
             _ => None,
         };
-        // Close visible prose before another durable block or interactive
-        // panel. Parallel tool progress must not overtake that prose.
-        if matches!(
-            event,
-            EngineEvent::ToolResult { .. }
-                | EngineEvent::HookProgress(_)
-                | EngineEvent::Notice { .. }
-                | EngineEvent::Retry(_)
-                | EngineEvent::ThinkingDelta { .. }
-                | EngineEvent::PermissionRequest { .. }
-                | EngineEvent::QuestionRequest { .. }
-        ) && has_prose_structure(self.markdown.pending_source())
-        {
-            self.flush_markdown();
-        }
+        // Asynchronous output leaves the provider's Markdown state intact.
+        // Publish its history together with the repositioned mutable preview.
         let outcome = self.render_event(event);
         self.publish_preview(delta);
         outcome
     }
 
-    fn publish_preview(&mut self, delta: Option<String>) {
+    fn publish_preview(&mut self, delta: Option<PreviewDelta>) {
         let output = self.preview_output.as_mut().expect("preview enabled");
         if output.is_empty() && delta.is_none() {
             return;
@@ -341,16 +330,23 @@ impl EngineEventRenderer {
             PreviewUpdate::Clear
         } else if committed.is_empty() {
             PreviewUpdate::Append {
-                delta: delta.unwrap_or_default(),
+                delta: delta.unwrap_or_else(|| PreviewDelta::Text(String::new())),
                 position,
             }
-        } else if self.markdown.pending_source().len() <= MAX_SOURCE_BYTES {
-            PreviewUpdate::Reset {
-                source: self.markdown.pending_source().to_string(),
-                position,
-            }
+        } else if delta.is_none() {
+            PreviewUpdate::Reposition(position)
         } else {
-            PreviewUpdate::Clear
+            let source = self.markdown.pending_source();
+            let is_frozen = source.len() > MAX_SOURCE_BYTES;
+            PreviewUpdate::Reset {
+                source: if is_frozen {
+                    String::new()
+                } else {
+                    source.to_string()
+                },
+                position,
+                is_frozen,
+            }
         };
         if let Some(writer) = &self.output_writer {
             writer.assistant_update(committed, preview);

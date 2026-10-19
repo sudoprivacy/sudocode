@@ -183,7 +183,8 @@ emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 Unfinished ordinary paragraphs stream above the live status area by default.
 Finalized text
 moves into native scrollback in the same presentation as preview removal,
-and a draft typed during the response stays available. The preview keeps
+and a draft typed during the response stays available. Parallel tool output
+keeps unfinished Markdown formatting intact. The preview keeps
 at most 8 KiB of source and fits around the input; longer paragraphs freeze
 their preview until finalization, which still retains the entire response.
 Code, tables, lists, headings and emoji with ambiguous terminal widths use

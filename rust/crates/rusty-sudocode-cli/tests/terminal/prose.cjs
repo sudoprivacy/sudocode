@@ -4,7 +4,8 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 
 exports.run = async function run(host, config) {
-  const { child, terminal, snapshot, viewport, settle, frame, resizeFrame, onPresentation } = host;
+  const { child, terminal, snapshot, viewport, settle, frame, resize, resizeFrame, onPresentation } = host;
+  const hasSavedHistory = ['prose_resize', 'prose_finish_resize'].includes(config.scenario);
 function proseRows() {
   const lines = snapshot().split('\n');
   const start = lines.findIndex(line => line.includes('ProseStart'));
@@ -30,7 +31,7 @@ function checkProseHistory() {
   const joined = text.replace(/\s/g, '');
   assert.equal(joined.split('ProseStart').length - 1, 1, text);
   assert.equal(joined.split('ProseDone.').length - 1, 1, text);
-  if (config.scenario === 'prose_resize') {
+  if (hasSavedHistory) {
     for (let i = 0; i < 70; i++)
       assert.equal(text.split('\n').filter(line => line.trim() === `Earlier history line ${i}`).length,
         1, `history ${i} was lost or duplicated\n${text}`);
@@ -43,6 +44,21 @@ async function prosePreview() {
     && fs.existsSync(path.join(config.root, 'prose-ready')));
   child.write('DraftSurvivesProse');
   await frame(() => viewport().includes('❯ DraftSurvivesProse'));
+  if (config.scenario === 'prose_finish_resize') {
+    await resizeFrame(40, 12, () => viewport().includes('❯ DraftSurvivesProse'));
+    // Finalization is deliberately released before the restored viewport has
+    // presented, exercising history and live-frame placement in one update.
+    resize(120, 40);
+    fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
+    const expected = 'ProseStart中文é💻ordinarytextwithboldwords,inlinecode,andalink(https://example.com).Moreordinaryprosewrapsacrossseveralrowswhiletheinputstaysavailable.ProseDone.'.normalize('NFC');
+    await settle(() => viewport().includes('turn 2') && viewport().includes('❯ DraftSurvivesProse')
+      && viewport().replace(/\s/g, '').normalize('NFC').includes(expected));
+    checkProseHistory();
+    child.write('\x15');
+    await frame(() => !viewport().includes('DraftSurvivesProse'));
+    console.log('SCODE_XTERM_PROSE_PASS');
+    return;
+  }
   if (config.scenario === 'prose_resize') {
     for (const [cols, rows] of [[60,40], [40,12], [120,40], [48,40], [120,40]]) {
       await resizeFrame(cols, rows, () => viewport().includes('❯ DraftSurvivesProse'));
@@ -58,7 +74,7 @@ async function prosePreview() {
   const handoffFrames = [];
   const stopWatching = onPresentation(() => handoffFrames.push(proseRows()));
   fs.writeFileSync(path.join(config.root, 'prose-release'), 'release');
-  await settle(() => viewport().includes(`turn ${config.scenario === 'prose_resize' ? 2 : 1}`)
+  await settle(() => viewport().includes(`turn ${hasSavedHistory ? 2 : 1}`)
     && viewport().includes('❯ DraftSurvivesProse'));
   stopWatching();
   const after = proseRows();
@@ -74,3 +90,29 @@ async function prosePreview() {
 }
   await prosePreview();
 };
+
+// Functional acceptance reuses the pinned observer without modifying the
+// protected performance workload runner or measurement fixtures.
+if (require.main === module) {
+  const { createHost } = require('../../../../../e2e/terminal-resize/host.cjs');
+  const config = JSON.parse(process.argv[2]);
+  const host = createHost(config);
+  (async () => {
+    try {
+      await exports.run(host, config);
+      host.child.write('/exit');
+      await host.settle(() => host.viewport().includes('❯ /exit'));
+      host.child.write('\r');
+      for (let i = 0; i < 250; i++) {
+        if (host.state.exitCode === undefined && process.platform === 'win32')
+          host.state.exitCode = host.child._agent?.exitCode;
+        if (host.state.exited && host.state.exitCode !== undefined && !host.state.pending) break;
+        await host.sleep(20);
+      }
+      assert(host.state.exited, 'scode did not exit');
+      assert.equal(host.state.exitCode, 0);
+    } finally {
+      await host.close();
+    }
+  })().then(() => process.exit(0)).catch(error => { console.error(error); process.exit(1); });
+}

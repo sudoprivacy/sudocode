@@ -2510,7 +2510,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut state = prose_preview
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.is_active() || task_panel.is_some() {
+        if !state.is_active()
+            || task_panel.is_some()
+            || !matches!(&current_input_slot, InputSlot::TextInput)
+        {
             return None;
         }
         let input_rows = match &current_input_slot {

@@ -265,17 +265,25 @@ fn tiny_resize_keeps_input_and_complete_final_text() {
         common::DEFAULT_TIMEOUT,
         "draft before resize",
     );
-    for (rows, cols) in [(40, 60), (12, 40), (40, 120)] {
+    let mut draft = "resize-draft".to_string();
+    for ((rows, cols), suffix) in [(40, 60), (12, 40), (40, 120)]
+        .into_iter()
+        .zip(['a', 'b', 'c'])
+    {
         session.resize(rows, cols).unwrap();
+        // A new edit proves the resized input owner presented a fresh frame;
+        // an unchanged draft can still be visible in the parser's old frame.
+        session.send(&suffix.to_string()).unwrap();
+        draft.push(suffix);
         common::expect_input_line(
             &session,
-            "resize-draft",
+            &draft,
             common::DEFAULT_TIMEOUT,
             "input after resize",
         );
     }
     std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
-    expect_finalized_with_draft(&session, &marker, "resize-draft");
+    expect_finalized_with_draft(&session, &marker, &draft);
     common::expect_screen(
         &session,
         |s| {
@@ -291,55 +299,57 @@ fn tiny_resize_keeps_input_and_complete_final_text() {
 
 #[test]
 fn source_above_preview_limit_is_committed_completely() {
-    let env = TestEnv::new_mock("prose-cap");
-    let mut session = start(&env, 120);
-    let marker = common::turn_status_marker(&session);
-    let document = format!("CapStart {} CapDone", "ordinary prose words ".repeat(600));
-    let prompt = gated_prompt(&env, &document);
-    let path = env.workspace_root().join("prose-control.json");
-    let mut control: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    control["chunk_chars"] = serde_json::json!(256);
-    control["delay_ms"] = serde_json::json!(5);
-    std::fs::write(path, serde_json::to_vec(&control).unwrap()).unwrap();
-    session.send(&format!("{prompt}\r")).unwrap();
-    let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-    while !env.workspace_root().join("prose-ready").exists() {
-        assert!(std::time::Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    session.send("bounded-draft").unwrap();
-    common::expect_input_line(
-        &session,
-        "bounded-draft",
-        common::DEFAULT_TIMEOUT,
-        "input with capped preview",
-    );
-    session.render(|screen| assert!(!screen.contents().contains("CapDone")));
-    std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
-    expect_finalized_with_draft(&session, &marker, "bounded-draft");
-    common::expect_screen(
-        &session,
-        |s| s.contains("CapDone"),
-        common::DEFAULT_TIMEOUT,
-        "final tail above cap",
-    );
-    finish(&mut session);
-    // Inspect the actual persisted assistant message, not the echoed prompt.
-    let sessions = env.workspace_root().join(".scode/sessions");
-    let mut is_complete = false;
-    for entry in walk_session_files(&sessions) {
-        if let Ok(saved) = runtime::Session::load_from_path(&entry) {
-            is_complete |= saved.messages.iter().any(|message| {
-                message.blocks.iter().any(|block|
-                matches!(block, runtime::ContentBlock::Text { text } if text == &document))
-            });
+    for chunk_chars in [256, 20_000] {
+        let env = TestEnv::new_mock("prose-cap");
+        let mut session = start(&env, 120);
+        let marker = common::turn_status_marker(&session);
+        let document = format!("CapStart {} CapDone", "ordinary prose words ".repeat(600));
+        let prompt = gated_prompt(&env, &document);
+        let path = env.workspace_root().join("prose-control.json");
+        let mut control: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        control["chunk_chars"] = serde_json::json!(chunk_chars);
+        control["delay_ms"] = serde_json::json!(5);
+        std::fs::write(path, serde_json::to_vec(&control).unwrap()).unwrap();
+        session.send(&format!("{prompt}\r")).unwrap();
+        let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
+        while !env.workspace_root().join("prose-ready").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
         }
+        session.send("bounded-draft").unwrap();
+        common::expect_input_line(
+            &session,
+            "bounded-draft",
+            common::DEFAULT_TIMEOUT,
+            "input with capped preview",
+        );
+        session.render(|screen| assert!(!screen.contents().contains("CapDone")));
+        std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
+        expect_finalized_with_draft(&session, &marker, "bounded-draft");
+        common::expect_screen(
+            &session,
+            |s| s.contains("CapDone"),
+            common::DEFAULT_TIMEOUT,
+            "final tail above cap",
+        );
+        finish(&mut session);
+        // Inspect the actual persisted assistant message, not the echoed prompt.
+        let sessions = env.workspace_root().join(".scode/sessions");
+        let mut is_complete = false;
+        for entry in walk_session_files(&sessions) {
+            if let Ok(saved) = runtime::Session::load_from_path(&entry) {
+                is_complete |= saved.messages.iter().any(|message| {
+                    message.blocks.iter().any(|block|
+                    matches!(block, runtime::ContentBlock::Text { text } if text == &document))
+                });
+            }
+        }
+        assert!(
+            is_complete,
+            "persisted session must retain every byte above the preview cap"
+        );
     }
-    assert!(
-        is_complete,
-        "persisted session must retain every byte above the preview cap"
-    );
 }
 
 fn walk_session_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -403,6 +413,7 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
         ("prose_wide", 120),
         ("prose_narrow", 48),
         ("prose_resize", 120),
+        ("prose_finish_resize", 120),
     ] {
         let env = TestEnv::new_mock(scenario);
         let prompt = gated_prompt(&env, mock_anthropic_service::PROSE_PREVIEW_DOC);
@@ -415,7 +426,7 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
             "read-only",
         ];
         let saved_path = env.workspace_root().join("saved.jsonl");
-        if scenario == "prose_resize" {
+        if matches!(scenario, "prose_resize" | "prose_finish_resize") {
             let mut saved = runtime::Session::new().with_workspace_root(env.workspace_root());
             saved.push_user_text("Saved conversation").unwrap();
             let mut body = String::new();
@@ -435,14 +446,32 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
             saved.save_to_path(&saved_path).unwrap();
             args.extend(["--resume", saved_path.to_str().unwrap()]);
         }
-        let output = common::terminal_host::run(
-            &env,
-            &args,
-            scenario,
-            serde_json::json!({
-                "cols": cols, "rows": 40, "prompt": prompt,
-            }),
-        );
+        // Acceptance owns its scenario entry point; the shared terminal
+        // observer and performance measurement fixtures remain unchanged.
+        let log_root = std::env::var_os("SCODE_TERMINAL_LOG_DIR")
+            .map_or_else(
+                || env.workspace_root().join("terminal-logs"),
+                std::path::PathBuf::from,
+            )
+            .join(scenario);
+        std::fs::create_dir_all(&log_root).unwrap();
+        let config = serde_json::json!({
+            "binary": common::scode_bin(), "args": args, "scenario": scenario,
+            "root": env.workspace_root(), "configHome": env.config_home(),
+            "todos": env.workspace_root().join("todos.json"), "logRoot": log_root,
+            "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
+            "cols": cols, "rows": 40, "prompt": prompt,
+        });
+        let script =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/terminal/prose.cjs");
+        let output = std::process::Command::new(
+            std::env::var_os("SCODE_TERMINAL_HOST").unwrap_or_else(|| "node".into()),
+        )
+        .arg(script)
+        .arg(config.to_string())
+        .env("ELECTRON_RUN_AS_NODE", "1")
+        .output()
+        .expect("start the pinned real terminal host; see e2e/terminal-resize/README.md");
         common::terminal_host::assert_success(&output);
     }
 }

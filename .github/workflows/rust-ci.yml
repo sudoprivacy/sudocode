@@ -303,6 +303,11 @@ jobs:
           SCODE_TEST_BACKEND: mock
           SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
         run: cargo test -p rusty-sudocode-cli --test pty_chrome_resize -- --ignored --nocapture
+      - name: Preserve streaming prose handoff, native history and drafts
+        env:
+          SCODE_TEST_BACKEND: mock
+          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
+        run: cargo test -p rusty-sudocode-cli --test pty_prose_preview -- --ignored --nocapture
       - name: Answer palette queries through the ready Unix terminal peer
         if: runner.os != 'Windows'
         env:

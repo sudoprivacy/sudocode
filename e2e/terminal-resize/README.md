@@ -40,13 +40,6 @@ workspace. `SCODE_CONPTY_BACKEND=system` runs the strict system-host diagnostic;
 it currently exposes history loss on Windows build 26300 even in static controls
 without application redraw. CI uses VS Code's bundled ConPTY.
 
-Streaming prose acceptance is covered by `pty_prose_preview`. Its ignored
-real-terminal case checks identical body rows and styles through preview/history
-handoff at wide and narrow widths, plus a saved conversation and tiny-window
-resize. Run it explicitly with `cargo test -p rusty-sudocode-cli --test
-pty_prose_preview -- --ignored --nocapture`. The scenario uses the same terminal
-host and history assertions; it does not change performance budgets.
-
 ## Release performance gate
 
 `pty_render_performance` reuses TestEnv, the protocol fixture and this terminal
@@ -61,8 +54,7 @@ python3 e2e/terminal-resize/benchmark.py --driver rust/target/release/deps/pty_r
 ```
 
 Run from the repository root. `--profile stress` adds 30 turns; `--preview 1`
-selects the preview setting on historical experimental builds. Streaming prose
-is enabled by default in current builds. Ordinary CI measures default behavior on Linux;
+measures the local experiment. Ordinary CI measures default behavior on Linux;
 the cross-platform resize job retains the visual and history contracts. Reports
 include raw input samples, per-turn process resources, terminal traces, binary
 hashes, A/A noise and paired A/B results. A noisy or incomplete run fails.

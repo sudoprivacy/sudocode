@@ -569,21 +569,17 @@ fn subagent_blocking_tools_overlap_and_accept_the_same_aliases_as_parent() {
 }
 
 #[test]
-fn prose_preview_preserves_open_fences_during_tool_completion() {
-    for is_fence in [true, false] {
+fn prose_preview_preserves_markdown_context_during_tool_completion() {
+    for (source, completion, is_fence) in [
+        ("```rust\nlet PendingFenceBody = 7;\n", "```\n", true),
+        ("ProseBeforeToolProgress ordinary words", "\n\n", false),
+        ("ProseBeforeToolProgress **bold", " words**\n\n", false),
+        ("ProseBeforeToolProgress `inline", " code`\n\n", false),
+    ] {
         let env = TestEnv::new_mock("preview-tool-interleave");
         fifo(&env, "early.fifo");
-        let source = if is_fence {
-            "```rust\nlet PendingFenceBody = 7;\n"
-        } else {
-            "ProseBeforeToolProgress ordinary words"
-        };
         let source_path = env.workspace_root().join("stream-text.json");
-        std::fs::write(
-            &source_path,
-            json!([source, if is_fence { "```\n" } else { "\n\n" }]).to_string(),
-        )
-        .unwrap();
+        std::fs::write(&source_path, json!([source, completion]).to_string()).unwrap();
         let gate = env.workspace_root().join("finish-stream");
         let mut call = bash("early", "cat early.fifo");
         call["stream_wait_for"] = json!(gate);
@@ -644,6 +640,25 @@ fn prose_preview_preserves_open_fences_during_tool_completion() {
         done(&sess);
         if is_fence {
             sess.render(|s| assert_eq!(s.contents().matches("PendingFenceBody").count(), 1));
+        } else {
+            sess.render(|s| {
+                let text = s.contents();
+                assert_eq!(text.matches("ProseBeforeToolProgress").count(), 1);
+                if source.contains("**") {
+                    assert!(
+                        !text.contains("**bold") && !text.contains("words**"),
+                        "{text}"
+                    );
+                    assert!(text.contains("bold words"), "{text}");
+                }
+                if source.contains('`') {
+                    assert!(
+                        !text.contains("`inline") && !text.contains("code`"),
+                        "{text}"
+                    );
+                    assert!(text.contains("inline code"), "{text}");
+                }
+            });
         }
         finish(sess);
     }

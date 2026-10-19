@@ -6,27 +6,57 @@ permissions:
   actions: read
 jobs:
   diagnose:
-    name: Validate all Windows prose cases against the unchanged production dependency
-    runs-on: windows-latest
-    timeout-minutes: 30
+    name: Compare Linux glyph-storage memory with fixed workloads
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v4
         with:
-          workspaces: rust -> target
-      - name: Run all ordinary prose tests with original Unicode and exact persisted content
-        working-directory: rust
-        env:
-          SCODE_TEST_BACKEND: mock
+          ref: 82a99dd262c746a1872ccfaf0ea46d7fe4bd6754
+          path: fixed
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: npm ci --prefix e2e/terminal-resize
+      - name: Freeze the unchanged reference release
         run: |
-          & cargo test --locked -p rusty-sudocode-cli --test pty_prose_preview -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/prose-complete.log"
-          if ($LASTEXITCODE -ne 0) { throw "Prose suite failed: $LASTEXITCODE" }
+          set -euo pipefail
+          cargo build --release --locked --manifest-path fixed/rust/Cargo.toml --target-dir "$RUNNER_TEMP/build/fixed" -p rusty-sudocode-cli
+          cp "$RUNNER_TEMP/build/fixed/release/scode" "$RUNNER_TEMP/scode-fixed"
+      - name: Pin and freeze the ASCII storage prototype
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('rust/crates/rusty-sudocode-cli/Cargo.toml')
+          source=p.read_text()
+          assert 'e04d0675960b4df36399450af513b48a78a59f92' in source
+          p.write_text(source.replace('e04d0675960b4df36399450af513b48a78a59f92','09df13bc83c753b7a21c1e04d0e10a0130acc642'))
+          PY
+          cargo build --release --manifest-path rust/Cargo.toml --target-dir "$RUNNER_TEMP/build/prototype" -p rusty-sudocode-cli
+          cp "$RUNNER_TEMP/build/prototype/release/scode" "$RUNNER_TEMP/scode-prototype"
+          "$RUNNER_TEMP/scode-fixed" version --output-format json
+          "$RUNNER_TEMP/scode-prototype" version --output-format json
+          sha256sum "$RUNNER_TEMP/scode-fixed" "$RUNNER_TEMP/scode-prototype"
+      - name: Compile the unchanged workload driver after freezing production artifacts
+        run: |
+          cargo test --release --locked --manifest-path rust/Cargo.toml --target-dir "$RUNNER_TEMP/build/prototype" -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/driver.jsonl"
+      - name: Run unmodified long and capped paragraphs in paired order
+        run: python3 .github/diagnostics/ascii_pilot.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-prose-complete
-          path: ${{ runner.temp }}/prose-complete.log
+          name: linux-ascii-cell-pilot
+          path: |
+            ${{ runner.temp }}/ascii-cell-pilot
+            ${{ runner.temp }}/scode-fixed
+            ${{ runner.temp }}/scode-prototype
           if-no-files-found: error

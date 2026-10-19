@@ -40,6 +40,13 @@ workspace. `SCODE_CONPTY_BACKEND=system` runs the strict system-host diagnostic;
 it currently exposes history loss on Windows build 26300 even in static controls
 without application redraw. CI uses VS Code's bundled ConPTY.
 
+The local `prosePreview` experiment adds `pty_prose_preview`. Its ignored
+real-terminal case checks identical body rows and styles through preview/history
+handoff at wide and narrow widths, plus a saved conversation and tiny-window
+resize. Run it explicitly with `cargo test -p rusty-sudocode-cli --test
+pty_prose_preview -- --ignored --nocapture`. The scenario uses the same terminal
+host and history assertions; it does not change performance budgets.
+
 ## Release performance gate
 
 `pty_render_performance` reuses TestEnv, the protocol fixture and this terminal

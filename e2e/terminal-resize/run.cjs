@@ -85,6 +85,8 @@ async function run() {
     if (config.scenario === 'performance') {
       await require('./performance.cjs').run(host, config);
 
+    } else if (config.scenario.startsWith('prose')) {
+      await require('./prose.cjs').run(host, config);
     } else if (config.scenario === 'a2a') {
       await queuedPeer();
     } else if (config.scenario === 'parallel') {

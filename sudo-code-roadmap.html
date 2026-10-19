@@ -1864,6 +1864,17 @@ send becomes irrelevant.</p>
 
 <h3>Inline rendering polish</h3>
 
+<p><strong>Local experiment, default off:</strong> <code>prosePreview</code>
+shows the unfinished ordinary paragraph in a bounded live region. The
+canonical Markdown stream still owns finalized history. Preview removal and
+history writes share one presentation; input remains in the existing editor.
+Enablement and structured-text fallback limits live in
+<a href="docs/usage.md#interactive-repl">the usage guide</a>. The refreshed
+trial follows current main and reuses its text adapters and semantic styles.
+PTY and real-terminal acceptance cover drafts, cancellation, parallel tool
+completion, narrow/wide handoff and tiny-window resize. Retain or remove the
+experiment after actual-terminal use; local construction alone is not acceptance.</p>
+
 <p>Improvements to how <code>rusty-sudocode-cli</code> draws its
 output inside the host terminal — colored diffs, syntax-highlighted
 tool results, post-turn timelines, box-drawn permission prompts,

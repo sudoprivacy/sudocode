@@ -37,9 +37,7 @@ fn text_element(
     width: Size,
 ) -> AnyElement<'static> {
     match width {
-        Size::Length(width) => {
-            element! { WidthText(contents, wrap, width) }.into()
-        }
+        Size::Length(width) => element! { WidthText(contents, wrap, width) }.into(),
         _ => element! { MixedText(contents, wrap) }.into(),
     }
 }

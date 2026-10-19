@@ -56,8 +56,8 @@ jobs:
           foreach ($backend in @('system', 'bundled')) {
             foreach ($variant in @('plain', 'clear', 'positioned')) {
               foreach ($mode in @('immediate', 'pending')) {
-                & $env:SCODE_TERMINAL_HOST e2e/terminal-resize/console-row-probe.cjs $pythonBinary $backend $variant $mode
-                if ($LASTEXITCODE -ne 0) { throw 'Native row probe failed' }
+                $probe = Start-Process -FilePath $env:SCODE_TERMINAL_HOST -ArgumentList @('e2e/terminal-resize/console-row-probe.cjs', $pythonBinary, $backend, $variant, $mode) -NoNewWindow -Wait -PassThru
+                if ($probe.ExitCode -ne 0) { throw "Native row probe failed: $($probe.ExitCode)" }
               }
             }
           }

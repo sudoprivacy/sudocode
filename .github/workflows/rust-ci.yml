@@ -40,6 +40,13 @@ jobs:
       - name: Build the same source with geometry observation
         working-directory: rust
         run: cargo test -p rusty-sudocode-cli --test pty_prose_preview --no-run
+      - name: Capture the exact fallback case and screen before changing its assertions
+        working-directory: rust
+        env:
+          SCODE_TEST_BACKEND: mock
+        run: |
+          & cargo test -p rusty-sudocode-cli --test pty_prose_preview ambiguous_grapheme_width_uses_complete_block_fallback -- --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/native-fallback.log"
+          $global:LASTEXITCODE = 0
       - name: Run complete native scenarios five times and retain every failure
         working-directory: rust
         env:

@@ -202,7 +202,7 @@ fn ambiguous_grapheme_width_uses_complete_block_fallback() {
         );
         session.render(|screen| {
             assert_eq!(screen.contents().matches(start).count(), 1);
-            assert!(screen.contents().contains(end));
+            assert!(screen.contents().contains(end), "document={document:?} screen={:?}", screen.contents());
             if document.starts_with("WidthStart") {
                 assert!(screen
                     .contents()

@@ -192,7 +192,13 @@ fn ambiguous_grapheme_width_uses_complete_block_fallback() {
             std::thread::sleep(Duration::from_millis(10));
         }
         std::thread::sleep(Duration::from_millis(160));
-        session.render(|screen| assert!(!screen.contents().contains(end)));
+        session.render(|screen| {
+            assert!(!screen
+                .contents()
+                .split_whitespace()
+                .collect::<String>()
+                .contains(end));
+        });
         std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
         common::expect_turn_complete_after(
             &session,
@@ -200,17 +206,21 @@ fn ambiguous_grapheme_width_uses_complete_block_fallback() {
             common::DEFAULT_TIMEOUT,
             "ambiguous grapheme canonical flush",
         );
-        session.render(|screen| {
-            assert_eq!(screen.contents().matches(start).count(), 1);
-            assert!(screen.contents().contains(end), "document={document:?} screen={:?}", screen.contents());
-            if document.starts_with("WidthStart") {
-                assert!(screen
-                    .contents()
-                    .split_whitespace()
-                    .collect::<String>()
-                    .contains(&document.split_whitespace().collect::<String>()));
-            }
-        });
+        let screen = session.render(|screen| screen.contents());
+        let logical_text = screen.split_whitespace().collect::<String>();
+        assert_eq!(screen.matches(start).count(), 1, "{screen}");
+        // A legacy host may wrap inside a word; require every character
+        // across physical row boundaries, without normalizing Unicode.
+        assert!(
+            logical_text.contains(end),
+            "document={document:?}\n{screen}"
+        );
+        if document.starts_with("WidthStart") {
+            assert!(
+                logical_text.contains(&document.split_whitespace().collect::<String>()),
+                "document={document:?}\n{screen}"
+            );
+        }
         finish(&mut session);
         assert_persisted_text(&env, &document);
     }

@@ -13,15 +13,19 @@ const host = createHost({ binary: python,
   backend, cols: 120, rows: 40 });
 (async () => {
   try {
-    await host.settle(text => text.includes('ProseDone.') && fs.existsSync(report));
-    const lines = host.viewport().split('\n');
+    await host.settle(() => fs.existsSync(report));
+    const lines = host.snapshot().split('\n');
     const start = lines.findIndex(line => line.includes('ProseStart'));
     let end = start;
-    while (end < lines.length - 1 && !lines[end].includes('ProseDone.')) end++;
-    const rows = lines.slice(start, end + 1);
+    while (end >= 0 && end < lines.length - 1 && !lines[end].includes('ProseDone.')) end++;
+    const rows = start >= 0 ? lines.slice(start, end + 1) : [];
     const joined = rows.join('').replace(/\s/g, '').normalize('NFC');
     const expected = 'ProseStart中文é💻ordinarytextwithboldwords,inlinecode,andalink(https://example.com).Moreordinaryprosewrapsacrossseveralrowswhiletheinputstaysavailable.ProseDone.'.normalize('NFC');
-    const result = { name, start, rows, complete: joined.includes(expected), ...JSON.parse(fs.readFileSync(report, 'utf8')) };
+    const viewportStart = start - host.terminal.buffer.active.baseY;
+    const result = { name, start: viewportStart, rows, complete: joined.includes(expected),
+      visible: viewportStart >= 0 && end - host.terminal.buffer.active.baseY < host.terminal.rows,
+      starts: lines.filter(line => line.includes('ProseStart')).length,
+      ...JSON.parse(fs.readFileSync(report, 'utf8')) };
     fs.mkdirSync(logRoot, { recursive: true });
     fs.writeFileSync(path.join(logRoot, 'result.json'), JSON.stringify(result, null, 2));
     console.log(JSON.stringify(result));

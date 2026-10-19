@@ -48,22 +48,22 @@ jobs:
           Get-FileHash $candidateBinary.FullName
           "SCODE_DIAG_BASE=$($mainBinary.FullName)" >> $env:GITHUB_ENV
           "SCODE_DIAG_CANDIDATE=$($candidateBinary.FullName)" >> $env:GITHUB_ENV
-      - name: Probe full-width native console output
+      - name: Replay captured live canvas output through both terminal backends
         env:
           ELECTRON_RUN_AS_NODE: '1'
         run: |
           $pythonBinary = (Get-Command python).Source
           foreach ($backend in @('system', 'bundled')) {
-            foreach ($variant in @('plain', 'clear', 'positioned')) {
-              foreach ($mode in @('immediate', 'pending')) {
-                $probe = Start-Process -FilePath $env:SCODE_TERMINAL_HOST -ArgumentList @('e2e/terminal-resize/console-row-probe.cjs', $pythonBinary, $backend, $variant, $mode) -NoNewWindow -Wait -PassThru
-                if ($probe.ExitCode -ne 0) { throw "Native row probe failed: $($probe.ExitCode)" }
+            foreach ($variant in @('original', 'positioned', 'cleared')) {
+              foreach ($writes in @('lines', 'frames')) {
+                $probe = Start-Process -FilePath $env:SCODE_TERMINAL_HOST -ArgumentList @('e2e/terminal-resize/prose-frame-replay.cjs', $pythonBinary, $backend, $variant, $writes) -NoNewWindow -Wait -PassThru
+                if ($probe.ExitCode -ne 0) { throw "Frame replay failed: $($probe.ExitCode)" }
               }
             }
           }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-console-row-probe
-          path: row-probe-results
+          name: windows-prose-frame-replay
+          path: frame-replay-results
           if-no-files-found: error

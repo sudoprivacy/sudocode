@@ -12,9 +12,7 @@ spec=importlib.util.spec_from_file_location('benchmark',ROOT/'e2e/terminal-resiz
 benchmark=importlib.util.module_from_spec(spec);spec.loader.exec_module(benchmark)
 policy_path=ROOT/'e2e/terminal-resize/performance-policy.json'
 policy=json.loads(policy_path.read_text())
-messages=[json.loads(line) for line in Path(os.environ['RUNNER_TEMP'],'driver.jsonl').read_text().splitlines()]
-drivers=[x['executable'] for x in messages if x.get('reason')=='compiler-artifact' and x.get('executable') and x['target']['name']=='pty_render_performance']
-assert len(drivers)==1,drivers
+drivers=[str(Path(os.environ['RUNNER_TEMP'])/'driver-pilot')]
 results=[]
 for round_number in range(4):
  for case in ['cap','long']:

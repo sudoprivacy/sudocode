@@ -6,7 +6,7 @@ permissions:
   actions: read
 jobs:
   diagnose:
-    name: Measure compact glyph ownership using frozen production artifacts
+    name: Measure shared glyph and style storage with original workloads
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -26,49 +26,43 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
-          run-id: 39337925146
-          name: linux-ascii-cell-pilot
+          run-id: 39340958866
+          name: linux-arc-cell-pilot-validated
           path: reference-artifact
-      - uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ github.token }}
-          run-id: 39339403496
-          name: linux-arc-cell-pilot
-          path: prototype-artifact
-      - name: Verify immutable production provenance
+      - name: Restore immutable baseline and trusted driver
         run: |
-          python3 - <<'PY'
+          python3 - <<'PYTHON'
           from pathlib import Path
           import hashlib, json, os, shutil, subprocess
-          roots=[('reference-artifact','scode-fixed','82a99dd262c746a1872ccfaf0ea46d7fe4bd6754'),('prototype-artifact','scode-prototype','bcc952ec563ec7a1f428e37e6d49a8aea295f6b3')]
-          for folder,name,expected in roots:
-              sources=list(Path(folder).rglob(name))
+          for name in ['scode-fixed','driver-pilot']:
+              sources=list(Path('reference-artifact').rglob(name))
               assert len(sources)==1,sources
               target=Path(os.environ['RUNNER_TEMP'])/name
               shutil.copy2(sources[0],target)
               target.chmod(target.stat().st_mode | 0o111)
-              version=json.loads(subprocess.check_output([str(target),'version','--output-format','json'],text=True))
-              assert len(version['git_sha']) >= 7 and expected.startswith(version['git_sha']),version
-              print(json.dumps({'name':name,'version':version,'sha256':hashlib.sha256(target.read_bytes()).hexdigest()}))
-          PY
-      - run: npm ci --prefix e2e/terminal-resize
-      - name: Compile the unchanged trusted workload driver
+              print(name,hashlib.sha256(target.read_bytes()).hexdigest())
+          version=json.loads(subprocess.check_output([str(Path(os.environ['RUNNER_TEMP'])/'scode-fixed'),'version','--output-format','json'],text=True))
+          assert len(version['git_sha'])>=7 and '82a99dd262c746a1872ccfaf0ea46d7fe4bd6754'.startswith(version['git_sha']),version
+          PYTHON
+      - name: Build and freeze normal production candidate
         run: |
-          cargo test --release --locked --manifest-path rust/Cargo.toml -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/driver.jsonl"
-          python3 - <<'PY'
+          cargo build --release --locked --manifest-path rust/Cargo.toml -p rusty-sudocode-cli --bin scode
+          cp rust/target/release/scode "$RUNNER_TEMP/scode-prototype"
+          python3 - <<'PYTHON'
           from pathlib import Path
-          import json, os, shutil
-          messages=[json.loads(line) for line in Path(os.environ['RUNNER_TEMP'],'driver.jsonl').read_text().splitlines()]
-          drivers=[x['executable'] for x in messages if x.get('reason')=='compiler-artifact' and x.get('executable') and x['target']['name']=='pty_render_performance']
-          assert len(drivers)==1,drivers
-          shutil.copy2(drivers[0],Path(os.environ['RUNNER_TEMP'])/'driver-pilot')
-          PY
+          import hashlib, json, os, subprocess
+          p=Path(os.environ['RUNNER_TEMP'])/'scode-prototype'
+          version=json.loads(subprocess.check_output([str(p),'version','--output-format','json'],text=True))
+          assert len(version['git_sha'])>=7 and os.environ['GITHUB_SHA'].startswith(version['git_sha']),version
+          print(json.dumps({'version':version,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}))
+          PYTHON
+      - run: npm ci --prefix e2e/terminal-resize
       - name: Run original long and capped workloads in paired order
         run: python3 .github/diagnostics/ascii_pilot.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: linux-arc-cell-pilot-validated
+          name: linux-shared-style-cell-pilot
           path: |
             ${{ runner.temp }}/ascii-cell-pilot
             ${{ runner.temp }}/scode-fixed

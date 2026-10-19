@@ -66,7 +66,7 @@ jobs:
           shutil.copy2(sources[0],target)
           target.chmod(target.stat().st_mode | 0o111)
           version=json.loads(subprocess.check_output([str(target),'version','--output-format','json'],text=True))
-          assert version['git_sha'].startswith('82a99dd2'),version
+          assert len(version['git_sha']) >= 7 and '82a99dd262c746a1872ccfaf0ea46d7fe4bd6754'.startswith(version['git_sha']),version
           print(json.dumps(version))
           PY
           sha256sum "$RUNNER_TEMP/scode-fixed" "$RUNNER_TEMP/scode-prototype"

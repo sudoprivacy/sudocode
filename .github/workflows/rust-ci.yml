@@ -48,13 +48,22 @@ jobs:
           Get-FileHash $candidateBinary.FullName
           "SCODE_DIAG_BASE=$($mainBinary.FullName)" >> $env:GITHUB_ENV
           "SCODE_DIAG_CANDIDATE=$($candidateBinary.FullName)" >> $env:GITHUB_ENV
-      - name: Compare raw and pasted Unicode through both native ConPTY backends
+      - name: Probe full-width native console output
         env:
           ELECTRON_RUN_AS_NODE: '1'
-        run: '& $env:SCODE_TERMINAL_HOST e2e/terminal-resize/prose-input-diagnostic.cjs "$env:SCODE_DIAG_BASE" "$env:SCODE_DIAG_CANDIDATE"'
+        run: |
+          $pythonBinary = (Get-Command python).Source
+          foreach ($backend in @('system', 'bundled')) {
+            foreach ($variant in @('plain', 'clear', 'positioned')) {
+              foreach ($mode in @('immediate', 'pending')) {
+                & $env:SCODE_TERMINAL_HOST e2e/terminal-resize/console-row-probe.cjs $pythonBinary $backend $variant $mode
+                if ($LASTEXITCODE -ne 0) { throw 'Native row probe failed' }
+              }
+            }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-prose-unicode-diagnostic
-          path: diagnostic-results
+          name: windows-console-row-probe
+          path: row-probe-results
           if-no-files-found: error

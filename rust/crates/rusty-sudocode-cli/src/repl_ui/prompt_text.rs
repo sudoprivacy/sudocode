@@ -7,6 +7,7 @@ use super::ansi_text::RichText;
 pub(super) struct PromptTextViewProps {
     pub content: Option<runtime::PromptText>,
     pub width: usize,
+    pub layout_width: Size,
 }
 
 struct PromptTextCache {
@@ -42,8 +43,8 @@ pub(super) fn PromptTextView(
         cache.as_ref().unwrap().rendered.clone()
     });
     element! {
-        View(flex_direction: FlexDirection::Column) {
-            #(content.map(|content| element! { RichText(content) }))
+        View(flex_direction: FlexDirection::Column, width: props.layout_width) {
+            #(content.map(|content| element! { RichText(content, width: props.layout_width) }))
         }
     }
 }

@@ -24,6 +24,9 @@ use crate::render::{
     layout_policy::LayoutPolicy, query_terminal_width, MarkdownStreamState, ResponseGlyphState,
     SpinnerRef, TerminalRenderer, DIM, RESET,
 };
+use crate::repl_ui::prose_preview::{
+    has_prose_structure, PreviewPosition, PreviewUpdate, MAX_SOURCE_BYTES,
+};
 use crate::repl_ui::OutputSender;
 
 /// What the caller (the REPL event loop) should do after an event is rendered.
@@ -62,6 +65,8 @@ pub(crate) struct EngineEventRenderer {
     block: Option<OutputBlock>,
     spinner: Option<SpinnerRef>,
     output_writer: Option<OutputSender>,
+    /// Collect one event's history writes for a single history/preview handoff.
+    preview_output: Option<String>,
     /// `true` while inside a thinking block, so the "Reasoning…" spinner cue is
     /// raised once and lowered when real content resumes.
     thinking_active: bool,
@@ -93,6 +98,8 @@ enum OutputBlock {
 
 impl EngineEventRenderer {
     pub(crate) fn new(spinner: Option<SpinnerRef>, output_writer: Option<OutputSender>) -> Self {
+        let is_preview_enabled = output_writer.is_some()
+            && runtime::experiments::is_enabled(runtime::experiments::Experiment::ProsePreview);
         Self {
             markdown: MarkdownStreamState::default(),
             thinking_pending: String::new(),
@@ -102,6 +109,7 @@ impl EngineEventRenderer {
             block: None,
             spinner,
             output_writer,
+            preview_output: is_preview_enabled.then(String::new),
             thinking_active: false,
             thinking_printed: false,
             tool_inputs: crate::cli::format::ToolInputRegistry::default(),
@@ -121,7 +129,9 @@ impl EngineEventRenderer {
             return;
         }
         self.layout.observe(text);
-        if let Some(writer) = self.output_writer.as_mut() {
+        if let Some(output) = self.preview_output.as_mut() {
+            output.push_str(text);
+        } else if let Some(writer) = self.output_writer.as_mut() {
             let _ = write!(writer, "{text}").and_then(|()| writer.flush());
         } else {
             let _ = crate::render::output::write_stdout(text);
@@ -286,6 +296,69 @@ impl EngineEventRenderer {
     }
 
     pub(crate) fn render(&mut self, event: EngineEvent) -> RenderOutcome {
+        if self.preview_output.is_none() {
+            return self.render_event(event);
+        }
+        let delta = match &event {
+            EngineEvent::TextDelta { text } if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        };
+        // Close visible prose before another durable block or interactive
+        // panel. Parallel tool progress must not overtake that prose.
+        if matches!(
+            event,
+            EngineEvent::ToolResult { .. }
+                | EngineEvent::HookProgress(_)
+                | EngineEvent::Notice { .. }
+                | EngineEvent::Retry(_)
+                | EngineEvent::ThinkingDelta { .. }
+                | EngineEvent::PermissionRequest { .. }
+                | EngineEvent::QuestionRequest { .. }
+        ) && has_prose_structure(self.markdown.pending_source())
+        {
+            self.flush_markdown();
+        }
+        let outcome = self.render_event(event);
+        self.publish_preview(delta);
+        outcome
+    }
+
+    fn publish_preview(&mut self, delta: Option<String>) {
+        let output = self.preview_output.as_mut().expect("preview enabled");
+        if output.is_empty() && delta.is_none() {
+            return;
+        }
+        let committed = std::mem::take(output);
+        let is_new_block = self.block != Some(OutputBlock::Assistant);
+        let position = PreviewPosition {
+            response: self.glyph.position(is_new_block),
+            gap: if is_new_block {
+                self.layout.before_block()
+            } else {
+                ""
+            },
+        };
+        let preview = if self.markdown.pending_source().is_empty() {
+            PreviewUpdate::Clear
+        } else if committed.is_empty() {
+            PreviewUpdate::Append {
+                delta: delta.unwrap_or_default(),
+                position,
+            }
+        } else if self.markdown.pending_source().len() <= MAX_SOURCE_BYTES {
+            PreviewUpdate::Reset {
+                source: self.markdown.pending_source().to_string(),
+                position,
+            }
+        } else {
+            PreviewUpdate::Clear
+        };
+        if let Some(writer) = &self.output_writer {
+            writer.assistant_update(committed, preview);
+        }
+    }
+
+    fn render_event(&mut self, event: EngineEvent) -> RenderOutcome {
         match event {
             EngineEvent::TextDelta { text } => {
                 self.end_thinking();
@@ -469,6 +542,19 @@ impl EngineEventRenderer {
             | EngineEvent::Subagent(_)
             | EngineEvent::BackgroundTask(_)
             | EngineEvent::BackgroundTaskError { .. } => RenderOutcome::Continue,
+        }
+    }
+}
+
+impl Drop for EngineEventRenderer {
+    fn drop(&mut self) {
+        // Cancellation can drop the consumer before TurnComplete is received.
+        // Preserve the visible partial response and clear it in the same batch.
+        if self.preview_output.is_some() && !self.markdown.pending_source().is_empty() {
+            self.end_thinking();
+            self.flush_markdown();
+            self.write_out(self.layout.before_block());
+            self.publish_preview(None);
         }
     }
 }

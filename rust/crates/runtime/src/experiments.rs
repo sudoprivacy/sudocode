@@ -41,11 +41,16 @@ pub enum Experiment {
     /// `mcp__*` tools to the model. (ACP session-injected MCP servers
     /// are an explicit per-session request and are NOT gated by this.)
     McpConfigServers,
+    /// Bounded, disposable prose above the inline REPL's input area.
+    ProsePreview,
 }
 
 impl Experiment {
-    pub const ALL: &'static [Experiment] =
-        &[Experiment::CoordinatorMode, Experiment::McpConfigServers];
+    pub const ALL: &'static [Experiment] = &[
+        Experiment::CoordinatorMode,
+        Experiment::McpConfigServers,
+        Experiment::ProsePreview,
+    ];
 
     /// Key under `"experimental"` in `settings.json` (camelCase, like
     /// every other settings key).
@@ -54,6 +59,7 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => "coordinatorMode",
             Experiment::McpConfigServers => "mcpConfigServers",
+            Experiment::ProsePreview => "prosePreview",
         }
     }
 
@@ -63,6 +69,7 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => "COORDINATOR_MODE",
             Experiment::McpConfigServers => "MCP_CONFIG_SERVERS",
+            Experiment::ProsePreview => "PROSE_PREVIEW",
         }
     }
 
@@ -74,6 +81,7 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => Some("SUDOCODE_COORDINATOR_MODE"),
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
+            Experiment::ProsePreview => None,
         }
     }
 }

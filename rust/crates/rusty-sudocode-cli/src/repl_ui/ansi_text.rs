@@ -176,11 +176,14 @@ mod tests {
         assert_eq!(label.weight, Weight::Normal);
         assert!(label.dim);
         assert!(label.strikethrough);
-        let plain = spans.last().unwrap();
-        assert!(plain.text.ends_with("PlainSample"));
-        assert_eq!(plain.color, None);
-        assert_eq!(plain.weight, Weight::Normal);
-        assert!(!plain.dim);
-        assert!(!plain.strikethrough);
+        let plain_start = text.text.rfind("PlainSample").unwrap();
+        assert_eq!(text.text[plain_start..].trim_end(), "PlainSample");
+        for (style, _) in text.spans(plain_start..text.text.len()) {
+            assert_eq!(style.foreground_color, None);
+            assert_eq!(style.background_color, None);
+            assert!(!style.attributes.has(Attribute::Bold));
+            assert!(!style.attributes.has(Attribute::Dim));
+            assert!(!style.attributes.has(Attribute::CrossedOut));
+        }
     }
 }

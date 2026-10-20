@@ -152,6 +152,129 @@ fn session_auto_save_creates_jsonl() {
     );
 }
 
+/// Independent OS processes save distinct durable objects in one shared store.
+#[test]
+fn concurrent_processes_save_uuid_sessions_without_replacing_each_other() {
+    let env = common::TestEnv::new("session-process-ids");
+    // Cold startup must publish one complete plugin snapshot before another
+    // process discovers it. Multiple payload files expose partial copies.
+    let bundled_root = env.workspace_root().join("bundled");
+    let plugin_root = bundled_root.join("session-fixture");
+    let manifest_root = plugin_root.join(".sudocode-plugin");
+    fs::create_dir_all(&manifest_root).unwrap();
+    let manifest = serde_json::json!({
+        "name": "session-fixture",
+        "version": "1.0.0",
+        "description": "Concurrent startup fixture",
+        "defaultEnabled": false,
+    });
+    fs::write(
+        manifest_root.join("plugin.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let payload = vec![b'x'; 16 * 1024];
+    for index in 0..128 {
+        fs::write(plugin_root.join(format!("payload-{index}")), &payload).unwrap();
+    }
+    fs::write(
+        env.config_home().join("settings.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "plugins": {"bundledRoot": bundled_root},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let prompt = env.prompt("Reply with exactly 4.", "single_turn_text");
+    let mut processes: Vec<_> = (0..4)
+        .map(|_| env.spawn(&["--permission-mode", "read-only", &prompt]))
+        .collect();
+    for (index, process) in processes.iter_mut().enumerate() {
+        assert_eq!(
+            process.expect_eof().expect("process should exit"),
+            0,
+            "process {index} failed:\n{}",
+            common::screen_tail(process, 4000)
+        );
+    }
+    let installed_root = env
+        .config_home()
+        .join("plugins/installed/session-fixture-bundled");
+    let installed_manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(installed_root.join(".sudocode-plugin/plugin.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(installed_manifest, manifest);
+    for index in 0..128 {
+        assert_eq!(
+            fs::read(installed_root.join(format!("payload-{index}"))).unwrap(),
+            payload
+        );
+    }
+    let registry: serde_json::Value = serde_json::from_slice(
+        &fs::read(env.config_home().join("plugins/installed.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        registry["plugins"]["session-fixture@bundled"]["version"],
+        "1.0.0"
+    );
+    let store = runtime::SessionStore::from_cwd_with(
+        env.workspace_root(),
+        std::sync::Arc::new(runtime::StdFsBackend),
+    )
+    .unwrap();
+    let expected_answer = if env.is_mock() {
+        "The answer is 4"
+    } else {
+        "4"
+    };
+    let mut ids = std::collections::HashSet::new();
+    let root = env.workspace_root().join(".scode/sessions");
+    for workspace in fs::read_dir(root).unwrap() {
+        for entry in fs::read_dir(workspace.unwrap().path()).unwrap() {
+            let directory = entry.unwrap().path();
+            let transcript = directory.join("transcript.jsonl");
+            if !transcript.is_file() {
+                continue;
+            }
+            let content = fs::read_to_string(&transcript).unwrap();
+            let metadata: serde_json::Value = content
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|value| value["type"] == "session_meta")
+                .expect("saved transcript metadata");
+            let id = metadata["session_id"].as_str().unwrap();
+            let uuid = id.strip_prefix("session-").expect("session prefix");
+            assert_eq!(uuid.len(), 36, "cross-process ID must use a UUID: {id}");
+            assert_eq!(
+                &uuid[14..15],
+                "4",
+                "UUID must use independent random allocation"
+            );
+            assert!(matches!(&uuid[19..20], "8" | "9" | "a" | "b"));
+            assert_eq!(directory.file_name().unwrap().to_str().unwrap(), id);
+            assert!(content.contains("Reply with exactly 4."));
+            let session = store.load_session(id).unwrap().session;
+            assert!(
+                session.messages.iter().any(|message| {
+                    message.role == runtime::MessageRole::Assistant
+                        && message.blocks.iter().any(|block| {
+                            matches!(block, runtime::ContentBlock::Text { text } if text.trim() == expected_answer)
+                        })
+                }),
+                "session {id} must preserve its actual model answer"
+            );
+            assert!(ids.insert(id.to_string()), "duplicate durable ID: {id}");
+        }
+    }
+    assert_eq!(
+        ids.len(),
+        4,
+        "all four processes must keep their own transcript"
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // 2. resume restores context
 // ──────────────────────────────────────────────────────────────────────

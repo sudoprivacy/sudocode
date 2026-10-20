@@ -8,8 +8,8 @@
 #   SCODE_INSTALL_DIR   Directory to install into. Overrides default resolution.
 #   SCODE_MIRROR        Base URL for archive downloads (no trailing slash).
 #                       Use this to point at a mirror (e.g. Tencent COS) for
-#                       faster downloads in China. The checksum file is always
-#                       fetched from GitHub Releases for security.
+#                       faster downloads in China. The archive and checksum
+#                       manifest come from the same immutable release directory.
 #                       A /latest URL resolves version.txt once and downloads
 #                       from the immutable sibling /vX.Y.Z directory.
 #                       Example: https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest
@@ -280,6 +280,16 @@ case "$MIRROR_BASE" in
         ;;
 esac
 
+if [ -n "$MIRROR_BASE" ]; then
+    mirror_tag="${MIRROR_BASE##*/}"
+    if printf '%s\n' "$mirror_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+        if [ -n "$VERSION" ] && [ "$VERSION" != "$mirror_tag" ]; then
+            die "mirror directory $mirror_tag differs from requested version $VERSION"
+        fi
+        VERSION="$mirror_tag"
+    fi
+fi
+
 if [ -z "$VERSION" ]; then
     info "resolving latest release from ${API_BASE}/latest"
     VERSION=$(resolve_latest_version)
@@ -287,7 +297,7 @@ fi
 ok "version: ${C_BOLD}${VERSION}${C_RESET}"
 
 # Sanity check the tag exists (gives a friendly error before we start downloading).
-if ! http_get "${API_BASE}/tags/${VERSION}" >/dev/null 2>&1; then
+if [ -z "$MIRROR_BASE" ] && ! http_get "${API_BASE}/tags/${VERSION}" >/dev/null 2>&1; then
     err "release ${VERSION} not found"
     err "see all releases: ${RELEASES_PAGE}"
     exit 1
@@ -296,13 +306,12 @@ fi
 # ----- artifact selection ----------------------------------------------------
 TARGET=$(detect_target)
 ARCHIVE="scode-${TARGET}.tar.gz"
-# Checksums always come from GitHub Releases (authoritative source).
-CHECKSUM_URL="${DOWNLOAD_BASE}/${VERSION}/${CHECKSUM_FILE}"
-# Archive may come from a mirror when SCODE_MIRROR is set.
 if [ -n "$MIRROR_BASE" ]; then
     ARCHIVE_URL="${MIRROR_BASE}/${ARCHIVE}"
+    CHECKSUM_URL="${MIRROR_BASE}/${CHECKSUM_FILE}"
 else
     ARCHIVE_URL="${DOWNLOAD_BASE}/${VERSION}/${ARCHIVE}"
+    CHECKSUM_URL="${DOWNLOAD_BASE}/${VERSION}/${CHECKSUM_FILE}"
 fi
 
 info "target: ${C_BOLD}${TARGET}${C_RESET}"

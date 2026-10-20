@@ -569,6 +569,102 @@ fn subagent_blocking_tools_overlap_and_accept_the_same_aliases_as_parent() {
 }
 
 #[test]
+fn prose_preview_preserves_markdown_context_during_tool_completion() {
+    for (source, completion, is_fence) in [
+        ("```rust\nlet PendingFenceBody = 7;\n", "```\n", true),
+        ("ProseBeforeToolProgress ordinary words", "\n\n", false),
+        ("ProseBeforeToolProgress **bold", " words**\n\n", false),
+        ("ProseBeforeToolProgress `inline", " code`\n\n", false),
+    ] {
+        let env = TestEnv::new_mock("preview-tool-interleave");
+        fifo(&env, "early.fifo");
+        let source_path = env.workspace_root().join("stream-text.json");
+        std::fs::write(&source_path, json!([source, completion]).to_string()).unwrap();
+        let gate = env.workspace_root().join("finish-stream");
+        let mut call = bash("early", "cat early.fifo");
+        call["stream_wait_for"] = json!(gate);
+        call["stream_text_chunks_path"] = json!(source_path);
+        let mut sess = env.spawn_with_env(
+            &["--permission-mode", "danger-full-access"],
+            &[
+                ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+                ("TERM", "xterm-256color"),
+                ("COLORTERM", "truecolor"),
+            ],
+        );
+        sess.resize(80, 120).unwrap();
+        common::expect_screen(
+            &sess,
+            |s| s.contains('❯'),
+            Duration::from_secs(30),
+            "prompt",
+        );
+        send_batch(&env, &mut sess, &[call]);
+        // The counter confirms that the renderer consumed the source delta.
+        let counter = format!("↓ {} tokens", source.len() / 4);
+        common::expect_screen(
+            &sess,
+            |s| s.contains(&counter),
+            Duration::from_secs(30),
+            "open text consumed",
+        );
+        if is_fence {
+            assert!(!sess.render(|s| s.contents()).contains("PendingFenceBody"));
+        } else {
+            common::expect_screen(
+                &sess,
+                |s| s.contains("ProseBeforeToolProgress"),
+                common::DEFAULT_TIMEOUT,
+                "live prose before tool output",
+            );
+        }
+        release(
+            writer(&env, "early.fifo", &sess),
+            "TOOL_FINISHED_WITH_OPEN_TEXT",
+        );
+        common::expect_screen(
+            &sess,
+            |s| s.contains("TOOL_FINISHED_WITH_OPEN_TEXT"),
+            common::DEFAULT_TIMEOUT,
+            "tool finished before stream closes",
+        );
+        if is_fence {
+            assert!(
+                !sess.render(|s| s.contents()).contains("PendingFenceBody"),
+                "tool progress must not flush an open code fence"
+            );
+        } else {
+            sess.render(|s| assert_eq!(s.contents().matches("ProseBeforeToolProgress").count(), 1));
+        }
+        std::fs::write(gate, "continue").unwrap();
+        done(&sess);
+        if is_fence {
+            sess.render(|s| assert_eq!(s.contents().matches("PendingFenceBody").count(), 1));
+        } else {
+            sess.render(|s| {
+                let text = s.contents();
+                assert_eq!(text.matches("ProseBeforeToolProgress").count(), 1);
+                if source.contains("**") {
+                    assert!(
+                        !text.contains("**bold") && !text.contains("words**"),
+                        "{text}"
+                    );
+                    assert!(text.contains("bold words"), "{text}");
+                }
+                if source.contains('`') {
+                    assert!(
+                        !text.contains("`inline") && !text.contains("code`"),
+                        "{text}"
+                    );
+                    assert!(text.contains("inline code"), "{text}");
+                }
+            });
+        }
+        finish(sess);
+    }
+}
+
+#[test]
 fn completed_tool_runs_and_renders_while_provider_stream_is_open() {
     let env = TestEnv::new_mock("parallel-stream-dispatch");
     fifo(&env, "early.fifo");

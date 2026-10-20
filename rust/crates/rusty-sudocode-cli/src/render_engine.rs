@@ -9,6 +9,7 @@
 //! is blocked on a permission / question answer (which the loop collects and
 //! sends back as an `EngineCommand`) and when the turn is finished.
 
+use std::collections::HashSet;
 use std::io::Write;
 
 use engine_events::{
@@ -16,10 +17,15 @@ use engine_events::{
     RetryEvent, ToolProgressEvent,
 };
 
-use crate::cli::format::format_tool_result;
+use crate::cli::format::{
+    format_auto_compaction_notice, format_compaction_notice, format_tool_result,
+};
 use crate::render::{
     layout_policy::LayoutPolicy, query_terminal_width, MarkdownStreamState, ResponseGlyphState,
     SpinnerRef, TerminalRenderer, DIM, RESET,
+};
+use crate::repl_ui::prose_preview::{
+    PreviewDelta, PreviewPosition, PreviewUpdate, MAX_SOURCE_BYTES,
 };
 use crate::repl_ui::OutputSender;
 
@@ -59,6 +65,8 @@ pub(crate) struct EngineEventRenderer {
     block: Option<OutputBlock>,
     spinner: Option<SpinnerRef>,
     output_writer: Option<OutputSender>,
+    /// Collect one event's history writes for a single history/preview handoff.
+    preview_output: Option<String>,
     /// `true` while inside a thinking block, so the "Reasoning…" spinner cue is
     /// raised once and lowered when real content resumes.
     thinking_active: bool,
@@ -73,6 +81,8 @@ pub(crate) struct EngineEventRenderer {
     tool_inputs: crate::cli::format::ToolInputRegistry,
     /// Whether the latest progress summary occupies the live status row.
     activity_visible: bool,
+    /// Final progress and TurnComplete can carry the same run's report.
+    compaction_runs: HashSet<String>,
 }
 
 /// Consecutive chunks of prose/reasoning/activity belong to the same block.
@@ -88,6 +98,7 @@ enum OutputBlock {
 
 impl EngineEventRenderer {
     pub(crate) fn new(spinner: Option<SpinnerRef>, output_writer: Option<OutputSender>) -> Self {
+        let is_preview_enabled = output_writer.is_some();
         Self {
             markdown: MarkdownStreamState::default(),
             thinking_pending: String::new(),
@@ -97,10 +108,12 @@ impl EngineEventRenderer {
             block: None,
             spinner,
             output_writer,
+            preview_output: is_preview_enabled.then(String::new),
             thinking_active: false,
             thinking_printed: false,
             tool_inputs: crate::cli::format::ToolInputRegistry::default(),
             activity_visible: false,
+            compaction_runs: HashSet::new(),
         }
     }
 
@@ -115,7 +128,9 @@ impl EngineEventRenderer {
             return;
         }
         self.layout.observe(text);
-        if let Some(writer) = self.output_writer.as_mut() {
+        if let Some(output) = self.preview_output.as_mut() {
+            output.push_str(text);
+        } else if let Some(writer) = self.output_writer.as_mut() {
             let _ = write!(writer, "{text}").and_then(|()| writer.flush());
         } else {
             let _ = crate::render::output::write_stdout(text);
@@ -280,6 +295,65 @@ impl EngineEventRenderer {
     }
 
     pub(crate) fn render(&mut self, event: EngineEvent) -> RenderOutcome {
+        if self.preview_output.is_none() {
+            return self.render_event(event);
+        }
+        let delta = match &event {
+            EngineEvent::TextDelta { text } if !text.is_empty() => {
+                Some(PreviewDelta::from_source(text))
+            }
+            _ => None,
+        };
+        // Asynchronous output leaves the provider's Markdown state intact.
+        // Publish its history together with the repositioned mutable preview.
+        let outcome = self.render_event(event);
+        self.publish_preview(delta);
+        outcome
+    }
+
+    fn publish_preview(&mut self, delta: Option<PreviewDelta>) {
+        let output = self.preview_output.as_mut().expect("preview enabled");
+        if output.is_empty() && delta.is_none() {
+            return;
+        }
+        let committed = std::mem::take(output);
+        let is_new_block = self.block != Some(OutputBlock::Assistant);
+        let position = PreviewPosition {
+            response: self.glyph.position(is_new_block),
+            gap: if is_new_block {
+                self.layout.before_block()
+            } else {
+                ""
+            },
+        };
+        let preview = if self.markdown.pending_source().is_empty() {
+            PreviewUpdate::Clear
+        } else if committed.is_empty() {
+            PreviewUpdate::Append {
+                delta: delta.unwrap_or_else(|| PreviewDelta::Text(String::new())),
+                position,
+            }
+        } else if delta.is_none() {
+            PreviewUpdate::Reposition(position)
+        } else {
+            let source = self.markdown.pending_source();
+            let is_frozen = source.len() > MAX_SOURCE_BYTES;
+            PreviewUpdate::Reset {
+                source: if is_frozen {
+                    String::new()
+                } else {
+                    source.to_string()
+                },
+                position,
+                is_frozen,
+            }
+        };
+        if let Some(writer) = &self.output_writer {
+            writer.assistant_update(committed, preview);
+        }
+    }
+
+    fn render_event(&mut self, event: EngineEvent) -> RenderOutcome {
         match event {
             EngineEvent::TextDelta { text } => {
                 self.end_thinking();
@@ -399,7 +473,7 @@ impl EngineEventRenderer {
                 }
                 RenderOutcome::Continue
             }
-            EngineEvent::Error { message } => {
+            EngineEvent::Error { message } | EngineEvent::TurnFailed { message, .. } | EngineEvent::PromptRejected { message } => {
                 // Flush any partial assistant text first, then surface the error.
                 // `end_thinking` first so a turn that failed while still
                 // reasoning closes its dim block rather than letting the error
@@ -409,7 +483,27 @@ impl EngineEventRenderer {
                 self.finish_turn();
                 RenderOutcome::Done
             }
-            EngineEvent::TurnComplete(_) => {
+            EngineEvent::Compaction(progress) => {
+                if let Some(report) = progress.report {
+                    if self.compaction_runs.insert(report.run_id.clone()) {
+                        self.finish_response();
+                        self.write_block(&format_compaction_notice(&report), OutputBlock::Notice);
+                        self.resume_spinner();
+                    }
+                }
+                RenderOutcome::Continue
+            }
+            EngineEvent::TurnComplete(complete) => {
+                self.finish_response();
+                if let Some(event) = complete.auto_compaction {
+                    if let Some(report) = event.report {
+                        if self.compaction_runs.insert(report.run_id.clone()) {
+                            self.write_block(&format_compaction_notice(&report), OutputBlock::Notice);
+                        }
+                    } else {
+                        self.write_block(&format_auto_compaction_notice(event.removed_message_count), OutputBlock::Notice);
+                    }
+                }
                 // A turn can end on a thinking block (the model reasoned and
                 // then produced no text, e.g. it was interrupted): close it so
                 // the next prompt is not written into an open dim run.
@@ -432,13 +526,30 @@ impl EngineEventRenderer {
             | EngineEvent::Usage(_)
             | EngineEvent::PromptCache(_)
             | EngineEvent::AutoCompaction(_)
-            | EngineEvent::Compaction(_)
             | EngineEvent::ModelChanged { .. }
             | EngineEvent::PermissionModeChanged { .. }
             // Background completions are scheduled by the REPL event bridge.
+            | EngineEvent::SubagentCompletionReady(_)
+            | EngineEvent::ContextCommitted(_)
+            | EngineEvent::CommandResult { .. }
+            | EngineEvent::CompletionRequest { .. }
+            | EngineEvent::CompletionIdle
             | EngineEvent::Subagent(_)
             | EngineEvent::BackgroundTask(_)
             | EngineEvent::BackgroundTaskError { .. } => RenderOutcome::Continue,
+        }
+    }
+}
+
+impl Drop for EngineEventRenderer {
+    fn drop(&mut self) {
+        // Cancellation can drop the consumer before TurnComplete is received.
+        // Preserve the visible partial response and clear it in the same batch.
+        if self.preview_output.is_some() && !self.markdown.pending_source().is_empty() {
+            self.end_thinking();
+            self.flush_markdown();
+            self.write_out(self.layout.before_block());
+            self.publish_preview(None);
         }
     }
 }

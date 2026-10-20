@@ -57,6 +57,61 @@ session and independent across sessions:
   Setup and legacy slash operations that use the process working directory
   acquire a directory lease while they run.
 
+### Human takeover of tools
+
+Hosts check `initialize.result._meta.sudocode.toolPause.version == 1` before
+offering takeover. Both transports expose the same session extension:
+
+1. Send `_sudocode/session/pause_tools` with `{ "sessionId": "..." }`.
+   Admission closes immediately, the current turn is cancelled, and all owned
+   background agents and shells receive cancellation. The response is
+   `{ "pauseEpoch": 1, "isQuiescent": true }` only after the main turn, child
+   producers and actual tool workers have drained. Cancelling a tool's caller
+   does not release its worker's operation lease.
+2. While the user owns control, new prompts and tools are refused. Reloading the
+   live session cannot replace its fence. Prompts queued before the takeover are
+   also refused after control changes. A repeated pause retains the same epoch.
+3. Send `_sudocode/session/resume_tools` with the same `sessionId` and
+   `pauseEpoch`. A stale epoch or unfinished work is refused. The response is
+   `{}`. Returning control permits a new turn; it does not restart cancelled work.
+4. The host starts a new turn that observes the user's changes before taking
+   further action. For browser takeover, retain the same browser/profile/tab and
+   use the browser service's own lease to fence browser-side operations.
+
+Pause has a 30-second response budget. A timeout preserves the fence and must
+remain a visible stopping state; it never acknowledges human control. The host
+can repeat the pause request once slow operations have ended. Closing a session
+remains available. This contract covers work owned by this agent session;
+external processes and independently connected clients need their own control
+lease.
+
+The native terminal regression runs in CI on all three platforms:
+
+```bash
+cd rust
+cargo test -p rusty-sudocode-cli --test pty_tool_pause -- --nocapture
+```
+
+With a configured provider account, the foreground shell journey also runs
+against the real model in the same native PTY:
+
+```bash
+SCODE_TEST_BACKEND=live SCODE_LIVE_MODEL=your-configured-model \
+cargo test -p rusty-sudocode-cli --test pty_tool_pause \
+  host_takeover_stops_a_foreground_shell_before_human_edit -- --nocapture
+```
+
+The real model journey starts main and background child shells, pauses them,
+checks their file writes stop, rejects stale return, and reads a human edit in a
+new turn. It requires explicit real API credentials and an empty evidence path:
+
+```bash
+SCODE_TOOL_PAUSE_LIVE=1 SCODE_TEST_BIN=/absolute/path/to/scode \
+OPENAI_API_KEY=... OPENAI_BASE_URL=https://your-provider.example/v1 \
+SCODE_LIVE_MODEL=your-model \
+python crates/rusty-sudocode-cli/tests/live/tool_pause.py --evidence /tmp/pause-evidence
+```
+
 ### Question descriptions and plan approval
 
 `_scode/ask_user_question` keeps `description` as a string and supplies optional
@@ -193,6 +248,30 @@ Rules:
 - The `initialize` response advertises `_meta.sudocode.sessionMemory: true`
   so clients can feature-detect.
 
+### Model turn usage
+
+The prompt response reports provider token usage when available. Input, output,
+cache and cost fields may arrive in separate stream frames; the shared engine
+merges those cumulative snapshots before recording the assistant message and
+returning ACP usage. Counts are never inferred from answer length. The same
+merge rule serves collected responses and the terminal renderer.
+
+A provider may report a nonzero aggregate without allocating it to input or
+output tokens. The normalized usage retains this as `reported_total_tokens`,
+through saved sessions, resumed sessions and cumulative accounting. Totals use
+the larger of the reported aggregate and known allocated counts; allocations
+are never guessed. ACP adds `_meta.sudocode.tokenBreakdownComplete: false` when
+the allocation is incomplete; complete usage retains its existing wire shape. CLI JSON
+exposes `token_breakdown_complete` alongside `total_tokens`. With an incomplete
+breakdown, context occupancy falls back to the history estimate, and estimated
+cost is unavailable (JSON `null`); an independently reported actual bill remains
+usable. [OpenAI prompt counts include cached tokens](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events), so normalization removes
+the cache breakdown from the uncached input count before aggregation.
+
+OpenAI-compatible streams finish at `[DONE]` (Chat Completions) or a terminal
+`response.*` event (Responses). A completed SSE message does not wait for the
+HTTP connection to close; usage frames before its terminal event are retained.
+
 ### Slash commands
 
 A `session/prompt` whose text starts with `/` is a slash command, not a model
@@ -206,7 +285,7 @@ no `usage`. The ACP agent implements a fixed subset of the REPL commands:
 | `/status` | Model, usage, git and config status for this session. |
 | `/cost` | Cumulative token usage for this session. |
 | `/model [<model-id>]` | Show the current model, or switch this session to another model. |
-| `/compact` | Summarise older messages to free context. A validated LLM checkpoint; failures preserve the original history and return an error. No token threshold — an explicit request always compacts when there is anything beyond the preserved recent tail. The compacted transcript is persisted immediately. The reply reports the method used, messages removed / kept, and the estimated token count before and after. The original transcript is archived before replacement. |
+| `/compact` | Summarise older messages to free context under the strict compaction contract below. A successful replacement meets both the history-reduction target and the next-request budget, is persisted immediately, and archives the original transcript. An unchanged achieved target or safe history with nothing summarizable can skip. The reply reports the outcome, method, estimated history before / after and target; the structured report also includes request attempts. Failure preserves message history and returns an error; known maintenance usage is still recorded. |
 | `/config [section]` | Show the effective configuration (read-only; `/config set` is REPL-only). |
 | `/diff` | Staged and unstaged git changes in the session directory. |
 | `/doctor` | Local health checks for auth, config and workspace. |
@@ -243,10 +322,12 @@ already knows the session id when it arrives; be ready to receive
 because this one follows immediately. The same table drives `/help` and the
 unknown-command hint, so the three never disagree.
 
-`session/cancel` applies to `/compact`: a cancel during the model round-trip
-drops the call, a cancel that lands after it discards the result; either way
-the transcript in memory and on disk is left untouched and the prompt ends
-with `stopReason: "cancelled"`. The other commands are local and complete
+`session/cancel` applies to `/compact`: cancellation before the durable commit
+stops the pending call or discards its staged candidate, preserves the original
+message history, and ends the prompt with `stopReason: "cancelled"`. The runtime
+finalizes any usage already received before returning, so maintenance metadata
+can change even though message history does not. A completed durable commit
+wins over a later cancellation. The other commands are local and complete
 before a cancel could matter.
 
 **Live compaction lifecycle.** Before manual or automatic context maintenance,
@@ -256,12 +337,76 @@ engine-owned operation, not a tool registered with the model. `rawInput` carries
 `trigger` (`manual`, `preflight`, `in_turn_budget`, `provider_rejection`, or
 `post_turn_usage`) and `before_tokens`. Completion emits `tool_call_update` with
 the same ID, status `completed` or `failed`, and `rawOutput` containing `id`,
-`trigger`, `status` (`completed`, `failed`, or `cancelled`), `before_tokens`, and
-`after_tokens` on success. Counts are estimates; summary text is never included.
-Cancellation uses ACP status `completed` with `rawOutput.status: "cancelled"`.
+`trigger`, `status` (`completed`, `failed`, or `cancelled`), `before_tokens`,
+optional `after_tokens`, and an optional structured `report`. Counts are
+estimates; summary text is never included. Cancellation uses ACP status
+`completed` with `rawOutput.status: "cancelled"`. A skipped run also uses ACP
+status `completed`; `report.outcome` distinguishes it from a committed result.
 Every terminal update is delivered before the prompt response, including error
 responses. A failed compaction ends the prompt with an error; clients must mark
 the run failed. The completed operation remains available for client replay.
+
+**Compaction contract.** A replacement is accepted only when the estimated
+tokens of the complete resulting history are at most
+`min(50% of the original history, safe history budget for the next request)`.
+The ideal is 30% of the original history, bounded by that same target. The
+complete history includes the checkpoint, continuation framing, Todo state and
+protected recent tail. The safe history budget reserves the routed model's
+output allowance, actual system prompt and selected tool schemas, pending input
+and pressure buffer. These are local estimates, not tokenizer guarantees; a
+provider context rejection still requires recovery or a failed prompt.
+
+The visible summary ceiling is computed from the remaining target after
+protected history and framing, capped at 12,000 tokens and the model's available
+output limit. Budgeted thinking is reserved separately before choosing that
+visible ceiling; adaptive thinking adds no manual thinking reservation. The
+ceiling can therefore be much smaller than 12,000; fitting
+the summary alone is insufficient if the complete history misses the target.
+No partially reduced candidate is installed.
+
+All summary paths and retries in one run share limits of two completed model
+responses, four actual model HTTP attempts and two transient-error retries.
+Local budget checks and token estimates do not consume HTTP attempts. Provider
+transport retries do not add a separate allowance. A quality retry starts from
+the same frozen source, protected tail and Todo state; it does not summarize a
+rejected candidate. Permanent provider errors stop the run. Cache-preserving
+compaction can switch to the fallback for a context overflow, a typed
+unsupported-path error, or a completed checkpoint whose truncation or visible
+ceiling requires a quality retry. A generic authentication or configuration
+failure does not qualify.
+
+The report's `outcome` is `target_met`, `skipped`, `failed` or `cancelled`.
+`target_met` means the accepted complete history meets the bound. `skipped`
+can mean a previously achieved target remains safe with an unchanged
+history/context/configuration/tools/budget fingerprint, or there is no
+summarizable source and the existing history is safe. A provider-rejection
+recovery does not use those skips. Failed and cancelled runs preserve message
+history; rejected or cancelled candidates are not installed or archived.
+
+The optional `report` contains:
+
+| Fields | Meaning |
+|---|---|
+| `run_id` | The same ID as the enclosing progress `id` and ACP `toolCallId`. |
+| `before_history`, `after_history` | Estimated complete history before and after the run. |
+| `target_history`, `ideal_history` | Acceptance bound and preferred target; null for a skipped run. |
+| `source_safe_history_budget`, `safe_history_budget`, `actual_fixed_overhead` | Source and final next-request history budgets, and the final estimated system/tool overhead. |
+| `method`, `outcome`, `reason` | Selected method, result and diagnostic reason. |
+| `attempts`, `completed_responses` | Actual model HTTP sends and completed model responses in this run. |
+| `estimate_source` | Estimator identity, currently `local_history_estimate_v1`. |
+
+Maintenance usage receipts are keyed by run and actual request attempt. Known
+usage is counted once in cumulative session usage and cost, including usage
+received before a failed or cancelled response. It is persisted as optional
+session metadata and restored on load; an unknown receipt remains unknown.
+Maintenance usage does not become the current task's usage, add a task turn or
+set the context anchor for the next task request. Metadata persistence failures
+are reported. If the durable source changes, its newer history is preserved and
+any receipts that could not be saved remain in memory.
+Capturing a revision also merges durable maintenance receipts from the same
+snapshot, so externally added bills survive unchanged-history compaction.
+An unreadable or unreloadable source prevents stale persistence during exit or
+later operations until a successful reload restores the session.
 
 **Automatic compaction.** When a turn compacts the transcript on its own —
 either the pre-turn overflow guard or the in-turn threshold path — the
@@ -278,8 +423,9 @@ pressure handling from [DeepSeek Harness](https://github.com/deepseek-ai/deepsee
 Sudo Code retains its model-specific output reservation and pressure buffer.
 
 Compaction stages changes before replacing the live transcript. An empty,
-truncated, or non-shrinking summary is rejected. Failure before or during a
-turn stops the pending model request with history intact. Post-turn compaction
+truncated, or non-shrinking summary, or a candidate that misses the complete
+history target, is rejected. Failure before or during a turn stops the pending
+model request with message history intact. Post-turn compaction
 failure also fails the prompt, even if answer text has already streamed; it must
 not report a successful run or continue queued work. No automatic
 local-statistics fallback is used. The next request cannot proceed when its
@@ -288,8 +434,9 @@ history still exceeds the context budget.
 Automatic pressure first trims oversized tool text (over 8,192 Unicode code
 points) to a 4,096-point head and 1,024-point tail plus a marker. ToolSearch
 results are exempt because their JSON also enables deferred tool schemas.
-If trimming suffices, no summary call is made. Otherwise the same checkpoint
-pipeline as manual compaction runs. A checkpoint rewrites prior summaries
+If trimming meets the complete-history target, no summary call is made.
+Otherwise the same checkpoint pipeline as manual compaction runs. A checkpoint
+rewrites prior summaries
 with newer history instead of concatenating them. Recent retention is token
 priced: at most 16% of the model window, capped at half the available history
 budget and one fifth of current history, with a four-message minimum and
@@ -301,13 +448,20 @@ Main-agent and subagent clients use the same non-streaming text transport in
 and tool schemas; runtime owns compaction prompts, retry policy and validation.
 The shared transport also owns message conversion and cache hints.
 
-Both LLM paths ask for a summary within 8,000 tokens where possible and request
-at most 12,000 output tokens (or the model's smaller limit). The preferred
-path reuses the system prompt, tool schemas and older
-message prefix; the fallback strips thinking and replaces images with text
-placeholders. Neither path drops the oldest input to recover from overflow.
-Transient failures are retried with bounded backoff.
+Both LLM paths use the dynamic visible summary ceiling above and ask for the
+ideal size, up to 8,000 tokens, where possible. The preferred path reuses the
+system prompt, tool schemas and older message prefix, with a separate model
+thinking reservation where required; the fallback strips thinking and replaces
+images with text placeholders. Neither path drops the oldest input to recover
+from overflow. Transient failures use bounded backoff within the shared run
+limits.
 
+Only the final accepted candidate is committed. Run preparation replays the
+durable source and requires its message history to match the frozen source
+before capturing that revision. Before any archive or replacement, the
+filesystem backend checks the captured revision again. An observed source
+change fails the run and preserves the newer transcript. These checks are not
+a cross-process compare-and-swap or lock.
 On successful replacement, `<transcript>.before-compact-<timestamp>` retains
 the original JSONL snapshot through the same filesystem backend. These
 snapshots are not listed as independent sessions and are not automatically
@@ -432,3 +586,168 @@ keys under the update's own `_meta.sudocode` tell them apart:
 - Sub-agents inherit the parent's permission mode. A child tool that requires
   approval sends `session/request_permission` through the parent's controller
   connection and waits for its answer. A missing approver denies the call.
+
+## Durable direct sub-agent completions (extension v1)
+
+The on-disk journal uses version 2 from its first supported release. Transcript
+mutations and journal registration, replay and ACKs share one native storage
+writer. A competing ACP process receives `session_writer_busy` without changing
+either file. Replay may retire an interrupted turn only after the previous
+process has released ownership. A cold replay reused by `session/load` shares
+that writer rather than acquiring a competing one. Backends with only expiring,
+unfenced leases cannot advertise this extension.
+
+Version 1 journals came only from unreleased development builds. They remain
+unchanged and return `legacy_writer_unconfirmed`: acquiring a new lock cannot
+prove that a non-locking old executable has stopped. Automatic conversion or
+deletion is not supported. Protocol negotiation remains extension version 1;
+it is independent of the journal format.
+
+A controller opts in on each connection with
+`initialize._meta.sudocode.subagentCompletions: {"version":1}`. The server
+advertises the same version only on runtimes that implement the journal and
+exact-context contract. Without negotiation, existing ACP behavior is unchanged.
+`subagentEvents` remains the display stream. This extension covers only children
+spawned directly by the top-level ACP session; nested children and background
+shell/Monitor jobs do not receive an automatic-continuation guarantee.
+
+Each opted-in `session/prompt` supplies `_meta.traceId`. Before starting a child,
+scode durably registers its agent ID, spawning tool call and trace in a journal
+beside the parent transcript. Shared CLI/ACP reduction requires actual
+`running`/`backgrounded` handoff, a persisted terminal manifest, and the committed
+parent turn. A canonical `pid_output` read suppresses an unpublished candidate.
+A synthetic abort without terminal evidence cannot publish a completion.
+If recording a terminal event fails temporarily, the existing delivery loop
+retains its bounded lifecycle data and retries the journal write. Delivery still
+waits for the parent commit and honors explicit result collection. A process
+restart recovers the terminal evidence from the persisted child manifest.
+
+The agent sends a JSON-RPC **request** `_sudocode/subagent/completed`:
+
+```json
+{"sessionId":"session-id","completionId":"64 lowercase SHA-256 hex characters",
+ "agentId":"agent-id","parentToolCallId":"tool-call-id","originTraceId":"run:prompt",
+ "status":"completed","message":"<task-notification>...</task-notification>"}
+```
+
+Status is `completed`, `failed`, or `cancelled`. The message uses the existing
+XML-escaped tool-result renderer, bounded to 64 KiB UTF-8 before delivery. It is
+untrusted tool output, not a system instruction. Completion identity is derived
+from version/session/tool/agent; payload freezes before the first send. Publication
+is the deduplication cutoff: a later explicit read cannot retract an in-flight
+receipt. This does not promise exactly-once model execution.
+
+The controller replies only after committing its durable receipt:
+`{"completionId":"…","disposition":"stored"}`. A previously verified binding
+whose session has been deleted may instead reply
+`{"completionId":"…","disposition":"discarded","reason":"session_deleted"}`.
+Delivery is sequential per session in durable publication order, outside
+engine/prompt locks. An earlier spawn finishing late cannot overtake an
+unacknowledged publication, including after restart. Transient errors
+and missing ACKs retry the identical payload with bounded exponential backoff;
+invalid requests or inconsistent ACKs quarantine that item. Method-not-found and
+authentication-required suspend delivery until a fresh binding. Replies from a
+retired binding cannot stop the replacement delivery. ACK persistence failure
+leaves the item pending. ACK tombstones retain identity, releasing result text;
+journals stop accepting additions at 10,000 registered children or 64 MiB and
+report `completion_journal_capacity` rather than silently dropping work.
+
+`_sudocode/subagent/replay {sessionId,cwd}` reads only the exact journal,
+transcript and registered child manifests. It does **not** load engines, MCP or
+plugins, restart children, scan unrelated cwd results, or run a model. It binds
+pending deliveries and returns `{watermark,waiting,pending,unresolved,settled,
+blocked,contextRef}`. Missing terminal evidence is `execution_unconfirmed`;
+uncommitted parent evidence is `source_context_unconfirmed`. After an interrupted
+parent, a new explicit human turn may proceed, but cannot retroactively publish
+that parent's unproven completions.
+
+An opted-in prompt's committed response and `session/load` expose
+`_meta.sudocode.contextRef = {sessionId,revision,digest,lastTraceId}`. The digest
+covers recoverable transcript bytes. Live load validates exact cwd and rebinds
+without replacing the engine; cold load opens the exact stored session. A
+controller sending an automatic input supplies `_meta.sudocode.expectedContext`.
+The agent checks it inside that session's prompt lane before any model work;
+mismatch returns `-32602` with `context_mismatch`. Transcript edits/compaction that
+invalidate the recorded digest cannot be presented as exact recovery. Hosted
+factories do not advertise this extension until they implement its storage contract.
+
+
+## Direct background terminal completions (task extension v1)
+
+Controllers negotiate `initialize._meta.sudocode.taskCompletions: {"version":1}`.
+When both completion extensions are offered, the server selects task completions
+only. This uses the same journal, sender and receipt reduction as sub-agent v1;
+sub-agent IDs, frozen messages, order and receipt hashes remain unchanged.
+Only native storage with session writer exclusion advertises the extension.
+
+`_sudocode/task/completed` is a JSON-RPC request. Sub-agent payloads replace
+`agentId` with `kind: "subagent"` and `taskId`. Terminal payloads are:
+
+```json
+{"sessionId":"session-id","completionId":"64 lowercase SHA-256 hex characters",
+ "kind":"terminal","taskId":"shell-random-id","parentToolCallId":"tool-id",
+ "originTraceId":"run:prompt","status":"failed",
+ "terminal":{"shell":"bash","scope":"command","exitCode":7,"signal":null,
+ "termination":"exit","outputTruncated":false},
+ "message":"<task-notification>...</task-notification>"}
+```
+
+`shell` is `bash` or `powershell`; `termination` is `exit`, `signal` or
+`cancelled`. A terminal source must have been registered before spawn, returned
+an actual background handle and supplied observed exit evidence. A parent turn
+must commit before delivery. Synchronous commands return their ordinary tool
+result and never enqueue a completion. Nested shells do not directly notify the
+top-level parent. Explicit result collection suppresses an unpublished result.
+The ACK contract is the same as sub-agent v1.
+
+The durable terminal snapshot keeps a UTF-8 output tail of at most 24 KiB. The
+entire encoded terminal completion is bounded to 64 KiB, including XML escaping,
+JSON escaping, identity and metadata. Rendering truncates only output text and
+sets `outputTruncated`; frozen payloads and IDs are stable on retry.
+
+All control operations require the original absolute `cwd` and `sessionId`.
+`_sudocode/task/replay {sessionId,cwd}` without `storageRef` is a read-only binding
+probe returning `{sessionId,storageRef,deleted}`. It neither starts a delivery nor
+creates a journal. Use that exact reference with subsequent operations:
+
+- `replay {sessionId,cwd,storageRef,afterTaskId?}` rebinds delivery without loading
+  an engine and returns the common counters and context plus `storageRef`,
+  `running`, `executionUnconfirmed`, `taskSetHash`, `terminalSources` (up to 50)
+  and `nextTaskId`. No PID attachment, process restart or command execution occurs.
+- `suppress {sessionId,cwd,storageRef,originTraceId}` requires a closed trace. Its
+  ACK is `{disposition:"suppressed",originTraceId,storageRef,watermark}`. Repeating
+  a no-op suppression preserves the committed watermark. Suppression closes
+  delivery eligibility, including sources without a result; it does not kill
+  execution or remove unknown execution facts.
+- `purge {sessionId,cwd,storageRef,cleanupId}` requires no active prompt. Its ACK
+  is `{disposition:"purged",cleanupId,storageRef}` after writing a minimal deleted
+  binding. It retires cached results and fences all late writes. It does not
+  remove the transcript, child manifests, project files or original full logs.
+  Native session deletion additionally removes its transcript and offloaded
+  tool results after committing the same tombstone.
+
+Transcript saves, compaction, journal writes, ACKs and deletion share one native
+writer lifetime and serialized write operations. A second process gets
+`session_writer_busy`; a cold delivery reused by `session/load` shares its writer.
+Deleting a result never removes the independent lock file. Deleted sessions
+cannot reopen. A temporary storage error retains the bounded exit snapshot for
+retry; a process loss before that snapshot was saved becomes
+`execution_unconfirmed`, even if its child later exits. Uncertain process creation
+or cancellation also cannot be presented as terminal evidence. Never rerun such
+a command automatically. Recovery covers reconnects and process restart, not
+power-loss durability.
+
+The first supported on-disk journal format is v2, introduced together with
+shared writer ownership in the sub-agent completion change. Both stages use
+that same format and writer. The earlier, non-locking v1 format existed only in
+development/test builds; it is rejected with `legacy_writer_unconfirmed` and
+its original bytes are preserved. Automatic conversion/deletion is not an
+upgrade path, and no production v1 migration workflow is required.
+
+Stage-one v2 sub-agent records can be replayed and acknowledged by the task
+extension without changing their source, frozen payload, publication ordinal,
+ACK or context. Rolling back remains supported for sub-agent-only records.
+Once terminal sources exist, the stage-one binary rejects completion replay
+and transcript mutations with `completion_journal_unsupported`; read-only
+transcript loading without completion negotiation does not grant write access.
+Both journal and transcript bytes remain intact.

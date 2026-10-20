@@ -133,6 +133,12 @@ const ACP_SLASH_COMMANDS: &[AcpSlashCommandSpec] = &[
         holds_cwd_lease: true,
     },
     AcpSlashCommandSpec {
+        name: "effort",
+        description: "Show or change reasoning effort",
+        input_hint: Some("[auto|low|medium|high|xhigh|max]"),
+        holds_cwd_lease: true,
+    },
+    AcpSlashCommandSpec {
         name: "compact",
         description: "Summarise older messages to free context (validated LLM checkpoint)",
         input_hint: None,
@@ -535,9 +541,9 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "effort",
         aliases: &[],
-        summary: "Set the effort level for responses",
-        argument_hint: Some("[none|minimal|low|medium|high]"),
-        resume_supported: true,
+        summary: "Show or change reasoning effort",
+        argument_hint: Some("[auto|low|medium|high|xhigh|max]"),
+        resume_supported: false,
     },
     SlashCommandSpec {
         name: "fast",
@@ -1523,6 +1529,9 @@ pub fn validate_slash_command_input(
         "model" => SlashCommand::Model {
             model: optional_single_arg(command, &args, "[model]")?,
         },
+        "effort" => SlashCommand::Effort {
+            level: optional_single_arg(command, &args, "[auto|low|medium|high|xhigh|max]")?,
+        },
         "permissions" => SlashCommand::Permissions {
             mode: parse_permissions_mode(&args)?,
         },
@@ -1690,7 +1699,6 @@ pub fn validate_slash_command_input(
         "hooks" => SlashCommand::Hooks { args: remainder },
         "context" => SlashCommand::Context { action: remainder },
         "color" => SlashCommand::Color { scheme: remainder },
-        "effort" => SlashCommand::Effort { level: remainder },
         "branch" => SlashCommand::Branch { name: remainder },
         "rewind" => SlashCommand::Rewind { steps: remainder },
         "ide" => SlashCommand::Ide { target: remainder },

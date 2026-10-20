@@ -50,8 +50,8 @@ fn dead_pid_is_rejected_but_unknown_name_passes() {
     let err =
         reject_dead_pid_for_test("agent-9001").expect_err("a known-terminal pid must be rejected");
     assert!(
-        err.contains("exited") || err.contains("dead"),
-        "error should explain the pid is dead: {err}"
+        err.contains("no active runtime"),
+        "error should explain that this task has no active runtime: {err}"
     );
 
     // A plain agent-name with no manifest is not a dead pid — offline-capable,

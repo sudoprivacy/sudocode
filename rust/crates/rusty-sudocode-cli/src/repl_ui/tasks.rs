@@ -386,7 +386,9 @@ impl TaskBrowser {
 fn status_color(status: BackgroundTaskStatus) -> crossterm::style::Color {
     match status {
         BackgroundTaskStatus::Running => theme().info(),
-        BackgroundTaskStatus::Stopping => theme().warning,
+        BackgroundTaskStatus::Stopping | BackgroundTaskStatus::ExecutionUnconfirmed => {
+            theme().warning
+        }
         BackgroundTaskStatus::Completed => theme().tool_borders().success,
         BackgroundTaskStatus::Failed | BackgroundTaskStatus::Cancelled => theme().error,
     }

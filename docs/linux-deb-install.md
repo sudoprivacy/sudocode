@@ -3,6 +3,10 @@
 This guide covers installing and validating the Ubuntu/Debian `scode`
 package produced by the `Release binaries` workflow.
 
+Choose the package matching `dpkg --print-architecture`: `amd64` or `arm64`.
+ARM64 packages are available starting with v0.2.32 and require glibc 2.35 or
+newer (for example Ubuntu 22.04 or 24.04). The amd64 executable is static musl.
+
 ## Download the package
 
 For a manual GitHub Actions run, download the `scode-linux-x64-deb`
@@ -12,11 +16,15 @@ artifact. After extracting it, you should have a file named like:
 scode_0.0.0.12345_amd64.deb
 ```
 
+For ARM64, download the `scode-linux-arm64-installers` artifact, which contains
+both `scode_0.0.0.12345_arm64.deb` and the ARM64 bundle.
+
 For a tagged release, download the versioned package from the GitHub
 Release assets:
 
 ```text
-scode_0.1.13_amd64.deb
+scode_0.2.32_amd64.deb
+scode_0.2.32_arm64.deb
 ```
 
 ## Upload to the server

@@ -21,11 +21,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 use tokio::time::timeout;
@@ -288,6 +289,14 @@ fn base_command_with_mode(
     for (key, value) in isolated_env::inherited_env() {
         cmd.env(key, value);
     }
+    if let Some(path) = std::env::var_os("SCODE_LOG_PATH") {
+        cmd.env("SCODE_LOG_PATH", path);
+    }
+    // The live job's stream budget must survive environment isolation; otherwise
+    // the default 300s budget outlives the harness's 120s receive bound.
+    if let Some(budget) = std::env::var_os("SUDOCODE_API_READ_TIMEOUT") {
+        cmd.env("SUDOCODE_API_READ_TIMEOUT", budget);
+    }
     cmd.args([
         "--auth",
         "proxy",
@@ -483,7 +492,7 @@ async fn scenario_session_prompt(client: &mut AcpTestClient, session_id: &str) {
     );
     assert!(
         result.get("usage").is_some(),
-        "prompt response should include usage"
+        "prompt response should include usage; full response: {resp}"
     );
 }
 
@@ -528,6 +537,7 @@ async fn await_agent_result(manifest_file: &str, budget: Duration) -> String {
 }
 
 async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: &str) {
+    let model = std::env::var("SCODE_LIVE_MODEL").unwrap_or_else(|_| "sonnet".to_string());
     let (notifs, resp) = client
         .send_request(
             "session/prompt",
@@ -538,15 +548,18 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
                     "Do NOT answer the questions yourself. Do NOT skip the Agent tool.\n",
                     "The entire purpose of this request is to test the Agent tool.\n\n",
                     "For each calculation below, call Agent with:\n",
+                    "  model: <LIVE_MODEL>\n",
                     "  description: \"calc <N>\"\n",
                     "  prompt: \"What is <expr>? Reply with ONLY the number.\"\n\n",
+                    "Omit auth_mode entirely: all child agents must inherit this session's current credential path.\n",
+                    "No switch to subscription or api-key authentication is requested.\n\n",
                     "Calculations:\n",
                     "1. 101 + 102\n",
                     "2. 201 + 202\n",
                     "3. 301 + 302\n\n",
                     "After all 3 agents return, output exactly this JSON and nothing else:\n",
                     "{\"results\": [<agent1_answer>, <agent2_answer>, <agent3_answer>]}"
-                )}]
+                ).replace("<LIVE_MODEL>", &model)}]
             }),
         )
         .await;
@@ -643,74 +656,53 @@ async fn scenario_subagent_calculations(client: &mut AcpTestClient, session_id: 
         })
         .collect();
 
-    if agent_starts.is_empty() {
-        // A rejected credential lands HERE, not in the assertion below: no Agent tool
-        // call was made because no turn happened, so the "model bypassed Agent" branch
-        // is exactly the path a dead credential takes — and then reports its refusal
-        // text as a wrong answer. This is the sibling of the guard at the `pong`
-        // assertion; missing it left the same failure misfiled on `main`, which is how
-        // it was found (the run said "text output is also wrong (expected 203, 403,
-        // 603)" and quoted an authentication failure).
-        fail_clearly_if_the_credential_was_rejected(&text_output);
+    fail_clearly_if_the_credential_was_rejected(&text_output);
+    assert_eq!(
+        agent_starts.len(),
+        3,
+        "expected exactly 3 Agent tool_call starts, got {}; provider reply: {text_output}",
+        agent_starts.len()
+    );
+    assert!(
+        failed_updates.is_empty(),
+        "subagent workflow contains failed tools"
+    );
+    assert_eq!(
+        spawn_manifests.len(),
+        3,
+        "each spawn must report the manifest that will carry its result, got {spawn_manifests:?}"
+    );
 
-        // Model bypassed Agent and answered directly.  Verify it at least
-        // produced the correct numbers so we know the prompt/session works —
-        // but warn that the subagent pipeline was not exercised.
-        eprintln!(
-            "WARN: model did not use Agent tool — subagent pipeline NOT exercised. \
-             Verifying text output contains correct answers instead."
-        );
+    // Read the answers off the manifests the runtime wrote, not out of the
+    // orchestrator's reply.
+    //
+    // This used to assert `rawOutput.result` on a completed tool_call_update,
+    // which is only ever populated by a `pid_output` call — so it asserted
+    // that the MODEL chose to collect. It stopped choosing to once
+    // `pid_output` became a deferred tool: it spawns the three agents, finds
+    // `pid_output` through ToolSearch, then satisfies the prompt's
+    // "output the JSON" by doing the arithmetic itself (101 + 102 is not a
+    // calculation a model needs an agent for). Identical counts on five
+    // consecutive main runs — a deterministic shortcut, not a flake.
+    //
+    // What this test exists to prove is that the subagent pipeline runs over
+    // ACP: three agents really started, really executed, and really produced
+    // their answers. The manifests are that fact, and they hold it however
+    // the orchestrator decides to narrate the turn.
+    // Concurrently, on one shared budget: the three agents run in parallel,
+    // so waiting for them in series would bill their latencies end to end.
+    let results = futures_util::future::join_all(
+        spawn_manifests
+            .iter()
+            .map(|m| await_agent_result(m, Duration::from_secs(90))),
+    )
+    .await;
+    let joined = results.join(" | ");
+    for expected in ["203", "403", "603"] {
         assert!(
-            text_output.contains("203")
-                && text_output.contains("403")
-                && text_output.contains("603"),
-            "model bypassed Agent but text output is also wrong \
-             (expected 203, 403, 603): {text_output:?}"
+            joined.contains(expected),
+            "no subagent produced {expected}; manifests said: {joined}"
         );
-    } else {
-        assert_eq!(
-            agent_starts.len(),
-            3,
-            "expected exactly 3 Agent tool_call starts, got {}",
-            agent_starts.len()
-        );
-        assert_eq!(
-            spawn_manifests.len(),
-            3,
-            "each spawn must report the manifest that will carry its result, got {spawn_manifests:?}"
-        );
-
-        // Read the answers off the manifests the runtime wrote, not out of the
-        // orchestrator's reply.
-        //
-        // This used to assert `rawOutput.result` on a completed tool_call_update,
-        // which is only ever populated by a `pid_output` call — so it asserted
-        // that the MODEL chose to collect. It stopped choosing to once
-        // `pid_output` became a deferred tool: it spawns the three agents, finds
-        // `pid_output` through ToolSearch, then satisfies the prompt's
-        // "output the JSON" by doing the arithmetic itself (101 + 102 is not a
-        // calculation a model needs an agent for). Identical counts on five
-        // consecutive main runs — a deterministic shortcut, not a flake.
-        //
-        // What this test exists to prove is that the subagent pipeline runs over
-        // ACP: three agents really started, really executed, and really produced
-        // their answers. The manifests are that fact, and they hold it however
-        // the orchestrator decides to narrate the turn.
-        // Concurrently, on one shared budget: the three agents run in parallel,
-        // so waiting for them in series would bill their latencies end to end.
-        let results = futures_util::future::join_all(
-            spawn_manifests
-                .iter()
-                .map(|m| await_agent_result(m, Duration::from_secs(90))),
-        )
-        .await;
-        let joined = results.join(" | ");
-        for expected in ["203", "403", "603"] {
-            assert!(
-                joined.contains(expected),
-                "no subagent produced {expected}; manifests said: {joined}"
-            );
-        }
     }
 
     // Print the whole response, not just the field: a JSON-RPC error carries no
@@ -794,6 +786,26 @@ async fn run_subagent_scenarios(client: &mut AcpTestClient, workspace: &TestWork
     scenario_initialize(client).await;
     let session_id = scenario_session_new(client, &workspace.root).await;
     scenario_subagent_calculations(client, &session_id).await;
+    let session = runtime::SessionStore::from_cwd(&workspace.root)
+        .expect("subagent test session store")
+        .load_session("latest")
+        .expect("subagent test must persist its transcript")
+        .session;
+    let mut spawns = 0;
+    for block in session.messages.iter().flat_map(|message| &message.blocks) {
+        if let runtime::ContentBlock::ToolUse { name, input, .. } = block {
+            if matches!(name.as_str(), "Agent" | "agent_spawn") {
+                let args: Value = serde_json::from_str(input).expect("agent tool arguments");
+                assert!(
+                    args.get("auth_mode").is_none_or(Value::is_null),
+                    "auth inheritance requires an omitted or null auth_mode, got {:?}",
+                    args.get("auth_mode")
+                );
+                spawns += 1;
+            }
+        }
+    }
+    assert_eq!(spawns, 3, "must inspect every persisted Agent call");
 }
 
 // ---------------------------------------------------------------------------
@@ -846,6 +858,122 @@ async fn live_anthropic_smoke_ws() {
     run_live_scenarios(&mut client, &workspace).await;
     client.shutdown().await;
     workspace.cleanup();
+}
+
+/// Run the live harness under an explicit parent budget without mutating this
+/// test process's environment. The peer sends heartbeats until the production
+/// stream reader recovers, then answers the identical request.
+#[tokio::test]
+async fn inherited_idle_budget_recovers_a_heartbeat_only_stream() {
+    const TEST: &str = "inherited_idle_budget_recovers_a_heartbeat_only_stream";
+    const FIXTURE_CHILD: &str = "SCODE_ACP_IDLE_BUDGET_FIXTURE";
+    if std::env::var_os(FIXTURE_CHILD).is_some() {
+        let workspace = TestWorkspace::new("idle-budget");
+        workspace.create();
+        workspace.write_sudocode_json();
+        let mut client = spawn_stdio_client(&workspace, "test-idle-budget");
+        run_live_scenarios(&mut client, &workspace).await;
+        client.shutdown().await;
+        workspace.cleanup();
+        return;
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let peer = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            let (socket, _) = listener.accept().await.unwrap();
+            connections.spawn(answer_idle_budget_request(socket, captured.clone()));
+        }
+    });
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(FIXTURE_CHILD, "1")
+            .env("PROXY_AUTH_TOKEN", "test-idle-budget")
+            .env("PROXY_BASE_URL", endpoint)
+            .env("SCODE_LIVE_MODEL", "grok")
+            .env("SUDOCODE_API_READ_TIMEOUT", "2")
+            .env_remove("SCODE_LOG_PATH")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    peer.abort();
+    let output = output
+        .expect("the live harness must preserve the parent's idle budget")
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one empty-stream recovery, no harness retry"
+    );
+    assert_eq!(
+        requests[0], requests[1],
+        "recovery must preserve the request"
+    );
+}
+
+async fn answer_idle_budget_request(
+    socket: tokio::net::TcpStream,
+    captured: Arc<Mutex<Vec<Value>>>,
+) {
+    let mut socket = BufReader::new(socket);
+    let mut line = String::new();
+    socket.read_line(&mut line).await.unwrap();
+    let is_query = line.starts_with("POST /v1/chat/completions ");
+    let is_catalog = line.starts_with("GET /v1/models ");
+    let mut length = 0;
+    loop {
+        line.clear();
+        if socket.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+    }
+    let mut body = vec![0; length];
+    socket.read_exact(&mut body).await.unwrap();
+    let mut socket = socket.into_inner();
+    if is_catalog {
+        let body = r#"{"data":[{"id":"grok-3"}]}"#;
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        return;
+    }
+    assert!(is_query, "unexpected fixture route");
+    let index = {
+        let mut requests = captured.lock().unwrap();
+        requests.push(serde_json::from_slice::<Value>(&body).unwrap());
+        requests.len()
+    };
+    if index == 1 {
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n").await.unwrap();
+        while socket.write_all(b": ping\n\n").await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    } else {
+        let body = concat!(
+            "data: {\"id\":\"idle-budget\",\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n",
+            "data: {\"id\":\"idle-budget\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"idle-budget\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------

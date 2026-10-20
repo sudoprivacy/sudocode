@@ -87,11 +87,7 @@ pub use context_usage::{collect_context_usage, ContextEntry, ContextUsage};
 pub use runtime_build::*;
 pub use session_engine::*;
 
-/// Stop one running sub-agent by id — the same abort a
-/// `SendMessage(shutdown_request)` fires. `false` when no running agent is
-/// registered under that id (it already finished, or never ran in the
-/// background).
-#[must_use]
-pub fn abort_subagent(agent_id: &str) -> bool {
-    tools::abort_registered_agent(agent_id)
-}
+mod prompt_images;
+mod vlm_describe;
+
+mod management;

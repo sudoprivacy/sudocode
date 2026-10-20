@@ -90,7 +90,7 @@ fn json_type_label(value: &JsonValue) -> &'static str {
     match value {
         JsonValue::Null => "null",
         JsonValue::Bool(_) => "a boolean",
-        JsonValue::Number(_) => "a number",
+        JsonValue::Number(_) | JsonValue::NumberValue(_) => "a number",
         JsonValue::String(_) => "a string",
         JsonValue::Array(_) => "an array",
         JsonValue::Object(_) => "an object",

@@ -784,6 +784,12 @@ async fn send_message_reuses_recent_completion_cache_entries() {
     assert_eq!(cache_stats.completion_cache_hits, 1);
     assert_eq!(cache_stats.completion_cache_misses, 1);
     assert_eq!(cache_stats.completion_cache_writes, 1);
+    // A replay has no provider request, usage charge or prompt-cache refresh.
+    assert_eq!(cache_stats.tracked_requests, 1);
+    assert_eq!(cache_stats.input_tokens_observed_requests, 1);
+    assert_eq!(cache_stats.total_input_tokens, 3);
+    assert_eq!(cache_stats.total_cache_read_input_tokens, 4000);
+    assert_eq!(cache_stats.total_cache_creation_input_tokens, 5);
 
     let _ = std::fs::remove_dir_all(temp_root);
     std::env::remove_var("SUDO_CODE_CONFIG_HOME");
@@ -1375,6 +1381,115 @@ async fn request_metadata_user_id_reaches_the_wire_on_both_transports() {
             "stream={stream}: the routing key must be the conversation's session id",
         );
     }
+}
+
+#[tokio::test]
+async fn anthropic_cache_scope_respects_tools_and_preserves_signed_history() {
+    for with_tools in [false, true] {
+        let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+        let server = spawn_server(
+            state.clone(),
+            vec![http_response(
+                "200 OK",
+                "application/json",
+                &ok_message_body(),
+            )],
+        )
+        .await;
+        let client = AnthropicClient::new("fixture-key")
+            .with_base_url(server.base_url())
+            .with_cache_ttl_1h(true);
+        let mut request = sample_request(false);
+        request.model = KNOWN_WINDOW_MODEL.into();
+        if !with_tools {
+            request.tools = None;
+            request.tool_choice = None;
+        }
+        request.cache_hints = Some(api::CacheHints {
+            system_static: Some("shared static instructions".into()),
+            system_dynamic: Some("fixture session context".into()),
+            breakpoint_last_message: true,
+        });
+        request.messages.insert(
+            0,
+            InputMessage {
+                role: "assistant".into(),
+                content: vec![InputContentBlock::Thinking {
+                    thinking: "preserved thinking".into(),
+                    signature: Some("preserved-signature".into()),
+                }],
+            },
+        );
+        client
+            .send_message(&request, None)
+            .await
+            .expect("cache request");
+        let captured = state.lock().await;
+        let body: serde_json::Value = serde_json::from_str(&captured[0].body).expect("wire JSON");
+        let cache = &body["system"][0]["cache_control"];
+        assert_eq!(cache["type"], "ephemeral");
+        assert_eq!(cache["ttl"], "1h");
+        if with_tools {
+            assert!(
+                cache.get("scope").is_none(),
+                "ordinary tools precede system text"
+            );
+            assert_eq!(body["tools"][0]["name"], "get_weather");
+        } else {
+            assert_eq!(cache["scope"], "global");
+        }
+        assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
+        assert_eq!(
+            body["messages"][1]["content"][1]["cache_control"]["ttl"],
+            "1h"
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["thinking"],
+            "preserved thinking"
+        );
+        assert_eq!(
+            body["messages"][0]["content"][0]["signature"],
+            "preserved-signature"
+        );
+    }
+}
+
+#[tokio::test]
+async fn gemini_preserves_nullable_enum_on_the_http_wire() {
+    let state = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
+    let event = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+    let server = spawn_server(
+        state.clone(),
+        vec![http_response("200 OK", "text/event-stream", event)],
+    )
+    .await;
+    let client = api::GeminiClient::from_resolved(&ResolvedProvider {
+        kind: ProviderKind::Gemini,
+        api_format: ApiFormat::GeminiGenerateContent,
+        base_url: server.base_url(),
+        credential: Credential::ApiKey("fixture-key".into()),
+        model_id: "gemini-test".into(),
+        extra_body: Default::default(),
+        cache_ttl_1h: Some(false),
+    })
+    .expect("Gemini client");
+    let mut input = sample_request(false);
+    input.model = "gemini-test".into();
+    input.tools.as_mut().expect("sample tools")[0].input_schema["properties"]["units"] = json!({"type": ["string", "null"], "enum": ["celsius", "fahrenheit", null], "default": null});
+    client
+        .send_message(&input, None)
+        .await
+        .expect("Gemini reply");
+    let captured = state.lock().await;
+    let body: serde_json::Value =
+        serde_json::from_str(&captured[0].body).expect("Gemini wire JSON");
+    let schema = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+    assert_eq!(schema["required"], json!(["city"]));
+    let units = &schema["properties"]["units"];
+    assert_eq!(units["type"], "string");
+    assert_eq!(units["nullable"], true);
+    assert_eq!(units["enum"], json!(["celsius", "fahrenheit"]));
+    assert!(units.get("default").is_none());
 }
 
 fn sample_request(stream: bool) -> MessageRequest {

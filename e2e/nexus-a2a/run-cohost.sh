@@ -45,7 +45,7 @@ REPLY="${NEXUS_A2A_COHOST_REPLY:-PONG from the co-host}"
 MODEL="${NEXUS_A2A_COHOST_MODEL:-claude-sonnet-4-6}"
 RUST_DIR="${RUST_DIR:-$(cd ../../rust && pwd)}"
 MANIFEST=("--manifest-path" "$RUST_DIR/Cargo.toml")
-CARGO_TEST=(cargo test "${MANIFEST[@]}" -q -p runtime --test mailbox_nexus_live)
+CARGO_TEST=(cargo_in_workspace test "${MANIFEST[@]}" -q -p runtime --test mailbox_nexus_live)
 
 echo "== 0. the co-host daemon binary =="
 BIN="${NEXUSD_COHOST_BIN:-}"
@@ -53,8 +53,8 @@ if [ -z "$BIN" ]; then
   # `--features daemon,driver-ai`: the bin is behind it so the workspace's own test and
   # clippy jobs do not compile a raft + tonic tree on three platforms (and do not
   # need `protoc`, which the macOS runners have not got).
-  cargo build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon,driver-ai
-  BIN="$(cargo metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
+  cargo_in_workspace build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon,driver-ai
+  BIN="$(cargo_in_workspace metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
          | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/nexusd-cohost"
   [ -x "$BIN" ] || BIN="$BIN.exe"
 fi
@@ -74,7 +74,7 @@ MOCK_PID=
 AUTHON_DAEMON_PID=
 WORK_DIR=
 cleanup() {
-  [ -n "$AUTHON_DAEMON_PID" ] && kill "$AUTHON_DAEMON_PID" 2>/dev/null || true
+  authon_stop
   [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
   # `NEXUS_A2A_KEEP_WORK=1` leaves the data dir, both logs and the generated
   # config behind. The failure dumps below are a tail; a real diagnosis usually
@@ -102,10 +102,10 @@ else
   echo "== 1. mock model on 127.0.0.1:${MOCK_PORT} =="
   # Built first, then run: `cargo run` would otherwise compile INTO the log this
   # waits on, and a cold build outlasts any sane readiness window.
-  cargo build "${MANIFEST[@]}" -q -p mock-anthropic-service
+  cargo_in_workspace build "${MANIFEST[@]}" -q -p mock-anthropic-service
   # Start the executable itself so cleanup owns the server PID. Killing
   # `cargo run` leaves its child holding the port on Windows.
-  MOCK_BIN="$(cargo metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
+  MOCK_BIN="$(cargo_in_workspace metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
     | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/mock-anthropic-service"
   [ -x "$MOCK_BIN" ] || MOCK_BIN="$MOCK_BIN.exe"
   "$MOCK_BIN" --bind "127.0.0.1:${MOCK_PORT}" >"$WORK_DIR/mock.log" 2>&1 &
@@ -162,9 +162,7 @@ authon_wait_log "Static topology applied" 45
 
 # The mint opens the same data dir the daemon locks, so it must be down for it.
 echo "== 3b. stop, mint the client bundle, restart =="
-kill "$AUTHON_DAEMON_PID" 2>/dev/null || true
-wait "$AUTHON_DAEMON_PID" 2>/dev/null || true
-AUTHON_DAEMON_PID=
+authon_stop
 CLIENT_ID="live-probe"
 [ "${NEXUS_A2A_MODEL_LIVE:-0}" != 1 ] || CLIENT_ID="$OPERATOR"
 CLIENT_BUNDLE="$(authon_mint "$CLIENT_ID")" || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
@@ -194,6 +192,10 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
   NEXUS_A2A_MODEL_ZONE="model" \
   NEXUS_A2A_MODEL_STORAGE="$(native_path "$WORK_DIR/model-cache")" \
   "${CARGO_TEST[@]}" live_mount_cohost_model -- --ignored --nocapture
+
+echo "== durable reader receipts through native Raft =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked -- --ignored --nocapture
 
 # THE PAIR, before the agent starts. The conversation must exist before the
 # spawn (the co-host arms its tail on what its chat list names at startup), and
@@ -225,6 +227,7 @@ echo "== 6. attach a controller, send a peer message, and approve its tools =="
 # is the only place that says why. Dumping it on failure is the difference
 # between a diagnosis and a guess.
 if ! NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
   NEXUS_A2A_TEST_INBOX="$AGENT" \
   NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" \
   NEXUS_A2A_TEST_REPLY_BODY="$REPLY" NEXUS_A2A_TEST_MODEL="$MODEL" \
@@ -249,5 +252,13 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$RESUME_CLIENT_BUND
   NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
   NEXUS_A2A_TEST_REPLY_TO="$OPERATOR" NEXUS_A2A_TEST_MODEL="$MODEL" \
   "${CARGO_TEST[@]}" live_cohost_session_resume -- --ignored --nocapture
+
+echo "== 9. filesystem stream reads preserve every committed frame =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_filesystem_stream_read_and_append_preserve_all_frames -- --ignored --nocapture
+
+echo "== 10. a silent client connection times out and recovers =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
 
 echo "COHOST E2E OK"

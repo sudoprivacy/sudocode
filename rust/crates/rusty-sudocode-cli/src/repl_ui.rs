@@ -29,13 +29,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use commands::suggest_slash_commands;
+use crossterm::style::Color as TerminalColor;
 use iocraft::prelude::*;
 
 mod ansi_text;
+mod prompt_text;
+mod queued_message;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
-use ansi_text::{AnsiText, PromptTextView, RichText};
+use ansi_text::{AnsiText, RichText};
+use prompt_text::PromptTextView;
+pub(crate) mod prose_preview;
+use prose_preview::{PreviewUpdate, ProsePreview};
 use tasks::{TaskBrowser, TaskFocus};
 
 // ── stderr redirect ───────────────────────────────────────────────────
@@ -703,7 +709,7 @@ const PASTE_PLACEHOLDER_MAX_LINES: usize = 2;
 fn should_use_paste_placeholder(text: &str) -> bool {
     let newline_count = text.chars().filter(|&c| c == '\n').count();
     text.chars().count() > PASTE_PLACEHOLDER_CHAR_THRESHOLD
-        || newline_count > PASTE_PLACEHOLDER_MAX_LINES
+        || newline_count >= PASTE_PLACEHOLDER_MAX_LINES
 }
 
 /// Normalize pasted line endings to `\n`.
@@ -951,6 +957,11 @@ fn format_question_panel(
 /// (which need a trailing newline) from raw byte chunks (which already
 /// include their own newlines from the markdown renderer).
 enum OutputMsg {
+    /// One event's stable history and replacement live prose, in order.
+    AssistantUpdate {
+        committed: String,
+        preview: PreviewUpdate,
+    },
     /// Complete line — `StdoutHandle::println` will append `\n`.
     Line(String),
     /// Raw chunk — `StdoutHandle::print`, no extra newline.
@@ -1026,6 +1037,12 @@ pub struct OutputSender {
 impl OutputSender {
     pub(crate) fn tool_progress(&self, text: Option<String>) {
         let _ = self.tx.send(OutputMsg::ToolProgress(text));
+    }
+
+    pub(crate) fn assistant_update(&self, committed: String, preview: PreviewUpdate) {
+        let _ = self
+            .tx
+            .send(OutputMsg::AssistantUpdate { committed, preview });
     }
 
     pub fn println(&self, text: &str) {
@@ -1225,6 +1242,8 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: u
         return String::new();
     }
     let max_lines = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
+    let support = crate::render::ColorSupport::detect();
+    let theme = crate::render::theme();
 
     // Messages are one line each and always shown; reserve their space first so
     // tool cards (multi-line) can never crowd a queued message out.
@@ -1263,11 +1282,7 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: u
     for (item, card_lines) in items.iter().zip(cards) {
         match item {
             PendingItem::QueuedMessage { display, .. } => {
-                let first = display.lines().next().unwrap_or("");
-                lines.push(crate::render::text_layout::truncate_to_width(
-                    &format!("{DIM}↳ queued: {first}{RESET}"),
-                    term_width,
-                ));
+                lines.push(queued_message::render(display, term_width, support, theme));
             }
             PendingItem::Tool(_) => {
                 let card_lines = card_lines.expect("tool card projection");
@@ -1335,17 +1350,17 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
 
     // Header summary line
     let mut header = crate::render::StyledLine::muted();
-    header.push_bold(todos.len().to_string());
+    header.push_count(todos.len());
     header.push(" todos (");
-    header.push_bold(completed_count.to_string());
+    header.push_count(completed_count);
     header.push(" done");
     if in_progress_count > 0 {
         header.push(", ");
-        header.push_bold(in_progress_count.to_string());
+        header.push_count(in_progress_count);
         header.push(" in progress");
     }
     header.push(", ");
-    header.push_bold(open_count.to_string());
+    header.push_count(open_count);
     header.push(" open)");
 
     let mut lines = Vec::with_capacity(todos.len() + 2);
@@ -1417,6 +1432,7 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
     tasks: Arc<Mutex<TaskBrowser>>,
+    prose_preview: Arc<Mutex<ProsePreview>>,
     output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
     terminal_handoff: Arc<Mutex<Option<TerminalHandoff>>>,
     ui_rx: Arc<Mutex<Receiver<UiCommand>>>,
@@ -1451,6 +1467,8 @@ pub type UpArrowDequeueHook = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 #[component]
 fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let ctx = hooks.use_context::<ReplContext>();
+    let prose_preview = ctx.prose_preview.clone();
+    let prose_preview_for_future = ctx.prose_preview.clone();
     let output_rx = Arc::clone(&ctx.output_rx);
     let terminal_handoff = Arc::clone(&ctx.terminal_handoff);
     let terminal_handoff_for_future = Arc::clone(&ctx.terminal_handoff);
@@ -1533,6 +1551,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut task_clock_tick = Instant::now();
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
+            let mut is_preview_changed = false;
 
             // Drain stderr redirect — route captured text through stdout
             // so it appears in the iocraft scrollback instead of corrupting
@@ -1553,6 +1572,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(rx) = output_rx_for_future.lock() {
                 loop {
                     let (text, terminated) = match rx.try_recv() {
+                        Ok(OutputMsg::AssistantUpdate { committed, preview }) => {
+                            prose_preview_for_future
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .update(preview);
+                            is_preview_changed = true;
+                            // use_output queues history for the same presentation
+                            // as the newly rendered preview, never an empty frame.
+                            (committed, false)
+                        }
                         Ok(OutputMsg::Line(text)) => (text, true),
                         Ok(OutputMsg::Raw(text)) => (text, false),
                         Ok(OutputMsg::ToolProgress(text)) => {
@@ -1613,8 +1642,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             input_value.set(String::new());
                         }
                         Ok(UiCommand::ClearQuestion) => {
+                            let is_plain_input = matches!(*input_slot.read(), InputSlot::TextInput);
                             input_slot.set(InputSlot::TextInput);
-                            input_value.set(String::new());
+                            if !is_plain_input {
+                                input_value.set(String::new());
+                            }
                         }
                         Ok(UiCommand::SetTurnResult(text)) => {
                             turn_result.set(Some(text));
@@ -1748,6 +1780,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if turn_result.read().is_some() {
                     turn_result.set(None);
                 }
+            }
+            if is_preview_changed && text.is_empty() {
+                // A stable Markdown block may pause the spinner. Subsequent
+                // pending prose still needs one coalesced layout on this tick.
+                frame.set(idx.wrapping_add(1));
             }
             if *spinner_text.read() != text {
                 spinner_text.set(text);
@@ -2411,7 +2448,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Merge TodoSlot into the upper separator as a single
     // multi-line Text element so the element tree structure stays
     // identical (avoids iocraft hook-index shifts).
-    let todo_line = if task_panel.is_some() {
+    let mut todo_line = if task_panel.is_some() {
         String::new()
     } else {
         todo_items
@@ -2419,11 +2456,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .ok()
             .map(|items| render_todo_panel(&items, term_height as usize))
             .unwrap_or_default()
-    };
-    let upper_sep = if todo_line.is_empty() {
-        sep.clone()
-    } else {
-        format!("{todo_line}\n{sep}")
     };
 
     // PendingSlot: queued/running tool cards and queued messages
@@ -2433,7 +2465,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // todo panel. A pure overlay: it never commits to scrollback (the render
     // engine commits finished tool cards; the coordinator echoes flushed
     // messages).
-    let pending_text = if task_panel.is_some() {
+    let mut pending_text = if task_panel.is_some() {
         String::new()
     } else {
         pending
@@ -2443,8 +2475,99 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             .unwrap_or_default()
     };
 
+    // Slots choose their semantic initial style. The decoder owns explicit
+    // resets; the UI adapter must not repaint reset spans with a parent color.
+    let chrome_has_color =
+        crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
+    let chrome_theme = crate::render::theme();
+    let chrome_style = |color| crossterm::style::ContentStyle {
+        foreground_color: chrome_has_color.then_some(color),
+        ..crossterm::style::ContentStyle::default()
+    };
+    let chrome_muted = chrome_style(chrome_theme.muted);
+    let chrome_border = chrome_has_color
+        .then_some(chrome_theme.border)
+        .and_then(ansi_text::ui_color);
+    // Keep question presentation unchanged here; finer selection roles are a
+    // separate design step, not a reason to retain the reset bug.
+    let question_style = chrome_style(TerminalColor::Cyan);
+    let status_rows = {
+        let rows = match &status_slot {
+            StatusSlot::Spinner(text) => chrome_rows(text, w),
+            StatusSlot::TurnResult(text) => chrome_rows(&text.text, w),
+            StatusSlot::Tips => chrome_rows(&tips_text, w),
+            StatusSlot::Empty => 0,
+        };
+        // Keep usual spinner/result transitions at the same height. Reserve
+        // a 128-column result; unusually long summaries can still expand.
+        if rows > 0 {
+            rows.max(128usize.div_ceil(w.max(1)))
+        } else {
+            0
+        }
+    };
+    let preview_text = (|| {
+        let mut state = prose_preview
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.is_active()
+            || task_panel.is_some()
+            || !matches!(&current_input_slot, InputSlot::TextInput)
+        {
+            return None;
+        }
+        let input_rows = match &current_input_slot {
+            InputSlot::TextInput => chrome_rows(&format!("{prompt_label}{val}"), w),
+            InputSlot::Hint(text) => chrome_rows(text, w),
+            InputSlot::DialPad(_) => 0,
+            InputSlot::FuzzySelect(fs) => chrome_rows(&format!("{prompt_label}{}", fs.filter), w),
+        };
+        let base_rows = status_rows
+            + input_rows
+            + chrome_rows(&footer_text, w)
+            + panel_text.as_ref().map_or(0, |text| chrome_rows(text, w))
+            + 2; // separators
+
+        // The terminal backend reserves a blank anchor row; leave another
+        // row for concurrent chrome changes. Optional panels never displace input.
+        let mut remaining = (term_height as usize).saturating_sub(base_rows + 2);
+        if chrome_rows(&pending_text, w) + chrome_rows(&todo_line, w) > remaining {
+            todo_line.clear();
+        }
+        if chrome_rows(&pending_text, w) > remaining {
+            pending_text.clear();
+        }
+        remaining =
+            remaining.saturating_sub(chrome_rows(&pending_text, w) + chrome_rows(&todo_line, w));
+        state.layout(w, remaining)
+    })();
+    let preview_rows = preview_text
+        .as_ref()
+        .map_or(0, |text| text.text.lines().count());
+    let slot_width = Size::Length(u32::from(term_width));
+    let preview_height = Size::Length(u32::try_from(preview_rows).unwrap_or(0));
+    let status_height = Size::Length(u32::try_from(status_rows).unwrap_or(0));
+    let status_element = match &status_slot {
+        StatusSlot::Spinner(s) => Some(AnyElement::from(
+            element! { AnsiText(content: s.clone(), width: slot_width) },
+        )),
+        StatusSlot::TurnResult(s) => Some(AnyElement::from(
+            element! { RichText(content: s.clone(), width: slot_width) },
+        )),
+        StatusSlot::Tips => Some(AnyElement::from(
+            element! { AnsiText(content: tips_text.clone(), initial_style: chrome_muted, width: slot_width) },
+        )),
+        StatusSlot::Empty => None,
+    };
+    let separator_wrap = TextWrap::NoWrap;
+
     element! {
-        View(flex_direction: FlexDirection::Column) {
+        View(flex_direction: FlexDirection::Column, width: slot_width) {
+            // A fixed parent keeps TextInput's identity through preview handoff.
+            View(flex_direction: FlexDirection::Column, width: slot_width,
+                height: preview_height) {
+                #(preview_text.map(|text| element! { RichText(content: text, wrap: TextWrap::NoWrap, width: slot_width) }))
+            }
             // PendingSlot: tools + queued messages, arrival order. Rendered only
             // when non-empty — an empty `Text` is not zero-height in iocraft
             // (its measure clamps to `height.max(1)`), so an always-present slot
@@ -2453,35 +2576,40 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             #(if pending_text.is_empty() {
                 None
             } else {
-                Some(element! { AnsiText(content: pending_text) })
+                Some(element! { AnsiText(content: pending_text, width: slot_width) })
             })
             // StatusSlot
-            #(match &status_slot {
-                StatusSlot::Spinner(s) => Some(AnyElement::from(element! { AnsiText(content: s.clone()) })),
-                StatusSlot::TurnResult(s) => Some(AnyElement::from(element! { RichText(content: s.clone()) })),
-                StatusSlot::Tips => Some(AnyElement::from(element! { AnsiText(content: tips_text.clone(), color: Color::DarkGrey) })),
-                StatusSlot::Empty => None,
+            View(flex_direction: FlexDirection::Column, width: slot_width, height: status_height) {
+                #(status_element)
+            }
+            // Each slot owns its semantic styles. The separator's grey must
+            // not become a fallback for neutral Todo quantities or labels.
+            #(if todo_line.is_empty() {
+                None
+            } else {
+                Some(element! { AnsiText(content: todo_line, width: slot_width) })
             })
-            // Upper chrome: TodoSlot (when non-empty), then separator
-            AnsiText(content: upper_sep, color: Color::DarkGrey)
+            // Generated at terminal width; keep Taffy's min-content pass from
+            // measuring one separator character per row inside a fixed width.
+            Text(content: sep.clone(), color: chrome_border, wrap: separator_wrap)
             // InputSlot
             #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
-                AnsiText(content: format!("[{title}]"), color: Color::Cyan)
+                AnsiText(content: format!("[{title}]"), initial_style: question_style, width: slot_width)
             }))
             #(question.and_then(|question| question.description.as_ref()).map(|description| element! {
-                PromptTextView(content: Some(description.clone()), width: w)
+                PromptTextView(content: Some(description.clone()), width: w, layout_width: slot_width)
             }))
             #(if let Some(panel) = task_panel.clone() {
-                Some(element! { AnsiText(content: panel) })
+                Some(element! { AnsiText(content: panel, width: slot_width) })
             } else {
-                panel_text.map(|panel| element! { AnsiText(content: panel, color: Color::Cyan) })
+                panel_text.map(|panel| element! { AnsiText(content: panel, initial_style: question_style, width: slot_width) })
             })
             #(if task_panel.is_some() {
                 element! { View(flex_direction: FlexDirection::Row) {} }
             } else if let InputSlot::Hint(ref hint_text) = current_input_slot {
                 element! {
                     View(flex_direction: FlexDirection::Row) {
-                        AnsiText(content: hint_text.clone(), color: Color::DarkGrey)
+                        AnsiText(content: hint_text.clone(), initial_style: chrome_muted)
                     }
                 }
             } else if matches!(current_input_slot, InputSlot::DialPad(_)) {
@@ -2558,9 +2686,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             })
             // Separator
-            Text(content: sep, color: Color::DarkGrey)
+            Text(content: sep, color: chrome_border, wrap: separator_wrap)
             // FooterSlot
-            AnsiText(content: footer_text, color: Color::DarkGrey)
+            AnsiText(content: footer_text, initial_style: chrome_muted, width: slot_width)
         }
     }
 }
@@ -2595,6 +2723,7 @@ pub fn spawn_repl_ui(
 
     let ctx = ReplContext {
         tasks: Arc::new(Mutex::new(TaskBrowser::default())),
+        prose_preview: Arc::new(Mutex::new(ProsePreview::default())),
         output_rx: Arc::new(Mutex::new(output_rx)),
         terminal_handoff: Arc::new(Mutex::new(None)),
         ui_rx: Arc::new(Mutex::new(ui_rx)),
@@ -2647,6 +2776,20 @@ pub fn spawn_repl_ui(
         spinner,
         ui_thread: Some(join_handle),
     }
+}
+
+/// Physical rows of optional chrome, including terminal-width wrapping.
+fn chrome_rows(text: &str, width: usize) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    text.split('\n')
+        .map(|line| {
+            crate::render::text_layout::display_width(line)
+                .max(1)
+                .div_ceil(width.max(1))
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -2941,6 +3084,22 @@ mod tests {
         assert_eq!(out, "hi there");
         assert!(store.is_empty(), "short paste is literal, not stored");
         assert_eq!(id, 1, "no id consumed");
+    }
+
+    #[test]
+    fn apply_paste_line_count_boundary() {
+        for (pasted, expected, next_id) in [
+            ("l1\nl2", "l1\nl2", 1),
+            ("l1\nl2\nl3", "[Pasted text #1 +2 lines]", 2),
+        ] {
+            let mut store = std::collections::HashMap::new();
+            let mut id = 1;
+            let out = apply_paste_to_buffer("", pasted, &mut id, &mut store);
+            assert_eq!(out, expected);
+            assert_eq!(id, next_id);
+            assert_eq!(store.is_empty(), next_id == 1);
+            assert_eq!(expand_paste_placeholders(&out, &store), pasted);
+        }
     }
 
     #[test]

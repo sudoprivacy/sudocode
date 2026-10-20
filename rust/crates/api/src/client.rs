@@ -8,6 +8,7 @@ use crate::providers::gemini::{self, GeminiClient};
 use crate::providers::openai_compat::{self, OpenAiCompatClient, OpenAiCompatConfig};
 use crate::providers::registry::{ApiFormat, Credential, ResolvedProvider};
 use crate::providers::{AuthMode, ProviderKind};
+use crate::request_scope::RequestScope;
 use crate::stream_collect::ResponseAccumulator;
 use crate::types::{MessageRequest, MessageResponse, StreamEvent};
 
@@ -117,6 +118,32 @@ impl ProviderClient {
                 // carries; the reserved list covers the ones it omits when
                 // unset (e.g. `stream` when false).
                 for (key, value) in &resolved.extra_body {
+                    if key == "betas" {
+                        let mut betas: Vec<String> = serde_json::from_value(value.clone())
+                            .map_err(|_| {
+                                ApiError::Configuration(
+                                    "Anthropic extraBody.betas must be an array of strings".into(),
+                                )
+                            })?;
+                        if betas.iter().any(|beta| {
+                            beta.is_empty()
+                                || !beta
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                        }) {
+                            return Err(ApiError::Configuration(
+                                "Anthropic extraBody.betas contains an invalid beta name".into(),
+                            ));
+                        }
+                        let profile = client.request_profile().clone();
+                        if profile.betas.iter().any(|beta| beta == "oauth-2025-04-20")
+                            && !betas.iter().any(|beta| beta == "oauth-2025-04-20")
+                        {
+                            betas.push("oauth-2025-04-20".into());
+                        }
+                        client = client.with_request_profile(profile.with_betas(betas));
+                        continue;
+                    }
                     if crate::types::is_reserved_request_body_key(key) {
                         continue;
                     }
@@ -216,6 +243,18 @@ impl ProviderClient {
         }
     }
 
+    /// Stable request route identity for context-maintenance skip validation.
+    #[must_use]
+    pub fn route_identity(&self) -> String {
+        let base_url = match self {
+            Self::Anthropic(client) => client.base_url(),
+            Self::Xai(client) | Self::OpenAi(client) => client.base_url(),
+            Self::Codex(client) => client.base_url(),
+            Self::Gemini(client) => client.base_url(),
+        };
+        format!("{:?}|{base_url}", self.provider_kind())
+    }
+
     #[must_use]
     pub fn with_session_tracer(self, session_tracer: SessionTracer) -> Self {
         match self {
@@ -295,23 +334,50 @@ impl ProviderClient {
         request: &MessageRequest,
         trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
+        let scope = RequestScope::default();
+        let inner = scope
+            .scope(self.stream_message_raw(request, trace_id))
+            .await?;
+        let provider = inner.provider_label();
+        Ok(MessageStream {
+            inner: Some(inner),
+            replay: Some(ReplayRequest {
+                client: self.clone(),
+                request: request.clone(),
+                trace_id: trace_id.map(ToOwned::to_owned),
+            }),
+            model: request.model.clone(),
+            scope,
+            provider,
+            events_seen: 0,
+            replayed: false,
+            done: false,
+            last_request_id: None,
+        })
+    }
+
+    async fn stream_message_raw(
+        &self,
+        request: &MessageRequest,
+        trace_id: Option<&str>,
+    ) -> Result<RawMessageStream, ApiError> {
         match self {
             Self::Anthropic(client) => client
                 .stream_message(request, trace_id)
                 .await
-                .map(MessageStream::Anthropic),
+                .map(RawMessageStream::Anthropic),
             Self::Xai(client) | Self::OpenAi(client) => client
                 .stream_message(request, trace_id)
                 .await
-                .map(MessageStream::OpenAiCompat),
+                .map(RawMessageStream::OpenAiCompat),
             Self::Codex(client) => client
                 .stream_message(request, trace_id)
                 .await
-                .map(MessageStream::Codex),
+                .map(RawMessageStream::Codex),
             Self::Gemini(client) => client
                 .stream_message(request, trace_id)
                 .await
-                .map(MessageStream::Gemini),
+                .map(RawMessageStream::Gemini),
         }
     }
 
@@ -346,14 +412,14 @@ impl ProviderClient {
 
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
-pub enum MessageStream {
+enum RawMessageStream {
     Anthropic(anthropic::MessageStream),
     OpenAiCompat(openai_compat::MessageStream),
     Codex(crate::providers::codex::MessageStream),
     Gemini(gemini::MessageStream),
 }
 
-impl MessageStream {
+impl RawMessageStream {
     #[must_use]
     pub fn request_id(&self) -> Option<&str> {
         match self {
@@ -383,6 +449,149 @@ impl MessageStream {
             Self::Gemini(_) => "gemini",
         }
     }
+}
+
+/// A logical provider stream. Socket bytes, SSE comments and provider pings do
+/// not complete `next_event`, so liveness is measured at this shared boundary.
+/// One safe replay is allowed before any event escapes, within the same HTTP
+/// attempt budget. After events escape, failure is surfaced without replay.
+pub struct MessageStream {
+    inner: Option<RawMessageStream>,
+    replay: Option<ReplayRequest>,
+    model: String,
+    scope: RequestScope,
+    provider: &'static str,
+    events_seen: u64,
+    replayed: bool,
+    done: bool,
+    last_request_id: Option<String>,
+}
+
+struct ReplayRequest {
+    client: ProviderClient,
+    request: MessageRequest,
+    trace_id: Option<String>,
+}
+
+impl std::fmt::Debug for MessageStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MessageStream")
+            .field("provider", &self.provider)
+            .field("events_seen", &self.events_seen)
+            .field("replayed", &self.replayed)
+            .field("done", &self.done)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MessageStream {
+    #[must_use]
+    pub fn request_id(&self) -> Option<&str> {
+        self.inner
+            .as_ref()
+            .and_then(RawMessageStream::request_id)
+            .or(self.last_request_id.as_deref())
+    }
+
+    #[must_use]
+    pub const fn provider_label(&self) -> &'static str {
+        self.provider
+    }
+
+    pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, ApiError> {
+        loop {
+            if self.done {
+                return Ok(None);
+            }
+            // Start the timer when the caller asks for another event. Time spent
+            // executing a tool or otherwise not polling is not upstream idleness.
+            let timeout = self.scope.idle_timeout();
+            let inner = self.inner.as_mut().expect("active provider stream");
+            let result = if let Some(idle_timeout) = timeout {
+                match tokio::time::timeout(idle_timeout, inner.next_event()).await {
+                    Ok(result) => result,
+                    Err(_) => Err(ApiError::StreamStalled {
+                        provider: self.provider.into(),
+                        model: self.model.clone(),
+                        idle_timeout,
+                        request_id: self.request_id().map(ToOwned::to_owned),
+                    }),
+                }
+            } else {
+                inner.next_event().await
+            };
+            match result {
+                Ok(Some(event)) => {
+                    self.events_seen = self.events_seen.saturating_add(1);
+                    // Large conversations are needed for replay only until the
+                    // first event. Do not retain another history for the turn.
+                    self.replay = None;
+                    return Ok(Some(event));
+                }
+                Ok(None) => {
+                    self.replay = None;
+                    self.done = true;
+                    return Ok(None);
+                }
+                Err(error) => {
+                    self.last_request_id = self.request_id().map(ToOwned::to_owned);
+                    let error = if self.events_seen > 0
+                        && error.is_retryable()
+                        && !runtime::compaction_scope::is_active()
+                    {
+                        // Compaction owns its replay decision and already records
+                        // partial usage in its parent budget before retrying.
+                        ApiError::PartialStream {
+                            source: Box::new(error),
+                            request_id: self.last_request_id.clone(),
+                        }
+                    } else {
+                        error
+                    };
+                    self.scope.record_stream_failure(&error);
+                    // Drop the failed body before opening a replacement request.
+                    self.inner = None;
+                    if self.events_seen == 0
+                        && !self.replayed
+                        && error.is_retryable()
+                        && self.scope.has_attempts_left()
+                    {
+                        self.replayed = true;
+                        if let Err(error) = self.scope.wait_before_replay(&error).await {
+                            self.replay = None;
+                            self.done = true;
+                            return Err(error);
+                        }
+                        let replay = self.replay.as_ref().expect("no event has escaped");
+                        match self
+                            .scope
+                            .scope(
+                                replay.client.stream_message_raw(
+                                    &replay.request,
+                                    replay.trace_id.as_deref(),
+                                ),
+                            )
+                            .await
+                        {
+                            Ok(inner) => {
+                                self.last_request_id = inner.request_id().map(ToOwned::to_owned);
+                                self.inner = Some(inner);
+                            }
+                            Err(error) => {
+                                self.replay = None;
+                                self.done = true;
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        self.replay = None;
+                        self.done = true;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
 
     /// Drain this stream and assemble the single `MessageResponse` an
     /// equivalent non-streaming request would have returned.
@@ -393,13 +602,46 @@ impl MessageStream {
         &mut self,
         request_model: &str,
     ) -> Result<MessageResponse, ApiError> {
-        let request_id = self.request_id().map(ToString::to_string);
         let mut accumulator = ResponseAccumulator::new(self.provider_label(), request_model);
+        let mut saw_terminal = false;
         while let Some(event) = self.next_event().await? {
+            saw_terminal |= matches!(&event, StreamEvent::MessageStop(_))
+                || matches!(&event, StreamEvent::MessageDelta(delta) if delta.delta.stop_reason.is_some())
+                || matches!(&event, StreamEvent::MessageStart(start) if start.message.stop_reason.is_some());
+            record_compaction_stream_event(&event)?;
             accumulator.push(event);
         }
-        accumulator.finish(request_id)
+        if runtime::compaction_scope::is_active() && !saw_terminal {
+            return Err(ApiError::incomplete_stream(
+                self.provider_label(),
+                request_model,
+                "summary stream ended without a provider terminal event",
+            ));
+        }
+        accumulator.finish(self.request_id().map(ToString::to_string))
     }
+}
+
+/// Capture received summary usage before a queued event can be cancelled.
+pub(crate) fn record_compaction_stream_event(event: &StreamEvent) -> Result<(), ApiError> {
+    let usage = match event {
+        StreamEvent::MessageStart(start) => Some(&start.message.usage),
+        StreamEvent::MessageDelta(delta) => Some(&delta.usage),
+        _ => None,
+    };
+    // Synthetic initial events in Codex/Gemini carry default usage.
+    // Only a received bill changes an unknown receipt into known usage.
+    if let Some(usage) = usage.filter(|usage| **usage != crate::types::Usage::default()) {
+        runtime::compaction_scope::record_usage(usage.token_usage());
+    }
+    if matches!(event, StreamEvent::MessageStop(_))
+        || matches!(event, StreamEvent::MessageDelta(delta) if delta.delta.stop_reason.is_some())
+        || matches!(event, StreamEvent::MessageStart(start) if start.message.stop_reason.is_some())
+    {
+        runtime::compaction_scope::record_completed_response()
+            .map_err(|error| ApiError::Configuration(error.to_string()))?;
+    }
+    Ok(())
 }
 
 pub use anthropic::{

@@ -50,6 +50,11 @@ def payload(dist, installer, version):
         for platform in ("linux-x64", "linux-arm64", "macos-x64", "macos-arm64")
     } | {f"scode-windows-{arch}.zip" for arch in ("x64", "arm64")}
     required.add(f"scode_{version[1:]}_amd64.deb")
+    if tuple(map(int, version[1:].split("."))) >= (0, 2, 32):
+        required.update({
+            "scode-linux-arm64-bundle.tar.gz",
+            f"scode_{version[1:]}_arm64.deb",
+        })
     # Older releases have no bundle. When present, it is covered by the same
     # manifest and immutable readback checks as every required platform archive.
     optional = {"scode-linux-x64-bundle.tar.gz"}

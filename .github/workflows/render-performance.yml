@@ -108,15 +108,16 @@ jobs:
       - name: Install the shared terminal observer
         run: npm ci --prefix trusted/e2e/terminal-resize
       - name: Compile both releases and the trusted fixture before timing
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/render-build
         run: |
           set -euo pipefail
-          cargo build --locked --release --manifest-path baseline/rust/Cargo.toml -p rusty-sudocode-cli
-          cp "$CARGO_TARGET_DIR/release/scode" "$RUNNER_TEMP/scode-baseline"
-          cargo build --locked --release --manifest-path candidate/rust/Cargo.toml -p rusty-sudocode-cli
-          cp "$CARGO_TARGET_DIR/release/scode" "$RUNNER_TEMP/scode-candidate"
-          cargo test --locked --release --manifest-path trusted/rust/Cargo.toml -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json > "$RUNNER_TEMP/render-driver.jsonl"
+          rustc --version > "$RUNNER_TEMP/render-toolchain.txt"
+          # Same-version path crates in different checkouts can reuse stale Cargo
+          # artifacts. Keep every checkout isolated, including the trusted driver.
+          cargo build --locked --release --manifest-path baseline/rust/Cargo.toml --target-dir "$RUNNER_TEMP/render-build/baseline" -p rusty-sudocode-cli
+          cp "$RUNNER_TEMP/render-build/baseline/release/scode" "$RUNNER_TEMP/scode-baseline"
+          cargo build --locked --release --manifest-path candidate/rust/Cargo.toml --target-dir "$RUNNER_TEMP/render-build/candidate" -p rusty-sudocode-cli
+          cp "$RUNNER_TEMP/render-build/candidate/release/scode" "$RUNNER_TEMP/scode-candidate"
+          cargo test --locked --release --manifest-path trusted/rust/Cargo.toml --target-dir "$RUNNER_TEMP/render-build/trusted" -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/render-driver.jsonl"
           python3 - <<'PY'
           import json, os
           from pathlib import Path
@@ -126,7 +127,6 @@ jobs:
           with open(os.environ['GITHUB_ENV'], 'a') as stream:
               stream.write('SCODE_RENDER_DRIVER=' + drivers[0] + '\n')
           PY
-          rustc --version > "$RUNNER_TEMP/render-toolchain.txt"
       - name: Calibrate and compare fixed workloads
         env:
           RENDER_PROFILE: ${{ github.event_name == 'schedule' && 'stress' || inputs.profile || 'core' }}
@@ -146,6 +146,7 @@ jobs:
           path: |
             ${{ runner.temp }}/render-results
             ${{ runner.temp }}/render-toolchain.txt
+            ${{ runner.temp }}/render-driver.jsonl
             selected-policy
           if-no-files-found: error
 

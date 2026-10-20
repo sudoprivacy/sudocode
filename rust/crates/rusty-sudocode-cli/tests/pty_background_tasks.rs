@@ -52,23 +52,38 @@ fn expect_input_ready(session: &PtySession, budget: Duration, context: &str) {
 }
 
 fn expect_parent_complete(session: &PtySession, before: &str) {
-    common::expect_screen(
+    common::expect_turn_complete_after(
         session,
-        |_| {
-            let after = common::turn_status_marker(session);
-            !after.is_empty() && after != before
-        },
-        Duration::from_secs(180),
+        before,
+        common::LIVE_TURN_BUDGET,
         "background launch turn completed",
     );
     expect_input_ready(session, common::DEFAULT_TIMEOUT, "parent returned to input");
 }
 
-fn start(env: &TestEnv, calls: &[Value]) -> PtySession {
-    let mut session = env.spawn_with_env(
-        &["--permission-mode", "danger-full-access"],
+fn spawn_for_calls(env: &TestEnv, calls: &[Value]) -> PtySession {
+    // The declared workflow is the source of truth for the offered tool pool.
+    // A POSIX Bash fixture must not silently become a PowerShell task on Windows.
+    let allowed = calls
+        .iter()
+        .map(|call| tools::canonicalize_tool_name(call["name"].as_str().unwrap()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(",");
+    env.spawn_with_env(
+        &[
+            "--permission-mode",
+            "danger-full-access",
+            "--allowedTools",
+            &allowed,
+        ],
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
-    );
+    )
+}
+
+fn start(env: &TestEnv, calls: &[Value]) -> PtySession {
+    let mut session = spawn_for_calls(env, calls);
     session.resize(40, 100).unwrap();
     expect_input_ready(&session, Duration::from_secs(30), "ready");
     let before = common::turn_status_marker(&session);
@@ -113,6 +128,10 @@ fn shell(id: &str, command: &str, description: &str) -> Value {
 }
 
 fn screen(session: &PtySession, text: &str) -> String {
+    screen_with_budget(session, text, Duration::from_secs(90))
+}
+
+fn screen_with_budget(session: &PtySession, text: &str, budget: Duration) -> String {
     common::expect_screen(
         session,
         |s| {
@@ -120,7 +139,7 @@ fn screen(session: &PtySession, text: &str) -> String {
                 .map_or(s, |(_, panel)| panel)
                 .contains(text)
         },
-        Duration::from_secs(90),
+        budget,
         text,
     )
 }
@@ -199,23 +218,18 @@ fn failed_background_shell_exposes_unread_result_and_exit_code() {
 #[test]
 fn inspecting_running_task_does_not_acknowledge_its_future_result() {
     let (env, _release) = task_env("background-result-after-peek");
-    let mut session = env.spawn_with_env(
-        &["--permission-mode", "danger-full-access"],
-        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
-    );
+    let calls = [shell(
+        "background",
+        "echo PEEK_RUNNING; while [ ! -f release ]; do sleep 0.1; done; echo PEEK_FINISHED",
+        "Inspect before completion",
+    )];
+    let mut session = spawn_for_calls(&env, &calls);
     expect_input_ready(&session, Duration::from_secs(30), "ready");
     assert!(!session.render(|s| s.contents()).contains("↓ to view"));
     let before = common::turn_status_marker(&session);
-    send_calls(
-        &env,
-        &mut session,
-        &[shell(
-            "background",
-            "echo PEEK_RUNNING; while [ ! -f release ]; do sleep 0.1; done; echo PEEK_FINISHED",
-            "Inspect before completion",
-        )],
-    );
-    screen(&session, "1 terminal · ↓ to view");
+    send_calls(&env, &mut session, &calls);
+    // This transition includes a complete model tool call, before any local UI action.
+    screen_with_budget(&session, "1 terminal · ↓ to view", common::LIVE_TURN_BUDGET);
     expect_parent_complete(&session, &before);
     open(&mut session);
     screen(&session, "  PEEK_RUNNING");
@@ -246,7 +260,7 @@ fn start_agent(env: &TestEnv, automatic: bool) -> PtySession {
     common::expect_turn_complete_after(
         &session,
         &before,
-        Duration::from_secs(180),
+        common::LIVE_TURN_BUDGET,
         "agent handed off",
     );
     session
@@ -275,26 +289,63 @@ fn explicit_and_automatic_background_agents_share_the_task_browser() {
 #[test]
 fn stopping_one_background_task_keeps_its_sibling_running() {
     let (env, _release) = task_env("background-stop-one");
+    for name in ["one", "two"] {
+        for (level, next) in [("parent", "child"), ("child", "grandchild")] {
+            fs::write(
+                env.workspace_root().join(format!("{name}-{level}.sh")),
+                format!("echo $$ > {name}-{level}.pid\nsh {name}-{next}.sh &\nwait\n"),
+            )
+            .unwrap();
+        }
+        fs::write(
+            env.workspace_root().join(format!("{name}-grandchild.sh")),
+            format!("echo $$ > {name}-grandchild.pid\nwhile [ ! -f release-{name} ]; do sleep 0.1; done\necho {}_FINISHED > {name}-done\ncat {name}-done\n", name.to_uppercase()),
+        ).unwrap();
+    }
     let mut session = start(
         &env,
         &[
-            shell(
-                "one",
-                "while [ ! -f release-one ]; do sleep 0.1; done; echo ONE_FINISHED",
-                "Stop this task",
-            ),
-            shell(
-                "two",
-                "while [ ! -f release-two ]; do sleep 0.1; done; echo TWO_FINISHED",
-                "Keep this task",
-            ),
+            shell("one", "sh one-parent.sh", "Stop this task"),
+            shell("two", "sh two-parent.sh", "Keep this task"),
         ],
     );
     screen(&session, "2 terminals · ↓ to view");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for name in ["one", "two"] {
+        while fs::read_to_string(env.workspace_root().join(format!("{name}-grandchild.pid")))
+            .map_or(true, |pid| pid.trim().is_empty())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{name} process tree did not start"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
     open(&mut session);
+    let details = screen(&session, "Esc task list");
+    let (stopped, survivor) = if details.contains("Stop this task") {
+        ("one", "two")
+    } else {
+        assert!(details.contains("Keep this task"), "{details}");
+        ("two", "one")
+    };
     session.send("k").unwrap();
     screen(&session, "cancelled");
     screen(&session, "1 terminal");
+    #[cfg(unix)]
+    for level in ["parent", "child", "grandchild"] {
+        let pid = fs::read_to_string(env.workspace_root().join(format!("{stopped}-{level}.pid")))
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        assert_eq!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None),
+            Err(nix::errno::Errno::ESRCH),
+            "cancelled was published while {stopped}'s {level} was still present"
+        );
+    }
     // Both scripts are released; only the task not stopped may finish normally.
     fs::write(env.workspace_root().join("release-one"), "go").unwrap();
     fs::write(env.workspace_root().join("release-two"), "go").unwrap();
@@ -308,7 +359,15 @@ fn stopping_one_background_task_keeps_its_sibling_running() {
         "surviving sibling output",
     );
     screen(&session, "exit 0");
-    assert!(result.contains("FINISHED"));
+    assert!(result.contains(&format!("{}_FINISHED", survivor.to_uppercase())));
+    assert!(!env
+        .workspace_root()
+        .join(format!("{stopped}-done"))
+        .exists());
+    assert!(env
+        .workspace_root()
+        .join(format!("{survivor}-done"))
+        .exists());
     close(session);
 }
 
@@ -447,7 +506,7 @@ fn exiting_during_a_foreground_tool_reaps_both_process_groups() {
             json!({"id":"foreground","name":"Bash","input":{"command":"touch foreground-ready; while [ ! -f foreground-release ]; do sleep 0.1; done; echo leaked > foreground-leaked.txt","description":"Foreground cleanup fixture"}}),
         ],
     );
-    let deadline = Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + common::LIVE_TURN_BUDGET;
     while !env.workspace_root().join("foreground-ready").exists() {
         assert!(
             Instant::now() < deadline,

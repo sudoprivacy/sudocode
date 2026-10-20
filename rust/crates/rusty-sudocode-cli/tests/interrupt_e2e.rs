@@ -89,13 +89,11 @@ fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() 
 
     let mut child = ChildGuard(child);
 
-    // Generous: this is a liveness wait, not the assertion. Under a parallel
-    // `cargo test --workspace` the machine is running many other `scode`
-    // children, and 10s was not always enough for this one to start and reach
-    // the mock server.
-    wait_for_message_request(&runtime, &server, 1, Duration::from_secs(60));
-    thread::sleep(Duration::from_millis(1500));
-    assert_running(&mut child, "before the interrupt is fired");
+    wait_for_bash_ready(
+        &mut child,
+        &workspace.join("cancel-ready"),
+        Duration::from_secs(60),
+    );
     interrupt.fire(child.id());
 
     let status = wait_for_exit(&mut child, Duration::from_secs(60))
@@ -136,7 +134,11 @@ fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() 
         .expect("tool_results should be an array");
     assert_eq!(tool_results.len(), 1);
     assert_eq!(tool_results[0]["tool_name"], "bash");
-    assert_eq!(tool_results[0]["is_error"], true);
+    assert_eq!(
+        tool_results[0]["is_error"], true,
+        "interrupted tool result: {}\nstderr:\n{stderr}",
+        tool_results[0]
+    );
 
     let tool_output: Value = serde_json::from_str(
         tool_results[0]["output"]
@@ -151,25 +153,17 @@ fn sigint_during_bash_tool_returns_interrupted_result_without_continuing_turn() 
     fs::remove_dir_all(&workspace).expect("workspace cleanup should succeed");
 }
 
-fn wait_for_message_request(
-    runtime: &tokio::runtime::Runtime,
-    server: &MockAnthropicService,
-    expected: usize,
-    timeout: Duration,
-) {
+fn wait_for_bash_ready(child: &mut ChildGuard, marker: &std::path::Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     loop {
-        let captured = runtime.block_on(server.captured_requests());
-        let count = captured
-            .iter()
-            .filter(|request| request.path == "/v1/messages")
-            .count();
-        if count >= expected {
+        assert_running(child, "while waiting for the Bash command to start");
+        if fs::read_to_string(marker).is_ok_and(|content| content == "ready") {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {expected} /v1/messages request(s); saw {count}"
+            "timed out waiting for the Bash command's ready marker at {}",
+            marker.display()
         );
         thread::sleep(Duration::from_millis(50));
     }

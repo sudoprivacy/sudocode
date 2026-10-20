@@ -4,12 +4,26 @@ pub mod proto {
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
 use proto::{
-    CallRequest, DeleteRequest, ReadRequest, ReaddirRequest, SetattrRequest, StatRequest,
-    StreamReadAtRequest, StreamWriteRequest, WriteRequest,
+    CallRequest, DeleteRequest, LockRequest, ReadRequest, ReaddirRequest, SetattrRequest,
+    StatRequest, StreamReadAtRequest, StreamWriteRequest, UnlockRequest, WriteRequest,
 };
 use std::io;
 use std::sync::mpsc;
 use std::time::Duration;
+
+pub struct StreamReadResult {
+    pub data: Vec<u8>,
+    pub next_offset: u64,
+    pub eof: bool,
+    pub timed_out: bool,
+}
+
+/// One typed read, including the resolved entry type and stream continuation.
+pub struct VfsReadResult {
+    pub data: Vec<u8>,
+    pub entry_type: i32,
+    pub next_offset: Option<u64>,
+}
 
 /// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
 /// `Setattr` when provisioning a mailbox DT_STREAM.
@@ -34,10 +48,20 @@ const DT_DIR_SETATTR: i32 = DT_DIR as i32;
 const DT_LINK_SETATTR: i32 = 6;
 
 enum VfsOp {
+    Lock {
+        request: LockRequest,
+        resp: mpsc::SyncSender<io::Result<Option<String>>>,
+    },
+    Unlock {
+        request: UnlockRequest,
+        resp: mpsc::SyncSender<io::Result<bool>>,
+    },
     Read {
         path: String,
         auth_token: String,
-        resp: mpsc::SyncSender<io::Result<Vec<u8>>>,
+        offset: u64,
+        timeout_ms: u64,
+        resp: mpsc::SyncSender<io::Result<VfsReadResult>>,
     },
     Write {
         path: String,
@@ -73,7 +97,7 @@ enum VfsOp {
         blocking: bool,
         timeout_ms: u64,
         auth_token: String,
-        resp: mpsc::SyncSender<io::Result<(Vec<u8>, u64, bool)>>,
+        resp: mpsc::SyncSender<io::Result<StreamReadResult>>,
     },
     /// `sys_setattr(<entry_type>)` — create (or no-op if present) a typed entry at
     /// `path`. Returns whether it was freshly created.
@@ -136,8 +160,8 @@ impl NexusVfsClient {
     /// (`client_cert_pem` + `client_key_pem`), and validate the server
     /// against `server_name` (the cluster's fixed SAN, e.g. `nexus-node`).
     /// Required to reach an auth-on `nexusd-cluster` (which serves MUTUAL
-    /// TLS — a plaintext client is rejected). Caller identity still rides
-    /// the per-request `auth_token`, not the client cert.
+    /// TLS — a plaintext client is rejected). A verified agent certificate
+    /// supplies identity when the per-request `auth_token` is absent.
     pub fn connect_tls(
         endpoint: &str,
         ca_pem: Vec<u8>,
@@ -232,9 +256,33 @@ impl NexusVfsClient {
                         // that as `Disconnected` -> `BrokenPipe`.
                         tokio::spawn(async move {
                             match op {
+                                VfsOp::Lock { request, resp } => {
+                                    let result =
+                                        client.lock(deadlined(request, LOCK_DEADLINE)).await;
+                                    let _ = resp.send(grpc_result(result, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(r.acquired.then_some(r.lock_id))
+                                        }
+                                    }));
+                                }
+                                VfsOp::Unlock { request, resp } => {
+                                    let result =
+                                        client.unlock(deadlined(request, LOCK_DEADLINE)).await;
+                                    let _ = resp.send(grpc_result(result, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else {
+                                            Ok(r.released)
+                                        }
+                                    }));
+                                }
                                 VfsOp::Read {
                                     path,
                                     auth_token,
+                                    offset,
+                                    timeout_ms,
                                     resp,
                                 } => {
                                     let r = client
@@ -243,17 +291,21 @@ impl NexusVfsClient {
                                                 path,
                                                 auth_token,
                                                 content_id: String::new(),
-                                                timeout_ms: 0,
-                                                offset: 0,
+                                                timeout_ms,
+                                                offset,
                                             },
-                                            OP_DEADLINE,
+                                            tail_deadline(timeout_ms > 0, timeout_ms),
                                         ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
                                         } else {
-                                            Ok(r.content)
+                                            Ok(VfsReadResult {
+                                                data: r.content,
+                                                entry_type: r.entry_type,
+                                                next_offset: r.stream_next_offset,
+                                            })
                                         }
                                     }));
                                 }
@@ -381,7 +433,12 @@ impl NexusVfsClient {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
                                         } else {
-                                            Ok((r.data, r.next_offset, r.eof))
+                                            Ok(StreamReadResult {
+                                                data: r.data,
+                                                next_offset: r.next_offset,
+                                                eof: r.eof,
+                                                timed_out: r.timed_out,
+                                            })
                                         }
                                     }));
                                 }
@@ -411,11 +468,15 @@ impl NexusVfsClient {
                                         ))
                                         .await;
                                     let _ = resp.send(grpc_result(r, |r| {
-                                        if r.found {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else if r.found {
                                             Ok(VfsStat {
                                                 size: u64::try_from(r.size).unwrap_or(0),
                                                 is_directory: r.is_directory,
-                                                modified_at_ms: None,
+                                                entry_type: r.entry_type,
+                                                zone_id: r.zone_id,
+                                                modified_at_ms: r.modified_at_ms,
                                                 link_target: Some(r.link_target)
                                                     .filter(|t| !t.is_empty()),
                                             })
@@ -451,6 +512,7 @@ impl NexusVfsClient {
                                                 .map(|e| VfsDirEntry {
                                                     name: e.name,
                                                     is_directory: e.entry_type == DT_DIR,
+                                                    entry_type: e.entry_type,
                                                 })
                                                 .collect())
                                         }
@@ -467,15 +529,82 @@ impl NexusVfsClient {
     }
 
     pub fn read(&self, path: &str, auth_token: &str) -> io::Result<Vec<u8>> {
+        self.read_entry(path, 0, auth_token)
+            .map(|result| result.data)
+    }
+
+    /// Read one entry payload at a byte cursor using the existing Read RPC.
+    /// Streams return one deframed payload and its continuation cursor.
+    pub fn read_entry(
+        &self,
+        path: &str,
+        offset: u64,
+        auth_token: &str,
+    ) -> io::Result<VfsReadResult> {
+        self.read_entry_wait(path, offset, 0, auth_token)
+    }
+
+    /// Read an entry with a bounded stream wait, retaining its type and cursor.
+    pub fn read_entry_wait(
+        &self,
+        path: &str,
+        offset: u64,
+        timeout_ms: u64,
+        auth_token: &str,
+    ) -> io::Result<VfsReadResult> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
             .send(VfsOp::Read {
                 path: path.to_owned(),
                 auth_token: auth_token.to_owned(),
+                offset,
+                timeout_ms,
                 resp: resp_tx,
             })
             .map_err(|_| broken_pipe())?;
-        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+        await_reply(
+            &resp_rx,
+            tail_deadline(timeout_ms > 0, timeout_ms) + HANDOFF_GRACE,
+        )
+    }
+
+    /// Atomically acquire, or renew `lock_id`, through the existing lock RPC.
+    pub fn lock(
+        &self,
+        path: &str,
+        lock_id: &str,
+        ttl_ms: u64,
+        auth_token: &str,
+    ) -> io::Result<Option<String>> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::Lock {
+                request: LockRequest {
+                    path: path.to_owned(),
+                    auth_token: auth_token.to_owned(),
+                    lock_id: lock_id.to_owned(),
+                    timeout_ms: ttl_ms,
+                },
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, LOCK_DEADLINE + HANDOFF_GRACE)
+    }
+
+    pub fn unlock(&self, path: &str, lock_id: &str, auth_token: &str) -> io::Result<bool> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::Unlock {
+                request: UnlockRequest {
+                    path: path.to_owned(),
+                    auth_token: auth_token.to_owned(),
+                    lock_id: lock_id.to_owned(),
+                    force: false,
+                },
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, LOCK_DEADLINE + HANDOFF_GRACE)
     }
 
     pub fn write(&self, path: &str, content: Vec<u8>, auth_token: &str) -> io::Result<()> {
@@ -537,7 +666,7 @@ impl NexusVfsClient {
         blocking: bool,
         timeout_ms: u64,
         auth_token: &str,
-    ) -> io::Result<(Vec<u8>, u64, bool)> {
+    ) -> io::Result<StreamReadResult> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
             .send(VfsOp::StreamReadAt {
@@ -691,6 +820,9 @@ impl NexusVfsClient {
 pub struct VfsStat {
     pub size: u64,
     pub is_directory: bool,
+    /// Native entry type already carried by the `Stat` RPC.
+    pub entry_type: i32,
+    pub zone_id: String,
     pub modified_at_ms: Option<i64>,
     /// Where a DT_LINK points; `None` for every other entry type.
     ///
@@ -705,6 +837,7 @@ pub struct VfsStat {
 pub struct VfsDirEntry {
     pub name: String,
     pub is_directory: bool,
+    pub entry_type: u32,
 }
 
 fn grpc_result<T, R, F>(result: Result<tonic::Response<T>, tonic::Status>, f: F) -> io::Result<R>
@@ -713,31 +846,37 @@ where
 {
     match result {
         Ok(resp) => f(resp.into_inner()),
-        Err(status) => Err(io::Error::other(status.to_string())),
+        Err(status) => {
+            let kind = match status.code() {
+                tonic::Code::NotFound => io::ErrorKind::NotFound,
+                tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
+                    io::ErrorKind::PermissionDenied
+                }
+                tonic::Code::DeadlineExceeded => io::ErrorKind::TimedOut,
+                _ => io::ErrorKind::Other,
+            };
+            Err(io::Error::new(kind, status.to_string()))
+        }
     }
 }
 
-/// Map a node error payload to an `io::Error`, preserving "not found".
-///
-/// Callers BRANCH on that one: a receiver listing a chat list that does not
-/// exist yet has no conversations, which is not the same as a call that
-/// failed. Flattened to `Other`, the two are indistinguishable and the
-/// receiver reports an error where the honest answer is "none yet".
-///
-/// Every other code keeps its message and lands as `Other`, since nothing
-/// downstream tells them apart today.
+/// Preserve missing-entry and admission errors from the VFS response envelope.
 fn vfs_err(payload: &[u8]) -> io::Error {
     /// `FileNotFound` on the node's error enum (`transport/src/grpc.rs`).
     const FILE_NOT_FOUND: i64 = -32007;
+    const PERMISSION_ERROR: i64 = -32003;
+    const ACCESS_DENIED: i64 = -32018;
 
     let text = String::from_utf8_lossy(payload).into_owned();
     let code = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
         .and_then(|v| v.get("code").and_then(serde_json::Value::as_i64));
-    if code == Some(FILE_NOT_FOUND) {
-        return io::Error::new(io::ErrorKind::NotFound, text);
-    }
-    io::Error::other(text)
+    let kind = match code {
+        Some(FILE_NOT_FOUND) => io::ErrorKind::NotFound,
+        Some(PERMISSION_ERROR | ACCESS_DENIED) => io::ErrorKind::PermissionDenied,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, text)
 }
 
 fn broken_pipe() -> io::Error {
@@ -756,6 +895,7 @@ fn broken_pipe() -> io::Error {
 /// Generous on purpose: a stuck-detector, not a latency budget, so it must never
 /// fire on a slow-but-working call.
 const OP_DEADLINE: Duration = Duration::from_secs(60);
+const LOCK_DEADLINE: Duration = Duration::from_secs(5);
 
 /// How much later than a blocking tail's own `timeout_ms` its deadline sits.
 ///

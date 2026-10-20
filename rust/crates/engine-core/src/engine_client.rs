@@ -20,7 +20,7 @@ use std::time::Duration;
 use api::{
     AuthMode, ContentBlockDelta, InputMessage, MessageRequest, MessageResponse, MessageStream,
     OutputContentBlock, PromptCache, PromptCacheRecord, ProviderClient, ResolvedProvider,
-    StreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition,
+    StreamEvent, SudoCodeConfig, ToolChoice, ToolDefinition, Usage,
 };
 use async_trait::async_trait;
 use runtime::{
@@ -58,7 +58,29 @@ pub struct EngineApiClient {
     catalog: Option<runtime::model_discovery::ModelCatalog>,
 }
 
+impl Drop for EngineApiClient {
+    fn drop(&mut self) {
+        // Covers every host, including runtimes taken out of BuiltRuntime.
+        if !api::flush_response_captures(&self.session_id, Duration::from_secs(2)) {
+            if let Some(tracer) = self.session_tracer() {
+                tracer.record("response_capture_shutdown_timeout", serde_json::Map::new());
+            }
+        }
+    }
+}
+
 impl EngineApiClient {
+    #[must_use]
+    pub fn with_response_archive(mut self, archive: Arc<dyn telemetry::ResponseArchive>) -> Self {
+        if let Some(tracer) = self.client.session_tracer().cloned() {
+            self.client = self
+                .client
+                .clone()
+                .with_session_tracer(tracer.with_response_archive(archive));
+        }
+        self
+    }
+
     /// Identity every request from this client carries, built in one place so
     /// the main loop and the subagent client cannot disagree about the routing
     /// key — a conversation split across two keys is split across two upstream
@@ -299,6 +321,7 @@ impl EngineApiClient {
             prefetched_next,
             saw_stop: false,
             has_content: false,
+            usage: Usage::default(),
             done: false,
             client: self.client.clone(),
             session_id: self.session_id.clone(),
@@ -384,6 +407,7 @@ impl EngineApiClient {
                         &mut state.pending_tool,
                         &mut state.saw_stop,
                         &mut state.has_content,
+                        &mut state.usage,
                     );
 
                     if let Some(event) = state.buffer.pop_front() {
@@ -465,6 +489,55 @@ impl ApiClient for EngineApiClient {
         }
     }
 
+    fn context_budget_for_request(
+        &self,
+        model: &str,
+        request: &ApiRequest,
+    ) -> runtime::ContextBudget {
+        let mut budget = self.context_budget(model, &request.system_prompt);
+        let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
+        let tools = self.request_tools(request);
+        budget.overhead_tokens =
+            api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize;
+        budget
+    }
+
+    fn compaction_route_fingerprint(&self, request: &ApiRequest) -> String {
+        format!(
+            "{}|{}|{}|{:?}|{}",
+            self.client.route_identity(),
+            self.model,
+            self.thinking_enabled,
+            self.reasoning_effort,
+            serde_json::to_string(&self.request_tools(request)).unwrap_or_default()
+        )
+    }
+
+    fn context_budget_for_completion(
+        &self,
+        model: &str,
+        request: &ApiRequest,
+        options: runtime::TextCompletionOptions,
+    ) -> runtime::ContextBudget {
+        let mut budget = self.context_budget(model, &request.system_prompt);
+        let system = (!request.system_prompt.is_empty()).then(|| request.system_prompt.render());
+        let tools = options
+            .include_tools
+            .then(|| self.request_tools(request))
+            .flatten();
+        budget.overhead_tokens =
+            api::estimate_request_overhead_tokens(system.as_deref(), tools.as_deref()) as usize;
+        budget.max_output_tokens = options.max_tokens as usize;
+        budget
+    }
+
+    async fn prepare_compaction_route(&mut self) -> Result<(), RuntimeError> {
+        if let Some(catalog) = &self.catalog {
+            catalog.refresh_if_missing().await;
+        }
+        Ok(())
+    }
+
     async fn complete_text(
         &mut self,
         request: ApiRequest,
@@ -507,7 +580,24 @@ impl ApiClient for EngineApiClient {
         Some(self.session_id.as_str())
     }
 
+    async fn stream_final_answer(
+        &mut self,
+        request: ApiRequest,
+    ) -> Result<AssistantEventStream, RuntimeError> {
+        self.stream_with_tool_availability(request, false).await
+    }
+
     async fn stream(&mut self, request: ApiRequest) -> Result<AssistantEventStream, RuntimeError> {
+        self.stream_with_tool_availability(request, true).await
+    }
+}
+
+impl EngineApiClient {
+    async fn stream_with_tool_availability(
+        &mut self,
+        request: ApiRequest,
+        allow_tools: bool,
+    ) -> Result<AssistantEventStream, RuntimeError> {
         let catalog = self.catalog.clone();
         let request = async {
             let is_post_tool = request_ends_with_tool_result(&request);
@@ -517,14 +607,15 @@ impl ApiClient for EngineApiClient {
                 &request,
                 runtime::TextCompletionOptions {
                     max_tokens: api::max_tokens_for_model(&self.model),
-                    include_tools: self.enable_tools,
+                    include_tools: self.enable_tools && allow_tools,
                     cache_prefix: true,
                     thinking_enabled: self.thinking_enabled,
                 },
                 tools,
                 self.session_request_fields(),
             );
-            message_request.tool_choice = self.enable_tools.then_some(ToolChoice::Auto);
+            message_request.tool_choice =
+                (self.enable_tools && allow_tools).then_some(ToolChoice::Auto);
 
             // Post-tool continuations get one stall-timeout retry (a nudge); other
             // turns run a single attempt.
@@ -589,12 +680,15 @@ fn runtime_error_from_api(
     let message = user_visible_error(session_id, account, model, error);
     if error.is_context_window_failure() {
         RuntimeError::context_window_blocked(message)
+    } else if error.is_thinking_replay_rejected() {
+        RuntimeError::thinking_replay_rejected(message)
     } else {
         RuntimeError::new(message).retryable(error.is_retryable())
     }
 }
 
 struct StreamState {
+    usage: Usage,
     provider_stream: MessageStream,
     pending_tool: Option<(String, String, String, Option<String>)>,
     buffer: VecDeque<AssistantEvent>,
@@ -625,9 +719,12 @@ fn process_provider_event(
     pending_tool: &mut Option<(String, String, String, Option<String>)>,
     saw_stop: &mut bool,
     has_content: &mut bool,
+    usage: &mut Usage,
 ) {
     match event {
         StreamEvent::MessageStart(start) => {
+            usage.merge_snapshot(start.message.usage);
+            buffer.push_back(AssistantEvent::Usage(usage.token_usage()));
             if !start.message.model.is_empty() {
                 buffer.push_back(AssistantEvent::Model(start.message.model.clone()));
             }
@@ -688,7 +785,8 @@ fn process_provider_event(
             }
         }
         StreamEvent::MessageDelta(delta) => {
-            buffer.push_back(AssistantEvent::Usage(delta.usage.token_usage()));
+            usage.merge_snapshot(delta.usage);
+            buffer.push_back(AssistantEvent::Usage(usage.token_usage()));
         }
         StreamEvent::MessageStop(_) => {
             *saw_stop = true;

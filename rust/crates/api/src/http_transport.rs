@@ -12,7 +12,8 @@ use serde_json::{Map, Value};
 use telemetry::{AnalyticsEvent, SessionTracer};
 
 use crate::error::ApiError;
-use crate::http_client::build_http_client_or_default;
+use crate::http_client::{configured_http_client, TimeoutConfig};
+use crate::request_scope::{RequestScope, TransportState};
 
 /// Callback interface for surfacing HTTP retry attempts to the UI layer.
 /// Implementors bridge the transport retry loop to spinners, progress bars,
@@ -42,7 +43,7 @@ const CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 /// Result of a successful HTTP request with tracking information.
 pub struct HttpRequestResult {
     /// The HTTP response.
-    pub response: reqwest::Response,
+    pub response: crate::RecordedResponse,
     /// Client-generated unique request ID for tracking.
     pub request_id: String,
     /// UUID sent as `x-client-request-id` for the successful HTTP attempt.
@@ -96,7 +97,7 @@ impl RetryPolicy {
     /// `Retry-After` delay when present. The base is the larger of the
     /// exponential backoff and the `Retry-After` value (capped at
     /// `max_backoff`), with additive jitter on top.
-    fn delay_for_attempt(
+    pub(crate) fn delay_for_attempt(
         &self,
         attempt: u32,
         retry_after: Option<Duration>,
@@ -117,6 +118,7 @@ impl RetryPolicy {
 #[derive(Clone)]
 pub struct HttpTransport {
     inner: reqwest::Client,
+    timeout: TimeoutConfig,
     nexus: Option<crate::nexus_transport::NexusTransport>,
     session_tracer: Option<SessionTracer>,
     retry_notifier: Option<std::sync::Arc<dyn RetryNotifier>>,
@@ -141,8 +143,10 @@ impl Default for HttpTransport {
 impl HttpTransport {
     #[must_use]
     pub fn new() -> Self {
+        let (inner, timeout) = configured_http_client();
         Self {
-            inner: build_http_client_or_default(),
+            inner,
+            timeout,
             nexus: None,
             session_tracer: None,
             retry_notifier: None,
@@ -211,8 +215,17 @@ impl HttpTransport {
         F: Fn(reqwest::Response) -> Fut,
         Fut: Future<Output = Result<reqwest::Response, ApiError>>,
     {
+        // The compaction orchestrator owns its single global retry budget.
+        // Nested provider retries would resend the entire history invisibly.
+        let compaction_active = runtime::compaction_scope::is_active();
+        let max_retries = if compaction_active {
+            0
+        } else {
+            retry_policy.max_retries
+        };
         let path = extract_path(url);
         let mut attempts = 0u32;
+        let request_scope = RequestScope::current();
         let mut last_error: Option<ApiError>;
 
         // Use external trace_id if provided, otherwise generate a new request_id
@@ -235,12 +248,30 @@ impl HttpTransport {
             if let Some(id) = &client_request_id {
                 attempt_headers.push((CLIENT_REQUEST_ID_HEADER.to_string(), id.clone()));
             }
+            let observed_attempt = if let Some(scope) = &request_scope {
+                scope.begin_attempt(
+                    RetryPolicy {
+                        max_retries,
+                        ..retry_policy.clone()
+                    },
+                    TransportState {
+                        request_id: request_id.clone(),
+                        path: path.clone(),
+                        started_ms: start_timestamp_ms,
+                        idle_timeout: self.timeout.read_timeout,
+                        tracer: self.session_tracer.clone(),
+                        notifier: self.retry_notifier.clone(),
+                    },
+                )?
+            } else {
+                attempts
+            };
 
             // Log started.
             if let Some(tracer) = &self.session_tracer {
                 tracer.record_http_request_started(
                     &request_id,
-                    attempts,
+                    observed_attempt,
                     "POST",
                     &path,
                     Map::new(),
@@ -264,6 +295,8 @@ impl HttpTransport {
                 );
             }
 
+            runtime::compaction_scope::reserve_request_attempt()
+                .map_err(|error| ApiError::Configuration(error.to_string()))?;
             // Build and send request.
             let send_result = if let Some(nexus) = &self.nexus {
                 nexus.send(url, &attempt_headers, body, &request_id).await
@@ -315,28 +348,81 @@ impl HttpTransport {
 
                             if let Some(tracer) = &self.session_tracer {
                                 tracer.record_http_request_succeeded(
-                                    &request_id,
-                                    attempts,
-                                    "POST",
-                                    &path,
+                                    telemetry::HttpRequestAttempt {
+                                        request_id: &request_id,
+                                        attempt: observed_attempt,
+                                        method: "POST",
+                                        path: &path,
+                                        start_timestamp_ms,
+                                    },
                                     status,
-                                    start_timestamp_ms,
                                     request_id_from_headers(response.headers()),
                                     Map::new(),
                                 );
                             }
+                            let capture = self.session_tracer.as_ref().and_then(|tracer| {
+                                if !tracer.has_response_archive()
+                                    || (!is_streaming
+                                        && body.get("stream").and_then(Value::as_bool)
+                                            != Some(true)
+                                        && !url.contains(":streamGenerateContent"))
+                                {
+                                    return None;
+                                }
+                                let endpoint = reqwest::Url::parse(url).ok().map_or_else(
+                                    || "unknown".to_string(),
+                                    |url| {
+                                        format!("{}{}", url.host_str().unwrap_or(""), url.path())
+                                            .chars()
+                                            .take(512)
+                                            .collect()
+                                    },
+                                );
+                                Some((
+                                    tracer.clone(),
+                                    telemetry::ResponseCaptureMetadata {
+                                        request_id: request_id.clone(),
+                                        model: body
+                                            .get("model")
+                                            .and_then(Value::as_str)
+                                            .map(|v| v.chars().take(256).collect()),
+                                        endpoint,
+                                        status,
+                                        content_type: response
+                                            .headers()
+                                            .get("content-type")
+                                            .and_then(|v| v.to_str().ok())
+                                            .unwrap_or("")
+                                            .chars()
+                                            .take(128)
+                                            .collect(),
+                                        provider_request_id: request_id_from_headers(
+                                            response.headers(),
+                                        )
+                                        .map(|v| v.chars().take(128).collect()),
+                                        gateway_request_id: response
+                                            .headers()
+                                            .get(ONEAPI_REQUEST_ID_HEADER)
+                                            .and_then(|v| v.to_str().ok())
+                                            .map(|v| v.chars().take(128).collect()),
+                                        started_at_ms: start_timestamp_ms,
+                                    },
+                                ))
+                            });
                             return Ok(HttpRequestResult {
-                                response,
+                                response: crate::RecordedResponse::new(response, capture),
                                 request_id,
                                 client_request_id,
                             });
                         }
                         Err(error)
-                            if error.is_retryable() && attempts <= retry_policy.max_retries + 1 =>
+                            if error.is_retryable()
+                                && attempts <= max_retries.saturating_add(1)
+                                && !compaction_active =>
                         {
                             self.record_failure(
                                 &request_id,
-                                attempts,
+                                observed_attempt,
                                 &path,
                                 &error,
                                 start_timestamp_ms,
@@ -346,7 +432,7 @@ impl HttpTransport {
                         Err(error) => {
                             self.record_failure(
                                 &request_id,
-                                attempts,
+                                observed_attempt,
                                 &path,
                                 &error,
                                 start_timestamp_ms,
@@ -355,22 +441,42 @@ impl HttpTransport {
                         }
                     }
                 }
-                Err(error) if error.is_retryable() && attempts <= retry_policy.max_retries + 1 => {
-                    self.record_failure(&request_id, attempts, &path, &error, start_timestamp_ms);
+                Err(error)
+                    if error.is_retryable()
+                        && attempts <= max_retries.saturating_add(1)
+                        && !compaction_active =>
+                {
+                    self.record_failure(
+                        &request_id,
+                        observed_attempt,
+                        &path,
+                        &error,
+                        start_timestamp_ms,
+                    );
                     last_error = Some(error);
                 }
                 Err(error) => {
-                    self.record_failure(&request_id, attempts, &path, &error, start_timestamp_ms);
+                    self.record_failure(
+                        &request_id,
+                        observed_attempt,
+                        &path,
+                        &error,
+                        start_timestamp_ms,
+                    );
                     return Err(error);
                 }
             }
 
-            if attempts > retry_policy.max_retries {
+            if attempts > max_retries
+                || request_scope
+                    .as_ref()
+                    .is_some_and(|scope| !scope.has_attempts_left())
+            {
                 break;
             }
 
             let retry_after = last_error.as_ref().and_then(ApiError::retry_after);
-            let delay = retry_policy.delay_for_attempt(attempts, retry_after)?;
+            let delay = retry_policy.delay_for_attempt(observed_attempt, retry_after)?;
             // Surface retry attempts to the user so they know scode
             // isn't hung — it's waiting for the provider to recover.
             if let Some(ref error) = last_error {
@@ -391,7 +497,7 @@ impl HttpTransport {
                 // indicator once the notifier stopped being installed, which is
                 // what let that regression go unnoticed.
                 if let Some(ref notifier) = self.retry_notifier {
-                    notifier.on_retry(attempts, retry_policy.max_retries, &reason);
+                    notifier.on_retry(observed_attempt, max_retries, &reason);
                 }
             }
             tokio::time::sleep(delay).await;
@@ -401,7 +507,9 @@ impl HttpTransport {
         }
 
         Err(ApiError::RetriesExhausted {
-            attempts,
+            attempts: request_scope
+                .as_ref()
+                .map_or(attempts, RequestScope::attempts),
             last_error: Box::new(last_error.expect("retry loop must capture an error")),
         })
     }
@@ -416,13 +524,15 @@ impl HttpTransport {
     ) {
         if let Some(tracer) = &self.session_tracer {
             tracer.record_http_request_failed(
-                request_id,
-                attempt,
-                "POST",
-                path,
+                telemetry::HttpRequestAttempt {
+                    request_id,
+                    attempt,
+                    method: "POST",
+                    path,
+                    start_timestamp_ms,
+                },
                 error.to_string(),
                 error.is_retryable(),
-                start_timestamp_ms,
                 Map::new(),
             );
         }

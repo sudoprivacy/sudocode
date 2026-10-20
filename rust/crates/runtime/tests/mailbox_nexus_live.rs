@@ -36,6 +36,8 @@
 //! * **Never read a just-sent frame without blocking.** See
 //!   [`DELIVERY_WAIT_MS`].
 
+#[path = "common/paused_transport.rs"]
+mod paused_transport;
 #[path = "common/session_controller.rs"]
 mod session_controller;
 use session_controller::Controller;
@@ -141,6 +143,81 @@ fn fresh() -> u64 {
         .unwrap_or_default()
         .as_nanos() as u64;
     nanos.wrapping_add(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
+fn live_filesystem_stream_read_and_append_preserve_all_frames() {
+    use runtime::fs_backend::NexusVfsFsBackend;
+    use runtime::FsBackend;
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").unwrap();
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let client = dial(&endpoint);
+    let fs = NexusVfsFsBackend::from_arc(Arc::clone(&client), auth);
+    let path = format!("/sessions/vfs-probe-{}/transcript.jsonl", fresh());
+    fs.create_append_log(&path, 0).unwrap();
+    assert!(fs.is_append_stream(&path).unwrap());
+    assert!(!fs.is_append_stream(&format!("{path}.missing")).unwrap());
+    assert_eq!(fs.read(&path).unwrap(), Vec::<u8>::new());
+
+    let mut expected = Vec::new();
+    let large_frame = vec![b'x'; 128 * 1024];
+    for payload in [b"first\n".as_slice(), b"", &large_frame, b"last\n"] {
+        fs.append(&path, payload).unwrap();
+        expected.extend_from_slice(payload);
+    }
+    // A write can return before Raft applies it. Wait for the exact complete
+    // content and verify every intermediate read preserves the committed prefix.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let actual = fs.read(&path).unwrap();
+        assert!(expected.starts_with(&actual), "stream content changed");
+        if actual == expected {
+            break;
+        }
+        assert!(Instant::now() < deadline, "stream read lost later frames");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut cursor = 0;
+    // Empty appends are no-ops in both the memory and WAL stream backends.
+    for expected_frame in [b"first\n".as_slice(), &large_frame, b"last\n"] {
+        let (data, next, eof) = fs.tail_read(&path, cursor, 0).unwrap();
+        assert_eq!(data, expected_frame);
+        assert!(next > cursor, "every committed frame advances its cursor");
+        assert!(!eof);
+        cursor = next;
+    }
+    assert_eq!(
+        fs.tail_read(&path, cursor, 0).unwrap(),
+        (Vec::new(), cursor, true)
+    );
+
+    let ordinary = format!("/conversations/vfs-probe-{}/transcript", fresh());
+    fs.write(&ordinary, b"ordinary ").unwrap();
+    assert!(!fs.is_append_stream(&ordinary).unwrap());
+    fs.append(&ordinary, b"file").unwrap();
+    assert_eq!(fs.read(&ordinary).unwrap(), b"ordinary file");
+    assert_eq!(
+        fs.tail_read(&ordinary, 9, 0).unwrap(),
+        (b"file".to_vec(), 13, false)
+    );
+    assert_eq!(
+        fs.tail_read(&ordinary, 13, 0).unwrap(),
+        (Vec::new(), 13, true)
+    );
+
+    // The server remains authoritative if the entry changes type at this path.
+    fs.delete(&path).unwrap();
+    fs.write(&path, b"replacement").unwrap();
+    assert!(!fs.is_append_stream(&path).unwrap());
+    fs.append(&path, b" bytes").unwrap();
+    assert_eq!(fs.read(&path).unwrap(), b"replacement bytes");
+    assert_eq!(
+        fs.tail_read(&path, 0, 0).unwrap(),
+        (b"replacement bytes".to_vec(), 17, false)
+    );
 }
 
 #[test]
@@ -305,7 +382,7 @@ fn live_cohost_reads_its_inbox_and_replies() {
     let client = dial(&endpoint);
 
     let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
-    let started = client
+    let denied = client
         .call(
             "managed_agent.start_session_v1",
             serde_json::json!({"agent_id":agent,"model":model})
@@ -313,9 +390,20 @@ fn live_cohost_reads_its_inbox_and_replies() {
                 .as_bytes(),
             &auth,
         )
+        .expect_err("a mailbox identity must not create a managed session");
+    assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+    let operator = Arc::new(model_operator());
+    let started = operator
+        .call(
+            "managed_agent.start_session_v1",
+            serde_json::json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"})
+                .to_string()
+                .as_bytes(),
+            "",
+        )
         .unwrap();
     let started = serde_json::from_slice(&started).unwrap();
-    let _controller = Controller::attach(&client, &started, &auth);
+    let _controller = Controller::attach(&operator, &started, "");
 
     // From where the operator's inbox is NOW, so the reply found below is this
     // run's rather than a previous one's.
@@ -742,37 +830,35 @@ fn live_ensure_inbox() {
     println!("ensured the {inbox}<->{peer} conversation");
 }
 
-/// Spawn a co-host responder agent in a running `nexusd-cluster-cohost` daemon
+/// Spawn a co-host responder agent in a running `nexusd-cohost` daemon
 /// (the control-plane `managed_agent.start_session_v1`), so a standalone
 /// `scode` has a REAL LLM partner to converse with over A2A. The responder
 /// binds its replicated inbox `/agents/<name>/chat-with-me` and auto-replies to
 /// whoever messages it. Drives the full duet:
 ///
 /// ```text
-/// NEXUS_A2A_TEST_ENDPOINT=127.0.0.1:2126 NEXUS_A2A_TEST_SPAWN=mac-ai \
-///   cargo test -p runtime --test nexus_mailbox_live live_spawn_cohost -- --ignored --nocapture
+/// NEXUS_A2A_TEST_ENDPOINT=https://127.0.0.1:2126 NEXUS_A2A_TEST_SPAWN=mac-ai \
+/// NEXUS_A2A_MODEL_TLS_DIR=<operator TLS directory> \
+///   cargo test -p runtime --test mailbox_nexus_live live_spawn_cohost -- --ignored --nocapture
 /// ```
 #[test]
-#[ignore = "requires a running nexusd-cluster-cohost daemon + funded key; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_SPAWN"]
+#[ignore = "requires a running cohost daemon, funded model and operator TLS credential"]
 fn live_spawn_cohost() {
-    let endpoint =
-        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
     let agent = std::env::var("NEXUS_A2A_TEST_SPAWN").expect("set NEXUS_A2A_TEST_SPAWN=<agent>");
     let model =
         std::env::var("NEXUS_A2A_TEST_MODEL").unwrap_or_else(|_| "claude-sonnet-4-6".to_string());
-    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let client = dial(&endpoint);
+    let client = Arc::new(model_operator());
 
     // String-only params -> rpc_codec is plain JSON, so a raw JSON payload works.
     let payload =
         format!(r#"{{"agent_id":"{agent}","model":"{model}","owner_id":"root","zone_id":"root"}}"#);
     let resp = client
-        .call("managed_agent.start_session_v1", payload.as_bytes(), &auth)
+        .call("managed_agent.start_session_v1", payload.as_bytes(), "")
         .expect("start_session_v1 call");
     let body = String::from_utf8_lossy(&resp);
     println!("start_session_v1 -> {body}");
     let started = serde_json::from_slice(&resp).unwrap();
-    let _controller = Controller::attach(&client, &started, &auth);
+    let _controller = Controller::attach(&client, &started, "");
     assert!(
         body.contains("session_id"),
         "expected a session_id in the spawn response, got {body}"
@@ -994,6 +1080,66 @@ fn live_a_silent_server_errors_and_then_recovers() {
     }
 }
 
+/// Keep the real mTLS connection open and stop forwarding bytes on every OS.
+#[test]
+#[ignore = "requires the harness's real mTLS Nexus daemon"]
+fn live_a_silent_transport_errors_and_then_recovers() {
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set daemon endpoint");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let transport = paused_transport::PausedTransport::new(&endpoint).unwrap();
+    let client = dial(&transport.endpoint());
+    let direct = dial(&endpoint);
+    let me = "scode-silent-transport-probe";
+    let mailbox = mailbox(&client, me, &auth);
+    mailbox.ensure_conversation(PROBE_PEER).unwrap();
+    let (_, tail) = mailbox.poll_conversation(PROBE_PEER, 0, 0).unwrap();
+
+    transport.set_paused(true);
+    direct
+        .stat(&mailbox.transcript_path(PROBE_PEER), &auth)
+        .expect("daemon remains responsive");
+    let started = Instant::now();
+    let result = mailbox.poll_conversation(PROBE_PEER, tail, 500);
+    let elapsed = started.elapsed();
+    transport.set_paused(false);
+    assert!(result.is_err(), "paused connection returned {result:?}");
+    let error = format!("{result:?}").to_ascii_lowercase();
+    assert!(
+        error.contains("timeout") || error.contains("deadline"),
+        "wrong failure: {result:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(500),
+        "connection closed before its wait expired"
+    );
+    assert!(!format!("{result:?}").contains("vfs worker sent no reply"));
+    assert!(
+        elapsed < Duration::from_secs(7),
+        "request exceeded its deadline: {elapsed:?}"
+    );
+
+    send_to(&direct, PROBE_PEER, me, "transport recovered", &auth).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match mailbox.poll_conversation(PROBE_PEER, tail, 500) {
+            Ok((messages, next))
+                if messages
+                    .iter()
+                    .any(|message| message.body == "transport recovered") =>
+            {
+                assert!(next > tail);
+                println!("SILENT TRANSPORT OK: timed out after {elapsed:?}, recovered at {next}");
+                break;
+            }
+            result => assert!(
+                Instant::now() < deadline,
+                "connection failed to recover: {result:?}"
+            ),
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Send `sig` to `pid`. Unix-only by construction: `SIGSTOP` has no Windows
 /// equivalent that leaves the socket open, which is the whole point of the
 /// injection, so the harness only sets the pid where it works.
@@ -1170,6 +1316,89 @@ fn live_directory_unions_local_and_nexus_peers() {
     let _ = std::fs::remove_dir_all(&pair_root);
 }
 
+/// `/agents` and `/sessions` are DIFFERENT namespaces, not two names for one.
+///
+/// Both are mounted from the same zone, so a router that drops the mount prefix
+/// hands both the same key and the two alias (nexus-vfs#361). The damage lands on
+/// discovery: `readdir /agents` then returns session ids, and `agent_list`
+/// becomes unusable - a name that only ever existed as a session answers as an
+/// addressable agent.
+///
+/// The fix is two halves and a daemon can ship one without the other: #368
+/// separates the metastore KEYS, #382 separates the backend PATH (and makes a
+/// never-written subtree root list empty instead of erroring). A probe that
+/// only compares metadata therefore passes on a build whose content side still
+/// aliases - a guarantee the test does not actually hold, which is worse than
+/// no test because a bump past the fix stays quiet.
+///
+/// So both halves are asserted, each by the discriminant of the half it covers:
+/// the same LEAF under two prefixes (the backend collides per leaf, so a
+/// directory stat cannot see it), gated on the write having landed; and a
+/// never-written prefix listing empty rather than not-found, which is the path
+/// a first-run `agent_list` takes.
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_CERT_DIR"]
+fn live_agents_and_sessions_are_not_the_same_namespace() {
+    let endpoint =
+        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
+    let client = dial(&endpoint);
+    let leaf = format!("alias-probe-{}", fresh());
+
+    // ── (a) the SAME leaf path under two prefixes ──────────────────────────
+    //
+    // Deliberately one leaf, not a leaf under one prefix and a directory under
+    // the other: the backend collision happens per leaf, so a `stat` of a
+    // DIRECTORY never asks the backend about that leaf and cannot see the
+    // content-side alias at all.
+    let session_leaf = format!("/sessions/{leaf}");
+    client
+        .ensure_stream(
+            &session_leaf,
+            "wal,memory",
+            runtime::agent_mailbox::DEFAULT_STREAM_CAPACITY,
+            "",
+        )
+        .unwrap_or_else(|e| panic!("provision {session_leaf}: {e}"));
+
+    // State gate first. Without it, a write that silently went nowhere would
+    // make both negative assertions below pass for the wrong reason.
+    assert!(
+        client.stat(&session_leaf, "").is_ok(),
+        "{session_leaf} is missing right after it was provisioned, so the two \
+         assertions below would pass because nothing was written, not because \
+         the prefixes are isolated"
+    );
+    for other in [format!("/agents/{leaf}"), format!("/conversations/{leaf}")] {
+        assert!(
+            client.stat(&other, "").is_err(),
+            "{other} resolved although {leaf} was only ever written under /sessions - \
+             the prefixes share a backend path (nexus-vfs#361; the router half is #382, \
+             which #368 alone does not fix), so discovery is reading another \
+             namespace's entries and agent_list cannot be trusted on this daemon"
+        );
+    }
+
+    // ── (b) a prefix nothing has written to lists EMPTY, not not-found ─────
+    //
+    // On a fresh cluster `agent_list` enumerates `/agents` before any agent has
+    // announced. Without the subtree-root half of the fix that readdir is an
+    // error rather than an empty listing, so discovery fails on exactly the
+    // path a first-run session takes.
+    // The SUBTREE ROOT, not an arbitrary child: a child that was never created
+    // is legitimately not-found on every version. What the fix changed is that
+    // the mounted root itself enumerates as empty instead of erroring.
+    for root in ["/conversations", "/sessions", "/agents"] {
+        if let Err(e) = client.readdir(root, "") {
+            panic!(
+                "readdir of the mounted subtree root {root} failed with {e} instead of \
+                 returning a listing - on a fresh cluster the first `agent_list` enumerates \
+                 this root before anyone has announced, so discovery errors on exactly the \
+                 path a first-run session takes"
+            );
+        }
+    }
+}
+
 /// Provision the operator's model route over the same authenticated gRPC bind.
 #[test]
 #[ignore = "requires the co-host daemon and model mount environment"]
@@ -1234,7 +1463,7 @@ fn live_cohost_subagent_context() {
     let user = std::env::var("NEXUS_A2A_TEST_REPLY_TO").unwrap();
     let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
     let client = dial(&endpoint);
-    let operator = model_operator();
+    let operator = Arc::new(model_operator());
     let mb = mailbox(&client, &user, "");
     mb.ensure_conversation(&agent).unwrap();
 
@@ -1262,7 +1491,7 @@ fn live_cohost_subagent_context() {
 
     let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
     let started: Value = serde_json::from_slice(
-        &client
+        &operator
             .call(
                 "managed_agent.start_session_v1",
                 payload.to_string().as_bytes(),
@@ -1271,7 +1500,7 @@ fn live_cohost_subagent_context() {
             .unwrap(),
     )
     .unwrap();
-    let _controller = Controller::attach(&client, &started, "");
+    let _controller = Controller::attach(&operator, &started, "");
     let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
     send_to(
         &client,
@@ -1331,7 +1560,7 @@ fn live_cohost_subagent_context() {
     assert_eq!(child["nexus_http"]["path"], "v1/messages");
 
     let cancel = json!({"session_id":started["session_id"],"mode":"session"});
-    client
+    operator
         .call("managed_agent.cancel_v1", cancel.to_string().as_bytes(), "")
         .unwrap();
     println!("COHOST CONTEXT: delegated result, VFS memory, workspace and host isolation verified");
@@ -1350,7 +1579,7 @@ fn live_cohost_model_workflow() {
     let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
     println!("LIVE COHOST: connecting agent and operator");
     let client = dial(&endpoint);
-    let operator = model_operator();
+    let operator = Arc::new(model_operator());
     let mb = mailbox(&client, &user, "");
     println!("LIVE COHOST: ensuring conversation");
     mb.ensure_conversation(&agent).unwrap();
@@ -1371,7 +1600,7 @@ fn live_cohost_model_workflow() {
     let payload = json!({"agent_id":agent,"model":model,"owner_id":"root","zone_id":"root"});
     println!("LIVE COHOST: starting managed session");
     let started: Value = serde_json::from_slice(
-        &client
+        &operator
             .call(
                 "managed_agent.start_session_v1",
                 payload.to_string().as_bytes(),
@@ -1380,7 +1609,7 @@ fn live_cohost_model_workflow() {
             .unwrap(),
     )
     .unwrap();
-    let _controller = Controller::attach(&client, &started, "");
+    let _controller = Controller::attach(&operator, &started, "");
     let workspace = &data;
     println!("LIVE COHOST: fresh quote mounted at {workspace}");
     let (_, mut cursor) = mb.poll_conversation(&agent, 0, 0).unwrap();
@@ -1407,7 +1636,7 @@ fn live_cohost_model_workflow() {
     verify_live_child(&operator, &agent, &model, &code, total);
     verify_live_model_requests(&operator);
     let cancel = json!({"session_id":started["session_id"],"mode":"session"});
-    client
+    operator
         .call("managed_agent.cancel_v1", cancel.to_string().as_bytes(), "")
         .unwrap();
 }
@@ -1520,13 +1749,15 @@ fn live_cohost_session_resume() {
     let user = std::env::var("NEXUS_A2A_TEST_REPLY_TO").unwrap();
     let model = std::env::var("NEXUS_A2A_TEST_MODEL").unwrap();
     let client = dial(&endpoint);
-    let operator = model_operator();
+    let operator = Arc::new(model_operator());
     let read_transcript = |path: &str| {
         let mut contents = Vec::new();
         let mut offset = 0;
         loop {
             match operator.stream_read_at(path, offset, false, 0, "") {
-                Ok((bytes, next, _)) => {
+                Ok(result) => {
+                    let bytes = result.data;
+                    let next = result.next_offset;
                     let is_empty = bytes.is_empty();
                     contents.extend_from_slice(&bytes);
                     if is_empty || next <= offset {
@@ -1547,7 +1778,7 @@ fn live_cohost_session_resume() {
     mb.ensure_conversation(&agent).unwrap();
     let mut request = json!({"agent_id":agent,"owner_id":"root","zone_id":"root","model":model});
     let rpc = |method: &str, payload: &Value| -> Result<Value, String> {
-        let bytes = client
+        let bytes = operator
             .call(method, payload.to_string().as_bytes(), "")
             .map_err(|e| e.to_string())?;
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())
@@ -1567,7 +1798,7 @@ fn live_cohost_session_resume() {
         }
     };
     let first = rpc("managed_agent.start_session_v1", &request).unwrap();
-    let controller = Controller::attach(&client, &first, "");
+    let controller = Controller::attach(&operator, &first, "");
     let sid = first["durable_session_id"]
         .as_str()
         .expect("co-host durable ID");
@@ -1629,7 +1860,7 @@ fn live_cohost_session_resume() {
             Err(error) => panic!("restore failed: {error}"),
         }
     };
-    let _controller = Controller::attach(&client, &second, "");
+    let _controller = Controller::attach(&operator, &second, "");
     assert_ne!(second["session_id"], first["session_id"]);
     assert_eq!(second["durable_session_id"], sid);
     let snapshot = rpc(
@@ -1707,5 +1938,59 @@ fn live_cohost_session_resume() {
     println!(
         "COHOST RESUME OK: durable={sid}, old_pid={}, new_pid={}",
         first["session_id"], second["session_id"]
+    );
+}
+
+/// Atomic reader claims and receipt recovery through mTLS, gRPC and Raft.
+#[test]
+#[ignore = "requires the daemon started by e2e/nexus-a2a/run-cohost.sh"]
+fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("daemon endpoint");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let first_client = dial(&endpoint);
+    let second_client = dial(&endpoint);
+    let receiver = format!("scode-receipt-{}", fresh());
+    let peer = "receipt-peer";
+    let body = "durable pending receipt through native raft";
+    send_to(&first_client, peer, &receiver, body, &auth).unwrap();
+    let first = mailbox(&first_client, &receiver, &auth);
+    let second = mailbox(&second_client, &receiver, &auth);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let pending = loop {
+        let batch = first
+            .read_unread(peer)
+            .unwrap()
+            .expect("first reader available");
+        if batch.messages().iter().any(|message| message.body == body) {
+            break batch;
+        }
+        drop(batch);
+        assert!(
+            Instant::now() < deadline,
+            "replicated delivery did not arrive"
+        );
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(first.read_position(peer).unwrap(), Some(0));
+    assert!(
+        second.read_unread(peer).unwrap().is_none(),
+        "second RPC client must contend atomically"
+    );
+    thread::sleep(Duration::from_secs(35));
+    assert!(
+        second.read_unread(peer).unwrap().is_none(),
+        "reader must renew while consumer is blocked"
+    );
+    drop(pending);
+    let replay = second
+        .read_unread(peer)
+        .unwrap()
+        .expect("dropped receipt releases lock");
+    assert!(replay.messages().iter().any(|message| message.body == body));
+    replay.acknowledge().unwrap();
+    let after = first.read_unread(peer).unwrap().unwrap();
+    assert!(
+        after.messages().is_empty(),
+        "acknowledged delivery must not replay"
     );
 }

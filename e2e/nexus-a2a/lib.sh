@@ -67,6 +67,11 @@ authon_daemon_env() {
     "RUST_LOG=${RUST_LOG:-info}"
 }
 
+# Run Cargo where the workspace's target and compiler configuration is discovered.
+cargo_in_workspace() {
+  (cd "$RUST_DIR" && cargo "$@")
+}
+
 # Boot the founder in the background, setting AUTHON_DAEMON_PID. Reads the daemon
 # binary from AUTHON_NEXUSD_BIN.
 authon_boot() {
@@ -76,6 +81,27 @@ authon_boot() {
     "$AUTHON_NEXUSD_BIN" --bind-addr "0.0.0.0:${AUTHON_PORT}" \
     >>"$AUTHON_DATA_DIR/daemon.log" 2>&1 &
   AUTHON_DAEMON_PID=$!
+}
+
+# Stop the daemon tree owned by authon_boot, including an MSYS env wrapper.
+authon_stop() {
+  local signal="${1:-TERM}" native_pid
+  [ -n "${AUTHON_DAEMON_PID:-}" ] || return 0
+  if kill -0 "$AUTHON_DAEMON_PID" 2>/dev/null; then
+    case "${OSTYPE:-}" in
+      msys*|cygwin*)
+        native_pid="$(ps -l -p "$AUTHON_DAEMON_PID" | awk 'NR == 2 { print $4 }')"
+        [[ "$native_pid" =~ ^[0-9]+$ ]] || {
+          echo "!! cannot resolve the owned daemon's Windows PID" >&2
+          return 1
+        }
+        MSYS_NO_PATHCONV=1 taskkill.exe /PID "$native_pid" /T /F >/dev/null
+        ;;
+      *) kill -s "$signal" "$AUTHON_DAEMON_PID" ;;
+    esac
+  fi
+  wait "$AUTHON_DAEMON_PID" 2>/dev/null || true
+  AUTHON_DAEMON_PID=
 }
 
 # Wait until the daemon log contains a needle, or fail loud with a tail.

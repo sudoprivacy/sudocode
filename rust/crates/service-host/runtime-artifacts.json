@@ -1,0 +1,26 @@
+{
+  "versions": {
+    "nexus-vault": "0.5.68",
+    "nexus-local-connector": "0.4.64",
+    "nexus-fuse-plugin": "0.6.64"
+  },
+  "sha256": {
+    "v0.8.22/nexusd-cluster-linux-aarch64.tar.gz": "0c6f37389ef289718e4f4a675c263784ec8db94c6b7742d61c7521458767ab30",
+    "v0.8.22/nexusd-cluster-linux-x86_64.tar.gz": "b94bc46abf206ea1862100ad2f15950b3b3614c113a7419396f63cfba849ac50",
+    "v0.8.22/nexusd-cluster-macos-aarch64.tar.gz": "b93fb4857311bf35ab98f53d24af53b931033f603edcb095d9c35d323279dbbf",
+    "v0.8.22/nexusd-cluster-macos-x86_64.tar.gz": "7d00421beb0f45c255eb0073d43a12709fe23efe64c72036102049f3271b1cd5",
+    "v0.8.22/nexusd-cluster-windows-aarch64.zip": "682244352821449f1f45c6744748de5eee8ecfdce3add32069e38d9a28036de0",
+    "v0.8.22/nexusd-cluster-windows-x86_64.zip": "e7ece855dbaf09d04a081a8a8f6aa99dd553b637ce5a6e962584be959f070e46",
+    "vault-v0.5.68/nexus-vault-linux-x86_64.tar.gz": "60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914",
+    "vault-v0.5.68/nexus-vault-macos-arm64.tar.gz": "4d0a0814c94bc9dff4934331885d2d811ee51a13c9c661377fef0f9ca6f4c018",
+    "vault-v0.5.68/nexus-vault-macos-x86_64.tar.gz": "6380f3435ea549db9f0c7399ea402600a07efce0f73df94a1bce54b966385525",
+    "vault-v0.5.68/nexus-vault-windows-x86_64.zip": "2c8b0818a148a5e9d84b584ef577b62309eaff20a559b7c7c4f0a3a31a1e22cd",
+    "local-connector-v0.4.64/nexus-local-connector-linux-x86_64.tar.gz": "8034f83e60725664bc0fa4f9ae5af067cfbe76b55f3d6d4540f6626637e32061",
+    "local-connector-v0.4.64/nexus-local-connector-macos-arm64.tar.gz": "982725fabae2e04e94f04a94aea5ea87dd885351a051d81f432946148a5170a2",
+    "local-connector-v0.4.64/nexus-local-connector-macos-x86_64.tar.gz": "159537d1bf085e71265f9d5cf14972755dc39dc8b0baf95fddd44ee94745744f",
+    "local-connector-v0.4.64/nexus-local-connector-windows-x86_64.zip": "333e546b34243c6222aecf52ff07151b64048b16cce5ca936db23337e1a68188",
+    "fuse-v0.6.64/nexus-fuse-plugin-linux-x86_64.tar.gz": "d890c473ddeef209663733af26dc4ea862a4dca42aa53499ac134a59d3a4e16c",
+    "fuse-v0.6.64/nexus-fuse-plugin-macos-arm64.tar.gz": "6f4692a043d5095659a297e1bd00b854a350be01979aaf1257eb5d6d7e312033",
+    "fuse-v0.6.64/nexus-fuse-plugin-macos-x86_64.tar.gz": "6974057dcbc492e3fb0aad50f17f0d953ced63de648e96b9dfbc935073ddd3d1"
+  }
+}

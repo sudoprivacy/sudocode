@@ -9,7 +9,7 @@
 //! report DATA a model switch returns (each renderer formats it its own way).
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use engine_core::AuthMode;
 use plugins::PluginLoadOutcome;
@@ -24,7 +24,9 @@ use crate::config::{
     require_sudocode_config_for_cwd, resolve_auth_mode, resolve_model_alias_with_config,
     resolve_model_switch_auth_mode, resolve_repl_model, AllowedToolSet,
 };
-use crate::context_usage::{collect_context_usage, ContextUsage};
+use crate::context_usage::{
+    collect_context_occupancy, collect_context_usage, ContextOccupancy, ContextUsage,
+};
 use crate::runtime_build::{build_engine_runtime, BuiltRuntime, RuntimeConfig};
 use crate::session::{
     canonical_session_cwd, context_overflow_user_message, create_managed_session_handle_for,
@@ -125,7 +127,7 @@ pub struct ModelSwitchReport {
 /// no formatting crosses the seam.
 pub struct CompactionOutcome {
     /// `true` when a `session/cancel` aborted the compaction mid-round-trip (or
-    /// landed after it): the transcript in memory and on disk is untouched.
+    /// landed before commit): message history in memory and on disk is unchanged.
     pub cancelled: bool,
     /// Estimated session tokens before compaction.
     pub before_tokens: usize,
@@ -135,14 +137,19 @@ pub struct CompactionOutcome {
     pub removed: usize,
     /// Messages kept.
     pub kept: usize,
-    /// `Some((method, summary_source))` when messages were actually removed;
+    /// `Some((method, summary_source))` when a validated candidate was installed;
     /// `None` when skipped or cancelled — matching the `method` argument shape
     /// of `commands::reports::format_acp_compact_report`.
     pub method: Option<(runtime::CompactionMethod, runtime::CompactionSummarySource)>,
+    /// Final history/budget result for this run, including skips and cancellation.
+    pub report: Option<runtime::CompactionReport>,
 }
 
 pub struct SessionEngine {
     background_tasks: runtime::background_tasks::BackgroundTasks,
+    /// A cancellation endpoint that stays accessible while compaction holds
+    /// the session mutex for its model request and receipt finalization.
+    compaction_abort_signal: runtime::HookAbortSignal,
     session: std::sync::Mutex<AcpCliSession>,
     /// The session's blocking runtime for turn work. `Option` so `Drop` can take
     /// it and `shutdown_background()` it: the seam pump owns this delegate and
@@ -155,8 +162,8 @@ pub struct SessionEngine {
     /// keeps a copy). Resolved once at build from the CLI override / default;
     /// `/permissions` mutates it in place and every runtime rebuild reads it.
     permission_mode: std::sync::Mutex<PermissionMode>,
-    /// Reasoning effort — immutable for now (no `/effort` verb yet).
-    reasoning_effort: Option<String>,
+    /// Session override; a model switch keeps the user's effort preference.
+    reasoning_effort: std::sync::Mutex<Option<String>>,
     /// Auth-mode override — the engine's SSOT. `None` = auto-resolve from the
     /// model + config; `/auth` pins a concrete mode. Every rebuild reads it.
     auth_mode: std::sync::Mutex<Option<AuthMode>>,
@@ -166,6 +173,22 @@ pub struct SessionEngine {
 }
 
 impl SessionEngine {
+    pub(crate) fn session_cwd(&self) -> PathBuf {
+        self.lock_session().cwd.clone()
+    }
+
+    fn build_async_runtime() -> Result<tokio::runtime::Runtime, String> {
+        // The caller drives the turn on its own thread. Network and transport
+        // tasks need a bounded pool; one CPU-sized pool per hosted Session
+        // otherwise multiplies the machine's core count by its Session count.
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("scode-engine")
+            .enable_all()
+            .build()
+            .map_err(|error| format!("failed to create engine tokio runtime: {error}"))
+    }
+
     /// Adopt a session prepared by a host, retaining its filesystem and writer
     /// lease. This is the same engine used by the CLI and every ACP transport.
     #[allow(clippy::too_many_arguments)]
@@ -207,6 +230,7 @@ impl SessionEngine {
         let cwd = host.shell_root.clone();
         Ok(Self {
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
+            compaction_abort_signal: abort_signal.clone(),
             session: std::sync::Mutex::new(AcpCliSession {
                 cwd,
                 host,
@@ -218,10 +242,10 @@ impl SessionEngine {
                 prompt_overrides,
                 memory,
             }),
-            tokio_runtime: Some(tokio::runtime::Runtime::new().map_err(|e| e.to_string())?),
+            tokio_runtime: Some(Self::build_async_runtime()?),
             allowed_tools,
             permission_mode: std::sync::Mutex::new(permission_mode),
-            reasoning_effort: None,
+            reasoning_effort: std::sync::Mutex::new(None),
             auth_mode: std::sync::Mutex::new(Some(auth_mode)),
             host_prompt_sections,
             _host_resources: Some(std::sync::Mutex::new(Some(resources))),
@@ -302,14 +326,12 @@ impl SessionEngine {
         };
         Ok(Self {
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
+            compaction_abort_signal: session.abort_signal.clone(),
             session: std::sync::Mutex::new(session),
-            tokio_runtime: Some(
-                tokio::runtime::Runtime::new()
-                    .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
-            ),
+            tokio_runtime: Some(Self::build_async_runtime()?),
             allowed_tools,
             permission_mode: std::sync::Mutex::new(permission_mode),
-            reasoning_effort,
+            reasoning_effort: std::sync::Mutex::new(reasoning_effort),
             auth_mode: std::sync::Mutex::new(auth_mode),
             host_prompt_sections: Vec::new(),
             _host_resources: None,
@@ -387,14 +409,12 @@ impl SessionEngine {
         };
         Ok(Self {
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
+            compaction_abort_signal: session.abort_signal.clone(),
             session: std::sync::Mutex::new(session),
-            tokio_runtime: Some(
-                tokio::runtime::Runtime::new()
-                    .map_err(|e| format!("failed to create engine tokio runtime: {e}"))?,
-            ),
+            tokio_runtime: Some(Self::build_async_runtime()?),
             allowed_tools,
             permission_mode: std::sync::Mutex::new(permission_mode),
-            reasoning_effort,
+            reasoning_effort: std::sync::Mutex::new(reasoning_effort),
             auth_mode: std::sync::Mutex::new(auth_mode),
             host_prompt_sections: Vec::new(),
             _host_resources: None,
@@ -473,7 +493,10 @@ impl SessionEngine {
             },
             &session.session_mcp_servers,
             session.abort_signal.clone(),
-            self.reasoning_effort.clone(),
+            self.reasoning_effort
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
         )
         .map_err(|e| e.to_string())?;
         let runtime = match inherited_known_date {
@@ -558,6 +581,10 @@ impl SessionEngine {
             if resolved == previous {
                 (previous, message_count, turns, false)
             } else {
+                session
+                    .runtime
+                    .ensure_session_persistence_allowed()
+                    .map_err(|error| error.to_string())?;
                 let mut new_session = session.runtime.session().clone();
                 new_session.model = Some(resolved.clone());
                 let handle = session.handle.clone();
@@ -593,24 +620,33 @@ impl SessionEngine {
     /// Run an explicit `/compact` that a `session/cancel` can abort mid-flight
     /// (the ACP path; the REPL's [`SessionLifecycle::run_compaction`] is not
     /// cancellable, since the REPL has no concurrent cancel channel). Compacts
-    /// through the LLM path with a local-heuristic fallback, installs + persists
-    /// the compacted transcript when anything was removed, and records the same
+    /// through the strict LLM path, installs + persists
+    /// a validated compacted transcript, and records the same
     /// telemetry the ACP `/compact` always did. A cancel during the model
-    /// round-trip — or one that lands right after it — leaves the transcript
+    /// round-trip — or one that lands before commit — leaves message history
     /// untouched and returns `cancelled`. Returns report DATA; the renderer
     /// formats it. Ports `AcpCliAgent::handle_acp_compact`.
     pub fn compact_cancellable(
         &self,
         observer: &mut dyn runtime::RuntimeObserver,
     ) -> Result<CompactionOutcome, String> {
+        self.compaction_abort_signal.reset();
+        self.compact_admitted(observer)
+    }
+
+    pub(crate) fn compact_admitted(
+        &self,
+        observer: &mut dyn runtime::RuntimeObserver,
+    ) -> Result<CompactionOutcome, String> {
         let mut session = self.lock_session();
-        // Reset before publishing Started: a cancel in response to that event
-        // must not be cleared when the summarizer begins.
-        session.abort_signal.reset();
+        session.runtime.set_compaction_pending_input_tokens(0);
         let before_tokens = estimate_session_tokens(session.runtime.session());
         let mut progress = runtime::CompactionProgress::started("manual", before_tokens);
         observer.on_compaction(&progress);
-        let result = self.compact_cancellable_inner(&mut session, before_tokens);
+        let result =
+            self.compact_cancellable_inner(&mut session, before_tokens, progress.id.clone());
+        progress.report = session.runtime.last_compaction_report().cloned();
+        progress.after_tokens = Some(estimate_session_tokens(session.runtime.session()));
         progress.status = match &result {
             Ok(outcome) if outcome.cancelled => runtime::CompactionStatus::Cancelled,
             Ok(outcome) => {
@@ -629,6 +665,7 @@ impl SessionEngine {
         &self,
         session: &mut AcpCliSession,
         before_tokens: usize,
+        run_id: String,
     ) -> Result<CompactionOutcome, String> {
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         let abort_signal = session.abort_signal.clone();
@@ -636,39 +673,39 @@ impl SessionEngine {
             max_estimated_tokens: 0,
             ..CompactionConfig::default()
         };
-        let compaction = self.rt().block_on(async {
-            tokio::select! {
-                result = session.runtime.compact_with_method(config, None) => Some(result),
-                () = wait_for_abort(&abort_signal) => None,
-            }
-        });
-        let Some(attempt) = compaction.filter(|_| !abort_signal.is_aborted()) else {
-            if let Some(tracer) = session.runtime.session_tracer() {
-                tracer.record("slash_compact_cancelled", Map::new());
-            }
-            return Ok(CompactionOutcome {
-                cancelled: true,
-                before_tokens,
-                after_tokens: before_tokens,
-                removed: 0,
-                kept: session.runtime.session().messages.len(),
-                method: None,
-            });
-        };
-        let (result, method) = attempt.map_err(|error| error.to_string())?;
-        let removed = result.removed_message_count;
-        let summary_source = result.summary_source;
-        if removed > 0 {
-            let path = session.handle.path.clone();
-            result
-                .compacted_session
-                .save_compacted_to_path(session.runtime.session(), &path)
-                .map_err(|e| {
-                    format!("failed to persist compacted session; history preserved: {e}")
-                })?;
+        // The runtime owns cancellation and finalizes known usage receipts
+        // before returning. Dropping its future here would lose that billing.
+        let attempt = self.rt().block_on(
             session
                 .runtime
-                .install_compacted_session(result.compacted_session);
+                .compact_with_method_for_run(config, None, run_id),
+        );
+        if abort_signal.is_aborted() {
+            return Self::finalize_cancelled_compaction(session, before_tokens);
+        }
+        let (result, method) = match attempt {
+            Ok(result) => result,
+            Err(error) => {
+                Self::persist_compaction_metadata(session);
+                return Err(error.to_string());
+            }
+        };
+        let removed = result.removed_message_count;
+        let summary_source = result.summary_source.clone();
+        let changed = result
+            .report
+            .as_ref()
+            .is_some_and(|report| report.outcome == runtime::CompactionOutcome::TargetMet);
+        if changed {
+            Self::commit_compaction(session, &result)?;
+        } else {
+            if let Some(report) = result.report.clone() {
+                session.runtime.set_compaction_report(report);
+            }
+            Self::persist_compaction_metadata(session);
+            if let Some(error) = Self::compaction_finalization_error(session) {
+                return Err(error);
+            }
         }
         let kept = session.runtime.session().messages.len();
         let after_tokens = estimate_session_tokens(session.runtime.session());
@@ -700,8 +737,215 @@ impl SessionEngine {
             after_tokens,
             removed,
             kept,
-            method: (removed > 0).then_some((method, summary_source)),
+            method: changed.then_some((method, summary_source)),
+            report: session
+                .runtime
+                .last_compaction_report()
+                .cloned()
+                .or(result.report),
         })
+    }
+
+    fn finalize_cancelled_compaction(
+        session: &mut AcpCliSession,
+        before_tokens: usize,
+    ) -> Result<CompactionOutcome, String> {
+        // A concurrent durable-source change takes precedence over a
+        // cancellation label and must never restore the stale snapshot.
+        if let Some(error) = Self::compaction_finalization_error(session).filter(|_| {
+            session
+                .runtime
+                .last_compaction_report()
+                .and_then(|report| report.reason.as_deref())
+                .is_some_and(|reason| reason.starts_with("source_changed"))
+        }) {
+            return Err(error);
+        }
+        if let Some(mut report) = session.runtime.last_compaction_report().cloned() {
+            report.outcome = runtime::CompactionOutcome::Cancelled;
+            report.after_history = report.before_history;
+            report.reason = Some(match report.reason.as_deref() {
+                Some(reason) if reason.contains("maintenance metadata could not be saved") => {
+                    format!("cancelled_before_commit; {reason}")
+                }
+                _ => "cancelled_before_commit".into(),
+            });
+            session.runtime.set_compaction_report(report);
+        }
+        Self::persist_compaction_metadata(session);
+        if let Some(error) = Self::compaction_finalization_error(session) {
+            return Err(error);
+        }
+        if let Some(tracer) = session.runtime.session_tracer() {
+            tracer.record("slash_compact_cancelled", Map::new());
+        }
+        Ok(CompactionOutcome {
+            cancelled: true,
+            before_tokens,
+            after_tokens: before_tokens,
+            removed: 0,
+            kept: session.runtime.session().messages.len(),
+            method: None,
+            report: session.runtime.last_compaction_report().cloned(),
+        })
+    }
+
+    fn commit_compaction(
+        session: &mut AcpCliSession,
+        result: &runtime::CompactionResult,
+    ) -> Result<(), String> {
+        let path = session.handle.path.clone();
+        if let Err(error) = result.compacted_session.save_compacted_to_path_checked(
+            session.runtime.session(),
+            &path,
+            result.source_revision.as_deref(),
+        ) {
+            if matches!(&error, runtime::SessionError::SourceChanged) {
+                let refresh = session.runtime.refresh_compaction_source();
+                if let Some(mut report) = result.report.clone() {
+                    report.outcome = runtime::CompactionOutcome::Failed;
+                    report.after_history = estimate_session_tokens(session.runtime.session());
+                    let mut reason = "source_changed".to_string();
+                    if report.attempts > 0 {
+                        reason.push_str("; maintenance receipts could not be saved");
+                    }
+                    if let Err(refresh_error) = &refresh {
+                        use std::fmt::Write;
+                        let _ = write!(
+                            reason,
+                            "; latest source could not be reloaded: {refresh_error}"
+                        );
+                    }
+                    report.reason = Some(reason);
+                    session.runtime.set_compaction_report(report);
+                }
+                // A stale metadata snapshot would overwrite the external
+                // writer's history. The report stays in memory instead.
+                return Err(match refresh {
+                    Ok(()) => format!("{error}; newer history preserved"),
+                    Err(refresh_error) => format!(
+                        "{error}; durable history preserved; latest source could not be reloaded: {refresh_error}"
+                    ),
+                });
+            }
+            if let Some(mut report) = result.report.clone() {
+                report.outcome = runtime::CompactionOutcome::Failed;
+                report.after_history = report.before_history;
+                report.reason = Some("persistence_failed".into());
+                session.runtime.set_compaction_report(report);
+            }
+            Self::persist_compaction_metadata(session);
+            return Err(format!(
+                "failed to persist compacted session; history preserved: {error}"
+            ));
+        }
+        // No await or cancellation check between durable commit and memory
+        // installation: a cancellation after commit cannot undo success.
+        session
+            .runtime
+            .install_compacted_session(result.compacted_session.clone());
+        session.runtime.mark_compaction_committed(result);
+        Ok(())
+    }
+
+    fn persist_compaction_metadata(session: &mut AcpCliSession) {
+        session.runtime.persist_compaction_maintenance();
+    }
+
+    fn compaction_finalization_error(session: &AcpCliSession) -> Option<String> {
+        session
+            .runtime
+            .last_compaction_report()
+            .filter(|report| report.outcome == runtime::CompactionOutcome::Failed)
+            .map(|report| {
+                format!(
+                    "compaction finalization failed; durable history preserved: {}",
+                    report.reason.as_deref().unwrap_or("failed")
+                )
+            })
+    }
+
+    fn ensure_fresh_session_source(
+        session: &mut AcpCliSession,
+    ) -> Result<(), runtime::RuntimeError> {
+        if session
+            .runtime
+            .ensure_session_persistence_allowed()
+            .is_err()
+        {
+            session
+                .runtime
+                .refresh_compaction_source()
+                .map_err(|error| runtime::RuntimeError::new(error.to_string()))?;
+        }
+        session
+            .runtime
+            .ensure_session_persistence_allowed()
+            .map_err(|error| runtime::RuntimeError::new(error.to_string()))?;
+        Ok(())
+    }
+
+    fn record_pre_send_compaction_check(
+        runtime: &BuiltRuntime,
+        estimated_tokens: usize,
+        prompt_tokens: usize,
+        history_budget: usize,
+        context_limit: usize,
+    ) {
+        if let Some(tracer) = runtime.session_tracer() {
+            tracer.record("auto_compact_check", {
+                let mut attrs = Map::new();
+                attrs.insert(
+                    "estimated_tokens".to_string(),
+                    Value::Number(estimated_tokens.into()),
+                );
+                attrs.insert(
+                    "prompt_tokens".to_string(),
+                    Value::Number(prompt_tokens.into()),
+                );
+                attrs.insert(
+                    "history_budget".to_string(),
+                    Value::Number(history_budget.into()),
+                );
+                attrs.insert(
+                    "context_limit".to_string(),
+                    Value::Number(context_limit.into()),
+                );
+                attrs
+            });
+        }
+    }
+
+    /// Preserve legacy counts while reporting the latest run in this turn,
+    /// including runs that skipped or ended with cancellation.
+    fn turn_compaction_summary(
+        runtime: &BuiltRuntime,
+        previous_run_id: Option<&str>,
+        preflight: Option<runtime::AutoCompactionEvent>,
+        in_turn: Option<runtime::AutoCompactionEvent>,
+    ) -> Option<runtime::AutoCompactionEvent> {
+        let mut combined = match (preflight, in_turn) {
+            (Some(first), Some(last)) => Some(runtime::AutoCompactionEvent {
+                removed_message_count: first
+                    .removed_message_count
+                    .saturating_add(last.removed_message_count),
+                report: last.report.or(first.report),
+            }),
+            (Some(event), None) | (None, Some(event)) => Some(event),
+            (None, None) => None,
+        };
+        if let Some(report) = runtime
+            .last_compaction_report()
+            .filter(|report| previous_run_id != Some(report.run_id.as_str()))
+        {
+            combined
+                .get_or_insert(runtime::AutoCompactionEvent {
+                    removed_message_count: 0,
+                    report: None,
+                })
+                .report = Some(report.clone());
+        }
+        combined
     }
 
     /// Set the trace id the next turn's requests carry (ACP `_meta.traceId`).
@@ -711,10 +955,7 @@ impl SessionEngine {
             .set_trace_id(trace_id.to_string());
     }
 
-    /// Push each block as its own `User` message onto the live session before a
-    /// turn runs — the ACP image path pre-loads native / VLM-described image
-    /// blocks this way (the renderer prepares the blocks; the engine only
-    /// appends them). Ports the message-push half of `AcpSdkDelegate::push_images`.
+    /// Append user input prepared by a lifecycle operation or image preflight.
     pub fn push_user_blocks(&self, blocks: Vec<runtime::ContentBlock>) -> Result<(), String> {
         let mut session = self.lock_session();
         for block in blocks {
@@ -735,21 +976,6 @@ impl SessionEngine {
     }
 }
 
-/// Resolve once `signal` is aborted. Polls as well as awaiting the signal's
-/// notification, so an `abort()` that races the subscription is still seen
-/// promptly. Ported from the ACP `/compact` path (`main.rs::wait_for_abort`).
-async fn wait_for_abort(signal: &runtime::HookAbortSignal) {
-    loop {
-        if signal.is_aborted() {
-            return;
-        }
-        tokio::select! {
-            () = signal.cancelled() => {}
-            () = tokio::time::sleep(Duration::from_millis(50)) => {}
-        }
-    }
-}
-
 impl Drop for SessionEngine {
     fn drop(&mut self) {
         self.background_tasks.shutdown();
@@ -767,6 +993,38 @@ impl Drop for SessionEngine {
 }
 
 impl engine_core::EngineDelegate for SessionEngine {
+    fn prepare_prompt(
+        &self,
+        blocks: Vec<runtime::ContentBlock>,
+        image_policy: engine_core::engine_events::ImageInputPolicy,
+    ) -> Result<Vec<runtime::ContentBlock>, runtime::RuntimeError> {
+        if image_policy == engine_core::engine_events::ImageInputPolicy::Native
+            || !blocks
+                .iter()
+                .any(|block| matches!(block, runtime::ContentBlock::Image { .. }))
+        {
+            return Ok(blocks);
+        }
+        let mut images = Vec::new();
+        let mut remaining = Vec::new();
+        for block in blocks {
+            match block {
+                runtime::ContentBlock::Image { data, mime_type } => images.push((data, mime_type)),
+                block => remaining.push(block),
+            }
+        }
+        if !images.is_empty() {
+            let cwd = self.lock_session().cwd.clone();
+            crate::prompt_images::prepare_and_push_images(self, &images, &cwd)
+                .map_err(runtime::RuntimeError::new)?;
+        }
+        Ok(remaining)
+    }
+
+    fn set_trace_id(&self, trace_id: &str) {
+        SessionEngine::set_trace_id(self, trace_id);
+    }
+
     fn run_turn(
         &self,
         blocks: Vec<runtime::ContentBlock>,
@@ -774,7 +1032,11 @@ impl engine_core::EngineDelegate for SessionEngine {
         prompter: &mut dyn runtime::PermissionPrompter,
     ) -> Result<engine_core::TurnComplete, runtime::RuntimeError> {
         let mut session = self.lock_session();
-        session.abort_signal.reset();
+        Self::ensure_fresh_session_source(&mut session)?;
+        let previous_compaction_run_id = session
+            .runtime
+            .last_compaction_report()
+            .map(|report| report.run_id.clone());
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         session
             .runtime
@@ -796,41 +1058,23 @@ impl engine_core::EngineDelegate for SessionEngine {
         // the same call the runtime's in-turn guard makes. Two copies of this
         // arithmetic drifting apart is what makes the preflight pass a request
         // the in-turn guard then compacts, or the reverse.
-        let model = session.runtime.session().model.clone().unwrap_or_default();
-        let budget = session
-            .runtime
-            .api_client()
-            .context_budget(&model, session.runtime.system_prompt());
+        let budget = session.runtime.context_budget_for_next_request();
         let context_limit = budget.context_limit;
-        let max_output_tokens = budget.max_output_tokens;
-        let overhead_tokens = budget.overhead_tokens;
         let history_budget = budget.history_budget();
         let prompt_tokens: usize = blocks.iter().map(estimate_block_tokens).sum();
+        session
+            .runtime
+            .set_compaction_pending_input_tokens(prompt_tokens);
         let estimated_tokens = estimate_session_tokens(session.runtime.session());
         let mut pre_send_compaction = None;
         if estimated_tokens + prompt_tokens > history_budget {
-            if let Some(tracer) = session.runtime.session_tracer() {
-                tracer.record("auto_compact_check", {
-                    let mut attrs = Map::new();
-                    attrs.insert(
-                        "estimated_tokens".to_string(),
-                        Value::Number(estimated_tokens.into()),
-                    );
-                    attrs.insert(
-                        "prompt_tokens".to_string(),
-                        Value::Number(prompt_tokens.into()),
-                    );
-                    attrs.insert(
-                        "history_budget".to_string(),
-                        Value::Number(history_budget.into()),
-                    );
-                    attrs.insert(
-                        "context_limit".to_string(),
-                        Value::Number(context_limit.into()),
-                    );
-                    attrs
-                });
-            }
+            Self::record_pre_send_compaction_check(
+                &session.runtime,
+                estimated_tokens,
+                prompt_tokens,
+                history_budget,
+                context_limit,
+            );
             let attempt = self.rt().block_on(session.runtime.compact_in_place(
                 CompactionConfig {
                     // Bypass the size heuristic: the budget check above is
@@ -842,6 +1086,12 @@ impl engine_core::EngineDelegate for SessionEngine {
                 runtime::CompactionTrigger::Preflight,
                 Some(observer),
             ));
+            if let Some(error) = Self::compaction_finalization_error(&session) {
+                return Err(runtime::RuntimeError::new(format!(
+                    "{}: {error}",
+                    runtime::COMPACTION_FAILED
+                )));
+            }
             if session.abort_signal.is_aborted() {
                 return Ok(engine_core::TurnComplete {
                     iterations: 0,
@@ -849,7 +1099,12 @@ impl engine_core::EngineDelegate for SessionEngine {
                     session_usage: session.runtime.usage().cumulative_usage(),
                     cancelled: true,
                     response_model: None,
-                    auto_compaction: None,
+                    auto_compaction: Self::turn_compaction_summary(
+                        &session.runtime,
+                        previous_compaction_run_id.as_deref(),
+                        attempt.ok().flatten(),
+                        None,
+                    ),
                 });
             }
             pre_send_compaction =
@@ -857,12 +1112,16 @@ impl engine_core::EngineDelegate for SessionEngine {
             // Re-estimate against the hard limit the preflight enforces. Still
             // over → classified error instead of a request that will be rejected.
             let new_estimated_tokens = estimate_session_tokens(session.runtime.session());
-            if !budget.fits(new_estimated_tokens + prompt_tokens) {
+            let next_budget = session.runtime.context_budget_for_next_request();
+            if !next_budget.fits_buffered(new_estimated_tokens.saturating_add(prompt_tokens)) {
                 return Err(runtime::RuntimeError::context_window_blocked(
                     context_overflow_user_message(
                         session.runtime.session(),
-                        new_estimated_tokens + prompt_tokens + overhead_tokens + max_output_tokens,
-                        context_limit,
+                        new_estimated_tokens
+                            + prompt_tokens
+                            + next_budget.overhead_tokens
+                            + next_budget.max_output_tokens,
+                        next_budget.context_limit,
                     ),
                 ));
             }
@@ -883,8 +1142,13 @@ impl engine_core::EngineDelegate for SessionEngine {
             session_usage: turn_summary.session_usage,
             cancelled: turn_summary.cancelled,
             response_model: turn_summary.response_model,
-            // Prefer the pre-send compaction event; else the runtime's in-turn one.
-            auto_compaction: pre_send_compaction.or(turn_summary.auto_compaction),
+            // Carry the latest run; each earlier run was already emitted separately.
+            auto_compaction: Self::turn_compaction_summary(
+                &session.runtime,
+                previous_compaction_run_id.as_deref(),
+                pre_send_compaction,
+                turn_summary.auto_compaction,
+            ),
         })
     }
 
@@ -896,7 +1160,7 @@ impl engine_core::EngineDelegate for SessionEngine {
     }
 
     fn abort_signal(&self) -> runtime::HookAbortSignal {
-        self.lock_session().abort_signal.clone()
+        self.compaction_abort_signal.clone()
     }
 
     fn set_model(&self, new_model: &str) -> Result<(String, Vec<String>), String> {
@@ -932,6 +1196,23 @@ impl engine_core::EngineDelegate for SessionEngine {
         Ok(String::new())
     }
 
+    fn run_management(
+        &self,
+        line: &str,
+        build: &engine_core::engine_events::ManagementContext,
+        observer: &mut dyn runtime::RuntimeObserver,
+    ) -> Result<bool, runtime::RuntimeError> {
+        crate::management::execute(self, line, build, observer).map_err(runtime::RuntimeError::new)
+    }
+
+    fn attach_completions(
+        &self,
+        state: &engine_core::subagent_completion::CompletionState,
+    ) -> Result<(), String> {
+        let session = self.lock_session();
+        state.attach_session(session.runtime.session(), &session.cwd)
+    }
+
     fn background_tasks(&self) -> Option<runtime::background_tasks::BackgroundTasks> {
         Some(self.background_tasks.clone())
     }
@@ -940,7 +1221,9 @@ impl engine_core::EngineDelegate for SessionEngine {
         self.background_tasks.shutdown();
         let session = self.lock_session();
         let path = session.handle.path.clone();
-        let _ = session.runtime.session().save_to_path(&path);
+        if session.runtime.ensure_session_persistence_allowed().is_ok() {
+            let _ = session.runtime.session().save_to_path(&path);
+        }
         // Release the writer lease on explicit close, even if a renderer still
         // retains an Arc to this closed engine for a queued notification.
         if let Some(resources) = &self._host_resources {
@@ -1053,6 +1336,8 @@ pub fn billing_account_for_model(model: &str, auth_override: Option<AuthMode>) -
 /// rare, non-hot-path management ops (export / status / slash / undo), so the
 /// clones cost nothing on the critical path.
 pub trait SessionLifecycle: Send + Sync + 'static {
+    /// File-tool root without cloning the conversation history.
+    fn workspace_root(&self) -> Result<String, String>;
     /// A clone of the current session (for export / status / read inspection).
     fn session_snapshot(&self) -> runtime::Session;
     /// The active session's handle (id + persistence path). Owned clone so a
@@ -1073,6 +1358,7 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     /// What the next request would carry, by category — the data behind
     /// `/context`. See [`crate::context_usage`].
     fn context_usage(&self) -> ContextUsage;
+    fn context_occupancy(&self) -> ContextOccupancy;
     /// A clone of the session tracer, if telemetry is active. Returned owned
     /// (the tracer is `Arc`-backed and cheap to clone) so callers record events
     /// without holding the session lock.
@@ -1124,6 +1410,12 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     /// `changed` / counts / `available`); the renderer formats it. Shares the
     /// one impl with [`engine_core::EngineDelegate::set_model`].
     fn set_model(&self, new_model: &str) -> Result<ModelSwitchReport, String>;
+    /// User preference and model-specific effective value for the effort picker.
+    fn current_effort(&self) -> (Option<String>, Option<String>);
+    /// Resolve aliases through the active provider before offering model levels.
+    fn effort_options(&self, model: &str) -> Result<(String, Vec<String>), String>;
+    /// Apply effort without rebuilding the prompt or changing signed history.
+    fn set_effort(&self, level: &str) -> Result<(), String>;
     /// Pin the auth mode (engine SSOT) and rebuild so it takes effect.
     fn set_auth(&self, mode: AuthMode) -> Result<(), String>;
     /// Switch the active permission mode (engine SSOT) in place.
@@ -1145,13 +1437,23 @@ pub trait SessionLifecycle: Send + Sync + 'static {
     /// persist (`/plugins` reload).
     fn reload_features(&self) -> Result<(), String>;
     /// Run LLM-based history compaction and swap the compacted session in.
-    /// Returns `(removed, kept, skipped)` for the renderer's report.
-    fn run_compaction(
-        &self,
-    ) -> Result<(usize, usize, bool, runtime::CompactionSummarySource), String>;
+    /// Returns structured report data for the renderer.
+    fn run_compaction(&self) -> Result<CompactionOutcome, String>;
+    /// Cancel an in-flight maintenance operation without waiting on its lock.
+    /// The caller still waits for `run_compaction` to finalize and persist its
+    /// report and known usage before returning.
+    fn cancel_compaction(&self);
 }
 
 impl SessionLifecycle for SessionEngine {
+    fn workspace_root(&self) -> Result<String, String> {
+        self.lock_session()
+            .host
+            .fs
+            .working_root()
+            .map_err(|error| error.to_string())
+    }
+
     fn model_catalog(&self) -> Option<runtime::model_discovery::ModelCatalog> {
         self.lock_session().runtime.api_client().model_catalog()
     }
@@ -1168,6 +1470,10 @@ impl SessionLifecycle for SessionEngine {
 
     fn persist(&self) -> Result<(), String> {
         let session = self.lock_session();
+        session
+            .runtime
+            .ensure_session_persistence_allowed()
+            .map_err(|error| error.to_string())?;
         let path = session.handle.path.clone();
         session
             .runtime
@@ -1192,6 +1498,10 @@ impl SessionLifecycle for SessionEngine {
     fn context_usage(&self) -> ContextUsage {
         let session = self.lock_session();
         collect_context_usage(&session.cwd, &session.runtime)
+    }
+
+    fn context_occupancy(&self) -> ContextOccupancy {
+        collect_context_occupancy(&self.lock_session().runtime)
     }
 
     fn session_tracer(&self) -> Option<telemetry::SessionTracer> {
@@ -1242,6 +1552,10 @@ impl SessionLifecycle for SessionEngine {
     }
 
     fn set_billing_account(&self, name: &str) -> Result<BillingAccount, String> {
+        self.lock_session()
+            .runtime
+            .ensure_session_persistence_allowed()
+            .map_err(|error| error.to_string())?;
         let name = name.trim();
         // Refuse an account that is not configured rather than writing it and
         // letting the next request fail: the selector treats an unhonored
@@ -1267,6 +1581,10 @@ impl SessionLifecycle for SessionEngine {
 
         {
             let mut session = self.lock_session();
+            session
+                .runtime
+                .ensure_session_persistence_allowed()
+                .map_err(|error| error.to_string())?;
             let new_session = session.runtime.session().clone();
             let handle = session.handle.clone();
             self.rebuild_locked(&mut session, new_session, handle)?;
@@ -1278,12 +1596,74 @@ impl SessionLifecycle for SessionEngine {
         self.set_model_impl(new_model)
     }
 
+    fn current_effort(&self) -> (Option<String>, Option<String>) {
+        let session = self.lock_session();
+        let preference = session
+            .runtime
+            .api_client()
+            .reasoning_effort()
+            .map(str::to_string);
+        let effective = runtime::effort::claude_effort(
+            session
+                .runtime
+                .api_client()
+                .wire_model_id()
+                .unwrap_or_default(),
+            preference.as_deref(),
+        )
+        .map(str::to_string);
+        (preference, effective)
+    }
+
+    fn effort_options(&self, model: &str) -> Result<(String, Vec<String>), String> {
+        let cwd = self.session_cwd();
+        let _scope = runtime::WorkspaceRootScope::enter(&cwd);
+        let config = load_sudocode_config_for_current_dir();
+        let model = resolve_model_alias_with_config(model);
+        let mode = resolve_model_switch_auth_mode(&model, self.auth_override(), &config)?;
+        let resolved = engine_core::resolve_provider_from_config(&model, Some(mode), &config)
+            .map_err(|error| error.to_string())?;
+        let levels = runtime::effort::claude_levels(&resolved.model_id)
+            .iter()
+            .map(|level| (*level).to_string())
+            .collect();
+        Ok((resolved.model_id, levels))
+    }
+
+    fn set_effort(&self, level: &str) -> Result<(), String> {
+        if level != "auto" && !runtime::effort::CLAUDE_LEVELS.contains(&level) {
+            return Err("Effort must be auto, low, medium, high, xhigh, or max".into());
+        }
+        let mut session = self.lock_session();
+        session
+            .runtime
+            .ensure_session_persistence_allowed()
+            .map_err(|e| e.to_string())?;
+        let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
+        if level != "max" {
+            tools::set_config_setting("effortLevel", level)?;
+        }
+        let preference = (level != "auto").then(|| level.to_string());
+        if let Some(rt) = session.runtime.runtime_mut() {
+            rt.api_client_mut().set_reasoning_effort(preference.clone());
+        }
+        *self
+            .reasoning_effort
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = preference;
+        Ok(())
+    }
+
     fn set_auth(&self, mode: AuthMode) -> Result<(), String> {
+        let mut session = self.lock_session();
+        session
+            .runtime
+            .ensure_session_persistence_allowed()
+            .map_err(|error| error.to_string())?;
         *self
             .auth_mode
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(mode);
-        let mut session = self.lock_session();
         let new_session = session.runtime.session().clone();
         let handle = session.handle.clone();
         self.rebuild_locked(&mut session, new_session, handle)
@@ -1336,6 +1716,10 @@ impl SessionLifecycle for SessionEngine {
             return Err("fork requires a separate managed session and writer lease".into());
         }
         let mut session = self.lock_session();
+        session
+            .runtime
+            .ensure_session_persistence_allowed()
+            .map_err(|error| error.to_string())?;
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
         let forked = session.runtime.fork_session(branch);
         let handle = create_managed_session_handle_for(&session.cwd, &forked.session_id)
@@ -1355,6 +1739,10 @@ impl SessionLifecycle for SessionEngine {
 
     fn reload_features(&self) -> Result<(), String> {
         let mut session = self.lock_session();
+        session
+            .runtime
+            .ensure_session_persistence_allowed()
+            .map_err(|error| error.to_string())?;
         let mut new_session = session.runtime.session().clone();
         new_session.clear_prompt_snapshot();
         let handle = session.handle.clone();
@@ -1367,35 +1755,17 @@ impl SessionLifecycle for SessionEngine {
             .map_err(|e| e.to_string())
     }
 
-    fn run_compaction(
-        &self,
-    ) -> Result<(usize, usize, bool, runtime::CompactionSummarySource), String> {
+    fn run_compaction(&self) -> Result<CompactionOutcome, String> {
         let mut session = self.lock_session();
-        let cwd = session.cwd.clone();
-        let _scope = runtime::WorkspaceRootScope::enter(&cwd);
-        let result = self
-            .rt()
-            .block_on(session.runtime.compact(CompactionConfig::default(), None))
-            .map_err(|error| error.to_string())?;
-        let removed = result.removed_message_count;
-        let kept = result.compacted_session.messages.len();
-        let skipped = removed == 0;
-        // Surface the summary provenance to the renderer's `/compact` report
-        // (LLM vs heuristic) — main's compaction hardening added this column.
-        let summary_source = result.summary_source;
-        if !skipped {
-            let path = session.handle.path.clone();
-            result
-                .compacted_session
-                .save_compacted_to_path(session.runtime.session(), &path)
-                .map_err(|error| {
-                    format!("compaction persistence failed; history preserved: {error}")
-                })?;
-            session
-                .runtime
-                .install_compacted_session(result.compacted_session);
-        }
-        Ok((removed, kept, skipped, summary_source))
+        session.abort_signal.reset();
+        session.runtime.set_compaction_pending_input_tokens(0);
+        let before = estimate_session_tokens(session.runtime.session());
+        let run_id = runtime::CompactionProgress::started("manual", before).id;
+        self.compact_cancellable_inner(&mut session, before, run_id)
+    }
+
+    fn cancel_compaction(&self) {
+        self.compaction_abort_signal.abort();
     }
 }
 

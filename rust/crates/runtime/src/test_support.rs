@@ -6,10 +6,31 @@
 //! in the product calls this module.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
 use kernel::kernel::OperationContext;
+
+/// Return a fixture path unique across parallel calls and processes.
+///
+/// Clock resolution alone cannot distinguish concurrent tests. The caller
+/// creates and removes the directory.
+#[must_use]
+pub fn temp_dir_path(prefix: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time should be after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{nanos}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ))
+}
 
 /// An in-memory [`ObjectStore`] so DT_REG **content** round-trips under test.
 ///

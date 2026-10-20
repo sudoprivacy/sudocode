@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "scope": "Prompt cache observations and synthetic verification scenarios",
+  "metrics_spec": "spec/cache_metrics.json",
+  "defaults": {
+    "completion_ttl_seconds": 30,
+    "prompt_ttl_seconds": 300,
+    "cache_break_min_drop": 2000,
+    "probe_min_reported_tokens": 100,
+    "probe_system_repeats": 250,
+    "probe_large_system_repeats": 800
+  },
+  "fields": {
+    "input_tokens": "Anthropic uncached input tokens; total input includes cache reads and writes",
+    "cache_read_input_tokens": "Tokens reported as read from the provider prompt cache",
+    "cache_creation_input_tokens": "Tokens reported as written to the provider prompt cache",
+    "gateway_request_id": "Gateway correlation value whose meaning is defined by that gateway",
+    "provider_request_id": "Provider or gateway request identifier used to join request records"
+  },
+  "provider_semantics": {
+    "anthropic": {"read_field": "cache_read_input_tokens", "write_field": "cache_creation_input_tokens"},
+    "openai": {"read_field": "prompt_tokens_details.cached_tokens", "write_field": null},
+    "gemini": {"read_field": "cachedContentTokenCount", "write_field": null}
+  },
+  "evidence_scope": "Reported cache usage and request continuity; credential origin requires separate evidence",
+  "pair_scenarios": [
+    {"id": "write_then_read", "first_write": 4096, "second_write": 0, "second_read": 4096, "expected": "PASS"},
+    {"id": "read_with_new_suffix", "first_write": 4096, "second_write": 256, "second_read": 4096, "expected": "PASS"},
+    {"id": "read_only_provider", "first_write": 0, "second_write": 0, "second_read": 4096, "expected": "PASS"},
+    {"id": "repeated_write", "first_write": 4096, "second_write": 4096, "second_read": 0, "expected": "WARN"},
+    {"id": "unobserved", "first_write": 0, "second_write": 0, "second_read": 0, "expected": "SKIP"},
+    {"id": "below_probe_threshold", "first_write": 100, "second_write": 100, "second_read": 100, "expected": "SKIP"}
+  ],
+  "ledger_scenarios": [
+    {"id": "unchanged_prefix", "change": "none", "previous_read": 4096, "current_read": 4096, "expected_causes": []},
+    {"id": "append_turn_preserves_prefix", "change": "append", "previous_read": 4096, "current_read": 4096, "expected_causes": []},
+    {"id": "stable_prefix_loses_reads", "change": "none", "previous_read": 4096, "current_read": 0, "expected_causes": ["unexplained"]},
+    {"id": "model_changed", "change": "model", "previous_read": 4096, "current_read": 0, "expected_causes": ["model"]},
+    {"id": "system_changed_before_first_read", "change": "system", "previous_read": 0, "current_read": 0, "expected_causes": ["system"]},
+    {"id": "tool_revealed_before_first_read", "change": "tools", "previous_read": 0, "current_read": 0, "expected_causes": ["tools"]},
+    {"id": "thinking_and_signature_preserved", "change": "append_tool_result", "previous_read": 4096, "current_read": 4096, "expected_causes": []},
+    {"id": "thinking_content_changed", "change": "thinking", "previous_read": 4096, "current_read": 0, "expected_causes": ["messages-rewritten"]},
+    {"id": "thinking_signature_changed", "change": "signature", "previous_read": 4096, "current_read": 0, "expected_causes": ["messages-rewritten"]},
+    {"id": "thinking_block_removed", "change": "remove_thinking", "previous_read": 4096, "current_read": 0, "expected_causes": ["messages-rewritten"]}
+  ],
+  "history_fixture": [
+    {"role": "user", "content": [{"type": "text", "text": "Read fixture.txt with the declared tool."}]},
+    {"role": "assistant", "content": [
+      {"type": "thinking", "thinking": "Synthetic reasoning fixture", "signature": "synthetic-signature-v1"},
+      {"type": "tool_use", "id": "toolu_fixture", "name": "read_file", "input": {"path": "fixture.txt"}}
+    ]}
+  ],
+  "sources": ["https://platform.claude.com/docs/en/build-with-claude/prompt-caching"]
+}

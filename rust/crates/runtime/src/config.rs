@@ -187,6 +187,7 @@ impl SudoCodeConfig {
 /// Structured feature configuration consumed by runtime subsystems.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuntimeFeatureConfig {
+    max_steps: Option<u32>,
     hooks: RuntimeHookConfig,
     plugins: RuntimePluginConfig,
     mcp: McpConfigCollection,
@@ -199,6 +200,7 @@ pub struct RuntimeFeatureConfig {
     provider_fallbacks: ProviderFallbackConfig,
     /// Enable extended thinking for models that support it (default: true).
     thinking: bool,
+    response_recording: crate::response_archive::ResponseRecordingConfig,
     /// `experimental` section: feature-flag key -> enabled. Keys are
     /// validated against `crate::experiments::Experiment` at parse time.
     experiments: BTreeMap<String, bool>,
@@ -974,7 +976,14 @@ impl ConfigLoader {
 
         let merged_value = JsonValue::Object(merged.clone());
 
+        let max_steps = optional_u32(&merged, "maxSteps", "merged settings")?;
+        if max_steps == Some(0) {
+            return Err(ConfigError::Parse(
+                "maxSteps must be a positive integer".into(),
+            ));
+        }
         let feature_config = RuntimeFeatureConfig {
+            max_steps,
             hooks: parse_optional_hooks_config(&merged_value)?,
             plugins: parse_optional_plugin_config(&merged_value)?,
             mcp: McpConfigCollection {
@@ -988,6 +997,9 @@ impl ConfigLoader {
             sandbox: parse_optional_sandbox_config(&merged_value)?,
             provider_fallbacks: parse_optional_provider_fallbacks(&merged_value)?,
             thinking: parse_optional_thinking(&merged_value),
+            response_recording: crate::response_archive::ResponseRecordingConfig::parse(
+                merged.get("responseRecording"),
+            )?,
             experiments: parse_optional_experiments(&merged_value)?,
         };
 
@@ -1157,6 +1169,14 @@ impl RuntimeConfig {
         self.feature_config.thinking
     }
 
+    /// Persisted effort preference. Max is deliberately session scoped, as in CC.
+    #[must_use]
+    pub fn effort_level(&self) -> Option<&str> {
+        self.get("effortLevel")
+            .and_then(JsonValue::as_str)
+            .filter(|level| crate::effort::CLAUDE_LEVELS.contains(level) && *level != "max")
+    }
+
     #[must_use]
     pub fn aliases(&self) -> &BTreeMap<String, String> {
         &self.feature_config.aliases
@@ -1184,6 +1204,17 @@ impl RuntimeConfig {
 }
 
 impl RuntimeFeatureConfig {
+    #[must_use]
+    pub fn response_recording(&self) -> &crate::response_archive::ResponseRecordingConfig {
+        &self.response_recording
+    }
+
+    /// Maximum tool rounds per user turn; absent means unlimited.
+    #[must_use]
+    pub fn max_steps(&self) -> Option<u32> {
+        self.max_steps
+    }
+
     #[must_use]
     pub fn with_hooks(mut self, hooks: RuntimeHookConfig) -> Self {
         self.hooks = hooks;
@@ -2632,24 +2663,9 @@ mod tests {
     use crate::json::JsonValue;
     use crate::sandbox::FilesystemIsolationMode;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> std::path::PathBuf {
-        // #149: previously used `runtime-config-{nanos}` which collided
-        // under parallel `cargo test --workspace` when multiple tests
-        // started within the same nanosecond bucket on fast machines.
-        // Add process id + a monotonically-incrementing atomic counter
-        // so every callsite gets a provably-unique directory regardless
-        // of clock resolution or scheduling.
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be after epoch")
-            .as_nanos();
-        let pid = std::process::id();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("runtime-config-{pid}-{nanos}-{seq}"))
+        crate::test_support::temp_dir_path("runtime-config")
     }
 
     #[test]

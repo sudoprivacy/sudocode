@@ -16,7 +16,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// One update from a sub-agent, or about one.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SubagentEvent {
     /// The sub-agent stream this update belongs to. `None` only for the
     /// lifecycle of a top-level agent, which belongs to the parent session.
@@ -26,7 +26,7 @@ pub struct SubagentEvent {
 
 /// Where an update sits: which agent's stream, spawned by which call, and its
 /// position in that agent's sequence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SubagentStreamRef {
     /// The client-visible id of the call that spawned `agent_id`.
     pub parent_tool_call_id: String,
@@ -37,7 +37,7 @@ pub struct SubagentStreamRef {
 }
 
 /// What happened.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SubagentUpdate {
     TextDelta {
         text: String,
@@ -63,7 +63,7 @@ pub enum SubagentUpdate {
 
 /// Start or end of one spawned agent, reported against the call that spawned
 /// it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SubagentLifecycle {
     /// Client-visible id of the spawning call.
     pub tool_call_id: String,
@@ -83,7 +83,7 @@ pub struct SubagentLifecycle {
     pub completion_notification: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SubagentPhase {
     Started,
     Finished,
@@ -100,7 +100,7 @@ impl SubagentPhase {
 }
 
 /// Who the spawned agent is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SubagentIdentity {
     pub agent_id: String,
     pub name: String,
@@ -152,6 +152,7 @@ impl SubagentScope {
 pub struct SubagentSink {
     emit: Arc<dyn Fn(SubagentEvent) + Send + Sync>,
     scope: Option<Arc<SubagentScope>>,
+    completion: Option<Arc<crate::subagent_completion::CompletionJournal>>,
 }
 
 impl SubagentSink {
@@ -160,7 +161,32 @@ impl SubagentSink {
         Self {
             emit: Arc::new(f),
             scope: None,
+            completion: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_completion_journal(
+        mut self,
+        journal: Option<Arc<crate::subagent_completion::CompletionJournal>>,
+    ) -> Self {
+        self.completion = journal;
+        self
+    }
+
+    /// The caller must finish this durable registration before starting work.
+    /// Nested streams deliberately have no top-level completion authority.
+    pub fn register_completion(
+        &self,
+        lifecycle: SubagentLifecycle,
+        manifest: String,
+    ) -> Result<(), String> {
+        if self.scope.is_none() {
+            if let Some(journal) = &self.completion {
+                journal.register(lifecycle, manifest)?;
+            }
+        }
+        Ok(())
     }
 
     /// The same destination, scoped to `scope`'s stream.
@@ -169,6 +195,7 @@ impl SubagentSink {
         Self {
             emit: Arc::clone(&self.emit),
             scope: Some(scope),
+            completion: self.completion.clone(),
         }
     }
 

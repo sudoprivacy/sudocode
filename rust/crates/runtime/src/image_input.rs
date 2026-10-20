@@ -88,6 +88,41 @@ pub enum ToolContextAction {
 }
 
 impl ToolOutput {
+    /// Preserve images from an authorized MCP tool as native attachments.
+    /// Shell/plugin text never enters this explicitly trusted boundary.
+    pub fn from_mcp_result(output: String, model: &str) -> Result<Self, ToolError> {
+        let mut value: serde_json::Value = serde_json::from_str(&output)
+            .map_err(|error| ToolError::new(format!("invalid MCP result: {error}")))?;
+        let Some(content) = value
+            .get_mut("content")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return Ok(Self::text(output));
+        };
+        let mut attachments = Vec::new();
+        for block in content {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+                continue;
+            }
+            let data = block
+                .get("data")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ToolError::new("MCP image data is required"))?;
+            let mime = block
+                .get("mimeType")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ToolError::new("MCP image MIME type is required"))?;
+            attachments.push(prepare_image(data, mime, model).map_err(ToolError::new)?);
+            *block = serde_json::json!({ "type": "text", "text": format!("Image ({mime}); attached below.") });
+        }
+        Ok(Self {
+            text: serde_json::to_string_pretty(&value)
+                .map_err(|error| ToolError::new(error.to_string()))?,
+            attachments,
+            context_action: None,
+        })
+    }
+
     #[must_use]
     pub fn text(text: String) -> Self {
         Self {

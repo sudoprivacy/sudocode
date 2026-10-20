@@ -41,7 +41,9 @@ pub use runtime::{
     // Prompt-cache + auto-compaction telemetry (AssistantEvent::PromptCache,
     // TurnSummary::auto_compaction).
     AutoCompactionEvent,
+    CompactionOutcome,
     CompactionProgress,
+    CompactionReport,
     CompactionStatus,
     // The content-block vocabulary a renderer sends back in an
     // `EngineCommand::Prompt` (text, images, …).
@@ -98,6 +100,78 @@ pub enum BackgroundTaskAction {
 /// within a single engine session, including across cancelled turns.
 pub type RequestId = u64;
 
+pub use runtime::subagent_completion::{ContextRef, TaskCompletion};
+
+/// Explicit input policy, independent of the frontend driving the session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImageInputPolicy {
+    /// Preserve native blocks and the runtime's image validation.
+    #[default]
+    Native,
+    /// Allow engine-side description for unsupported or oversized images.
+    DescribeUnsupported,
+}
+
+/// Optional identity and optimistic context check for a durable turn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PromptContext {
+    pub trace_id: String,
+    pub expected_context: Option<ContextRef>,
+    pub image_policy: ImageInputPolicy,
+}
+
+/// Build metadata used by session management reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManagementContext {
+    pub agent_version: String,
+    pub git_sha: Option<String>,
+    pub build_target: Option<String>,
+}
+
+/// Completion delivery uses the same command/event boundary as model turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionAction {
+    Configure {
+        tasks: bool,
+        connected: bool,
+    },
+    CheckBinding {
+        session_id: String,
+        cwd: std::path::PathBuf,
+    },
+    Status,
+    Replay {
+        storage_ref: Option<String>,
+        after: Option<String>,
+        legacy: bool,
+    },
+    Suppress {
+        storage_ref: String,
+        trace: String,
+    },
+    Purge {
+        storage_ref: String,
+        cleanup_id: String,
+    },
+    Receipt {
+        attempt: u64,
+        receipt: CompletionReceipt,
+    },
+}
+
+/// Transport facts only. The engine validates identity and advances receipts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionReceipt {
+    Ack {
+        completion_id: Option<String>,
+        disposition: Option<String>,
+        reason: Option<String>,
+    },
+    ProtocolRejected,
+    Unavailable,
+    Retry,
+}
+
 /// The engine's lifecycle state, surfaced to renderers via
 /// [`EngineEvent::State`].
 ///
@@ -152,6 +226,16 @@ pub struct TurnComplete {
 /// — `PartialEq` is all any consumer (tests included) needs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
+    CommandResult {
+        id: u64,
+        result: Result<serde_json::Value, String>,
+    },
+    CompletionRequest {
+        attempt: u64,
+        tasks: bool,
+        payload: runtime::subagent_completion::TaskCompletion,
+    },
+    CompletionIdle,
     /// A new turn has begun. `label` is a short human description (e.g. the
     /// first line of the prompt) for progress display.
     TurnStarted {
@@ -256,11 +340,23 @@ pub enum EngineEvent {
     PermissionModeChanged {
         mode: PermissionMode,
     },
-    /// What a spawned sub-agent is doing (was invisible: the child runtime
-    /// had no observer). Only emitted when the renderer attached a
-    /// `SubagentRelay` to its observer; may arrive after the spawning turn
-    /// ended when the agent runs in the background.
+    /// What a spawned sub-agent is doing. Always routed by the engine session;
+    /// may arrive after the spawning turn ended.
     Subagent(SubagentEvent),
+    /// A background child result qualified by the engine for parent delivery.
+    /// Renderers enqueue the frozen notification; they do not infer readiness.
+    SubagentCompletionReady(Box<SubagentLifecycle>),
+    /// The durable parent transcript has committed at this revision.
+    ContextCommitted(ContextRef),
+    /// The prompt was rejected before a turn began; existing state is intact.
+    PromptRejected {
+        message: String,
+    },
+    /// A model turn failed with its runtime classification preserved.
+    TurnFailed {
+        message: String,
+        context_window: bool,
+    },
     /// Session-owned shells and child tasks, including updates while idle.
     BackgroundTask(BackgroundTaskEvent),
     BackgroundTaskError {
@@ -287,19 +383,41 @@ pub enum EngineEvent {
 /// each renderer's ad-hoc prompt path. They all collapse into these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCommand {
+    CancelSubagent {
+        request_id: u64,
+        agent_id: String,
+    },
+    Management {
+        line: String,
+        context: Option<PromptContext>,
+        build: ManagementContext,
+    },
+    Completion {
+        id: Option<u64>,
+        action: CompletionAction,
+    },
     /// Start a turn with the given content blocks (was
     /// `run_turn_with_blocks`).
-    Prompt { blocks: Vec<ContentBlock> },
+    Prompt {
+        blocks: Vec<ContentBlock>,
+        context: Option<PromptContext>,
+    },
     /// Cancel the in-flight turn (was `abort_signal.abort()`).
     Cancel,
     /// Inspect or stop session-owned background work without interrupting a turn.
-    BackgroundTask { action: BackgroundTaskAction },
+    BackgroundTask {
+        action: BackgroundTaskAction,
+    },
     /// Switch the active model; the engine replies with
     /// [`EngineEvent::ModelChanged`].
-    SetModel { model: String },
+    SetModel {
+        model: String,
+    },
     /// Switch the active permission mode; the engine replies with
     /// [`EngineEvent::PermissionModeChanged`].
-    SetPermissionMode { mode: PermissionMode },
+    SetPermissionMode {
+        mode: PermissionMode,
+    },
     /// Answer to a prior [`EngineEvent::PermissionRequest`] with a matching
     /// [`RequestId`].
     PermissionAnswer {
@@ -314,7 +432,9 @@ pub enum EngineCommand {
     },
     /// Run a slash command (`/model`, `/compact`, …); the engine replies with
     /// [`EngineEvent::Notice`] (or a more specific event).
-    SlashCommand { line: String },
+    SlashCommand {
+        line: String,
+    },
     /// Tear down the session. No further events follow.
     Close,
 }

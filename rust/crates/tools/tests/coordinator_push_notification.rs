@@ -67,7 +67,13 @@ fn coord_mode_on_persist_terminal_pushes_task_notification_to_inbox() {
     .expect("persist ok");
 
     // Drain from the SAME workspace and verify one XML block landed.
-    let batch = coordinator_notification::drain(&ws).expect("drain ok");
+    let pending = coordinator_notification::drain(&ws).expect("drain ok");
+    let mut batch: Vec<_> = pending
+        .messages()
+        .map(|message| (message.timestamp, message.body.clone()))
+        .collect();
+    batch.sort_by_key(|(timestamp, _)| *timestamp);
+    let batch: Vec<_> = batch.into_iter().map(|(_, body)| body).collect();
     assert_eq!(batch.len(), 1, "one task-notification emitted");
     let xml = &batch[0];
     assert!(xml.starts_with("<task-notification>"));
@@ -77,6 +83,8 @@ fn coord_mode_on_persist_terminal_pushes_task_notification_to_inbox() {
     // values we recorded via persist_terminal_with_telemetry.
     assert!(xml.contains("<total_tokens>1234</total_tokens>"));
     assert!(xml.contains("<tool_uses>5</tool_uses>"));
+
+    pending.acknowledge().unwrap();
 
     // Restore cwd + env before returning.
     std::env::set_current_dir(prior_cwd).ok();
@@ -108,8 +116,9 @@ fn coord_mode_off_persist_terminal_does_not_touch_inbox() {
         !inbox.exists(),
         "coord mode OFF must not create the coordinator inbox file"
     );
-    let batch = coordinator_notification::drain(&ws).unwrap_or_default();
-    assert!(batch.is_empty());
+    let pending = coordinator_notification::drain(&ws).unwrap_or_default();
+    assert_eq!(pending.messages().count(), 0);
+    drop(pending);
 
     std::env::set_current_dir(prior_cwd).ok();
     let _ = std::fs::remove_dir_all(&ws);
@@ -150,7 +159,13 @@ fn double_persist_terminal_for_same_agent_emits_exactly_once() {
     )
     .expect("persist ok #2");
 
-    let batch = coordinator_notification::drain(&ws).expect("drain ok");
+    let pending = coordinator_notification::drain(&ws).expect("drain ok");
+    let mut batch: Vec<_> = pending
+        .messages()
+        .map(|message| (message.timestamp, message.body.clone()))
+        .collect();
+    batch.sort_by_key(|(timestamp, _)| *timestamp);
+    let batch: Vec<_> = batch.into_iter().map(|(_, body)| body).collect();
     assert_eq!(
         batch.len(),
         1,
@@ -167,6 +182,7 @@ fn double_persist_terminal_for_same_agent_emits_exactly_once() {
         Some(true),
         "notified flag MUST persist"
     );
+    pending.acknowledge().unwrap();
 
     std::env::set_current_dir(prior_cwd).ok();
     std::env::remove_var(COORDINATOR_ENV_VAR);
@@ -188,7 +204,13 @@ fn two_subagents_completing_produce_two_task_notifications_in_fifo_order() {
     persist_terminal_with_telemetry_for_test(&m2, "failed", None, Some("boom".into()), None)
         .unwrap();
 
-    let batch = coordinator_notification::drain(&ws).expect("drain ok");
+    let pending = coordinator_notification::drain(&ws).expect("drain ok");
+    let mut batch: Vec<_> = pending
+        .messages()
+        .map(|message| (message.timestamp, message.body.clone()))
+        .collect();
+    batch.sort_by_key(|(timestamp, _)| *timestamp);
+    let batch: Vec<_> = batch.into_iter().map(|(_, body)| body).collect();
     assert_eq!(batch.len(), 2);
     assert!(
         batch[0].contains("agent-first"),
@@ -199,7 +221,21 @@ fn two_subagents_completing_produce_two_task_notifications_in_fifo_order() {
         "second-completed comes second"
     );
     // Second batch is empty — offset advanced.
-    assert!(coordinator_notification::drain(&ws).unwrap().is_empty());
+    drop(pending);
+    let replay = coordinator_notification::drain(&ws).unwrap();
+    assert_eq!(
+        replay.messages().count(),
+        2,
+        "unprocessed notifications must replay"
+    );
+    replay.acknowledge().unwrap();
+    assert_eq!(
+        coordinator_notification::drain(&ws)
+            .unwrap()
+            .messages()
+            .count(),
+        0
+    );
 
     std::env::set_current_dir(prior_cwd).ok();
     std::env::remove_var(COORDINATOR_ENV_VAR);

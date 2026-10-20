@@ -1,0 +1,4 @@
+command-group 5.0.1
+https://github.com/watchexec/command-group
+Commit: 790d818d67ef091166bada894e1694cb543792bb
+Local change: expose Windows Job active-process accounting for bounded termination confirmation.

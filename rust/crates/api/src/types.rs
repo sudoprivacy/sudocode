@@ -58,8 +58,9 @@ pub struct MessageRequest {
     pub presence_penalty: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
-    /// Reasoning effort level for OpenAI-compatible reasoning models (e.g. `o4-mini`).
-    /// Accepted values: `"low"`, `"medium"`, `"high"`. Omitted when `None`.
+    /// Reasoning effort level; adaptive Anthropic requests map this to
+    /// `output_config.effort`, OpenAI-compatible requests use their own format.
+    /// Accepted values are provider-specific. Omitted when `None`.
     /// Silently ignored by backends that do not support it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
@@ -70,9 +71,10 @@ pub struct MessageRequest {
     #[serde(skip)]
     pub cache_hints: Option<CacheHints>,
 
-    /// Enable extended thinking (Anthropic-specific). When true, the
-    /// Anthropic client injects `thinking: { type: "enabled", budget_tokens }`
-    /// into the request body. Other providers ignore this field.
+    /// Request thinking (Anthropic-specific). Budgeted models use an explicit
+    /// model-level budget. Always-adaptive models cannot disable reasoning:
+    /// this flag selects summarized versus omitted display, retaining signed
+    /// blocks in both cases. Other providers ignore this field.
     #[serde(skip)]
     pub thinking_enabled: bool,
 
@@ -151,7 +153,7 @@ impl RequestMetadata {
 pub struct SessionRequestFields {
     /// Routing key — see [`RequestMetadata`].
     pub metadata: Option<RequestMetadata>,
-    /// Reasoning effort for OpenAI-compatible reasoning models. Session-level
+    /// Reasoning effort for reasoning models. Session-level
     /// state (`--reasoning-effort`, or an agent definition), so a completion
     /// that replays a turn's prefix has to declare the same value the turns
     /// declare, and a summary generated at a different effort than the user
@@ -401,6 +403,12 @@ pub enum OutputContentBlock {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
+    #[serde(
+        default,
+        alias = "total_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reported_total_tokens: Option<u32>,
     #[serde(default)]
     pub input_tokens: u32,
     #[serde(default)]
@@ -416,17 +424,43 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Merge fields from a cumulative provider snapshot. A zero-filled field
+    /// leaves the last reported count intact; costs may explicitly be zero.
+    /// Anthropic splits input/cache counts at `message_start` and output at
+    /// `message_delta`. Collecting and incremental consumers use the same rule.
+    pub fn merge_snapshot(&mut self, incoming: Self) {
+        if let Some(total) = incoming.reported_total_tokens {
+            self.reported_total_tokens = Some(self.reported_total_tokens.unwrap_or(0).max(total));
+        }
+        if incoming.input_tokens > 0 {
+            self.input_tokens = incoming.input_tokens;
+        }
+        if incoming.output_tokens > 0 {
+            self.output_tokens = incoming.output_tokens;
+        }
+        if incoming.cache_creation_input_tokens > 0 {
+            self.cache_creation_input_tokens = incoming.cache_creation_input_tokens;
+        }
+        if incoming.cache_read_input_tokens > 0 {
+            self.cache_read_input_tokens = incoming.cache_read_input_tokens;
+        }
+        if incoming.cost_units.is_some() {
+            self.cost_units = incoming.cost_units;
+        }
+        if incoming.cost_currency.is_some() {
+            self.cost_currency = incoming.cost_currency;
+        }
+    }
+
     #[must_use]
-    pub const fn total_tokens(&self) -> u32 {
-        self.input_tokens
-            + self.output_tokens
-            + self.cache_creation_input_tokens
-            + self.cache_read_input_tokens
+    pub fn total_tokens(&self) -> u32 {
+        self.token_usage().total_tokens()
     }
 
     #[must_use]
     pub fn token_usage(&self) -> TokenUsage {
         TokenUsage {
+            reported_total_tokens: self.reported_total_tokens,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             cache_creation_input_tokens: self.cache_creation_input_tokens,
@@ -437,11 +471,10 @@ impl Usage {
     }
 
     #[must_use]
-    pub fn estimated_cost_usd(&self, model: &str) -> UsageCostEstimate {
+    pub fn estimated_cost_usd(&self, model: &str) -> Option<UsageCostEstimate> {
         let usage = self.token_usage();
-        pricing_for_model(model).map_or_else(
-            || usage.estimate_cost_usd(),
-            |pricing| usage.estimate_cost_usd_with_pricing(pricing),
+        usage.estimate_cost_usd_with_pricing(
+            pricing_for_model(model).unwrap_or_else(runtime::ModelPricing::default_sonnet_tier),
         )
     }
 }
@@ -582,7 +615,10 @@ mod tests {
             gateway_request_id: None,
         };
 
-        let cost = response.usage.estimated_cost_usd(&response.model);
+        let cost = response
+            .usage
+            .estimated_cost_usd(&response.model)
+            .expect("complete token allocation");
         assert_eq!(format_usd(cost.total_cost_usd()), "$54.6750");
         assert_eq!(response.total_tokens(), 1_800_000);
     }

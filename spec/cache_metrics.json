@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "cache": {
+    "read_share_pct": {"numerator": "read", "denominator": ["read", "write", "uncached"]},
+    "write_share_pct": {"numerator": "write", "denominator": ["read", "write", "uncached"]},
+    "reuse_pct": {"numerator": "read", "denominator": ["read", "write"]}
+  },
+  "ttl": {
+    "cost_5m": ["+", ["*", "write", "write_5m"], ["*", "read", "read_price"]],
+    "cost_1h": ["+", ["*", ["-", "write", "rescued"], "write_1h"], ["*", ["+", "read", "rescued"], "read_price"]],
+    "break_even_ratio": ["/", ["-", "write_1h", "write_5m"], ["-", "write_1h", "read_price"]]
+  }
+}

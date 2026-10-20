@@ -26,6 +26,7 @@ your first contribution.
 - [Prerequisites](#prerequisites)
 - [Building](#building)
 - [Required checks](#required-checks)
+- [Company model routing in CI](#company-model-routing-in-ci)
 - [Measuring prompt-cache behaviour](#measuring-prompt-cache-behaviour)
 - [Running the CLI locally](#running-the-cli-locally)
 - [Working on a single crate](#working-on-a-single-crate)
@@ -64,7 +65,7 @@ the code first.
 
 - **No in-CLI multi-agent dashboard.** sudocode is an agent unit,
   not a hub. Multi-agent orchestration UI belongs in sudowork /
-  hydra / your tmux — not inside scode. (See ROADMAP § Goal 4.)
+  your tmux — not inside scode. (See ROADMAP § Goal 4.)
 
 - **No CLA, no copyright assignment, no closed-source escape
   hatch.** Contributors retain their copyright; their code is
@@ -91,7 +92,7 @@ the code first.
   and [`.../src/session.rs`](./rust/crates/engine-core/src/session.rs).
   A CI `boundary-gate` job enforces it. (See ROADMAP → ACP-cut / #100.)
 
-The full Always / Never list lives in [`README.md` § Design
+The product principles live in [`README.md` § Design
 principles](./README.md#design-principles). When in doubt, read
 that section before opening the PR.
 
@@ -317,6 +318,12 @@ the PR description first.
 
 ## Required checks
 
+Prompt cache observation defaults, field semantics and synthetic scenarios live
+in [`spec/prompt_cache_observations.json`](./spec/prompt_cache_observations.json).
+The native ledger reads that specification directly. Endpoint probes can pin
+the same public file by commit and SHA-256. Cache efficiency formulas remain
+in [`spec/cache_metrics.json`](./spec/cache_metrics.json).
+
 ### Startup latency
 
 `SCODE_TRACE_STARTUP=1 scode version` prints local phase durations to stderr.
@@ -423,6 +430,36 @@ cargo build -p mock-anthropic-service
 cargo doc --workspace --no-deps
 ```
 
+## Company model routing in CI
+
+CI uses the company `SUDOROUTER_CI_API_KEY` secret. Personal developer accounts
+belong only in local configuration and must never be copied into CI secrets.
+`SUDOROUTER_NATIVE_CHANNEL` optionally selects an existing company-accessible
+native Anthropic channel without replacing the credential. Both native ACP
+acceptance and model review read this repository variable. They also share
+`SUDOROUTER_NATIVE_MODEL` (default `claude-sonnet-4-6`). GPT protocol acceptance
+keeps its separate baseline and normal company routing. File/tool PTY journeys
+use a faster model verified with the original approval, report-read and replay
+assertions; changing a route or model does not raise their turn budgets.
+
+`SUDOROUTER_AZURE_CHANNEL` selects the existing Azure channel for the DeepSeek
+reasoning/file-tool journey. That journey uses its own copied auth profile with
+the same company credential and a channel suffix. Other PTYs keep normal routing.
+Validate this route with the complete file-read scenario on Linux and Windows.
+
+Verify a changed native route with the original real subagent/cache scenario,
+retaining its output/thinking budgets and assertions. A small successful request
+alone is insufficient. Channel selection does not prove another model or the
+rest of the catalog is usable.
+
+Review runs follow the current ready PR head and cancel superseded runs. They
+use the job-scoped read-only GitHub token so workflow edits can receive a real
+review. The workflow checks the live PR and checkout before and after execution;
+the repository-owned [review instructions](.github/prompts/code-review.md) define
+the independent reviews to run. Prior comments never substitute for reviewing
+the current commit. Missing execution records, skipped fan-out and incomplete
+model runs fail the job, with the sanitized execution evidence retained.
+
 ## Measuring prompt-cache behaviour
 
 Anthropic's prompt cache matches a **byte-exact prefix**, so anything that
@@ -430,8 +467,9 @@ rewrites an earlier part of a request throws away everything cached after it.
 That failure is invisible in normal output — the run still succeeds, it just
 costs several times more input. Two places report it:
 
-- **Live, per turn** — the status line's `⚡NN%` (hit rate, higher is better)
-  and `✎NN%` (write rate, lower is steadier; red on a spike ≥25%).
+- **Live, per turn** — `⚡NN%` and `✎NN%` are cache reads and writes divided
+  by all prompt input, including uncached input. `Σ⚡NN%` is the session's
+  cumulative read share. Write shares of at least 25% appear red.
 - **After the fact, across sessions** — `scode cache stats`
   (`--output-format json` for a machine-readable version):
 
@@ -441,7 +479,13 @@ scode cache stats
 
 It reads per-session records under
 `~/.nexus/sudocode/cache/prompt-cache/<session-id>/stats.json` and reports
-reads, writes, hit rate and cache breaks. A break is classified: `system
+reads, writes, cache reuse and cache breaks. Reuse divides reads by reads plus
+writes, so it differs from the status line's prompt denominator. JSON includes
+both metrics and per-session completion-interval histograms. Each histogram
+reads at most the last 512 KiB and reports sampling, duplicates and malformed
+rows. These are response-completion intervals; they do not establish expiry.
+Legacy rollups without uncached-input coverage report prompt shares as unknown.
+A break is classified: `system
 prompt changed` / `tool definitions changed` / `model changed` / `message
 history rewritten at index N`, or **`unexpected`** when reads dropped while
 the request fingerprint held steady — that last one means the prefix went
@@ -460,6 +504,16 @@ If you change anything that touches the system prompt, the tool list, or the
 message history, take a reading before and after — the cost of getting this
 wrong does not show up as a failure.
 
+`spec/cache_metrics.json` is the calculation source for the StatusSlot, offline
+reports and Ladder monitoring. Update it, run
+`python scripts/generate_cache_metrics.py`, and commit both generated outputs.
+CI runs `--check` to prevent drift. Ladder vendors `scripts/cache_metrics.py`
+at a recorded commit and SHA-256; sync it with Ladder's
+`tools/sync_cache_metrics.py --source-root <scode-checkout>` after committing
+the canonical changes. Keep calculations in this shared contract instead of
+adding separate percentages or TTL price formulas to a renderer or monitor.
+Changes to measurement do not enable telemetry or automatic TTL selection.
+
 Main turns, subagent turns, and compaction share
 `api::session_message_request`. Add session-level request fields there rather
 than assembling another request in a caller. `SystemPrompt` uses copy-on-write
@@ -475,6 +529,19 @@ compaction, forks, and restart. They also exercise explicit prompt replacement.
 The scoped-context cases verify config roots, CLI package discovery, layered
 memory, and memory write permissions through the real CLI.
 Mock usage numbers are fixtures, not evidence of real provider cache hits.
+
+`SUDOCODE_CACHE_DIAGNOSTICS=1` opts into the provider's diagnosis beta. Its
+previous-message ID belongs to one client/session and is restored from
+`cache/prompt-cache/<session-id>/cache-diagnostics.json` on restart. The existing
+SSE decoder captures diagnostic metadata across HTTP chunks, JSON whitespace and
+whole-JSON responses; it does not run a second parser. With diagnostics disabled,
+no diagnostic fields, beta or diagnostic-state I/O are added. State persistence
+is best effort and cannot fail or retry a provider request. Set
+`SUDOCODE_DUMP_REQUESTS` to keep diagnoses next to request dumps; these opt-in
+dumps can contain conversation data and must not be published as raw evidence.
+The PTY prefix suite tests correlation and unchanged wire prefixes, not real
+cache availability. Neither a correct diagnosis chain nor identical client
+prefixes establish a live cache hit or an upstream account/cache-shard identity.
 
 ## Running the CLI locally
 
@@ -568,12 +635,15 @@ review comments.
 
 Once approved, a maintainer merges with **`--merge`** (not squash)
 to preserve the feature-branch commit history. The "Block Merge
-Commits in PR" CI check requires you to **rebase** (not merge) when
-syncing your feature branch onto the latest `main` —
-`git fetch origin`, `git rebase origin/main`, then
-`git push --force-with-lease` is the safe form. The required check
-examines the actual PR head, rejects PR-only merge commits and new
-conflict markers, and runs for every PR regardless of changed paths.
+Commits in PR" CI check requires your branch to include the latest
+`main` and have a linear PR history. Update with `git fetch origin`,
+`git rebase origin/main`, resolve any conflicts, and
+`git push --force-with-lease` for an already-pushed branch. Preserve the
+feature commits and their authors while rebasing. The check examines the
+actual PR head and rejects every merge commit introduced by the PR,
+including merges of `main`. Existing merge commits already in `main`
+remain valid. It also rejects new conflict markers and runs for every PR
+regardless of changed paths.
 Strict branch protection also requires the PR to remain up to date
 and pass the required CI checks before merging, including for admins.
 

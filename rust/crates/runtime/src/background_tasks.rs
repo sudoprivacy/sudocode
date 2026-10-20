@@ -23,6 +23,7 @@ pub enum BackgroundTaskKind {
 pub enum BackgroundTaskStatus {
     Running,
     Stopping,
+    ExecutionUnconfirmed,
     Completed,
     Failed,
     Cancelled,
@@ -40,6 +41,7 @@ impl BackgroundTaskStatus {
         match self {
             Self::Running => "running",
             Self::Stopping => "stopping",
+            Self::ExecutionUnconfirmed => "execution_unconfirmed",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
@@ -110,12 +112,38 @@ struct Registry {
     sink: Option<TaskSink>,
     changed: Arc<Condvar>,
     closing: bool,
+    paused: bool,
+    pause_epoch: u64,
+    operations: usize,
+}
+
+/// Retained by the actual tool worker, including after its caller is cancelled.
+#[derive(Clone)]
+pub struct ToolOperation {
+    _lease: Arc<ToolOperationLease>,
+}
+
+struct ToolOperationLease {
+    registry: Arc<Mutex<Registry>>,
+}
+
+impl Drop for ToolOperationLease {
+    fn drop(&mut self) {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.operations -= 1;
+        registry.changed.notify_all();
+    }
 }
 
 #[derive(Clone, Default)]
 pub struct BackgroundTasks {
     registry: Arc<Mutex<Registry>>,
     parent_id: Option<String>,
+    completion: Arc<Mutex<Option<Arc<crate::subagent_completion::CompletionJournal>>>>,
+    tool_id: Option<String>,
 }
 
 impl std::fmt::Debug for BackgroundTasks {
@@ -125,6 +153,195 @@ impl std::fmt::Debug for BackgroundTasks {
 }
 
 impl BackgroundTasks {
+    /// Admit one operation before dispatch. All child contexts share this registry.
+    pub fn begin_operation(&self) -> Result<ToolOperation, String> {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if registry.paused || registry.closing {
+            return Err(
+                "Tool execution is paused by the user; wait for explicit return of control"
+                    .to_string(),
+            );
+        }
+        registry.operations += 1;
+        Ok(ToolOperation {
+            _lease: Arc::new(ToolOperationLease {
+                registry: Arc::clone(&self.registry),
+            }),
+        })
+    }
+
+    /// Fence admission before signalling every current child, including late producers.
+    pub fn begin_pause(&self) -> u64 {
+        let ids = {
+            let mut registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !registry.paused {
+                registry.pause_epoch = registry
+                    .pause_epoch
+                    .checked_add(1)
+                    .expect("tool pause epoch exhausted");
+                registry.paused = true;
+            }
+            (
+                registry.pause_epoch,
+                registry.tasks.keys().cloned().collect::<Vec<_>>(),
+            )
+        };
+        for id in ids.1 {
+            let _ = self.stop(&id);
+        }
+        ids.0
+    }
+
+    /// A timeout preserves the fence; it never grants human control prematurely.
+    pub fn wait_paused(&self, epoch: u64, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if !registry.paused || registry.pause_epoch != epoch {
+                return Err("Tool pause ownership changed".to_string());
+            }
+            if registry.operations == 0
+                && registry
+                    .tasks
+                    .values()
+                    .all(|record| !record.task.status.is_active())
+            {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(
+                    "Tool operations are still stopping; control remains fenced".to_string()
+                );
+            }
+            let changed = Arc::clone(&registry.changed);
+            registry = changed
+                .wait_timeout(registry, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    pub fn resume_operations(&self, epoch: u64) -> Result<(), String> {
+        let mut registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if registry.closing || !registry.paused || registry.pause_epoch != epoch {
+            return Err("Tool pause ownership changed".to_string());
+        }
+        if registry.operations != 0
+            || registry
+                .tasks
+                .values()
+                .any(|record| record.task.status.is_active())
+        {
+            return Err("Tool operations are still stopping; control remains fenced".to_string());
+        }
+        registry.paused = false;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .paused
+    }
+
+    #[must_use]
+    pub fn tool_control(&self) -> (u64, bool) {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (registry.pause_epoch, registry.paused)
+    }
+
+    #[must_use]
+    pub fn with_completion(
+        self,
+        journal: Option<Arc<crate::subagent_completion::CompletionJournal>>,
+    ) -> Self {
+        if self.parent_id.is_none() {
+            if let Some(journal) = &journal {
+                let registry = Arc::downgrade(&self.registry);
+                journal.set_cache_clear(move || {
+                    if let Some(registry) = registry.upgrade() {
+                        let mut registry = registry
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // This registry also owns cancellation. Purging stored
+                        // results must retain unfinished process ownership.
+                        registry.tasks.retain(|_, record| {
+                            record.task.status.is_active()
+                                || record.task.status == BackgroundTaskStatus::ExecutionUnconfirmed
+                        });
+                        registry.changed.notify_all();
+                    }
+                });
+            }
+            *self
+                .completion
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = journal;
+        }
+        self
+    }
+
+    /// Per-invocation identity, never a mutable session-global current tool ID.
+    #[must_use]
+    pub fn for_tool(&self, tool: Option<&str>) -> Self {
+        let mut tasks = self.clone();
+        tasks.tool_id = tool.map(str::to_owned);
+        tasks
+    }
+
+    pub fn prepare_terminal(
+        &self,
+        task: &str,
+        shell: crate::subagent_completion::ShellKind,
+    ) -> Result<Option<Arc<crate::subagent_completion::CompletionJournal>>, String> {
+        if self.parent_id.is_some() {
+            return Ok(None);
+        }
+        let journal = self
+            .completion
+            .lock()
+            .map_err(|_| "completion binding poisoned")?
+            .clone();
+        let Some(journal) = journal.filter(|j| j.tasks_enabled()) else {
+            return Ok(None);
+        };
+        journal.register_terminal(
+            self.tool_id
+                .as_deref()
+                .ok_or("terminal tool identity missing")?,
+            task,
+            shell,
+        )?;
+        Ok(Some(journal))
+    }
+
+    pub fn durable_terminal(&self, task: &str) -> Result<Option<serde_json::Value>, String> {
+        let journal = self
+            .completion
+            .lock()
+            .map_err(|_| "completion binding poisoned")?
+            .clone();
+        journal.map_or(Ok(None), |j| j.terminal_result(task))
+    }
+
     pub fn set_sink(&self, sink: impl Fn(BackgroundTaskEvent) + Send + Sync + 'static) {
         let mut registry = self
             .registry
@@ -147,6 +364,7 @@ impl BackgroundTasks {
         // A producer may register just as its parent is being stopped. Inherit
         // cancellation while holding the same lock used by recursive stop.
         let should_stop = registry.closing
+            || registry.paused
             || task.parent_id.as_ref().is_some_and(|id| {
                 registry.tasks.get(id).is_some_and(|parent| {
                     matches!(
@@ -278,6 +496,8 @@ impl BackgroundTasks {
         Self {
             registry: Arc::clone(&self.registry),
             parent_id: Some(id.to_string()),
+            completion: Arc::clone(&self.completion),
+            tool_id: None,
         }
     }
 

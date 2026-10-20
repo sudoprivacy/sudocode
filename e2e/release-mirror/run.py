@@ -76,6 +76,8 @@ import os, sys, urllib.request, urllib.error
 args = sys.argv[1:]
 url = args[-1]
 base = os.environ['MIRROR_TEST_URL']
+if os.environ.get('MIRROR_BLOCK_GITHUB') == '1' and 'github.com/' in url:
+    raise RuntimeError('GitHub is unavailable in this region')
 for remote, local in [
     ('https://api.github.com/repos/sudoprivacy/sudocode/releases', '/api'),
     ('https://github.com/sudoprivacy/sudocode/releases/download', '/github'),
@@ -129,9 +131,12 @@ else:
             (dist / f"scode-windows-{arch}.zip").write_bytes(version.encode())
         (dist / f"scode_{version[1:]}_amd64.deb").write_bytes(version.encode())
         if is_bundle:
-            shutil.copyfile(
-                dist / "scode-linux-x64.tar.gz", dist / "scode-linux-x64-bundle.tar.gz"
-            )
+            for arch in ("x64", "arm64"):
+                shutil.copyfile(
+                    dist / f"scode-linux-{arch}.tar.gz",
+                    dist / f"scode-linux-{arch}-bundle.tar.gz",
+                )
+            (dist / f"scode_{version[1:]}_arm64.deb").write_bytes(version.encode())
         checksums = "".join(
             f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
             for path in sorted(dist.iterdir())
@@ -157,10 +162,10 @@ else:
 
     installed = root / "installed"
 
-    def install(expected, *flags, success=True):
+    def install(expected, *flags, success=True, extra=None):
         result = run(
             ["sh", str(ROOT / "install.sh"), "--prefix", str(installed), "--no-sudo", *flags],
-            success=success,
+            success=success, extra=extra,
         )
         if success:
             assert run([str(installed / "scode")]).stdout.strip() == expected
@@ -170,16 +175,18 @@ else:
         return (root / "uploads.jsonl").read_text().splitlines()
 
     pointer = public / "sudocode/release/latest/version.txt"
-    prepare("v1.0.0")
+    prepare("v0.2.31")
     # Before migration there is no pointer: use the same GitHub version for both files.
-    install("v1.0.0")
-    install("v1.0.0", "--version", "v1.0.0")
-    publish("stage", "v1.0.0")
+    install("v0.2.31")
+    install("v0.2.31", "--version", "v0.2.31")
+    publish("stage", "v0.2.31")
     assert not pointer.exists()
-    publish("promote", "v1.0.0")
-    install("v1.0.0")
-    prepare("v1.0.1", is_bundle=True)
-    dist = root / "v1.0.1"
+    publish("promote", "v0.2.31")
+    requests.clear()
+    install("v0.2.31", extra={"MIRROR_BLOCK_GITHUB": "1"})
+    assert all(not path.startswith(("/api/", "/github/")) for path in requests)
+    prepare("v0.2.32", is_bundle=True)
+    dist = root / "v0.2.32"
     manifest = dist / "SHA256SUMS.txt"
     original_manifest = manifest.read_text()
     before = len(uploads())
@@ -188,53 +195,54 @@ else:
     manifest.write_text(
         original_manifest + f"{hashlib.sha256(extra.read_bytes()).hexdigest()}  {extra.name}\n"
     )
-    assert "release artifact set differs" in publish("stage", "v1.0.1", success=False).stderr
+    assert "release artifact set differs" in publish("stage", "v0.2.32", success=False).stderr
     extra.unlink()
-    manifest.write_text("".join(
-        line for line in original_manifest.splitlines(True)
-        if "scode-linux-arm64.tar.gz" not in line
-    ))
-    assert "release artifact set differs" in publish("stage", "v1.0.1", success=False).stderr
+    for missing in ("scode-linux-arm64.tar.gz", "scode-linux-arm64-bundle.tar.gz", "scode_0.2.32_arm64.deb"):
+        manifest.write_text("".join(
+            line for line in original_manifest.splitlines(True)
+            if missing not in line
+        ))
+        assert "release artifact set differs" in publish("stage", "v0.2.32", success=False).stderr
     manifest.write_text(original_manifest)
     assert len(uploads()) == before, "invalid manifests must fail before uploading"
-    bundle = dist / "scode-linux-x64-bundle.tar.gz"
+    bundle = dist / "scode-linux-arm64-bundle.tar.gz"
     original_bundle = bundle.read_bytes()
     bundle.write_bytes(b"corrupt bundle")
-    assert "local checksum mismatch" in publish("stage", "v1.0.1", success=False).stderr
+    assert "local checksum mismatch" in publish("stage", "v0.2.32", success=False).stderr
     assert len(uploads()) == before
     bundle.write_bytes(original_bundle)
     before = len(uploads())
-    publish("stage", "v1.0.1", success=False, extra={"MIRROR_FAIL_AT": str(before + 4)})
+    publish("stage", "v0.2.32", success=False, extra={"MIRROR_FAIL_AT": str(before + 4)})
     staged = uploads()[before:]
     assert len(staged) == 3
     requests.clear()
-    install("v1.0.0")
+    install("v0.2.31")
     assert "/api/latest" not in requests
-    assert "/github/v1.0.0/SHA256SUMS.txt" in requests
-    publish("promote", "v1.0.1", success=False)
-    assert pointer.read_text().strip() == "v1.0.0"
-    publish("stage", "v1.0.1")
+    assert "/sudocode/release/v0.2.31/SHA256SUMS.txt" in requests
+    publish("promote", "v0.2.32", success=False)
+    assert pointer.read_text().strip() == "v0.2.31"
+    publish("stage", "v0.2.32")
     assert all(uploads().count(key) == 1 for key in staged), "retry replaced matching assets"
     # Even interruption after the new installer upload leaves a complete old release.
-    publish("promote", "v1.0.1", success=False, extra={"MIRROR_FAIL_AT": str(len(uploads()) + 2)})
-    install("v1.0.0")
-    publish("promote", "v1.0.1")
-    assert (public / "sudocode/release/v1.0.1" / bundle.name).read_bytes() == original_bundle
-    install("v1.0.1")
-    install("v1.0.0", "--version", "v1.0.0")
-    publish("promote", "v1.0.0")
-    assert pointer.read_text().strip() == "v1.0.1", "old retry rolled latest backward"
-    install("v1.0.1")
+    publish("promote", "v0.2.32", success=False, extra={"MIRROR_FAIL_AT": str(len(uploads()) + 2)})
+    install("v0.2.31")
+    publish("promote", "v0.2.32")
+    assert (public / "sudocode/release/v0.2.32" / bundle.name).read_bytes() == original_bundle
+    install("v0.2.32")
+    install("v0.2.31", "--version", "v0.2.31")
+    publish("promote", "v0.2.31")
+    assert pointer.read_text().strip() == "v0.2.32", "old retry rolled latest backward"
+    install("v0.2.32")
     target_os = "macos" if platform.system() == "Darwin" else "linux"
     arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "x64"
-    archive = public / f"sudocode/release/v1.0.1/scode-{target_os}-{arch}.tar.gz"
+    archive = public / f"sudocode/release/v0.2.32/scode-{target_os}-{arch}.tar.gz"
     archive.write_bytes(b"corrupt mirror")
     result = install(None, success=False)
     assert "checksum mismatch" in result.stderr
-    assert run([str(installed / "scode")]).stdout.strip() == "v1.0.1"
-    result = publish("stage", "v1.0.1", success=False)
+    assert run([str(installed / "scode")]).stdout.strip() == "v0.2.32"
+    result = publish("stage", "v0.2.32", success=False)
     assert "refusing to replace immutable object" in result.stderr
-    assert pointer.read_text().strip() == "v1.0.1"
+    assert pointer.read_text().strip() == "v0.2.32"
 
 
 if __name__ == "__main__":

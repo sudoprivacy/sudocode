@@ -103,7 +103,7 @@ pub(crate) fn build_acp_prompt_for_host(
     let mut prompt = runtime::load_system_prompt_with_fs_and_memory(
         root,
         runtime::today_local(),
-        "Nexus virtual filesystem (POSIX paths)",
+        runtime::NEXUS_FILESYSTEM_PLATFORM,
         "unknown",
         host.fs.as_ref(),
         memory,

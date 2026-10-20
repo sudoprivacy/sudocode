@@ -303,9 +303,10 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                 )?;
             }
             let blocks = runtime::image_input::prompt_blocks(&prompt, &runtime::StdFsBackend)?;
-            cli.engine_handle
-                .commands
-                .send(EngineCommand::Prompt { blocks })?;
+            cli.engine_handle.commands.send(EngineCommand::Prompt {
+                blocks,
+                context: None,
+            })?;
             result["num_turns"] = json!(1);
             stage = "runtime_error";
             let mut messages = Messages::default();
@@ -413,9 +414,7 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                         result["result"] = json!(messages.final_text);
                         result["model_round_trips"] = json!(tc.iterations);
                         if usage_observed {
-                            result["usage"] = json!({"input_tokens":tc.turn_usage.input_tokens, "output_tokens":tc.turn_usage.output_tokens,
-                            "cache_read_input_tokens":tc.turn_usage.cache_read_input_tokens,
-                            "cache_creation_input_tokens":tc.turn_usage.cache_creation_input_tokens});
+                            result["usage"] = tc.turn_usage.to_json();
                         }
                         if needs_input {
                             stage = "needs_input";
@@ -439,7 +438,9 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                         }
                         return Ok(());
                     }
-                    EngineEvent::Error { message } => return Err(message.into()),
+                    EngineEvent::Error { message }
+                    | EngineEvent::TurnFailed { message, .. }
+                    | EngineEvent::PromptRejected { message } => return Err(message.into()),
                     EngineEvent::Notice { text } if options.verbose => eprintln!("{text}"),
                     _ => {}
                 }

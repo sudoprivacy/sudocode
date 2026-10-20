@@ -12,11 +12,11 @@ pub mod acp_stdio_server;
 pub mod acp_ws_server;
 #[cfg(feature = "mailbox")]
 pub mod managed_agent;
+mod session_driver;
 /// ACP-side session lifecycle + turn glue on top of the `engine_core` seam
-/// (build/load/fork a `SessionEngine` per session, drive one `run_turn` per
-/// `session/prompt`, translate `EngineEvent`/`TurnComplete` onto the ACP wire).
+/// (build/load/fork a session, drive it through `EngineHandle`, and translate
+/// `EngineEvent`/`TurnComplete` onto the ACP wire).
 mod session_ops;
-/// VLM image-describe side-call for text-only models handed an image.
-mod vlm_describe;
+mod subagent_completions;
 
 pub use acp_sdk_server::AcpError;

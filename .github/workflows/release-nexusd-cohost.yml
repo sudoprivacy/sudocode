@@ -27,6 +27,7 @@ on:
       - .github/workflows/release-nexusd-cohost.yml
       - rust/Cargo.toml
       - rust/Cargo.lock
+      - rust/vendor/**
       - rust/crates/nexusd-cohost/**
       - rust/crates/engine-acp/**
       - rust/crates/engine-host/**
@@ -284,6 +285,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          make_latest: false
           files: |
             dist/nexusd-cohost-*
             dist/SHA256SUMS.txt

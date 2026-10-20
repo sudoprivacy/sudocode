@@ -4,6 +4,10 @@ mod common;
 use common::TestEnv;
 use runtime::{ContentBlock, ConversationMessage, Session, TokenUsage};
 
+#[cfg(windows)]
+#[path = "support/windows_palette.rs"]
+mod windows_palette;
+
 #[test]
 #[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
 fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {

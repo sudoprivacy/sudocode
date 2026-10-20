@@ -4,11 +4,12 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ProviderErrorBody, ProviderErrorEnvelope};
 use crate::http_transport::{
-    parse_retry_after, request_id_from_headers, HttpTransport, RetryPolicy,
+    parse_retry_after, request_id_from_headers, HttpRequestResult, HttpTransport, RetryPolicy,
 };
 use crate::stream_collect::ResponseAccumulator;
+use crate::stream_diagnostics::StreamProgress;
 use crate::types::{
     is_reserved_request_body_key, ContentBlockDelta, ContentBlockDeltaEvent,
     ContentBlockStartEvent, ContentBlockStopEvent, InputContentBlock, InputMessage, MessageDelta,
@@ -16,6 +17,7 @@ use crate::types::{
     OutputContentBlock, StreamEvent, ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
 };
 
+use super::inline_reasoning::InlineReasoning;
 use super::registry::{preflight_message_request, ApiFormat};
 use super::{Provider, ProviderFuture};
 
@@ -222,7 +224,9 @@ impl OpenAiCompatClient {
                 .await?;
             return collect_response_stream(&mut stream, &request).await;
         }
-        let response = self.send_request(&request, trace_id).await?;
+        let result = self.send_request(&request, trace_id).await?;
+        let client_request_id = result.request_id;
+        let response = result.response;
         let request_id = request_id_from_headers(response.headers());
         let body = response.text().await.map_err(ApiError::from)?;
         // Some backends return {"error":{"message":"...","type":"...","code":...}}
@@ -243,10 +247,7 @@ impl OpenAiCompatClient {
                 return Err(ApiError::Api {
                     status: reqwest::StatusCode::from_u16(code.unwrap_or(400))
                         .unwrap_or(reqwest::StatusCode::BAD_REQUEST),
-                    error_type: err_obj
-                        .get("type")
-                        .and_then(|t| t.as_str())
-                        .map(str::to_owned),
+                    error_type: ProviderErrorBody::kind_from_json(err_obj),
                     message: Some(msg),
                     request_id,
                     body,
@@ -269,17 +270,19 @@ impl OpenAiCompatClient {
         }
         if has_usage {
             if let Some(tracer) = self.session_tracer() {
-                tracer.record_usage_with_cost(
-                    normalized
-                        .request_id
-                        .clone()
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    normalized.usage.input_tokens,
-                    normalized.usage.output_tokens,
-                    normalized.usage.cache_creation_input_tokens,
-                    normalized.usage.cache_read_input_tokens,
-                    normalized.usage.cost_units,
-                    normalized.usage.cost_currency.as_deref(),
+                tracer.record_usage_snapshot(
+                    client_request_id,
+                    telemetry::UsageTokens {
+                        input_tokens: normalized.usage.input_tokens,
+                        output_tokens: normalized.usage.output_tokens,
+                        cache_creation_input_tokens: normalized.usage.cache_creation_input_tokens,
+                        cache_read_input_tokens: normalized.usage.cache_read_input_tokens,
+                        reported_total_tokens: normalized.usage.reported_total_tokens,
+                    },
+                    telemetry::UsageCost {
+                        units: normalized.usage.cost_units,
+                        currency: normalized.usage.cost_currency.as_deref(),
+                    },
                 );
             }
         }
@@ -292,12 +295,14 @@ impl OpenAiCompatClient {
         trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
         preflight_message_request(request)?;
-        let response = self
+        let result = self
             .send_request(&request.clone().with_streaming(), trace_id)
             .await?;
+        let response = result.response;
         Ok(match self.api_format {
             ApiFormat::OpenAiCompletions => MessageStream::chat(
                 request_id_from_headers(response.headers()),
+                result.request_id,
                 response,
                 self.config.provider_name,
                 request.model.clone(),
@@ -305,6 +310,7 @@ impl OpenAiCompatClient {
             ),
             ApiFormat::OpenAiResponses => MessageStream::responses(
                 request_id_from_headers(response.headers()),
+                result.request_id,
                 response,
                 request.model.clone(),
                 self.session_tracer().cloned(),
@@ -318,7 +324,7 @@ impl OpenAiCompatClient {
         &self,
         request: &MessageRequest,
         trace_id: Option<&str>,
-    ) -> Result<reqwest::Response, ApiError> {
+    ) -> Result<HttpRequestResult, ApiError> {
         match self.api_format {
             ApiFormat::OpenAiCompletions => check_request_body_size(request, self.config())?,
             ApiFormat::OpenAiResponses => {
@@ -343,6 +349,14 @@ impl OpenAiCompatClient {
             _ => unreachable!("OpenAiCompatClient only supports OpenAI-compatible formats"),
         };
         merge_extra_body(&mut body, &self.extra_body);
+        super::anthropic::dump_request_body(
+            if self.api_format == ApiFormat::OpenAiResponses {
+                "responses"
+            } else {
+                "chat-completions"
+            },
+            &body,
+        );
 
         let headers = vec![
             ("content-type".to_string(), "application/json".to_string()),
@@ -362,7 +376,6 @@ impl OpenAiCompatClient {
                 trace_id,
             )
             .await
-            .map(|result| result.response)
     }
 }
 
@@ -402,29 +415,34 @@ impl Provider for OpenAiCompatClient {
 #[derive(Debug)]
 pub struct MessageStream {
     request_id: Option<String>,
-    response: reqwest::Response,
+    client_request_id: String,
+    response: crate::RecordedResponse,
     parser: MessageStreamParser,
     pending: VecDeque<StreamEvent>,
     done: bool,
     usage_recorded: bool,
     session_tracer: Option<telemetry::SessionTracer>,
     state: MessageStreamState,
-    /// Number of HTTP chunks successfully read from the stream.
-    chunks_read: u64,
-    /// Number of SSE events successfully parsed from the stream.
-    sse_events_read: u64,
+    progress: StreamProgress,
 }
 
 impl MessageStream {
     fn chat(
         request_id: Option<String>,
-        response: reqwest::Response,
+        client_request_id: String,
+        response: crate::RecordedResponse,
         provider: impl Into<String>,
         model: String,
         session_tracer: Option<telemetry::SessionTracer>,
     ) -> Self {
+        let progress = StreamProgress::new(
+            session_tracer.clone(),
+            Some(client_request_id.clone()),
+            model.clone(),
+        );
         Self {
             request_id,
+            client_request_id,
             response,
             parser: MessageStreamParser::Chat(OpenAiSseParser::with_context(
                 provider,
@@ -435,19 +453,25 @@ impl MessageStream {
             usage_recorded: false,
             session_tracer,
             state: MessageStreamState::Chat(ChatStreamState::new(model)),
-            chunks_read: 0,
-            sse_events_read: 0,
+            progress,
         }
     }
 
     fn responses(
         request_id: Option<String>,
-        response: reqwest::Response,
+        client_request_id: String,
+        response: crate::RecordedResponse,
         model: String,
         session_tracer: Option<telemetry::SessionTracer>,
     ) -> Self {
+        let progress = StreamProgress::new(
+            session_tracer.clone(),
+            Some(client_request_id.clone()),
+            model.clone(),
+        );
         Self {
             request_id,
+            client_request_id,
             response,
             parser: MessageStreamParser::Responses(ResponsesSseParser::new()),
             pending: VecDeque::new(),
@@ -455,8 +479,7 @@ impl MessageStream {
             usage_recorded: false,
             session_tracer,
             state: MessageStreamState::Responses(ResponsesStreamState::new(model)),
-            chunks_read: 0,
-            sse_events_read: 0,
+            progress,
         }
     }
 
@@ -468,6 +491,7 @@ impl MessageStream {
     pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, ApiError> {
         loop {
             if let Some(event) = self.pending.pop_front() {
+                self.progress.observe_event(&event);
                 return Ok(Some(event));
             }
 
@@ -475,6 +499,7 @@ impl MessageStream {
                 self.pending.extend(self.state.finish()?);
                 self.record_usage_once();
                 if let Some(event) = self.pending.pop_front() {
+                    self.progress.observe_event(&event);
                     return Ok(Some(event));
                 }
                 return Ok(None);
@@ -482,25 +507,35 @@ impl MessageStream {
 
             match self.response.chunk().await {
                 Ok(Some(chunk)) => {
-                    self.chunks_read += 1;
+                    self.progress.observe_chunk(chunk.len());
                     match (&mut self.parser, &mut self.state) {
                         (MessageStreamParser::Chat(parser), MessageStreamState::Chat(state)) => {
                             for parsed in parser.push(&chunk)? {
-                                self.sse_events_read += 1;
+                                self.progress.sse_events_read += 1;
                                 self.pending.extend(state.ingest_chunk(parsed)?);
                             }
+                            // [DONE] terminates SSE independently of HTTP EOF.
+                            // The preceding usage-only chunk must be consumed
+                            // before the final normalized events are emitted.
+                            self.done = parser.done;
                         }
                         (
                             MessageStreamParser::Responses(parser),
                             MessageStreamState::Responses(state),
                         ) => {
                             for frame in parser.push(&chunk) {
-                                self.sse_events_read += 1;
+                                self.progress.sse_events_read += 1;
                                 self.pending.extend(state.ingest_frame(&frame)?);
                             }
+                            self.done = state.stop_reason.is_some();
                         }
                         _ => unreachable!("message stream parser/state mismatch"),
                     }
+                    let pending = match &self.parser {
+                        MessageStreamParser::Chat(parser) => &parser.buffer,
+                        MessageStreamParser::Responses(parser) => &parser.buffer,
+                    };
+                    self.progress.parsed_chunk(pending);
                 }
                 Ok(None) => {
                     // Flush any trailing non-SSE body (HTML error page, bare
@@ -509,7 +544,7 @@ impl MessageStream {
                         (&mut self.parser, &mut self.state)
                     {
                         for parsed in parser.finish()? {
-                            self.sse_events_read += 1;
+                            self.progress.sse_events_read += 1;
                             self.pending.extend(state.ingest_chunk(parsed)?);
                         }
                     }
@@ -519,13 +554,10 @@ impl MessageStream {
                     if let Some(tracer) = &self.session_tracer {
                         let error_chain = format_error_chain(&error);
                         tracer.record_stream_error(telemetry::StreamErrorTelemetry {
-                            request_id: self
-                                .request_id
-                                .clone()
-                                .unwrap_or_else(|| "unknown".to_string()),
+                            request_id: self.client_request_id.clone(),
                             model: self.state.model().to_string(),
-                            chunks_read: self.chunks_read,
-                            sse_events_read: self.sse_events_read,
+                            chunks_read: self.progress.chunks_read,
+                            sse_events_read: self.progress.sse_events_read,
                             usage_seen: self.state.usage().is_some(),
                             stream_finished: self.state.is_finished(),
                             error_message: error.to_string(),
@@ -539,6 +571,10 @@ impl MessageStream {
     }
 
     fn record_usage_once(&mut self) {
+        if let Some(usage) = self.state.usage() {
+            runtime::compaction_scope::record_usage(usage.token_usage());
+        }
+
         if self.usage_recorded {
             return;
         }
@@ -546,19 +582,23 @@ impl MessageStream {
         let Some(usage) = self.state.usage() else {
             return;
         };
+        runtime::compaction_scope::record_usage(usage.token_usage());
         let Some(tracer) = &self.session_tracer else {
             return;
         };
-        tracer.record_usage_with_cost(
-            self.request_id
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string()),
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.cache_creation_input_tokens,
-            usage.cache_read_input_tokens,
-            usage.cost_units,
-            usage.cost_currency.as_deref(),
+        tracer.record_usage_snapshot(
+            self.client_request_id.clone(),
+            telemetry::UsageTokens {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+                reported_total_tokens: usage.reported_total_tokens,
+            },
+            telemetry::UsageCost {
+                units: usage.cost_units,
+                currency: usage.cost_currency.as_deref(),
+            },
         );
     }
 }
@@ -577,6 +617,17 @@ enum MessageStreamState {
 
 impl MessageStreamState {
     fn finish(&mut self) -> Result<Vec<StreamEvent>, ApiError> {
+        let terminal = match self {
+            Self::Chat(state) => state.stop_reason.is_some(),
+            Self::Responses(state) => state.stop_reason.is_some(),
+        };
+        if runtime::compaction_scope::is_active() && !terminal {
+            return Err(ApiError::incomplete_stream(
+                "OpenAI-compatible",
+                self.model(),
+                "summary stream ended without a provider terminal event",
+            ));
+        }
         match self {
             Self::Chat(state) => state.finish(),
             Self::Responses(state) => Ok(state.finish()),
@@ -610,6 +661,7 @@ struct OpenAiSseParser {
     buffer: Vec<u8>,
     provider: String,
     model: String,
+    done: bool,
 }
 
 impl OpenAiSseParser {
@@ -618,6 +670,7 @@ impl OpenAiSseParser {
             buffer: Vec::new(),
             provider: provider.into(),
             model: model.into(),
+            done: false,
         }
     }
 
@@ -635,9 +688,27 @@ impl OpenAiSseParser {
         let mut events = Vec::new();
 
         while let Some(frame) = next_sse_frame(&mut self.buffer) {
-            if let Some(event) = parse_sse_frame(&frame, &self.provider, &self.model)? {
-                events.push(event);
+            let event = match parse_sse_frame(&frame, &self.provider, &self.model)? {
+                ChatSseFrame::Chunk(event) => event,
+                ChatSseFrame::Done => {
+                    self.done = true;
+                    self.buffer.clear();
+                    break;
+                }
+                ChatSseFrame::Ignored => continue,
+            };
+            if let Some(usage) = &event.usage {
+                runtime::compaction_scope::record_usage(usage.to_api_usage().token_usage());
             }
+            if event
+                .choices
+                .iter()
+                .any(|choice| choice.finish_reason.is_some())
+            {
+                runtime::compaction_scope::record_completed_response()
+                    .map_err(|error| ApiError::Configuration(error.to_string()))?;
+            }
+            events.push(event);
         }
 
         Ok(events)
@@ -662,15 +733,23 @@ impl OpenAiSseParser {
         // truncation, not a malformed model payload: surface it as a retryable
         // IncompleteStream instead of a JSON error that blames the model.
         match parse_sse_frame(&tail, &self.provider, &self.model) {
-            Ok(Some(event)) => Ok(vec![event]),
+            Ok(ChatSseFrame::Chunk(event)) => Ok(vec![event]),
+            Ok(ChatSseFrame::Done) => {
+                self.done = true;
+                Ok(Vec::new())
+            }
             // An unframed body that does not parse as JSON at all was cut off
             // mid-object. Nothing else sees these bytes — `push` holds whole
             // bodies for this method — so returning empty would drop a
             // truncation silently and report a successful empty turn.
-            Ok(None) if crate::sse::unframed_body_was_truncated(tail.trim()) => Err(
-                ApiError::incomplete_stream(&self.provider, &self.model, &tail),
-            ),
-            Ok(None) => Ok(Vec::new()),
+            Ok(ChatSseFrame::Ignored) if crate::sse::unframed_body_was_truncated(tail.trim()) => {
+                Err(ApiError::incomplete_stream(
+                    &self.provider,
+                    &self.model,
+                    &tail,
+                ))
+            }
+            Ok(ChatSseFrame::Ignored) => Ok(Vec::new()),
             // An error envelope is a real answer about a real problem — keep it
             // rather than marking it a retryable truncation and re-uploading the
             // conversation to be told the same thing. Reachable for any JSON
@@ -714,6 +793,7 @@ fn whole_completion_as_chunk(body: &str) -> Option<ChatCompletionChunk> {
         choices: vec![ChunkChoice {
             delta: ChunkDelta {
                 content: choice.message.content,
+                reasoning: choice.message.reasoning,
                 reasoning_content: choice.message.reasoning_content,
                 tool_calls: choice
                     .message
@@ -751,11 +831,13 @@ struct ChatStreamState {
     tool_calls: BTreeMap<u32, ToolCallState>,
     thinking_started: bool,
     thinking_finished: bool,
+    inline_reasoning: Option<InlineReasoning>,
 }
 
 impl ChatStreamState {
     fn new(model: String) -> Self {
         Self {
+            inline_reasoning: InlineReasoning::for_model(&model),
             model,
             message_id: None,
             response_model: None,
@@ -773,56 +855,38 @@ impl ChatStreamState {
 
     fn ingest_chunk(&mut self, chunk: ChatCompletionChunk) -> Result<Vec<StreamEvent>, ApiError> {
         let mut events = Vec::new();
-        if self.message_id.is_none() {
+        if self.message_id.is_none() && !chunk.id.is_empty() {
             self.message_id = Some(chunk.id.clone());
         }
         if self.response_model.is_none() {
-            self.response_model = chunk.model.clone();
+            self.response_model = chunk.model.filter(|model| !model.is_empty());
         }
 
         if let Some(usage) = chunk.usage {
-            self.usage = Some(usage.to_api_usage());
+            self.usage
+                .get_or_insert_with(Usage::default)
+                .merge_snapshot(usage.to_api_usage());
         }
 
         for choice in chunk.choices {
-            if let Some(reasoning) = choice.delta.reasoning_content {
-                if !self.thinking_started {
-                    self.ensure_message_started(&mut events);
-                    self.thinking_started = true;
-                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
-                        index: 0,
-                        content_block: OutputContentBlock::Thinking {
-                            thinking: String::new(),
-                            signature: None,
-                        },
-                    }));
-                }
+            if let Some(reasoning) =
+                normalize_reasoning(choice.delta.reasoning, choice.delta.reasoning_content)
+            {
                 if !reasoning.is_empty() {
-                    events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                        index: 0,
-                        delta: ContentBlockDelta::ThinkingDelta {
-                            thinking: reasoning,
-                        },
-                    }));
+                    // Native structured reasoning already establishes the
+                    // protocol. Its answer may contain literal <think> text.
+                    self.inline_reasoning = None;
                 }
+                self.ingest_thinking(reasoning, &mut events);
             }
 
             if let Some(content) = choice.delta.content.filter(|value| !value.is_empty()) {
-                self.close_thinking(&mut events);
-                if !self.text_started {
-                    self.ensure_message_started(&mut events);
-                    self.text_started = true;
-                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
-                        index: self.text_block_index(),
-                        content_block: OutputContentBlock::Text {
-                            text: String::new(),
-                        },
-                    }));
-                }
-                events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
-                    index: self.text_block_index(),
-                    delta: ContentBlockDelta::TextDelta { text: content },
-                }));
+                let segments = if let Some(parser) = &mut self.inline_reasoning {
+                    parser.push(&content)
+                } else {
+                    vec![(false, content)]
+                };
+                self.ingest_content(segments, &mut events);
             }
 
             for tool_call in choice.delta.tool_calls {
@@ -866,6 +930,9 @@ impl ChatStreamState {
             }
 
             if let Some(finish_reason) = choice.finish_reason {
+                if finish_reason == "content_filter" {
+                    self.ensure_message_started(&mut events);
+                }
                 self.stop_reason = Some(normalize_finish_reason(&finish_reason));
                 if finish_reason == "tool_calls" {
                     let tool_index_offset = self.tool_index_offset();
@@ -891,6 +958,10 @@ impl ChatStreamState {
         self.finished = true;
 
         let mut events = Vec::new();
+        if let Some(parser) = &mut self.inline_reasoning {
+            let segments = parser.finish()?;
+            self.ingest_content(segments, &mut events);
+        }
         self.close_thinking(&mut events);
         if self.text_started && !self.text_finished {
             self.text_finished = true;
@@ -933,18 +1004,55 @@ impl ChatStreamState {
                     ),
                     stop_sequence: None,
                 },
-                usage: self.usage.clone().unwrap_or(Usage {
-                    input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                    output_tokens: 0,
-                    cost_units: None,
-                    cost_currency: None,
-                }),
+                usage: self.usage.clone().unwrap_or(Usage::default()),
             }));
             events.push(StreamEvent::MessageStop(MessageStopEvent {}));
         }
         Ok(events)
+    }
+
+    fn ingest_content(&mut self, segments: Vec<(bool, String)>, events: &mut Vec<StreamEvent>) {
+        for (reasoning, text) in segments {
+            if reasoning {
+                self.ingest_thinking(text, events);
+            } else {
+                self.close_thinking(events);
+                if !self.text_started {
+                    self.ensure_message_started(events);
+                    self.text_started = true;
+                    events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                        index: self.text_block_index(),
+                        content_block: OutputContentBlock::Text {
+                            text: String::new(),
+                        },
+                    }));
+                }
+                events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                    index: self.text_block_index(),
+                    delta: ContentBlockDelta::TextDelta { text },
+                }));
+            }
+        }
+    }
+
+    fn ingest_thinking(&mut self, thinking: String, events: &mut Vec<StreamEvent>) {
+        if !self.thinking_started {
+            self.ensure_message_started(events);
+            self.thinking_started = true;
+            events.push(StreamEvent::ContentBlockStart(ContentBlockStartEvent {
+                index: 0,
+                content_block: OutputContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: None,
+                },
+            }));
+        }
+        if !thinking.is_empty() {
+            events.push(StreamEvent::ContentBlockDelta(ContentBlockDeltaEvent {
+                index: 0,
+                delta: ContentBlockDelta::ThinkingDelta { thinking },
+            }));
+        }
     }
 
     fn ensure_message_started(&mut self, events: &mut Vec<StreamEvent>) {
@@ -964,14 +1072,7 @@ impl ChatStreamState {
                     .unwrap_or_else(|| self.model.clone()),
                 stop_reason: None,
                 stop_sequence: None,
-                usage: Usage {
-                    input_tokens: 0,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0,
-                    output_tokens: 0,
-                    cost_units: None,
-                    cost_currency: None,
-                },
+                usage: Usage::default(),
                 request_id: None,
                 gateway_request_id: None,
             },
@@ -1340,24 +1441,43 @@ impl ResponsesStreamState {
                     }
                 }
             }
-            "response.completed" => {
+            "response.completed" | "response.incomplete" | "response.failed" => {
                 let resp = json.get("response").unwrap_or(&json);
                 if let Some(u) = resp.get("usage") {
-                    self.usage = Some(Usage {
-                        input_tokens: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)
-                            as u32,
-                        output_tokens: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0)
-                            as u32,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0,
-                        ..Usage::default()
+                    let usage: OpenAiUsage =
+                        serde_json::from_value(u.clone()).map_err(|error| {
+                            ApiError::json_deserialize("OpenAI", &self.model, &u.to_string(), error)
+                        })?;
+                    self.usage = Some(usage.to_api_usage());
+                }
+                runtime::compaction_scope::record_completed_response()
+                    .map_err(|error| ApiError::Configuration(error.to_string()))?;
+                let event_type = frame.event_type.as_str();
+                let refusal = responses_refusal(resp);
+                if runtime::compaction_scope::is_active()
+                    && (event_type == "response.failed"
+                        || refusal.is_some()
+                        || (event_type == "response.incomplete"
+                            && resp["incomplete_details"]["reason"] == "content_filter"))
+                {
+                    return Err(ApiError::ProviderRefusal {
+                        provider: "OpenAI-compatible".into(),
+                        model: self.model.clone(),
+                        category: Some(event_type.into()),
+                        explanation: refusal
+                            .or_else(|| resp["error"]["message"].as_str().map(str::to_string)),
+                        usage: self.usage.clone().map(Box::new),
                     });
                 }
-                self.stop_reason = Some(if self.tool_blocks.is_empty() {
-                    "end_turn".to_string()
+                if event_type == "response.incomplete" {
+                    self.stop_reason = Some("incomplete".into());
                 } else {
-                    "tool_use".to_string()
-                });
+                    self.stop_reason = Some(if self.tool_blocks.is_empty() {
+                        "end_turn".to_string()
+                    } else {
+                        "tool_use".to_string()
+                    });
+                }
             }
             _ => {}
         }
@@ -1456,6 +1576,23 @@ impl ResponsesStreamState {
     }
 }
 
+fn responses_refusal(response: &Value) -> Option<String> {
+    response
+        .get("output")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flatten()
+        .find_map(|part| {
+            (part["type"] == "refusal").then(|| {
+                part["refusal"]
+                    .as_str()
+                    .unwrap_or("provider refusal")
+                    .to_string()
+            })
+        })
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     id: String,
@@ -1478,9 +1615,25 @@ struct ChatMessage {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ResponseToolCall>,
+}
+
+/// vLLM uses `reasoning`; older compatible APIs use `reasoning_content`.
+/// Read both separately because a serde alias rejects responses carrying both.
+/// Prefer the nonempty current field, with the legacy field as a fallback.
+fn normalize_reasoning(
+    reasoning: Option<String>,
+    reasoning_content: Option<String>,
+) -> Option<String> {
+    match (reasoning, reasoning_content) {
+        (Some(reasoning), _) if !reasoning.is_empty() => Some(reasoning),
+        (_, Some(legacy)) => Some(legacy),
+        (reasoning, None) => reasoning,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1497,6 +1650,14 @@ struct ResponseToolFunction {
 
 #[derive(Debug, Default, Deserialize)]
 struct OpenAiUsage {
+    #[serde(default)]
+    total_tokens: Option<u32>,
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
+    #[serde(default, deserialize_with = "null_to_default")]
+    input_tokens_details: PromptTokensDetails,
     #[serde(default)]
     prompt_tokens: u32,
     #[serde(default)]
@@ -1533,11 +1694,21 @@ impl OpenAiUsage {
     }
 
     fn to_api_usage(&self) -> Usage {
+        let input = self.prompt_tokens.max(self.input_tokens);
+        let cached = self
+            .prompt_tokens_details
+            .cached_tokens
+            .max(self.input_tokens_details.cached_tokens);
+        let written = self
+            .prompt_tokens_details
+            .cache_write_tokens
+            .max(self.input_tokens_details.cache_write_tokens);
         Usage {
-            input_tokens: self.prompt_tokens,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: self.prompt_tokens_details.cached_tokens,
-            output_tokens: self.completion_tokens,
+            reported_total_tokens: self.total_tokens.filter(|total| *total > 0),
+            input_tokens: input.saturating_sub(cached).saturating_sub(written),
+            cache_creation_input_tokens: written,
+            cache_read_input_tokens: cached,
+            output_tokens: self.completion_tokens.max(self.output_tokens),
             cost_units: self.effective_cost_units(),
             cost_currency: self.effective_cost_currency(),
         }
@@ -1546,6 +1717,8 @@ impl OpenAiUsage {
 
 #[derive(Debug, Default, Deserialize)]
 struct PromptTokensDetails {
+    #[serde(default)]
+    cache_write_tokens: u32,
     #[serde(default)]
     cached_tokens: u32,
 }
@@ -1577,6 +1750,8 @@ struct ChatCompletionChunk {
 
 #[derive(Debug, Deserialize)]
 struct ChunkChoice {
+    // Azure annotation and terminal frames may omit or null the delta.
+    #[serde(default, deserialize_with = "null_to_default")]
     delta: ChunkDelta,
     #[serde(default)]
     finish_reason: Option<String>,
@@ -1586,6 +1761,8 @@ struct ChunkChoice {
 struct ChunkDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default, deserialize_with = "deserialize_null_as_empty_vec")]
@@ -1608,18 +1785,6 @@ struct DeltaFunction {
     name: Option<String>,
     #[serde(default)]
     arguments: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
-}
-
-#[derive(Debug, Deserialize)]
-struct ErrorBody {
-    #[serde(rename = "type")]
-    error_type: Option<String>,
-    message: Option<String>,
 }
 
 /// Returns true for models known to reject tuning parameters like temperature,
@@ -2013,6 +2178,9 @@ fn responses_tool_definition(tool: &ToolDefinition) -> Value {
         "type": "function",
         "name": tool.name,
         "parameters": parameters,
+        // Preserve optional arguments; Responses otherwise attempts strict
+        // schema normalization, which can require credential-path overrides.
+        "strict": false,
     });
     if let Some(desc) = &tool.description {
         def["description"] = json!(desc);
@@ -2325,6 +2493,9 @@ fn openai_tool_definition(tool: &ToolDefinition) -> Value {
             "name": tool.name,
             "description": tool.description,
             "parameters": parameters,
+            // Keep the same optional-argument contract through gateways that
+            // translate Chat Completions function tools into Responses tools.
+            "strict": false,
         }
     })
 }
@@ -2356,10 +2527,9 @@ fn normalize_response(
             "chat completion response missing choices",
         ))?;
     let mut content = Vec::new();
-    if let Some(thinking) = choice
-        .message
-        .reasoning_content
-        .filter(|value| !value.is_empty())
+    if let Some(thinking) =
+        normalize_reasoning(choice.message.reasoning, choice.message.reasoning_content)
+            .filter(|value| !value.is_empty())
     {
         content.push(OutputContentBlock::Thinking {
             thinking,
@@ -2367,7 +2537,22 @@ fn normalize_response(
         });
     }
     if let Some(text) = choice.message.content.filter(|value| !value.is_empty()) {
-        content.push(OutputContentBlock::Text { text });
+        if let Some(mut parser) = InlineReasoning::for_model(model).filter(|_| content.is_empty()) {
+            let mut segments = parser.push(&text);
+            segments.extend(parser.finish()?);
+            for (reasoning, text) in segments {
+                content.push(if reasoning {
+                    OutputContentBlock::Thinking {
+                        thinking: text,
+                        signature: None,
+                    }
+                } else {
+                    OutputContentBlock::Text { text }
+                });
+            }
+        } else {
+            content.push(OutputContentBlock::Text { text });
+        }
     }
     for tool_call in choice.message.tool_calls {
         content.push(OutputContentBlock::ToolUse {
@@ -2388,17 +2573,10 @@ fn normalize_response(
             .finish_reason
             .map(|value| normalize_finish_reason(&value)),
         stop_sequence: None,
-        usage: response.usage.as_ref().map_or(
-            Usage {
-                input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-                output_tokens: 0,
-                cost_units: None,
-                cost_currency: None,
-            },
-            OpenAiUsage::to_api_usage,
-        ),
+        usage: response
+            .usage
+            .as_ref()
+            .map_or(Usage::default(), OpenAiUsage::to_api_usage),
         request_id: None,
         gateway_request_id: None,
     })
@@ -2445,14 +2623,16 @@ fn next_sse_frame(buffer: &mut Vec<u8>) -> Option<String> {
     Some(String::from_utf8_lossy(&frame[..frame_len]).into_owned())
 }
 
-fn parse_sse_frame(
-    frame: &str,
-    provider: &str,
-    model: &str,
-) -> Result<Option<ChatCompletionChunk>, ApiError> {
+enum ChatSseFrame {
+    Chunk(ChatCompletionChunk),
+    Done,
+    Ignored,
+}
+
+fn parse_sse_frame(frame: &str, provider: &str, model: &str) -> Result<ChatSseFrame, ApiError> {
     let trimmed = frame.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Ok(ChatSseFrame::Ignored);
     }
 
     let mut data_lines = Vec::new();
@@ -2479,11 +2659,11 @@ fn parse_sse_frame(
                 return Err(error);
             }
         }
-        return Ok(None);
+        return Ok(ChatSseFrame::Ignored);
     }
     let payload = data_lines.join("\n");
     if payload == "[DONE]" {
-        return Ok(None);
+        return Ok(ChatSseFrame::Done);
     }
     // Some backends embed an error object in a data: frame instead of using an
     // HTTP error status. Surface the error message directly rather than letting
@@ -2503,10 +2683,7 @@ fn parse_sse_frame(
                 .unwrap_or(reqwest::StatusCode::BAD_REQUEST);
             return Err(ApiError::Api {
                 status,
-                error_type: err_obj
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .map(str::to_owned),
+                error_type: ProviderErrorBody::kind_from_json(err_obj),
                 message: Some(msg),
                 request_id: None,
                 body: payload.clone(),
@@ -2517,7 +2694,7 @@ fn parse_sse_frame(
         }
     }
     serde_json::from_str::<ChatCompletionChunk>(&payload)
-        .map(Some)
+        .map(ChatSseFrame::Chunk)
         .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))
 }
 
@@ -2568,7 +2745,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let request_id = request_id_from_headers(response.headers());
     let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
-    let parsed_error = serde_json::from_str::<ErrorEnvelope>(&body).ok();
+    let parsed_error = serde_json::from_str::<ProviderErrorEnvelope>(&body).ok();
     let retryable = crate::error::is_retryable_http_status(status.as_u16())
         || crate::error::is_retryable_masked_400(status, &body);
 
@@ -2576,9 +2753,7 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
 
     Err(ApiError::Api {
         status,
-        error_type: parsed_error
-            .as_ref()
-            .and_then(|error| error.error.error_type.clone()),
+        error_type: parsed_error.as_ref().and_then(|error| error.error.kind()),
         message: parsed_error
             .as_ref()
             .and_then(|error| error.error.message.clone()),
@@ -2645,7 +2820,7 @@ mod tests {
         normalize_response, openai_tool_choice, parse_tool_arguments, ChatStreamState,
         OpenAiCompatClient, OpenAiCompatConfig, ResponsesSseFrame, ResponsesStreamState,
     };
-    use crate::error::ApiError;
+    use crate::error::{ApiError, ProviderErrorBody, ProviderErrorEnvelope};
     use crate::types::{
         ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent, ContentBlockStopEvent,
         InputContentBlock, InputMessage, MessageRequest, OutputContentBlock, StreamEvent,
@@ -2803,6 +2978,7 @@ mod tests {
                 message: super::ChatMessage {
                     role: "assistant".to_string(),
                     content: Some("final answer".to_string()),
+                    reasoning: None,
                     reasoning_content: Some("hidden thought".to_string()),
                     tool_calls: Vec::new(),
                 },
@@ -2835,6 +3011,7 @@ mod tests {
                 message: super::ChatMessage {
                     role: "assistant".to_string(),
                     content: Some("final answer".to_string()),
+                    reasoning: None,
                     reasoning_content: None,
                     tool_calls: Vec::new(),
                 },
@@ -2843,16 +3020,20 @@ mod tests {
             usage: Some(super::OpenAiUsage {
                 prompt_tokens: 10,
                 completion_tokens: 4,
-                prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+                prompt_tokens_details: super::PromptTokensDetails {
+                    cached_tokens: 3,
+                    ..Default::default()
+                },
                 cost_units: None,
                 cost_currency: None,
                 quota: Some(698),
+                ..Default::default()
             }),
         };
 
         let normalized = normalize_response("sudorouter-model", response).expect("normalized");
 
-        assert_eq!(normalized.usage.input_tokens, 10);
+        assert_eq!(normalized.usage.input_tokens, 7);
         assert_eq!(normalized.usage.output_tokens, 4);
         assert_eq!(normalized.usage.cache_read_input_tokens, 3);
         assert_eq!(normalized.usage.cost_units, Some(698));
@@ -2867,10 +3048,14 @@ mod tests {
         let usage = super::OpenAiUsage {
             prompt_tokens: 10,
             completion_tokens: 4,
-            prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+            prompt_tokens_details: super::PromptTokensDetails {
+                cached_tokens: 3,
+                ..Default::default()
+            },
             cost_units: Some(43_700),
             cost_currency: None,
             quota: Some(698),
+            ..Default::default()
         }
         .to_api_usage();
 
@@ -2898,10 +3083,14 @@ mod tests {
         let usage = super::OpenAiUsage {
             prompt_tokens: 10,
             completion_tokens: 4,
-            prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+            prompt_tokens_details: super::PromptTokensDetails {
+                cached_tokens: 3,
+                ..Default::default()
+            },
             cost_units: None,
             cost_currency: Some("custom_point".to_string()),
             quota: Some(698),
+            ..Default::default()
         }
         .to_api_usage();
 
@@ -2919,6 +3108,7 @@ mod tests {
                 choices: vec![super::ChunkChoice {
                     delta: super::ChunkDelta {
                         content: Some("answer".to_string()),
+                        reasoning: None,
                         reasoning_content: None,
                         tool_calls: Vec::new(),
                     },
@@ -2935,10 +3125,14 @@ mod tests {
                 usage: Some(super::OpenAiUsage {
                     prompt_tokens: 10,
                     completion_tokens: 4,
-                    prompt_tokens_details: super::PromptTokensDetails { cached_tokens: 3 },
+                    prompt_tokens_details: super::PromptTokensDetails {
+                        cached_tokens: 3,
+                        ..Default::default()
+                    },
                     cost_units: None,
                     cost_currency: None,
                     quota: Some(698),
+                    ..Default::default()
                 }),
             })
             .expect("usage chunk");
@@ -3079,6 +3273,7 @@ mod tests {
                 choices: vec![super::ChunkChoice {
                     delta: super::ChunkDelta {
                         content: None,
+                        reasoning: None,
                         reasoning_content: Some("think".to_string()),
                         tool_calls: Vec::new(),
                     },
@@ -3095,6 +3290,7 @@ mod tests {
                     choices: vec![super::ChunkChoice {
                         delta: super::ChunkDelta {
                             content: Some(" answer".to_string()),
+                            reasoning: None,
                             reasoning_content: None,
                             tool_calls: Vec::new(),
                         },
@@ -3155,6 +3351,7 @@ mod tests {
                 choices: vec![super::ChunkChoice {
                     delta: super::ChunkDelta {
                         content: None,
+                        reasoning: None,
                         reasoning_content: Some(String::new()),
                         tool_calls: Vec::new(),
                     },
@@ -3171,6 +3368,7 @@ mod tests {
                     choices: vec![super::ChunkChoice {
                         delta: super::ChunkDelta {
                             content: None,
+                            reasoning: None,
                             reasoning_content: None,
                             tool_calls: vec![super::DeltaToolCall {
                                 index: 0,

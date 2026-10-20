@@ -44,7 +44,13 @@ use common::TestEnv;
 /// performs a request/response handshake (`initialize` → `tools/list` →
 /// `tools/call`) and sends no notifications, so those three methods are
 /// all that need handling.
-const MCP_SERVER_SCRIPT: &str = r#"import json, sys
+const MCP_SERVER_SCRIPT: &str = r#"import base64, json, struct, sys, zlib
+
+def chunk(kind, data):
+    return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+
+png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 64, 64, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress((b'\x00' + b'\xff\x00\x00' * 64) * 64)) + chunk(b'IEND', b'')
+image = base64.b64encode(png).decode('ascii')
 
 def read_message():
     line = sys.stdin.buffer.readline()
@@ -97,7 +103,7 @@ while True:
             'jsonrpc': '2.0',
             'id': request['id'],
             'result': {
-                'content': [{'type': 'text', 'text': f'echo:{text}'}],
+                'content': [{'type': 'text', 'text': f'echo:{text}'}, {'type': 'image', 'data': image, 'mimeType': 'image/png'}],
                 'isError': False,
             },
         })
@@ -146,7 +152,7 @@ fn mcp_echo_tool_round_trips_through_ndjson_stdio() {
 
     let prompt = env.prompt(
         "Use the parity echo MCP tool to echo the text 'hello from mcp parity', \
-         then tell me exactly what it returned.",
+         then tell me exactly what it returned in English, including the dominant color of its image.",
         "mcp_tool_roundtrip",
     );
 
@@ -157,6 +163,11 @@ fn mcp_echo_tool_round_trips_through_ndjson_stdio() {
         &["--permission-mode", "danger-full-access", &prompt],
         &[("SUDOCODE_ENABLE_MCP", "1")],
     );
+    if env.is_live() {
+        // A real gateway may spend longer than 30s in queue/tool discovery.
+        // Keep a bounded live deadline without slowing deterministic CI runs.
+        sess.set_default_timeout(std::time::Duration::from_secs(180));
+    }
 
     // Assert on the `echo:`-prefixed form, not the bare input text: the
     // `echo:` prefix is added only by the MCP server's response, so it
@@ -164,8 +175,43 @@ fn mcp_echo_tool_round_trips_through_ndjson_stdio() {
     // NDJSON transport and the nested-runtime bridge. Matching the bare
     // input would false-positive on the turn-1 tool-call arguments.
     sess.expect("echo:hello from mcp parity")
-        .expect("response should surface the echoed MCP tool output");
+        .unwrap_or_else(|error| {
+            panic!(
+                "MCP result was not displayed: {error:?}\n{}",
+                common::screen_tail(&sess, 5000)
+            );
+        });
 
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(exit, 0, "MCP tool turn should exit 0; got {exit}");
+    if env.is_live() {
+        let screen = common::screen_tail(&sess, 5000);
+        assert!(
+            screen.to_lowercase().contains("red"),
+            "the real model must identify the MCP image color: {screen}"
+        );
+    }
+    if !env.is_live() {
+        let requests = env.captured_message_bodies();
+        assert!(
+            requests
+                .iter()
+                .any(|body| body.contains("\"type\":\"image\"") && body.contains("image/png")),
+            "the model must receive a native MCP image attachment"
+        );
+        for body in requests {
+            let request: serde_json::Value =
+                serde_json::from_str(&body).expect("model request JSON");
+            for message in request["messages"].as_array().expect("messages") {
+                for block in message["content"].as_array().into_iter().flatten() {
+                    if block["type"] == "tool_result" {
+                        assert!(
+                            !block.to_string().contains("\\\"data\\\""),
+                            "base64 must not appear inside tool text"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

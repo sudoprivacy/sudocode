@@ -10,6 +10,11 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+mod response_capture;
+pub use response_capture::{
+    ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder,
+};
+
 const SUDOCLAW_LOG_ROTATE_AFTER_BYTES: u64 = 10 * 1024 * 1024; // 10MB
 const SUDOCLAW_LOG_MAX_ROTATED_FILES: usize = 3;
 
@@ -269,6 +274,8 @@ pub enum TelemetryEvent {
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        reported_total_tokens: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_units: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_currency: Option<String>,
@@ -391,13 +398,13 @@ impl Debug for SudoclawLogSink {
 }
 
 impl SudoclawLogSink {
-    /// Creates a new SudoclawLogSink with automatic path detection.
+    /// Creates a new `SudoclawLogSink` with automatic path detection.
     pub fn new() -> Result<Self, std::io::Error> {
         let path = Self::resolve_log_path()?;
         Self::with_path(&path)
     }
 
-    /// Creates a new SudoclawLogSink with a specific path.
+    /// Creates a new `SudoclawLogSink` with a specific path.
     pub fn with_path(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -449,7 +456,7 @@ impl SudoclawLogSink {
         &self.path
     }
 
-    /// Rotates the log file, keeping up to SUDOCLAW_LOG_MAX_ROTATED_FILES rotated files.
+    /// Rotates the log file, keeping up to `SUDOCLAW_LOG_MAX_ROTATED_FILES` rotated files.
     fn rotate_log_file(&self) -> Result<(), std::io::Error> {
         // Remove the oldest rotated file if it exists
         let oldest_rotated = format!("{}.{}", self.path.display(), SUDOCLAW_LOG_MAX_ROTATED_FILES);
@@ -458,7 +465,7 @@ impl SudoclawLogSink {
         }
 
         // Shift existing rotated files
-        for i in (1..=SUDOCLAW_LOG_MAX_ROTATED_FILES - 1).rev() {
+        for i in (1..SUDOCLAW_LOG_MAX_ROTATED_FILES).rev() {
             let current = format!("{}.{}", self.path.display(), i);
             let next = format!("{}.{}", self.path.display(), i + 1);
             if Path::new(&current).exists() {
@@ -508,7 +515,7 @@ impl TelemetrySink for SudoclawLogSink {
 
                 // Perform rotation
                 if let Err(e) = self.rotate_log_file() {
-                    eprintln!("[scode telemetry] Failed to rotate log: {}", e);
+                    eprintln!("[scode telemetry] Failed to rotate log: {e}");
                 }
 
                 // Re-acquire lock after rotation
@@ -520,15 +527,15 @@ impl TelemetrySink for SudoclawLogSink {
         }
 
         if let Err(e) = writeln!(file, "{json}") {
-            eprintln!("[scode telemetry] Failed to write log: {}", e);
+            eprintln!("[scode telemetry] Failed to write log: {e}");
         }
         if let Err(e) = file.flush() {
-            eprintln!("[scode telemetry] Failed to flush log: {}", e);
+            eprintln!("[scode telemetry] Failed to flush log: {e}");
         }
     }
 }
 
-/// Formats a TelemetryEvent into a structured log entry.
+/// Formats a `TelemetryEvent` into a structured log entry.
 fn format_log_entry(event: &TelemetryEvent) -> Map<String, Value> {
     let mut entry = Map::new();
 
@@ -536,8 +543,9 @@ fn format_log_entry(event: &TelemetryEvent) -> Map<String, Value> {
 
     // Set log level based on event type
     let level = match event {
-        TelemetryEvent::HttpRequestDebug { .. } => "debug",
-        TelemetryEvent::HttpResponseDebug { .. } => "debug",
+        TelemetryEvent::HttpRequestDebug { .. } | TelemetryEvent::HttpResponseDebug { .. } => {
+            "debug"
+        }
         TelemetryEvent::HttpRequestFailed { .. } => "warn",
         _ => "info",
     };
@@ -556,215 +564,61 @@ fn format_log_entry(event: &TelemetryEvent) -> Map<String, Value> {
     entry
 }
 
-/// Extracts event information from a TelemetryEvent.
+/// Extracts event information from a `TelemetryEvent`.
 fn extract_event_info(event: &TelemetryEvent) -> (String, String, Map<String, Value>) {
-    match event {
-        TelemetryEvent::HttpRequestStarted {
-            session_id,
-            request_id,
-            attempt,
-            method,
-            path,
-            timestamp_ms,
-            attributes,
-        } => {
-            let mut attrs = attributes.clone();
-            attrs.insert("request_id".to_string(), Value::String(request_id.clone()));
-            attrs.insert("attempt".to_string(), Value::from(*attempt));
-            attrs.insert("method".to_string(), Value::String(method.clone()));
-            attrs.insert("path".to_string(), Value::String(path.clone()));
-            attrs.insert("timestamp_ms".to_string(), Value::from(*timestamp_ms));
-            (session_id.clone(), "request_started".to_string(), attrs)
-        }
-        TelemetryEvent::HttpRequestSucceeded {
-            session_id,
-            request_id,
-            attempt,
-            method,
-            path,
-            status,
-            start_timestamp_ms,
-            end_timestamp_ms,
-            duration_ms,
-            provider_request_id,
-            attributes,
-        } => {
-            let mut attrs = attributes.clone();
-            attrs.insert("request_id".to_string(), Value::String(request_id.clone()));
-            attrs.insert("attempt".to_string(), Value::from(*attempt));
-            attrs.insert("method".to_string(), Value::String(method.clone()));
-            attrs.insert("path".to_string(), Value::String(path.clone()));
-            attrs.insert("status".to_string(), Value::from(*status));
-            attrs.insert(
-                "start_timestamp_ms".to_string(),
-                Value::from(*start_timestamp_ms),
-            );
-            attrs.insert(
-                "end_timestamp_ms".to_string(),
-                Value::from(*end_timestamp_ms),
-            );
-            attrs.insert("duration_ms".to_string(), Value::from(*duration_ms));
-            if let Some(rid) = provider_request_id {
-                attrs.insert(
-                    "provider_request_id".to_string(),
-                    Value::String(rid.clone()),
-                );
-            }
-            (session_id.clone(), "request_succeeded".to_string(), attrs)
-        }
-        TelemetryEvent::HttpRequestFailed {
-            session_id,
-            request_id,
-            attempt,
-            method,
-            path,
-            error,
-            retryable,
-            start_timestamp_ms,
-            end_timestamp_ms,
-            duration_ms,
-            attributes,
-        } => {
-            let mut attrs = attributes.clone();
-            attrs.insert("request_id".to_string(), Value::String(request_id.clone()));
-            attrs.insert("attempt".to_string(), Value::from(*attempt));
-            attrs.insert("method".to_string(), Value::String(method.clone()));
-            attrs.insert("path".to_string(), Value::String(path.clone()));
-            attrs.insert("error".to_string(), Value::String(error.clone()));
-            attrs.insert("retryable".to_string(), Value::Bool(*retryable));
-            attrs.insert(
-                "start_timestamp_ms".to_string(),
-                Value::from(*start_timestamp_ms),
-            );
-            attrs.insert(
-                "end_timestamp_ms".to_string(),
-                Value::from(*end_timestamp_ms),
-            );
-            attrs.insert("duration_ms".to_string(), Value::from(*duration_ms));
-            (session_id.clone(), "request_failed".to_string(), attrs)
-        }
-        TelemetryEvent::HttpRequestDebug {
-            session_id,
-            request_id,
-            timestamp_ms,
-            url,
-            method,
-            headers,
-            body,
-        } => {
-            let mut attrs = Map::new();
-            attrs.insert("request_id".to_string(), Value::String(request_id.clone()));
-            attrs.insert("timestamp_ms".to_string(), Value::from(*timestamp_ms));
-            attrs.insert("url".to_string(), Value::String(url.clone()));
-            attrs.insert("method".to_string(), Value::String(method.clone()));
-            attrs.insert("headers".to_string(), Value::Object(headers.clone()));
-            attrs.insert("body".to_string(), body.clone());
-            (session_id.clone(), "request_debug".to_string(), attrs)
-        }
-        TelemetryEvent::HttpResponseDebug {
-            session_id,
-            request_id,
-            timestamp_ms,
-            status,
-            headers,
-            body,
-        } => {
-            let mut attrs = Map::new();
-            attrs.insert("request_id".to_string(), Value::String(request_id.clone()));
-            attrs.insert("timestamp_ms".to_string(), Value::from(*timestamp_ms));
-            attrs.insert("status".to_string(), Value::from(*status));
-            attrs.insert("headers".to_string(), Value::Object(headers.clone()));
-            attrs.insert("body".to_string(), body.clone());
-            (session_id.clone(), "response_debug".to_string(), attrs)
-        }
-        TelemetryEvent::HttpResponseUsage {
-            session_id,
-            request_id,
-            timestamp_ms,
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-            cost_units,
-            cost_currency,
-        } => {
-            let mut attrs = Map::new();
-            attrs.insert("request_id".to_string(), Value::String(request_id.clone()));
-            attrs.insert("timestamp_ms".to_string(), Value::from(*timestamp_ms));
-            attrs.insert("input_tokens".to_string(), Value::from(*input_tokens));
-            attrs.insert("output_tokens".to_string(), Value::from(*output_tokens));
-            attrs.insert(
-                "cache_creation_input_tokens".to_string(),
-                Value::from(*cache_creation_input_tokens),
-            );
-            attrs.insert(
-                "cache_read_input_tokens".to_string(),
-                Value::from(*cache_read_input_tokens),
-            );
-            if let Some(cost_units) = cost_units {
-                attrs.insert("cost_units".to_string(), Value::from(*cost_units));
-            }
-            if let Some(cost_currency) = cost_currency {
-                attrs.insert(
-                    "cost_currency".to_string(),
-                    Value::String(cost_currency.clone()),
-                );
-            }
-            (session_id.clone(), "response_usage".to_string(), attrs)
-        }
+    let (session_id, name) = match event {
         TelemetryEvent::Analytics(event) => {
             let mut attrs = event.properties.clone();
-            attrs.insert(
-                "namespace".to_string(),
-                Value::String(event.namespace.clone()),
+            attrs.insert("namespace".into(), Value::String(event.namespace.clone()));
+            attrs.insert("action".into(), Value::String(event.action.clone()));
+            return (String::new(), "event".into(), attrs);
+        }
+        TelemetryEvent::SessionTrace(record) => {
+            return (
+                record.session_id.clone(),
+                record.name.clone(),
+                record.attributes.clone(),
             );
-            attrs.insert("action".to_string(), Value::String(event.action.clone()));
-            (String::new(), "event".to_string(), attrs)
         }
-        TelemetryEvent::SessionTrace(record) => (
-            record.session_id.clone(),
-            record.name.clone(),
-            record.attributes.clone(),
-        ),
-        TelemetryEvent::SessionStarted {
-            session_id,
-            timestamp_ms: _,
-            version,
-            cwd,
-            mode,
-            model,
-        } => {
-            let attrs = Map::from_iter([
-                ("version".to_string(), Value::String(version.clone())),
-                ("cwd".to_string(), Value::String(cwd.clone())),
-                ("mode".to_string(), Value::String(mode.clone())),
-                ("model".to_string(), Value::String(model.clone())),
-            ]);
-            (session_id.clone(), "session_started".to_string(), attrs)
+        TelemetryEvent::HttpRequestStarted { session_id, .. } => (session_id, "request_started"),
+        TelemetryEvent::HttpRequestSucceeded { session_id, .. } => {
+            (session_id, "request_succeeded")
         }
-        TelemetryEvent::SessionEnded {
-            session_id,
-            timestamp_ms: _,
-            total_turns,
-            total_input_tokens,
-            total_output_tokens,
-            duration_ms,
-        } => {
-            let attrs = Map::from_iter([
-                ("total_turns".to_string(), Value::from(*total_turns)),
-                (
-                    "total_input_tokens".to_string(),
-                    Value::from(*total_input_tokens),
-                ),
-                (
-                    "total_output_tokens".to_string(),
-                    Value::from(*total_output_tokens),
-                ),
-                ("duration_ms".to_string(), Value::from(*duration_ms)),
-            ]);
-            (session_id.clone(), "session_ended".to_string(), attrs)
+        TelemetryEvent::HttpRequestFailed { session_id, .. } => (session_id, "request_failed"),
+        TelemetryEvent::HttpRequestDebug { session_id, .. } => (session_id, "request_debug"),
+        TelemetryEvent::HttpResponseDebug { session_id, .. } => (session_id, "response_debug"),
+        TelemetryEvent::HttpResponseUsage { session_id, .. } => (session_id, "response_usage"),
+        TelemetryEvent::SessionStarted { session_id, .. } => (session_id, "session_started"),
+        TelemetryEvent::SessionEnded { session_id, .. } => (session_id, "session_ended"),
+    };
+    // Event serialization owns field names and optional-value omission. The log
+    // envelope only flattens attributes, with canonical event fields winning.
+    // These variants contain only strings, integers, booleans and JSON values.
+    let Value::Object(mut fields) =
+        serde_json::to_value(event).expect("serializable telemetry event")
+    else {
+        unreachable!("telemetry events serialize as objects")
+    };
+    fields.remove("type");
+    fields.remove("session_id");
+    let mut attrs = match fields.remove("attributes") {
+        Some(Value::Object(attrs)) => attrs,
+        _ => Map::new(),
+    };
+    match event {
+        TelemetryEvent::SessionStarted { .. } | TelemetryEvent::SessionEnded { .. } => {
+            fields.remove("timestamp_ms");
         }
+        TelemetryEvent::HttpRequestDebug { .. } | TelemetryEvent::HttpResponseDebug { .. } => {
+            // The structured log keeps empty headers; the raw event omits them.
+            fields
+                .entry("headers")
+                .or_insert_with(|| Value::Object(Map::new()));
+        }
+        _ => {}
     }
+    attrs.extend(fields);
+    (session_id.clone(), name.into(), attrs)
 }
 
 /// Formats the current timestamp in ISO 8601 format.
@@ -772,11 +626,39 @@ fn format_timestamp() -> String {
     Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z").to_string()
 }
 
+/// Identity and start time of one HTTP request attempt.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpRequestAttempt<'a> {
+    pub request_id: &'a str,
+    pub attempt: u32,
+    pub method: &'a str,
+    pub path: &'a str,
+    pub start_timestamp_ms: u64,
+}
+
+/// Provider token counters, including an optional independently reported aggregate.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UsageTokens {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_creation_input_tokens: u32,
+    pub cache_read_input_tokens: u32,
+    pub reported_total_tokens: Option<u32>,
+}
+
+/// Optional provider cost fields; either field may be absent independently.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UsageCost<'a> {
+    pub units: Option<u64>,
+    pub currency: Option<&'a str>,
+}
+
 #[derive(Clone)]
 pub struct SessionTracer {
     session_id: String,
     sequence: Arc<AtomicU64>,
     sink: Arc<dyn TelemetrySink>,
+    response_archive: Option<Arc<dyn ResponseArchive>>,
 }
 
 impl Debug for SessionTracer {
@@ -794,12 +676,46 @@ impl SessionTracer {
             session_id: session_id.into(),
             sequence: Arc::new(AtomicU64::new(0)),
             sink,
+            response_archive: None,
         }
     }
 
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    #[must_use]
+    pub fn with_response_archive(mut self, archive: Arc<dyn ResponseArchive>) -> Self {
+        self.response_archive = Some(archive);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_response_archive(&self) -> bool {
+        self.response_archive.is_some()
+    }
+
+    pub fn begin_response_capture(
+        &self,
+        metadata: ResponseCaptureMetadata,
+    ) -> Option<Box<dyn ResponseRecorder>> {
+        let archive = self.response_archive.as_ref()?;
+        let request_id = metadata.request_id.clone();
+        match archive.begin(metadata) {
+            Ok(recorder) => Some(recorder),
+            Err(error) => {
+                self.record(
+                    "response_capture_unavailable",
+                    serde_json::Map::from_iter([
+                        ("request_id".into(), Value::String(request_id)),
+                        ("reason".into(), Value::String(error.to_string())),
+                    ]),
+                );
+                None
+            }
+        }
     }
 
     pub fn record(&self, name: impl Into<String>, attributes: Map<String, Value>) {
@@ -835,15 +751,18 @@ impl SessionTracer {
 
     pub fn record_http_request_succeeded(
         &self,
-        request_id: impl Into<String>,
-        attempt: u32,
-        method: impl Into<String>,
-        path: impl Into<String>,
+        request: HttpRequestAttempt<'_>,
         status: u16,
-        start_timestamp_ms: u64,
         provider_request_id: Option<String>,
         attributes: Map<String, Value>,
     ) {
+        let HttpRequestAttempt {
+            request_id,
+            attempt,
+            method,
+            path,
+            start_timestamp_ms,
+        } = request;
         let end_timestamp_ms = current_timestamp_ms();
         let duration_ms = end_timestamp_ms.saturating_sub(start_timestamp_ms);
         // Only record once - no duplicate SessionTrace
@@ -864,15 +783,18 @@ impl SessionTracer {
 
     pub fn record_http_request_failed(
         &self,
-        request_id: impl Into<String>,
-        attempt: u32,
-        method: impl Into<String>,
-        path: impl Into<String>,
+        request: HttpRequestAttempt<'_>,
         error: impl Into<String>,
         retryable: bool,
-        start_timestamp_ms: u64,
         attributes: Map<String, Value>,
     ) {
+        let HttpRequestAttempt {
+            request_id,
+            attempt,
+            method,
+            path,
+            start_timestamp_ms,
+        } = request;
         let end_timestamp_ms = current_timestamp_ms();
         let duration_ms = end_timestamp_ms.saturating_sub(start_timestamp_ms);
         // Only record once - no duplicate SessionTrace
@@ -943,8 +865,7 @@ impl SessionTracer {
             output_tokens,
             cache_creation_input_tokens,
             cache_read_input_tokens,
-            None,
-            None,
+            UsageCost::default(),
         );
     }
 
@@ -955,19 +876,39 @@ impl SessionTracer {
         output_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_read_input_tokens: u32,
-        cost_units: Option<u64>,
-        cost_currency: Option<&str>,
+        cost: UsageCost<'_>,
+    ) {
+        self.record_usage_snapshot(
+            request_id,
+            UsageTokens {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                reported_total_tokens: None,
+            },
+            cost,
+        );
+    }
+
+    /// Preserve a provider aggregate even when its token allocation is unavailable.
+    pub fn record_usage_snapshot(
+        &self,
+        request_id: impl Into<String>,
+        tokens: UsageTokens,
+        cost: UsageCost<'_>,
     ) {
         self.sink.record(TelemetryEvent::HttpResponseUsage {
             session_id: self.session_id.clone(),
             request_id: request_id.into(),
             timestamp_ms: current_timestamp_ms(),
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-            cost_units,
-            cost_currency: cost_currency.map(ToOwned::to_owned),
+            input_tokens: tokens.input_tokens,
+            output_tokens: tokens.output_tokens,
+            cache_creation_input_tokens: tokens.cache_creation_input_tokens,
+            cache_read_input_tokens: tokens.cache_read_input_tokens,
+            reported_total_tokens: tokens.reported_total_tokens,
+            cost_units: cost.units,
+            cost_currency: cost.currency.map(ToOwned::to_owned),
         });
     }
 
@@ -1200,8 +1141,10 @@ mod tests {
             200,
             0,
             100,
-            Some(43_700),
-            Some("sudo_point"),
+            UsageCost {
+                units: Some(43_700),
+                currency: Some("sudo_point"),
+            },
         );
 
         let event = TelemetryEvent::HttpResponseUsage {
@@ -1212,6 +1155,7 @@ mod tests {
             output_tokens: 200,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 100,
+            reported_total_tokens: None,
             cost_units: Some(43_700),
             cost_currency: Some("sudo_point".to_string()),
         };
@@ -1260,7 +1204,7 @@ mod tests {
         let sink = SudoclawLogSink::with_path(&log_path).expect("sink should create file");
         sink.record(TelemetryEvent::SessionStarted {
             session_id: "test-session".to_string(),
-            timestamp_ms: 1234567890,
+            timestamp_ms: 1_234_567_890,
             version: "0.1.0".to_string(),
             cwd: "/test".to_string(),
             mode: "standalone".to_string(),
@@ -1283,7 +1227,7 @@ mod tests {
             attempt: 1,
             method: "POST".to_string(),
             path: "/v1/messages".to_string(),
-            timestamp_ms: 1234567890,
+            timestamp_ms: 1_234_567_890,
             attributes: Map::new(),
         };
 

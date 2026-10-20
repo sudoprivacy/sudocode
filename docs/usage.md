@@ -2,6 +2,42 @@
 
 Day-to-day `scode` workflows.
 
+## Installation and updates
+
+Install macOS/Linux with the [installer](../install.sh), or choose a platform
+package from [GitHub Releases](https://github.com/sudoprivacy/sudocode/releases/latest).
+Release builds check for updates in the background when an interactive terminal
+session starts. A cached newer release offers **Update now**, **Skip**, or
+**Skip until next version** before the session starts. The next launch shows a
+newly discovered version. The check runs at most once per 20 hours after
+a successful refresh, in the local config home's `cache/release.json`.
+
+```sh
+scode update --check
+scode update
+scode update --version vX.Y.Z
+```
+
+Selecting **Update now** installs the checked release and restarts with the same
+arguments and working directory. Self-update works on macOS, Linux and Windows;
+`scode update` also provides an explicit installation command. Set
+`SCODE_CHECK_UPDATES=0` to disable startup checks; `1` enables them in a source
+build as well. An unavailable service leaves the terminal usable and retains the
+previous metadata.
+
+The default source is GitHub, with COS as the metadata fallback. Choose the China
+mirror explicitly with `SCODE_MIRROR`:
+
+```sh
+export SCODE_MIRROR=https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest
+```
+
+An explicit mirror supplies its version pointer, archive and published checksum
+manifest. Both the installer and updater resolve `/latest` once, then download
+from the immutable sibling `vX.Y.Z` directory. A versioned mirror directory pins
+its own version. The publisher verifies the complete mirror before promoting the
+pointer; the client verifies the downloaded archive's SHA-256 before installation.
+
 ## Editing a prompt
 
 `Ctrl+U` clears the current draft. You can immediately continue typing or paste
@@ -144,6 +180,19 @@ Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
+Unfinished ordinary paragraphs stream above the live status area by default.
+Finalized text
+moves into native scrollback in the same presentation as preview removal,
+and a draft typed during the response stays available. Parallel tool output
+keeps unfinished Markdown formatting intact. The preview keeps
+at most 8 KiB of source and fits around the input; longer paragraphs freeze
+their preview until finalization, which still retains the entire response.
+Code, tables, lists, headings and emoji with ambiguous terminal widths use
+the existing complete-block rendering path. On Windows, this also applies to
+combining sequences whose widths legacy console hosts cannot reliably preserve;
+the original Unicode text is retained without normalization. A clipped paragraph or an
+unusually long result summary can still change its visible position.
+
 The live UI retains the existing formatter colors and supported text styles:
 tool-card borders show status without extra icons: muted while waiting for
 hooks, approval, or an execution slot; amber while running; the code theme's
@@ -202,25 +251,38 @@ Incoming peer messages appear in a separate `Message from <peer>` frame with
 muted content and a blue peer name. This presentation does not alter the
 message envelope or content supplied to the model.
 
-Queued messages are dimmed, and Todo
+Queued messages use muted labels and normal-intensity bodies, and Todo
 items distinguish active and completed states. This uses the same palette as
 the transcript; it does not introduce a new color theme. Completed Todo labels
 retain their dim strikethrough. Todo summaries use one muted foreground for all
-labels and punctuation, with every count bold. Per-turn status uses the same
+labels and punctuation, with every count in bold terminal foreground, including
+zero. Ordinary task descriptions also retain the terminal foreground instead
+of a slot-wide grey; active labels remain bold and completed labels retain dim
+strikethrough. Amber is reserved for accent/activity, not neutral quantities.
+Per-turn status uses the same
 theme-selected muted foreground without an additional dim attribute; cache
 health indicators keep their semantic colors. Emphasis and color are scoped
 to individual spans so they do not leak into following labels or input.
+
+Tips and footer text use the theme's readable muted foreground without an
+additional dim attribute; separators use its border role. The input draft
+retains the terminal foreground. A slot's initial color is decoded as text
+state, not applied again as a fallback to every span: ANSI foreground/full
+resets restore the terminal default instead of silently inheriting a parent
+color. The same structured spans feed the live UI and transcript adapters.
+No-color chrome does not force a palette color.
 
 Code colors follow Codex's default Catppuccin Mocha (dark) and Latte (light)
 themes, including inline code, Bash command previews, language grammars, and
 added/removed diff fills. Bash commands are highlighted in both running and
 completed cards; stdout/stderr retain the producing program’s own colors.
 Recognized plain unified diffs reuse the Edit palette; ordinary logs stay plain.
-The default REPL queries the terminal palette once at startup, with a shared
-250 ms deadline and preservation of queued keys and pastes. Native Windows
-console windows can also supply their color table; ConPTY does not use its
-backing console as the visible palette. If the query is unsupported,
-`COLORFGBG` selects the theme (dark otherwise). `NO_COLOR` skips the query and
+On Unix, the default REPL queries the terminal palette once at startup, with
+a shared 250 ms deadline and preservation of queued keys and pastes. Windows
+does not send OSC 10/11 color queries: some console hosts deliver replies as
+input, so startup uses `COLORFGBG` instead (dark if absent or invalid). This
+also avoids treating ConPTY's backing-console colors as the visible theme.
+Unsupported Unix queries use the same fallback. `NO_COLOR` skips the query and
 colors; noninteractive commands do not query the terminal. The legacy REPL
 uses `COLORFGBG`. Running tool previews cache syntax highlighting; repainting
 or editing input does not reparse their code. Output stays in native terminal
@@ -257,6 +319,8 @@ the viewport, resize clears only the live UI from its retained start position,
 without clearing the preceding conversation or purging terminal scrollback.
 
 While a turn is running, messages you submit wait in the staging area.
+Each queued preview uses a muted label and normal-intensity message text;
+narrow windows shorten the label and clip the preview, not the queued text.
 Press ↑ on an empty input to bring all queued human messages back for editing,
 joined in their original submit order. Their staging entries disappear;
 peer/A2A messages remain queued. The cursor starts at the end of the recalled
@@ -295,6 +359,10 @@ Failures retain `returnCodeInterpretation`; interrupted runs include
 `interrupted: true`. Background launches retain `backgroundTaskId` and
 `rawOutputPath`, but do not claim a completed exit code. Signal termination
 also has no numeric exit code and is described in `returnCodeInterpretation`.
+
+Windows console-control exits are treated as interruptions even if the child
+exits before the parent's cancellation notification arrives. Partial output is
+preserved; an interrupted tool does not become a successful result.
 
 Empty optional fields and routine sandbox capability flags are omitted. The
 public Rust result type accepts omitted stderr and interruption fields as an
@@ -469,10 +537,15 @@ See [`permissions-and-sandbox.md`](./permissions-and-sandbox.md).
 color per category (system prompt, system tools, MCP tools, agent types,
 memory files, skills, messages), with free space in `⛶` and the buffer
 auto-compaction keeps in reserve in `⛝`. The legend lists each category's
-estimated tokens and share of the window; the headline total is the
-provider-reported occupancy of the latest response once a turn has completed,
-and a local estimate before that. The footer summarises each source with a
-count and a token total; `/context all` expands it to one line per tool,
+estimated tokens and share of the window. The headline total uses a valid
+provider-reported occupancy anchor from the latest task response. Without one,
+it shows a full next-request estimate, including the actual system and tool
+overhead, marked `≈`. Successful compaction clears the old anchor; manual,
+automatic, and resumed sessions refresh the meter without resetting cumulative
+tokens or cost. Summary-request usage counts toward the cumulative bill but
+does not become a task-response anchor or add a conversation turn.
+The footer summarises each source with a count and a token total;
+`/context all` expands it to one line per tool,
 agent type, memory file, and skill. Tool definitions are counted exactly as
 the next request would carry them: a deferred tool the model has not yet
 discovered through ToolSearch is listed but costs no tokens.
@@ -496,24 +569,99 @@ or is cancelled.
 
 `/compact` in the REPL, ACP, or `scode --resume <id> /compact` uses the same
 model-backed checkpoint pipeline, even below the automatic pressure threshold.
-The configured provider must be available. Older history and any previous
-checkpoint are summarized together; recent messages and complete tool exchanges
-are retained by token budget. Automatic compaction first tries trimming large
-tool outputs to avoid an unnecessary model call.
+Older history and any previous checkpoint are summarized together. The whole
+replacement history, including the checkpoint, recent messages, continuation
+framing, and Todo state, must shrink to at most **50% of the original history**
+and fit the next request's safe budget. **30% is the ideal target**, rather than
+a minimum or a separate success condition. These figures use local content
+estimates; reaching them does not guarantee lossless summarization.
 
-The checkpoint prompt asks for a complete summary within 8,000 tokens where
-possible. Generation has a fixed ceiling of 12,000 output tokens, capped by
-the model's smaller output limit (including a `maxOutputTokens` override).
-The model's context-window limit still applies.
+The retention ratio uses the original history before any tool-output trimming.
+The run retains at least four recent messages and complete tool exchanges by
+token budget. Automatic compaction first stages large-tool-output trimming; it
+can commit that alone only when the same 50% and request-budget checks pass.
+Otherwise, both summary attempts reuse that same frozen, trimmed copy; manual
+compaction summarizes its frozen original source. If protected content prevents
+the target, the operation fails without installing a weaker replacement.
 
-Failed, empty, truncated, or non-shrinking summaries leave history intact and
-report an error instead of continuing with a statistical or empty history.
-Pre-request failure stops that request. A post-turn maintenance failure keeps
-the already completed response. Successful replacements archive the original
-JSONL at `<transcript>.before-compact-<timestamp>` before committing the new
+The visible summary allowance is dynamic: at most 12,000 tokens, reduced by the
+space left after retained history and framing, the next-request target, and
+the model's output limit (including `maxOutputTokens` overrides). The prompt
+keeps 8,000 tokens as soft guidance and asks for a shorter summary when needed.
+Budgeted thinking can require additional output reservation. Adaptive thinking
+does not add a manual thinking budget to the summary's output ceiling. Both the
+summary request and the following task request are checked against their own
+actual system, tool schemas, output reservation, and safety buffer; pending
+user input also reduces the next request's history budget.
+
+One run allows at most two completed summary responses, four actual model HTTP
+requests, and two transient retries, shared across cache-safe generation,
+standard-path fallback, and shorter-summary attempts. Local preflight rejection
+does not count as an HTTP request. Authentication and permanent protocol errors
+stop immediately; unchanged oversized requests are not resent.
+
+Reports distinguish `target_met`, `skipped`, `failed`, and `cancelled`, with
+the method, estimated before/after history, retention ratio, target, and reason.
+An unchanged, previously committed achievement with the same request state and
+budget can skip without another model call; history with no summarizable source
+can also skip when the original request is safe. A skipped report describes the
+current unchanged history and does not claim a new reduction. The configured
+provider must be available when a summary request is needed.
+
+Empty, truncated, tool-calling, non-shrinking, or over-target summaries are never
+installed. Failure or cancellation before commit preserves source messages;
+pre-request failure stops that request, while post-turn maintenance failure
+keeps the already streamed response in history but still fails the prompt/run.
+Streamed output alone does not make that run successful. Cancellation after a
+durable commit reports the committed result. Resumed one-shot `/compact` handles
+Ctrl-C by waiting for its final report and usage receipts before exiting.
+
+Known usage from every summary attempt, including rejected summaries and
+cancelled requests, is saved separately as maintenance usage and counted once
+toward cumulative billing. Unknown usage stays unknown in its receipt, leaving
+the complete cumulative paid amount unknown while retaining known token
+subtotals. The status line can still show an estimated cost marked `~`.
+Maintenance metadata does not change active history or its occupancy anchor;
+a persistence failure is reported explicitly. Durable maintenance receipts are
+merged when capturing the source revision, including receipts added externally
+while message history stays unchanged.
+
+Before archiving or replacing history, the source's durable revision is checked.
+A detected external change rejects the candidate and reloads the newer source
+without writing the stale snapshot; unsaved maintenance metadata is reported.
+If the source cannot be parsed or reloaded, ordinary persistence and exit do
+not write back the stale history. A successful reload restores normal writes.
+The check detects changes observed during commit preparation and is not a
+cross-process lock or compare-and-swap. Successful replacements archive the
+original JSONL at `<transcript>.before-compact-<timestamp>` before committing the new
 history. Keep these files to inspect or recover older context; they are not
 subject to automatic cleanup. See [ACP compaction](acp.md#slash-commands) for
 budgets and persistence details.
+
+### Limit execution steps per turn
+
+Set `maxSteps` in `.nexus/sudocode/settings.json` (or user settings):
+
+```json
+{"maxSteps": 5}
+```
+
+Use a positive integer, for example 5 or 10. Omit the setting for unlimited
+execution. One step is one completed model/tool round; several tool calls in
+one model response count as one step. After the last round's results arrive,
+scode sends a final request with no tools and instructs the model to answer
+using existing results, describe unfinished work, and discuss concrete next
+steps with the user. This final answer is an additional model request, outside
+the execution budget. Each new user turn gets a fresh budget. Already-started
+background work is not cancelled by this limit.
+
+## Editing files
+
+`edit_file` requires a nonempty `old_string`. By default it must match exactly
+once, including after LF-to-CRLF normalization. Ambiguous edits return an error
+without modifying the file. Include more surrounding context to select one
+occurrence, or set `replace_all: true` to replace every non-overlapping match.
+Use `write_file` to create a file or replace its full contents.
 
 ## Images and browser screenshots
 
@@ -530,10 +678,10 @@ or invalid referenced image produces an error rather than a text-only request.
 Repeated references to the same spelling of a path attach it once per prompt.
 
 Agents can inspect images using `Read` (`read_file`). For example, after the
-independently installed sudohand CLI saves a browser screenshot:
+browser skill uses the installed `ai-dev-browser` package to save a screenshot:
 
 ```sh
-suh browser page_screenshot --port <browser-port> --path screenshot.png
+python3 -m ai_dev_browser.tools.page_screenshot --session-id <browser-session-id> --path screenshot.png
 ```
 
 ask scode to **Read `screenshot.png` and inspect the screenshot**. The screenshot
@@ -557,14 +705,16 @@ the existing optimistic policy, so the provider may reject image input.
 
 Regression coverage lives in `pty_image_handling` (CLI references, image Read,
 parallel results, errors, text-only model rejection, and resume) and the API transport tests.
-With suh and Chrome installed, run the actual browser-to-model-payload test:
+With `ai-dev-browser` and Chrome installed, run the browser-to-model-payload test.
+Set `SCODE_BROWSER_PYTHON` to the interpreter containing the package if it is
+installed in a virtual environment:
 
 ```sh
 cd rust
 cargo test -p rusty-sudocode-cli --test pty_image_handling -- --include-ignored
 ```
 
-This last test scripts only model replies: scode executes Bash, suh captures
+This last test scripts only model replies: scode executes Bash, ai-dev-browser captures
 real Chrome pixels, and the test verifies those exact bytes in the next model
 request. A live model's visual accuracy is a separate check.
 
@@ -600,7 +750,11 @@ Output contracts (schema version 1):
   `permission_denials`, and observed current-run `usage`. `num_turns` counts
   user turns (one for a started invocation), whereas `model_round_trips` counts
   provider calls, including those following tool results. Unknown usage/cost
-  is omitted; usage never includes earlier resumed turns.
+  is omitted; usage never includes earlier resumed turns. Usage includes
+  `total_tokens` and `token_breakdown_complete`; `reported_total_tokens` is
+  included when the provider supplies an aggregate. When allocation is
+  incomplete, the total survives and the breakdown is marked incomplete.
+  Missing cost fields stay omitted rather than becoming a zero bill.
   Execution errors include the CLI's machine-readable `kind` alongside `error`.
 - `stream-json`: flushed JSON lines: `system` initialization, complete
   `assistant.message.content` (text and tool_use blocks), `user` tool_result
@@ -627,3 +781,23 @@ cancels the engine. An unwritable pipe cannot receive a final result.
 Exit codes: success `0`, execution/startup/output failure `1`, invalid arguments
 or input `2`, SIGINT `130`, SIGTERM `143` (Unix). Structured errors use the same
 result envelope as success, with `is_error: true` and an error subtype.
+
+## Runtime memory
+
+Performance reports measure peak resident set size (RSS), RSS after the workload,
+and growth across turns for the release `scode` process. Relevant PRs use paired
+baseline and candidate runs; the daily stress profile adds 30 turns. The
+[performance CI](https://github.com/sudoprivacy/sudocode/actions/workflows/render-performance.yml)
+retains the raw reports, and the
+[measurement guide](../e2e/terminal-resize/README.md#release-performance-gate)
+defines the workloads and regression checks.
+
+The [2026-10-09 UTC stress run](https://github.com/sudoprivacy/sudocode/actions/runs/37995377154)
+measured **28.27–32.71 MiB peak RSS** across its scenarios, using the median of
+seven candidate runs per scenario. Its 30-turn scenario peaked at **29.42 MiB**,
+with **1.77 MiB** growth from the first to the last turn. The run used Linux and
+a deterministic provider. Scope is one `scode` process; child tools, browsers,
+Nexus, and the model server are measured separately when assessing a complete
+deployment. Apple/Spark measurements require workloads on that hardware.
+RSS includes shared pages; unique memory across several processes requires a
+measure such as proportional set size (PSS).

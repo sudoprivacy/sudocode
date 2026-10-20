@@ -9,7 +9,7 @@ use glob::Pattern;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 
-use crate::fs_backend::FsBackend;
+use crate::fs_backend::{native_path_for_matching, FsBackend};
 
 /// Maximum file size that can be read (10 MB).
 const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
@@ -367,6 +367,13 @@ pub fn edit_file(
 
     let original_file = fs.read_to_string(&abs_str)?;
 
+    if old_string.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "old_string must not be empty; use write_file to create or replace a file",
+        ));
+    }
+
     if old_string == new_string {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -395,6 +402,26 @@ pub fn edit_file(
             "old_string not found in file",
         ));
     };
+
+    if !replace_all {
+        // Search beyond the first character, rather than the whole match, so
+        // overlapping occurrences are ambiguous too. Normalize line endings first.
+        let first = original_file
+            .find(&effective_old)
+            .expect("match checked above");
+        let next = first
+            + effective_old
+                .chars()
+                .next()
+                .expect("nonempty old_string")
+                .len_utf8();
+        if original_file[next..].contains(&effective_old) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "old_string matches more than once; include surrounding context to match exactly once, or set replace_all to true",
+            ));
+        }
+    }
 
     let updated = if replace_all {
         original_file.replace(&effective_old, &effective_new)
@@ -456,10 +483,15 @@ pub fn glob_search(
     // patterns regardless of host; it matches backslash-separated entries
     // internally.
     let search_pattern = if is_absolute_path(pattern) {
-        pattern.replace('\\', "/")
+        pattern.to_string()
     } else {
-        format!("{}/{}", base_dir.trim_end_matches(['/', '\\']), pattern).replace('\\', "/")
+        format!("{}/{}", base_dir.trim_end_matches(['/', '\\']), pattern)
     };
+    // A Windows extended-length prefix is path metadata, not a `?` glob.
+    // Use the same native alias rule as filesystem routing before matching.
+    let search_pattern = native_path_for_matching(Path::new(&search_pattern))
+        .to_string_lossy()
+        .replace('\\', "/");
 
     // The `glob` crate does not support brace expansion ({a,b,c}). Expand
     // into multiple patterns so `Assets/**/*.{cs,uxml,uss}` works.
@@ -477,7 +509,7 @@ pub fn glob_search(
             &walk_root,
             &|name| GLOB_SEARCH_IGNORED_DIRS.contains(&name),
             &mut candidates,
-        );
+        )?;
         for candidate in candidates {
             // Match against a forward-slash-normalised string so the
             // forward-slash glob pattern matches the Windows-side
@@ -489,15 +521,28 @@ pub fn glob_search(
         }
     }
 
-    matches.sort_by_key(|path| {
-        fs.stat(path)
-            .ok()
-            .and_then(|metadata| metadata.modified)
-            .map(Reverse)
-    });
+    // Resolve each sort key once. A stat can cross gRPC, so doing it inside
+    // the comparator would turn N metadata reads into O(N log N) RPCs.
+    let mut ranked = Vec::with_capacity(matches.len());
+    for path in matches {
+        match fs.stat(&path) {
+            Ok(metadata) => ranked.push((metadata.modified, path)),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    ranked.sort_by_key(|(modified, _)| Reverse(*modified));
 
-    let truncated = matches.len() > 100;
-    let filenames = matches.into_iter().take(100).collect::<Vec<_>>();
+    let truncated = ranked.len() > 100;
+    let filenames = ranked
+        .into_iter()
+        .take(100)
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
 
     Ok(GlobSearchOutput {
         duration_ms: started.elapsed().as_millis(),
@@ -552,8 +597,19 @@ pub fn grep_search_with_abort(
             continue;
         }
 
-        let Ok(file_contents) = fs.read_to_string(&file_path) else {
-            continue;
+        let file_contents = match fs.read_to_string(&file_path) {
+            Ok(contents) => contents,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::PermissionDenied
+                        | io::ErrorKind::InvalidData
+                ) =>
+            {
+                continue
+            }
+            Err(error) => return Err(error),
         };
 
         if output_mode == "count" {
@@ -637,18 +693,24 @@ fn walk_files_via_backend(
     root: &str,
     skip_dir: &dyn Fn(&str) -> bool,
     out: &mut Vec<String>,
-) {
-    let entries = fs.readdir(root).unwrap_or_default();
+) -> io::Result<()> {
+    let entries = match fs.readdir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotADirectory => Vec::new(),
+        Err(error) => return Err(error),
+    };
     if entries.is_empty() {
         // Either an empty directory or an exact-path root that names a
         // file (readdir on a file yields nothing) — include the file so
         // glob/grep on a concrete path still resolves it.
-        if let Ok(meta) = fs.stat(root) {
-            if meta.is_file {
-                out.push(root.to_string());
-            }
+        match fs.stat(root) {
+            Ok(meta) if meta.is_file => out.push(root.to_string()),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        return;
+        return Ok(());
     }
     for entry in entries {
         let child = fs.join_path(root, &entry.name);
@@ -656,11 +718,12 @@ fn walk_files_via_backend(
             if skip_dir(&entry.name) {
                 continue;
             }
-            walk_files_via_backend(fs, &child, skip_dir, out);
+            walk_files_via_backend(fs, &child, skip_dir, out)?;
         } else {
             out.push(child);
         }
     }
+    Ok(())
 }
 
 /// Longest leading glob-free prefix of a forward-slash pattern — the
@@ -706,10 +769,11 @@ fn collect_search_files_via_backend(
     base: &str,
     abort_signal: Option<&crate::HookAbortSignal>,
 ) -> io::Result<Vec<String>> {
-    if let Ok(meta) = fs.stat(base) {
-        if meta.is_file {
-            return Ok(vec![base.to_string()]);
-        }
+    match fs.stat(base) {
+        Ok(meta) if meta.is_file => return Ok(vec![base.to_string()]),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
     }
     let mut files = Vec::new();
     walk_search_files_via_backend(fs, base, abort_signal, &mut files)?;
@@ -723,7 +787,12 @@ fn walk_search_files_via_backend(
     out: &mut Vec<String>,
 ) -> io::Result<()> {
     check_abort(abort_signal)?;
-    for entry in fs.readdir(root).unwrap_or_default() {
+    let entries = match fs.readdir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
         let child = fs.join_path(root, &entry.name);
         if entry.is_dir {
             walk_search_files_via_backend(fs, &child, abort_signal, out)?;

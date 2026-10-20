@@ -1486,6 +1486,26 @@ impl PluginManager {
         })
     }
 
+    // Hold one OS lock across the registry and installed directory snapshot.
+    // The stable sidecar is never unlinked: replacing it would split waiters
+    // between different files. Closing the handle releases it, including on exit.
+    fn lock_store(&self) -> Result<fs::File, PluginError> {
+        let mut path = self.registry_path().into_os_string();
+        path.push(".lock");
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock = fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
     #[must_use]
     pub fn settings_path(&self) -> PathBuf {
         self.config.config_home.join(SETTINGS_FILE_NAME)
@@ -1531,6 +1551,12 @@ impl PluginManager {
     }
 
     pub fn plugin_registry_report(&self) -> Result<PluginRegistryReport, PluginError> {
+        let _store_lock = self.lock_store()?;
+        self.discover_registry_report()
+    }
+
+    // The caller holds the store lock through synchronization and discovery.
+    fn discover_registry_report(&self) -> Result<PluginRegistryReport, PluginError> {
         self.sync_bundled_plugins()?;
 
         let mut discovery = PluginDiscovery::default();
@@ -1591,6 +1617,7 @@ impl PluginManager {
         let cleanup_source = matches!(install_source, PluginInstallSource::GitUrl { .. });
         let manifest = load_plugin_from_directory(&staged_source)?;
 
+        let _store_lock = self.lock_store()?;
         let plugin_id = plugin_id(&manifest.name, EXTERNAL_MARKETPLACE);
         let install_path = self.install_root().join(sanitize_plugin_id(&plugin_id));
         if install_path.exists() {
@@ -1628,6 +1655,7 @@ impl PluginManager {
     }
 
     pub fn enable(&mut self, plugin_id: &str) -> Result<(), PluginError> {
+        let _store_lock = self.lock_store()?;
         self.ensure_known_plugin(plugin_id)?;
         self.write_enabled_state(plugin_id, Some(true))?;
         self.config
@@ -1637,6 +1665,7 @@ impl PluginManager {
     }
 
     pub fn disable(&mut self, plugin_id: &str) -> Result<(), PluginError> {
+        let _store_lock = self.lock_store()?;
         self.ensure_known_plugin(plugin_id)?;
         self.write_enabled_state(plugin_id, Some(false))?;
         self.config
@@ -1646,6 +1675,7 @@ impl PluginManager {
     }
 
     pub fn uninstall(&mut self, plugin_id: &str) -> Result<(), PluginError> {
+        let _store_lock = self.lock_store()?;
         let mut registry = self.load_registry()?;
         let record = registry.plugins.remove(plugin_id).ok_or_else(|| {
             PluginError::NotFound(format!("plugin `{plugin_id}` is not installed"))
@@ -1666,6 +1696,7 @@ impl PluginManager {
     }
 
     pub fn update(&mut self, plugin_id: &str) -> Result<UpdateOutcome, PluginError> {
+        let _store_lock = self.lock_store()?;
         let mut registry = self.load_registry()?;
         let record = registry.plugins.get(plugin_id).cloned().ok_or_else(|| {
             PluginError::NotFound(format!("plugin `{plugin_id}` is not installed"))
@@ -1821,6 +1852,7 @@ impl PluginManager {
     }
 
     pub fn installed_plugin_registry_report(&self) -> Result<PluginRegistryReport, PluginError> {
+        let _store_lock = self.lock_store()?;
         self.sync_bundled_plugins()?;
         Ok(self.build_registry_report(self.discover_installed_plugins_with_failures()?))
     }
@@ -1921,7 +1953,11 @@ impl PluginManager {
     }
 
     fn ensure_known_plugin(&self, plugin_id: &str) -> Result<(), PluginError> {
-        if self.plugin_registry()?.contains(plugin_id) {
+        if self
+            .discover_registry_report()?
+            .into_registry()?
+            .contains(plugin_id)
+        {
             Ok(())
         } else {
             Err(PluginError::NotFound(format!(
@@ -2137,15 +2173,10 @@ fn detect_unsupported_manifest_contracts(
 
     let mut errors = Vec::new();
 
-    for (field, detail) in [(
-        "agents",
-        "plugin manifest field `agents` uses the SudoCode plugin contract; `scode` does not load plugin-managed agent markdown catalogs from plugin manifests.",
-    )] {
-        if root.contains_key(field) {
-            errors.push(PluginManifestValidationError::UnsupportedManifestContract {
-                detail: detail.to_string(),
-            });
-        }
+    if root.contains_key("agents") {
+        errors.push(PluginManifestValidationError::UnsupportedManifestContract {
+            detail: "plugin manifest field `agents` uses the SudoCode plugin contract; `scode` does not load plugin-managed agent markdown catalogs from plugin manifests.".to_string(),
+        });
     }
 
     if root

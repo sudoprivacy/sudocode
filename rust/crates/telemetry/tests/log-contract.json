@@ -1,0 +1,301 @@
+[
+  {
+    "input": {
+      "type": "http_request_started",
+      "session_id": "session",
+      "request_id": "request",
+      "attempt": 2,
+      "method": "POST",
+      "path": "/v1/messages",
+      "timestamp_ms": 100,
+      "attributes": {
+        "request_id": "overridden",
+        "custom": 3
+      }
+    },
+    "expected": {
+      "level": "info",
+      "session_id": "session",
+      "component": "scode",
+      "event": "request_started",
+      "attributes": {
+        "request_id": "request",
+        "custom": 3,
+        "attempt": 2,
+        "method": "POST",
+        "path": "/v1/messages",
+        "timestamp_ms": 100
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "http_request_succeeded",
+      "session_id": "session",
+      "request_id": "request",
+      "attempt": 2,
+      "method": "POST",
+      "path": "/v1/messages",
+      "status": 200,
+      "start_timestamp_ms": 100,
+      "end_timestamp_ms": 110,
+      "duration_ms": 10,
+      "provider_request_id": "provider",
+      "attributes": {
+        "custom": true
+      }
+    },
+    "expected": {
+      "level": "info",
+      "session_id": "session",
+      "component": "scode",
+      "event": "request_succeeded",
+      "attributes": {
+        "custom": true,
+        "request_id": "request",
+        "attempt": 2,
+        "method": "POST",
+        "path": "/v1/messages",
+        "status": 200,
+        "start_timestamp_ms": 100,
+        "end_timestamp_ms": 110,
+        "duration_ms": 10,
+        "provider_request_id": "provider"
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "http_request_failed",
+      "session_id": "session",
+      "request_id": "request",
+      "attempt": 2,
+      "method": "POST",
+      "path": "/v1/messages",
+      "error": "network",
+      "retryable": true,
+      "start_timestamp_ms": 100,
+      "end_timestamp_ms": 110,
+      "duration_ms": 10
+    },
+    "expected": {
+      "level": "warn",
+      "session_id": "session",
+      "component": "scode",
+      "event": "request_failed",
+      "attributes": {
+        "request_id": "request",
+        "attempt": 2,
+        "method": "POST",
+        "path": "/v1/messages",
+        "error": "network",
+        "retryable": true,
+        "start_timestamp_ms": 100,
+        "end_timestamp_ms": 110,
+        "duration_ms": 10
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "http_request_debug",
+      "session_id": "session",
+      "request_id": "request",
+      "timestamp_ms": 100,
+      "url": "https://example.test",
+      "method": "POST",
+      "body": {
+        "messages": []
+      }
+    },
+    "expected": {
+      "level": "debug",
+      "session_id": "session",
+      "component": "scode",
+      "event": "request_debug",
+      "attributes": {
+        "request_id": "request",
+        "timestamp_ms": 100,
+        "url": "https://example.test",
+        "method": "POST",
+        "body": {
+          "messages": []
+        },
+        "headers": {}
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "http_response_debug",
+      "session_id": "session",
+      "request_id": "request",
+      "timestamp_ms": 110,
+      "status": 200,
+      "headers": {
+        "content-type": "application/json"
+      },
+      "body": null
+    },
+    "expected": {
+      "level": "debug",
+      "session_id": "session",
+      "component": "scode",
+      "event": "response_debug",
+      "attributes": {
+        "request_id": "request",
+        "timestamp_ms": 110,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": null
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "http_response_usage",
+      "session_id": "session",
+      "request_id": "request",
+      "timestamp_ms": 110,
+      "input_tokens": 20,
+      "output_tokens": 10,
+      "cache_creation_input_tokens": 3,
+      "cache_read_input_tokens": 5,
+      "cost_units": 30,
+      "cost_currency": "USD"
+    },
+    "expected": {
+      "level": "info",
+      "session_id": "session",
+      "component": "scode",
+      "event": "response_usage",
+      "attributes": {
+        "request_id": "request",
+        "timestamp_ms": 110,
+        "input_tokens": 20,
+        "output_tokens": 10,
+        "cache_creation_input_tokens": 3,
+        "cache_read_input_tokens": 5,
+        "cost_units": 30,
+        "cost_currency": "USD"
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "http_response_usage",
+      "session_id": "session",
+      "request_id": "request",
+      "timestamp_ms": 110,
+      "input_tokens": 20,
+      "output_tokens": 10,
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0
+    },
+    "expected": {
+      "level": "info",
+      "session_id": "session",
+      "component": "scode",
+      "event": "response_usage",
+      "attributes": {
+        "request_id": "request",
+        "timestamp_ms": 110,
+        "input_tokens": 20,
+        "output_tokens": 10,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "analytics",
+      "namespace": "cli",
+      "action": "done",
+      "properties": {
+        "namespace": "ignored",
+        "custom": true
+      }
+    },
+    "expected": {
+      "level": "info",
+      "session_id": "",
+      "component": "scode",
+      "event": "event",
+      "attributes": {
+        "namespace": "cli",
+        "custom": true,
+        "action": "done"
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "session_trace",
+      "session_id": "session",
+      "name": "turn_finished",
+      "sequence": 4,
+      "timestamp_ms": 110,
+      "attributes": {
+        "custom": "trace"
+      }
+    },
+    "expected": {
+      "level": "info",
+      "session_id": "session",
+      "component": "scode",
+      "event": "turn_finished",
+      "attributes": {
+        "custom": "trace"
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "session_started",
+      "session_id": "session",
+      "timestamp_ms": 100,
+      "version": "0.2.29",
+      "cwd": "/tmp/workspace",
+      "mode": "standalone",
+      "model": "fixture"
+    },
+    "expected": {
+      "level": "info",
+      "session_id": "session",
+      "component": "scode",
+      "event": "session_started",
+      "attributes": {
+        "version": "0.2.29",
+        "cwd": "/tmp/workspace",
+        "mode": "standalone",
+        "model": "fixture"
+      }
+    }
+  },
+  {
+    "input": {
+      "type": "session_ended",
+      "session_id": "session",
+      "timestamp_ms": 110,
+      "total_turns": 2,
+      "total_input_tokens": 20,
+      "total_output_tokens": 10,
+      "duration_ms": 10
+    },
+    "expected": {
+      "level": "info",
+      "session_id": "session",
+      "component": "scode",
+      "event": "session_ended",
+      "attributes": {
+        "total_turns": 2,
+        "total_input_tokens": 20,
+        "total_output_tokens": 10,
+        "duration_ms": 10
+      }
+    }
+  }
+]

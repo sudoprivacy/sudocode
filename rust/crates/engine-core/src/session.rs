@@ -10,7 +10,7 @@
 //!            renderer side  (ABOVE the seam)          engine side (BELOW)
 //!            ────────────────────────────────         ────────────────────
 //!   REPL  ──▶ EngineHandle { commands, events } ──▶ EngineSession ──▶ EngineDelegate
-//!   ACP   ──▶ (send EngineCommand, recv EngineEvent)   (the pump)      (impl'd by the CLI)
+//!   ACP   ──▶ (send EngineCommand, recv EngineEvent)   (the pump)      (engine-host)
 //!  moss/…─▶                                                             wraps one runtime turn
 //! ```
 //!
@@ -41,7 +41,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::oneshot;
@@ -56,10 +56,12 @@ use runtime::{
     TokenUsage,
 };
 
+use crate::subagent_completion::{CompletionState, EventSink};
+
 /// The engine-side contract: one live session's worth of "things a turn can do".
 ///
-/// Implement this to plug an engine into the seam. The CLI implements it over
-/// its `ConversationRuntime`; the ACP path reuses the same impl. Held as
+/// Implement this to plug an engine into the seam. `engine-host` implements it
+/// over its `ConversationRuntime`; CLI and ACP share the implementation. Held as
 /// `Arc<dyn EngineDelegate>` so the pump and the blocking turn can share it
 /// (methods take `&self` + interior mutability, mirroring the runtime's own
 /// `&self` tool dispatch).
@@ -74,6 +76,7 @@ pub trait EngineDelegate: Send + Sync + 'static {
     /// * forward every streaming event to `observer` (the runtime already does
     ///   this when you pass the observer into `run_turn_with_blocks`);
     /// * consult `prompter` for permission decisions (pass it into the runtime);
+    /// * preserve the abort signal reset by the pump before input preparation;
     /// * run on a **multi-threaded Tokio runtime** (`rt.block_on(...)`), so the
     ///   `prompter`/question `block_in_place` bridge does not panic.
     ///
@@ -87,17 +90,70 @@ pub trait EngineDelegate: Send + Sync + 'static {
         prompter: &mut dyn PermissionPrompter,
     ) -> Result<TurnComplete, RuntimeError>;
 
+    /// Prepare model-specific input after admission, before the model turn.
+    fn prepare_prompt(
+        &self,
+        blocks: Vec<ContentBlock>,
+        _image_policy: engine_events::ImageInputPolicy,
+    ) -> Result<Vec<ContentBlock>, RuntimeError> {
+        Ok(blocks)
+    }
+
+    /// Execute session management under the same admission and commit boundary.
+    fn run_management(
+        &self,
+        _line: &str,
+        _build: &engine_events::ManagementContext,
+        _observer: &mut dyn RuntimeObserver,
+    ) -> Result<bool, RuntimeError> {
+        Err(RuntimeError::new("session management is unsupported"))
+    }
+
+    /// Attach completion persistence during engine composition, before execution.
+    fn attach_completions(&self, _state: &CompletionState) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Bind a host's trace identity after turn admission succeeds.
+    fn set_trace_id(&self, _trace_id: &str) {}
+
     /// Install the question prompter the `AskUserQuestion` tool uses for the
     /// *next* turn. The driver calls this immediately before each `run_turn`.
     fn set_question_prompter(&self, prompter: Box<dyn QuestionPrompter>);
 
     /// A clone of the in-flight turn's abort signal. The pump fires it on
-    /// [`EngineCommand::Cancel`] while `run_turn` is blocked.
+    /// [`EngineCommand::Cancel`] while `run_turn` is blocked. This accessor must
+    /// not acquire the session mutex held by the work being cancelled.
     fn abort_signal(&self) -> HookAbortSignal;
 
     /// One registry owned by the engine session, shared by every turn driver.
     fn background_tasks(&self) -> Option<runtime::background_tasks::BackgroundTasks> {
         None
+    }
+
+    /// Fence every main and child tool before cancellation. The host waits for
+    /// the turn and actual workers before acknowledging human ownership.
+    fn begin_tool_pause(&self) -> Result<u64, String> {
+        self.background_tasks()
+            .map(|tasks| tasks.begin_pause())
+            .ok_or_else(|| "This engine does not support tool pause".to_string())
+    }
+
+    fn wait_tool_pause(&self, epoch: u64, timeout: std::time::Duration) -> Result<(), String> {
+        self.background_tasks()
+            .ok_or_else(|| "This engine does not support tool pause".to_string())?
+            .wait_paused(epoch, timeout)
+    }
+
+    fn resume_tool_operations(&self, epoch: u64) -> Result<(), String> {
+        self.background_tasks()
+            .ok_or_else(|| "This engine does not support tool pause".to_string())?
+            .resume_operations(epoch)
+    }
+
+    fn tool_control(&self) -> (u64, bool) {
+        self.background_tasks()
+            .map_or((0, false), |tasks| tasks.tool_control())
     }
 
     /// Switch the active model. Returns `(display_model, available_models)`; the
@@ -141,7 +197,7 @@ impl EngineHandle {
     }
 }
 
-/// The pump. Spawns a dedicated engine thread that owns a Tokio runtime, routes
+/// The pump. Spawns a dedicated engine thread on the shared Tokio executor, routes
 /// [`EngineCommand`]s to the [`EngineDelegate`], and streams the delegate's
 /// callbacks back out as [`EngineEvent`]s. Contains no engine- or
 /// renderer-specific logic.
@@ -153,6 +209,15 @@ impl EngineSession {
     /// [`EngineCommand::Close`] is received or the command channel is dropped.
     #[must_use]
     pub fn spawn(delegate: Arc<dyn EngineDelegate>) -> EngineHandle {
+        Self::spawn_with_completions(delegate, Arc::default())
+    }
+
+    /// Use the same driver with a durable completion journal supplied by the host.
+    #[must_use]
+    pub(crate) fn spawn_with_completions(
+        delegate: Arc<dyn EngineDelegate>,
+        completions: Arc<CompletionState>,
+    ) -> EngineHandle {
         let (cmd_tx, cmd_rx) = std_mpsc::channel::<EngineCommand>();
         let (evt_tx, evt_rx) = std_mpsc::channel::<EngineEvent>();
         let (stopped_tx, stopped_rx) = std_mpsc::channel();
@@ -160,12 +225,17 @@ impl EngineSession {
         std::thread::Builder::new()
             .name("engine-session".into())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("engine-session tokio runtime");
-                rt.block_on(drive(delegate, cmd_rx, evt_tx));
-                drop(rt);
+                // One executor for every session, including multi-session ACP.
+                // A new renderer must not multiply worker pools per conversation.
+                static EXECUTOR: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+                let runtime = EXECUTOR.get_or_init(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .enable_all()
+                        .build()
+                        .expect("engine-session tokio runtime")
+                });
+                runtime.block_on(drive(delegate, cmd_rx, EventSink::new(evt_tx, completions)));
                 let _ = stopped_tx.send(());
             })
             .expect("spawn engine-session thread");
@@ -239,10 +309,10 @@ enum ShutdownReason {
 async fn drive(
     delegate: Arc<dyn EngineDelegate>,
     cmd_rx: std_mpsc::Receiver<EngineCommand>,
-    evt_tx: std_mpsc::Sender<EngineEvent>,
+    evt_tx: EventSink,
 ) {
-    let subagents = SubagentRelay::to_session(evt_tx.clone());
-    let tasks = delegate.background_tasks().unwrap_or_default();
+    let subagents = SubagentRelay::new(evt_tx.clone());
+
     // A cancelled prompt can reply after the next turn starts. Never reuse
     // its id for a new question or permission request in this engine session.
     let next_request_id = Arc::new(AtomicU64::new(0));
@@ -263,12 +333,32 @@ async fn drive(
     let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
 
     let mut shutdown = ShutdownReason::Disconnected;
-    while let Some(cmd) = tcmd_rx.recv().await {
+    loop {
+        let cmd = tokio::select! {
+            cmd = tcmd_rx.recv() => { let Some(cmd) = cmd else { break; }; cmd },
+            () = evt_tx.completions.delivery_changed() => { evt_tx.completions.deliver(&evt_tx); continue; }
+        };
+        let tasks = delegate.background_tasks().unwrap_or_default();
         match cmd {
-            EngineCommand::Prompt { blocks } => {
+            EngineCommand::Completion { id, action } => handle_completion(id, action, &evt_tx),
+            EngineCommand::CancelSubagent {
+                request_id,
+                agent_id,
+            } => handle_subagent_cancel(request_id, &agent_id, &evt_tx),
+            command @ (EngineCommand::Prompt { .. } | EngineCommand::Management { .. }) => {
+                let (input, context) = TurnInput::from_command(command);
+                if let Err(message) = evt_tx.completions.begin(context.as_ref()) {
+                    // Admission failed before the turn began; do not mutate the
+                    // previous completion transaction.
+                    let _ = evt_tx.reject_prompt(message);
+                    continue;
+                }
+                if let Some(context) = &context {
+                    delegate.set_trace_id(&context.trace_id);
+                }
                 if let Some(reason) = run_one_turn(
                     &delegate,
-                    blocks,
+                    input,
                     &evt_tx,
                     &mut tcmd_rx,
                     &subagents,
@@ -281,47 +371,27 @@ async fn drive(
                     break;
                 }
             }
-            EngineCommand::SetModel { model } => match delegate.set_model(&model) {
-                Ok((model, available)) => {
-                    let _ = evt_tx.send(EngineEvent::ModelChanged { model, available });
-                }
-                Err(message) => {
-                    let _ = evt_tx.send(EngineEvent::Error { message });
-                }
-            },
-            EngineCommand::SetPermissionMode { mode } => match delegate.set_permission_mode(mode) {
-                Ok(()) => {
-                    let _ = evt_tx.send(EngineEvent::PermissionModeChanged { mode });
-                }
-                Err(message) => {
-                    let _ = evt_tx.send(EngineEvent::Error { message });
-                }
-            },
-            EngineCommand::SlashCommand { line } => match delegate.handle_slash_command(&line) {
-                Ok(text) => {
-                    if !text.is_empty() {
-                        let _ = evt_tx.send(EngineEvent::Notice { text });
-                    }
-                }
-                Err(message) => {
-                    let _ = evt_tx.send(EngineEvent::Error { message });
-                }
-            },
+            command @ (EngineCommand::SetModel { .. }
+            | EngineCommand::SetPermissionMode { .. }
+            | EngineCommand::SlashCommand { .. }) => {
+                change_setting(delegate.as_ref(), command, &evt_tx);
+            }
             EngineCommand::BackgroundTask { action } => {
                 handle_background_task(action, &tasks, &evt_tx);
             }
-            // No turn is in flight here, so these are stale/no-ops. During a turn
-            // they are consumed by the `select!` inside `run_one_turn`.
-            EngineCommand::Cancel
-            | EngineCommand::PermissionAnswer { .. }
-            | EngineCommand::QuestionAnswer { .. } => {}
+            // Cancellation also reaches a lifecycle operation, such as manual
+            // compaction, that holds the session's shared abort signal.
+            EngineCommand::Cancel => delegate.abort_signal().abort(),
+            EngineCommand::PermissionAnswer { .. } | EngineCommand::QuestionAnswer { .. } => {}
             EngineCommand::Close => {
                 shutdown = ShutdownReason::ExplicitClose;
                 break;
             }
         }
     }
-    tasks.shutdown();
+    if let Some(tasks) = delegate.background_tasks() {
+        tasks.shutdown();
+    }
     // Always reap owned work, but preserve the existing persistence contract:
     // dropping the handle after a read-only command or failed compaction must
     // not save a newly assembled prompt snapshot into its resumed transcript.
@@ -330,10 +400,46 @@ async fn drive(
     }
 }
 
+fn change_setting(delegate: &dyn EngineDelegate, command: EngineCommand, sink: &EventSink) {
+    let result = match command {
+        EngineCommand::SetModel { model } => delegate
+            .set_model(&model)
+            .map(|(model, available)| Some(EngineEvent::ModelChanged { model, available })),
+        EngineCommand::SetPermissionMode { mode } => delegate
+            .set_permission_mode(mode)
+            .map(|()| Some(EngineEvent::PermissionModeChanged { mode })),
+        EngineCommand::SlashCommand { line } => delegate
+            .handle_slash_command(&line)
+            .map(|text| (!text.is_empty()).then_some(EngineEvent::Notice { text })),
+        _ => unreachable!("setting command"),
+    };
+    match result {
+        Ok(Some(event)) => {
+            let _ = sink.send(event);
+        }
+        Ok(None) => {}
+        Err(message) => {
+            let _ = sink.send(EngineEvent::Error { message });
+        }
+    }
+}
+
+fn handle_completion(id: Option<u64>, action: engine_events::CompletionAction, sink: &EventSink) {
+    let result = sink.completions.command(action);
+    if let Some(id) = id {
+        let _ = sink.send(EngineEvent::CommandResult { id, result });
+    }
+}
+
+fn handle_subagent_cancel(id: u64, agent_id: &str, sink: &EventSink) {
+    let result = sink.completions.cancel_subagent(agent_id);
+    let _ = sink.send(EngineEvent::CommandResult { id, result });
+}
+
 fn handle_background_task(
     action: engine_events::BackgroundTaskAction,
     tasks: &runtime::background_tasks::BackgroundTasks,
-    tx: &std_mpsc::Sender<EngineEvent>,
+    tx: &EventSink,
 ) {
     match action {
         engine_events::BackgroundTaskAction::Watch => {
@@ -350,14 +456,47 @@ fn handle_background_task(
     }
 }
 
+struct TurnInput {
+    blocks: Vec<ContentBlock>,
+    management: Option<(String, engine_events::ManagementContext)>,
+    image_policy: engine_events::ImageInputPolicy,
+}
+
+impl TurnInput {
+    fn from_command(command: EngineCommand) -> (Self, Option<engine_events::PromptContext>) {
+        let (blocks, context, management) = match command {
+            EngineCommand::Prompt { blocks, context } => (blocks, context, None),
+            EngineCommand::Management {
+                line,
+                context,
+                build,
+            } => (Vec::new(), context, Some((line, build))),
+            _ => unreachable!(),
+        };
+        let image_policy = context
+            .as_ref()
+            .map_or(engine_events::ImageInputPolicy::Native, |context| {
+                context.image_policy
+            });
+        (
+            Self {
+                blocks,
+                management,
+                image_policy,
+            },
+            context,
+        )
+    }
+}
+
 /// Drive a single [`EngineCommand::Prompt`]: install the adapters, run the turn
 /// on a blocking task, and concurrently service answer/cancel commands until it
 /// finishes. Returns the shutdown reason if a close or disconnection arrived
 /// mid-turn, so the caller tears the session down after the aborted turn drains.
 async fn run_one_turn(
     delegate: &Arc<dyn EngineDelegate>,
-    blocks: Vec<ContentBlock>,
-    evt_tx: &std_mpsc::Sender<EngineEvent>,
+    input: TurnInput,
+    evt_tx: &EventSink,
     tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
     subagents: &SubagentRelay,
     next_request_id: &Arc<AtomicU64>,
@@ -367,7 +506,10 @@ async fn run_one_turn(
         next_id: Arc::clone(next_request_id),
         ..RequestTable::default()
     };
-    let label = turn_label(&blocks);
+    let label = input.management.as_ref().map_or_else(
+        || turn_label(&input.blocks),
+        |(line, _)| line.chars().take(80).collect(),
+    );
 
     // The question prompter is installed on the tool executor (via the delegate)
     // before the turn; the permission prompter + observer are passed into the
@@ -378,6 +520,7 @@ async fn run_one_turn(
     }));
 
     let abort = delegate.abort_signal();
+    abort.reset();
     let _ = evt_tx.send(EngineEvent::TurnStarted { label });
     let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
 
@@ -387,14 +530,14 @@ async fn run_one_turn(
     let subagents = subagents.clone();
     let turn_tasks = tasks.clone();
     let mut handle = tokio::task::spawn_blocking(move || {
-        let mut observer = ObserverAdapter::new(turn_tx.clone())
+        let mut observer = ObserverAdapter::with_sink(turn_tx.clone())
             .with_subagent_relay(subagents)
             .with_background_tasks(turn_tasks);
         let mut prompter = PrompterAdapter {
             tx: turn_tx,
             table: turn_table,
         };
-        delegate.run_turn(blocks, &mut observer, &mut prompter)
+        execute_input(delegate.as_ref(), input, &mut observer, &mut prompter)
     });
 
     let mut shutdown = None;
@@ -413,6 +556,8 @@ async fn run_one_turn(
                     }
                 }
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
+                Some(EngineCommand::Completion { id, action }) => handle_completion(id, action, evt_tx),
+                Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
                 // Both paths abort and reap; only explicit Close persists.
                 command @ (Some(EngineCommand::Close) | None) => {
                     shutdown = Some(if command.is_some() {
@@ -434,22 +579,23 @@ async fn run_one_turn(
                 // turns). Ignore it rather than interleave.
                 Some(_) => {}
             },
+            () = evt_tx.completions.delivery_changed() => evt_tx.completions.deliver(evt_tx),
             result = &mut handle => {
+                table.cancel_all();
                 match result {
                     Ok(Ok(complete)) => {
                         let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
                     }
                     Ok(Err(error)) => {
-                        // The event channel carries a string message; the typed
-                        // classification is consumed by the direct (ACP) caller,
-                        // not this renderer-facing pump.
-                        let _ = evt_tx.send(EngineEvent::Error {
+                        let _ = evt_tx.send(EngineEvent::TurnFailed {
                             message: error.to_string(),
+                            context_window: error.is_context_window_blocked(),
                         });
                     }
                     Err(join_error) => {
-                        let _ = evt_tx.send(EngineEvent::Error {
+                        let _ = evt_tx.send(EngineEvent::TurnFailed {
                             message: format!("engine turn panicked: {join_error}"),
+                            context_window: false,
                         });
                     }
                 }
@@ -459,6 +605,27 @@ async fn run_one_turn(
         }
     }
     shutdown
+}
+
+fn execute_input(
+    delegate: &dyn EngineDelegate,
+    input: TurnInput,
+    observer: &mut dyn RuntimeObserver,
+    prompter: &mut dyn PermissionPrompter,
+) -> Result<TurnComplete, RuntimeError> {
+    if let Some((line, build)) = input.management {
+        let cancelled = delegate.run_management(&line, &build, observer)?;
+        return Ok(TurnComplete {
+            iterations: 0,
+            turn_usage: TokenUsage::default(),
+            session_usage: TokenUsage::default(),
+            cancelled,
+            response_model: None,
+            auto_compaction: None,
+        });
+    }
+    let blocks = delegate.prepare_prompt(input.blocks, input.image_policy)?;
+    delegate.run_turn(blocks, observer, prompter)
 }
 
 /// Short human label for a turn (first non-empty line of the first text block).
@@ -476,32 +643,15 @@ fn turn_label(blocks: &[ContentBlock]) -> String {
 /// `RuntimeObserver` → [`EngineEvent`] (fire-and-forget). All seven runtime
 /// callbacks map straight to an event.
 ///
-/// Public so an out-of-process renderer that runs its own turn — the ACP
-/// server, which drives one [`EngineDelegate::run_turn`] per `session/prompt`
-/// — reuses the exact same runtime→event translation the in-process pump uses,
-/// instead of re-implementing a `RuntimeObserver` (which would force a renderer
-/// crate to name `runtime::RuntimeObserver`, defeating the seam). The ACP path
-/// owns the receiving end of `tx` and maps the [`EngineEvent`]s onto its wire.
-pub struct ObserverAdapter {
-    tx: std_mpsc::Sender<EngineEvent>,
+/// Only the shared driver constructs observers, for model and management work.
+struct ObserverAdapter {
+    tx: EventSink,
     subagents: Option<SubagentRelay>,
     tasks: runtime::background_tasks::BackgroundTasks,
 }
 
 impl ObserverAdapter {
-    /// Bind an observer to the same task owner used by the session pump.
-    #[must_use]
-    pub fn for_delegate(tx: std_mpsc::Sender<EngineEvent>, delegate: &dyn EngineDelegate) -> Self {
-        Self::new(tx).with_background_tasks(delegate.background_tasks().unwrap_or_default())
-    }
-
-    /// Build an adapter that forwards every runtime callback to `tx` as an
-    /// [`EngineEvent`]. `tx` is a plain [`std::sync::mpsc::Sender`] so the
-    /// receiving renderer can block-recv without a Tokio runtime (the ACP path
-    /// bridges it into its async `select!` via a small forwarder thread, the
-    /// same shape the pump uses for its command channel).
-    #[must_use]
-    pub fn new(tx: std_mpsc::Sender<EngineEvent>) -> Self {
+    fn with_sink(tx: EventSink) -> Self {
         Self {
             tasks: runtime::background_tasks::BackgroundTasks::default(),
             tx,
@@ -511,10 +661,7 @@ impl ObserverAdapter {
 
     /// Reuse one registry across the whole session instead of one turn.
     #[must_use]
-    pub fn with_background_tasks(
-        mut self,
-        tasks: runtime::background_tasks::BackgroundTasks,
-    ) -> Self {
+    fn with_background_tasks(mut self, tasks: runtime::background_tasks::BackgroundTasks) -> Self {
         self.tasks = tasks;
         self
     }
@@ -522,86 +669,25 @@ impl ObserverAdapter {
     /// Also report what spawned sub-agents do, as [`EngineEvent::Subagent`]
     /// through `relay`. Without this, sub-agents run unobserved.
     #[must_use]
-    pub fn with_subagent_relay(mut self, relay: SubagentRelay) -> Self {
+    fn with_subagent_relay(mut self, relay: SubagentRelay) -> Self {
         self.subagents = Some(relay);
         self
     }
 }
 
-/// Session-lifetime route for [`EngineEvent::Subagent`].
-///
-/// A background sub-agent outlives the turn that spawned it, so its events
-/// cannot ride the turn's event channel alone: that channel has to close when
-/// the turn ends (the renderer answers the turn once it drains). The relay
-/// sends into the attached turn's channel while one is attached — keeping a
-/// synchronous child's events in order with the parent's — and into the
-/// session channel returned by [`SubagentRelay::new`] otherwise.
+/// One session event route, retained by children that outlive their parent turn.
 #[derive(Clone)]
-pub struct SubagentRelay {
-    route: Arc<Mutex<SubagentRoute>>,
-}
-
-struct SubagentRoute {
-    turn: Option<std_mpsc::Sender<EngineEvent>>,
-    session: std_mpsc::Sender<EngineEvent>,
+struct SubagentRelay {
+    tx: EventSink,
 }
 
 impl SubagentRelay {
-    /// A relay plus the receiving end of its session channel. The channel
-    /// stays open while the relay or any sub-agent it reaches is alive.
-    #[must_use]
-    pub fn new() -> (Self, std_mpsc::Receiver<EngineEvent>) {
-        let (session, rx) = std_mpsc::channel();
-        (Self::to_session(session), rx)
-    }
-
-    fn to_session(session: std_mpsc::Sender<EngineEvent>) -> Self {
-        Self {
-            route: Arc::new(Mutex::new(SubagentRoute {
-                turn: None,
-                session,
-            })),
-        }
-    }
-
-    /// Route events into `turn` until the returned guard drops. Drop the guard
-    /// before waiting for `turn`'s channel to close.
-    #[must_use]
-    pub fn attach_turn(&self, turn: std_mpsc::Sender<EngineEvent>) -> SubagentTurnGuard {
-        self.lock().turn = Some(turn);
-        SubagentTurnGuard {
-            relay: self.clone(),
-        }
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, SubagentRoute> {
-        self.route
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn new(tx: EventSink) -> Self {
+        Self { tx }
     }
 
     fn emit(&self, event: runtime::SubagentEvent) {
-        let route = self.lock();
-        let event = EngineEvent::Subagent(event);
-        let event = match &route.turn {
-            Some(turn) => match turn.send(event) {
-                Ok(()) => return,
-                Err(std_mpsc::SendError(event)) => event,
-            },
-            None => event,
-        };
-        let _ = route.session.send(event);
-    }
-}
-
-/// Detaches the turn from a [`SubagentRelay`] on drop.
-pub struct SubagentTurnGuard {
-    relay: SubagentRelay,
-}
-
-impl Drop for SubagentTurnGuard {
-    fn drop(&mut self) {
-        self.relay.lock().turn = None;
+        let _ = self.tx.send(EngineEvent::Subagent(event));
     }
 }
 
@@ -722,11 +808,19 @@ impl RuntimeObserver for ObserverAdapter {
 
     fn subagent_sink(&self) -> Option<runtime::SubagentSink> {
         let relay = self.subagents.clone()?;
-        Some(runtime::SubagentSink::new(move |event| relay.emit(event)))
+        let journal = relay.tx.completions.journal();
+        Some(
+            runtime::SubagentSink::new(move |event| relay.emit(event))
+                .with_completion_journal(journal),
+        )
     }
 
     fn background_tasks(&self) -> Option<runtime::background_tasks::BackgroundTasks> {
-        Some(self.tasks.clone())
+        let journal = self
+            .subagents
+            .as_ref()
+            .and_then(|relay| relay.tx.completions.journal());
+        Some(self.tasks.clone().with_completion(journal))
     }
 }
 
@@ -734,7 +828,7 @@ impl RuntimeObserver for ObserverAdapter {
 /// [`EngineCommand::PermissionAnswer`] back.
 #[derive(Clone)]
 struct PrompterAdapter {
-    tx: std_mpsc::Sender<EngineEvent>,
+    tx: EventSink,
     table: RequestTable,
 }
 
@@ -776,7 +870,7 @@ impl PermissionPrompter for PrompterAdapter {
 /// Questions and permissions share one interaction queue. Waiting for a reply
 /// yields to other tools; only ownership of the input surface is exclusive.
 struct QuestionAdapter {
-    tx: std_mpsc::Sender<EngineEvent>,
+    tx: EventSink,
     table: RequestTable,
 }
 
@@ -812,21 +906,23 @@ impl QuestionPrompter for QuestionAdapter {
 /// future is dropped on cancellation or a provider stream failure.
 struct PromptLease {
     table: RequestTable,
-    tx: std_mpsc::Sender<EngineEvent>,
+    tx: EventSink,
     id: RequestId,
 }
 
 impl Drop for PromptLease {
     fn drop(&mut self) {
         self.table.take(self.id);
-        let _ = self.tx.send(EngineEvent::State(EngineState::Running));
+        if !self.table.cancelled.load(Ordering::SeqCst) {
+            let _ = self.tx.send(EngineEvent::State(EngineState::Running));
+        }
     }
 }
 
 impl RequestTable {
     fn show_prompt(
         &self,
-        tx: &std_mpsc::Sender<EngineEvent>,
+        tx: &EventSink,
         answer: PendingAnswer,
         event: impl FnOnce(RequestId) -> EngineEvent,
     ) -> PromptLease {

@@ -13,13 +13,14 @@ async-trait = "0.1"
 axum = { workspace = true }
 base64 = "0.22"
 chrono = "0.4"
-command-group = { version = "5", features = ["with-tokio"] }
+command-group = { workspace = true, features = ["with-tokio"] }
 # Cron feature: 5-field POSIX schedule parsing + next-run computation
 # (`cron` takes a 6-field expr, so the scheduler prepends a `0` seconds
 # field to the CC-standard 5-field input) and per-job IANA timezones.
 chrono-tz = "0.9"
 cron = "0.12"
 futures = "0.3"
+flate2 = "1"
 # Cross-platform CSPRNG. Replaces the historical Unix-only
 # `/dev/urandom` read in oauth::generate_random_token, which broke
 # every PKCE-derived test on Windows with `Os { code: 3, kind:
@@ -60,10 +61,17 @@ tracing = "0.1"
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
 tower-http = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["poll", "process"] }
+nix = { version = "0.29", features = ["poll", "process", "signal"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Exercise the shipped VFS host and its error envelopes over real TCP.
+transport = { workspace = true }
+nexus-rebac = { workspace = true }
+tonic-host = { package = "tonic", version = "0.14", default-features = false }
 
 [target.'cfg(unix)'.dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

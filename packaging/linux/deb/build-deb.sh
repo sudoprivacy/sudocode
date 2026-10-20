@@ -3,18 +3,28 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: build-deb.sh --version VERSION --binary PATH --output DIR
+Usage: build-deb.sh --version VERSION --binary PATH --output DIR [--arch amd64|arm64]
 
-Build scode_VERSION_amd64.deb from an existing Linux x64 scode binary.
+Build a Debian package from an existing Linux scode binary (default: amd64).
 EOF
 }
 
 VERSION=""
 BINARY=""
 OUTPUT=""
+ARCH=amd64
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --arch)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      ARCH="$2"
+      shift 2
+      ;;
+    --arch=*)
+      ARCH="${1#--arch=}"
+      shift
+      ;;
     --version)
       [ $# -ge 2 ] || { usage >&2; exit 2; }
       VERSION="$2"
@@ -54,6 +64,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+case "$ARCH" in
+  amd64|x64|x86_64) ARCH=amd64; LIBC_DEPENDENCY="" ;;
+  arm64|aarch64) ARCH=arm64; LIBC_DEPENDENCY=", libc6 (>= 2.35), libgcc-s1" ;;
+  *) printf 'unsupported architecture: %s\n' "$ARCH" >&2; exit 2 ;;
+esac
+
 [ -n "$VERSION" ] || { printf 'missing --version\n' >&2; exit 2; }
 [ -n "$BINARY" ] || { printf 'missing --binary\n' >&2; exit 2; }
 [ -n "$OUTPUT" ] || { printf 'missing --output\n' >&2; exit 2; }
@@ -72,14 +88,15 @@ TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM HUP
 
-pkg="$TMP/scode_${VERSION}_amd64"
+pkg="$TMP/scode_${VERSION}_$ARCH"
 mkdir -p \
   "$pkg/DEBIAN" \
   "$pkg/usr/bin" \
   "$pkg/usr/lib/scode" \
   "$pkg/usr/share/doc/scode"
 
-sed "s/@VERSION@/$VERSION/g" "$SCRIPT_DIR/control.template" > "$pkg/DEBIAN/control"
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@ARCH@/$ARCH/g" -e "s/@LIBC_DEPENDENCY@/$LIBC_DEPENDENCY/g" \
+  "$SCRIPT_DIR/control.template" > "$pkg/DEBIAN/control"
 install -m 0755 "$SCRIPT_DIR/postinst" "$pkg/DEBIAN/postinst"
 install -m 0755 "$SCRIPT_DIR/prerm" "$pkg/DEBIAN/prerm"
 install -m 0755 "$BINARY" "$pkg/usr/bin/scode"
@@ -98,5 +115,5 @@ else
 fi
 
 mkdir -p "$OUTPUT"
-"$DPKG_DEB" --build --root-owner-group "$pkg" "$OUTPUT/scode_${VERSION}_amd64.deb" >/dev/null
-printf '%s\n' "$OUTPUT/scode_${VERSION}_amd64.deb"
+"$DPKG_DEB" --build --root-owner-group "$pkg" "$OUTPUT/scode_${VERSION}_$ARCH.deb" >/dev/null
+printf '%s\n' "$OUTPUT/scode_${VERSION}_$ARCH.deb"

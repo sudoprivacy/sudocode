@@ -3,6 +3,8 @@
 本文档说明如何使用 `scode-linux-x64-bundle.tar.gz` 在 Linux 服务器上安装
 `scode`。该方式不依赖 deb、rpm、apt 或 yum，适合客户服务器发行版和版本不确定的场景。
 
+从 v0.2.32 起，ARM64（`uname -m` 为 `aarch64`）可使用 `scode-linux-arm64-bundle.tar.gz`，后续命令中的 `x64` 相应替换为 `arm64`。ARM64 版本需要 glibc 2.35 或更新版本（例如 Ubuntu 22.04/24.04），x64 版本使用静态 musl 构建。Debian 包也分别提供 `amd64` 和 `arm64` 架构。
+
 ## 适用场景
 
 推荐在以下场景使用 bundle：

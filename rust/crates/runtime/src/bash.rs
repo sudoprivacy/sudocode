@@ -17,6 +17,18 @@ use crate::sandbox::{
 use crate::workspace_root::current_workspace_root;
 use crate::ConfigLoader;
 
+/// Keep shell lifetime under the engine's cancellation and process-tree control.
+pub fn shell_process_group<T>(
+    mut group: command_group::builder::CommandGroupBuilder<'_, T>,
+) -> command_group::builder::CommandGroupBuilder<'_, T> {
+    // A Windows Job Object controls lifetime but does not isolate console signals.
+    // Let the parent's handler cancel the engine before killing its shell tree.
+    #[cfg(windows)]
+    group.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
+    group.kill_on_drop(true);
+    group
+}
+
 /// Default foreground subprocess timeout for tool-backed command execution.
 ///
 /// Tool schemas still allow callers to provide a larger or smaller per-call
@@ -115,6 +127,40 @@ pub struct BashCommandOutput {
 }
 
 impl BashCommandOutput {
+    /// Project a completed native process, including a Windows console-control
+    /// exit that can race the parent's cancellation notification.
+    #[must_use]
+    pub fn completed(status: std::process::ExitStatus, stdout: String, mut stderr: String) -> Self {
+        let interrupted = native_control_exit(status);
+        let return_code_interpretation = if interrupted {
+            if !stderr.is_empty() && !stderr.ends_with('\n') {
+                stderr.push('\n');
+            }
+            stderr.push_str("Command interrupted by user");
+            Some("interrupted".to_owned())
+        } else {
+            describe_exit_status(status)
+        };
+        let no_output_expected =
+            Some(!interrupted && stdout.trim().is_empty() && stderr.trim().is_empty());
+        Self {
+            stdout,
+            stderr,
+            exit_code: status.code().filter(|_| !interrupted),
+            raw_output_path: None,
+            interrupted,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation,
+            no_output_expected,
+            structured_content: None,
+            sandbox_status: None,
+        }
+    }
+
     /// Common background launch result for every supported terminal shell.
     #[must_use]
     pub fn background(id: String, output_path: String) -> Self {
@@ -183,6 +229,19 @@ impl BashCommandOutput {
         }
         value
     }
+}
+
+#[cfg(windows)]
+fn native_control_exit(status: std::process::ExitStatus) -> bool {
+    // NTSTATUS 0xC000013A, not an ordinary shell exit code or a timeout.
+    // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55
+    const STATUS_CONTROL_C_EXIT: i32 = -1_073_741_510;
+    status.code() == Some(STATUS_CONTROL_C_EXIT)
+}
+
+#[cfg(not(windows))]
+fn native_control_exit(_status: std::process::ExitStatus) -> bool {
+    false
 }
 
 fn describe_exit_status(status: std::process::ExitStatus) -> Option<String> {
@@ -364,7 +423,7 @@ async fn execute_bash_async(
 
     command.kill_on_drop(true);
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = command.group().kill_on_drop(true).spawn()?;
+    let mut child = shell_process_group(command.group()).spawn()?;
     let mut stdout_pipe = child.inner().stdout.take().expect("stdout piped");
     let mut stderr_pipe = child.inner().stderr.take().expect("stderr piped");
     let timeout_sleep = tokio::time::sleep(Duration::from_millis(timeout_ms));
@@ -429,25 +488,10 @@ async fn execute_bash_async(
         &String::from_utf8_lossy(&output.stderr),
         MAX_OUTPUT_BYTES_SAFETY,
     );
-    let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = describe_exit_status(output.status);
-
-    Ok(BashCommandOutput {
-        exit_code: output.status.code(),
-        stdout,
-        stderr,
-        raw_output_path: None,
-        interrupted: false,
-        is_image: None,
-        background_task_id: None,
-        backgrounded_by_user: None,
-        assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-        return_code_interpretation,
-        no_output_expected,
-        structured_content: None,
-        sandbox_status: Some(sandbox_status),
-    })
+    let mut result = BashCommandOutput::completed(output.status, stdout, stderr);
+    result.dangerously_disable_sandbox = input.dangerously_disable_sandbox;
+    result.sandbox_status = Some(sandbox_status);
+    Ok(result)
 }
 
 /// One line read off a child's stdout or stderr by [`pump_lines`].
@@ -523,7 +567,7 @@ async fn execute_bash_streaming(
     command.kill_on_drop(true);
 
     let timeout_ms = input.timeout.unwrap_or(DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS);
-    let mut child = command.group().kill_on_drop(true).spawn()?;
+    let mut child = shell_process_group(command.group()).spawn()?;
 
     let stdout = child.inner().stdout.take().expect("stdout piped");
     let stderr = child.inner().stderr.take().expect("stderr piped");
@@ -655,25 +699,10 @@ async fn execute_bash_streaming(
 
     let stdout = truncate_output(&stdout_buf, MAX_OUTPUT_BYTES_SAFETY);
     let stderr = truncate_output(&stderr_buf, MAX_OUTPUT_BYTES_SAFETY);
-    let no_output_expected = Some(stdout.trim().is_empty() && stderr.trim().is_empty());
-    let return_code_interpretation = describe_exit_status(status);
-
-    Ok(BashCommandOutput {
-        exit_code: status.code(),
-        stdout,
-        stderr,
-        raw_output_path: None,
-        interrupted: false,
-        is_image: None,
-        background_task_id: None,
-        backgrounded_by_user: None,
-        assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox: input.dangerously_disable_sandbox,
-        return_code_interpretation,
-        no_output_expected,
-        structured_content: None,
-        sandbox_status: Some(sandbox_status),
-    })
+    let mut result = BashCommandOutput::completed(status, stdout, stderr);
+    result.dangerously_disable_sandbox = input.dangerously_disable_sandbox;
+    result.sandbox_status = Some(sandbox_status);
+    Ok(result)
 }
 
 pub(crate) fn interrupted_bash_output(
@@ -725,6 +754,7 @@ fn launch_background_shell(
 ) -> io::Result<(String, String)> {
     launch_background_command(
         prepare_command(&input.command, cwd, sandbox, false),
+        crate::subagent_completion::ShellKind::Bash,
         &input.command,
         input.description.as_deref().unwrap_or(&input.command),
         tasks,
@@ -734,6 +764,7 @@ fn launch_background_shell(
 /// Spawn any terminal command under one output and cancellation owner.
 pub fn launch_background_command(
     mut command: Command,
+    shell: crate::subagent_completion::ShellKind,
     command_text: &str,
     title: &str,
     tasks: Option<&crate::background_tasks::BackgroundTasks>,
@@ -759,12 +790,49 @@ pub fn launch_background_command(
     }
     let output = options.open(&path)?;
     let reader = std::fs::File::open(&path)?;
-    let child = command
+    let stdout = Stdio::from(output.try_clone()?);
+    let id = format!("shell-{nonce}");
+    let journal = tasks
+        .prepare_terminal(&id, shell)
+        .map_err(io::Error::other)?;
+    command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(output.try_clone()?))
-        .stderr(Stdio::from(output))
-        .group_spawn()?;
-    let id = format!("shell-{}-{nonce}", child.id());
+        .stdout(stdout)
+        .stderr(Stdio::from(output));
+    let child = shell_process_group(command.group()).spawn();
+    let child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            #[cfg(windows)]
+            {
+                // command-group may fail assigning a Job after spawning the child.
+                // Retain the identity: an error here is not proof it never ran.
+                if let Some(journal) = &journal {
+                    let _ = journal.terminal_unconfirmed(&id);
+                }
+                let mut task =
+                    BackgroundTask::new(id.clone(), BackgroundTaskKind::Terminal, title.into());
+                task.status = crate::background_tasks::BackgroundTaskStatus::ExecutionUnconfirmed;
+                task.activity = format!("Process ownership unconfirmed; do not rerun: {error}");
+                task.command = Some(command_text.into());
+                task.output_path = Some(path.to_string_lossy().into_owned());
+                tasks.register(task, HookAbortSignal::default());
+                return Ok((id, path.to_string_lossy().into_owned()));
+            }
+            #[cfg(not(windows))]
+            {
+                if let Some(journal) = &journal {
+                    let _ = journal.terminal_not_started(&id);
+                }
+                return Err(error);
+            }
+        }
+    };
+    if let Some(journal) = &journal {
+        if let Err(error) = journal.terminal_started(&id) {
+            eprintln!("[task-completion] start persistence pending: {error}");
+        }
+    }
     let mut task = BackgroundTask::new(id.clone(), BackgroundTaskKind::Terminal, title.to_string());
     task.command = Some(command_text.to_string());
     task.output_path = Some(path.to_string_lossy().into_owned());
@@ -774,10 +842,17 @@ pub fn launch_background_command(
         child: Some(child),
         tasks,
         id: id.clone(),
+        journal,
+        shell,
     };
-    std::thread::Builder::new()
+    let monitor = std::thread::Builder::new()
         .name(format!("background-{id}"))
-        .spawn(move || process.monitor(reader, &abort))?;
+        .spawn(move || process.monitor(reader, &abort));
+    if let Err(error) = monitor {
+        // The process already existed. Return its identity, never a retryable
+        // spawn error that invites the model to execute the command twice.
+        eprintln!("[task-completion] background monitor unavailable: {error}");
+    }
     Ok((id, path.to_string_lossy().into_owned()))
 }
 
@@ -785,6 +860,8 @@ struct BackgroundShell {
     child: Option<command_group::GroupChild>,
     tasks: crate::background_tasks::BackgroundTasks,
     id: String,
+    journal: Option<std::sync::Arc<crate::subagent_completion::CompletionJournal>>,
+    shell: crate::subagent_completion::ShellKind,
 }
 
 impl BackgroundShell {
@@ -792,13 +869,21 @@ impl BackgroundShell {
         use crate::background_tasks::{BackgroundTaskStatus, TASK_OUTPUT_TAIL_BYTES};
         use std::io::{Read, Seek, SeekFrom};
         let mut last_size = 0;
+        let mut final_output = String::new();
+        let mut output_truncated = false;
+        let mut kill_confirmed = false;
         loop {
-            let child = self.child.as_mut().expect("live child");
-            let result = if abort.is_aborted() {
-                let _ = child.kill();
-                child.wait().map(Some)
+            let cancelling = abort.is_aborted();
+            let result = if cancelling {
+                // Consume ownership so error cleanup cannot signal this group
+                // again after the confirmation deadline (its PID may be reused).
+                let mut child = self.child.take().expect("live child");
+                terminate_background_group(&mut child).map(|(status, confirmed)| {
+                    kill_confirmed = confirmed;
+                    Some(status)
+                })
             } else {
-                child.try_wait()
+                self.child.as_mut().expect("live child").inner().try_wait()
             };
             let size = output.metadata().map_or(last_size, |m| m.len());
             if size != last_size {
@@ -810,16 +895,47 @@ impl BackgroundShell {
                         .read_to_end(&mut bytes)
                 });
                 if read.is_ok() {
+                    final_output = String::from_utf8_lossy(&bytes).into_owned();
+                    output_truncated = start > 0;
                     self.tasks.update(&self.id, |task| {
-                        task.output = String::from_utf8_lossy(&bytes).into_owned();
+                        task.output.clone_from(&final_output);
                     });
                     last_size = size;
                 }
             }
             match result {
                 Ok(Some(status)) => {
+                    self.child = None;
+                    if let Some(journal) = &self.journal {
+                        #[cfg(unix)]
+                        let signal = {
+                            use std::os::unix::process::ExitStatusExt;
+                            status.signal()
+                        };
+                        #[cfg(not(unix))]
+                        let signal = None;
+                        let snapshot = crate::subagent_completion::TerminalSnapshot {
+                            shell: self.shell,
+                            scope: "command".into(),
+                            exit_code: status.code(),
+                            signal,
+                            termination: if cancelling {
+                                "cancelled"
+                            } else if signal.is_some() {
+                                "signal"
+                            } else {
+                                "exit"
+                            }
+                            .into(),
+                            output_truncated,
+                            output: final_output,
+                        };
+                        self.persist_terminal(journal, &snapshot, cancelling && !kill_confirmed);
+                    }
                     self.tasks.update(&self.id, |task| {
-                        task.status = if abort.is_aborted() {
+                        task.status = if cancelling && !kill_confirmed {
+                            BackgroundTaskStatus::ExecutionUnconfirmed
+                        } else if cancelling {
                             BackgroundTaskStatus::Cancelled
                         } else if status.success() {
                             BackgroundTaskStatus::Completed
@@ -833,8 +949,11 @@ impl BackgroundShell {
                     return;
                 }
                 Err(error) => {
+                    if let Some(journal) = &self.journal {
+                        let _ = journal.terminal_unconfirmed(&self.id);
+                    }
                     self.tasks.update(&self.id, |task| {
-                        task.status = BackgroundTaskStatus::Failed;
+                        task.status = BackgroundTaskStatus::ExecutionUnconfirmed;
                         task.activity = error.to_string();
                     });
                     return;
@@ -843,21 +962,95 @@ impl BackgroundShell {
             }
         }
     }
+
+    fn persist_terminal(
+        &self,
+        journal: &crate::subagent_completion::CompletionJournal,
+        snapshot: &crate::subagent_completion::TerminalSnapshot,
+        unconfirmed: bool,
+    ) {
+        let mut backoff = 100;
+        loop {
+            let saved = if unconfirmed {
+                journal.terminal_unconfirmed(&self.id)
+            } else {
+                journal.terminal_finished(&self.id, snapshot.clone())
+            };
+            if saved.is_ok() || journal.deleted() {
+                break;
+            }
+            // The existing monitor retains exit evidence until the session
+            // store accepts it, even with ACP disconnected.
+            std::thread::sleep(Duration::from_millis(backoff));
+            backoff = (backoff * 2).min(30_000);
+        }
+    }
 }
 
 impl Drop for BackgroundShell {
     fn drop(&mut self) {
         if let Some(child) = &mut self.child {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Some(journal) = &self.journal {
+                let _ = journal.terminal_unconfirmed(&self.id);
+            }
+            let _ = terminate_background_group(child);
             self.tasks.update(&self.id, |task| {
                 if task.status.is_active() {
-                    task.status = crate::background_tasks::BackgroundTaskStatus::Failed;
+                    task.status =
+                        crate::background_tasks::BackgroundTaskStatus::ExecutionUnconfirmed;
                     task.activity = "Background monitor stopped unexpectedly".into();
                 }
             });
         }
     }
+}
+
+fn terminate_background_group(
+    child: &mut command_group::GroupChild,
+) -> io::Result<(std::process::ExitStatus, bool)> {
+    // Signal only once. Neither a successful kill nor reaping the leader proves
+    // the descendants have gone; orphan reaping can lag behind leader exit.
+    let _ = child.kill();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut exit = None;
+    loop {
+        if exit.is_none() {
+            exit = child.inner().try_wait()?;
+        }
+        if let Some(status) = exit {
+            #[cfg(unix)]
+            let group_gone = process_group_gone(child.id());
+            #[cfg(windows)]
+            let group_gone = child.group_is_empty()?;
+            #[cfg(not(any(unix, windows)))]
+            let group_gone = false;
+            if group_gone {
+                return Ok((status, true));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok((status, false));
+            }
+        } else if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Background process termination could not be confirmed",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+// waitpid only reaps our children, not all group members. Cancellation needs
+// an independent absence check; a failed probe is not a termination proof.
+#[cfg(unix)]
+fn process_group_gone(id: u32) -> bool {
+    let Ok(id) = i32::try_from(id) else {
+        return false;
+    };
+    matches!(
+        nix::sys::signal::killpg(nix::unistd::Pid::from_raw(id), None),
+        Err(nix::errno::Errno::ESRCH)
+    )
 }
 
 fn prepare_command(

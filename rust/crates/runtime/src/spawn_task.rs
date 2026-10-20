@@ -79,7 +79,8 @@ const COHOST_FRAMING: &str = "Peer messages are shown as \
 
 /// What a co-hosted agent is told about where its shell runs.
 ///
-/// Its files are in the VFS at `workspace` and are reached with the file tools;
+/// A local reference uses the same directory for both and needs no extra section.
+/// Otherwise its files are in the VFS at `workspace` and reached with file tools;
 /// its `bash` runs on the daemon's host filesystem, starting in `shell_root`,
 /// which is NOT the workspace. Without this the model does the reasonable thing —
 /// `ls` to see what it is working with — reads an unrelated directory, and
@@ -91,8 +92,14 @@ const COHOST_FRAMING: &str = "Peer messages are shown as \
 /// TOOLS address, and the process sandbox is the deployment's job — not this
 /// sentence's.
 #[must_use]
-pub fn cohost_shell_prompt_section(workspace: &str, shell_root: &std::path::Path) -> String {
-    format!(
+pub fn cohost_shell_prompt_section(
+    workspace: &str,
+    shell_root: &std::path::Path,
+) -> Option<String> {
+    if std::path::Path::new(workspace) == shell_root {
+        return None;
+    }
+    Some(format!(
         "# Your files and your shell are in different places\n\
          Your workspace is `{workspace}` and you reach it with the file tools \
          (read_file / write_file / edit_file / glob / grep). Your `bash` runs on \
@@ -100,7 +107,7 @@ pub fn cohost_shell_prompt_section(workspace: &str, shell_root: &std::path::Path
          own that is NOT your workspace, so `ls` there will not show your files. \
          Use the file tools for your work and `bash` for commands.",
         shell_root.display()
-    )
+    ))
 }
 
 /// Decide whether to deliver a turn's prose back to its sender.

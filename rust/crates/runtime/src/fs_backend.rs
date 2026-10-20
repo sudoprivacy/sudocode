@@ -14,8 +14,42 @@ use std::sync::Arc;
 use crate::workspace_root::current_workspace_root;
 use kernel::kernel::convenience::KernelConvenience;
 use kernel::kernel::syscall::ReaddirOpts;
-use kernel::kernel::OperationContext;
+use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::{DT_LINK, DT_STREAM};
+use kernel::Permission;
+
+/// An exclusive backend lock. Dropping the handle releases ownership.
+/// Renewal returning false means ownership was lost and writes must stop.
+pub trait FsLock: Send + Sync {
+    fn renew(&self) -> io::Result<bool>;
+}
+
+struct BackendLock {
+    renew: Box<dyn Fn() -> io::Result<bool> + Send + Sync>,
+    release: Box<dyn Fn() + Send + Sync>,
+}
+
+impl FsLock for BackendLock {
+    fn renew(&self) -> io::Result<bool> {
+        (self.renew)()
+    }
+}
+
+impl Drop for BackendLock {
+    fn drop(&mut self) {
+        (self.release)();
+    }
+}
+
+struct HostLock {
+    _file: std::fs::File,
+}
+
+impl FsLock for HostLock {
+    fn renew(&self) -> io::Result<bool> {
+        Ok(true)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Metadata types
@@ -29,6 +63,17 @@ pub struct FsMetadata {
     pub is_file: bool,
     pub is_symlink: bool,
     pub modified: Option<std::time::SystemTime>,
+}
+
+fn modification_time(milliseconds: Option<i64>) -> Option<std::time::SystemTime> {
+    milliseconds.and_then(|ms| {
+        let duration = std::time::Duration::from_millis(ms.unsigned_abs());
+        if ms < 0 {
+            std::time::UNIX_EPOCH.checked_sub(duration)
+        } else {
+            std::time::UNIX_EPOCH.checked_add(duration)
+        }
+    })
 }
 
 /// Directory entry returned by [`FsBackend::readdir`].
@@ -77,13 +122,32 @@ const MEMORY_SEGMENT: &str = "/memory";
 /// Every method mirrors a common `std::fs` operation. Implementations must be
 /// thread-safe so a single backend can be shared across the runtime.
 pub trait FsBackend: Send + Sync + 'static {
+    /// True only for locks that exclude a previous writer until it exits.
+    /// Expiring advisory leases do not meet the completion-journal contract.
+    fn fenced_locks(&self) -> bool {
+        false
+    }
+    /// Try an atomic exclusive claim. Unsupported backends must fail explicitly.
+    fn try_lock(&self, _path: &str, _ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend has no atomic lock",
+        ))
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>>;
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()>;
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()>;
     fn delete(&self, path: &str) -> io::Result<()>;
     fn stat(&self, path: &str) -> io::Result<FsMetadata>;
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>>;
-    fn exists(&self, path: &str) -> io::Result<bool>;
+    /// Only a missing entry is false. Admission and storage failures are errors.
+    fn exists(&self, path: &str) -> io::Result<bool> {
+        match self.stat(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
     fn create_dir_all(&self, path: &str) -> io::Result<()>;
     fn rename(&self, from: &str, to: &str) -> io::Result<()>;
     fn canonicalize(&self, path: &str) -> io::Result<String>;
@@ -156,14 +220,14 @@ pub trait FsBackend: Send + Sync + 'static {
     /// * the VFS (`KernelFsBackend`, `NexusVfsFsBackend`) makes a real `DT_LINK`, the
     ///   destination in metadata — which a mount with no content store keeps, while it
     ///   drops bytes;
-    /// * a host FS makes a pointer FILE holding the target, because a real symlink on
-    ///   Windows needs Developer Mode or admin. A no-op would be the other option and is
-    ///   worse than it sounds: the name would not appear, so a receiver on a host FS
-    ///   could not enumerate its conversations at all.
+    /// * a host FS uses an unprivileged Unix symlink or Windows directory junction,
+    ///   with a pointer file fallback when the platform cannot create that link.
+    ///   The fallback supports indexes through `read_link`, not ordinary path
+    ///   traversal by shell or Git tools.
     ///
-    /// So `ls -l` on a host FS shows a small text file where the VFS shows a link. That
-    /// is deliberate. [`Self::read_link`] is the follow half and resolves both, which is
-    /// the only way production should ever ask where one points.
+    /// [`Self::read_link`] resolves both the native link and pointer-file shapes.
+    /// Removing an alias must leave its target intact. None of these link types
+    /// provides reference-counted reclamation of managed temporary objects.
     ///
     /// The default is a no-op so a backend with no namespace of its own stays silent —
     /// but a backend that serves a chat list MUST override it, or the index is empty and
@@ -238,38 +302,14 @@ pub trait FsBackend: Send + Sync + 'static {
     ///
     /// The default polls file size at 100ms intervals (cross-platform).
     /// `KernelFsBackend` overrides with the kernel's blocking `sys_read`.
-    /// `NexusVfsFsBackend` overrides with `stream_read_at` (gRPC blocking
-    /// tail).
+    /// `NexusVfsFsBackend` uses the typed Read RPC with a bounded stream wait.
     fn tail_read(
         &self,
         path: &str,
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
-        use std::io::{Read, Seek, SeekFrom};
-        use std::time::{Duration, Instant};
-
-        let deadline = Instant::now() + Duration::from_millis(block_ms);
-        let poll_interval = Duration::from_millis(100);
-
-        loop {
-            let len = match self.stat(path) {
-                Ok(meta) => meta.len,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
-                Err(e) => return Err(e),
-            };
-            if len > cursor {
-                let mut f = std::fs::File::open(path)?;
-                f.seek(SeekFrom::Start(cursor))?;
-                let mut buf = vec![0u8; (len - cursor) as usize];
-                f.read_exact(&mut buf)?;
-                return Ok((buf, len, false));
-            }
-            if block_ms == 0 || Instant::now() >= deadline {
-                return Ok((vec![], cursor, true));
-            }
-            std::thread::sleep(poll_interval.min(deadline - Instant::now()));
-        }
+        read_byte_tail(self, path, cursor, block_ms)
     }
 }
 
@@ -345,10 +385,7 @@ fn host_absolute_as_vfs(path: &str) -> io::Result<Option<String>> {
     // Windows accepts either separator spelling for the extended-length
     // prefix. Recognize it before the POSIX-root branch, or //?/C:/file
     // becomes /?/C:/file and misses the mounted /C drive.
-    let bare = path
-        .strip_prefix(r"\\?\")
-        .or_else(|| path.strip_prefix("//?/"))
-        .unwrap_or(path);
+    let bare = strip_host_verbatim_prefix(path).unwrap_or(path);
     if bare == path && path.starts_with('/') {
         return Ok(Some(path.to_string()));
     }
@@ -413,6 +450,12 @@ fn lexical_join(root: &str, path: &str) -> io::Result<String> {
 
 // Blanket impl: Arc<dyn FsBackend> delegates to the inner backend.
 impl FsBackend for Arc<dyn FsBackend> {
+    fn fenced_locks(&self) -> bool {
+        (**self).fenced_locks()
+    }
+    fn try_lock(&self, path: &str, ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        (**self).try_lock(path, ttl_ms)
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         (**self).read(path)
     }
@@ -489,6 +532,70 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
 }
 
+/// Byte-addressed fallback for object backends whose read returns the whole file.
+fn read_byte_tail<B: FsBackend + ?Sized>(
+    backend: &B,
+    path: &str,
+    cursor: u64,
+    block_ms: u64,
+) -> io::Result<(Vec<u8>, u64, bool)> {
+    read_tail_with(cursor, block_ms, |_| match backend.read(path) {
+        Ok(bytes) => Ok(TailPayload::Bytes(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(TailPayload::Bytes(Vec::new())),
+        Err(error) => Err(error),
+    })
+}
+
+enum TailPayload {
+    Bytes(Vec<u8>),
+    Frame(Vec<u8>, u64),
+}
+
+/// Byte logs poll within one wait budget; framed reads carry their own cursor.
+fn read_tail_with(
+    cursor: u64,
+    block_ms: u64,
+    mut read: impl FnMut(u64) -> io::Result<TailPayload>,
+) -> io::Result<(Vec<u8>, u64, bool)> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(block_ms);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let wait_ms = if block_ms == 0 {
+            0
+        } else {
+            u64::try_from(remaining.as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1)
+        };
+        let bytes = match read(wait_ms)? {
+            TailPayload::Bytes(bytes) => bytes,
+            TailPayload::Frame(bytes, next) => {
+                if next < cursor || (!bytes.is_empty() && next == cursor) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "stream read did not advance its cursor",
+                    ));
+                }
+                let eof = bytes.is_empty() && next == cursor;
+                return Ok((bytes, next, eof));
+            }
+        };
+        let next = bytes.len() as u64;
+        if next > cursor {
+            let start = usize::try_from(cursor)
+                .map_err(|_| io::Error::other("cursor exceeds addressable file size"))?;
+            return Ok((bytes[start..].to_vec(), next, false));
+        }
+        if block_ms == 0 || std::time::Instant::now() >= deadline {
+            return Ok((Vec::new(), cursor, true));
+        }
+        std::thread::sleep(
+            std::time::Duration::from_millis(100)
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // StdFsBackend — zero-size, compiler inlines all methods
 // ---------------------------------------------------------------------------
@@ -538,6 +645,59 @@ fn platform_link(alias: &str, target: &str) -> io::Result<()> {
 }
 
 impl FsBackend for StdFsBackend {
+    fn fenced_locks(&self) -> bool {
+        true
+    }
+    fn tail_read(
+        &self,
+        path: &str,
+        cursor: u64,
+        block_ms: u64,
+    ) -> io::Result<(Vec<u8>, u64, bool)> {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_millis(block_ms);
+        let poll_interval = Duration::from_millis(100);
+
+        loop {
+            let len = match self.stat(path) {
+                Ok(meta) => meta.len,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => 0,
+                Err(e) => return Err(e),
+            };
+            if len > cursor {
+                let mut f = std::fs::File::open(path)?;
+                f.seek(SeekFrom::Start(cursor))?;
+                let length = usize::try_from(len - cursor).map_err(io::Error::other)?;
+                let mut buf = vec![0u8; length];
+                f.read_exact(&mut buf)?;
+                return Ok((buf, len, false));
+            }
+            if block_ms == 0 || Instant::now() >= deadline {
+                return Ok((vec![], cursor, true));
+            }
+            std::thread::sleep(poll_interval.min(deadline - Instant::now()));
+        }
+    }
+
+    fn try_lock(&self, path: &str, _ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Keep this inode separate from the cursor file, which is replaced by rename.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Arc::new(HostLock { _file: file }))),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         std::fs::read(path)
     }
@@ -613,6 +773,18 @@ impl FsBackend for StdFsBackend {
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
+        // A Windows directory junction is removed as a directory entry. Never
+        // traverse its target: removing a runtime alias must preserve the object.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileTypeExt;
+            if std::fs::symlink_metadata(path)?
+                .file_type()
+                .is_symlink_dir()
+            {
+                return std::fs::remove_dir(path);
+            }
+        }
         std::fs::remove_file(path)
     }
 
@@ -655,10 +827,6 @@ impl FsBackend for StdFsBackend {
             });
         }
         Ok(entries)
-    }
-
-    fn exists(&self, path: &str) -> io::Result<bool> {
-        Ok(std::path::Path::new(path).exists())
     }
 
     fn create_dir_all(&self, path: &str) -> io::Result<()> {
@@ -743,37 +911,108 @@ impl FsBackend for StdFsBackend {
 // KernelFsBackend — in-process kernel syscalls for nexusd
 // ---------------------------------------------------------------------------
 
+enum KernelPathView {
+    Virtual,
+    HostRoot(String),
+    LocalWorkspace(std::path::PathBuf),
+}
+
 /// Kernel-backed filesystem for in-process execution inside nexusd.
-///
-/// Forwards every operation through the [`KernelConvenience`] trait so managed
-/// agents read/write the VFS trie via `sys_read` / `sys_write` /
-/// `sys_stat` / `sys_readdir` instead of touching the host
-/// filesystem.
+/// Operations retain the caller's identity and pass through the kernel policy.
 pub struct KernelFsBackend<K: KernelConvenience> {
     kernel: Arc<K>,
     ctx: OperationContext,
     /// Absolute VFS path that relative tool paths resolve against and that
     /// `glob` / `grep` default to (e.g. `/proc/{pid}/workspace`).
     workspace_root: String,
-    /// The same directory as the HOST spells it, when the host has its own
-    /// spelling for these files.
-    ///
-    /// `None` for a co-hosted agent: its world IS the VFS, so a VFS path is the
-    /// only name its files have and the name it should report. `Some` for a CLI
-    /// session, whose files are also host files -- the path its user typed and
-    /// the only one its `bash` tool can open. Set, this backend answers in host
-    /// spelling and converts on the way to each syscall
-    /// ([`Self::to_kernel`]), so one file has one name across every tool.
-    host_root: Option<String>,
+    /// The tool-facing spelling. CLI files retain their host paths and state
+    /// directories. A local workspace projects only its project directory;
+    /// managed session streams, memory, and messaging keep their VFS paths.
+    path_view: KernelPathView,
 }
 
-impl<K: KernelConvenience> KernelFsBackend<K> {
+/// Permission capability needed by the in-process filesystem adapter.
+/// Metadata syscalls carry only a routing zone, so the adapter must admit them
+/// through the kernel's installed policy using the caller's full identity.
+/// Implementations delegate to that policy rather than maintaining another one.
+pub trait KernelFsAccess {
+    fn check_fs_permission(
+        &self,
+        path: &str,
+        permission: Permission,
+        ctx: &OperationContext,
+    ) -> Result<(), KernelError>;
+
+    /// Resolve an authorized, reference-backed project directory for native
+    /// execution. `None` means the route has no local filesystem view.
+    fn local_workspace_directory(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+    ) -> Result<Option<std::path::PathBuf>, KernelError>;
+}
+
+impl KernelFsAccess for Kernel {
+    fn check_fs_permission(
+        &self,
+        path: &str,
+        permission: Permission,
+        ctx: &OperationContext,
+    ) -> Result<(), KernelError> {
+        let route = self.vfs_router_arc().route(path, &ctx.zone_id);
+        self.check_permission_with_route(path, route.as_ref(), permission, ctx)
+    }
+
+    fn local_workspace_directory(
+        &self,
+        path: &str,
+        ctx: &OperationContext,
+    ) -> Result<Option<std::path::PathBuf>, KernelError> {
+        self.check_fs_permission(path, Permission::Read, ctx)?;
+        self.check_fs_permission(path, Permission::Write, ctx)?;
+        let Some(route) = self.vfs_router_arc().route(path, &ctx.zone_id) else {
+            return Ok(None);
+        };
+        let Some(backend) = route.backend else {
+            return Ok(None);
+        };
+        let Some(physical) = backend.resolve_physical_path(&route.backend_path) else {
+            return Ok(None);
+        };
+        let root = backend
+            .resolve_physical_path("")
+            .and_then(|path| path.canonicalize().ok())
+            .ok_or_else(|| KernelError::IOError("workspace backend has no local root".into()))?;
+        let ancestor = physical
+            .ancestors()
+            .find(|path| path.exists())
+            .and_then(|path| path.canonicalize().ok())
+            .ok_or_else(|| KernelError::IOError("workspace has no existing parent".into()))?;
+        if !ancestor.starts_with(&root) {
+            return Err(KernelError::PermissionDenied(
+                "workspace directory escapes its backend root".into(),
+            ));
+        }
+        self.mkdir(path, ctx, true, true)?;
+        let physical = physical
+            .canonicalize()
+            .map_err(|error| KernelError::IOError(format!("workspace directory: {error}")))?;
+        if !physical.starts_with(&root) || !physical.is_dir() {
+            return Err(KernelError::PermissionDenied(
+                "workspace directory escapes its backend root".into(),
+            ));
+        }
+        Ok(Some(physical))
+    }
+}
+
+impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     pub fn new(kernel: Arc<K>, ctx: OperationContext, workspace_root: impl Into<String>) -> Self {
         Self {
             kernel,
             ctx,
             workspace_root: workspace_root.into(),
-            host_root: None,
+            path_view: KernelPathView::Virtual,
         }
     }
 
@@ -781,6 +1020,8 @@ impl<K: KernelConvenience> KernelFsBackend<K> {
     /// The [`OperationContext`] is the agent's own (owner / zone / name);
     /// `workspace_root` is the absolute VFS path relative tool paths
     /// resolve against (typically the agent's procfs workspace subtree).
+    /// File tools are not system operations: the host's permission provider
+    /// must authorize this agent's access.
     /// Constructing the context here keeps `kernel`-crate types off the
     /// `tools`-crate factory that calls this.
     pub fn for_agent(
@@ -790,7 +1031,7 @@ impl<K: KernelConvenience> KernelFsBackend<K> {
         agent_name: &str,
         workspace_root: impl Into<String>,
     ) -> Self {
-        let ctx = OperationContext::new(owner_id, zone_id, false, Some(agent_name), true);
+        let ctx = crate::agent_operation_context(owner_id, zone_id, agent_name);
         Self::new(kernel, ctx, workspace_root)
     }
 
@@ -798,8 +1039,27 @@ impl<K: KernelConvenience> KernelFsBackend<K> {
     /// directory this backend's `workspace_root` mounts.
     #[must_use]
     pub fn with_host_root(mut self, host_root: impl Into<String>) -> Self {
-        self.host_root = Some(host_root.into());
+        self.path_view = KernelPathView::HostRoot(host_root.into());
         self
+    }
+
+    /// Expose a reference-backed project in the same spelling native commands
+    /// use. Other VFS namespaces retain their paths and authorization.
+    pub fn with_local_workspace(
+        mut self,
+        mount: impl Into<std::path::PathBuf>,
+    ) -> io::Result<Self> {
+        let mount = mount.into();
+        if !mount.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a local workspace requires an absolute path",
+            ));
+        }
+        self.path_view = KernelPathView::LocalWorkspace(std::path::PathBuf::from(
+            host_lexical_join(&mount.to_string_lossy(), "."),
+        ));
+        Ok(self)
     }
 
     /// The VFS path a caller's `path` names.
@@ -810,7 +1070,35 @@ impl<K: KernelConvenience> KernelFsBackend<K> {
     /// resolve against the workspace root; a host-absolute path (`C:\a\b`) is
     /// mapped by [`vfs_path_for_host_path`]'s rule.
     fn to_kernel(&self, path: &str) -> io::Result<String> {
+        if let KernelPathView::LocalWorkspace(mount) = &self.path_view {
+            // Compare equivalent native prefixes before resolving `..`, so an
+            // escaping caller still fails the workspace boundary below.
+            let mount = native_path_for_matching(mount);
+            let caller = native_path_for_matching(std::path::Path::new(path));
+            if caller.starts_with(mount.as_ref()) {
+                let normalized =
+                    host_lexical_join(&mount.to_string_lossy(), &caller.to_string_lossy());
+                let relative = std::path::Path::new(&normalized)
+                    .strip_prefix(mount.as_ref())
+                    .map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "path escapes the local workspace",
+                        )
+                    })?;
+                return lexical_join(
+                    &self.workspace_root,
+                    &relative.to_string_lossy().replace('\\', "/"),
+                );
+            }
+        }
         lexical_join(&self.workspace_root, path)
+    }
+
+    fn authorize(&self, path: &str, permission: Permission) -> io::Result<()> {
+        self.kernel
+            .check_fs_permission(path, permission, &self.ctx)
+            .map_err(kernel_err)
     }
 
     /// Turn a not-found into a transparent error when the cause is that no
@@ -849,14 +1137,23 @@ impl<K: KernelConvenience> KernelFsBackend<K> {
     /// a path the kernel stored rather than one the caller passed: `read_link`
     /// reads back a `DT_LINK` target, which was converted on the way in.
     ///
-    /// Asymmetric with the forward direction on purpose. Reading `C:\a\b` as
+    /// CLI drive conversion is asymmetric with the forward direction. Reading `C:\a\b` as
     /// drive-absolute is safe on any platform (no unix path looks like that), so
     /// the forward rule is platform-independent and a unix test proves the
     /// Windows branch. The reverse is not: `/C/a` is this mapping's output on
     /// Windows and an ordinary path on unix, so undoing it anywhere else would
     /// corrupt a perfectly good path.
     fn to_host(&self, vfs: &str) -> String {
-        if self.host_root.is_none() {
+        if let KernelPathView::LocalWorkspace(mount) = &self.path_view {
+            if let Ok(relative) = std::path::Path::new(vfs).strip_prefix(&self.workspace_root) {
+                if relative.as_os_str().is_empty() {
+                    return mount.to_string_lossy().into_owned();
+                }
+                return mount.join(relative).to_string_lossy().into_owned();
+            }
+            return vfs.to_string();
+        }
+        if matches!(&self.path_view, KernelPathView::Virtual) {
             return vfs.to_string();
         }
         #[cfg(windows)]
@@ -888,57 +1185,84 @@ impl<K: KernelConvenience> KernelFsBackend<K> {
     /// fetched transparently by the kernel. Non-blocking (`timeout_ms = 0`):
     /// the walk stops at the tail rather than parking for new data.
     fn read_stream_all(&self, path: &str) -> io::Result<Vec<u8>> {
-        let mut out = Vec::new();
-        let mut offset: u64 = 0;
-        loop {
+        read_framed_contents(|offset| {
             let result = self
                 .kernel
                 .sys_read(path, &self.ctx, 0, offset)
                 .map_err(kernel_err)?;
-            match result.data {
-                Some(payload) if !payload.is_empty() => {
-                    out.extend_from_slice(&payload);
-                    match result.stream_next_offset {
-                        Some(next) if next as u64 > offset => offset = next as u64,
-                        // No forward progress (tail reached / unknown) — stop.
-                        _ => break,
-                    }
-                }
-                _ => break,
-            }
+            Ok((
+                result.data.unwrap_or_default(),
+                result.stream_next_offset.map_or(offset, |next| next as u64),
+            ))
+        })
+    }
+}
+
+/// Concatenate frame payloads through the live tail using each transport's
+/// offset read. Empty frames advance; a nonempty frame must advance too.
+fn read_framed_contents(
+    mut read: impl FnMut(u64) -> io::Result<(Vec<u8>, u64)>,
+) -> io::Result<Vec<u8>> {
+    let mut contents = Vec::new();
+    let mut offset = 0;
+    loop {
+        let (payload, next) = read(offset)?;
+        if payload.is_empty() && next == offset {
+            return Ok(contents);
         }
-        Ok(out)
+        if next <= offset {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stream read did not advance its cursor",
+            ));
+        }
+        contents.extend_from_slice(&payload);
+        offset = next;
     }
 }
 
-/// Map a kernel error to an `io::Error`.
-///
-/// "Not found" is singled out because [`FsBackend`] callers BRANCH on it, and
-/// the two backends have to answer alike: `StdFsBackend` reports a missing file
-/// as [`io::ErrorKind::NotFound`], so a kernel-backed read that reported the
-/// same condition as `Other` turns "this reader has no position yet" into "this
-/// read failed". The receiver then never claims its seat and simply hears
-/// nothing, with the error scrolling past as a retry.
-///
-/// Only a missing ENTRY qualifies. An unmounted path is deliberately left as an
-/// error: "the namespace is not here" is not "there is nothing here", and
-/// collapsing them would have a reader start from zero — replaying a
-/// conversation — every time a mount was late.
-///
-/// The kernel's error type is opaque at this boundary (this is generic over
-/// `impl Debug` precisely so the backend does not depend on it), so the
-/// classification reads the debug text. That is load-bearing enough to be
-/// tested rather than trusted — see `a_missing_path_reports_not_found` in
-/// `runtime/tests/spawn_task.rs`, which fails if the variant is ever renamed.
-fn kernel_err(e: impl std::fmt::Debug) -> io::Error {
-    let text = format!("{e:?}");
-    if text.contains("FileNotFound") {
-        return io::Error::new(io::ErrorKind::NotFound, text);
-    }
-    io::Error::other(text)
+/// Preserve the error kinds filesystem callers use for admission and creation.
+fn kernel_err(error: KernelError) -> io::Error {
+    let kind = match &error {
+        KernelError::FileNotFound(_) => io::ErrorKind::NotFound,
+        KernelError::PermissionDenied(_) => io::ErrorKind::PermissionDenied,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, error.to_string())
 }
 
-impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend<K> {
+impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
+    for KernelFsBackend<K>
+{
+    fn try_lock(&self, path: &str, ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        let path = self.to_kernel(path)?;
+        self.kernel
+            .check_fs_permission(&path, Permission::Write, &self.ctx)
+            .map_err(kernel_err)?;
+        let ttl_secs = ttl_ms / 1000 + 1;
+        let Some(id) = self
+            .kernel
+            .sys_lock(&path, "", 1, ttl_secs, &self.ctx.user_id)
+            .map_err(kernel_err)?
+        else {
+            return Ok(None);
+        };
+        let kernel = Arc::clone(&self.kernel);
+        let renew_kernel = Arc::clone(&kernel);
+        let renew_path = path.clone();
+        let renew_id = id.clone();
+        Ok(Some(Arc::new(BackendLock {
+            renew: Box::new(move || {
+                renew_kernel
+                    .sys_lock(&renew_path, &renew_id, 1, ttl_secs, "")
+                    .map(|id| id.is_some())
+                    .map_err(kernel_err)
+            }),
+            release: Box::new(move || {
+                let _ = kernel.sys_unlock(&path, &id, false);
+            }),
+        })))
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         // The message this builds names the path as the CALLER spelled it: an
         // error a user reads should name the file the way they named it.
@@ -964,7 +1288,15 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
         self.kernel
             .sys_write(path, &self.ctx, data, 0)
             .map_err(kernel_err)
-            .map(|_| ())
+            .and_then(|result| {
+                if result.hit {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(format!(
+                        "Nexus did not write {path}: no writable backend handled this path"
+                    )))
+                }
+            })
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -974,13 +1306,13 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
         // Regular files have no O(1) append, so fall back to read-concat-write
         // (kernel `sys_write` is a whole-object replace, not an OS append).
         if self.is_stream_entry(path) {
-            return self
-                .kernel
-                .sys_write(path, &self.ctx, data, 0)
-                .map_err(kernel_err)
-                .map(|_| ());
+            return self.write(path, data);
         }
-        let existing = self.read(path).unwrap_or_default();
+        let existing = match self.read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
         let mut combined = existing;
         combined.extend_from_slice(data);
         self.write(path, &combined)
@@ -988,13 +1320,14 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
 
     fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {
         let path = &self.to_kernel(path)?;
+        self.authorize(path, Permission::Write)?;
         // Idempotent: an existing entry (DT_STREAM to append to, or a DT_REG
         // from a prior degraded run) is left as-is.
         if self.kernel.sys_stat(path, &self.ctx.zone_id).is_some() {
             return Ok(());
         }
         if let Some(parent) = std::path::Path::new(path).parent() {
-            let _ = self.create_dir_all(&parent.to_string_lossy());
+            self.create_dir_all(&parent.to_string_lossy())?;
         }
         // Prefer a durable, raft-replicated WAL DT_STREAM: O(1) frame append,
         // tail-read via `sys_stat.size`, unbounded via cold-segment auto-spill
@@ -1007,6 +1340,7 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
             .kernel
             .sys_setattr(
                 path,
+                &self.ctx,
                 DT_STREAM as i32,
                 "",    // backend_name
                 None,  // backend
@@ -1038,7 +1372,9 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(self.is_stream_entry(&self.to_kernel(path)?))
+        let path = self.to_kernel(path)?;
+        self.authorize(&path, Permission::Read)?;
+        Ok(self.is_stream_entry(&path))
     }
 
     fn tail_read(
@@ -1048,33 +1384,26 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
         let path = &self.to_kernel(path)?;
-        let result = self
+        // Missing paths can become asynchronous model reply streams. Only a
+        // confirmed regular file uses byte cursors; otherwise preserve the
+        // kernel's stream cursor and let a missing-path read be retried.
+        if self
             .kernel
-            .sys_read(path, &self.ctx, block_ms, cursor)
-            .map_err(kernel_err)?;
-        match result.data {
-            Some(payload) if !payload.is_empty() => {
-                let next = result
-                    .stream_next_offset
-                    .map(|n| n as u64)
-                    // A DT_STREAM reports where its next RECORD begins. A
-                    // byte-addressed entry has no record offset to report, so
-                    // the next cursor is what this read consumed — which is the
-                    // contract `StdFsBackend::tail_read` already answers by
-                    // returning the file's new length.
-                    //
-                    // Returning `cursor` unchanged here meant a reader could
-                    // never advance past a byte-addressed conversation, so every
-                    // poll re-delivered the same envelope: the re-delivery storm,
-                    // measured at 1044 turns in 60 seconds. It is not a corner
-                    // case — a conversation degrades to a DT_REG whenever its
-                    // `"wal"` stream cannot be created, which is any daemon
-                    // without federation wired.
-                    .unwrap_or_else(|| cursor + payload.len() as u64);
-                Ok((payload, next, false))
-            }
-            _ => Ok((vec![], cursor, true)),
+            .sys_stat(path, &self.ctx.zone_id)
+            .is_some_and(|entry| entry.entry_type == kernel::meta_store::DT_REG)
+        {
+            return read_byte_tail(self, path, cursor, block_ms);
         }
+        read_tail_with(cursor, block_ms, |wait_ms| {
+            let result = self
+                .kernel
+                .sys_read(path, &self.ctx, wait_ms, cursor)
+                .map_err(kernel_err)?;
+            Ok(TailPayload::Frame(
+                result.data.unwrap_or_default(),
+                result.stream_next_offset.map_or(cursor, |next| next as u64),
+            ))
+        })
     }
 
     fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
@@ -1082,10 +1411,10 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
         // transcripts, sub-agents and memory belong where its own tooling looks
         // (`scode --resume`, `.sudocode-agents`, the project memory dir), and
         // they outlive a VFS that exists only while the session does.
-        if self.host_root.is_some() {
+        if matches!(&self.path_view, KernelPathView::HostRoot(_)) {
             return None;
         }
-        match concern {
+        let root = match concern {
             // Flat and session-id-keyed: no `.scode`, no `workspace_hash`,
             // because isolation here is policy plus `owner`, not path.
             ManagedRoot::Sessions => Some(contracts::SESSIONS_BASE.to_string()),
@@ -1099,20 +1428,23 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
             // own: a todo list is one small file, and a directory per file is a
             // namespace nobody browses.
             ManagedRoot::Todos => self.agent_subtree(""),
-        }
+        };
+        root.map(|path| self.to_host(&path))
     }
 
     fn link(&self, alias: &str, target: &str) -> io::Result<()> {
         let alias = &self.to_kernel(alias)?;
         let target = &self.to_kernel(target)?;
+        self.authorize(alias, Permission::Write)?;
         // DT_LINK: a VFS-internal pointer alias → target (e.g. the
         // `/agents/{name}/sessions/<sid>` enum index → `/sessions/<sid>`).
         if let Some(parent) = std::path::Path::new(alias).parent() {
-            let _ = self.create_dir_all(&parent.to_string_lossy());
+            self.create_dir_all(&parent.to_string_lossy())?;
         }
         self.kernel
             .sys_setattr(
                 alias,
+                &self.ctx,
                 DT_LINK as i32,
                 "",   // backend_name
                 None, // backend
@@ -1140,6 +1472,7 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
 
     fn read_link(&self, alias: &str) -> io::Result<String> {
         let alias = &self.to_kernel(alias)?;
+        self.authorize(alias, Permission::Read)?;
         // `sys_stat` is lstat — for a `DT_LINK` it fills `link_target` with the
         // path this alias points at. The host-FS `read_link` returns the same
         // target string, so a caller resolving a link is backend-agnostic.
@@ -1168,6 +1501,7 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
 
     fn stat(&self, path: &str) -> io::Result<FsMetadata> {
         let vfs = &self.to_kernel(path)?;
+        self.authorize(vfs, Permission::Read)?;
         self.kernel
             .sys_stat(vfs, &self.ctx.zone_id)
             .ok_or_else(|| {
@@ -1189,14 +1523,13 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
                 // `sys_stat` is lstat, so this describes the entry itself rather than
                 // whatever it points at, which is what the question means.
                 is_symlink: s.entry_type == DT_LINK,
-                modified: s
-                    .modified_at_ms
-                    .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)),
+                modified: modification_time(s.modified_at_ms),
             })
     }
 
     fn readdir(&self, path: &str) -> io::Result<Vec<FsDirEntry>> {
         let path = &self.to_kernel(path)?;
+        self.authorize(path, Permission::Read)?;
         let zone = &self.ctx.zone_id;
         // `sys_readdir` returns `Vec<(child_GLOBAL_path, entry_type)>` —
         // full paths like `/ws/a.rs`, not basenames. The `FsBackend`
@@ -1207,26 +1540,28 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
         let entries = self
             .kernel
             .sys_readdir(path, zone, false, ReaddirOpts::default());
-        Ok(entries
-            .into_iter()
-            .map(|(child, entry_type)| FsDirEntry {
+        let mut visible = Vec::with_capacity(entries.len());
+        for (child, entry_type) in entries {
+            match self.authorize(&child, Permission::Read) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => continue,
+                Err(error) => return Err(error),
+            }
+            visible.push(FsDirEntry {
                 name: child
                     .rsplit(['/', '\\'])
                     .next()
                     .unwrap_or(&child)
                     .to_string(),
                 is_dir: entry_type == 1, // DT_DIR
-            })
-            .collect())
-    }
-
-    fn exists(&self, path: &str) -> io::Result<bool> {
-        let path = &self.to_kernel(path)?;
-        Ok(self.kernel.sys_stat(path, &self.ctx.zone_id).is_some())
+            });
+        }
+        Ok(visible)
     }
 
     fn create_dir_all(&self, path: &str) -> io::Result<()> {
         let path = &self.to_kernel(path)?;
+        self.authorize(path, Permission::Write)?;
         // Writing `/ws/sub/c.rs` creates only the leaf's metastore entry —
         // the intermediate `/ws/sub` dirent is NOT auto-planted, so a later
         // `readdir("/ws")` would not see `sub` and a recursive walk could
@@ -1244,29 +1579,33 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
             {
                 continue;
             }
-            let _ = self.kernel.sys_setattr(
-                &prefix,
-                1, // DT_DIR
-                "",
-                None,
-                None,
-                None,
-                "balanced",
-                &self.ctx.zone_id,
-                false,
-                0,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
+            self.authorize(&prefix, Permission::Write)?;
+            self.kernel
+                .sys_setattr(
+                    &prefix,
+                    &self.ctx,
+                    1, // DT_DIR
+                    "",
+                    None,
+                    None,
+                    None,
+                    "balanced",
+                    &self.ctx.zone_id,
+                    false,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(kernel_err)?;
         }
         Ok(())
     }
@@ -1299,10 +1638,10 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
     }
 
     fn working_root(&self) -> io::Result<String> {
-        Ok(self
-            .host_root
-            .clone()
-            .unwrap_or_else(|| self.workspace_root.clone()))
+        Ok(match &self.path_view {
+            KernelPathView::HostRoot(root) => root.clone(),
+            _ => self.to_host(&self.workspace_root),
+        })
     }
 
     /// Absolute, lexically clean, in this backend's spelling.
@@ -1312,23 +1651,58 @@ impl<K: KernelConvenience + Send + Sync + 'static> FsBackend for KernelFsBackend
     /// `normalize_allow_missing` is the trait's default, which is this: the
     /// resolution is lexical either way, so a missing leaf is not special.
     fn normalize(&self, path: &str) -> io::Result<String> {
-        match &self.host_root {
-            Some(root) => Ok(host_lexical_join(root, path)),
-            None => lexical_join(&self.workspace_root, path),
+        match &self.path_view {
+            KernelPathView::LocalWorkspace(_) => {
+                self.to_kernel(path).map(|path| self.to_host(&path))
+            }
+            KernelPathView::HostRoot(root) => Ok(host_lexical_join(root, path)),
+            KernelPathView::Virtual => lexical_join(&self.workspace_root, path),
         }
     }
 
     fn join_path(&self, dir: &str, name: &str) -> String {
-        match self.host_root {
+        match &self.path_view {
             // Host separators, for the same reason `StdFsBackend` uses them:
             // the composed path is handed back to the user and to `bash`.
-            Some(_) => std::path::Path::new(dir)
-                .join(name)
-                .to_string_lossy()
-                .into_owned(),
-            None => format!("{}/{}", dir.trim_end_matches(['/', '\\']), name),
+            KernelPathView::HostRoot(_) | KernelPathView::LocalWorkspace(_) => {
+                std::path::Path::new(dir)
+                    .join(name)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+            KernelPathView::Virtual => format!("{}/{}", dir.trim_end_matches(['/', '\\']), name),
         }
     }
+}
+
+/// Recognize the extended-length marker consistently in native and VFS views.
+fn strip_host_verbatim_prefix(path: &str) -> Option<&str> {
+    path.strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix("//?/"))
+}
+
+/// Compare native Windows path aliases without changing stored host spelling,
+/// consulting the host filesystem, or reinterpreting a VFS namespace.
+pub(crate) fn native_path_for_matching(
+    path: &std::path::Path,
+) -> std::borrow::Cow<'_, std::path::Path> {
+    if cfg!(windows) {
+        if let Some(bare) = path.to_str().and_then(strip_host_verbatim_prefix) {
+            let ordinary = match bare
+                .strip_prefix(r"UNC\")
+                .or_else(|| bare.strip_prefix("UNC/"))
+            {
+                Some(share) => format!(r"\\{}", share.replace('/', r"\")),
+                None => bare.replace('/', r"\"),
+            };
+            let ordinary = std::path::PathBuf::from(ordinary);
+            // Volume/device prefixes have no equivalent ordinary absolute path.
+            if ordinary.is_absolute() {
+                return std::borrow::Cow::Owned(ordinary);
+            }
+        }
+    }
+    std::borrow::Cow::Borrowed(path)
 }
 
 /// Resolve `path` against `root` in HOST spelling, touching no filesystem.
@@ -1387,8 +1761,47 @@ impl NexusVfsFsBackend {
 }
 
 impl FsBackend for NexusVfsFsBackend {
+    fn try_lock(&self, path: &str, ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
+        let Some(id) = self.client.lock(path, "", ttl_ms, &self.auth_token)? else {
+            return Ok(None);
+        };
+        let client = Arc::clone(&self.client);
+        let token = self.auth_token.clone();
+        let path = path.to_owned();
+        let renew_client = Arc::clone(&client);
+        let renew_token = token.clone();
+        let renew_path = path.clone();
+        let renew_id = id.clone();
+        Ok(Some(Arc::new(BackendLock {
+            renew: Box::new(move || {
+                renew_client
+                    .lock(&renew_path, &renew_id, ttl_ms, &renew_token)
+                    .map(|id| id.is_some())
+            }),
+            release: Box::new(move || {
+                let _ = client.unlock(&path, &id, &token);
+            }),
+        })))
+    }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
-        self.client.read(path, &self.auth_token)
+        let first = self.client.read_entry(path, 0, &self.auth_token)?;
+        if first.entry_type != i32::from(DT_STREAM) {
+            return Ok(first.data);
+        }
+        let mut first = Some(first);
+        read_framed_contents(|offset| {
+            let result = match first.take() {
+                Some(first) => first,
+                None => self.client.read_entry(path, offset, &self.auth_token)?,
+            };
+            if result.entry_type != i32::from(DT_STREAM) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream entry type changed during read",
+                ));
+            }
+            Ok((result.data, result.next_offset.unwrap_or(offset)))
+        })
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -1396,21 +1809,18 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        // Ask the predicate rather than restating it. This branch spelled
-        // spelled the mailbox leaf on its own, so when the mailbox moved
-        // to `…/transcript` it quietly took the read-modify-write path below:
-        // every append re-read the stream through `read` (which yields its FIRST
-        // frame), concatenated the new envelope onto that, and wrote the pair
-        // back as a single frame. Two JSON objects in one frame parse as
-        // neither, so every message after the first became unreadable — sends
-        // reporting success, a receiver seeing nothing, and only a real daemon
-        // able to show it.
+        // Stream identity comes from the server's entry type and uses its
+        // atomic frame append. Ordinary files retain their byte append path.
         if self.is_append_stream(path)? {
             self.client
                 .stream_write(path, data.to_vec(), &self.auth_token)
                 .map(|_offset| ())
         } else {
-            let mut existing = self.client.read(path, &self.auth_token).unwrap_or_default();
+            let mut existing = match self.client.read(path, &self.auth_token) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => return Err(error),
+            };
             existing.extend_from_slice(data);
             self.client.write(path, existing, &self.auth_token)
         }
@@ -1423,7 +1833,11 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(crate::mailbox::is_conversation_transcript_path(path))
+        match self.client.stat(path, &self.auth_token) {
+            Ok(stat) => Ok(stat.entry_type == i32::from(DT_STREAM)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
@@ -1439,9 +1853,7 @@ impl FsBackend for NexusVfsFsBackend {
             // A link is one whichever backend answers. `Stat` is lstat, so a target
             // present means this entry IS the link rather than the thing it points at.
             is_symlink: stat.link_target.is_some(),
-            modified: stat
-                .modified_at_ms
-                .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms as u64)),
+            modified: modification_time(stat.modified_at_ms),
         })
     }
 
@@ -1467,10 +1879,6 @@ impl FsBackend for NexusVfsFsBackend {
                 is_dir: e.is_directory,
             })
             .collect())
-    }
-
-    fn exists(&self, path: &str) -> io::Result<bool> {
-        Ok(self.client.stat(path, &self.auth_token).is_ok())
     }
 
     /// A DT_LINK, with the destination in the entry's metadata.
@@ -1583,8 +1991,31 @@ impl FsBackend for NexusVfsFsBackend {
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
-        self.client
-            .stream_read_at(path, cursor, block_ms > 0, block_ms, &self.auth_token)
+        read_tail_with(cursor, block_ms, |wait_ms| {
+            let result = match self
+                .client
+                .read_entry_wait(path, cursor, wait_ms, &self.auth_token)
+            {
+                Ok(result) => result,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(TailPayload::Bytes(Vec::new()));
+                }
+                Err(error) => return Err(error),
+            };
+            match result.entry_type {
+                kind if kind == i32::from(DT_STREAM) => Ok(TailPayload::Frame(
+                    result.data,
+                    result.next_offset.unwrap_or(cursor),
+                )),
+                kind if kind == i32::from(kernel::meta_store::DT_REG) => {
+                    Ok(TailPayload::Bytes(result.data))
+                }
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "tail requires a file or stream",
+                )),
+            }
+        })
     }
 }
 

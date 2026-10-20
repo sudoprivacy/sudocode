@@ -6,12 +6,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
+
 use crate::fs_backend::{FsBackend, StdFsBackend};
 use crate::json::{JsonError, JsonValue};
 use crate::prompt::SessionPromptSnapshot;
 use crate::usage::{parse_usage_cost_currency, TokenUsage};
 
 const SESSION_VERSION: u32 = 1;
+const UNANSWERED_TURN_TEXT: &str = "No response requested.";
 const ROTATE_AFTER_BYTES: u64 = 256 * 1024;
 const MAX_ROTATED_FILES: usize = 3;
 /// Cold-storage retention budget (bytes) for a transcript backed by a native
@@ -158,6 +161,7 @@ impl SessionMode {
 struct SessionPersistence {
     path: PathBuf,
     fs: Arc<dyn FsBackend>,
+    writer: Arc<std::sync::Mutex<Option<Arc<crate::session_writer::SessionWriter>>>>,
 }
 
 impl fmt::Debug for SessionPersistence {
@@ -227,6 +231,134 @@ impl HostedSessionIdentity {
     }
 }
 
+/// One real model HTTP attempt during context maintenance. Missing usage means
+/// the provider did not report a bill, rather than a zero-cost request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceUsageReceipt {
+    pub run_id: String,
+    pub attempt_id: u32,
+    pub usage: Option<TokenUsage>,
+}
+
+impl MaintenanceUsageReceipt {
+    fn to_json(&self) -> JsonValue {
+        let mut object = BTreeMap::from([
+            ("run_id".into(), JsonValue::String(self.run_id.clone())),
+            (
+                "attempt_id".into(),
+                JsonValue::Number(i64::from(self.attempt_id)),
+            ),
+        ]);
+        if let Some(usage) = self.usage {
+            object.insert("usage".into(), usage_to_json(usage));
+        }
+        JsonValue::Object(object)
+    }
+
+    fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| SessionError::Format("maintenance receipt must be an object".into()))?;
+        Ok(Self {
+            run_id: required_string(object, "run_id")?,
+            attempt_id: required_u32(object, "attempt_id")?,
+            usage: object.get("usage").map(usage_from_json).transpose()?,
+        })
+    }
+}
+
+/// Evidence for a previously committed, target-achieving compaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionAchievement {
+    pub fingerprint: String,
+    pub before_history: usize,
+    pub target_history: usize,
+    pub after_history: usize,
+    pub policy_version: String,
+}
+
+impl CompactionAchievement {
+    fn to_json(&self) -> Result<JsonValue, SessionError> {
+        Ok(JsonValue::Object(BTreeMap::from([
+            (
+                "fingerprint".into(),
+                JsonValue::String(self.fingerprint.clone()),
+            ),
+            (
+                "before_history".into(),
+                JsonValue::Number(
+                    i64::try_from(self.before_history)
+                        .map_err(|_| SessionError::Format("before_history overflow".into()))?,
+                ),
+            ),
+            (
+                "target_history".into(),
+                JsonValue::Number(
+                    i64::try_from(self.target_history)
+                        .map_err(|_| SessionError::Format("target_history overflow".into()))?,
+                ),
+            ),
+            (
+                "after_history".into(),
+                JsonValue::Number(
+                    i64::try_from(self.after_history)
+                        .map_err(|_| SessionError::Format("after_history overflow".into()))?,
+                ),
+            ),
+            (
+                "policy_version".into(),
+                JsonValue::String(self.policy_version.clone()),
+            ),
+        ])))
+    }
+
+    fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
+        let object = value.as_object().ok_or_else(|| {
+            SessionError::Format("compaction achievement must be an object".into())
+        })?;
+        let history = |key| {
+            usize::try_from(required_u64(object, key)?)
+                .map_err(|_| SessionError::Format(format!("{key} overflow")))
+        };
+        Ok(Self {
+            fingerprint: required_string(object, "fingerprint")?,
+            before_history: history("before_history")?,
+            target_history: history("target_history")?,
+            after_history: history("after_history")?,
+            policy_version: required_string(object, "policy_version")?,
+        })
+    }
+}
+
+fn compaction_report_from_json(
+    object: &BTreeMap<String, JsonValue>,
+) -> Result<Option<crate::compact::CompactionReport>, SessionError> {
+    object
+        .get("last_compaction_report")
+        .map(|value| {
+            serde_json::from_str(&value.render())
+                .map_err(|error| SessionError::Format(error.to_string()))
+        })
+        .transpose()
+}
+
+fn maintenance_usage_from_json(
+    object: &BTreeMap<String, JsonValue>,
+) -> Result<Vec<MaintenanceUsageReceipt>, SessionError> {
+    object
+        .get("maintenance_usage")
+        .map(|value| {
+            value
+                .as_array()
+                .ok_or_else(|| SessionError::Format("maintenance_usage must be an array".into()))?
+                .iter()
+                .map(MaintenanceUsageReceipt::from_json)
+                .collect()
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
 /// Persisted conversational state for the runtime and CLI session manager.
 ///
 /// `workspace_root` binds the session to the worktree it was created in. The
@@ -243,6 +375,9 @@ pub struct Session {
     pub updated_at_ms: u64,
     pub messages: Vec<ConversationMessage>,
     pub compaction: Option<SessionCompaction>,
+    pub maintenance_usage: Vec<MaintenanceUsageReceipt>,
+    pub compaction_achievement: Option<CompactionAchievement>,
+    pub last_compaction_report: Option<crate::compact::CompactionReport>,
     pub fork: Option<SessionFork>,
     pub workspace_root: Option<PathBuf>,
     pub identity: Option<HostedSessionIdentity>,
@@ -258,6 +393,9 @@ pub struct Session {
     pub mode: SessionMode,
     prompt_snapshot: Option<SessionPromptSnapshot>,
     prompt_snapshot_dirty: bool,
+    /// Repairs projected during a read-only load, awaiting the active writer.
+    /// This bookkeeping is never serialized into the durable transcript.
+    pending_tool_repairs: usize,
     persistence: Option<SessionPersistence>,
 }
 
@@ -269,6 +407,9 @@ impl PartialEq for Session {
             && self.updated_at_ms == other.updated_at_ms
             && self.prompt_snapshot == other.prompt_snapshot
             && self.messages == other.messages
+            && self.maintenance_usage == other.maintenance_usage
+            && self.compaction_achievement == other.compaction_achievement
+            && self.last_compaction_report == other.last_compaction_report
             && self.compaction == other.compaction
             && self.fork == other.fork
             && self.identity == other.identity
@@ -287,6 +428,7 @@ pub enum SessionError {
     Io(std::io::Error),
     Json(JsonError),
     Format(String),
+    SourceChanged,
 }
 
 impl Display for SessionError {
@@ -295,6 +437,7 @@ impl Display for SessionError {
             Self::Io(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
             Self::Format(error) => write!(f, "{error}"),
+            Self::SourceChanged => f.write_str("session source changed during compaction"),
         }
     }
 }
@@ -324,6 +467,9 @@ impl Session {
             updated_at_ms: now,
             messages: Vec::new(),
             compaction: None,
+            maintenance_usage: Vec::new(),
+            compaction_achievement: None,
+            last_compaction_report: None,
             fork: None,
             workspace_root: None,
             identity: None,
@@ -333,6 +479,7 @@ impl Session {
             mode: SessionMode::Interactive,
             prompt_snapshot: None,
             prompt_snapshot_dirty: false,
+            pending_tool_repairs: 0,
             persistence: None,
         }
     }
@@ -363,6 +510,7 @@ impl Session {
         self.persistence = Some(SessionPersistence {
             path: path.into(),
             fs: Arc::new(StdFsBackend),
+            writer: Arc::default(),
         });
         self
     }
@@ -421,6 +569,141 @@ impl Session {
         self.persistence.as_ref().map(|value| value.path.as_path())
     }
 
+    /// Shared by cloned session snapshots and their journal. A separately
+    /// loaded session cannot silently become a second writer in this process.
+    pub fn completion_writer(&self) -> Result<Arc<crate::session_writer::SessionWriter>, String> {
+        let path = self.persistence_path().ok_or("session has no transcript")?;
+        self.writer_for(path)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "completion_storage_exclusion_unavailable".into())
+    }
+
+    pub(crate) fn adopt_completion_writer(
+        &self,
+        writer: Arc<crate::session_writer::SessionWriter>,
+    ) -> Result<(), String> {
+        writer.check()?;
+        let persistence = self
+            .persistence
+            .as_ref()
+            .ok_or("session has no transcript")?;
+        let mut current = persistence
+            .writer
+            .lock()
+            .map_err(|_| "session writer poisoned")?;
+        if let Some(existing) = current.as_ref() {
+            if !Arc::ptr_eq(existing, &writer) {
+                return Err("session_writer_busy".into());
+            }
+        } else {
+            *current = Some(writer);
+        }
+        Ok(())
+    }
+
+    fn writer_for(
+        &self,
+        path: &Path,
+    ) -> Result<Option<Arc<crate::session_writer::SessionWriter>>, SessionError> {
+        let backend = self.backend();
+        if !backend.fenced_locks() {
+            return Ok(None);
+        }
+        if let Some(persistence) = &self.persistence {
+            if persistence.path == path {
+                let mut guard = persistence
+                    .writer
+                    .lock()
+                    .map_err(|_| SessionError::Format("session writer poisoned".into()))?;
+                if guard.is_none() {
+                    *guard = Some(
+                        crate::session_writer::SessionWriter::acquire(backend, path)
+                            .map_err(SessionError::Format)?,
+                    );
+                }
+                let writer = guard.as_ref().expect("writer acquired");
+                writer.check().map_err(SessionError::Format)?;
+                return Ok(Some(Arc::clone(writer)));
+            }
+        }
+        crate::session_writer::SessionWriter::acquire(backend, path)
+            .map(Some)
+            .map_err(SessionError::Format)
+    }
+
+    /// Revision of the current durable transcript through its own backend.
+    /// In-memory sessions have no revision. A configured path which is absent
+    /// has a distinct sentinel, so external creation also counts as a change.
+    pub fn durable_revision(&self) -> Result<Option<String>, SessionError> {
+        let Some(path) = self.persistence_path() else {
+            return Ok(None);
+        };
+        let bytes = match self.backend().read(&path.to_string_lossy()) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Some(durable_bytes_revision(bytes.as_deref())))
+    }
+
+    /// Bind a source history to the revision of the same durable bytes.
+    /// A source cloned before an external append must not capture the newer
+    /// revision and subsequently replace messages it never saw. Metadata may
+    /// differ, but replayed message history must match after the same orphan
+    /// repair used on load. This is a read-time check, not a backend lock.
+    pub fn durable_revision_for_history(&self) -> Result<Option<String>, SessionError> {
+        self.durable_history_revision()
+            .map(|(revision, _)| revision)
+    }
+
+    /// Bind the same history and preserve maintenance receipts observed in
+    /// those durable bytes. Return newly known bills for the live tracker;
+    /// pending receipts and staged prompt metadata remain in memory.
+    pub fn capture_durable_revision_for_history(
+        &mut self,
+    ) -> Result<(Option<String>, Vec<TokenUsage>), SessionError> {
+        let (revision, receipts) = self.durable_history_revision()?;
+        let newly_known = self.merge_maintenance_usage(&receipts);
+        Ok((revision, newly_known))
+    }
+
+    fn durable_history_revision(
+        &self,
+    ) -> Result<(Option<String>, Vec<MaintenanceUsageReceipt>), SessionError> {
+        let Some(path) = self.persistence_path() else {
+            return Ok((None, Vec::new()));
+        };
+        let bytes = match self.backend().read(&path.to_string_lossy()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Some(durable_bytes_revision(None)), Vec::new()));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let contents = std::str::from_utf8(&bytes).map_err(|_| {
+            SessionError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session transcript is not valid UTF-8",
+            ))
+        })?;
+        let durable = Self::from_persisted_contents(contents)?;
+        // Tool input objects are stored canonically, while streamed input can
+        // contain different whitespace. Compare the persisted message values;
+        // the byte revision below still guards concurrent durable changes.
+        if !durable
+            .messages
+            .iter()
+            .map(ConversationMessage::to_json)
+            .eq(self.messages.iter().map(ConversationMessage::to_json))
+        {
+            return Err(SessionError::SourceChanged);
+        }
+        Ok((
+            Some(durable_bytes_revision(Some(&bytes))),
+            durable.maintenance_usage,
+        ))
+    }
+
     /// The filesystem this session persists through, as a shareable handle.
     ///
     /// The session is where a host's filesystem already reaches the engine, so
@@ -450,25 +733,10 @@ impl Session {
     /// offloaded-tool-results location — shared by the writer
     /// ([`Self::tool_results_dir`]) and session-deletion GC so both always
     /// agree on the subtree to create/read/remove.
+    #[inline]
     #[must_use]
     pub fn tool_results_dir_for(session_file: &Path, session_id: &str) -> Option<PathBuf> {
-        let parent = session_file.parent()?;
-        // Per-session-directory layout (`<id>/transcript.jsonl`): the parent IS
-        // the session dir, so tool-results lives directly under it — the whole
-        // session (transcript + tool-results) is one GC-able subtree.
-        if session_file.file_name().and_then(|name| name.to_str())
-            == Some(crate::session_control::TRANSCRIPT_FILE)
-        {
-            return Some(parent.join("tool-results"));
-        }
-        // Legacy flat layout (`<id>.jsonl`): namespace under a shared
-        // `tool-results/<id>/` so managed session files sharing one dir don't
-        // collide.
-        Some(
-            parent
-                .join("tool-results")
-                .join(Self::sanitize_offload_id(session_id)),
-        )
+        Self::attachment_dir_for(session_file, session_id, "tool-results")
     }
 
     /// This session's `tool-results/<session-id>/` dir (a grandchild of the
@@ -480,6 +748,31 @@ impl Session {
     #[must_use]
     pub fn tool_results_dir(&self) -> Option<PathBuf> {
         Self::tool_results_dir_for(self.persistence_path()?, &self.session_id)
+    }
+
+    /// Raw response attachments use the same session namespace as tool blobs.
+    /// The main transcript never includes these protocol frames as messages.
+    #[inline]
+    #[must_use]
+    pub fn response_captures_dir_for(session_file: &Path, session_id: &str) -> Option<PathBuf> {
+        Self::attachment_dir_for(session_file, session_id, "responses")
+    }
+
+    /// One namespace rule for current session directories and legacy flat files.
+    #[inline]
+    fn attachment_dir_for(session_file: &Path, session_id: &str, name: &str) -> Option<PathBuf> {
+        let parent = session_file.parent()?;
+        if session_file.file_name().and_then(|name| name.to_str())
+            == Some(crate::session_control::TRANSCRIPT_FILE)
+        {
+            Some(parent.join(name))
+        } else {
+            Some(
+                parent
+                    .join(name)
+                    .join(Self::sanitize_offload_id(session_id)),
+            )
+        }
     }
 
     /// Offload a full tool-result blob to `<session-dir>/tool-results/<id>` via
@@ -511,6 +804,17 @@ impl Session {
         })?;
         let dir_str = dir.to_string_lossy().into_owned();
         let backend = self.backend();
+        let writer = self
+            .writer_for(
+                self.persistence_path()
+                    .ok_or_else(|| std::io::Error::other("session has no persistence"))?,
+            )
+            .map_err(std::io::Error::other)?;
+        let _write = writer
+            .as_ref()
+            .map(|w| w.write())
+            .transpose()
+            .map_err(std::io::Error::other)?;
         backend.create_dir_all(&dir_str)?;
         let path_str = dir
             .join(Self::sanitize_offload_id(id))
@@ -522,6 +826,17 @@ impl Session {
 
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
         let path = path.as_ref();
+        let writer = self.writer_for(path)?;
+        let _write = writer
+            .as_ref()
+            .map(|w| w.write())
+            .transpose()
+            .map_err(SessionError::Format)?;
+        self.save_snapshot(path)
+    }
+
+    // Caller holds the writer operation guard, including bootstrap/compaction.
+    fn save_snapshot(&self, path: &Path) -> Result<(), SessionError> {
         let snapshot = self.render_jsonl_snapshot()?;
         let path_str = path.to_string_lossy();
         let backend = self.backend();
@@ -544,24 +859,79 @@ impl Session {
         original: &Session,
         path: impl AsRef<Path>,
     ) -> Result<(), SessionError> {
+        self.save_compacted_to_path_checked(original, path, None)
+    }
+
+    /// Check the source revision before making either the archive or the
+    /// replacement. This detects changes observed at commit preparation; it
+    /// serializes native writes, but cannot fence remote backend writers.
+    pub fn save_compacted_to_path_checked(
+        &self,
+        original: &Session,
+        path: impl AsRef<Path>,
+        expected_revision: Option<&str>,
+    ) -> Result<(), SessionError> {
+        self.save_replacement_to_path_checked(original, path.as_ref(), expected_revision, "compact")
+    }
+
+    /// Preserve rejected signed history before installing a thinking-only repair.
+    pub fn save_thinking_repaired_to_path_checked(
+        &self,
+        original: &Session,
+        path: impl AsRef<Path>,
+        expected_revision: Option<&str>,
+    ) -> Result<(), SessionError> {
+        self.save_replacement_to_path_checked(
+            original,
+            path.as_ref(),
+            expected_revision,
+            "thinking-repair",
+        )
+    }
+
+    fn save_replacement_to_path_checked(
+        &self,
+        original: &Session,
+        path: &Path,
+        expected_revision: Option<&str>,
+        purpose: &str,
+    ) -> Result<(), SessionError> {
         let path = path.as_ref();
+        let writer = self.writer_for(path)?;
+        let _write = writer
+            .as_ref()
+            .map(|w| w.write())
+            .transpose()
+            .map_err(SessionError::Format)?;
+        let durable = match self.backend().read(&path.to_string_lossy()) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if expected_revision
+            .is_some_and(|expected| expected != durable_bytes_revision(durable.as_deref()))
+        {
+            return Err(SessionError::SourceChanged);
+        }
         let archive = format!(
-            "{}.before-compact-{}",
+            "{}.before-{purpose}-{}",
             path.display(),
             current_time_millis()
         );
         // Preserve the durable source byte-for-byte. In-memory metadata can
         // already contain a staged prompt snapshot for a legacy transcript.
-        let snapshot = match self.backend().read_to_string(&path.to_string_lossy()) {
-            Ok(snapshot) => snapshot,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                original.render_jsonl_snapshot()?
-            }
-            Err(error) => return Err(error.into()),
+        let snapshot = match durable {
+            Some(bytes) => String::from_utf8(bytes).map_err(|_| {
+                SessionError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "session transcript is not valid UTF-8",
+                ))
+            })?,
+            None => original.render_jsonl_snapshot()?,
         };
         write_atomic_with(self.backend(), &archive, &snapshot)?;
         if self.backend().is_append_stream(&path.to_string_lossy())? {
-            return self.save_to_path(path);
+            return self.save_snapshot(path);
         }
         // Avoid rotation before the atomic replacement: failure must leave the
         // live transcript at its original path, rather than only in a backup.
@@ -596,7 +966,12 @@ impl Session {
     ) -> Result<Self, SessionError> {
         let path = path.as_ref();
         let contents = fs.read_to_string(&path.to_string_lossy())?;
-        let mut session = match JsonValue::parse(&contents) {
+        Ok(Self::from_persisted_contents(&contents)?.with_persistence_path(path.to_path_buf()))
+    }
+
+    /// Replay either persisted format with the repairs used by every load.
+    fn from_persisted_contents(contents: &str) -> Result<Self, SessionError> {
+        let mut session = match JsonValue::parse(contents) {
             Ok(value)
                 if value
                     .as_object()
@@ -604,27 +979,30 @@ impl Session {
             {
                 Self::from_json(&value)?
             }
-            Err(_) | Ok(_) => Self::from_jsonl(&contents)?,
+            Err(_) | Ok(_) => Self::from_jsonl(contents)?,
         };
         // Recover interrupted calls without changing existing result records:
         // local consumers such as /undo still need their structured payloads.
-        session.sanitize_orphan_tool_uses();
-        Ok(session.with_persistence_path(path.to_path_buf()))
+        session.pending_tool_repairs = session.sanitize_orphan_tool_uses();
+        Ok(session)
     }
 
     /// Repair unfinished tool batches before a new turn uses this history.
     /// Persist the repair without rewriting existing tool result records.
     pub fn repair_orphan_tool_uses(&mut self) -> Result<usize, SessionError> {
         let repairs = ToolHistoryRepairs::plan(&self.messages);
-        if repairs.missing.is_empty() {
+        if repairs.missing.is_empty() && self.pending_tool_repairs == 0 {
             return Ok(0);
         }
-        let original = self.messages.clone();
-        let repaired = repairs.apply_missing(&mut self.messages);
+        let original = (!repairs.missing.is_empty()).then(|| self.messages.clone());
+        let repaired = self.pending_tool_repairs + repairs.apply_missing(&mut self.messages);
         if let Err(error) = self.rewrite_persisted() {
-            self.messages = original;
+            if let Some(original) = original {
+                self.messages = original;
+            }
             return Err(error);
         }
+        self.pending_tool_repairs = 0;
         Ok(repaired)
     }
 
@@ -731,6 +1109,9 @@ impl Session {
             updated_at_ms: now,
             messages: self.messages.clone(),
             compaction: self.compaction.clone(),
+            maintenance_usage: self.maintenance_usage.clone(),
+            compaction_achievement: self.compaction_achievement.clone(),
+            last_compaction_report: self.last_compaction_report.clone(),
             fork: Some(SessionFork {
                 parent_session_id: self.session_id.clone(),
                 branch_name: normalize_optional_string(branch_name),
@@ -743,6 +1124,7 @@ impl Session {
             mode: self.mode,
             prompt_snapshot: self.prompt_snapshot.clone(),
             prompt_snapshot_dirty: false,
+            pending_tool_repairs: 0,
             persistence: None,
         }
     }
@@ -809,6 +1191,7 @@ impl Session {
                 ),
             );
         }
+        self.insert_maintenance_metadata(&mut object)?;
         Ok(JsonValue::Object(object))
     }
 
@@ -848,6 +1231,12 @@ impl Session {
             .get("compaction")
             .map(SessionCompaction::from_json)
             .transpose()?;
+        let maintenance_usage = maintenance_usage_from_json(object)?;
+        let compaction_achievement = object
+            .get("compaction_achievement")
+            .map(CompactionAchievement::from_json)
+            .transpose()?;
+        let last_compaction_report = compaction_report_from_json(object)?;
         let fork = object.get("fork").map(SessionFork::from_json).transpose()?;
         let identity = object
             .get("identity")
@@ -887,6 +1276,9 @@ impl Session {
             updated_at_ms,
             messages,
             compaction,
+            maintenance_usage,
+            compaction_achievement,
+            last_compaction_report,
             fork,
             workspace_root,
             identity,
@@ -896,6 +1288,7 @@ impl Session {
             mode,
             prompt_snapshot,
             prompt_snapshot_dirty: false,
+            pending_tool_repairs: 0,
             persistence: None,
         })
     }
@@ -911,6 +1304,9 @@ impl Session {
         let mut updated_at_ms = None;
         let mut messages = Vec::new();
         let mut compaction = None;
+        let mut maintenance_usage = Vec::new();
+        let mut compaction_achievement = None;
+        let mut last_compaction_report = None;
         let mut fork = None;
         let mut workspace_root = None;
         let mut identity = None;
@@ -953,6 +1349,12 @@ impl Session {
                     messages.clear();
                     prompt_history.clear();
                     compaction = None;
+                    maintenance_usage = maintenance_usage_from_json(object)?;
+                    compaction_achievement = object
+                        .get("compaction_achievement")
+                        .map(CompactionAchievement::from_json)
+                        .transpose()?;
+                    last_compaction_report = compaction_report_from_json(object)?;
                     version = required_u32(object, "version")?;
                     session_id = Some(required_string(object, "session_id")?);
                     created_at_ms = Some(required_u64(object, "created_at_ms")?);
@@ -1040,6 +1442,9 @@ impl Session {
             updated_at_ms: updated_at_ms.unwrap_or(created_at_ms.unwrap_or(now)),
             messages,
             compaction,
+            maintenance_usage,
+            compaction_achievement,
+            last_compaction_report,
             fork,
             workspace_root,
             identity,
@@ -1049,6 +1454,7 @@ impl Session {
             mode,
             prompt_snapshot,
             prompt_snapshot_dirty: false,
+            pending_tool_repairs: 0,
             persistence: None,
         })
     }
@@ -1103,6 +1509,12 @@ impl Session {
         let Some(path) = self.persistence_path() else {
             return Ok(());
         };
+        let writer = self.writer_for(path)?;
+        let _write = writer
+            .as_ref()
+            .map(|w| w.write())
+            .transpose()
+            .map_err(SessionError::Format)?;
         let path_str = path.to_string_lossy();
         if self.backend().exists(&path_str)? && self.backend().stat(&path_str)?.len > 0 {
             return Err(SessionError::Format(
@@ -1120,6 +1532,7 @@ impl Session {
     /// (the stream's internal cold-spill subsumes rotation). On a regular-file
     /// backend it stays the atomic snapshot rewrite + rotation via
     /// [`Self::save_to_path`].
+    // Caller holds the writer operation guard.
     fn bootstrap_append_log(&self, path: &Path) -> Result<(), SessionError> {
         let backend = self.backend();
         let path_str = path.to_string_lossy();
@@ -1130,7 +1543,7 @@ impl Session {
             }
             return Ok(());
         }
-        self.save_to_path(path)
+        self.save_snapshot(path)
     }
 
     fn append_persisted_message(&self, message: &ConversationMessage) -> Result<(), SessionError> {
@@ -1156,6 +1569,12 @@ impl Session {
         let Some(path) = self.persistence_path() else {
             return Ok(());
         };
+        let writer = self.writer_for(path)?;
+        let _write = writer
+            .as_ref()
+            .map(|w| w.write())
+            .transpose()
+            .map_err(SessionError::Format)?;
         let path_str = path.to_string_lossy();
         let backend = self.backend();
         let needs_bootstrap = !backend.exists(&path_str)?
@@ -1213,7 +1632,106 @@ impl Session {
                 JsonValue::String(self.mode.as_str().to_string()),
             );
         }
+        self.insert_maintenance_metadata(&mut object)?;
         Ok(JsonValue::Object(object))
+    }
+
+    fn insert_maintenance_metadata(
+        &self,
+        object: &mut BTreeMap<String, JsonValue>,
+    ) -> Result<(), SessionError> {
+        if !self.maintenance_usage.is_empty() {
+            object.insert(
+                "maintenance_usage".into(),
+                JsonValue::Array(
+                    self.maintenance_usage
+                        .iter()
+                        .map(MaintenanceUsageReceipt::to_json)
+                        .collect(),
+                ),
+            );
+        }
+        if let Some(achievement) = &self.compaction_achievement {
+            object.insert("compaction_achievement".into(), achievement.to_json()?);
+        }
+        if let Some(report) = &self.last_compaction_report {
+            let rendered = serde_json::to_string(report)
+                .map_err(|error| SessionError::Format(error.to_string()))?;
+            object.insert(
+                "last_compaction_report".into(),
+                JsonValue::parse(&rendered)?,
+            );
+        }
+        Ok(())
+    }
+
+    /// Merge receipts by run and HTTP attempt. Return only newly known bills
+    /// for the live usage tracker; replay reconstructs them from this ledger.
+    pub fn merge_maintenance_usage(
+        &mut self,
+        receipts: &[MaintenanceUsageReceipt],
+    ) -> Vec<TokenUsage> {
+        let mut newly_known = Vec::new();
+        for receipt in receipts {
+            if let Some(existing) = self.maintenance_usage.iter_mut().find(|existing| {
+                existing.run_id == receipt.run_id && existing.attempt_id == receipt.attempt_id
+            }) {
+                if existing.usage.is_none() && receipt.usage.is_some() {
+                    existing.usage = receipt.usage;
+                    newly_known.extend(receipt.usage);
+                }
+            } else {
+                newly_known.extend(receipt.usage);
+                self.maintenance_usage.push(receipt.clone());
+            }
+        }
+        if !receipts.is_empty() {
+            self.touch();
+        }
+        newly_known
+    }
+
+    /// Persist billing and achievement metadata in a full snapshot. Appending
+    /// a lone `session_meta` would erase history on JSONL replay. A failed write
+    /// keeps all known receipts in memory for the caller to report or retry.
+    pub fn persist_maintenance_metadata(&self) -> Result<(), SessionError> {
+        self.persist_maintenance_metadata_checked(None)
+    }
+
+    /// Guard metadata snapshot writes as well as candidate commits: failed,
+    /// skipped and cancelled runs must not overwrite externally changed history.
+    pub fn persist_maintenance_metadata_checked(
+        &self,
+        expected_revision: Option<&str>,
+    ) -> Result<(), SessionError> {
+        let writer = self
+            .persistence_path()
+            .map(|path| self.writer_for(path))
+            .transpose()?
+            .flatten();
+        let _write = writer
+            .as_ref()
+            .map(|w| w.write())
+            .transpose()
+            .map_err(SessionError::Format)?;
+        if let Some(expected) = expected_revision {
+            if self.durable_revision()?.as_deref() != Some(expected) {
+                return Err(SessionError::SourceChanged);
+            }
+        }
+        let Some(path) = self.persistence_path() else {
+            return Ok(());
+        };
+        let path_str = path.to_string_lossy();
+        let snapshot = self.render_jsonl_snapshot()?;
+        let backend = self.backend();
+        if backend.is_append_stream(&path_str)? {
+            backend.append(&path_str, snapshot.as_bytes())?;
+            return Ok(());
+        }
+        // Metadata failures must preserve the original transcript path, even
+        // for large sessions which ordinary saves would rotate first.
+        write_atomic_with(backend, &path_str, &snapshot)
     }
 
     fn touch(&mut self) {
@@ -1225,6 +1743,13 @@ impl Default for Session {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn durable_bytes_revision(bytes: Option<&[u8]>) -> String {
+    bytes.map_or_else(
+        || "missing".into(),
+        |bytes| format!("{:x}", Sha256::digest(bytes)),
+    )
 }
 
 impl ConversationMessage {
@@ -1248,6 +1773,23 @@ impl ConversationMessage {
             model: None,
             duration_ms: None,
         }
+    }
+
+    /// Close an unanswered turn before a new external request, matching CC.
+    #[must_use]
+    pub(crate) fn unanswered_turn_boundary() -> Self {
+        Self::assistant(vec![ContentBlock::Text {
+            text: UNANSWERED_TURN_TEXT.into(),
+        }])
+    }
+
+    /// An internal turn marker belongs in API history, not transcript display.
+    #[must_use]
+    pub fn is_unanswered_turn_boundary(&self) -> bool {
+        self.role == MessageRole::Assistant
+            && self.model.is_none()
+            && self.usage.is_none()
+            && matches!(self.blocks.as_slice(), [ContentBlock::Text { text }] if text == UNANSWERED_TURN_TEXT)
     }
 
     #[must_use]
@@ -1413,7 +1955,15 @@ impl ContentBlock {
                 );
                 object.insert("id".to_string(), JsonValue::String(id.clone()));
                 object.insert("name".to_string(), JsonValue::String(name.clone()));
-                object.insert("input".to_string(), JsonValue::String(input.clone()));
+                // CC journals tool inputs as objects. Continue reading legacy
+                // string records and preserve malformed historical input text.
+                let parsed = JsonValue::parse(input)
+                    .ok()
+                    .filter(|value| matches!(value, JsonValue::Object(_)));
+                object.insert(
+                    "input".to_string(),
+                    parsed.unwrap_or_else(|| JsonValue::String(input.clone())),
+                );
                 if let Some(sig) = thought_signature {
                     object.insert(
                         "thought_signature".to_string(),
@@ -1475,7 +2025,10 @@ impl ContentBlock {
             "tool_use" => Ok(Self::ToolUse {
                 id: required_string(object, "id")?,
                 name: required_string(object, "name")?,
-                input: required_string(object, "input")?,
+                input: match object.get("input") {
+                    Some(JsonValue::Object(input)) => JsonValue::Object(input.clone()).render(),
+                    _ => required_string(object, "input")?,
+                },
                 thought_signature: object
                     .get("thought_signature")
                     .and_then(JsonValue::as_str)
@@ -1660,6 +2213,12 @@ fn message_record(message: &ConversationMessage) -> JsonValue {
 
 fn usage_to_json(usage: TokenUsage) -> JsonValue {
     let mut object = BTreeMap::new();
+    if let Some(total) = usage.reported_total_tokens {
+        object.insert(
+            "reported_total_tokens".into(),
+            JsonValue::Number(i64::from(total)),
+        );
+    }
     object.insert(
         "input_tokens".to_string(),
         JsonValue::Number(i64::from(usage.input_tokens)),
@@ -1693,6 +2252,11 @@ fn usage_from_json(value: &JsonValue) -> Result<TokenUsage, SessionError> {
         .as_object()
         .ok_or_else(|| SessionError::Format("usage must be an object".to_string()))?;
     Ok(TokenUsage {
+        reported_total_tokens: object
+            .get("reported_total_tokens")
+            .filter(|value| !matches!(value, JsonValue::Null))
+            .map(|_| required_u32(object, "reported_total_tokens"))
+            .transpose()?,
         input_tokens: required_u32(object, "input_tokens")?,
         output_tokens: required_u32(object, "output_tokens")?,
         cache_creation_input_tokens: required_u32(object, "cache_creation_input_tokens")?,
@@ -1860,7 +2424,7 @@ impl ToolHistoryRepairs {
         }
         self.missing.push((before, pending.drain(..).map(|(id, name)| {
             ConversationMessage::tool_result(id, name,
-                "[Tool call was interrupted before it returned — no result was produced. Treated as cancelled.]", true)
+                "[Tool execution was interrupted before a final result was received. Side effects may already have occurred. Inspect the current state before retrying.]", true)
         }).collect()));
     }
 
@@ -1942,9 +2506,9 @@ fn current_time_millis() -> u64 {
 }
 
 fn generate_session_id() -> String {
-    let millis = current_time_millis();
-    let counter = SESSION_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("session-{millis}-{counter}")
+    // Durable objects can share a flat store across independent processes and
+    // nodes. Wall clocks and process-local counters cannot identify that object.
+    format!("session-{}", uuid::Uuid::new_v4())
 }
 
 #[cfg(test)]
@@ -2179,6 +2743,7 @@ mod tests {
                     },
                 ],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 10,
                     output_tokens: 4,
                     cache_creation_input_tokens: 1,
@@ -2303,8 +2868,10 @@ mod tests {
         assert_eq!(session.messages[3].role, MessageRole::User);
         assert!(matches!(
             &session.messages[2].blocks[0],
-            ContentBlock::ToolResult { tool_use_id, is_error, .. }
+            ContentBlock::ToolResult { tool_use_id, is_error, output, .. }
                 if tool_use_id == "second" && *is_error
+                    && output.contains("Side effects may already have occurred")
+                    && output.contains("before retrying")
         ));
         let persisted = fs::read_to_string(&path).expect("repair persisted");
         assert!(persisted.contains("\"tool_use_id\":\"second\""));
@@ -2418,6 +2985,7 @@ mod tests {
             "summarized earlier work",
             4,
             Some(TokenUsage {
+                reported_total_tokens: None,
                 input_tokens: 10,
                 output_tokens: 4,
                 cache_creation_input_tokens: 1,

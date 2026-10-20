@@ -2,9 +2,9 @@ Package: scode
 Version: @VERSION@
 Section: devel
 Priority: optional
-Architecture: amd64
+Architecture: @ARCH@
 Maintainer: sudocode
-Depends: bash, ca-certificates, curl
+Depends: bash, ca-certificates, curl@LIBC_DEPENDENCY@
 Description: Sudo Code command line coding agent
  scode is a terminal coding agent CLI. This package installs the scode
  binary and the scode-setup configuration command for Ubuntu/Debian systems.

@@ -3,18 +3,28 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: build-bundle.sh --version VERSION --binary PATH --output DIR
+Usage: build-bundle.sh --version VERSION --binary PATH --output DIR [--arch amd64|arm64]
 
-Build scode-linux-x64-bundle.tar.gz from an existing Linux x64 scode binary.
+Build a Linux bundle from an existing scode binary (default architecture: amd64).
 EOF
 }
 
 VERSION=""
 BINARY=""
 OUTPUT=""
+ARCH=amd64
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --arch)
+      [ $# -ge 2 ] || { usage >&2; exit 2; }
+      ARCH="$2"
+      shift 2
+      ;;
+    --arch=*)
+      ARCH="${1#--arch=}"
+      shift
+      ;;
     --version)
       [ $# -ge 2 ] || { usage >&2; exit 2; }
       VERSION="$2"
@@ -54,6 +64,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+case "$ARCH" in
+  amd64|x64|x86_64) BUNDLE_ARCH=x64 ;;
+  arm64|aarch64) BUNDLE_ARCH=arm64 ;;
+  *) printf 'unsupported architecture: %s\n' "$ARCH" >&2; exit 2 ;;
+esac
+
 [ -n "$VERSION" ] || { printf 'missing --version\n' >&2; exit 2; }
 [ -n "$BINARY" ] || { printf 'missing --binary\n' >&2; exit 2; }
 [ -n "$OUTPUT" ] || { printf 'missing --output\n' >&2; exit 2; }
@@ -71,7 +87,8 @@ TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM HUP
 
-bundle_dir="$TMP/scode-linux-x64-bundle"
+bundle_name="scode-linux-$BUNDLE_ARCH-bundle"
+bundle_dir="$TMP/$bundle_name"
 mkdir -p "$bundle_dir" "$OUTPUT"
 
 install -m 0755 "$BINARY" "$bundle_dir/scode"
@@ -107,5 +124,5 @@ EOF
   fi
 )
 
-tar -C "$TMP" -czf "$OUTPUT/scode-linux-x64-bundle.tar.gz" "scode-linux-x64-bundle"
-printf '%s\n' "$OUTPUT/scode-linux-x64-bundle.tar.gz"
+tar -C "$TMP" -czf "$OUTPUT/$bundle_name.tar.gz" "$bundle_name"
+printf '%s\n' "$OUTPUT/$bundle_name.tar.gz"

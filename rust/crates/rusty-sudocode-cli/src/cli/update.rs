@@ -1,21 +1,15 @@
-//! `scode update` — self-update from GitHub Releases, then restart.
+//! Release discovery, startup choices and CLI self-update.
 //!
-//! Mirrors the release layout that `install.sh` publishes and installs against,
-//! so a binary installed either way can update itself:
-//!   - latest tag  → `GET https://api.github.com/repos/<repo>/releases/latest`
-//!   - archive     → `…/releases/download/<tag>/scode-<target>.tar.gz`,
-//!     overridable with `SCODE_MIRROR` for faster CN downloads
-//!   - checksums   → `…/releases/download/<tag>/SHA256SUMS.txt` (always GitHub)
-//!
-//! Flow: resolve the target tag, download the archive + checksums, verify
-//! SHA-256, extract `scode-<target>/scode`, atomically swap it over the running
-//! executable (rename on the same filesystem — safe while the old image stays
-//! mapped), then re-exec the new binary so the caller lands on the new version.
+//! Startup and explicit updates share the platform archive, checksum and install
+//! path. Release sources and installation workflows are documented in usage.md.
 
 use sha2::{Digest, Sha256};
 use std::error::Error;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use runtime::{FsBackend, StdFsBackend};
 
 const REPO: &str = "sudoprivacy/sudocode";
 /// The version compiled into *this* binary (no leading `v`).
@@ -23,6 +17,121 @@ const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const BIN_NAME: &str = "scode";
 const CHECKSUM_FILE: &str = "SHA256SUMS.txt";
 const USER_AGENT: &str = concat!("scode-update/", env!("CARGO_PKG_VERSION"));
+const COS_LATEST: &str =
+    "https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest";
+const CHECK_INTERVAL_SECS: u64 = 20 * 60 * 60;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Release {
+    tag: String,
+    download_base: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReleaseCache {
+    checked_at: u64,
+    source: String,
+    release: Release,
+    #[serde(default)]
+    dismissed_version: Option<String>,
+}
+
+fn cache_path() -> PathBuf {
+    runtime::config::default_config_home()
+        .join("cache")
+        .join("release.json")
+}
+
+fn read_cache() -> Option<ReleaseCache> {
+    std::fs::read(cache_path())
+        .ok()
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+}
+
+fn write_cache(cache: &ReleaseCache) -> R<()> {
+    let path = cache_path();
+    std::fs::create_dir_all(path.parent().ok_or("missing cache directory")?)?;
+    StdFsBackend.write_atomic(&path.to_string_lossy(), &serde_json::to_vec(cache)?)?;
+    Ok(())
+}
+
+/// Refresh metadata in the background and offer the cached release before any
+/// engine or REPL takes ownership of the terminal.
+pub(crate) fn startup_prompt() -> R<()> {
+    let is_enabled = match std::env::var("SCODE_CHECK_UPDATES").as_deref() {
+        Ok("0" | "false" | "off") => false,
+        Ok("1" | "true" | "on") => true,
+        _ => !cfg!(debug_assertions),
+    };
+    if !is_enabled || !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Ok(());
+    }
+    let source = configured_mirror().unwrap_or_default();
+    let cached =
+        read_cache().filter(|cache| cache.source == source && is_stable_tag(&cache.release.tag));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |time| time.as_secs());
+    let is_fresh = cached.as_ref().is_some_and(|cache| {
+        cache.checked_at <= now && now - cache.checked_at < CHECK_INTERVAL_SECS
+    });
+    if !is_fresh {
+        let _ = std::thread::Builder::new()
+            .name("scode-release-check".into())
+            .spawn(move || {
+                let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                else {
+                    return;
+                };
+                let Ok(release) = runtime.block_on(resolve_release(None)) else {
+                    return;
+                };
+                let cache = ReleaseCache {
+                    checked_at: now,
+                    source,
+                    release,
+                    dismissed_version: read_cache().and_then(|cache| cache.dismissed_version),
+                };
+                let _ = write_cache(&cache);
+            });
+    }
+    let Some(mut cache) = cached.filter(|cache| {
+        is_newer(&cache.release.tag, &format!("v{CURRENT}"))
+            && cache.dismissed_version.as_deref() != Some(&cache.release.tag)
+    }) else {
+        return Ok(());
+    };
+    let selection = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        .with_prompt(format!(
+            "Update available: v{CURRENT} → {}",
+            cache.release.tag
+        ))
+        .items(&["Update now", "Skip", "Skip until next version"])
+        .default(0)
+        .interact_opt()
+        .unwrap_or_else(|error| {
+            eprintln!("Could not read update choice: {error}");
+            None
+        });
+    match selection {
+        Some(0) => {
+            let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+            if let Err(error) = install_release(&cache.release, &args) {
+                eprintln!("Update failed: {error}");
+            }
+        }
+        Some(2) => {
+            cache.dismissed_version = Some(cache.release.tag.clone());
+            if let Err(error) = write_cache(&cache) {
+                eprintln!("Could not save update preference: {error}");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
 type R<T> = Result<T, Box<dyn Error>>;
 
@@ -31,8 +140,7 @@ type R<T> = Result<T, Box<dyn Error>>;
 /// * `version` — pin a release tag (`v0.1.27` or `0.1.27`); `None` = latest.
 /// * `check`   — only report current vs. latest, download nothing.
 /// * `yes`     — skip the interactive confirmation.
-pub(crate) fn run(version: Option<String>, check: bool, yes: bool) -> R<()> {
-    let target = detect_target()?;
+pub(crate) fn run(version: Option<&str>, check: bool, yes: bool) -> R<()> {
     let current_tag = format!("v{CURRENT}");
 
     // Networked steps run on a short-lived runtime — `main` is synchronous and
@@ -40,14 +148,12 @@ pub(crate) fn run(version: Option<String>, check: bool, yes: bool) -> R<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     let pinned = version.is_some();
-    let latest = match version {
-        Some(v) => normalize_tag(&v),
-        None => rt.block_on(resolve_latest_tag())?,
-    };
+    let release = rt.block_on(resolve_release(version))?;
+    let latest = &release.tag;
 
-    println!("scode {current_tag} → {latest}  ({target})");
+    println!("scode {current_tag} → {latest}");
 
-    let up_to_date = !is_newer(&latest, &current_tag);
+    let up_to_date = !is_newer(latest, &current_tag);
     if check {
         println!(
             "{}",
@@ -70,13 +176,18 @@ pub(crate) fn run(version: Option<String>, check: bool, yes: bool) -> R<()> {
         return Ok(());
     }
 
-    let archive = format!("scode-{target}.tar.gz");
-    let archive_url = match std::env::var("SCODE_MIRROR") {
-        Ok(m) if !m.is_empty() => format!("{}/{archive}", m.trim_end_matches('/')),
-        _ => format!("https://github.com/{REPO}/releases/download/{latest}/{archive}"),
-    };
-    let checksum_url =
-        format!("https://github.com/{REPO}/releases/download/{latest}/{CHECKSUM_FILE}");
+    install_release(&release, &["--version".into()])
+}
+
+fn install_release(release: &Release, restart_args: &[std::ffi::OsString]) -> R<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let target = detect_target()?;
+    let extension = if cfg!(windows) { "zip" } else { "tar.gz" };
+    let archive = format!("scode-{target}.{extension}");
+    let archive_url = format!("{}/{archive}", release.download_base);
+    let checksum_url = format!("{}/{CHECKSUM_FILE}", release.download_base);
 
     println!("downloading {archive}");
     let (bytes, sums) = rt.block_on(async {
@@ -92,9 +203,9 @@ pub(crate) fn run(version: Option<String>, check: bool, yes: bool) -> R<()> {
 
     let exe = current_exe()?;
     install_over(&exe, &new_binary)?;
-    println!("installed {latest} → {}", exe.display());
+    println!("installed {} → {}", release.tag, exe.display());
 
-    restart(&exe)
+    restart(&exe, restart_args)
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +223,7 @@ fn detect_target() -> R<String> {
     let os = match std::env::consts::OS {
         "macos" => "macos",
         "linux" => "linux",
+        "windows" => "windows",
         other => return Err(format!("unsupported OS for self-update: {other}").into()),
     };
     Ok(format!("{os}-{arch}"))
@@ -137,9 +249,16 @@ fn is_newer(candidate: &str, current: &str) -> bool {
 }
 
 fn parse_semver(tag: &str) -> Option<(u64, u64, u64)> {
-    let t = tag.trim_start_matches('v');
-    let mut it = t.split('.').map(|p| p.parse::<u64>().ok());
-    Some((it.next()??, it.next()??, it.next()??))
+    let t = tag.strip_prefix('v').unwrap_or(tag);
+    let mut it = t.split('.').map(|part| {
+        if !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()) {
+            part.parse::<u64>().ok()
+        } else {
+            None
+        }
+    });
+    let version = (it.next()??, it.next()??, it.next()??);
+    it.next().is_none().then_some(version)
 }
 
 // ---------------------------------------------------------------------------
@@ -147,19 +266,86 @@ fn parse_semver(tag: &str) -> Option<(u64, u64, u64)> {
 // ---------------------------------------------------------------------------
 
 fn client() -> R<reqwest::Client> {
-    Ok(reqwest::Client::builder().user_agent(USER_AGENT).build()?)
+    Ok(reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(120))
+        .build()?)
+}
+
+fn configured_mirror() -> Option<String> {
+    std::env::var("SCODE_MIRROR")
+        .ok()
+        .map(|base| base.trim().trim_end_matches('/').to_string())
+        .filter(|base| !base.is_empty())
+}
+
+fn is_stable_tag(tag: &str) -> bool {
+    tag.starts_with('v') && parse_semver(tag).is_some()
+}
+
+/// Resolve one immutable release. Explicit mirrors keep all metadata and
+/// content requests on that source; the default falls back from GitHub to COS.
+async fn resolve_release(version: Option<&str>) -> R<Release> {
+    if let Some(base) = configured_mirror() {
+        return mirror_release(&base, version).await;
+    }
+    let tag = match version {
+        Some(version) => normalize_tag(version),
+        None => match resolve_latest_tag().await {
+            Ok(tag) if is_stable_tag(&tag) => tag,
+            _ => return mirror_release(COS_LATEST, None).await,
+        },
+    };
+    Ok(Release {
+        download_base: format!("https://github.com/{REPO}/releases/download/{tag}"),
+        tag,
+    })
+}
+
+async fn mirror_release(base: &str, version: Option<&str>) -> R<Release> {
+    let (tag, download_base) = if let Some(root) = base.strip_suffix("/latest") {
+        let tag = match version {
+            Some(version) => normalize_tag(version),
+            None => metadata_text(&format!("{base}/version.txt"))
+                .await?
+                .trim()
+                .to_string(),
+        };
+        let download_base = format!("{root}/{tag}");
+        (tag, download_base)
+    } else {
+        let tag = base.rsplit('/').next().unwrap_or_default().to_string();
+        if version.is_some_and(|version| normalize_tag(version) != tag) {
+            return Err("mirror directory differs from requested version".into());
+        }
+        (tag, base.to_string())
+    };
+    if !is_stable_tag(&tag) {
+        return Err("mirror must name a stable vX.Y.Z release".into());
+    }
+    Ok(Release { tag, download_base })
+}
+
+async fn metadata_text(url: &str) -> R<String> {
+    let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(8))
+        .build()?;
+    let mut response = client.get(url).send().await?.error_for_status()?;
+    let mut raw = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if raw.len() + chunk.len() > 64 * 1024 {
+            return Err("release metadata exceeds 64 KiB".into());
+        }
+        raw.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8(raw)?)
 }
 
 /// Resolve the latest release tag from the GitHub API.
 async fn resolve_latest_tag() -> R<String> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
-    let value: serde_json::Value = client()?
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let value: serde_json::Value = serde_json::from_str(&metadata_text(&url).await?)?;
     value
         .get("tag_name")
         .and_then(|t| t.as_str())
@@ -207,7 +393,8 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Pull the `scode` binary out of the `.tar.gz` (entry `scode-<target>/scode`).
+/// Read only the documented executable entry from the platform archive.
+#[cfg(not(windows))]
 fn extract_binary(archive: &[u8], target: &str) -> R<Vec<u8>> {
     let want = format!("scode-{target}/{BIN_NAME}");
     let gz = flate2::read::GzDecoder::new(archive);
@@ -215,9 +402,7 @@ fn extract_binary(archive: &[u8], target: &str) -> R<Vec<u8>> {
     for entry in tar.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
-        // Match the documented path, but also accept a bare `scode` file name
-        // in case the archive layout is flattened.
-        let is_match = path == Path::new(&want) || path.file_name().is_some_and(|n| n == BIN_NAME);
+        let is_match = path == Path::new(&want) || path == Path::new(BIN_NAME);
         if is_match {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
@@ -227,6 +412,19 @@ fn extract_binary(archive: &[u8], target: &str) -> R<Vec<u8>> {
         }
     }
     Err(format!("`{BIN_NAME}` not found inside the release archive").into())
+}
+
+#[cfg(windows)]
+fn extract_binary(archive: &[u8], target: &str) -> R<Vec<u8>> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(archive))?;
+    let want = format!("scode-{target}/{BIN_NAME}.exe");
+    let mut entry = archive.by_name(&want)?;
+    if entry.size() == 0 || entry.size() > 256 * 1024 * 1024 {
+        return Err("release executable has invalid size".into());
+    }
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Resolve the real path of the running executable (following symlinks so we
@@ -239,6 +437,7 @@ fn current_exe() -> R<PathBuf> {
 /// Atomically replace `exe` with `new_binary`: write to a sibling temp file on
 /// the same filesystem, mark it executable, then `rename` over the target. The
 /// running process keeps its already-mapped image, so this is safe live.
+#[cfg(not(windows))]
 fn install_over(exe: &Path, new_binary: &[u8]) -> R<()> {
     let dir = exe
         .parent()
@@ -269,25 +468,36 @@ fn install_over(exe: &Path, new_binary: &[u8]) -> R<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn install_over(exe: &Path, new_binary: &[u8]) -> R<()> {
+    let dir = exe
+        .parent()
+        .ok_or("cannot determine the install directory")?;
+    let mut candidate = tempfile::NamedTempFile::new_in(dir)?;
+    candidate.write_all(new_binary)?;
+    candidate.as_file().sync_all()?;
+    self_replace::self_replace(candidate.path())?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // restart / prompt
 // ---------------------------------------------------------------------------
 
-/// Restart into the freshly installed binary. On Unix this `exec`s in place
-/// (the process image becomes the new `scode`), so it never returns on success;
-/// we run `--version` so the caller sees the new version and a clean exit.
-fn restart(exe: &Path) -> R<()> {
+/// Start the installed binary with the caller's selected arguments. Unix replaces
+/// this process; Windows waits for the new process and propagates its exit code.
+fn restart(exe: &Path, args: &[std::ffi::OsString]) -> R<()> {
     println!("restarting…");
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let err = std::process::Command::new(exe).arg("--version").exec();
+        let err = std::process::Command::new(exe).args(args).exec();
         // `exec` only returns on failure.
         Err(format!("failed to restart {}: {err}", exe.display()).into())
     }
     #[cfg(not(unix))]
     {
-        let status = std::process::Command::new(exe).arg("--version").status()?;
+        let status = std::process::Command::new(exe).args(args).status()?;
         std::process::exit(status.code().unwrap_or(0));
     }
 }
@@ -295,12 +505,18 @@ fn restart(exe: &Path) -> R<()> {
 /// Ask the user to confirm on the terminal. A non-interactive/closed stdin is
 /// treated as "no" — use `--yes` to update unattended.
 fn confirm(prompt: &str) -> R<bool> {
-    print!("{prompt} [y/N] ");
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line)? == 0 {
-        return Ok(false);
-    }
+    let line = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        crate::prompt_choice_via_shared_editor(&format!("{prompt} [y/N] "))
+            .map_err(std::io::Error::other)?
+    } else {
+        print!("{prompt} [y/N] ");
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            return Ok(false);
+        }
+        line
+    };
     let a = line.trim().to_ascii_lowercase();
     Ok(a == "y" || a == "yes")
 }
@@ -342,14 +558,15 @@ mod tests {
 
     #[test]
     fn extracts_scode_from_archive() {
-        let target = "macos-arm64";
+        let target = detect_target().unwrap();
         let payload = b"#!/fake/scode binary payload";
-        let archive = make_archive(&format!("scode-{target}/scode"), payload);
-        let got = extract_binary(&archive, target).unwrap();
+        let binary = if cfg!(windows) { "scode.exe" } else { "scode" };
+        let archive = make_archive(&format!("scode-{target}/{binary}"), payload);
+        let got = extract_binary(&archive, &target).unwrap();
         assert_eq!(got, payload);
     }
 
-    /// Build a `.tar.gz` holding one file at `inner_path`.
+    #[cfg(not(windows))]
     fn make_archive(inner_path: &str, content: &[u8]) -> Vec<u8> {
         let mut tar_bytes = Vec::new();
         {
@@ -366,5 +583,15 @@ mod tests {
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         gz.write_all(&tar_bytes).unwrap();
         gz.finish().unwrap()
+    }
+
+    #[cfg(windows)]
+    fn make_archive(inner_path: &str, content: &[u8]) -> Vec<u8> {
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        archive
+            .start_file(inner_path, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(content).unwrap();
+        archive.finish().unwrap().into_inner()
     }
 }

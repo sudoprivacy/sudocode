@@ -47,6 +47,8 @@ pub struct ContextUsage {
     /// turn has completed — the same figure the status line's `ctx` segment
     /// and the auto-compaction trigger use.
     pub provider_context_tokens: Option<u32>,
+    /// Full next-request estimate, including the actual system/tool overhead.
+    pub estimated_request_tokens: usize,
     /// Built-in prompt blocks plus every dynamic section not attributed to a
     /// category below.
     pub system_prompt_tokens: usize,
@@ -77,10 +79,12 @@ impl ContextUsage {
         self.mcp_tools.iter().map(|t| t.tokens).sum()
     }
 
-    /// Sum of every category estimate — the fallback headline before the
-    /// first response reports real occupancy.
+    /// Full request estimate — the fallback when no valid provider anchor exists.
     #[must_use]
     pub fn estimated_total_tokens(&self) -> usize {
+        if self.estimated_request_tokens > 0 {
+            return self.estimated_request_tokens;
+        }
         self.system_prompt_tokens
             + self.system_tools_tokens()
             + self.mcp_tools_tokens()
@@ -104,6 +108,39 @@ impl ContextUsage {
     pub fn reserved_tokens(&self) -> u32 {
         self.context_window
             .saturating_sub(self.auto_compact_threshold)
+    }
+}
+
+/// Lightweight context meter for the status line; no file-derived prompt refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextOccupancy {
+    pub tokens: u32,
+    pub window: u32,
+    pub estimated: bool,
+}
+
+#[must_use]
+pub fn collect_context_occupancy(built: &BuiltRuntime) -> ContextOccupancy {
+    let Some(runtime) = built.runtime_ref() else {
+        return ContextOccupancy::default();
+    };
+    let catalog = runtime.api_client().model_catalog();
+    let _scope = catalog
+        .as_ref()
+        .map(runtime::model_discovery::ModelCatalog::enter);
+    let budget = runtime.context_budget_for_next_request();
+    let provider = runtime
+        .usage()
+        .current_context_usage()
+        .filter(|tokens| *tokens > 0);
+    let tokens = provider.map_or_else(
+        || estimate_session_tokens(runtime.session()).saturating_add(budget.overhead_tokens),
+        |tokens| tokens as usize,
+    );
+    ContextOccupancy {
+        tokens: u32::try_from(tokens).unwrap_or(u32::MAX),
+        window: u32::try_from(budget.context_limit).unwrap_or(u32::MAX),
+        estimated: provider.is_none(),
     }
 }
 
@@ -262,12 +299,16 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
         })
         .collect();
 
-    let provider_context_tokens = Some(runtime.usage().current_context_tokens()).filter(|t| *t > 0);
+    let provider_context_tokens = runtime.usage().current_context_usage().filter(|t| *t > 0);
+    let request_budget = runtime.context_budget_for_next_request();
 
     ContextUsage {
-        context_window: runtime::model_capabilities::context_window_or_default(&model),
-        auto_compact_threshold: runtime::auto_compact_threshold_for_model(&model),
+        context_window: u32::try_from(request_budget.context_limit).unwrap_or(u32::MAX),
+        auto_compact_threshold: u32::try_from(request_budget.reported_context_budget())
+            .unwrap_or(u32::MAX),
         provider_context_tokens,
+        estimated_request_tokens: estimate_session_tokens(session)
+            .saturating_add(request_budget.overhead_tokens),
         model,
         system_prompt_tokens,
         system_tools,

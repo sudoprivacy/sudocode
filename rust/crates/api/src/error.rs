@@ -3,6 +3,37 @@ use std::fmt::{Display, Formatter};
 use std::num::NonZeroU32;
 use std::time::Duration;
 
+/// Shared wire error for Anthropic and OpenAI-compatible responses.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ProviderErrorEnvelope {
+    pub error: ProviderErrorBody,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ProviderErrorBody {
+    #[serde(rename = "type")]
+    error_type: Option<String>,
+    #[serde(default)]
+    code: serde_json::Value,
+    pub message: Option<String>,
+}
+
+impl ProviderErrorBody {
+    /// A specific string code takes precedence over a broad error category.
+    /// Numeric codes remain HTTP wrapper statuses, not semantic error kinds.
+    pub fn kind(&self) -> Option<String> {
+        self.code
+            .as_str()
+            .filter(|code| !code.is_empty())
+            .or(self.error_type.as_deref())
+            .map(str::to_owned)
+    }
+
+    pub fn kind_from_json(error: &serde_json::Value) -> Option<String> {
+        serde_json::from_value::<Self>(error.clone()).ok()?.kind()
+    }
+}
+
 const GENERIC_FATAL_WRAPPER_MARKERS: &[&str] = &[
     "something went wrong while processing your request",
     "please try again, or use /new to start a fresh session",
@@ -88,6 +119,22 @@ pub enum ApiError {
     RetriesExhausted {
         attempts: u32,
         last_error: Box<ApiError>,
+    },
+    /// Idle waiting for provider events; heartbeat bytes are not progress.
+    StreamStalled {
+        provider: String,
+        model: String,
+        idle_timeout: Duration,
+        request_id: Option<String>,
+    },
+    /// Once events have escaped, automatic replay could repeat user-visible
+    /// output, usage or tool execution. Preserve the underlying failure.
+    PartialStream {
+        source: Box<ApiError>,
+        request_id: Option<String>,
+    },
+    RequestAttemptsExhausted {
+        attempts: u32,
     },
     InvalidSseFrame(&'static str),
     /// The response stream ended in the middle of an SSE frame — the trailing
@@ -179,11 +226,18 @@ impl ApiError {
     #[must_use]
     pub fn action(&self) -> ErrorAction {
         match self {
+            // A structured missing-model response requires a route/config fix,
+            // even when the gateway wraps it in a transient HTTP status.
+            Self::Api { error_type, .. } if error_type.as_deref() == Some("model_not_found") => {
+                ErrorAction::Human
+            }
             // Transport: the shared retry loop can recover these.
             Self::Http(error) if error.is_connect() || error.is_timeout() || error.is_request() => {
                 ErrorAction::Transport
             }
-            Self::IncompleteStream { .. } => ErrorAction::Transport,
+            Self::IncompleteStream { .. }
+            | Self::StreamStalled { .. }
+            | Self::RequestAttemptsExhausted { .. } => ErrorAction::Transport,
             Self::Api { retryable, .. } if *retryable => ErrorAction::Transport,
             Self::RetriesExhausted { last_error, .. } => last_error.action(),
 
@@ -198,7 +252,8 @@ impl ApiError {
 
             // Human: only a person can supply credentials / fix config / shrink
             // a request that is too large to ever fit.
-            Self::MissingCredentials { .. }
+            Self::PartialStream { .. }
+            | Self::MissingCredentials { .. }
             | Self::ExpiredOAuthToken
             | Self::Auth(_)
             | Self::InvalidApiKeyEnv(_)
@@ -302,6 +357,9 @@ impl ApiError {
             | Self::ProviderRefusal { .. } => ErrorCategory::Structured,
             // Transport failures: retryable, safe_failure_class = "provider_transport".
             Self::IncompleteStream { .. }
+            | Self::StreamStalled { .. }
+            | Self::PartialStream { .. }
+            | Self::RequestAttemptsExhausted { .. }
             | Self::InvalidSseFrame(_)
             | Self::BackoffOverflow { .. } => ErrorCategory::Transport,
             // Credential / auth errors: safe_failure_class = "provider_auth".
@@ -331,7 +389,9 @@ impl ApiError {
     #[must_use]
     pub fn request_id(&self) -> Option<&str> {
         match self {
-            Self::Api { request_id, .. } => request_id.as_deref(),
+            Self::Api { request_id, .. }
+            | Self::StreamStalled { request_id, .. }
+            | Self::PartialStream { request_id, .. } => request_id.as_deref(),
             Self::RetriesExhausted { last_error, .. } => last_error.request_id(),
             _ => None,
         }
@@ -420,6 +480,27 @@ impl ApiError {
             _ => false,
         }
     }
+
+    /// Only explicit pre-stream signature failures permit discarding thinking.
+    /// `PartialStream` deliberately does not recurse: replay could repeat effects.
+    #[must_use]
+    pub fn is_thinking_replay_rejected(&self) -> bool {
+        match self {
+            Self::Api {
+                status, message, ..
+            } if status.as_u16() == 400 => {
+                let text = message.as_deref().unwrap_or_default().to_ascii_lowercase();
+                let normalized = text.replace(['`', '\'', '"'], "");
+                (normalized.contains("invalid signature") && normalized.contains("thinking"))
+                    || (normalized.contains("invalid data")
+                        && normalized.contains("redacted_thinking"))
+                    || (normalized.contains("thinking.signature")
+                        && normalized.contains("field required"))
+            }
+            Self::RetriesExhausted { last_error, .. } => last_error.is_thinking_replay_rejected(),
+            _ => false,
+        }
+    }
 }
 
 impl Display for ApiError {
@@ -502,6 +583,12 @@ impl Display for ApiError {
                 f,
                 "failed to parse {provider} response for model {model}: {source}; first 200 chars of body: {body_snippet}"
             ),
+            Self::StreamStalled { provider, model, idle_timeout, .. } => write!(f,
+                "{provider} stream for {model} produced no provider events for {} seconds", idle_timeout.as_secs()),
+            Self::PartialStream { source, .. } => write!(f,
+                "stream failed after provider events; automatic replay disabled: {source}"),
+            Self::RequestAttemptsExhausted { attempts } => write!(f,
+                "request attempt budget exhausted after {attempts} HTTP attempts"),
             Self::IncompleteStream {
                 provider,
                 model,

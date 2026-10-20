@@ -2,6 +2,7 @@
 //! prompt. Both REPLs use the same engine transition and presentation rules.
 mod common;
 
+use std::cell::RefCell;
 use std::time::Duration;
 
 use common::{TestEnv, LIVE_TURN_BUDGET};
@@ -19,7 +20,7 @@ fn start(env: &TestEnv, queue: bool, no_color: bool) -> PtySession {
             "--permission-mode",
             "workspace-write",
             "--allowedTools",
-            "write_plan,write_file,AskUserQuestion",
+            "write_plan,write_file,read_file,AskUserQuestion",
         ],
         &[
             (
@@ -34,20 +35,61 @@ fn start(env: &TestEnv, queue: bool, no_color: bool) -> PtySession {
             ("COLORFGBG", "15;0"),
         ],
     );
+    // Set the document viewport before waiting for the editor. Resizing a
+    // ready Windows console and immediately pasting races its prompt repaint.
+    sess.resize(100, 100).unwrap();
     common::expect_input_line_cleared(
         &sess,
         env.timeout().max(Duration::from_secs(30)),
         "ready to review a plan",
     );
-    sess.resize(100, 100).unwrap();
     sess
 }
 
-fn submit_plan(env: &TestEnv, sess: &mut PtySession) {
-    let prompt = env.prompt(&format!(
-        "Earlier I considered editing the sample application. I have instead chosen the plan below. Call write_plan now with exactly this Markdown content:\n{PLAN_REVIEW_MARKDOWN}\nSet context to 'Review context marker', constraints to 'Only write the approved artifact.', and acceptance to 'The artifact contains the approved text.'. Wait for the tool's approval decision before using write_file to execute the plan."
-    ), "plan_execution_roundtrip");
-    sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+fn submit_plan(env: &TestEnv, sess: &mut PtySession, queue: bool) {
+    let prompt = if env.is_live() {
+        env.prompt(&format!(
+            "Earlier I considered editing the sample application. I have instead chosen the plan below. Call write_plan now. Set content to exactly the Markdown between BEGIN_PLAN_MARKDOWN and END_PLAN_MARKDOWN, excluding the delimiter lines. Only that Markdown belongs in content; do not include the instructions or the separate fields below.\nBEGIN_PLAN_MARKDOWN\n{PLAN_REVIEW_MARKDOWN}\nEND_PLAN_MARKDOWN\nSet the independent context field to 'Review context marker', constraints field to 'Only write the approved artifact.', and acceptance field to 'The artifact contains the approved text.'. Wait for the tool's approval decision before using write_file to execute the plan."
+        ), "plan_execution_roundtrip")
+    } else {
+        env.prompt(
+            "Earlier I considered editing the sample application.",
+            "plan_execution_roundtrip",
+        )
+    };
+    let input = if !queue && env.is_live() {
+        // Rustyline on Windows reads native console events. ANSI bracketed
+        // paste does not preserve its multiline payload there. As in the
+        // transcript-spacing live test, read the original instructions from
+        // the fixture instead of changing the shared OS clipboard.
+        std::fs::write(env.workspace_root().join("plan-input.md"), &prompt).unwrap();
+        "Earlier I considered editing the sample application. Read plan-input.md and follow it."
+            .to_string()
+    } else {
+        prompt.clone()
+    };
+    if queue {
+        sess.send(&format!("\x1b[200~{input}\x1b[201~")).unwrap();
+    } else {
+        sess.send(&input).unwrap();
+    }
+    let expected_input = if env.is_live() && queue {
+        format!("[Pasted text #1 +{} lines]", prompt.matches('\n').count())
+    } else {
+        input.clone()
+    };
+    common::expect_screen(
+        sess,
+        |screen| {
+            if env.is_live() && !queue {
+                common::input_line_of(screen) == expected_input
+            } else {
+                common::input_line_of(screen) == expected_input
+            }
+        },
+        env.timeout(),
+        "complete plan prompt pasted into current input",
+    );
     sess.send("\r").unwrap();
     common::expect_screen(
         sess,
@@ -62,51 +104,103 @@ fn submit_plan(env: &TestEnv, sess: &mut PtySession) {
     );
 }
 
-fn assert_style(sess: &PtySession, needle: &str, bold: bool, colored: bool) {
-    sess.render(|screen| {
-        let raw = screen.raw();
-        let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
-        let row = rows
-            .iter()
-            .rposition(|row| row.contains(needle))
-            .unwrap_or_else(|| panic!("missing {needle:?}: {}", raw.contents()));
-        let byte = rows[row].find(needle).unwrap();
-        let col = rows[row][..byte].width();
-        let cell = raw
-            .cell(u16::try_from(row).unwrap(), u16::try_from(col).unwrap())
-            .unwrap();
-        assert_eq!(cell.bold(), bold, "{needle}: {}", raw.contents());
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GlyphStyle {
+    row: u16,
+    col: u16,
+    bold: bool,
+    foreground: String,
+}
+
+struct StyledSnapshot {
+    contents: String,
+    samples: Vec<Option<GlyphStyle>>,
+}
+
+fn assert_styles(sess: &PtySession, expected: &[(&str, bool, bool)]) -> String {
+    let previous = RefCell::new(None);
+    let captured = RefCell::new(None);
+    // ConPTY can deliver a repaint in several chunks. Observe all sampled
+    // glyphs in one frame, with stable positions and styles. The spinner may
+    // keep animating outside this document, so the whole screen need not stop.
+    common::expect_screen(
+        sess,
+        |text| {
+            let snapshot = sess.render(|screen| {
+                let raw = screen.raw();
+                let rows: Vec<_> = raw.rows(0, raw.size().1).collect();
+                let samples = expected
+                    .iter()
+                    .map(|(needle, _, _)| {
+                        let row = rows.iter().rposition(|row| row.contains(needle))?;
+                        let byte = rows[row].find(needle)?;
+                        let col = rows[row][..byte].width();
+                        let row = row.try_into().ok()?;
+                        let col = col.try_into().ok()?;
+                        let cell = raw.cell(row, col)?;
+                        Some(GlyphStyle {
+                            row,
+                            col,
+                            bold: cell.bold(),
+                            foreground: format!("{:?}", cell.fgcolor()),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                StyledSnapshot {
+                    contents: raw.contents(),
+                    samples,
+                }
+            });
+            let is_complete =
+                snapshot.contents == text && snapshot.samples.iter().all(Option::is_some);
+            let are_styles_stable = previous.borrow().as_ref() == Some(&snapshot.samples);
+            previous.replace(Some(snapshot.samples.clone()));
+            captured.replace(Some(snapshot));
+            is_complete && are_styles_stable
+        },
+        common::DEFAULT_TIMEOUT,
+        "complete and settled plan text and styles",
+    );
+    let snapshot = captured.into_inner().unwrap();
+    // Assert after releasing the PTY reader's mutex. An assertion failure
+    // must not poison that mutex and obscure the original diagnostic.
+    for ((needle, bold, colored), sample) in expected.iter().zip(&snapshot.samples) {
+        let actual = sample.as_ref().unwrap();
+        assert_eq!(actual.bold, *bold, "{needle}: {}", snapshot.contents);
         assert_eq!(
-            format!("{:?}", cell.fgcolor()) != "Default",
-            colored,
+            actual.foreground != "Default",
+            *colored,
             "{needle}: {}",
-            raw.contents()
+            snapshot.contents
         );
-    });
+    }
+    snapshot.contents
 }
 
 fn assert_document(sess: &PtySession, no_color: bool) {
-    assert_style(sess, "Review plan", !no_color, false);
-    assert_style(sess, "Verify bold", !no_color, false);
-    assert_style(sess, "src/main.rs", false, !no_color);
-    assert_style(sess, "Context", !no_color, false);
-    sess.render(|screen| {
-        let text = screen.raw().contents();
-        let start = text
-            .rfind("[Choose an action]")
-            .or_else(|| text.rfind("Choose an action\n"));
-        if let Some(start) = start {
-            let document = &text[start..];
-            assert!(
-                !document.contains("**Verify bold**"),
-                "emphasis must be rendered: {document}"
-            );
-            assert!(
-                !document.contains("```rust"),
-                "fences must be rendered: {document}"
-            );
-        }
-    });
+    let text = assert_styles(
+        sess,
+        &[
+            ("Review plan", !no_color, false),
+            ("Verify bold", !no_color, false),
+            ("src/main.rs", false, !no_color),
+            ("Context", !no_color, false),
+        ],
+    );
+    let start = text
+        .rfind("[Choose an action]")
+        .or_else(|| text.rfind("Choose an action\n"));
+    if let Some(start) = start {
+        let document = &text[start..];
+        assert!(
+            !document.contains("**Verify bold**"),
+            "emphasis must be rendered: {document}"
+        );
+        assert!(
+            !document.contains("```rust"),
+            "fences must be rendered: {document}"
+        );
+    }
 }
 
 fn choose(sess: &mut PtySession, queue: bool, choice: &str) {
@@ -237,7 +331,7 @@ fn assert_requests(env: &TestEnv, plan: &str, clear: bool) {
 fn approve(queue: bool, clear: bool, no_color: bool) {
     let env = TestEnv::new("plan-markdown");
     let mut sess = start(&env, queue, no_color);
-    submit_plan(&env, &mut sess);
+    submit_plan(&env, &mut sess, queue);
     let saved = std::fs::read_to_string(env.workspace_root().join("reviewed-plan.md"))
         .expect("the complete source must already be persisted while approval is pending");
     for section in ["## Context", "## Constraints", "## Acceptance Criteria"] {
@@ -349,7 +443,7 @@ fn no_color_keeps_markdown_structure_and_keep_context_executes() {
 fn rejection_keeps_the_saved_draft_without_executing() {
     let env = TestEnv::new("plan-reject");
     let mut sess = start(&env, true, false);
-    submit_plan(&env, &mut sess);
+    submit_plan(&env, &mut sess, true);
     let marker = common::turn_status_marker(&sess);
     choose(&mut sess, true, "4");
     common::expect_turn_complete_after(&sess, &marker, LIVE_TURN_BUDGET, "rejection completes");
@@ -362,7 +456,7 @@ fn rejection_keeps_the_saved_draft_without_executing() {
 fn a_changed_file_cannot_execute_under_a_stale_approval() {
     let env = TestEnv::new("plan-stale");
     let mut sess = start(&env, true, false);
-    submit_plan(&env, &mut sess);
+    submit_plan(&env, &mut sess, true);
     std::fs::write(
         env.workspace_root().join("reviewed-plan.md"),
         "# Replacement draft\n",
@@ -388,8 +482,10 @@ fn fuzzy_questions_share_markdown_and_remain_responsive() {
         LIVE_TURN_BUDGET,
         "Markdown fuzzy question",
     );
-    assert_style(&sess, "Verify bold", true, false);
-    assert_style(&sess, "src/main.rs", false, true);
+    assert_styles(
+        &sess,
+        &[("Verify bold", true, false), ("src/main.rs", false, true)],
+    );
     sess.send("Option 12").unwrap();
     common::expect_screen(
         &sess,
@@ -407,7 +503,7 @@ fn fuzzy_questions_share_markdown_and_remain_responsive() {
 fn cancelling_review_does_not_schedule_execution_on_the_next_turn() {
     let env = TestEnv::new("plan-cancel");
     let mut sess = start(&env, true, false);
-    submit_plan(&env, &mut sess);
+    submit_plan(&env, &mut sess, true);
     sess.send("\x1b").unwrap();
     common::expect_input_line_cleared(&sess, LIVE_TURN_BUDGET, "cancelled review returns input");
     assert!(!env.workspace_root().join("plan-executed.txt").exists());

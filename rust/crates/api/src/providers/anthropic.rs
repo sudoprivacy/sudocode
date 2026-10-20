@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, SessionTracer};
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ProviderErrorEnvelope};
 use crate::http_transport::{
     gateway_trace_from_headers, parse_retry_after, request_id_from_headers, HttpTransport,
     RetryPolicy,
@@ -22,9 +22,13 @@ use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use super::registry::{self, model_token_limit};
 use super::{anthropic_missing_credentials, Provider, ProviderFuture};
 use crate::sse::SseParser;
+use crate::stream_diagnostics::StreamProgress;
 use crate::types::{
     MessageDeltaEvent, MessageRequest, MessageResponse, MessageStopEvent, StreamEvent, Usage,
 };
+
+mod cache_diagnostics;
+use cache_diagnostics::CacheDiagnostics;
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const OAUTH_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -146,6 +150,7 @@ pub struct AnthropicClient {
     request_profile: AnthropicRequestProfile,
     prompt_cache: Option<PromptCache>,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
+    cache_diagnostics: CacheDiagnostics,
     /// When true, prepend `OAUTH_SYSTEM_PREFIX` as the first system content
     /// block. Required for OAuth subscription tokens where the server gates
     /// access by checking the first system block for an exact match.
@@ -186,6 +191,7 @@ impl AnthropicClient {
             request_profile: AnthropicRequestProfile::default(),
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
+            cache_diagnostics: CacheDiagnostics::default(),
             oauth_system_prefix: false,
             // A bare API key is metered per token: a 1h write bills 2x base
             // against 1.25x for 5m, so the longer hold has to be asked for.
@@ -246,6 +252,7 @@ impl AnthropicClient {
             request_profile: AnthropicRequestProfile::default(),
             prompt_cache: None,
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
+            cache_diagnostics: CacheDiagnostics::default(),
             oauth_system_prefix: is_subscription,
             cache_ttl_1h: is_subscription,
             count_tokens_unsupported: Arc::new(AtomicBool::new(false)),
@@ -302,6 +309,11 @@ impl AnthropicClient {
     }
 
     #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         // OAuth subscription tokens must always use the direct Anthropic API.
         if !self.oauth_system_prefix {
@@ -345,12 +357,17 @@ impl AnthropicClient {
 
     #[must_use]
     pub fn with_extra_body_param(mut self, key: impl Into<String>, value: Value) -> Self {
+        let key = key.into();
+        if key == "thinking" && value.get("block_binding").is_some() {
+            self.request_profile = self.request_profile.with_beta(THINKING_BINDING_BETA);
+        }
         self.request_profile = self.request_profile.with_extra_body(key, value);
         self
     }
 
     #[must_use]
     pub fn with_prompt_cache(mut self, prompt_cache: PromptCache) -> Self {
+        self.cache_diagnostics = CacheDiagnostics::for_session(prompt_cache.paths().session_dir);
         self.prompt_cache = Some(prompt_cache);
         self
     }
@@ -428,19 +445,35 @@ impl AnthropicClient {
         let gateway_request_id =
             gateway_trace_from_headers(result.response.headers()).or(result.client_request_id);
         let body = result.response.text().await.map_err(ApiError::from)?;
-        let mut response = serde_json::from_str::<MessageResponse>(&body).map_err(|error| {
+        let raw = serde_json::from_str::<Value>(&body).map_err(|error| {
             ApiError::json_deserialize("Anthropic", &request.model, &body, error)
         })?;
+        let refusal = crate::sse::refusal_from_response(&raw, "Anthropic", &request.model);
+        let metadata = (cache_diagnostics_enabled()
+            || self
+                .request_profile
+                .betas
+                .iter()
+                .any(|beta| beta == THINKING_BINDING_BETA))
+        .then(|| crate::sse::MessageMetadata::from_message(&raw));
+        let mut response = serde_json::from_value::<MessageResponse>(raw).map_err(|error| {
+            ApiError::json_deserialize("Anthropic", &request.model, &body, error)
+        })?;
+        if let Some(metadata) = metadata {
+            record_thinking_transformations(
+                &metadata,
+                self.session_tracer(),
+                Some(&result.request_id),
+            );
+            if cache_diagnostics_enabled() {
+                self.cache_diagnostics.observe(metadata);
+            }
+        }
         if response.request_id.is_none() {
             response.request_id = request_id;
         }
         response.gateway_request_id = gateway_request_id;
 
-        let refusal = crate::sse::refusal_from_response(
-            &serde_json::from_str::<Value>(&body).map_err(ApiError::from)?,
-            "Anthropic",
-            &request.model,
-        );
         if let Some(prompt_cache) = &self.prompt_cache {
             // Refused responses still incur usage, but cannot enter the completion cache.
             let record = if refusal.is_some() {
@@ -469,12 +502,12 @@ impl AnthropicClient {
                 .with_property("total_tokens", Value::from(response.total_tokens()))
                 .with_property(
                     "estimated_cost_usd",
-                    Value::String(format_usd(
-                        response
-                            .usage
-                            .estimated_cost_usd(&response.model)
-                            .total_cost_usd(),
-                    )),
+                    response
+                        .usage
+                        .estimated_cost_usd(&response.model)
+                        .map_or(Value::Null, |cost| {
+                            Value::String(format_usd(cost.total_cost_usd()))
+                        }),
                 ),
         );
         refusal.map_or(Ok(response), Err)
@@ -485,17 +518,32 @@ impl AnthropicClient {
         request: &MessageRequest,
         trace_id: Option<&str>,
     ) -> Result<MessageStream, ApiError> {
-        self.preflight_message_request(request).await?;
+        crate::request_scope::RequestScope::preflight(self.preflight_message_request(request))
+            .await?;
         let result = self
             .send_request(&request.clone().with_streaming(), trace_id)
             .await?;
+        let progress = StreamProgress::new(
+            self.session_tracer().cloned(),
+            Some(result.request_id.clone()),
+            request.model.clone(),
+        );
         Ok(MessageStream {
             request_id: request_id_from_headers(result.response.headers()),
             gateway_request_id: gateway_trace_from_headers(result.response.headers())
                 .or(result.client_request_id),
             client_request_id: Some(result.request_id),
             response: result.response,
-            parser: SseParser::new().with_context("Anthropic", request.model.clone()),
+            parser: SseParser::new()
+                .with_context("Anthropic", request.model.clone())
+                .with_message_metadata(
+                    cache_diagnostics_enabled()
+                        || self
+                            .request_profile
+                            .betas
+                            .iter()
+                            .any(|beta| beta == THINKING_BINDING_BETA),
+                ),
             pending: VecDeque::new(),
             done: false,
             logically_complete: false,
@@ -507,8 +555,8 @@ impl AnthropicClient {
             usage_recorded: false,
             last_prompt_cache_record: Arc::clone(&self.last_prompt_cache_record),
             session_tracer: self.session_tracer().cloned(),
-            cache_diagnosis_buf: String::new(),
-            cache_diagnosis_done: false,
+            cache_diagnostics: cache_diagnostics_enabled().then(|| self.cache_diagnostics.clone()),
+            progress,
         })
     }
 
@@ -568,7 +616,7 @@ impl AnthropicClient {
         self.prepend_oauth_system_prefix(&mut body);
         let diagnose_cache = cache_diagnostics_enabled();
         if diagnose_cache {
-            apply_cache_diagnostics(&mut body);
+            self.cache_diagnostics.apply_request(&mut body);
         }
         dump_request_body("messages", &body);
 
@@ -1042,7 +1090,7 @@ pub struct MessageStream {
     gateway_request_id: Option<String>,
     /// Client-generated request ID for tracking.
     client_request_id: Option<String>,
-    response: reqwest::Response,
+    response: crate::RecordedResponse,
     parser: SseParser,
     pending: VecDeque<StreamEvent>,
     done: bool,
@@ -1064,10 +1112,8 @@ pub struct MessageStream {
     usage_recorded: bool,
     last_prompt_cache_record: Arc<Mutex<Option<PromptCacheRecord>>>,
     session_tracer: Option<SessionTracer>,
-    /// Partial SSE text held while looking for the `message_start` frame.
-    cache_diagnosis_buf: String,
-    /// Set once that frame has been read (or given up on).
-    cache_diagnosis_done: bool,
+    cache_diagnostics: Option<CacheDiagnostics>,
+    progress: StreamProgress,
 }
 
 impl MessageStream {
@@ -1090,7 +1136,9 @@ impl MessageStream {
                 // ignore the parse error rather than turning a completed
                 // message into a spurious IncompleteStream. Only surface the
                 // error when the stream stopped WITHOUT a logical end.
-                let remaining = match self.parser.finish() {
+                let parsed = self.parser.finish();
+                self.observe_message_metadata();
+                let remaining = match parsed {
                     Ok(remaining) => remaining,
                     Err(error @ ApiError::ProviderRefusal { .. }) => {
                         return Err(self.record_refusal(error))
@@ -1098,6 +1146,9 @@ impl MessageStream {
                     Err(_) if self.logically_complete => Vec::new(),
                     Err(error) => return Err(error),
                 };
+                for event in &remaining {
+                    crate::client::record_compaction_stream_event(event)?;
+                }
                 self.pending.extend(remaining);
                 if let Some(event) = self.pending.pop_front() {
                     // Observe it like any other event: a frame recovered here
@@ -1127,11 +1178,16 @@ impl MessageStream {
             };
             match chunk {
                 Ok(Some(chunk)) => {
-                    self.scan_chunk_for_cache_diagnosis(&chunk);
-                    let events = self
-                        .parser
-                        .push(&chunk)
-                        .map_err(|error| self.record_refusal(error))?;
+                    self.progress.observe_chunk(chunk.len());
+                    let parsed = self.parser.push(&chunk);
+                    self.observe_message_metadata();
+                    let events = parsed.map_err(|error| self.record_refusal(error))?;
+                    for event in &events {
+                        crate::client::record_compaction_stream_event(event)?;
+                    }
+                    self.progress.sse_events_read +=
+                        u64::try_from(events.len()).unwrap_or(u64::MAX);
+                    self.progress.parsed_chunk(self.parser.pending_bytes());
                     self.pending.extend(events);
                 }
                 Ok(None) => {
@@ -1183,44 +1239,31 @@ impl MessageStream {
         error
     }
 
-    /// Pull the message id (and any cache diagnosis) out of the raw
-    /// `message_start` frame, while cache diagnostics are enabled.
-    ///
-    /// Buffers only until that frame is seen, then stops: `message_start` is
-    /// the first frame of the response, so this never accumulates the body.
-    fn scan_chunk_for_cache_diagnosis(&mut self, chunk: &[u8]) {
-        if self.cache_diagnosis_done || !cache_diagnostics_enabled() {
-            return;
-        }
-        self.cache_diagnosis_buf
-            .push_str(&String::from_utf8_lossy(chunk));
-        let Some(start) = self.cache_diagnosis_buf.find("\"type\":\"message_start\"") else {
-            // Keep a bounded tail: enough to span a frame split across chunks,
-            // small enough that a response without the frame cannot grow it.
-            if self.cache_diagnosis_buf.len() > 65_536 {
-                self.cache_diagnosis_done = true;
-                self.cache_diagnosis_buf.clear();
+    fn observe_message_metadata(&mut self) {
+        if let Some(metadata) = self.parser.take_message_metadata() {
+            record_thinking_transformations(
+                &metadata,
+                self.session_tracer.as_ref(),
+                self.client_request_id.as_deref(),
+            );
+            if let Some(diagnostics) = &self.cache_diagnostics {
+                diagnostics.observe(metadata);
             }
-            return;
-        };
-        let Some(line_start) = self.cache_diagnosis_buf[..start].rfind("data:") else {
-            return;
-        };
-        let rest = &self.cache_diagnosis_buf[line_start + "data:".len()..];
-        let Some(line_end) = rest.find('\n') else {
-            return; // frame not complete yet
-        };
-        if let Ok(frame) = serde_json::from_str::<Value>(rest[..line_end].trim()) {
-            observe_cache_diagnostics(&frame);
         }
-        self.cache_diagnosis_done = true;
-        self.cache_diagnosis_buf.clear();
     }
 
     fn observe_event(&mut self, event: &StreamEvent) {
+        self.progress.observe_event(event);
         match event {
+            StreamEvent::MessageStart(start) => {
+                self.latest_usage
+                    .get_or_insert_with(Usage::default)
+                    .merge_snapshot(start.message.usage.clone());
+            }
             StreamEvent::MessageDelta(MessageDeltaEvent { usage, delta, .. }) => {
-                self.latest_usage = Some(usage.clone());
+                self.latest_usage
+                    .get_or_insert_with(Usage::default)
+                    .merge_snapshot(usage.clone());
                 // Content is complete, but finish the protocol before releasing
                 // the response. Closing here made completion depend on packet
                 // boundaries and could drop a separately framed message_stop.
@@ -1253,6 +1296,10 @@ impl MessageStream {
     /// `message_delta` carrying a `stop_reason` and then `message_stop` — and
     /// which of the two arrives is not guaranteed.
     fn record_usage_once(&mut self) {
+        if let Some(usage) = &self.latest_usage {
+            runtime::compaction_scope::record_usage(usage.token_usage());
+        }
+
         if self.usage_recorded {
             return;
         }
@@ -1261,6 +1308,7 @@ impl MessageStream {
         let Some(usage) = self.latest_usage.clone() else {
             return;
         };
+        runtime::compaction_scope::record_usage(usage.token_usage());
         if let Some(prompt_cache) = &self.prompt_cache {
             let record = prompt_cache.record_usage(
                 &self.request,
@@ -1284,14 +1332,19 @@ impl MessageStream {
                 .client_request_id
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            tracer.record_usage_with_cost(
+            tracer.record_usage_snapshot(
                 request_id,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cache_creation_input_tokens,
-                usage.cache_read_input_tokens,
-                usage.cost_units,
-                usage.cost_currency.as_deref(),
+                telemetry::UsageTokens {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    reported_total_tokens: usage.reported_total_tokens,
+                },
+                telemetry::UsageCost {
+                    units: usage.cost_units,
+                    currency: usage.cost_currency.as_deref(),
+                },
             );
         }
         self.usage_recorded = true;
@@ -1307,18 +1360,16 @@ async fn expect_success(response: reqwest::Response) -> Result<reqwest::Response
     let request_id = request_id_from_headers(response.headers());
     let retry_after = parse_retry_after(response.headers());
     let body = response.text().await.unwrap_or_else(|_| String::new());
-    let parsed_error = serde_json::from_str::<AnthropicErrorEnvelope>(&body).ok();
+    let parsed_error = serde_json::from_str::<ProviderErrorEnvelope>(&body).ok();
     let retryable = crate::error::is_retryable_http_status(status.as_u16())
         || crate::error::is_retryable_masked_400(status, &body);
 
     Err(ApiError::Api {
         status,
-        error_type: parsed_error
-            .as_ref()
-            .map(|error| error.error.error_type.clone()),
+        error_type: parsed_error.as_ref().and_then(|error| error.error.kind()),
         message: parsed_error
             .as_ref()
-            .map(|error| error.error.message.clone()),
+            .and_then(|error| error.error.message.clone()),
         request_id,
         body,
         retryable,
@@ -1430,6 +1481,9 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
         // These fields are OpenAI-compatible only; Anthropic rejects them.
         object.remove("frequency_penalty");
         object.remove("presence_penalty");
+        // Anthropic effort belongs under output_config; this OpenAI field must
+        // never leak through whole-request serialization or extraBody.
+        object.remove("reasoning_effort");
         // Anthropic uses "stop_sequences" not "stop". Convert if present.
         if let Some(stop_val) = object.remove("stop") {
             if stop_val.as_array().is_some_and(|a| !a.is_empty()) {
@@ -1442,20 +1496,39 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
         // budget is large enough to host a thinking budget; otherwise fall back
         // to no thinking (a model whose max output is <= 1024 cannot think).
         //
-        // Do not "modernize" this to `thinking: {"type": "adaptive"}`.
-        // Anthropic's own guidance deprecates `budget_tokens` in favour of
-        // adaptive on 4.6+ models, so this block reads like stale code — but
-        // that guidance describes the first-party API, and we do not talk to
-        // it. Every request here goes out over a proxy route, and on that route
-        // adaptive was measured to bill `thinking_tokens` as usual while
-        // returning an empty string as the visible text. Paying for reasoning
-        // and rendering nothing is strictly worse than not thinking at all,
-        // which is exactly what a documentation-driven cleanup would ship.
-        // `thinking_budget_is_explicit_not_adaptive` pins the wire shape so the
-        // swap cannot land silently; if you are here to make adaptive work,
-        // verify end-to-end that non-empty text comes back on the proxy route
-        // first, and change the test in the same commit as the code.
-        if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
+        // Select the wire contract per model. Opus 4.8 rejects manual budgets;
+        // Opus 5.5 additionally rejects disabled thinking. Legacy budgeted
+        // models retain their validated route behavior: do not switch those
+        // without live acceptance of readable output and tool continuations.
+        let thinking_mode = runtime::model_capabilities::anthropic_thinking_mode(&request.model);
+        if thinking_mode == runtime::model_capabilities::AnthropicThinkingMode::AdaptiveAlways
+            || (thinking_mode == runtime::model_capabilities::AnthropicThinkingMode::Adaptive
+                && request.thinking_enabled)
+        {
+            // Adaptive models reject budget_tokens. Always-on models use display
+            // to hide summaries; optional models omit thinking when disabled.
+            // Mode and effort stay independent of the output cap so compaction
+            // can reuse the ordinary turn's prefix.
+            let thinking = object
+                .entry("thinking")
+                .or_insert_with(|| serde_json::json!({}));
+            if !thinking.is_object() {
+                *thinking = serde_json::json!({});
+            }
+            let thinking = thinking
+                .as_object_mut()
+                .expect("thinking object initialized");
+            thinking.remove("budget_tokens");
+            thinking.insert("type".into(), serde_json::json!("adaptive"));
+            thinking.insert(
+                "display".into(),
+                serde_json::json!(if request.thinking_enabled {
+                    "summarized"
+                } else {
+                    "omitted"
+                }),
+            );
+        } else if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
             // The budget is a property of the *model*, not of this request's
             // output cap, because the value of the thinking parameter is part
             // of Anthropic's cache key. Deriving it here from
@@ -1494,22 +1567,68 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
             // rejects this field when extended thinking is not enabled.
             strip_thought_signatures(object);
         }
+        // Effort controls text and tool calls even when thinking is disabled.
+        // Keep it independent of both thinking mode and the output cap.
+        if let Some(effort) =
+            runtime::effort::claude_effort(&request.model, request.reasoning_effort.as_deref())
+        {
+            let output = object
+                .entry("output_config")
+                .or_insert_with(|| serde_json::json!({}));
+            if let Some(output) = output.as_object_mut() {
+                output.insert("effort".into(), Value::String(effort.to_string()));
+            }
+        }
     }
 }
 
 /// Beta that turns on Anthropic's server-side cache diagnosis.
 const CACHE_DIAGNOSIS_BETA: &str = "cache-diagnosis-2026-04-07";
+const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 
-/// The id of the last message the API returned, for `diagnostics.previous_message_id`.
-///
-/// Process-global rather than per-client because this is an opt-in debugging
-/// switch and threading a field through every `AnthropicClient` constructor
-/// would spread a diagnostic across the codebase. The consequence is that it
-/// only reads correctly when one conversation is in flight: concurrent
-/// sessions (subagents) interleave here and would pair a request with another
-/// session's previous message, which the API reports as a divergence that
-/// isn't one. Diagnose one session at a time.
-static LAST_MESSAGE_ID: Mutex<Option<String>> = Mutex::new(None);
+/// Record acknowledgment and bounded enum/path metadata, never provider blocks.
+fn record_thinking_transformations(
+    metadata: &crate::sse::MessageMetadata,
+    tracer: Option<&SessionTracer>,
+    request_id: Option<&str>,
+) {
+    let (Some(tracer), Some(transformations)) = (
+        tracer,
+        metadata
+            .input_transformations
+            .as_ref()
+            .and_then(Value::as_array),
+    ) else {
+        return;
+    };
+    let safe: Vec<Value> = transformations
+        .iter()
+        .take(128)
+        .map(|entry| {
+            let mut safe = serde_json::Map::new();
+            for key in ["type", "reason", "path"] {
+                if let Some(value) = entry.get(key).and_then(Value::as_str).filter(|value| {
+                    value.len() <= 160
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'))
+                }) {
+                    safe.insert(key.into(), Value::String(value.into()));
+                }
+            }
+            Value::Object(safe)
+        })
+        .collect();
+    tracer.record(
+        "thinking_input_transformations",
+        serde_json::json!({
+            "request_id":request_id, "count":transformations.len(), "transformations":safe
+        })
+        .as_object()
+        .expect("metadata object")
+        .clone(),
+    );
+}
 
 /// Whether to ask the API where the prompt cache broke
 /// (`SUDOCODE_CACHE_DIAGNOSTICS=1`).
@@ -1531,61 +1650,6 @@ fn cache_diagnostics_enabled() -> bool {
         })
 }
 
-/// Attach `diagnostics.previous_message_id` so the API compares this request
-/// against the previous one. Sent on every request while enabled — the API only
-/// stores a fingerprint for requests that carried the beta, so turning it on
-/// for a single request reports `previous_message_not_found` instead of a
-/// diagnosis.
-fn apply_cache_diagnostics(body: &mut Value) {
-    let Some(object) = body.as_object_mut() else {
-        return;
-    };
-    let previous = LAST_MESSAGE_ID
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    object.insert(
-        "diagnostics".to_string(),
-        serde_json::json!({ "previous_message_id": previous }),
-    );
-}
-
-/// Record the API's diagnosis for the next request to build on, and print it.
-///
-/// Reads the raw `message_start` frame rather than a parsed event: `diagnostics`
-/// is not part of our `MessageResponse`, and giving a debugging field a typed
-/// home in the shared response type would make every provider construct it.
-fn observe_cache_diagnostics(frame: &Value) {
-    let Some(message) = frame.get("message") else {
-        return;
-    };
-    if let Some(id) = message.get("id").and_then(Value::as_str) {
-        *LAST_MESSAGE_ID
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.to_string());
-    }
-    let Some(diagnostics) = message.get("diagnostics") else {
-        return;
-    };
-    // To a file when a dump directory exists, not to stderr. stderr has its own
-    // lock, so writing there from below the renderer seam interleaves with the
-    // spinner's stdout and tears the line in half — the exact bug this crate's
-    // sibling fix removed from hook progress. A diagnosis is also worth keeping
-    // next to the request bodies it explains.
-    if let Some(dir) = dump_request_dir() {
-        let record = serde_json::json!({
-            "message_id": message.get("id"),
-            "diagnostics": diagnostics,
-        });
-        let _ = write_request_dump(std::path::Path::new(&dir), "cache-diagnosis", &record);
-    } else {
-        eprintln!(
-            "[cache-diagnosis] {}",
-            serde_json::to_string(diagnostics).unwrap_or_else(|_| "<unserializable>".to_string())
-        );
-    }
-}
-
 /// Write the request body that is about to be sent to `SUDOCODE_DUMP_REQUESTS`,
 /// if that variable names a directory. Off by default; costs one env read.
 ///
@@ -1598,7 +1662,7 @@ fn observe_cache_diagnostics(frame: &Value) {
 /// it was supposed to observe. This call site is after serialisation and before
 /// the send, so it can only add a copy on disk — the bytes on the wire are the
 /// same whether it runs or not. That property is the whole point of it.
-fn dump_request_body(kind: &str, body: &Value) {
+pub(super) fn dump_request_body(kind: &str, body: &Value) {
     let Some(dir) = dump_request_dir() else {
         return;
     };
@@ -1674,7 +1738,8 @@ fn apply_request_metadata(body: &mut Value, request: &MessageRequest) {
 /// Translate provider-agnostic [`CacheHints`] into Anthropic-specific
 /// `cache_control` markers on the JSON body.
 ///
-/// - `system_static` → system block with `cache_control: {type: "ephemeral", scope: "global"}`
+/// - `system_static` → global cache when every preceding tool is globally
+///   scoped; otherwise use the ordinary cache scope
 /// - `system_dynamic` → system block with `cache_control: {type: "ephemeral"}`
 /// - `breakpoint_last_message` → `cache_control: {type: "ephemeral"}` on the last
 ///   content block of the last message
@@ -1700,6 +1765,19 @@ fn apply_cache_hints(body: &mut Value, request: &MessageRequest, ttl_1h: bool) {
         return;
     };
 
+    // Tools precede system blocks in the cached prefix. Static system text
+    // alone cannot make a prefix containing ordinary tools globally scoped.
+    let is_global_prefix = match obj.get("tools") {
+        None => true,
+        Some(Value::Array(tools)) => tools.iter().all(|tool| {
+            tool.get("cache_control")
+                .and_then(|cache| cache.get("scope"))
+                .and_then(Value::as_str)
+                == Some("global")
+        }),
+        Some(_) => false,
+    };
+
     // --- System blocks ---
     let mut system_blocks: Vec<Value> = Vec::new();
     if let Some(text) = &hints.system_static {
@@ -1707,7 +1785,7 @@ fn apply_cache_hints(body: &mut Value, request: &MessageRequest, ttl_1h: bool) {
             system_blocks.push(serde_json::json!({
                 "type": "text",
                 "text": text,
-                "cache_control": cache_control(true),
+                "cache_control": cache_control(is_global_prefix),
             }));
         }
     }
@@ -1757,18 +1835,6 @@ fn strip_thought_signatures(body: &mut Map<String, Value>) {
             }
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicErrorEnvelope {
-    error: AnthropicErrorBody,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicErrorBody {
-    #[serde(rename = "type")]
-    error_type: String,
-    message: String,
 }
 
 #[cfg(test)]
@@ -2139,39 +2205,6 @@ mod tests {
             headers.get("authorization").and_then(|v| v.to_str().ok()),
             Some("Bearer proxy-token")
         );
-    }
-
-    #[test]
-    fn cache_diagnostics_chains_the_previous_message_id() {
-        // First request of a session has no predecessor. The field must still
-        // be present and explicitly null: the API stores a fingerprint only for
-        // requests that carried the beta, so skipping it here would make the
-        // next request's diagnosis fail with `previous_message_not_found`.
-        *super::LAST_MESSAGE_ID
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let mut body = serde_json::json!({"model": "claude-sonnet-4-6"});
-        super::apply_cache_diagnostics(&mut body);
-        assert_eq!(
-            body["diagnostics"],
-            serde_json::json!({"previous_message_id": null})
-        );
-
-        // A `message_start` frame supplies the id the next request pairs with.
-        super::observe_cache_diagnostics(&serde_json::json!({
-            "type": "message_start",
-            "message": {"id": "msg_abc123", "type": "message"},
-        }));
-        let mut next = serde_json::json!({"model": "claude-sonnet-4-6"});
-        super::apply_cache_diagnostics(&mut next);
-        assert_eq!(
-            next["diagnostics"],
-            serde_json::json!({"previous_message_id": "msg_abc123"})
-        );
-
-        *super::LAST_MESSAGE_ID
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     #[test]

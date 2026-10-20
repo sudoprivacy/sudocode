@@ -1,0 +1,859 @@
+"""Windows live acceptance: Read, restart, and replay signed thinking.
+
+The recording proxy caps output and selects an explicit thinking profile.
+Credentials stay in memory; request bodies and raw SSE are local artifacts.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import secrets
+import select
+import signal
+import shutil
+import tempfile
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlsplit
+
+import pyte
+import requests
+from winpty import PtyProcess
+
+parser = argparse.ArgumentParser()
+parser.add_argument("binary", type=Path)
+parser.add_argument("--profile", default="sudorouter")
+parser.add_argument("--model", default="claude-sonnet-4-6")
+parser.add_argument(
+    "--thinking-display",
+    choices=("omitted", "summarized"),
+    default="omitted",
+    help="Require empty or summarized signed thinking from the provider",
+)
+parser.add_argument(
+    "--effort",
+    choices=("low", "high"),
+    default="low",
+    help="Recorded adaptive thinking effort",
+)
+parser.add_argument(
+    "--preserve-thinking",
+    action="store_true",
+    help="Validate the CLI's thinking/effort fields and forward them unchanged",
+)
+parser.add_argument(
+    "--check-context",
+    action="store_true",
+    help="Require the exact project instruction nonce in both answers",
+)
+parser.add_argument(
+    "--session-id",
+    type=uuid.UUID,
+    help="Reuse a diagnostic session UUID for upstream routing comparisons",
+)
+parser.add_argument(
+    "--config", type=Path, default=Path.home() / ".nexus/sudocode/sudocode.json"
+)
+parser.add_argument(
+    "--history-fixture", type=Path, help="Resume a copy of saved JSONL messages"
+)
+parser.add_argument(
+    "--history-messages", type=int, help="Copy only this many fixture messages"
+)
+parser.add_argument(
+    "--expect-compaction",
+    action="store_true",
+    help="Require one compaction before Read",
+)
+parser.add_argument(
+    "--crash-after-read",
+    action="store_true",
+    help="Crash after a real Read result, then resume with a different task",
+)
+parser.add_argument(
+    "--require-replay-label",
+    choices=("course", "court", "card"),
+    help="Require this historical label before any API message request",
+)
+parser.add_argument(
+    "--upstream-channel",
+    type=int,
+    help="Select a new-api channel using its admin key suffix",
+)
+parser.add_argument(
+    "--drop-global-cache-scope",
+    action="store_true",
+    help="Remove only system[0]'s global cache scope for a diagnostic comparison",
+)
+parser.add_argument(
+    "--artifacts",
+    type=Path,
+    help="Keep request bodies, SSE and screens in a fresh child directory",
+)
+args = parser.parse_args()
+if args.crash_after_read and (args.history_fixture or args.expect_compaction):
+    parser.error("--crash-after-read creates its own fresh history")
+if os.name != "nt":
+    parser.error("this acceptance runner requires Windows ConPTY")
+if not args.binary.is_file():
+    parser.error("binary must be an existing scode executable")
+if args.history_messages is not None and (
+    not args.history_fixture or args.history_messages < 1
+):
+    parser.error("--history-messages requires --history-fixture and a positive count")
+if (args.expect_compaction or args.require_replay_label) and not args.history_fixture:
+    parser.error("compaction and historical-label checks require --history-fixture")
+if args.upstream_channel is not None and args.upstream_channel < 1:
+    parser.error("--upstream-channel must be positive")
+history_bytes = args.history_fixture.read_bytes() if args.history_fixture else None
+history_hash = (
+    hashlib.sha256(history_bytes).hexdigest() if history_bytes is not None else None
+)
+profiles = json.loads(args.config.read_text(encoding="utf-8-sig"))["auth_modes"][
+    "proxy"
+]
+profile = profiles[args.profile]
+known_keys = sorted(
+    {p["apiKey"] for p in profiles.values() if p.get("apiKey")}, key=len, reverse=True
+)
+history_credential_redactions = 0
+
+
+def redact_history(value):
+    global history_credential_redactions
+    if isinstance(value, str):
+        for key in known_keys:
+            history_credential_redactions += value.count(key)
+            value = value.replace(key, "[REDACTED_PROFILE_KEY]")
+    elif isinstance(value, list):
+        value = [redact_history(item) for item in value]
+    elif isinstance(value, dict):
+        value = {key: redact_history(item) for key, item in value.items()}
+    return value
+
+
+history_rows = []
+if history_bytes is not None:
+    history_rows = [
+        row
+        for line in history_bytes.decode("utf-8-sig").splitlines()
+        if (row := json.loads(line)).get("type") == "message"
+    ]
+    if args.history_messages is not None:
+        history_rows = history_rows[: args.history_messages]
+    if not history_rows:
+        parser.error("history fixture must contain saved message rows")
+    history_rows = redact_history(history_rows)
+setup_requests = int(args.expect_compaction) + int(args.crash_after_read)
+code = "LIVE-" + secrets.token_hex(5)
+fixture_root = Path(os.environ["PUBLIC"]).resolve()
+temporary = tempfile.TemporaryDirectory(prefix="scode-" + code + "-", dir=fixture_root)
+workspace = Path(temporary.name).resolve()
+assert workspace.parent == fixture_root
+for ancestor in (workspace, *workspace.parents):
+    for name in (
+        "AGENTS.md",
+        ".nexus/sudocode/AGENTS.md",
+        "CLAUDE.md",
+        ".claude/CLAUDE.md",
+    ):
+        assert not (ancestor / name).exists(), "fixture inherits external instructions"
+config = workspace / "config"
+home = workspace / "home"
+config.mkdir()
+home.mkdir()
+fixture = workspace / "values.txt"
+a, b = secrets.randbelow(400) + 100, secrets.randbelow(400) + 100
+fixture.write_text(f"code={code}\na={a}\nb={b}\n", encoding="utf-8")
+context_nonce = "CONTEXT-" + secrets.token_hex(12) if args.check_context else None
+if context_nonce:
+    (workspace / "AGENTS.md").write_text(
+        f"diagnostic_nonce: {context_nonce}\n", encoding="utf-8"
+    )
+session = workspace / "session.jsonl"
+session_id = str(args.session_id or uuid.uuid4())
+stamp = int(time.time() * 1000)
+session.write_text(
+    json.dumps(
+        {
+            "type": "session_meta",
+            "version": 1,
+            "session_id": session_id,
+            "created_at_ms": stamp,
+            "updated_at_ms": stamp,
+            "model": args.model,
+            "workspace_root": str(workspace),
+        }
+    )
+    + "\n",
+    encoding="utf-8",
+)
+with session.open("a", encoding="utf-8") as history_file:
+    for row in history_rows:
+        history_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+target = urlsplit(profile["baseUrl"])
+assert target.scheme == "https"
+origin = target.scheme + "://" + target.netloc
+records = []
+errors = []
+lock = threading.Lock()
+seed_result_ready = threading.Event()
+seed_crash_released = threading.Event()
+crash_boundary_checked = False
+
+
+def without_cache_markers(value):
+    if isinstance(value, dict):
+        return {
+            key: without_cache_markers(child)
+            for key, child in value.items()
+            if key != "cache_control"
+        }
+    if isinstance(value, list):
+        return [without_cache_markers(child) for child in value]
+    return value
+
+
+def parse_sse(payload):
+    blocks = {}
+    usage = {}
+    stopped = False
+    for line in payload.decode("utf-8", errors="replace").splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:])
+        except ValueError:
+            continue
+        if event.get("type") == "content_block_start":
+            blocks[event["index"]] = dict(event["content_block"])
+        if event.get("type") == "content_block_delta":
+            block = blocks[event["index"]]
+            for key in ("text", "thinking", "signature", "partial_json"):
+                if key in event["delta"]:
+                    block[key] = block.get(key, "") + event["delta"][key]
+        if event.get("type") == "message_start":
+            usage.update(event.get("message", {}).get("usage", {}))
+        usage.update(event.get("usage", {}))
+        stopped |= event.get("type") == "message_stop"
+    return list(blocks.values()), usage, stopped
+
+
+class Proxy(BaseHTTPRequestHandler):
+    def log_message(self, *_):
+        pass
+
+    def forward(self, method):
+        raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if any(key in raw.decode("utf-8", errors="replace") for key in known_keys):
+            self.send_error(400, "configured API key found in request body")
+            print(json.dumps({"credential_body_rejected": True}), flush=True)
+            return
+        is_message = method == "POST" and self.path.split("?")[0].endswith("/messages")
+        if is_message:
+            if args.crash_after_read and len(records) == 1:
+                if not seed_crash_released.is_set():
+                    (workspace / "unfinished-request-client.json").write_bytes(raw)
+                    seed_result_ready.set()
+                    # No paid final-answer request: the real tool result is
+                    # already persisted before the CLI starts this HTTP call.
+                    seed_crash_released.wait(90)
+                    self.close_connection = True
+                    return
+                global crash_boundary_checked
+                previous = json.loads(
+                    (workspace / "unfinished-request-client.json").read_bytes()
+                )
+                current = json.loads(raw)
+                old = without_cache_markers(previous["messages"])
+                new = without_cache_markers(current["messages"])
+                index = len(old)
+                is_preserved = new[:index] == old and all(
+                    without_cache_markers(previous.get(key))
+                    == without_cache_markers(current.get(key))
+                    for key in (
+                        "model", "system", "tools", "thinking", "output_config", "metadata"
+                    )
+                )
+                is_closed = (
+                    len(new) > index + 1
+                    and new[index]["role"] == "assistant"
+                    and new[index]["content"]
+                    == [{"type": "text", "text": "No response requested."}]
+                    and new[index + 1]["role"] == "user"
+                )
+                if not (is_preserved and is_closed):
+                    errors.append(
+                        "crashed request context changed or new task has no turn boundary"
+                    )
+                    self.send_error(400, "unanswered turn boundary check failed")
+                    return
+                crash_boundary_checked = True
+            with lock:
+                number = len(records)
+                assert number < 5, "request budget exhausted"
+                records.append({"number": number, "completed": False})
+            (workspace / f"request-{number}-client.json").write_bytes(raw)
+            body = json.loads(raw)
+            if args.session_id:
+                assert json.loads(body["metadata"]["user_id"])["session_id"] == (
+                    session_id
+                ), "CLI did not preserve the selected diagnostic session id"
+            body["max_tokens"] = 2048
+            expected_thinking = {"type": "adaptive", "display": args.thinking_display}
+            if args.preserve_thinking:
+                if body.get("thinking") != expected_thinking or (
+                    body.get("output_config", {}).get("effort") != args.effort
+                ):
+                    errors.append(
+                        "CLI thinking/effort fields differ from the required native profile"
+                    )
+                    self.send_error(400, "native thinking configuration check failed")
+                    return
+            else:
+                body["thinking"] = expected_thinking
+                body["output_config"] = {"effort": args.effort}
+            if args.drop_global_cache_scope:
+                system = body.get("system")
+                if isinstance(system, list) and system:
+                    control = system[0].get("cache_control", {})
+                    if control.get("scope") == "global":
+                        del control["scope"]
+            raw = json.dumps(body, ensure_ascii=False).encode()
+            (workspace / f"request-{number}-live.json").write_bytes(raw)
+        headers = {
+            k: v
+            for k, v in self.headers.items()
+            if k.lower()
+            not in {
+                "host",
+                "content-length",
+                "authorization",
+                "x-api-key",
+                "connection",
+                "accept-encoding",
+            }
+        }
+        upstream_key = profile["apiKey"]
+        if args.upstream_channel is not None:
+            upstream_key += f"-{args.upstream_channel}"
+        headers.update({"x-api-key": upstream_key, "accept-encoding": "identity"})
+        try:
+            with (
+                requests.Session() as client,
+                client.request(
+                    method,
+                    origin + self.path,
+                    headers=headers,
+                    data=raw or None,
+                    stream=True,
+                    timeout=(20, 100),
+                ) as response,
+            ):
+                self.send_response(response.status_code)
+                self.send_header(
+                    "Content-Type",
+                    response.headers.get("content-type", "application/json"),
+                )
+                self.send_header("Connection", "close")
+                self.end_headers()
+                chunks = []
+                for chunk in response.iter_content(chunk_size=512):
+                    if not chunk:
+                        continue
+                    chunks.append(chunk)
+                    try:
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    except (
+                        BrokenPipeError,
+                        ConnectionResetError,
+                        ConnectionAbortedError,
+                    ):
+                        pass
+                    if is_message and parse_sse(b"".join(chunks))[2]:
+                        break
+                if is_message:
+                    payload = b"".join(chunks)
+                    (workspace / f"response-{number}.sse").write_bytes(payload)
+                    blocks, usage, stopped = parse_sse(payload)
+                    text = "\n".join(b.get("text", "") for b in blocks)
+                    records[number].update(
+                        {
+                            "completed": True,
+                            "http": response.status_code,
+                            "request_id": response.headers.get("x-oneapi-request-id"),
+                            "blocks": [b["type"] for b in blocks],
+                            "thinking": [
+                                {
+                                    "text_chars": len(b.get("thinking", "")),
+                                    "signature_chars": len(b.get("signature", "")),
+                                }
+                                for b in blocks
+                                if b["type"] == "thinking"
+                            ],
+                            "message_stop": stopped,
+                            "usage": usage,
+                            "artifact_words": re.findall(
+                                r"(?im)^\s*(course|court|card)\s*$", text
+                            ),
+                        }
+                    )
+                    print(
+                        json.dumps({"wire": records[number]}, ensure_ascii=False),
+                        flush=True,
+                    )
+                    if response.status_code != 200:
+                        errors.append("API HTTP " + str(response.status_code))
+        except requests.RequestException as error:
+            errors.append(type(error).__name__)
+            if is_message:
+                records[number]["transport_error"] = type(error).__name__
+
+    def do_GET(self):
+        self.forward("GET")
+
+    def do_POST(self):
+        self.forward("POST")
+
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+server.daemon_threads = True
+threading.Thread(target=server.serve_forever, daemon=True).start()
+(config / "sudocode.json").write_text(
+    json.dumps(
+        {
+            "default_model": args.model,
+            "auth_modes": {
+                "proxy": {
+                    "audit": {
+                        "baseUrl": f"http://127.0.0.1:{server.server_port}/v1",
+                        "apiKey": "local-placeholder",
+                    }
+                }
+            },
+        }
+    ),
+    encoding="utf-8",
+)
+(config / "settings.json").write_text(
+    json.dumps({"model": args.model, "auth_profile": "audit"}), encoding="utf-8"
+)
+env = {
+    k: v
+    for k, v in os.environ.items()
+    if not k.upper().startswith(
+        (
+            "ANTHROPIC",
+            "OPENAI",
+            "SUDO_CODE",
+            "SUDOCODE",
+            "SCODE_",
+            "CLAUDE",
+            "VSCODE",
+            "TERM_PROGRAM",
+        )
+    )
+}
+env.update(
+    SUDO_CODE_CONFIG_HOME=str(config),
+    HOME=str(home),
+    USERPROFILE=str(home),
+    NO_COLOR="1",
+    SCODE_LOG_PATH=str(workspace / "cli.log"),
+)
+command = [
+    str(args.binary.resolve()),
+    "--auth",
+    "proxy",
+    "--account",
+    "audit",
+    "--model",
+    args.model,
+    "--permission-mode",
+    "read-only",
+    "--allowedTools",
+    "Read",
+    "--resume",
+    str(session),
+]
+if args.preserve_thinking:
+    command.extend(["--reasoning-effort", args.effort])
+proc = None
+raw_pty = []
+
+
+def drain():
+    if select.select([proc.fileobj], [], [], 0)[0]:
+        try:
+            chunk = proc.read(65536)
+        except EOFError:
+            chunk = ""
+        if chunk:
+            raw_pty.append(chunk)
+            stream.feed(chunk)
+            (workspace / "current-screen.txt").write_text(
+                "\n".join(screen.display), encoding="utf-8"
+            )
+
+
+def visible():
+    return (
+        "\n".join(
+            "".join(c.data for _, c in sorted(row.items()))
+            for row in screen.history.top
+        )
+        + "\n"
+        + "\n".join(screen.display)
+    )
+
+
+def wait(predicate, seconds=150):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        drain()
+        assert not errors, errors
+        if predicate():
+            return
+        assert proc.isalive(), "CLI exited unexpectedly"
+        time.sleep(0.05)
+    raise AssertionError("live ConPTY expected state timed out")
+
+
+def start():
+    global proc, screen, stream
+    screen = pyte.HistoryScreen(140, 40, history=5000)
+    stream = pyte.Stream(screen)
+    proc = PtyProcess.spawn(command, cwd=str(workspace), env=env, dimensions=(40, 140))
+    wait(lambda: "\u276f" in "\n".join(screen.display), 45)
+    time.sleep(0.3)
+
+
+def send(text):
+    proc.write(text)
+    time.sleep(0.15)
+    proc.write("\r")
+
+
+def close():
+    if proc and proc.isalive():
+        try:
+            send("/exit")
+        except EOFError:
+            pass
+        deadline = time.monotonic() + 8
+        while proc.isalive() and time.monotonic() < deadline:
+            drain()
+            time.sleep(0.05)
+        if proc.isalive():
+            crash_owned_cli()
+
+
+def crash_owned_cli():
+    # On Windows, os.kill with SIGTERM calls TerminateProcess. Send it once:
+    # pywinpty.terminate sends SIGINT then SIGTERM and can reopen an exited PID.
+    try:
+        os.kill(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        deadline = time.monotonic() + 5
+        while proc.isalive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if proc.isalive():
+            raise
+    deadline = time.monotonic() + 5
+    while proc.isalive() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not proc.isalive(), "owned CLI did not stop after the simulated crash"
+
+
+def crash_after_real_read():
+    legacy = workspace / "old-task.txt"
+    old_code = "LEGACY-" + code
+    legacy.write_text(f"code={old_code}\na=11\nb=23\n", encoding="utf-8")
+    send(
+        f"Read {json.dumps(legacy.as_posix())} with the Read tool. "
+        "Then return LEGACY_DONE <code from file> sum=<a+b>."
+    )
+    wait(seed_result_ready.is_set)
+    pending = json.loads((workspace / "unfinished-request-client.json").read_bytes())
+    assert pending["messages"][-1]["role"] == "user"
+    assert any(
+        block.get("type") == "tool_result" and old_code in json.dumps(block)
+        for block in pending["messages"][-1]["content"]
+    ), "seed request did not contain the actual old file's Read result"
+    (workspace / "before-crash-screen.txt").write_text(visible(), encoding="utf-8")
+    crash_owned_cli()
+    seed_crash_released.set()
+    saved = [json.loads(line) for line in session.read_text("utf-8").splitlines()]
+    messages = [row["message"] for row in saved if row.get("type") == "message"]
+    assert messages[-1]["role"] in ("tool", "user")
+    assert any(block.get("type") == "tool_result" for block in messages[-1]["blocks"])
+    assert old_code in json.dumps(messages[-1]), "real tool result was not durable before the crash"
+    start()
+
+
+try:
+    print(
+        json.dumps(
+            {
+                "started": code,
+                "workspace": str(workspace),
+                "binary": str(args.binary),
+                "profile": args.profile,
+                "model": args.model,
+                "thinking_control": "adaptive-" + args.thinking_display,
+                "preserve_cli_thinking": args.preserve_thinking,
+                "effort": args.effort,
+                "check_context": args.check_context,
+                "session_id": session_id,
+                "history_messages": len(history_rows),
+                "history_sha256": history_hash,
+                "history_credential_redactions": history_credential_redactions,
+                "expected_compactions": int(args.expect_compaction),
+                "crash_after_real_read": args.crash_after_read,
+                "upstream_channel": args.upstream_channel,
+                "drop_global_cache_scope": args.drop_global_cache_scope,
+                "live_api_inference": True,
+            }
+        ),
+        flush=True,
+    )
+    start()
+    if args.crash_after_read:
+        crash_after_real_read()
+    if history_rows:
+        assert not records, "startup unexpectedly made an API message request"
+        replay = visible()
+        (workspace / "before-read-screen.txt").write_text(replay, encoding="utf-8")
+        replay_labels = re.findall(r"(?im)^\s*(course|court|card)\s*$", replay)
+        if args.require_replay_label:
+            assert args.require_replay_label in replay_labels, (
+                "required historical label was absent from startup replay"
+            )
+        print(
+            json.dumps(
+                {
+                    "startup_api_message_requests": 0,
+                    "historical_labels_visible_before_api": replay_labels,
+                }
+            ),
+            flush=True,
+        )
+    fixture_path = json.dumps(fixture.as_posix())
+    read_prompt = (
+        f"Read {fixture_path} with the Read tool. "
+        "Return only READ_DONE <code from file> sum=<a+b>."
+    )
+    read_expected = f"READ_DONE {code} sum={a + b}"
+    resume_expected = f"RESUME_DONE {code} value={a + b - 17}"
+    if context_nonce:
+        read_prompt = (
+            f"Read {fixture_path} with the Read tool. Return only READ_DONE "
+            "<code from file> sum=<a+b> context=<diagnostic_nonce from project instructions>."
+        )
+        read_expected += f" context={context_nonce}"
+        resume_expected += f" context={context_nonce}"
+    send(read_prompt)
+    wait(lambda: f"READ_DONE {code} sum={a + b}" in visible())
+    wait(
+        lambda: len(records) >= setup_requests + 2
+        and all(r.get("completed") for r in records)
+    )
+    (workspace / "read-screen.txt").write_text(visible(), encoding="utf-8")
+    if context_nonce:
+        original = json.loads((workspace / "request-0-client.json").read_bytes())
+        assert context_nonce in json.dumps(original["system"]), (
+            "CLI did not load the project instruction nonce"
+        )
+        assert context_nonce not in json.dumps(original["messages"]), (
+            "nonce must come from project instructions, not the user prompt"
+        )
+        assert len(records) == setup_requests + 2, (
+            "project context check required extra tool or retry requests"
+        )
+        blocks, _, _ = parse_sse(
+            (workspace / f"response-{setup_requests + 1}.sse").read_bytes()
+        )
+        answer = "".join(block.get("text", "") for block in blocks).strip()
+        assert answer == read_expected, (
+            "provider did not return the exact project instruction nonce with the Read result"
+        )
+    close()
+    fixture.rename(workspace / "values.unavailable")
+    start()
+    if args.crash_after_read:
+        assert "No response requested." not in visible(), (
+            "internal turn boundary leaked into restored scrollback"
+        )
+    resume_prompt = (
+        "Use the saved sum, subtract 17, and return only RESUME_DONE "
+        "<same code> value=<result>. Do not use tools."
+    )
+    if context_nonce:
+        resume_prompt = (
+            "Use the saved sum, subtract 17, and return only RESUME_DONE "
+            "<same code> value=<result> context=<diagnostic_nonce from project instructions>. "
+            "Do not use tools."
+        )
+    send(resume_prompt)
+    wait(lambda: f"RESUME_DONE {code} value={a + b - 17}" in visible())
+    wait(
+        lambda: len(records) >= setup_requests + 3
+        and all(r.get("completed") for r in records)
+    )
+    (workspace / "resume-screen.txt").write_text(visible(), encoding="utf-8")
+    close()
+    assert len(records) == setup_requests + 3, "unexpected tool or retry requests"
+    assert not args.crash_after_read or crash_boundary_checked
+    if args.expect_compaction:
+        compact_request = json.loads((workspace / "request-0-client.json").read_bytes())
+        assert "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools." in json.dumps(
+            compact_request["messages"][-1]
+        ), "first request must be compaction"
+        compact_blocks, _, stopped = parse_sse(
+            (workspace / "response-0.sse").read_bytes()
+        )
+        assert stopped and all(b["type"] == "text" for b in compact_blocks), (
+            "compaction must return complete text without tool calls"
+        )
+        summary = "".join(b.get("text", "") for b in compact_blocks).strip()
+        assert summary.startswith("<summary>") and summary.endswith("</summary>"), (
+            "compaction must return a complete summary"
+        )
+    first_blocks, _, _ = parse_sse(
+        (workspace / f"response-{setup_requests}.sse").read_bytes()
+    )
+    thinking_source = first_blocks
+    if args.crash_after_read:
+        # This journey exercises the signature generated before the crash.
+        # Adaptive thinking may legitimately skip a later simple Read.
+        thinking_source, _, stopped = parse_sse(
+            (workspace / "response-0.sse").read_bytes()
+        )
+        assert stopped, "seed response did not finish before the crash"
+    signed_thinking = [
+        b
+        for b in thinking_source
+        if b["type"] == "thinking"
+        and b.get("signature")
+        and bool(b.get("thinking")) == (args.thinking_display == "summarized")
+    ]
+    assert signed_thinking, (
+        "provider did not emit the target "
+        + args.thinking_display
+        + " signed thinking block"
+    )
+    second = json.loads(
+        (workspace / f"request-{setup_requests + 1}-client.json").read_bytes()
+    )
+    results = [
+        b
+        for m in second["messages"]
+        for b in m.get("content", [])
+        if isinstance(b, dict) and b.get("type") == "tool_result"
+    ]
+    assert results and not results[-1].get("is_error"), "Read must actually succeed"
+    read_output = json.dumps(results[-1]["content"])
+    assert all(value in read_output for value in (code, f"a={a}", f"b={b}")), (
+        "actual Read output must contain fresh data"
+    )
+    replayed = [
+        b
+        for m in second["messages"]
+        if m["role"] == "assistant"
+        for b in m.get("content", [])
+        if isinstance(b, dict)
+    ]
+    intact = all(
+        any(
+            b.get("type") == "thinking"
+            and b.get("thinking") == thought.get("thinking", "")
+            and b.get("signature") == thought["signature"]
+            for b in replayed
+        )
+        for thought in signed_thinking
+    )
+    assert intact, "signed thinking was dropped or changed before the tool continuation"
+    resumed = json.loads(
+        (workspace / f"request-{setup_requests + 2}-client.json").read_bytes()
+    )
+    if context_nonce:
+        assert context_nonce in json.dumps(resumed["system"]), (
+            "project instruction nonce was lost during restart/resume"
+        )
+    resumed_blocks = [
+        b
+        for m in resumed["messages"]
+        if m["role"] == "assistant"
+        for b in m.get("content", [])
+        if isinstance(b, dict)
+    ]
+    assert all(
+        any(
+            b.get("type") == "thinking"
+            and b.get("thinking") == thought.get("thinking", "")
+            and b.get("signature") == thought["signature"]
+            for b in resumed_blocks
+        )
+        for thought in signed_thinking
+    ), "signed thinking was lost during restart/resume"
+    assert all(
+        r.get("completed") and r.get("http") == 200 and r.get("message_stop")
+        for r in records
+    ), "all streams must finish"
+    for number, expected in (
+        (setup_requests + 1, read_expected),
+        (setup_requests + 2, resume_expected),
+    ):
+        blocks, _, _ = parse_sse((workspace / f"response-{number}.sse").read_bytes())
+        answer = "".join(block.get("text", "") for block in blocks).strip()
+        assert answer == expected, "final answer must contain only the requested result"
+    assert not any(r.get("artifact_words") for r in records), (
+        "new course/court/card text generated"
+    )
+    if args.history_fixture:
+        assert (
+            hashlib.sha256(args.history_fixture.read_bytes()).hexdigest()
+            == history_hash
+        ), "original history fixture changed"
+    print(
+        json.dumps(
+            {
+                "passed_workflow": True,
+                "real_crash_boundary_checked": crash_boundary_checked,
+                "signed_thinking_replayed": intact,
+                "thinking_display": args.thinking_display,
+                "empty_signed_thinking_replayed": (
+                    intact and args.thinking_display == "omitted"
+                ),
+                "project_context_checked": args.check_context,
+                "requests": len(records),
+                "live_api_inference": True,
+            }
+        ),
+        flush=True,
+    )
+finally:
+    seed_crash_released.set()
+    try:
+        close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        (workspace / "pty-output.txt").write_text("".join(raw_pty), encoding="utf-8")
+        try:
+            if args.artifacts:
+                destination = args.artifacts.resolve() / code
+                destination.mkdir(parents=True, exist_ok=False)
+                for path in workspace.iterdir():
+                    if path.is_file():
+                        shutil.copy2(path, destination / path.name)
+                print(json.dumps({"artifacts": str(destination)}), flush=True)
+        finally:
+            assert workspace.resolve().parent == fixture_root
+            temporary.cleanup()

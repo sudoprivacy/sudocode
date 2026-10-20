@@ -298,8 +298,23 @@ impl Mailbox {
     /// must not each decide for themselves.
     #[must_use]
     pub fn workspace_local(root: &std::path::Path, self_id: String) -> Self {
+        Self::workspace_at(Arc::new(crate::fs_backend::StdFsBackend), root, self_id)
+    }
+
+    /// A mailbox rooted at its backend's own workspace, independently of the shell.
+    ///
+    /// # Errors
+    /// The backend cannot resolve its working root.
+    pub fn workspace(fs: Arc<dyn FsBackend>, self_id: String) -> std::io::Result<Self> {
+        let root = fs.working_root()?;
+        Ok(Self::workspace_at(fs, std::path::Path::new(&root), self_id))
+    }
+
+    /// A mailbox at an explicit root in the supplied backend's namespace.
+    #[must_use]
+    pub fn workspace_at(fs: Arc<dyn FsBackend>, root: &std::path::Path, self_id: String) -> Self {
         Self::new(
-            Arc::new(crate::fs_backend::StdFsBackend),
+            fs,
             self_id,
             InboxConvention::new(
                 strip_windows_verbatim_prefix(&root.to_string_lossy()).into_owned(),
@@ -347,15 +362,14 @@ impl Mailbox {
     /// Whether the backend frames appends at `path` itself (a DT_STREAM record
     /// per append) rather than leaving framing to us (a JSONL line per append).
     ///
-    /// Asked per call, deliberately — do NOT cache it on the struct. For
-    /// `KernelFsBackend` this is a real `sys_stat`, so the answer CHANGES the
-    /// moment [`Self::ensure_conversation`] creates the stream: resolved once at
-    /// construction it would be `false` forever, and a provisioned DT_STREAM
-    /// inbox would be written and read as JSONL. The call is cheap — a string
-    /// test for the VFS backend, a constant `false` for the file one.
+    /// Classification comes from the backend's current entry type. Errors
+    /// propagate to the caller. Polling obtains data and its cursor directly
+    /// through `tail_read` within that operation's wait budget.
     #[inline]
-    fn backend_frames(&self, path: &str) -> bool {
-        self.backend.is_append_stream(path).unwrap_or(false)
+    fn backend_frames(&self, path: &str) -> Result<bool, String> {
+        self.backend
+            .is_append_stream(path)
+            .map_err(|error| format!("classify mailbox {path}: {error}"))
     }
 
     /// A nexus A2A mailbox for `agent` over an already-dialled client.
@@ -437,30 +451,30 @@ impl Mailbox {
             .map(|register| register.map(|r| r.read_offset))
     }
 
-    /// Take everything this agent has not read from `peer`, advancing the
-    /// recorded position past it.
-    ///
-    /// The one-shot counterpart to the receiver loop: that one parks and hands
-    /// each envelope to a sink, this returns the batch and returns. They
-    /// advance the SAME position, which is the point — a session that drains
-    /// and a receiver that tails cannot re-deliver each other's work, and
-    /// neither needs a consumed-offset file of its own.
-    ///
-    /// The position advances past every envelope taken, including ones the
-    /// caller filters out afterwards. That is deliberate: they were read, and
-    /// leaving them unread would hand them back on every later call.
-    ///
-    /// # Errors
-    /// Returns an error when the transcript cannot be read or the position
-    /// cannot be recorded.
-    pub fn take_unread(&self, peer: &str) -> Result<Vec<MailboxEnvelope>, String> {
-        let reader = self.conversation_reader(peer);
-        let from = reader.load()?.map_or(0, |r| r.read_offset);
-        let (messages, next) = self.poll_conversation(peer, from, 0)?;
-        if next > from {
-            reader.commit(next)?;
+    /// Read without advancing the durable cursor. The returned receipt holds
+    /// the exclusive reader until acknowledgement or drop. A dropped batch
+    /// stays unread, including after a process crash.
+    pub fn read_unread(&self, peer: &str) -> Result<Option<UnreadBatch>, String> {
+        let Some(reader) = self.conversation_reader(peer).acquire()? else {
+            return Ok(None);
+        };
+        let (messages, next) = self.poll_conversation(peer, reader.offset, 0)?;
+        Ok(Some(UnreadBatch {
+            messages,
+            next,
+            reader,
+        }))
+    }
+
+    /// Gather pending deliveries across conversations, retaining their receipts.
+    pub fn read_pending(&self) -> Result<PendingMessages, String> {
+        let mut batches = Vec::new();
+        for peer in self.list_conversations()? {
+            if let Some(batch) = self.read_unread(&peer)? {
+                batches.push(batch);
+            }
         }
-        Ok(messages)
+        Ok(PendingMessages { batches })
     }
 
     /// Make this agent discoverable before it has any conversations.
@@ -596,7 +610,7 @@ impl Mailbox {
         // success.
         self.ensure_provisioned(&envelope.to)?;
 
-        if self.backend_frames(&path) {
+        if self.backend_frames(&path)? {
             return self
                 .backend
                 .append(&path, &envelope.to_bytes())
@@ -655,17 +669,16 @@ impl Mailbox {
         block_ms: u64,
     ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
         let path = self.transcript_path(peer);
-        let is_stream = self.backend_frames(&path);
-        if is_stream {
-            self.poll_stream(&path, cursor, block_ms)
-        } else {
-            self.poll_jsonl(&path, cursor, block_ms)
-        }
+        let (mut messages, next) = self.poll_tail(&path, cursor, block_ms)?;
+        // Session control has its own generation-aware codec and consumer.
+        // All peer consumers skip those frames while advancing past them.
+        messages.retain(|message| message.kind != a2a::session::SESSION_KIND);
+        Ok((messages, next))
     }
 
-    /// DT_STREAM: one frame per `tail_read`, drain burst non-blocking
-    /// after the first blocking read (same pattern as `nexus_mailbox::poll_new`).
-    fn poll_stream(
+    /// Drain backend-owned chunks without a separate type lookup. A chunk is
+    /// either a complete envelope frame or a batch of JSONL envelope records.
+    fn poll_tail(
         &self,
         path: &str,
         mut cursor: u64,
@@ -683,7 +696,11 @@ impl Mailbox {
             if eof {
                 break;
             }
-            if let Some(env) = MailboxEnvelope::from_bytes(&data) {
+            let envelopes = MailboxEnvelope::from_bytes(&data).map_or_else(
+                || crate::agent_mailbox::parse_envelope_lines(&data),
+                |envelope| vec![envelope],
+            );
+            for env in envelopes {
                 if !env.from.is_empty() && env.from != self.self_id && !env.body.is_empty() {
                     out.push(env);
                 }
@@ -696,45 +713,13 @@ impl Mailbox {
         Ok((out, cursor))
     }
 
-    /// JSONL: `tail_read` returns raw bytes, split by newline.
-    fn poll_jsonl(
-        &self,
-        path: &str,
-        cursor: u64,
-        block_ms: u64,
-    ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
-        let (data, next, _eof) = self
-            .backend
-            .tail_read(path, cursor, block_ms)
-            .map_err(|e| format!("mailbox poll {path}@{cursor}: {e}"))?;
-        if data.is_empty() {
-            return Ok((vec![], next));
-        }
-        let text = String::from_utf8_lossy(&data);
-        let out: Vec<MailboxEnvelope> = text
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    return None;
-                }
-                let env = MailboxEnvelope::from_bytes(trimmed.as_bytes())?;
-                if env.from.is_empty() || env.from == self.self_id || env.body.is_empty() {
-                    return None;
-                }
-                Some(env)
-            })
-            .collect();
-        Ok((out, next))
-    }
-
     /// Read the whole conversation with `peer` (batch read). Primarily for the
     /// coordinator's multi-turn loop, which drains between turns.
     pub fn read_conversation(&self, peer: &str) -> Result<Vec<MailboxEnvelope>, String> {
         let path = self.transcript_path(peer);
-        let is_stream = self.backend_frames(&path);
+        let is_stream = self.backend_frames(&path)?;
         if is_stream {
-            let (envs, _cursor) = self.poll_stream(&path, 0, 0)?;
+            let (envs, _cursor) = self.poll_tail(&path, 0, 0)?;
             Ok(envs)
         } else {
             // Through the backend, for the same reason the write is: the
@@ -752,7 +737,8 @@ impl Mailbox {
     ///
     /// # Errors
     ///
-    /// An `Err` when the namespace cannot be enumerated, or when an entry's
+    /// A namespace whose directory has not been created yet has no recipients.
+    /// An `Err` when an existing namespace cannot be enumerated, or when an entry's
     /// presence cannot be determined — never an empty list, and never a silently
     /// shortened one. The difference matters to every caller: a broadcast over "no
     /// recipients" reports success having delivered nothing, and an agent told it
@@ -760,10 +746,11 @@ impl Mailbox {
     /// has to remember to ask first.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
         let dir = self.convention.agents_dir();
-        let entries = self
-            .backend
-            .readdir(&dir)
-            .map_err(|e| format!("list recipients at {dir}: {e}"))?;
+        let entries = match self.backend.readdir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(format!("list recipients at {dir}: {error}")),
+        };
         // A recipient is an agent that ANNOUNCED presence, and presence is a
         // `conversations` subdir under `agents_dir/<name>/` (the
         // `ensure_presence` contract). Filter to that shape so infrastructure
@@ -846,21 +833,9 @@ impl Mailbox {
     }
 }
 
-/// One agent's durable read position in one conversation, and the instance
-/// currently advancing it.
-///
-/// The three fields are ONE register deliberately. A reader whose position
-/// lived in one place and whose lease lived in another can be observed
-/// half-updated — a new holder reading the previous holder's offset, or an
-/// offset advancing under a lease already handed away. Written together, every
-/// read sees a self-consistent triple, and that is what lets the claim protocol
-/// below be plain read-after-write with no compare-and-swap underneath it.
-///
-/// Durable facts only: where this agent has read to, and until when the seat is
-/// spoken for. Both outlive the process that wrote them, which is the point —
-/// this replaced a dotfile beside the workspace, and a position that lives on
-/// one machine is lost the moment the agent is restarted on another. That is
-/// not hypothetical: it is half of what the Win↔Mac duet hit.
+/// An agent's durable position in one conversation. Legacy holder fields are
+/// retained for compatibility; exclusive ownership comes from the backend lock,
+/// never from reading and overwriting this register.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReaderRegister {
     /// The instance tailing this conversation for this agent, empty if the seat
@@ -868,7 +843,7 @@ pub struct ReaderRegister {
     /// agent are exactly what this has to tell apart.
     #[serde(default)]
     pub holder: String,
-    /// Unix millis after which another instance may take the seat.
+    /// Legacy diagnostic deadline; the backend lock controls ownership.
     #[serde(default)]
     pub lease_expires_at: u64,
     /// Offset past the last envelope this agent has taken responsibility for.
@@ -880,8 +855,8 @@ pub struct ReaderRegister {
 ///
 /// This is a deadlock escape, not a safety boundary: it bounds how long a
 /// conversation goes untailed after an instance dies without releasing. It
-/// compares wall clocks across machines, so it is sized far above any
-/// plausible NTP skew rather than tightly.
+/// is enforced by the backend lock manager. This client never steals a seat
+/// based on a timestamp stored in the cursor file.
 const READER_LEASE_MS: u64 = 30_000;
 
 /// Renew once the lease is half spent, so a renewal has a full half-lease to
@@ -904,6 +879,10 @@ const READER_RENEW_MS: u64 = READER_LEASE_MS / 2;
 const CONVERSATION_DISCOVERY_MS: u64 = 1_000;
 
 const LOCAL_POLL_BLOCK_MS: u64 = 1000;
+
+/// Refused inputs stay unread and retry with backoff, capped at the renewal
+/// interval so a fast consumer failure cannot spin or defer lease renewal.
+const DELIVERY_RETRY_INITIAL_MS: u64 = 1_000;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -941,28 +920,7 @@ fn instance_id() -> String {
     format!("{}-{nanos}-{seq}", std::process::id())
 }
 
-/// Whether this instance holds the reader seat for a conversation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Seat {
-    /// Held by us; carries the position to resume from.
-    Taken(u64),
-    /// Held by another live instance until this unix-millis deadline.
-    HeldBy(u64),
-}
-
-/// This mailbox's read position in one conversation, as a claimable seat.
-///
-/// Exactly one instance advances a given agent's position in a given
-/// conversation. Without that, two instances of one agent each tail the same
-/// transcript and each advance the same offset, so every message is handled
-/// twice or handled by whichever raced ahead — and the other instance never
-/// sees it, because the offset it would have read from has already moved.
-///
-/// The seat is claimed by read-after-write, which is sound here for one
-/// specific reason: the register is a single replicated value, so concurrent
-/// claims serialise and the last writer wins. Every claimant then reads back
-/// and only the one that sees its own holder proceeds. No compare-and-swap
-/// primitive is needed, and none exists to use.
+/// A durable cursor guarded by the backend's atomic exclusive lock.
 pub struct ConversationReader {
     backend: Arc<dyn FsBackend>,
     path: String,
@@ -984,11 +942,7 @@ impl ConversationReader {
     }
 
     fn store(&self, register: &ReaderRegister) -> Result<(), String> {
-        // `write_atomic` renames into place and will not create the parent,
-        // and the side that provisioned this conversation had no reader of its
-        // own to make room for. Done here rather than at the claim, because a
-        // claim is not the only thing that writes: a one-shot `take_unread`
-        // commits without ever claiming, and it hit exactly this.
+        // Cursor replacement must not replace the inode holding the OS lock.
         if let Some((dir, _)) = self.path.rsplit_once('/') {
             self.backend
                 .create_dir_all(dir)
@@ -1001,88 +955,152 @@ impl ConversationReader {
             .map_err(|e| format!("write reader register {}: {e}", self.path))
     }
 
-    /// Take the seat if it is free or expired, and report the position to
-    /// resume from.
-    fn acquire(&self) -> Result<Seat, String> {
-        let now = now_ms();
-        let current = self.load()?;
-        if let Some(held) = current
-            .as_ref()
-            .filter(|r| !r.holder.is_empty() && r.holder != self.holder && r.lease_expires_at > now)
-        {
-            return Ok(Seat::HeldBy(held.lease_expires_at));
+    fn acquire(self) -> Result<Option<OwnedReader>, String> {
+        let lock_path = format!("{}.lock", self.path);
+        if let Some((dir, _)) = self.path.rsplit_once('/') {
+            self.backend
+                .create_dir_all(dir)
+                .map_err(|e| format!("create reader directory {dir}: {e}"))?;
         }
-
-        // A first read starts at the BEGINNING. There is deliberately no
-        // seek-to-tail: a transcript carries one pair's conversation, so its
-        // history belongs to this reader, and what seeking skipped was the
-        // peer's opening message. The re-reply storm that seeking was added to
-        // prevent came from a SHARED inbox, where a restarting agent replayed
-        // everything every peer had ever sent it. Against a per-pair transcript
-        // with a durable position, a restart resumes and replays nothing.
-        //
-        // Nor is there a clamp for a position past the tail. That guarded a
-        // position kept in a node-local file while the stream lived in the
-        // cluster, so the two could outlive each other; the register now sits
-        // beside the transcript it describes and they are created and destroyed
-        // together.
-        let resume = current.as_ref().map_or(0, |r| r.read_offset);
-
-        self.store(&ReaderRegister {
-            holder: self.holder.clone(),
-            lease_expires_at: now + READER_LEASE_MS,
-            read_offset: resume,
-        })?;
-        match self.load()? {
-            Some(back) if back.holder == self.holder => Ok(Seat::Taken(back.read_offset)),
-            Some(back) => Ok(Seat::HeldBy(back.lease_expires_at)),
-            // Vanished between write and read-back: something deleted the
-            // conversation under us. Treat as contended rather than looping.
-            None => Ok(Seat::HeldBy(now + READER_LEASE_MS)),
-        }
-    }
-
-    /// Record `offset` as read and renew the lease. `Ok(false)` means the seat
-    /// was taken over and this instance must stop advancing it.
-    ///
-    /// Also the renewal path — renewing is committing the position already
-    /// held, so there is one write and one place that can get it wrong.
-    fn commit(&self, offset: u64) -> Result<bool, String> {
-        if let Some(current) = self.load()? {
-            if current.holder != self.holder {
-                return Ok(false);
-            }
-        }
+        let Some(lock) = self
+            .backend
+            .try_lock(&lock_path, READER_LEASE_MS)
+            .map_err(|e| format!("claim reader {}: {e}", self.path))?
+        else {
+            return Ok(None);
+        };
+        let offset = self.load()?.map_or(0, |r| r.read_offset);
         self.store(&ReaderRegister {
             holder: self.holder.clone(),
             lease_expires_at: now_ms() + READER_LEASE_MS,
             read_offset: offset,
         })?;
-        Ok(true)
+        let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_stop = Arc::clone(&stop);
+        let worker_valid = Arc::clone(&valid);
+        let worker_lock = Arc::clone(&lock);
+        // Renewal is independent of the sink: a model turn can block for longer
+        // than the lease. No cursor writes occur on the renewal thread.
+        let renewer = std::thread::Builder::new()
+            .name("mailbox-lease".into())
+            .spawn(move || {
+                let (mutex, wake) = &*worker_stop;
+                loop {
+                    let stopped = mutex
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let (stopped, _) = wake
+                        .wait_timeout_while(
+                            stopped,
+                            std::time::Duration::from_millis(READER_RENEW_MS),
+                            |stopped| !*stopped,
+                        )
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if *stopped {
+                        break;
+                    }
+                    drop(stopped);
+                    if !matches!(worker_lock.renew(), Ok(true)) {
+                        worker_valid.store(false, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| format!("start reader lease renewal: {e}"))?;
+        Ok(Some(OwnedReader {
+            reader: self,
+            lock,
+            stop,
+            valid,
+            renewer: Some(renewer),
+            offset,
+        }))
+    }
+}
+
+struct OwnedReader {
+    reader: ConversationReader,
+    lock: Arc<dyn crate::fs_backend::FsLock>,
+    stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    valid: Arc<std::sync::atomic::AtomicBool>,
+    renewer: Option<std::thread::JoinHandle<()>>,
+    offset: u64,
+}
+
+impl OwnedReader {
+    fn is_valid(&self) -> bool {
+        self.valid.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Give the seat up, keeping the position.
-    ///
-    /// Without this a clean shutdown still holds the seat until the lease runs
-    /// out, so an agent restarted inside that window is locked out of its own
-    /// conversation and simply appears not to receive. The lease is the
-    /// recovery path for an instance that DIED; an instance that is leaving
-    /// says so.
-    ///
-    /// A no-op when the seat has already moved on, so a tail that was taken
-    /// over cannot evict its successor on the way out.
-    fn release(&self) -> Result<(), String> {
-        let Some(current) = self.load()? else {
-            return Ok(());
-        };
-        if current.holder != self.holder {
-            return Ok(());
+    fn commit(&mut self, offset: u64) -> Result<(), String> {
+        if !self.is_valid()
+            || !self
+                .lock
+                .renew()
+                .map_err(|e| format!("renew reader: {e}"))?
+        {
+            self.valid
+                .store(false, std::sync::atomic::Ordering::Release);
+            return Err("reader ownership lost; delivery remains unacknowledged".into());
         }
-        self.store(&ReaderRegister {
-            holder: String::new(),
-            lease_expires_at: 0,
-            read_offset: current.read_offset,
-        })
+        self.reader.store(&ReaderRegister {
+            holder: self.reader.holder.clone(),
+            lease_expires_at: now_ms() + READER_LEASE_MS,
+            read_offset: offset,
+        })?;
+        self.offset = offset;
+        Ok(())
+    }
+}
+
+impl Drop for OwnedReader {
+    fn drop(&mut self) {
+        let (mutex, wake) = &*self.stop;
+        *mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        wake.notify_all();
+        if let Some(renewer) = self.renewer.take() {
+            let _ = renewer.join();
+        }
+        // The lock is released only after the renewal worker has stopped.
+    }
+}
+
+/// A pending delivery. Only acknowledge after the consumer durably records its
+/// successful turn; filtering or enqueueing alone does not consume the batch.
+pub struct UnreadBatch {
+    messages: Vec<MailboxEnvelope>,
+    next: u64,
+    reader: OwnedReader,
+}
+
+impl UnreadBatch {
+    #[must_use]
+    pub fn messages(&self) -> &[MailboxEnvelope] {
+        &self.messages
+    }
+    pub fn acknowledge(mut self) -> Result<(), String> {
+        self.reader.commit(self.next)
+    }
+}
+
+/// Pending deliveries sharing one acknowledgement boundary.
+#[derive(Default)]
+pub struct PendingMessages {
+    batches: Vec<UnreadBatch>,
+}
+
+impl PendingMessages {
+    pub fn messages(&self) -> impl Iterator<Item = &MailboxEnvelope> {
+        self.batches.iter().flat_map(UnreadBatch::messages)
+    }
+    pub fn acknowledge(self) -> Result<(), String> {
+        for batch in self.batches {
+            batch.acknowledge()?;
+        }
+        Ok(())
     }
 }
 
@@ -1200,83 +1218,43 @@ fn spawn_conversation_tail(
     std::thread::Builder::new()
         .name(format!("{label}-tail"))
         .spawn(move || {
-            let reader = mailbox.conversation_reader(&peer);
-            // Outer loop re-claims: a seat held by an instance that then dies is
-            // free once its lease expires, and nobody is coming to tell us.
             while !abort.is_aborted() {
-                let mut cursor = match reader.acquire() {
-                    Ok(Seat::Taken(at)) => at,
-                    Ok(Seat::HeldBy(until)) => {
-                        // A clean shutdown can release before this deadline.
-                        // Re-read the durable register so a replacement does
-                        // not sleep through that handoff for the whole lease.
-                        sleep_unless_aborted(
-                            &abort,
-                            until
-                                .saturating_sub(now_ms())
-                                .clamp(1, CONVERSATION_DISCOVERY_MS),
-                        );
+                let mut reader = match mailbox.conversation_reader(&peer).acquire() {
+                    Ok(Some(reader)) => reader,
+                    Ok(None) => {
+                        sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
                         continue;
                     }
                     Err(e) => {
-                        eprintln!("[{label}] claiming the reader seat for {peer} failed: {e}");
+                        eprintln!("[{label}] claiming reader for {peer}: {e}");
                         sleep_unless_aborted(&abort, block_ms.max(1));
                         continue;
                     }
                 };
-                let mut renew_at = now_ms() + READER_RENEW_MS;
-                while !abort.is_aborted() {
-                    let (msgs, next) = match mailbox.poll_conversation(&peer, cursor, block_ms) {
-                        Ok(batch) => batch,
-                        Err(e) => {
-                            eprintln!("[{label}] polling the conversation with {peer} failed: {e}");
-                            // Avoid a hot error loop when the backend is sick;
-                            // the blocking read itself paces the happy path.
-                            sleep_unless_aborted(&abort, block_ms.max(1));
-                            continue;
+                let mut retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
+                while !abort.is_aborted() && reader.is_valid() {
+                    let (msgs, next) =
+                        match mailbox.poll_conversation(&peer, reader.offset, block_ms) {
+                            Ok(batch) => batch,
+                            Err(e) => {
+                                eprintln!("[{label}] polling conversation with {peer}: {e}");
+                                sleep_unless_aborted(&abort, block_ms.max(1));
+                                continue;
+                            }
+                        };
+                    if msgs.iter().all(|m| reader.is_valid() && sink(m)) {
+                        retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
+                        if next > reader.offset {
+                            if let Err(e) = reader.commit(next) {
+                                eprintln!("[{label}] committing reader for {peer}: {e}");
+                                break;
+                            }
                         }
-                    };
-                    let accepted = msgs.iter().all(|m| sink(m));
-                    // Commit only on real forward progress the consumer took in
-                    // full, otherwise only when the lease needs renewing. A
-                    // batch is all-or-nothing because the position is one
-                    // offset — there is no way to say "past the second but not
-                    // the third". Re-delivering an accepted envelope is the
-                    // tolerable half of that: at-least-once, the right side to
-                    // err on for mail.
-                    let commit_at = if accepted && next > cursor {
-                        next
-                    } else if now_ms() >= renew_at {
-                        cursor
                     } else {
-                        continue;
-                    };
-                    match reader.commit(commit_at) {
-                        Ok(true) => {
-                            cursor = commit_at;
-                            renew_at = now_ms() + READER_RENEW_MS;
-                        }
-                        // Another instance of this agent took the seat. It is
-                        // now the one advancing the position; two tails
-                        // advancing one offset is the split this prevents.
-                        Ok(false) => {
-                            eprintln!(
-                                "[{label}] the reader seat for {peer} was taken over; \
-                                 stopping this tail"
-                            );
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("[{label}] committing the read position for {peer}: {e}");
-                            sleep_unless_aborted(&abort, block_ms.max(1));
-                        }
+                        sleep_unless_aborted(&abort, retry_delay_ms);
+                        retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
                     }
                 }
-            }
-            // Hand the seat back rather than leaving the next instance to wait
-            // out a lease held by a process that has already stopped.
-            if let Err(e) = reader.release() {
-                eprintln!("[{label}] releasing the reader seat for {peer} failed: {e}");
             }
         })
         .expect("spawn conversation tail thread")
@@ -1751,10 +1729,12 @@ mod tests {
             .send(note("parent", "worker", "follow-up"))
             .expect("a verbatim root must support creating chat-list paths");
         let unread = receiver
-            .take_unread("parent")
-            .expect("worker receives mail");
-        assert_eq!(unread.len(), 1);
-        assert_eq!(unread[0].body, "follow-up");
+            .read_unread("parent")
+            .expect("worker receives mail")
+            .expect("reader available");
+        assert_eq!(unread.messages().len(), 1);
+        assert_eq!(unread.messages()[0].body, "follow-up");
+        unread.acknowledge().unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 

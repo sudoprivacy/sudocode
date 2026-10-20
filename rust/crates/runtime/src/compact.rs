@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::fmt;
+use std::fmt::{self, Write};
 
 use crate::conversation::ApiClient;
 use crate::session::{ContentBlock, ConversationMessage, MessageRole, Session};
@@ -111,6 +111,16 @@ impl ContextBudget {
             .saturating_sub(self.max_output_tokens + self.overhead_tokens + self.buffer_tokens)
     }
 
+    /// Include the buffer and reject negative capacity instead of treating it as zero.
+    #[must_use]
+    pub fn fits_buffered(&self, history_tokens: usize) -> bool {
+        history_tokens
+            .checked_add(self.max_output_tokens)
+            .and_then(|tokens| tokens.checked_add(self.overhead_tokens))
+            .and_then(|tokens| tokens.checked_add(self.buffer_tokens))
+            .is_some_and(|tokens| tokens <= self.context_limit)
+    }
+
     /// Tokens of *provider-reported* context that still fit, buffer included.
     ///
     /// Compare this against a number that came back from the provider
@@ -218,7 +228,9 @@ impl Default for CompactionConfig {
 
 impl CompactionConfig {
     /// Retain a token-priced suffix, with the configured message floor and
-    /// complete tool exchanges. A single large exchange is never split.
+    /// complete tool exchanges. The checkpoint planner may relax this floor
+    /// when retained image results leave no room for a useful summary. A
+    /// single exchange is never split.
     #[must_use]
     pub fn with_token_retention(mut self, session: &Session, tokens: usize) -> Self {
         let mut accumulated = 0;
@@ -248,6 +260,8 @@ pub fn unchanged_compaction(session: &Session) -> CompactionResult {
         compacted_session: session.clone(),
         removed_message_count: 0,
         summary_source: CompactionSummarySource::Llm,
+        report: None,
+        source_revision: None,
     }
 }
 
@@ -287,17 +301,19 @@ pub(crate) fn validate_completion(
         response.stop_reason.as_deref(),
         Some("max_tokens" | "length" | "incomplete")
     ) {
-        return Err(RuntimeError::new(
+        return Err(RuntimeError::invalid_compaction_summary(
             "compaction summary was truncated at the output limit",
         ));
     }
     if response.has_tool_calls {
-        return Err(RuntimeError::new(
+        return Err(RuntimeError::invalid_compaction_summary(
             "compaction returned tool calls instead of a complete checkpoint",
         ));
     }
     if response.text.trim().is_empty() {
-        return Err(RuntimeError::new("compaction returned no summary text"));
+        return Err(RuntimeError::invalid_compaction_summary(
+            "compaction returned no summary text",
+        ));
     }
     Ok(response.text)
 }
@@ -353,6 +369,289 @@ impl fmt::Display for CompactionSummarySource {
     }
 }
 
+/// Strict compaction outcomes; every success reaches both the ratio and request budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionOutcome {
+    TargetMet,
+    Skipped,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CompactionReport {
+    pub run_id: String,
+    pub before_history: usize,
+    pub after_history: usize,
+    pub target_history: Option<usize>,
+    pub ideal_history: Option<usize>,
+    pub source_safe_history_budget: usize,
+    pub safe_history_budget: usize,
+    pub actual_fixed_overhead: usize,
+    pub method: Option<String>,
+    pub outcome: CompactionOutcome,
+    pub reason: Option<String>,
+    pub attempts: usize,
+    pub completed_responses: usize,
+    pub estimate_source: String,
+}
+
+pub(crate) const COMPACTION_POLICY_VERSION: &str = "strict-history-v2-estimator-v1";
+const MIN_SUMMARY_HEADROOM: usize = 512;
+
+/// Immutable source, tail and Todo framing reused for all attempts of one run.
+pub(crate) struct PreparedCompaction {
+    source: Session,
+    keep_from: usize,
+    todo: Option<String>,
+    pub raw_summary_budget: usize,
+    ideal_summary_budget: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CompactionAttemptOptions<'a> {
+    pub custom: Option<&'a str>,
+    pub cache_safe: bool,
+    pub visible_cap: usize,
+    pub quality_retry: bool,
+}
+
+impl PreparedCompaction {
+    pub fn new(source: &Session, config: CompactionConfig, target: usize, ideal: usize) -> Self {
+        let mut keep_from = find_safe_compaction_boundary(
+            source,
+            source
+                .messages
+                .len()
+                .saturating_sub(config.preserve_recent_messages),
+            0,
+        );
+        let todo = render_todo_continuity_block(source.fs_handle());
+        let fixed_cost = |boundary| {
+            let framing =
+                frozen_continuation("", todo.as_deref(), boundary < source.messages.len());
+            estimate_message_tokens(&ConversationMessage::user_text(framing))
+                + source.messages[boundary..]
+                    .iter()
+                    .map(estimate_message_tokens)
+                    .sum::<usize>()
+        };
+        let mut fixed = fixed_cost(keep_from);
+        // The configured recent-message floor can itself exceed the target
+        // when it contains image tool results. Keep the latest complete
+        // exchange so an in-flight image remains visible, but allow older
+        // image exchanges into the summary when the floor leaves no room for
+        // a useful checkpoint. Text-only protected tails retain their floor.
+        let latest_exchange =
+            find_safe_compaction_boundary(source, source.messages.len().saturating_sub(1), 0);
+        let has_retained_image = source.messages[keep_from..].iter().any(|message| {
+            message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        });
+        if has_retained_image && fixed.saturating_add(32 + MIN_SUMMARY_HEADROOM) >= target {
+            for candidate in keep_from + 1..=latest_exchange {
+                if find_safe_compaction_boundary(source, candidate, 0) != candidate {
+                    continue;
+                }
+                keep_from = candidate;
+                fixed = fixed_cost(candidate);
+                if fixed.saturating_add(32 + MIN_SUMMARY_HEADROOM) < target {
+                    break;
+                }
+            }
+        }
+        Self {
+            source: source.clone(),
+            keep_from,
+            todo,
+            raw_summary_budget: target.saturating_sub(fixed + 32),
+            ideal_summary_budget: ideal.saturating_sub(fixed + 32),
+        }
+    }
+
+    pub fn has_source(&self) -> bool {
+        self.keep_from > 0
+    }
+
+    pub fn todo_unchanged(&self) -> bool {
+        self.todo == render_todo_continuity_block(self.source.fs_handle())
+    }
+
+    /// One request only. Retry and provider fallback share the caller's run scope.
+    // Keep the preflight, single send and staged candidate in one auditable path.
+    #[allow(clippy::too_many_lines)]
+    pub async fn attempt<C: ApiClient>(
+        &self,
+        api: &mut C,
+        model: &str,
+        system: &crate::prompt::SystemPrompt,
+        options: CompactionAttemptOptions<'_>,
+    ) -> Result<CompactionResult, crate::conversation::RuntimeError> {
+        use crate::conversation::{ApiRequest, RuntimeError};
+        let CompactionAttemptOptions {
+            custom,
+            cache_safe,
+            visible_cap: cap,
+            quality_retry,
+        } = options;
+        let model_output_limit =
+            crate::model_capabilities::max_output_tokens_or_default(model) as usize;
+        let thinking = if cache_safe
+            && api.thinking_enabled()
+            && crate::model_capabilities::anthropic_thinking_mode(model)
+                == crate::model_capabilities::AnthropicThinkingMode::Budgeted
+            && crate::model_capabilities::request_max_output_tokens(model)
+                > crate::model_capabilities::MIN_THINKING_BUDGET_TOKENS
+        {
+            crate::model_capabilities::thinking_budget_tokens(model) as usize
+        } else {
+            0
+        };
+        let visible_cap = cap
+            .min(self.raw_summary_budget)
+            .min(COMPACT_MAX_OUTPUT_TOKENS as usize)
+            .min(model_output_limit.saturating_sub(thinking));
+        if visible_cap == 0 {
+            return Err(RuntimeError::new(
+                "protected history leaves no summary budget",
+            ));
+        }
+        let mut prompt = build_compaction_prompt(custom);
+        let _ = write!(prompt, "\n\nThis run requires the entire summary to fit within {visible_cap} tokens. Aim for {} tokens. Preserve all task-critical facts; consolidate redundant history. This is a strict ceiling, including all eight sections and summary tags.", if self.ideal_summary_budget == 0 { visible_cap.min(8_000) } else { self.ideal_summary_budget.min(8_000).min(visible_cap) });
+        if quality_retry {
+            let _ = write!(prompt, "\nThe preceding checkpoint was rejected. Start again from the full original source above. Remove repetition and superseded details, keep every active constraint and pending action, and aim below {} tokens so the checkpoint closes completely. Do not copy the rejected checkpoint.", visible_cap.min(self.ideal_summary_budget.max(visible_cap * 3 / 4)));
+        }
+        let mut request = ApiRequest {
+            system_prompt: if cache_safe {
+                system.clone()
+            } else {
+                {
+                    let mut p = crate::prompt::SystemPrompt::default();
+                    p.append_static_section(COMPACTION_SYSTEM_PROMPT);
+                    p
+                }
+            },
+            messages: if cache_safe {
+                self.source.messages[..self.keep_from].to_vec()
+            } else {
+                build_compaction_messages(&self.source.messages[..self.keep_from], &prompt)
+            },
+            trace_id: None,
+            pre_compact_discovered_tools: extract_pre_compact_discovered_tools(&self.source),
+        };
+        let output = visible_cap.saturating_add(thinking);
+        if output > crate::model_capabilities::max_output_tokens_or_default(model) as usize {
+            return Err(RuntimeError::context_window_blocked(
+                "cache-safe summary output reservation exceeds routed model output limit",
+            ));
+        }
+        if cache_safe {
+            request
+                .messages
+                .push(ConversationMessage::user_text(&prompt));
+        }
+        let input: usize = request.messages.iter().map(estimate_message_tokens).sum();
+        let budget = api.context_budget_for_completion(
+            model,
+            &request,
+            crate::conversation::TextCompletionOptions {
+                max_tokens: u32::try_from(output).unwrap_or(u32::MAX),
+                include_tools: cache_safe,
+                cache_prefix: cache_safe,
+                thinking_enabled: cache_safe && api.thinking_enabled(),
+            },
+        );
+        if !budget.fits_buffered(input) {
+            return Err(RuntimeError::context_window_blocked(
+                "summary request exceeds its context budget; no request sent",
+            ));
+        }
+        let summary = if cache_safe {
+            // The client appends the prompt itself.
+            request.messages.pop();
+            api.send_cache_safe_compaction(
+                request,
+                &prompt,
+                u32::try_from(output).unwrap_or(u32::MAX),
+            )
+            .await?
+        } else {
+            api.send_compaction(
+                model,
+                COMPACTION_SYSTEM_PROMPT,
+                request.messages,
+                u32::try_from(output).unwrap_or(u32::MAX),
+            )
+            .await?
+        };
+        validate_summary(&summary, &self.source.messages[..self.keep_from]).map_err(
+            |e| match e {
+                CompactionError::InvalidSummary(reason) => {
+                    RuntimeError::invalid_compaction_summary(reason)
+                }
+                error => RuntimeError::invalid_compaction_summary(error.to_string()),
+            },
+        )?;
+        if summary.len() / 4 + 1 > visible_cap {
+            return Err(RuntimeError::invalid_compaction_summary(
+                "summary exceeds visible output ceiling",
+            ));
+        }
+        let continuation = frozen_continuation(
+            &summary,
+            self.todo.as_deref(),
+            self.keep_from < self.source.messages.len(),
+        );
+        let mut session = self.source.clone();
+        session.messages = vec![ConversationMessage {
+            role: MessageRole::System,
+            blocks: vec![ContentBlock::Text { text: continuation }],
+            usage: None,
+            model: None,
+            duration_ms: None,
+        }];
+        session
+            .messages
+            .extend_from_slice(&self.source.messages[self.keep_from..]);
+        session.record_compaction_with_usage(
+            summary.clone(),
+            self.keep_from,
+            aggregate_compaction_usage(
+                self.source.compaction.as_ref().and_then(|c| c.usage),
+                &self.source.messages[..self.keep_from],
+            ),
+            extract_pre_compact_discovered_tools(&self.source),
+        );
+        Ok(CompactionResult {
+            formatted_summary: format_compact_summary(&summary),
+            summary,
+            compacted_session: session,
+            removed_message_count: self.keep_from,
+            summary_source: CompactionSummarySource::Llm,
+            report: None,
+            source_revision: None,
+        })
+    }
+}
+
+fn frozen_continuation(summary: &str, todo: Option<&str>, recent: bool) -> String {
+    let mut text = get_compact_continuation_message(summary, false, false, None);
+    if let Some(todo) = todo {
+        text.push_str("\n\n");
+        text.push_str(todo);
+    }
+    if recent {
+        text.push_str("\n\n");
+        text.push_str(COMPACT_RECENT_MESSAGES_NOTE);
+    }
+    text.push('\n');
+    text.push_str(COMPACT_DIRECT_RESUME_INSTRUCTION);
+    text
+}
+
 /// Result of compacting a session into a summary plus preserved tail messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionResult {
@@ -361,6 +660,9 @@ pub struct CompactionResult {
     pub compacted_session: Session,
     pub removed_message_count: usize,
     pub summary_source: CompactionSummarySource,
+    pub report: Option<CompactionReport>,
+    /// Durable source observed before this run; checked by the commit owner.
+    pub source_revision: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,20 +685,7 @@ pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
 fn estimate_single_block_tokens(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text } => text.len() / 4 + 1,
-        ContentBlock::Image { data, .. } => {
-            let base64_len = data.len();
-            if base64_len < 50_000 {
-                85
-            } else if base64_len < 200_000 {
-                256
-            } else if base64_len < 500_000 {
-                512
-            } else if base64_len < 1_000_000 {
-                1000
-            } else {
-                base64_len / 1000
-            }
-        }
+        ContentBlock::Image { data, .. } => estimate_image_tokens(data.len()),
         ContentBlock::ToolUse { name, input, .. } => (name.len() + input.len()) / 4 + 1,
         ContentBlock::ToolResult {
             tool_name, output, ..
@@ -406,6 +695,21 @@ fn estimate_single_block_tokens(block: &ContentBlock) -> usize {
             signature,
         } => thinking.len() / 4 + signature.as_ref().map_or(0, |value| value.len() / 4 + 1),
         ContentBlock::RedactedThinking { data } => data.len() / 4 + 1,
+    }
+}
+
+/// Estimate vision tokens from encoded image size without treating the base64
+/// payload as text. Providers resize large images before tokenizing them.
+#[must_use]
+pub fn estimate_image_tokens(base64_len: usize) -> usize {
+    if base64_len < 50_000 {
+        85
+    } else if base64_len < 200_000 {
+        256
+    } else if base64_len < 500_000 {
+        512
+    } else {
+        1_000
     }
 }
 
@@ -802,6 +1106,8 @@ async fn compact_session_inner<C: ApiClient>(
         compacted_session,
         removed_message_count: removed.len(),
         summary_source: CompactionSummarySource::Llm,
+        report: None,
+        source_revision: None,
     })
 }
 
@@ -811,6 +1117,7 @@ async fn compact_session_inner<C: ApiClient>(
 /// when the API client doesn't support it.
 ///
 /// Matches CC's `streamCompactSummary` path with `tengu_compact_cache_prefix`.
+#[cfg(test)]
 pub async fn compact_session_cache_safe<C: ApiClient>(
     session: &Session,
     config: CompactionConfig,
@@ -835,6 +1142,7 @@ pub async fn compact_session_cache_safe<C: ApiClient>(
     }
 }
 
+#[cfg(test)]
 async fn compact_session_cache_safe_inner<C: ApiClient>(
     session: &Session,
     config: CompactionConfig,
@@ -880,7 +1188,12 @@ async fn compact_session_cache_safe_inner<C: ApiClient>(
     // 32000 and read nothing for it, at HTTP 200, with no symptom but the bill.
     let model_max_output = crate::model_capabilities::max_output_tokens_or_default(model);
     let summary_max_tokens = std::cmp::min(COMPACT_MAX_OUTPUT_TOKENS, model_max_output);
-    let max_tokens = if api_client.thinking_enabled() {
+    // Adaptive mode has no manual budget to clamp; changing only max_tokens
+    // must not change its thinking mode, display, or session effort.
+    let max_tokens = if api_client.thinking_enabled()
+        && crate::model_capabilities::anthropic_thinking_mode(model)
+            == crate::model_capabilities::AnthropicThinkingMode::Budgeted
+    {
         std::cmp::min(
             model_max_output,
             summary_max_tokens
@@ -959,6 +1272,8 @@ async fn compact_session_cache_safe_inner<C: ApiClient>(
         compacted_session,
         removed_message_count: removed.len(),
         summary_source: CompactionSummarySource::Llm,
+        report: None,
+        source_revision: None,
     })
 }
 
@@ -991,6 +1306,8 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
             summary_source: CompactionSummarySource::Local {
                 fallback_reason: None,
             },
+            report: None,
+            source_revision: None,
         };
     }
 
@@ -1050,6 +1367,8 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
         summary_source: CompactionSummarySource::Local {
             fallback_reason: None,
         },
+        report: None,
+        source_revision: None,
     }
 }
 
@@ -1534,6 +1853,7 @@ mod tests {
                     text: "two ".repeat(200),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 10,
                     output_tokens: 4,
                     cache_creation_input_tokens: 1,
@@ -1548,6 +1868,7 @@ mod tests {
                     text: "four ".repeat(200),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 20,
                     output_tokens: 6,
                     cache_creation_input_tokens: 3,
@@ -1595,6 +1916,7 @@ mod tests {
                     text: "I will inspect the compact flow.".to_string(),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 10,
                     output_tokens: 4,
                     cache_creation_input_tokens: 1,
@@ -1609,6 +1931,7 @@ mod tests {
                     text: "Next: preserve prior summary context during auto compact.".to_string(),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 20,
                     output_tokens: 6,
                     cache_creation_input_tokens: 3,
@@ -1632,6 +1955,7 @@ mod tests {
                     text: "Working on regression coverage now.".to_string(),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 30,
                     output_tokens: 8,
                     cache_creation_input_tokens: 4,
@@ -2422,6 +2746,7 @@ mod tests {
                     text: "two ".repeat(200),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 10,
                     output_tokens: 5,
                     cache_creation_input_tokens: 1,
@@ -2441,6 +2766,7 @@ mod tests {
                     text: "six ".repeat(200),
                 }],
                 Some(TokenUsage {
+                    reported_total_tokens: None,
                     input_tokens: 20,
                     output_tokens: 8,
                     cache_creation_input_tokens: 3,

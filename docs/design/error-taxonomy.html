@@ -120,7 +120,7 @@ flowchart TD
 
 <section>
   <h2><span class="n">2</span>Status code → bucket map</h2>
-  <p class="lead">The HTTP status set for the Transport bucket is already a single SSOT (<code>is_retryable_http_status</code>, PR #722/#727).</p>
+  <p class="lead">The HTTP status set for the Transport bucket is already a single SSOT (<code>is_retryable_http_status</code>, PR #722/#727). The shared provider error decoder retains a specific string <code>error.code</code> or the native <code>error.type</code>. A structured <code>model_not_found</code> error takes precedence over that status hint: changing the model route requires human action, so it is never retried automatically, including when a gateway returns HTTP 503. The original reason and trace ID remain visible.</p>
   <table>
     <thead><tr><th>Status / error</th><th>Bucket</th><th>Why</th></tr></thead>
     <tbody>
@@ -133,6 +133,7 @@ flowchart TD
       <tr><td>tool argument error (<code>is_error:true</code>)</td><td><span class="pill model">Model</span></td><td>already goes through llm-revisit (tool_result feedback)</td></tr>
       <tr><td>context-window overflow</td><td><span class="pill model">Model</span> → <span class="pill human">Human</span></td><td>Model while compaction budget remains; Human once exhausted (state-dependent)</td></tr>
       <tr><td><code>401 403</code> / missing key / bad config</td><td><span class="pill human">Human</span></td><td>only a human can supply credentials / fix config</td></tr>
+      <tr><td><code>model_not_found</code>, any HTTP status</td><td><span class="pill human">Human</span></td><td>select an available model or repair the route; one request, no backoff</td></tr>
       <tr><td><code>413</code> request too large</td><td><span class="pill human">Human</span></td><td>needs a human to shrink input (or an upstream compaction strategy)</td></tr>
       <tr><td>malformed server JSON / semantic decode failure</td><td><span class="pill fatal">Fatal</span></td><td>a retry yields the same bad data</td></tr>
     </tbody>

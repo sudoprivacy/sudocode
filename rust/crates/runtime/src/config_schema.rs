@@ -234,6 +234,32 @@ const OAUTH_CHILDREN: &[FieldSchema] = &[
 
 /// All known fields in `settings.json`.
 pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
+    FieldSchema::object(
+        "responseRecording",
+        &[
+            FieldSchema::leaf(
+                "enabled",
+                FieldType::Bool,
+                "Save model response bodies with sessions (default: true)",
+            ),
+            FieldSchema::leaf(
+                "maxResponseBytes",
+                FieldType::Number,
+                "Maximum raw bytes saved per response (default: 33554432)",
+            ),
+            FieldSchema::leaf(
+                "maxSessionBytes",
+                FieldType::Number,
+                "Maximum compressed response bytes per session (default: 268435456)",
+            ),
+        ],
+        "Local model response evidence",
+    ),
+    FieldSchema::leaf(
+        "maxSteps",
+        FieldType::Number,
+        "Maximum tool rounds before answering with existing results",
+    ),
     FieldSchema::leaf("$schema", FieldType::String, "JSON schema URL"),
     {
         let mut f = FieldSchema::leaf("model", FieldType::String, "Active model identifier");
@@ -336,6 +362,11 @@ pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
         "alwaysThinkingEnabled",
         FieldType::Bool,
         "Always request extended thinking",
+    ),
+    FieldSchema::enumerated(
+        "effortLevel",
+        &["auto", "low", "medium", "high", "xhigh", "max"],
+        "Reasoning effort (max applies only to the current session)",
     ),
     FieldSchema::enumerated(
         "teammateMode",

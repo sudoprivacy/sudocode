@@ -87,3 +87,55 @@ fn compacted_summary_survives_save_and_reload() {
         "reloaded message count must match the compacted session"
     );
 }
+
+#[test]
+fn deletion_fences_compaction_and_late_transcript_writes() {
+    let path = temp_path("deleted");
+    let cwd = std::env::current_dir().unwrap();
+    let mut session = Session::new()
+        .with_workspace_root(cwd.clone())
+        .with_persistence_path(path.clone());
+    session.push_user_text("preserve original bytes").unwrap();
+    let journal =
+        runtime::subagent_completion::CompletionJournal::open(&session, &cwd, true).unwrap();
+    let original = fs::read(&path).unwrap();
+    let compacted = session.clone();
+    journal.purge(&journal.storage_ref(), "cleanup").unwrap();
+    assert!(compacted
+        .save_compacted_to_path(&session, &path)
+        .unwrap_err()
+        .to_string()
+        .contains("session_deleted"));
+    assert!(session
+        .rewrite_persisted()
+        .unwrap_err()
+        .to_string()
+        .contains("session_deleted"));
+    assert!(session
+        .persist_maintenance_metadata()
+        .unwrap_err()
+        .to_string()
+        .contains("session_deleted"));
+    assert!(session
+        .offload_tool_result("late", b"do not recreate")
+        .unwrap_err()
+        .to_string()
+        .contains("session_deleted"));
+    assert_eq!(fs::read(&path).unwrap(), original);
+    drop(journal);
+    drop(session);
+    drop(compacted);
+    assert!(Session::load_from_path(&path)
+        .unwrap()
+        .rewrite_persisted()
+        .unwrap_err()
+        .to_string()
+        .contains("session_deleted"));
+    for file in [
+        path.clone(),
+        path.with_extension("completions.json"),
+        path.with_extension("writer.lock"),
+    ] {
+        fs::remove_file(file).unwrap();
+    }
+}

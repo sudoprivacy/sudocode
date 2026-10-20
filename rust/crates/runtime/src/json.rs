@@ -6,6 +6,8 @@ pub enum JsonValue {
     Null,
     Bool(bool),
     Number(i64),
+    /// JSON numbers outside the signed integer range, including tool fractions.
+    NumberValue(serde_json::Number),
     String(String),
     Array(Vec<JsonValue>),
     Object(BTreeMap<String, JsonValue>),
@@ -40,6 +42,7 @@ impl JsonValue {
             Self::Null => "null".to_string(),
             Self::Bool(value) => value.to_string(),
             Self::Number(value) => value.to_string(),
+            Self::NumberValue(value) => value.to_string(),
             Self::String(value) => render_string(value),
             Self::Array(values) => {
                 let rendered = values
@@ -167,7 +170,7 @@ impl<'a> Parser<'a> {
             Some('"') => self.parse_string().map(JsonValue::String),
             Some('[') => self.parse_array(),
             Some('{') => self.parse_object(),
-            Some('-' | '0'..='9') => self.parse_number().map(JsonValue::Number),
+            Some('-' | '0'..='9') => self.parse_number(),
             Some(other) => Err(JsonError::new(format!("unexpected character: {other}"))),
             None => Err(JsonError::new("unexpected end of input")),
         }
@@ -214,6 +217,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unicode_escape(&mut self) -> Result<char, JsonError> {
+        let mut value = self.parse_unicode_quad()?;
+        if (0xD800..=0xDBFF).contains(&value) {
+            self.expect('\\')?;
+            self.expect('u')?;
+            let low = self.parse_unicode_quad()?;
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return Err(JsonError::new("invalid unicode surrogate pair"));
+            }
+            value = 0x1_0000 + ((value - 0xD800) << 10) + low - 0xDC00;
+        }
+        char::from_u32(value).ok_or_else(|| JsonError::new("invalid unicode scalar value"))
+    }
+
+    fn parse_unicode_quad(&mut self) -> Result<u32, JsonError> {
         let mut value = 0_u32;
         for _ in 0..4 {
             let Some(ch) = self.next() else {
@@ -223,7 +240,7 @@ impl<'a> Parser<'a> {
                 | ch.to_digit(16)
                     .ok_or_else(|| JsonError::new("invalid unicode escape"))?;
         }
-        char::from_u32(value).ok_or_else(|| JsonError::new("invalid unicode scalar value"))
+        Ok(value)
     }
 
     fn parse_array(&mut self) -> Result<JsonValue, JsonError> {
@@ -266,7 +283,8 @@ impl<'a> Parser<'a> {
         Ok(JsonValue::Object(entries))
     }
 
-    fn parse_number(&mut self) -> Result<i64, JsonError> {
+    fn parse_number(&mut self) -> Result<JsonValue, JsonError> {
+        let start = self.index;
         let mut value = String::new();
         if self.try_consume('-') {
             value.push('-');
@@ -281,16 +299,14 @@ impl<'a> Parser<'a> {
             return Err(JsonError::new("invalid number"));
         }
 
-        // `JsonValue::Number` is an i64, so a fractional or exponent part
-        // cannot be represented. Consume and discard it rather than failing
-        // the whole document: config files may carry float literals in
-        // pass-through sections (e.g. `models.<alias>.extraBody`), which are
-        // re-read with serde_json where the exact value matters.
         self.skip_number_tail();
-
-        value
-            .parse::<i64>()
-            .map_err(|_| JsonError::new("number out of range"))
+        let literal: String = self.chars[start..self.index].iter().collect();
+        let number: serde_json::Number = literal
+            .parse()
+            .map_err(|_| JsonError::new("invalid JSON number"))?;
+        Ok(number
+            .as_i64()
+            .map_or_else(|| JsonValue::NumberValue(number.clone()), JsonValue::Number))
     }
 
     /// Consume an optional `.digits` fraction and `e[+-]digits` exponent.

@@ -79,7 +79,9 @@ pub(crate) fn prepare_session<K: KernelConvenience + Send + Sync + 'static>(
     model: &str,
     abort: HookAbortSignal,
 ) -> Result<(Session, SessionLease), String> {
-    let workspace = format!("/proc/{}/workspace", desc.pid);
+    let workspace = fs
+        .working_root()
+        .map_err(|error| format!("co-host: resolve session workspace: {error}"))?;
     let identity = HostedSessionIdentity {
         agent_name: desc.name.clone(),
         owner_id: desc.owner_id.clone(),
@@ -123,19 +125,23 @@ pub(crate) fn prepare_session<K: KernelConvenience + Send + Sync + 'static>(
         session.model = Some(model.to_string());
     }
     let handle = store.create_handle(&id);
-    let session = session
+    let mut session = session
         .with_workspace_root(workspace)
         .with_persistence_path(handle.path.clone())
         .with_fs_backend(fs);
     // Publish even an empty session before returning its ID. Use the native
     // append-log bootstrap, not snapshot replacement (which would create a
     // regular file or append a duplicate snapshot to an existing DT_STREAM).
-    // Resume preserves stored bytes; the ordinary loader repairs interrupted
-    // tool calls in memory, as it does for CLI recovery.
+    // Only the active writer may publish interrupted tool results. Inspection
+    // loads keep them in memory; this host already holds the session lease.
     if resume_id.is_none() {
         session
             .initialize_persistence()
             .map_err(|e| format!("co-host: persist session: {e}"))?;
+    } else {
+        session
+            .repair_orphan_tool_uses()
+            .map_err(|error| format!("co-host: persist interrupted tool recovery: {error}"))?;
     }
     Ok((session, lease))
 }

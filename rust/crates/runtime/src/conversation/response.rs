@@ -126,6 +126,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         &mut self,
         mut stream: AssistantEventStream,
         iteration: usize,
+        allow_tools: bool,
         observer: &mut Option<&mut dyn RuntimeObserver>,
         prompter: &mut Option<&mut dyn PermissionPrompter>,
     ) -> ExecutedResponse {
@@ -162,6 +163,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 next = stream.next(), if !ended => match next {
                     Some(Ok(event)) => {
                         if let AssistantEvent::ToolUse { id, name, input, .. } = &event {
+                            if !allow_tools {
+                                error = Some(RuntimeError::new("model requested tools after the computation step limit was reached"));
+                                break;
+                            }
                             if assistant_index.is_none() {
                                 scheduler.initialize_context(self.dispatch_context(observer, prompter));
                             }

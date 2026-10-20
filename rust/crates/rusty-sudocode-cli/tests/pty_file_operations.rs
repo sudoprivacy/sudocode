@@ -11,8 +11,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::TestEnv;
 
 /// Windows accepts all these spellings of the same absolute file. The real
@@ -22,7 +20,9 @@ use common::TestEnv;
 fn windows_verbatim_paths_read_the_same_file() {
     use runtime::{ContentBlock, SessionStore};
 
-    let env = TestEnv::new("verbatim-file-paths");
+    // Feed every spelling through the CLI's tool loop as an exact fixture.
+    // The assertion covers Windows path handling in the VFS and transcript.
+    let env = TestEnv::new_mock("verbatim-file-paths");
     let nonce = format!(
         "path-content-{}-{}",
         std::process::id(),
@@ -149,6 +149,8 @@ fn write_then_read_back() {
         &prompt,
     ]);
 
+    sess.set_default_timeout(common::LIVE_TURN_BUDGET);
+
     // The mock exposes the internal tool name; live iocraft renders a stable
     // human-facing write card instead.
     if env.is_mock() {
@@ -209,6 +211,8 @@ fn edit_then_verify_on_disk() {
         "edit_file,read_file",
         &prompt,
     ]);
+
+    sess.set_default_timeout(common::LIVE_TURN_BUDGET);
 
     // The mock exposes the internal tool name; live iocraft renders a stable
     // human-facing update card instead.
@@ -273,7 +277,7 @@ fn glob_then_grep_discovery() {
     ]);
 
     // Agent trigger: at minimum grep must be called.
-    sess.set_default_timeout(common::at_least(Duration::from_secs(60)));
+    sess.set_default_timeout(common::LIVE_TURN_BUDGET);
     sess.expect("(?i)grep")
         .expect("should see grep tool call (agent trigger)");
 
@@ -281,7 +285,7 @@ fn glob_then_grep_discovery() {
     sess.expect("(?i)(parity|2|two|match|found|notes|data|complete)")
         .expect("response should reference discovery results");
 
-    sess.set_default_timeout(common::at_least(Duration::from_secs(120)));
+    sess.set_default_timeout(common::LIVE_TURN_BUDGET);
     let exit = sess.expect_eof().unwrap_or_else(|e| {
         let screen = sess.render(|s| s.contents());
         panic!("glob-grep scode should exit: {e}\nPTY screen:\n{screen}");

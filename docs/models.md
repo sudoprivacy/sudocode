@@ -10,6 +10,14 @@ including when it names the compiled-in default model. Without the flag,
 the environment wins over configuration, followed by the compiled-in default.
 The same selection applies to interactive sessions, resumed sessions and `-p`.
 
+`--model` uses the selected account's credentials and quota. It does not change
+accounts or replenish an exhausted quota. Use `--account <profile>` to select a
+configured account for this invocation, for example:
+
+```bash
+scode --account sudorouter --model gpt-6-luna
+```
+
 ## Aliases
 
 Short names resolve to the current pinned versions:
@@ -99,12 +107,38 @@ See [Anthropic's refusal protocol](https://platform.claude.com/docs/en/build-wit
 
 ## Provider-specific handling
 
+Anthropic SSE `error` events stop the response with the provider's error
+type and message. They are not parsed as answer events or retried after the
+stream has begun. See the [Anthropic stream error format](https://platform.claude.com/docs/en/build-with-claude/streaming#error-events).
+
 Translating Claude-style messages to OpenAI-compatible chat completion
 requests requires a few model-specific adjustments. Each rule below names
 the model family and the request shape the family expects.
 
 All detection strips a leading provider prefix (`dashscope/kimi-k2.5` →
 `kimi-k2.5`) before matching.
+
+### OpenAI-compatible reasoning fields
+
+Chat Completions responses accept both `reasoning` (current vLLM) and
+`reasoning_content` (older compatible APIs), in streaming `delta` objects and
+non-streaming `message` objects. A nonempty `reasoning` takes precedence; if it
+is absent, null, or empty, `reasoning_content` is used instead. When both are
+present, the text is consumed once. It is emitted as thinking, separately from
+the answer's `content`, through both the CLI and ACP.
+
+### Azure DeepSeek inline reasoning
+
+For `deepseek-*` deployment names ending in `-azure`, a leading
+`<think>…</think>` envelope is parsed into a reasoning block followed by the
+final answer. This follows the [Azure DeepSeek response format](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/tutorials/get-started-deepseek-r1#reasoning-content).
+Streaming accepts tags split across frames. An unclosed envelope fails the
+response instead of treating unfinished reasoning as an answer. Reported usage
+still includes the provider's reasoning tokens.
+
+A nonempty `reasoning` or `reasoning_content` field takes precedence. In that
+structured format, literal tags in the answer remain intact. Other model names
+keep their existing text handling.
 
 ### Kimi family — tool result field shape
 
@@ -184,6 +218,13 @@ Add the fields to the model entry in `sudocode.json`:
   `reasoning_effort`, …). Everything else is inserted as given. The list
   is `RESERVED_REQUEST_BODY_KEYS` in
   `rust/crates/api/src/types.rs`.
+- **Anthropic beta headers.** For `anthropic-messages`, `extraBody.betas`
+  is an explicit array of beta names sent in the `anthropic-beta` header,
+  replacing the default list. Required OAuth authentication is retained.
+  For example, `"betas": ["thinking-binding-controls-2026-08-01"]`
+  avoids legacy betas that a strict gateway may reject. Configuring
+  `thinking.block_binding` also adds its required binding beta. Beta names
+  are validated before sending; `betas` never enters the Messages JSON body.
 - **Absent means unchanged.** A model without `extraBody` sends exactly
   the payload it sent before this field existed.
 - Applies to the `openai-completions` and `openai-responses` wire
@@ -255,12 +296,88 @@ instructions. Standalone CLI subagents use their local project context.
 
 ### `reasoning_effort` values
 
-`--reasoning-effort` accepts `none`, `minimal`, `low`, `medium`, `high`.
+`--effort` (alias of `--reasoning-effort`) accepts `none`, `minimal`, `low`,
+`medium`, `high`, `xhigh`, and `max`.
 `none` / `minimal` are part of OpenAI's own ladder and are what several
 OpenAI-compatible backends accept to switch reasoning off; on DashScope
 they are the only accepted values that do (`low` still reasons). The
-flag reaches the wire on the `acp` and REPL paths; `--print` does not
-send it. For a backend that wants a body field instead, use `extraBody`.
+flag reaches the wire on ACP, REPL, `--print` and explicit `--resume` paths,
+including resumed `/compact`. For a backend that wants a body field instead,
+use `extraBody`.
+
+Claude uses `low`, `medium`, `high`, `xhigh`, and `max`. Opus/Sonnet 4.6
+map a saved `xhigh` preference to `high`; switching back to a model that
+supports `xhigh` restores it. Unsupported older models receive no effort field.
+Opus 4.8 defaults to `high`; Opus 5.5 defaults to `medium`. Effort is sent
+under `output_config.effort`, including when optional thinking is disabled.
+
+Use `/effort` to open the picker, `/effort xhigh` to set a level, or
+`/effort auto` to restore the model default. `/model` offers effort selection
+after the model; Escape cancels both choices. Named levels persist in
+`settings.json` as `effortLevel`. `max` applies only to the current process,
+so resume restores the saved preference. A CLI flag overrides the saved level.
+
+### Anthropic thinking and prompt-cache continuity
+
+The model-capability table owns the Anthropic thinking mode. Opus 4.8 uses
+`thinking: {"type": "adaptive", "display": "summarized"}` when thinking is
+enabled, with reasoning effort under `output_config.effort`. Turning thinking
+off omits the thinking configuration. Manual `budget_tokens` are unsupported
+on this model. See the [thinking configuration table](https://platform.claude.com/docs/en/build-with-claude/thinking#configuring-thinking).
+
+Opus 5.5
+requires adaptive thinking; scode sends `thinking.type: "adaptive"` and maps
+the session's reasoning effort to `output_config.effort`, not the OpenAI
+top-level `reasoning_effort` field. An unset effort uses the model default
+above; it is never derived from a request's output-token cap. Existing
+budgeted models retain their model-level `budget_tokens` policy.
+
+For Opus 5.5, `thinking: true` requests readable summaries with
+`display: "summarized"`. `thinking: false` requests `display: "omitted"`:
+it hides summaries, **not the model's mandatory reasoning or its cost**.
+No `disabled` or manual-budget request is sent to this model. See the
+[provider's thinking contract](https://platform.claude.com/docs/en/build-with-claude/thinking).
+
+Main turns, tool continuations and cache-safe compaction use the same
+session thinking and effort settings. Changing those settings or models can
+start a different cache prefix; changing only a summary's output cap must
+not silently change them. History preserves each signed thinking block,
+including empty text, separate adjacent blocks and split signature deltas,
+plus `redacted_thinking` ciphertext. Compaction keeps the preserved tail's
+blocks unchanged, and saving/resuming does not strip them.
+
+Tool arguments are journaled as JSON objects. Legacy string records remain
+readable; fractions, unsigned 64-bit integers, and Unicode survive restart.
+Whitespace normalization inside a tool argument does not count as an external
+history edit during compaction. Changes to the durable transcript still fail
+the revision check.
+
+Cache acceptance compares actual provider-converted requests and real
+per-request `cache_read_input_tokens` / `cache_creation_input_tokens`.
+HTTP 200, a stable client-side prefix, or the status-bar percentage alone
+does not establish a hit. Existing system/tool snapshots, routing metadata,
+breakpoints and the five-minute TTL policy are unchanged.
+
+The Anthropic adapter drains the actual `message_stop` after a logical
+`stop_reason` instead of closing the response at a network-packet boundary.
+If a gateway never finishes that terminal tail, a one-second absolute grace
+deadline preserves the confirmed completion and records usage exactly once.
+This is not an unconditional delay; normally the terminal event arrives
+immediately. Interrupted content before a logical end and explicit refusals
+still fail the turn.
+
+The opt-in thinking-binding diagnostic records `input_transformations` from
+both `message_start` and the final `message_delta`, including updates after a
+server fallback. It records bounded type, reason and path metadata without
+logging provider reasoning or signatures. It does not delete blocks merely
+because a different serving model could not read them.
+
+Changing effort still uses the top-level setting and restarts the prompt cache.
+Native Claude Code can append effort-only system messages instead. A real
+Opus 5.5 control through a private transparent copy of the current Bedrock
+bridge rejected that form even with the required beta in both the header and
+`anthropic_beta` body array. This client does not claim cache-preserving effort
+changes on that route. See the [provider's per-message effort contract](https://platform.claude.com/docs/en/build-with-claude/effort#per-message-effort-beta).
 
 ## Adding a model
 

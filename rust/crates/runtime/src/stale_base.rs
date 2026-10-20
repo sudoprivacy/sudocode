@@ -136,14 +136,9 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir() -> std::path::PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should be after epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("runtime-stale-base-{nanos}"))
+        crate::test_support::temp_dir_path("runtime-stale-base")
     }
 
     fn init_repo(path: &std::path::Path) {

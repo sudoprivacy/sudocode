@@ -44,10 +44,11 @@ impl Controller {
             let mut offset = 0;
             let mut ready_tx = Some(ready_tx);
             while !stop.load(Ordering::Acquire) {
-                let (bytes, next, _) = connection
+                let result = connection
                     .stream_read_at(&endpoint.transcript, offset, true, 200, &token)
                     .map_err(|e| e.to_string())?;
-                offset = next;
+                let bytes = result.data;
+                offset = result.next_offset;
                 if bytes.is_empty() {
                     continue;
                 }

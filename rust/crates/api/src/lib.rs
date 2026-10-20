@@ -9,8 +9,12 @@ mod nexus_transport;
 pub use nexus_transport::ModelAccess;
 mod prompt_cache;
 mod providers;
+mod recorded_response;
+pub use recorded_response::{flush_response_captures, RecordedResponse};
+mod request_scope;
 mod sse;
 mod stream_collect;
+mod stream_diagnostics;
 mod types;
 
 pub use client::{
@@ -31,7 +35,7 @@ pub use http_transport::{
 };
 pub use prompt_cache::{
     cache_break_cause, cache_root, CacheBreakEvent, PromptCache, PromptCacheConfig,
-    PromptCachePaths, PromptCacheRecord, PromptCacheRequestRow, PromptCacheStats,
+    PromptCachePaths, PromptCacheRecord, PromptCacheRequestRow, PromptCacheStats, ResponseTraceIds,
 };
 pub use providers::anthropic::{
     is_anthropic_api_key, is_claude_code_oauth_token, is_proxy_auth_token, AnthropicClient,

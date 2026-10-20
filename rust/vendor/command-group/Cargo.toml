@@ -1,0 +1,77 @@
+[package]
+name = "command-group"
+version = "5.0.1"
+
+authors = ["Félix Saparelli <felix@passcod.name>"]
+license = "Apache-2.0 OR MIT"
+description = "Extension to Command to spawn in a process group"
+keywords = ["command", "extension", "process", "group"]
+
+documentation = "https://docs.rs/command-group"
+homepage = "https://github.com/watchexec/command-group"
+repository = "https://github.com/watchexec/command-group"
+readme = "README.md"
+
+edition = "2021"
+exclude = ["/bin", "/.github"]
+rust-version = "1.68.0"
+
+# there are a few windows-specific ones
+autoexamples = false
+
+[dependencies]
+async-trait = { version = "0.1.74", optional = true }
+
+[dependencies.tokio]
+version = "1.33.0"
+features = ["io-util", "macros", "process", "rt"]
+optional = true
+
+[target.'cfg(unix)'.dependencies.nix]
+version = "0.27.1"
+default-features = false
+features = ["fs", "poll", "signal"]
+
+[target.'cfg(windows)'.dependencies.winapi]
+version = "0.3.9"
+features = [
+	"impl-default",
+	"handleapi",
+	"ioapiset",
+	"jobapi2",
+	"processthreadsapi",
+	"tlhelp32",
+	"winbase",
+]
+
+[features]
+default = []
+with-tokio = ["async-trait", "tokio"]
+
+[dev-dependencies]
+tokio = { version = "1.10.0", features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "time"] }
+
+[package.metadata.docs.rs]
+all-features = true
+
+[[example]]
+name = "basic"
+
+[[example]]
+name = "builder"
+
+[[example]]
+name = "async"
+required-features = ["with-tokio"]
+
+[[example]]
+name = "kill_on_drop"
+required-features = ["with-tokio"]
+
+[[example]]
+name = "daemon"
+required-features = ["with-tokio"]
+
+[[target.'cfg(windows)'.example]]
+name = "with_flags"
+required-features = ["with-tokio"]

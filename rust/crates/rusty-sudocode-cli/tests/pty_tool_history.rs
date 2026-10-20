@@ -41,7 +41,7 @@ fn assert_pairs(body: &Value) {
 
 #[test]
 fn resume_preserves_results_without_duplicate_or_unmatched_tool_ids() {
-    let env = TestEnv::new("tool-history-recovery");
+    let env = TestEnv::new_mock("tool-history-recovery");
     let root = env.workspace_root();
     let path = root.join("fixture.jsonl");
     let dump = root.join("requests");
@@ -135,8 +135,7 @@ fn resume_preserves_results_without_duplicate_or_unmatched_tool_ids() {
         .cloned()
         .collect();
     session.save_to_path(&path).unwrap();
-    let target =
-        std::env::var("SCODE_LIVE_SWITCH_MODEL").unwrap_or_else(|_| "claude-opus-4-6".into());
+    let target = "claude-opus-4-6";
 
     // A second process must preserve the repair and all result content.
     for turn in 0..2 {

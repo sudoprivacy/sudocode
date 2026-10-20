@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 
 use super::{AuthMode, ProviderKind};
 use crate::error::ApiError;
-use crate::types::MessageRequest;
+use crate::types::{InputContentBlock, MessageRequest};
 
 // Re-export the config types from the runtime crate so consumers can use them
 // via `api::providers::registry::*` without depending on runtime directly.
@@ -194,6 +194,26 @@ pub fn preflight_message_request(request: &MessageRequest) -> Result<(), ApiErro
 /// the expensive one disagree about when the expensive one is needed.
 pub(crate) fn estimate_message_request_input_tokens(request: &MessageRequest) -> u32 {
     let mut estimate = estimate_serialized_tokens(&request.messages);
+    // Image payloads serialize as base64, but providers tokenize the decoded
+    // image as vision input. Counting those bytes as text can reject a valid
+    // request before it reaches the provider and then trigger futile history
+    // compaction while the image itself remains protected in the recent tail.
+    for source in request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            InputContentBlock::Image { source } if source.source_type == "base64" => Some(source),
+            _ => None,
+        })
+    {
+        estimate = estimate
+            .saturating_sub(u32::try_from(source.data.len() / 4).unwrap_or(u32::MAX))
+            .saturating_add(
+                u32::try_from(runtime::estimate_image_tokens(source.data.len()))
+                    .unwrap_or(u32::MAX),
+            );
+    }
     estimate = estimate.saturating_add(estimate_request_overhead_tokens(
         request.system.as_deref(),
         request.tools.as_deref(),
@@ -736,7 +756,8 @@ fn adjust_base_url_for_format(base_url: &str, api_format: ApiFormat) -> String {
 /// - Explicit `api`: `"openai-completions"`, `"openai-responses"`, or
 ///   `"anthropic-messages"`.
 /// - Proxy mode without `api`: consult model capabilities SSOT (same
-///   source as `try_proxy_passthrough`), falling back to OpenAI completions.
+///   source as `try_proxy_passthrough`), then use the Claude or Codex protocol
+///   for a cold catalog and OpenAI completions for other models.
 /// - Non-proxy providers: inferred from the provider name.
 fn resolve_api_format(
     auth_mode: &str,
@@ -780,8 +801,19 @@ fn resolve_api_format(
         // Measured when this fired for real: 70 requests, 1.5M prompt tokens,
         // zero cache reads and zero cache writes, every token billed at full
         // rate — against the same workload caching normally serves at 0.1x.
+        // A cold catalog also lacks the endpoint required by Codex models.
+        // Keep this fallback in the shared resolver for CLI and hosted engines.
+        let wire_id = model_id
+            .rsplit('/')
+            .next()
+            .unwrap_or(model_id)
+            .to_ascii_lowercase();
         return Ok(if runtime::config::is_anthropic_model(model_id) {
             ApiFormat::AnthropicMessages
+        } else if wire_id.starts_with("gpt-")
+            && wire_id.split('-').any(|segment| segment == "codex")
+        {
+            ApiFormat::OpenAiResponses
         } else {
             ApiFormat::OpenAiCompletions
         });

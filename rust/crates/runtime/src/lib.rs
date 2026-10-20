@@ -13,6 +13,7 @@ pub mod bash_validation;
 mod bootstrap;
 pub mod branch_lock;
 mod compact;
+pub mod compaction_scope;
 pub mod config;
 pub mod config_schema;
 pub mod config_validate;
@@ -21,6 +22,7 @@ pub mod coordinator_mode;
 pub mod coordinator_notification;
 pub mod custom_agents;
 pub mod directory;
+pub mod effort;
 pub mod experiments;
 mod file_intent;
 mod file_ops;
@@ -33,6 +35,7 @@ mod hooks;
 pub mod image_input;
 pub mod image_registry;
 mod json;
+mod kernel_context;
 mod lane_events;
 pub mod lsp_client;
 pub mod mailbox;
@@ -62,9 +65,11 @@ mod policy_engine;
 mod prompt;
 pub mod recovery_recipes;
 mod remote;
+pub mod response_archive;
 pub mod sandbox;
 mod session;
 pub mod session_control;
+pub mod session_writer;
 pub mod test_support;
 pub mod verification_watcher;
 pub use session_control::SessionStore;
@@ -75,6 +80,7 @@ pub mod spawn_task;
 mod sse;
 pub mod stale_base;
 pub mod stale_branch;
+pub mod subagent_completion;
 pub mod subagent_events;
 pub mod summary_compression;
 pub mod task_packet;
@@ -92,17 +98,18 @@ pub mod workspace_root;
 pub use bash::{
     clear_bash_progress_callback, execute_bash, execute_bash_with_abort,
     execute_bash_with_progress, execute_bash_with_tasks, launch_background_command,
-    set_bash_progress_callback, BashCommandInput, BashCommandOutput, BashProgress,
-    BashProgressCallback, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
+    set_bash_progress_callback, shell_process_group, BashCommandInput, BashCommandOutput,
+    BashProgress, BashProgressCallback, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};
 pub use compact::{
     autocompact_buffer_tokens, compact_session, compact_session_sync,
-    compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_session_tokens,
-    format_compact_summary, get_compact_continuation_message, render_todo_continuity_block,
-    should_compact, CompactionConfig, CompactionError, CompactionResult, CompactionSummarySource,
-    ContextBudget, AUTOCOMPACT_BUFFER_TOKENS, COMPACTION_FAILED, COMPACT_MAX_OUTPUT_TOKENS,
+    compact_session_sync_after_llm_failure, estimate_block_tokens, estimate_image_tokens,
+    estimate_session_tokens, format_compact_summary, get_compact_continuation_message,
+    render_todo_continuity_block, should_compact, CompactionConfig, CompactionError,
+    CompactionOutcome, CompactionReport, CompactionResult, CompactionSummarySource, ContextBudget,
+    AUTOCOMPACT_BUFFER_TOKENS, COMPACTION_FAILED, COMPACT_MAX_OUTPUT_TOKENS,
 };
 pub use config::{
     default_config_home, load_plugin_mcp_servers, ConfigEntry, ConfigError, ConfigLoader,
@@ -142,13 +149,14 @@ pub use file_tracker::{CleanupResult, CleanupStrategy, FileOp, TurnFileTracker};
 pub use fs_backend::ManagedRoot;
 pub use fs_backend::{
     host_fs, host_fs_arc, vfs_path_for_host_path, FsBackend, FsDirEntry, FsMetadata,
-    KernelFsBackend, NexusVfsFsBackend, StdFsBackend,
+    KernelFsAccess, KernelFsBackend, NexusVfsFsBackend, StdFsBackend,
 };
 pub use git_context::{GitCommitEntry, GitContext};
 pub use hooks::{
     HookAbortSignal, HookEvent, HookProgressEvent, HookProgressReporter, HookRunResult, HookRunner,
 };
 pub use image_registry::{ImageRegistry, RegisteredImage};
+pub use kernel_context::agent_operation_context;
 pub use lane_events::{
     compute_event_fingerprint, dedupe_superseded_commit_events, dedupe_terminal_events,
     is_terminal_event, BlockedSubphase, EventProvenance, LaneCommitProvenance, LaneEvent,
@@ -209,7 +217,8 @@ pub use prompt::{
     load_system_prompt, load_system_prompt_for_agent, load_system_prompt_for_agent_with,
     load_system_prompt_with, load_system_prompt_with_fs_and_memory, load_system_prompt_with_memory,
     prepend_bullets, ContextFile, ProjectContext, PromptBuildError, SessionPromptSnapshot,
-    SystemPrompt, SystemPromptBuilder, SystemPromptOverrides, SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
+    SystemPrompt, SystemPromptBuilder, SystemPromptOverrides, NEXUS_FILESYSTEM_PLATFORM,
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 };
 pub use recovery_recipes::{
     attempt_recovery, recipe_for, EscalationPolicy, FailureScenario, RecoveryContext,
@@ -228,8 +237,9 @@ pub use sandbox::{
     SandboxRequest, SandboxStatus,
 };
 pub use session::{
-    model_tool_history, ContentBlock, ConversationMessage, HostedSessionIdentity, MessageRole,
-    Session, SessionCompaction, SessionError, SessionFork, SessionMode, SessionPromptEntry,
+    model_tool_history, ContentBlock, ConversationMessage, HostedSessionIdentity,
+    MaintenanceUsageReceipt, MessageRole, Session, SessionCompaction, SessionError, SessionFork,
+    SessionMode, SessionPromptEntry,
 };
 pub use sse::{IncrementalSseParser, SseEvent};
 pub use stale_base::{

@@ -18,6 +18,113 @@ use api::{
 };
 use serde_json::json;
 
+/// Runs the public JSON scenarios through the real ledger and persisted rows.
+/// The same contract also drives the endpoint probe's HTTP-backed scenarios.
+#[test]
+fn public_cache_contract_preserves_thinking_history_and_attributes_changes() {
+    let _guard = env_lock();
+    let _home = TempHome::new("public-contract");
+    let contract: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../spec/prompt_cache_observations.json"
+    ))
+    .expect("public contract must parse");
+    let defaults = api::PromptCacheConfig::default();
+    assert_eq!(
+        defaults.prompt_ttl.as_secs(),
+        contract["defaults"]["prompt_ttl_seconds"]
+    );
+    assert_eq!(
+        defaults.completion_ttl.as_secs(),
+        contract["defaults"]["completion_ttl_seconds"]
+    );
+    assert_eq!(
+        u64::from(defaults.cache_break_min_drop),
+        contract["defaults"]["cache_break_min_drop"]
+    );
+    for scenario in contract["ledger_scenarios"].as_array().unwrap() {
+        let label = scenario["id"].as_str().unwrap();
+        let cache = PromptCache::new(label);
+        let mut before = request_with_tools(vec![cron_list(true)]);
+        before.messages = serde_json::from_value(contract["history_fixture"].clone()).unwrap();
+        let mut after = before.clone();
+        match scenario["change"].as_str().unwrap() {
+            "none" => {}
+            "model" => after.model = "another-model".to_string(),
+            "system" => after.system = Some("changed system".to_string()),
+            "tools" => after.tools.as_mut().unwrap()[0].defer_loading = false,
+            "append" => after.messages.push(InputMessage {
+                role: "user".to_string(),
+                content: vec![InputContentBlock::Text { text: "next turn".to_string() }],
+            }),
+            "append_tool_result" => after.messages.push(serde_json::from_value(json!({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_fixture", "content": [{"type": "text", "text": "fixture contents"}]}]
+            })).unwrap()),
+            "thinking" | "signature" => {
+                let InputContentBlock::Thinking { thinking, signature } = &mut after.messages[1].content[0] else {
+                    panic!("signed thinking fixture is required");
+                };
+                if scenario["change"] == "thinking" {
+                    thinking.push_str(" changed");
+                } else {
+                    *signature = Some("changed-synthetic-signature".to_string());
+                }
+            }
+            "remove_thinking" => { after.messages[1].content.remove(0); }
+            other => panic!("unknown public scenario {other}"),
+        }
+        let original_history = serde_json::to_value(&before.messages).unwrap();
+        let _ = cache.record_usage(
+            &before,
+            &reads(
+                scenario["previous_read"]
+                    .as_u64()
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
+            Default::default(),
+        );
+        let record = cache.record_usage(
+            &after,
+            &reads(
+                scenario["current_read"]
+                    .as_u64()
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            ),
+            api::ResponseTraceIds {
+                gateway: Some("gateway-correlation-fixture".to_string()),
+                provider: Some("provider-request-fixture".to_string()),
+            },
+        );
+        let causes = record
+            .cache_break
+            .map_or_else(Vec::new, |event| event.causes);
+        assert_eq!(
+            serde_json::to_value(causes).unwrap(),
+            scenario["expected_causes"],
+            "{label}"
+        );
+        assert_eq!(
+            serde_json::to_value(&before.messages).unwrap(),
+            original_history,
+            "tracking must preserve the original signed history: {label}"
+        );
+        let ledger = std::fs::read_to_string(cache.paths().requests_path).unwrap();
+        let row: serde_json::Value = serde_json::from_str(ledger.lines().last().unwrap()).unwrap();
+        for field in contract["fields"].as_object().unwrap().keys() {
+            assert!(
+                row.get(field).is_some(),
+                "shared field {field} missing from {label}"
+            );
+        }
+        assert_eq!(row["gateway_request_id"], "gateway-correlation-fixture");
+        assert_eq!(row["provider_request_id"], "provider-request-fixture");
+    }
+}
+
 /// `record_usage` resolves its paths from `SUDO_CODE_CONFIG_HOME` at call time,
 /// so tests that set it cannot overlap.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {

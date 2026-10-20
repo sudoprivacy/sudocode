@@ -238,6 +238,34 @@ impl SessionStore {
         ))
     }
 
+    /// Completion tombstones remain addressable after native transcript deletion.
+    pub fn resolve_completion_path(
+        &self,
+        session_id: &str,
+    ) -> Result<PathBuf, SessionControlError> {
+        if let Ok(path) = self.resolve_managed_path(session_id) {
+            return Ok(path);
+        }
+        for path in [
+            session_transcript_path(&self.sessions_root, session_id),
+            legacy_session_path_with_ext(
+                &self.sessions_root,
+                session_id,
+                PRIMARY_SESSION_EXTENSION,
+            ),
+            legacy_session_path_with_ext(&self.sessions_root, session_id, LEGACY_SESSION_EXTENSION),
+        ] {
+            if self
+                .fs
+                .exists(&path.with_extension("completions.json").to_string_lossy())
+                .unwrap_or(false)
+            {
+                return Ok(path);
+            }
+        }
+        self.resolve_managed_path(session_id)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<ManagedSessionSummary>, SessionControlError> {
         let mut sessions = Vec::new();
         self.collect_sessions_from_dir(&self.sessions_root, &mut sessions)?;

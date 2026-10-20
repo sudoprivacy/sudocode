@@ -42,6 +42,12 @@ impl StyledLine {
         self.push_style(text.into(), self.base.bold());
     }
 
+    /// Quantities use terminal-owned foreground emphasis, not a brand/status
+    /// color or the surrounding muted label style. Zero has the same role.
+    pub(crate) fn push_count(&mut self, count: usize) {
+        self.push_style(count.to_string(), ContentStyle::new().bold());
+    }
+
     pub(crate) fn push_colored(&mut self, text: impl Into<String>, color: Color) {
         self.push_style(text.into(), self.base.with(color));
     }

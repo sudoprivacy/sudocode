@@ -288,6 +288,12 @@ impl ToolExecutor for CliToolExecutor {
         input: &str,
         ctx: &runtime::ToolDispatchContext,
     ) -> Result<ToolOutput, ToolError> {
+        let operation = ctx
+            .background_tasks
+            .as_ref()
+            .map(runtime::background_tasks::BackgroundTasks::begin_operation)
+            .transpose()
+            .map_err(ToolError::new)?;
         // Accept the call under either spelling. A model names tools its own
         // way — `Bash`, `Edit`, `Grep` for `bash`, `edit_file`, `grep_search` —
         // and dispatch canonicalises before matching, so comparing only the raw
@@ -359,7 +365,9 @@ impl ToolExecutor for CliToolExecutor {
             let abort_signal = self.abort_signal.clone();
             let ctx = ctx.clone();
             let workspace = WorkspaceRootHandoff::capture();
+            let work_operation = operation.clone();
             tokio::task::spawn_blocking(move || {
+                let _operation = work_operation;
                 let _workspace = workspace.enter();
                 if abort_signal
                     .as_ref()
@@ -435,7 +443,11 @@ impl ToolExecutor for CliToolExecutor {
             .as_ref()
             .and_then(|message| message.model.as_deref())
             .unwrap_or("");
-        ToolOutput::from_dispatch(&output_name, output, model)
+        if is_mcp_tool {
+            ToolOutput::from_mcp_result(output, model)
+        } else {
+            ToolOutput::from_dispatch(&output_name, output, model)
+        }
     }
 
     fn set_abort_signal(&mut self, abort_signal: runtime::HookAbortSignal) {

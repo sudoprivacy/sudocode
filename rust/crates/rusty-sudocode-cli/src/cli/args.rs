@@ -92,7 +92,7 @@ struct Cli {
     /// are what several OpenAI-compatible backends accept to turn reasoning
     /// off entirely (DashScope Qwen3.x, for one); keeping them out of the
     /// allow-list blocked a capability the wire already supports.
-    #[arg(long, global = true, value_parser = ["none", "minimal", "low", "medium", "high"])]
+    #[arg(long, alias = "effort", global = true, value_parser = ["none", "minimal", "low", "medium", "high", "xhigh", "max"])]
     reasoning_effort: Option<String>,
 
     /// Allow running in a broad (non-project) working directory
@@ -207,6 +207,11 @@ enum Cmd {
         #[arg(short, long)]
         yes: bool,
     },
+    /// Connect frontends to Sudocode's shared local services
+    Service {
+        #[command(subcommand)]
+        action: ServiceSub,
+    },
     /// Export a session transcript
     Export {
         /// Session reference (defaults to latest)
@@ -297,12 +302,24 @@ enum AcpSub {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ServiceSub {
+    /// Serve capabilities on a newline-delimited process channel
+    Stdio,
+    /// Run the OS-user service supervisor
+    #[command(hide = true)]
+    Daemon,
+}
+
 // ---------------------------------------------------------------------------
 // Public CliAction types (unchanged contract for downstream consumers)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CliAction {
+    Service {
+        is_daemon: bool,
+    },
     Headless(super::headless::HeadlessOptions),
     DumpManifests {
         output_format: CliOutputFormat,
@@ -347,6 +364,7 @@ pub(crate) enum CliAction {
         model: String,
         permission_mode: PermissionMode,
         auth_mode: Option<AuthMode>,
+        reasoning_effort: Option<String>,
     },
     ListSessions {
         output_format: CliOutputFormat,
@@ -448,6 +466,7 @@ impl CliAction {
                 | CliAction::Login
                 | CliAction::Logout
                 | CliAction::Update { .. }
+                | CliAction::Service { .. }
         )
     }
 }
@@ -664,6 +683,7 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             standalone_model(&model, model_flag_raw.as_deref()),
             permission_mode,
             auth_mode,
+            cli.reasoning_effort,
         );
     }
 
@@ -707,6 +727,9 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 yes,
             }),
             Cmd::Logout => Ok(CliAction::Logout),
+            Cmd::Service { action } => Ok(CliAction::Service {
+                is_daemon: matches!(action, ServiceSub::Daemon),
+            }),
             Cmd::Export { session, output } => Ok(CliAction::Export {
                 session_reference: session,
                 output_path: output,
@@ -920,6 +943,7 @@ fn parse_resume_from_clap(
     model: String,
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
+    reasoning_effort: Option<String>,
 ) -> Result<CliAction, String> {
     let (session_path, command_tokens) = if trailing.is_empty()
         && matches!(
@@ -945,6 +969,7 @@ fn parse_resume_from_clap(
             model,
             permission_mode,
             auth_mode,
+            reasoning_effort,
         );
     } else {
         (PathBuf::from(session_str), trailing)
@@ -957,6 +982,7 @@ fn parse_resume_from_clap(
         model,
         permission_mode,
         auth_mode,
+        reasoning_effort,
     )
 }
 
@@ -967,6 +993,7 @@ fn parse_resume_commands(
     model: String,
     permission_mode: PermissionMode,
     auth_mode: Option<AuthMode>,
+    reasoning_effort: Option<String>,
 ) -> Result<CliAction, String> {
     let mut commands = Vec::new();
     let mut current_command = String::new();
@@ -1004,6 +1031,7 @@ fn parse_resume_commands(
         model,
         permission_mode,
         auth_mode,
+        reasoning_effort,
     })
 }
 

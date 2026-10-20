@@ -33,9 +33,8 @@ use crate::tool_executor::{permission_policy, CliToolExecutor};
 /// files live and what the agent is called — not in any engine behaviour — so
 /// those are values a host passes, not facts the engine infers from a path.
 ///
-/// A co-host has no meaningful current directory. Deriving the workspace, the
-/// agent's identity and the skills listing from one would force it to invent a
-/// plausible path and hope all four derivations agreed with each other.
+/// A co-host's process directory does not identify a session. Its descriptor
+/// supplies the project and identity; resources are discovered in that project.
 pub struct HostContext {
     /// Co-hosted model traffic must use the session's Nexus filesystem.
     pub require_model_mount: bool,
@@ -48,16 +47,12 @@ pub struct HostContext {
     /// choice; that there is one is not, because a hook, a permission gate and
     /// an audit row that exist for one host have to exist for the other.
     pub fs: Arc<dyn runtime::FsBackend>,
-    /// Where the host reads its own files from: configuration, the skills and
-    /// agent-type listings, and the directory a session's agent name is derived
-    /// from when nothing configures one.
+    /// Where the host reads trusted configuration and credentials, and the
+    /// directory a CLI session's agent name is derived from when unconfigured.
     ///
     /// Stays on the HOST disk for both hosts, deliberately: a daemon has to
     /// read its configuration before it can serve the VFS that configuration
-    /// describes, so this is the one root that does NOT follow `fs`. It is also
-    /// why there is no second "workspace root" beside it — a host root that
-    /// answered *some* of these questions differently from `fs` is exactly how
-    /// a session ends up announcing one identity and writing as another.
+    /// describes. This location never stands in for the execution workspace.
     pub config_root: PathBuf,
     /// The agent's name when the host knows it. `None` means "derive it",
     /// which is what a CLI session does from its directory and config.
@@ -65,12 +60,9 @@ pub struct HostContext {
     /// The HOST directory this session's host-side execution runs in: `bash`,
     /// `git`, and every hook that resolves `current_workspace_root()`.
     ///
-    /// A CLI session's shell root IS its workspace — one directory, reached two
-    /// ways. A co-hosted agent's is not and cannot be: its workspace is a VFS
-    /// path (`/proc/<pid>/workspace`, a per-agent view of DT_LINKs onto the
-    /// repos it was given), and no shell can `cd` into that. So it gets a
-    /// directory of its own on the daemon's host, and the model is told the
-    /// difference (`cohost_shell_prompt_section`).
+    /// A reference-backed project uses the same directory for native commands
+    /// and kernel file tools. A VFS-only workspace has no native directory;
+    /// that host supplies a separate shell directory and describes the split.
     ///
     /// The value matters because the alternative is not "no scope" but "the
     /// daemon's scope": `current_workspace_root()` falls through to the process
@@ -144,15 +136,15 @@ impl HostContext {
     /// * `agent_name` / `mailbox` — from the descriptor, which is the SSOT for
     ///   who this agent is. Deriving either here would let `send` address one
     ///   identity while the agent receives on another.
-    /// * `shell_root` — created if missing, one per agent under the config home
-    ///   so it survives a respawn. See the field's docstring for why it cannot be
-    ///   the workspace.
+    /// * `shell_root` — the kernel-resolved local project when available;
+    ///   otherwise a per-agent host directory for VFS-only workspaces.
     pub fn for_cohost_agent(
         fs: Arc<dyn runtime::FsBackend>,
         agent_name: &str,
         mailbox: Arc<runtime::mailbox::Mailbox>,
+        shell_root: Option<PathBuf>,
     ) -> io::Result<Self> {
-        let shell_root = cohost_shell_root(agent_name);
+        let shell_root = shell_root.unwrap_or_else(|| cohost_shell_root(agent_name));
         std::fs::create_dir_all(&shell_root)?;
         Ok(Self {
             fs,
@@ -552,10 +544,11 @@ pub fn build_engine_runtime(
     let mut runtime = build_runtime_for_host(host, session, handle_id, config, session_mcp)?;
     runtime = runtime.with_hook_abort_signal(abort_signal);
     if let Some(rt) = runtime.runtime.as_mut() {
-        rt.api_client_mut().set_reasoning_effort(reasoning_effort);
-        let thinking = ConfigLoader::default_for(&host.config_root)
-            .load()
-            .map_or(true, |cfg| cfg.thinking());
+        let settings = ConfigLoader::default_for(&host.config_root).load()?;
+        rt.api_client_mut().set_reasoning_effort(
+            reasoning_effort.or_else(|| settings.effort_level().map(str::to_string)),
+        );
+        let thinking = settings.thinking();
         rt.api_client_mut().set_thinking_enabled(thinking);
     }
     Ok(runtime)
@@ -695,12 +688,11 @@ pub(crate) fn build_runtime_with_plugin_state(
         // This runs for the REPL, `--print`, and ACP sessions alike: they all land
         // in this function via `build_runtime_for_host`.
         //
-        // Read from the host's own root, not through `fs`: a skill and an agent
-        // type are host installations (they live beside the configuration that
-        // declares them), so a co-hosted agent gets the daemon's, exactly as it
-        // gets the daemon's auth mode.
+        // Discover resources where commands and the Skill tool resolve them.
+        // Trusted daemon credentials continue to use config_root; a project's
+        // installed skills belong to the session's actual project directory.
         system_prompt.extend_dynamic_sections(cwd_prompt_sections(
-            &host.config_root,
+            &host.shell_root,
             Some(&plugin_load_outcome),
         ));
         // Deferred tools listing: inject `<available-deferred-tools>` so the
@@ -735,7 +727,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         workspace_root,
         agent_name,
     });
-    let client = match EngineApiClient::new(
+    let mut client = match EngineApiClient::new(
         session_id,
         &config.sudocode_config,
         &config.model,
@@ -754,6 +746,24 @@ pub(crate) fn build_runtime_with_plugin_state(
             return Err(error);
         }
     };
+    match runtime::response_archive::SessionResponseArchive::for_session(
+        &session,
+        feature_config.response_recording(),
+    ) {
+        Ok(Some(archive)) => client = client.with_response_archive(archive),
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(tracer) = client.session_tracer() {
+                tracer.record(
+                    "response_capture_unavailable",
+                    serde_json::Map::from_iter([(
+                        "reason".into(),
+                        serde_json::Value::String(error.to_string()),
+                    )]),
+                );
+            }
+        }
+    }
     let mut tool_executor = CliToolExecutor::new(
         config.allowed_tools,
         tool_registry.clone(),
@@ -806,7 +816,8 @@ pub(crate) fn build_runtime_with_plugin_state(
         Directory::new(members)
     };
     tool_executor.set_directory(std::sync::Arc::new(directory));
-    let runtime = ConversationRuntime::new_with_features(
+    let session_tracer = client.session_tracer().cloned();
+    let mut runtime = ConversationRuntime::new_with_features(
         session,
         client,
         tool_executor,
@@ -816,6 +827,11 @@ pub(crate) fn build_runtime_with_plugin_state(
     )
     .with_session_known_date(runtime::today_local())
     .with_session_known_model(config.model.clone());
+    // Runtime maintenance and provider requests must share the session's
+    // existing local trace sink, including signed-history recovery notices.
+    if let Some(tracer) = session_tracer {
+        runtime = runtime.with_session_tracer(tracer);
+    }
     // Live plugin-hook progress rides the seam: the observer (the seam's
     // `engine-core` adapter) installs its `HookProgressSink` as the runtime's
     // `hook_progress_reporter` at the start of each turn, so no reporter is

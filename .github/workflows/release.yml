@@ -15,6 +15,7 @@ on:
         options:
           - all
           - linux-x64
+          - linux-arm64
       resume_tag:
         description: 'Resume a stable release using its existing GitHub assets (no rebuild)'
         required: false
@@ -144,41 +145,13 @@ jobs:
 
   build:
     name: build-${{ matrix.name }}
-    if: ${{ !inputs.resume_tag && (github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all') }}
+    if: ${{ !inputs.resume_tag && (github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' || inputs.build_scope == 'linux-arm64') }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: linux-arm64
-            # Oldest hosted arm64 runner: the arm64 binary links glibc
-            # dynamically, so the build machine's glibc is the floor the
-            # binary demands at runtime — 22.04 = glibc 2.35. (linux-x64 is
-            # static musl; its runner version does not matter.)
-            os: ubuntu-22.04-arm
-            bin: scode
-            package_dir: scode-linux-arm64
-            archive_name: scode-linux-arm64.tar.gz
-          - name: macos-arm64
-            os: macos-15
-            bin: scode
-            package_dir: scode-macos-arm64
-            archive_name: scode-macos-arm64.tar.gz
-          - name: macos-x64
-            os: macos-15-intel
-            bin: scode
-            package_dir: scode-macos-x64
-            archive_name: scode-macos-x64.tar.gz
-          - name: windows-x64
-            os: windows-2022
-            bin: scode.exe
-            package_dir: scode-windows-x64
-            archive_name: scode-windows-x64.zip
-          - name: windows-arm64
-            os: windows-11-arm
-            bin: scode.exe
-            package_dir: scode-windows-arm64
-            archive_name: scode-windows-arm64.zip
+        # ARM64 remains on Ubuntu 22.04 to preserve the glibc 2.35 runtime floor.
+        include: ${{ fromJSON(inputs.build_scope == 'linux-arm64' && '[{"name":"linux-arm64","os":"ubuntu-22.04-arm","bin":"scode","package_dir":"scode-linux-arm64","archive_name":"scode-linux-arm64.tar.gz"}]' || '[{"name":"linux-arm64","os":"ubuntu-22.04-arm","bin":"scode","package_dir":"scode-linux-arm64","archive_name":"scode-linux-arm64.tar.gz"},{"name":"macos-arm64","os":"macos-15","bin":"scode","package_dir":"scode-macos-arm64","archive_name":"scode-macos-arm64.tar.gz"},{"name":"macos-x64","os":"macos-15-intel","bin":"scode","package_dir":"scode-macos-x64","archive_name":"scode-macos-x64.tar.gz"},{"name":"windows-x64","os":"windows-2022","bin":"scode.exe","package_dir":"scode-windows-x64","archive_name":"scode-windows-x64.zip"},{"name":"windows-arm64","os":"windows-11-arm","bin":"scode.exe","package_dir":"scode-windows-arm64","archive_name":"scode-windows-arm64.zip"}]') }}
     defaults:
       run:
         working-directory: rust
@@ -221,11 +194,50 @@ jobs:
             -DestinationPath "dist/${{ matrix.archive_name }}" `
             -Force
 
+      - name: Build ARM64 bundle and Debian installers
+        if: matrix.name == 'linux-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0.${GITHUB_RUN_NUMBER}"
+          fi
+          target/release/scode --version
+          ../packaging/linux/bundle/build-bundle.sh --arch arm64 \
+            --version "$version" --binary target/release/scode --output dist
+          ../packaging/linux/deb/build-deb.sh --arch arm64 \
+            --version "$version" --binary target/release/scode --output dist
+          mkdir -p dist/bundle-smoke
+          tar -xzf dist/scode-linux-arm64-bundle.tar.gz -C dist/bundle-smoke
+          (cd dist/bundle-smoke/scode-linux-arm64-bundle && sha256sum -c SHA256SUMS.txt && ./scode --version)
+          test "$(dpkg-deb -f dist/scode_*_arm64.deb Architecture)" = arm64
+          dpkg-deb --extract dist/scode_*_arm64.deb dist/deb-smoke
+          dist/deb-smoke/usr/bin/scode --version
+          install_root="$RUNNER_TEMP/scode-arm64-install"
+          SCODE_INSTALL_ROOT="$install_root" SCODE_SKIP_CONFIG=1 \
+            dist/bundle-smoke/scode-linux-arm64-bundle/scode-setup install --bin-dir /usr/local/bin
+          "$install_root/usr/local/bin/scode" --version
+          SCODE_INSTALL_ROOT="$install_root" \
+            "$install_root/usr/local/bin/scode-setup" uninstall --yes
+          test ! -e "$install_root/usr/local/bin/scode"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.package_dir }}
           path: rust/dist/${{ matrix.archive_name }}
+
+      - name: Upload ARM64 installers
+        if: matrix.name == 'linux-arm64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scode-linux-arm64-installers
+          path: |
+            rust/dist/scode-linux-arm64-bundle.tar.gz
+            rust/dist/scode_*_arm64.deb
+          if-no-files-found: error
 
   publish-release:
     name: publish-release

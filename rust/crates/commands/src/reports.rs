@@ -687,6 +687,104 @@ pub fn format_acp_compact_report(
     }
 }
 
+/// The final result of one compaction run, shared by terminal and ACP reports.
+#[must_use]
+pub fn format_compaction_report(report: &runtime::CompactionReport) -> String {
+    let outcome = match report.outcome {
+        runtime::CompactionOutcome::TargetMet => "compacted (target_met)",
+        runtime::CompactionOutcome::Skipped => "skipped",
+        runtime::CompactionOutcome::Failed => "failed",
+        runtime::CompactionOutcome::Cancelled => "cancelled",
+    };
+    let mut text = format!(
+        "Compact\n  Result           {outcome}\n  Estimated tokens {} → {}{}",
+        report.before_history,
+        report.after_history,
+        compaction_remaining(report),
+    );
+    if let Some(target) = report.target_history {
+        let _ = write!(text, "\n  Target           ≤{target}");
+    }
+    if let Some(ideal) = report.ideal_history {
+        let _ = write!(text, "\n  Ideal            ≤{ideal}");
+    }
+    let _ = write!(
+        text,
+        "\n  Safe history     ≤{}\n  Fixed overhead   {}\n  Estimate         {}",
+        report.safe_history_budget, report.actual_fixed_overhead, report.estimate_source,
+    );
+    if let Some(method) = &report.method {
+        let method = compaction_method_label(method);
+        let _ = write!(text, "\n  Method           {method}");
+    }
+    if let Some(reason) = &report.reason {
+        let _ = write!(text, "\n  Reason           {reason}");
+    }
+    text
+}
+
+#[must_use]
+pub fn format_compaction_report_with_messages(
+    report: &runtime::CompactionReport,
+    removed: usize,
+    kept: usize,
+) -> String {
+    let mut text = format_compaction_report(report);
+    let _ = write!(
+        text,
+        "\n  Messages removed {removed}\n  Messages kept    {kept}"
+    );
+    text
+}
+
+/// A short notice for a completed automatic compaction run.
+#[must_use]
+pub fn format_compaction_notice(report: &runtime::CompactionReport) -> String {
+    let label = match report.outcome {
+        runtime::CompactionOutcome::TargetMet => "auto-compacted",
+        runtime::CompactionOutcome::Skipped => "compaction skipped",
+        runtime::CompactionOutcome::Failed => "compaction failed",
+        runtime::CompactionOutcome::Cancelled => "compaction cancelled",
+    };
+    let mut text = format!(
+        "[{label}: {} → {} history tokens{}",
+        report.before_history,
+        report.after_history,
+        compaction_remaining(report),
+    );
+    if let Some(target) = report.target_history {
+        let _ = write!(text, "; target ≤{target}");
+    }
+    if let Some(ideal) = report.ideal_history {
+        let _ = write!(text, "; ideal ≤{ideal}");
+    }
+    let _ = write!(text, "; safe ≤{}", report.safe_history_budget);
+    if let Some(method) = &report.method {
+        let _ = write!(text, "; method {}", compaction_method_label(method));
+    }
+    if let Some(reason) = &report.reason {
+        let _ = write!(text, "; {reason}");
+    }
+    text.push(']');
+    text
+}
+
+fn compaction_method_label(method: &str) -> &str {
+    match method {
+        "llm_summary" => "llm summary",
+        "tool_pruning" => "tool output pruning",
+        other => other,
+    }
+}
+
+fn compaction_remaining(report: &runtime::CompactionReport) -> String {
+    if report.before_history == 0 {
+        return String::new();
+    }
+    let percent = report.after_history.saturating_mul(100) / report.before_history;
+    format!(" ({percent}% remaining)")
+}
+
 #[must_use]
 pub fn format_sandbox_report(status: &runtime::SandboxStatus) -> String {
     format!(

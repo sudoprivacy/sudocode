@@ -11,6 +11,15 @@
 
 mod common;
 
+#[test]
+fn service_help_describes_frontend_channel() {
+    let mut session = common::spawn_scode(&["service", "--help"]).expect("spawn service help");
+    session
+        .expect("stdio")
+        .expect("frontend channel must be discoverable");
+    assert_eq!(session.expect_eof().expect("help exits"), 0);
+}
+
 use common::spawn_scode;
 
 // ──────────────────────────────────────────────────────────────────────

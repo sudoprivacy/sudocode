@@ -9,9 +9,13 @@ static COLORS: OnceLock<Option<(Rgb, Rgb)>> = OnceLock::new();
 
 /// Called before the default REPL starts its input reader. The probe and the
 /// REPL use iocraft's same crossterm event queue, preserving early keys/pastes.
+/// Windows hosts can deliver OSC replies as console key records rather than
+/// parsed terminal events. Do not solicit them there: use the existing
+/// COLORFGBG/default-theme fallback instead of risking the input draft.
 pub(crate) fn initialize() {
     COLORS.get_or_init(|| {
-        if !io::stdin().is_terminal()
+        if cfg!(windows)
+            || !io::stdin().is_terminal()
             || !io::stdout().is_terminal()
             || super::ColorSupport::detect() == super::ColorSupport::NoColor
         {

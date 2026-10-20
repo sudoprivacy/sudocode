@@ -24,14 +24,14 @@
 //! zero engine/renderer-specific logic. See [`session`] for the full map + the
 //! one internal subtlety (the sync-prompt → async-answer bridge).
 //!
-//! # Crate topology (why the seam can't leak)
+//! # Crate topology and enforcement
 //!
-//! The seam is enforced by the *dependency graph*, not by convention: a renderer
-//! crate depends on `engine-core` and NOT on `runtime`/`api`, so the engine's
-//! internal types (`runtime::AssistantEvent`, `TurnSummary`, `RuntimeObserver`,
-//! `api::StreamEvent`) are literally un-nameable there — a leak fails to compile,
-//! not just a CI lint. Growing a second cross-boundary path would require adding
-//! a `runtime` dependency to a renderer's `Cargo.toml`: a visible, reviewable act.
+//! The observer adapter and subagent relay are private to this crate. The CI
+//! boundary gate rejects renderer use of runtime turn drivers, observer types
+//! and completion reducers. ACP and CLI still depend on `runtime`/`engine-host`
+//! for composition, configuration and lifecycle operations; those dependencies
+//! do not make this a compile-time restriction on every runtime type. Turn and
+//! completion control use the command/event contract described here.
 //!
 //! ```text
 //! ── engine side (below the seam — free to use runtime) ──────────────
@@ -44,22 +44,31 @@
 //!
 //! ═══════════ seam: EngineEvent / EngineCommand ═════════════════════
 //!
-//! ── renderer side (above the seam — deps engine-core ONLY) ──────────
-//!   sudocode-render      EngineEvent → terminal + input → EngineCommand
+//! ── renderer side (above the seam) ─────────────────────────────────
+//!   native REPL modules  EngineEvent → terminal + input → EngineCommand
 //!                        (in-process; the native REPL — NOT an ACP client)
 //!   engine-acp           EngineEvent ↔ ACP over stdio/ws (the ONE wire
 //!                        serialization; moss / sudowork / Zed / any ACP client)
 //!
 //! ── composition root ───────────────────────────────────────────────
 //!   scode (bin)          build the engine-host delegate → EngineSession::spawn
-//!                        → hand the EngineHandle to sudocode-render; the
-//!                        `scode acp` subcommand hands it to engine-acp instead
+//!                        → hand the EngineHandle to the native REPL;
+//!                        engine-acp composes one handle per hosted session
 //! ```
 //!
 //! Consumers by process boundary: the native REPL is **in-process** and consumes
 //! the enum directly; **every out-of-process** renderer (moss, sudowork, Zed, any
 //! third-party ACP client) goes through `engine-acp` — one serialization, so ACP
 //! is structurally just one more renderer, not a special case.
+//!
+//! # Completion ownership
+//!
+//! Completion qualification, durable context commit, replay, suppression,
+//! receipt validation and retry scheduling stay below this seam. The same
+//! `EngineHandle` carries model turns, management work and completion controls.
+//! A storage-only session can replay results before a model is loaded;
+//! [`EngineAttachment`] installs that model at composition time on its existing
+//! handle. Renderers translate transport requests and raw receipts.
 //!
 //! # What else this crate owns
 //!
@@ -73,19 +82,26 @@
 //! (`StreamEvent`, `MessageRequest`, the provider clients, …) stay internal to
 //! the engine side.
 
+mod attachment;
+pub mod cache_metrics;
+pub mod cache_report;
 mod engine_client;
+pub use attachment::EngineAttachment;
 mod session;
+pub mod subagent_completion;
 pub use engine_client::EngineApiClient;
-pub use session::{
-    EngineDelegate, EngineHandle, EngineSession, ObserverAdapter, SubagentRelay, SubagentTurnGuard,
-};
+pub use session::{EngineDelegate, EngineHandle, EngineSession};
 
 // Re-export the seam data types so a renderer / engine gets the WHOLE seam from
 // `engine_core` alone (`use engine_core::{EngineEvent, EngineCommand,
 // EngineSession, EngineHandle, EngineDelegate};`). The payload value types ride
 // along via `engine_events` (which re-exports them from `runtime`).
 pub use engine_events;
-pub use engine_events::{EngineCommand, EngineEvent, EngineState, RequestId, TurnComplete};
+pub use engine_events::{
+    EngineCommand, EngineEvent, EngineState, PromptContext, RequestId, TurnComplete,
+};
+// Cost fields accepted by the session tracer exposed through EngineApiClient.
+pub use telemetry::{UsageCost, UsageTokens};
 
 // --- Config / provider / error surface (the renderer's `api::` SSOT) ---------
 //

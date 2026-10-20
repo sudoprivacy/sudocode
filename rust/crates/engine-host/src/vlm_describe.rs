@@ -1,5 +1,5 @@
 //! VLM-route helper: turn a base64 image into a short text description by
-//! POSTing it to an OpenAI-compatible `/chat/completions` endpoint.
+//! sending it to an OpenAI-compatible `/chat/completions` endpoint.
 //!
 //! This is the side-call used by `push_images` when:
 //!   1. `image_registry::preflight_base64` returns `ImageTooLargeError` even
@@ -8,9 +8,8 @@
 //!   2. The active chat model isn't vision-capable but the user attached an
 //!      image — historically a wrong-model error; now transparent VLM-route.
 //!
-//! Architecture: HTTP lives in this file (cli crate), the runtime crate stays
-//! free of network calls. The function is async; `push_images` runs it via a
-//! one-off blocking tokio runtime since the SdkAcpDelegate trait is sync.
+//! HTTP lives on the engine side. Input preparation runs the async helper
+//! on its own thread before entering the synchronous model-turn driver.
 //!
 //! Design rationale: `docs/design/image-handling-non-user-facing.html`
 //! (Decision 2 + the "VLM model selection" section).

@@ -1,9 +1,3 @@
-<!--
-  Rust-native CLI coding agent for hackers — simple, inspectable,
-  composable. This README is the canonical voice; sudo-code-roadmap.html holds
-  the engineering plan; docs/ holds mechanism-level reference.
--->
-
 # SUDO CODE
 
 <p align="center">
@@ -12,379 +6,181 @@
 
 <p align="center">
   <a href="#license"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
-  <img alt="Rust 2021" src="https://img.shields.io/badge/rust-2021-orange?logo=rust">
+  <img alt="Rust" src="https://img.shields.io/badge/rust-native-orange?logo=rust">
   <img alt="Platform: macOS, Linux, Windows" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
-  <img alt="Protocol" src="https://img.shields.io/badge/protocol-ACP-purple">
-  <img alt="Model-agnostic" src="https://img.shields.io/badge/models-Anthropic%20%C2%B7%20OpenAI%20%C2%B7%20xAI%20%C2%B7%20Gemini-blueviolet">
-  <a href="./CONTRIBUTING.md"><img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-welcome-success.svg"></a>
+  <a href="docs/acp.md"><img alt="Protocol: ACP" src="https://img.shields.io/badge/protocol-ACP-purple"></a>
+  <a href="CONTRIBUTING.md"><img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-welcome-success.svg"></a>
 </p>
 
 ## FOR HACKERS.
 
-**Less ceremony. More control.**
-
-Sudo Code (`scode`) is a Rust-native CLI coding agent for people who
-live in the terminal and want to understand, compose, and change the
-tools they run. Inline interaction, shell pipes, headless ACP,
-readable sessions, and a choice of model providers. MIT licensed.
-
-The goal is simple: shorten the path from intent to verified work.
-Keep the interface quiet, the important state visible, and the user
-in control. A hacker tool should earn its place in your workflow,
-not become the workflow.
+Sudo Code (`scode`) is a Rust coding agent for terminal users. It edits files,
+runs tools, preserves readable sessions, and works with the model provider you
+choose. Use it interactively, in shell scripts, or through ACP from an editor
+or [Sudowork](https://sudowork.sudoprivacy.com).
 
 <p align="center">
   <img src="assets/scode-demo.gif" alt="Sudo Code terminal demo" width="900" />
 </p>
 
----
-
-## Who this is for
-
-For engineers who work in `tmux`, SSH, or an IDE terminal; automate
-repeated work; inspect what an agent is doing; and expect to choose
-their models, versions, and tools.
-
-"Hacker" describes that relationship with a tool, not a token budget
-or a minimum number of agents. One focused session is a complete
-workflow. When work grows, compose sessions with worktrees, scripts,
-reviewers, and external orchestrators — don't turn the CLI into a
-dashboard. Sudo Code stays the
-[agent unit](#position-in-the-larger-picture).
-
----
-
 ## Design principles
 
-These are design constraints, not a claim that every implementation
-already meets them. Bugs are gaps to close, not reasons to weaken
-the principles.
+These principles define the product. Engineering tasks and acceptance evidence
+live in the [roadmap](sudo-code-roadmap.html).
 
-### Always
-
-| Principle | What it means in practice |
+| Principle | Meaning |
 |---|---|
-| **Simple, not stripped down.** | Fewer steps, fewer concepts, less visual noise. Keep useful controls accessible; simplicity must not mean hiding capability. |
-| **Control and predictability.** | The user chooses providers, credentials, versions, and permissions. Make defaults understandable, actions interruptible, and consequential changes explicit. |
-| **Evidence over reassurance.** | Show commands, paths, diffs, failures, and costs. Make important activity easy to scan and details available to inspect. "Reading `src/auth.rs:42–89`" beats "working on it". |
-| **Protect work before appearance.** | Preserve input and terminal history during ordinary interaction and resize. A cleaner screen is never a reason to silently discard the user's record. |
-| **Responsive under load.** | Typing, cancellation, and resize matter as much as first-token latency. Measure the real workflow, including memory across long sessions and parallel processes; Rust alone is not evidence of speed. |
-| **Meaningful visual design.** | Amber is the primary accent. Use color, contrast, and spacing to distinguish state, not decorate it. Keep text readable and state understandable without color; no spectacle at the expense of clarity. |
-| **Composable, headless first-class.** | Work with the shell, pipes, scripts, and editors. REPL and ACP share the engine; the CLI is an agent unit, not an orchestration hub. |
-| **Local-first, inspectable state.** | File-based config, JSONL sessions, filesystem plugins. Keep state readable and portable. Model and tool traffic goes to the services the user configures; local-first does not mean offline. |
-| **Polish before scope.** | Dogfood daily. Fix broken core interactions before adding surface area. Address causes at their owning layer, with one source of truth, rather than accumulating local workarounds. |
+| **Simple and capable.** | Keep concepts few and useful controls accessible. Make commands and defaults easy to understand. |
+| **User control.** | Let users choose models, credentials, versions, and permissions. Make work interruptible and consequential actions explicit. |
+| **Inspectable work.** | Show commands, paths, diffs, failures, and costs. Keep important activity easy to scan and details available to inspect. |
+| **Preserve the record.** | Keep input, conversation history, and terminal scrollback through ordinary interaction and resize. Explain recovery choices before discarding work. |
+| **Responsive interaction.** | Measure typing, cancellation, resize, and long sessions through real terminal workflows. |
+| **Small runtime memory.** | On unified-memory machines, agent processes share physical memory with the GPU running a local model. Keep room for model weights and KV caches, especially with parallel agents. Track peak RSS and growth across turns in [performance CI](https://github.com/sudoprivacy/sudocode/actions/workflows/render-performance.yml); [measurement scope](#runtime-footprint) accompanies every result. |
+| **Compose through one engine.** | Terminal, ACP, and cohost renderers use the same engine boundary. The shell, editors, and Sudowork supply their own interaction and orchestration surfaces. |
+| **Portable Agent identity.** | Cohost and standalone share the [Agent storage contract](docs/design/agent-context-storage-matrix.html#agent-delivery-contract). Backends handle physical placement and transport. |
+| **Durable facts, transient runtime state.** | Persist sessions, memory, configuration, attachments, and consumed message positions. Keep PID presence, live status, and process queues in their runtime layer. |
+| **One source of truth.** | Put each capability and contract in its owning layer. Reuse that implementation and reference its documentation. |
+| **Readable visual design.** | Use amber as the activity accent, semantic colors, and clear typography. Keep state understandable through text as well as color. |
+| **Open and composable.** | MIT licensing, contributor copyright, explicit opt-in telemetry, inline terminal output, and provider choice are part of the product contract. |
 
-Your terminal history includes shell commands, build logs, and debug
-output from before `scode` started. A saved agent session is not a
-backup of all of that. If terminal limitations prevent a clean
-redraw, report the limitation and preserve the record. Recovery that
-discards history must be an explicit user choice, with the loss
-explained beforehand — never an automatic resize fix.
+### Runtime footprint
 
-The inline renderer measures terminal columns and keeps grapheme clusters
-intact when wrapping responses, tables, and tool cards. Continued tool rows
-retain their text styles. Amber remains the brand accent. Markdown follows
-[Codex's default styles](https://github.com/openai/codex/blob/b741e480e203f037ca726bc2a76d99a8e8668e66/codex-rs/tui/src/markdown_render.rs):
-headings and emphasis use the terminal foreground with typographic emphasis,
-inline code and file links use the syntax theme's inline-code scope, web links
-use blue with an underline, and ordered markers use terminal bright blue.
-Inline code omits literal backticks; fenced code has no added frame or fill.
+[Apple silicon](https://developer.apple.com/videos/play/wwdc2020/10686/) and
+[NVIDIA DGX Spark](https://docs.nvidia.com/dgx/dgx-spark-porting-guide/overview.html)
+share physical memory between CPU and GPU. Runtime memory therefore competes
+with local inference memory.
 
-Status summaries pass structured styles directly to iocraft. External ANSI
-content is decoded at the boundary. The shared ColorTheme selects the bundled
-Catppuccin Mocha/Latte themes from two-face 0.5.1, matching the Codex reference's
-assets. Syntax grammars and the selected theme load only when needed and are
-shared across turns. Truecolor preserves theme RGB values; indexed terminals
-use Codex-compatible perceptual matching to the fixed xterm palette. Code
-keeps the terminal background, so contrast follows the selected theme and the
-terminal's colors rather than a fixed scode code-block background. Unknown
-languages and input beyond Codex's highlighting limits (512 KiB, 10,000 lines,
-or a line over 4 KiB) remain plain. NO_COLOR disables Markdown styling.
-
-PTY acceptance compares actual terminal cells with the committed Codex style
-reference in rusty-sudocode-cli/tests/fixtures/codex_styles.json. Regenerate it
-from a local Codex checkout with e2e/codex-style/capture.py; that standalone
-reference build uses upstream helpers, and does not add ratatui to scode.
-
-The shared code_theme adapter also supplies running and completed diff cards.
-Added/removed diff fills use Codex defaults, with text adjusted to 4.5:1
-contrast against the painted surface. The existing bounded startup palette
-probe detects the terminal background while retaining queued input; COLORFGBG
-is its fallback. NO_COLOR disables both Markdown styling and the probe.
-
-### Never
-
-| Boundary | Commitment |
-|---|---|
-| **Closed or paywalled core.** | Open source. MIT. Forever. No free/pro feature split in Sudo Code. |
-| **Vendor lock-in.** | Your supported provider, subscription, key, or proxy. Open ACP integration; no mandatory model vendor. |
-| **Alternate-screen TUI.** | Inline ANSI only. No `ratatui`, split-pane mode, or `--tui` flag. The terminal remains the host. |
-| **In-CLI multi-agent dashboard.** | Orchestration UI belongs in sudowork, tmux, or your IDE. |
-| **Telemetry by default.** | Opt-in must be explicit. |
-| **CLA or copyright assignment.** | Contributors keep their copyright. MIT is the arrangement. |
-| **Trading away user control for mass-market appeal.** | "Some users might misclick" is not a reason to hide a finished feature. Explain consequences; keep the controls. Unfinished experiments follow the [feature-flag policy](./CONTRIBUTING.md#experimental-features--standing-rule). |
-
----
+The [runtime memory reference](docs/usage.md#runtime-memory)
+defines RSS, measurement scope, and a recorded example. The
+[release performance gate](e2e/terminal-resize/README.md#release-performance-gate)
+describes workloads and regression checks; the
+[versioned policy](e2e/terminal-resize/performance-policy.json) owns the budgets.
 
 ## Position in the larger picture
 
-**Sudo Code is a unit, not a hub.** It plugs into a larger
-collaboration plane through one shared primitive: the `chat-with-me`
-mailbox on the [nexus VFS](https://github.com/nexi-lab/nexus).
-Orchestration, multi-agent UI, fleet management — none of that is
-our job. Sudo Code is the well-behaved agent unit that other
-surfaces can drive: a human in a [sudowork](https://sudowork.sudoprivacy.com)
-chat, a [hydra](https://github.com/sudoprivacy/hydra)-style
-orchestrator, another sudocode running as copilot, a peer agent like
-Claude or Codex on ACP. Same primitive, same plane.
-
-### Topology — sudocode is one box among peers
-
-```mermaid
-flowchart LR
-    subgraph Orch["Orchestrator — NOT sudocode<br/>(sudowork main · hydra UI)"]
-      O["ManagedAgentService<br/>start_session_v1 · cancel · get_session"]
-    end
-
-    subgraph Units["Agent units — sudocode is one of these"]
-      direction TB
-      H["👤 human"]
-      SC["scode pid<br/>copilot OR worker role"]
-      CL["claude pid (via ACP)"]
-      CX["codex pid (via ACP)"]
-    end
-
-    subgraph Plane["nexus VFS plane"]
-      MB["chat-with-me DT_STREAMs<br/>/agents/{name}/chat-with-me<br/>/proc/{pid}/chat-with-me<br/><br/>sys_watch + sys_write<br/>kernel stamps 'from' field"]
-    end
-
-    O -. spawn .-> SC
-    O -. spawn .-> CL
-    O -. spawn .-> CX
-
-    H <--> MB
-    SC <--> MB
-    CL <--> MB
-    CX <--> MB
-```
-
-Sudo Code is interchangeable with `claude` / `codex` / a human at the
-mailbox primitive. It does not sit in the orchestrator box.
-
-### One binary, three deployment modes
-
-Same `scode` binary is a copilot, a worker, or a standalone CLI —
-chosen by which `FsBackend` impl the runtime routes through:
+Sudo Code supplies the agent engine. Sudowork supplies a UI; Nexus supplies
+storage, communication, and managed runtime services.
 
 ```mermaid
 flowchart TB
-    subgraph Runtime["sudocode runtime (Rust)"]
-      direction LR
-      SES["SessionStore"]
-      CFG["ConfigLoader"]
-      FOPS["file_ops helpers"]
-    end
-
-    TRAIT["FsBackend trait<br/>(one trait · three impls)"]
-
-    SES --> TRAIT
-    CFG --> TRAIT
-    FOPS --> TRAIT
-
-    TRAIT --> B1["StdFsBackend<br/>host std::fs"]
-    TRAIT --> B2["NexusVfsFsBackend<br/>gRPC → remote kernel"]
-    TRAIT --> B3["KernelFsBackend&lt;Kernel&gt;<br/>in-process syscalls"]
-
-    B1 -.deployed in.-> M1["standalone CLI<br/>(scode on hacker's laptop)"]
-    B2 -.deployed in.-> M2["edge / dev CLI<br/>(scode → remote nexus)"]
-    B3 -.deployed in.-> M3["sudocode-host binary<br/>(prod managed agent)"]
+    Terminal["Terminal and shell"] --> CLI["scode"]
+    Clients["Sudowork, editors, and service clients"] --> ACP["ACP renderer"]
+    CLI --> Engine["Shared Sudo Code engine"]
+    ACP --> Engine
+    Engine --> Models["Selected model provider"]
+    Engine --> Tools["Tools, skills, and MCP"]
+    Engine --> FS["Filesystem boundary"]
+    FS --> Storage["Workspace and durable Agent data"]
+    Engine <--> A2A["Nexus A2A conversations"]
+    A2A <--> Peers["Peer agents and controllers"]
 ```
 
-### Hydra evolution
+The [engine boundary](rust/crates/engine-core/src/lib.rs) defines commands and
+events between the engine and renderers. The
+[crate map](rust/README.md) identifies their implementations.
 
-[Hydra](https://github.com/sudoprivacy/hydra) — today a TypeScript
-VS Code extension shelling out to tmux + git worktrees to spawn
-Claude / Gemini / Codex — gets thin once `sudocode-host` lands:
+Saved sessions keep compressed [raw response recordings](docs/response-recording.md)
+for diagnosing streaming and protocol problems. Recordings stay beside the
+session, with size limits and an option to disable them.
 
-```mermaid
-flowchart LR
-    subgraph Today["Today — hydra is a hack on system tools"]
-      direction TB
-      T1["VS Code extension<br/>(TypeScript)"]
-      T2["tmux pane persistence"]
-      T3["git worktree isolation"]
-      T4["spawned claude / gemini / codex<br/>via shell"]
-      T1 --> T2 --> T3 --> T4
-    end
+### Agent communication and hosting
 
-    subgraph Future["After sudocode-on-nexus-vfs ships"]
-      direction TB
-      F1["VS Code sidebar<br/>(thin — UI only)"]
-      F2["ManagedAgentService<br/>start_session_v1()"]
-      F3["WorkspaceBoundaryHook<br/>(VFS-enforced isolation)"]
-      F4["scode / claude / codex<br/>as agent units"]
-      F5["chat-with-me DT_STREAM<br/>(persistence + raft replication)"]
-      F1 --> F2 --> F3 --> F4 --> F5
-    end
+Peer agents discover names with `agent_list` and exchange messages with `send`.
+Nexus A2A uses conversations shared by their participants; the
+[storage matrix](docs/design/agent-context-storage-matrix.html#agent-delivery-contract)
+owns identity, directory links, durable delivery, and visibility contracts.
+The [Nexus integration architecture](https://s.shareone.vip/s/nexus-integration-architecture#a2a)
+owns transport framing and managed session control.
 
-    Today ==>|"hydra internals rewritten, becomes thin"| Future
-```
-
-Sudo Code is the agent unit underneath that whole future picture.
-For the engineering plan to get there, see
-[`sudo-code-roadmap.html` § Goal 4](./sudo-code-roadmap.html).
-
----
+`agent_spawn` delegates a child task in the current process. Independent
+managed Agents use Nexus's `ManagedAgentService`. Standalone `scode` and the
+`nexusd-cohost` composition host the same engine through the filesystem and
+session interfaces. The [shared service contract](https://s.shareone.vip/s/nexus-integration-architecture#shared-agent-home)
+defines runtime ownership, installation, and the Sudowork integration boundary.
+Implementation tasks live in [roadmap Goal 4](sudo-code-roadmap.html#goal-4).
 
 ## Install
 
-```bash
+On macOS or Linux:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/sudoprivacy/sudocode/main/install.sh | sh
 ```
 
-`install.sh` downloads the prebuilt `scode` binary for the host
-platform (macOS arm64/x64, Linux x64/arm64) and verifies a SHA-256
-checksum. On macOS Apple Silicon: `/opt/homebrew/bin`. On macOS x64
-and Linux: `/usr/local/bin`, prompting for `sudo` only when stdin is
-a TTY. When the preferred system directory is unwritable and `sudo`
-is unavailable, the script installs to `$HOME/.local/bin`. Windows
-users grab the zip from the
-[Releases page](https://github.com/sudoprivacy/sudocode/releases/latest).
+The installer selects the host architecture and verifies the binary's SHA-256.
+Use `sh install.sh --no-sudo` for a per-user installation, or set
+`SCODE_INSTALL_DIR` to choose a directory. Set `SCODE_VERSION=vX.Y.Z` to pin a
+release. Run `sh install.sh --help` for all options.
 
-Overrides:
+For downloads through the China mirror:
 
-- `SCODE_VERSION=v0.1.5 sh install.sh` — pin a specific release.
-- `sh install.sh --no-sudo` — install to `$HOME/.local/bin`.
-- `SCODE_INSTALL_DIR=$HOME/.local/bin sh install.sh` — explicit per-user install.
-- `sh install.sh --prefix /usr/local` — explicit prefix.
-
-China mirror (checksums still verified against GitHub):
-
-```bash
+```sh
 curl -fsSL https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest/install.sh | \
   SCODE_MIRROR=https://sudowork-release-1309794936.cos.ap-beijing.myqcloud.com/sudocode/release/latest sh
 ```
 
-## Build from source
+The mirror supplies the archive and its published checksum manifest. Windows binaries and
+platform packages are available on the
+[Releases page](https://github.com/sudoprivacy/sudocode/releases/latest).
 
-```bash
-git clone https://github.com/sudoprivacy/sudocode.git
-cd sudocode/rust
-cargo build --release
-# Binary at ./target/release/scode
-```
-
-Requires a recent stable Rust 2021 toolchain.
+The [installation and updates guide](docs/usage.md#installation-and-updates)
+covers startup checks, mirror selection and version pinning. Configure a model
+and credentials using the [authentication guide](docs/authentication.md).
 
 ## Quick Start
 
-```bash
-# Pick an auth mode (see docs/authentication.md)
-export CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat-..."
-
-# Interactive REPL
+```sh
+# Interactive terminal session
 scode
 
-# One-shot prompt — pipe-composable, like every unix tool
-scode "explain this codebase" | bat
-scode --output-format json prompt "list failing tests" | jq .
+# One-shot work and JSON output
+scode "explain this codebase"
+scode --output-format json prompt "list failing tests"
 
-# Read a plan from stdin, resume a prior session
-cat plan.md | scode --resume <session-id>
+# Restore a saved session
+scode --resume <session-id>
 
-# Headless ACP server for editors / web clients
+# ACP for an editor or Web client
+scode acp
 scode acp serve --port 8080
 
-# Health check
+# Check configuration and runtime dependencies
 scode doctor
 ```
 
-For day-to-day workflows see [`docs/usage.md`](./docs/usage.md).
+The [usage guide](docs/usage.md) covers prompt editing, background tasks,
+session recovery, configuration, and output formats. The
+[ACP guide](docs/acp.md) covers transports, permissions, and session controls.
 
-The model can delegate through `agent_spawn`: `Explore` searches a codebase,
-`Plan` researches an implementation, and `Verification` runs checks or monitors
-CI. These are child tasks within the current scode process, with their own
-conversation and restricted tool sets. They inherit the parent's model and
-permissions. Nexus-managed agents have a separate independent-agent lifecycle.
+## Build and contribute
 
-In the default interactive REPL, including `--resume`, background sub-agent
-completion automatically starts a follow-up turn. Results arriving during a
-parent turn wait until that turn finishes; the user can continue chatting while
-a worker runs. Synchronous results return directly, and a synchronous worker
-that exceeds the auto-background threshold follows the same completion path.
-`pid_output` remains available for explicit retrieval. The legacy synchronous
-REPL (`SUDOCODE_INTERRUPT_QUEUE_MODE=off`) requires retrieval; print mode
-requires `run_in_background: false`. Child tasks do not survive process exit.
-
-## Architecture — current implementation
-
-```mermaid
-flowchart LR
-    subgraph Clients
-      Term([Terminal user])
-      Editor([Editor / IDE])
-      Browser([Browser / Web UI])
-      Service([Backend service])
-    end
-
-    Term -->|REPL · one-shot| CLI
-    Editor -->|ACP stdio| STDIO[scode acp]
-    Browser -->|WebSocket + HTML| WS[scode acp serve --port N]
-    Service -->|WebSocket / JSON-RPC| WS
-
-    CLI[scode CLI / REPL] --> RT
-    STDIO --> RT
-    WS --> RT
-
-    RT[Runtime<br/>session · permissions · sandbox · config] --> API[API Client<br/>SSE streaming]
-    RT --> TOOLS[Tools]
-    RT --> MCP[MCP servers]
-    RT --> PLUG[Plugins / Skills]
-
-    TOOLS --> T1[Bash · Read · Write · Edit]
-    TOOLS --> T2[Grep · Glob · WebSearch · WebFetch]
-
-    API --> P1[Anthropic]
-    API --> P2[OpenAI / Codex]
-    API --> P3[xAI · Gemini]
-    API --> P4[Proxy / Mock]
+```sh
+git clone https://github.com/sudoprivacy/sudocode.git
+cd sudocode/rust
+cargo build --release
+# Binary: target/release/scode
 ```
 
-The Cargo workspace is described in
-[`rust/README.md`](./rust/README.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for prerequisites, required checks,
+test policy, and the PR workflow. Discussion and issues are welcome in any
+language; canonical project documentation is in English.
 
 ## Documentation
 
-- [`sudo-code-roadmap.html`](./sudo-code-roadmap.html) — goals, design notes, engineering sequencing.
-- [`docs/usage.md`](./docs/usage.md) — REPL, one-shot, JSON output, resume, doctor.
-- [`docs/authentication.md`](./docs/authentication.md) — auth modes and credentials.
-- [`docs/permissions-and-sandbox.md`](./docs/permissions-and-sandbox.md) — permission modes, Linux sandbox.
-- [`docs/acp.md`](./docs/acp.md) — ACP transports and the embedded Web UI.
-- [`docs/models.md`](./docs/models.md) — aliases, provider-specific handling.
-- [`docs/plugins.md`](./docs/plugins.md) — authoring and using `scode` plugins.
-- [`docs/container.md`](./docs/container.md) — building and running inside a container.
-- [`sudo-code-roadmap.html`](./sudo-code-roadmap.html) Goal 2 — what claude-code parity means and how it is tracked (reference sources, resolution taxonomy, sync markers).
-- [`docs/mock-parity-harness.md`](./docs/mock-parity-harness.md) — the deterministic mock backend and harness.
-- [Memory systems comparison](./docs/research/memory-systems-2026-10-01/memory-systems-comparison.html) — a dated source investigation of Codex CLI, Claude Code, and Sudocode; [read and discuss on ShareOne](https://s.shareone.vip/s/codex-claude-code-sudocode-memory-systems).
-- [`rust/README.md`](./rust/README.md) — Cargo workspace map.
-
-## Contributing
-
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Contributors keep their
-copyright — no CLA, no assignment, no waivers. Commit directly.
-
-Chinese-speaking hackers: open issues and PRs in Chinese on the
-GitHub issue tracker if it's faster for you. The canonical docs
-(this README, ROADMAP, contracts) stay in English so there's one
-source of truth, but conversations in any language are welcome.
+| Reference | Scope |
+|---|---|
+| [Roadmap](sudo-code-roadmap.html) | Engineering tasks and acceptance evidence |
+| [Usage](docs/usage.md) | Terminal workflows and saved sessions |
+| [Authentication](docs/authentication.md) | Model credentials and auth modes |
+| [Permissions and sandbox](docs/permissions-and-sandbox.md) | Tool approval and execution boundaries |
+| [ACP](docs/acp.md) | Editor and Web client protocol |
+| [Agent storage matrix](docs/design/agent-context-storage-matrix.html) | Agent identity, durable paths, links, and delivery |
+| [Nexus integration](https://s.shareone.vip/s/nexus-integration-architecture) | Runtime services and communication transport |
+| [Models](docs/models.md) | Provider and model configuration |
+| [Plugins](docs/plugins.md) | Skills, plugins, and MCP integration |
+| [Containers](docs/container.md) | Container builds and startup |
+| [Rust workspace](rust/README.md) | Crate boundaries and ownership |
 
 ## License
 
-Released under the MIT License. See the per-crate license fields in
-[`rust/Cargo.toml`](./rust/Cargo.toml).
-
----
-
-Sudo Code is maintained by the Sudo Privacy community as the agent
-unit underneath the [Sudowork](https://sudowork.sudoprivacy.com)
-collaboration platform.
+[MIT](LICENSE). Contributors retain their copyright.

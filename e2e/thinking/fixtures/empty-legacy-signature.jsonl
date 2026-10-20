@@ -1,0 +1,2 @@
+{"type":"message","message":{"role":"user","blocks":[{"type":"text","text":"Record that the earlier task completed."}]}}
+{"type":"message","message":{"role":"assistant","blocks":[{"type":"thinking","thinking":"","signature":""},{"type":"thinking","thinking":"An unsigned legacy note.","signature":""},{"type":"text","text":"The earlier task completed."}]}}

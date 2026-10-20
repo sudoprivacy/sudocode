@@ -71,6 +71,9 @@ pub(crate) fn render_message(
     renderer: &crate::render::TerminalRenderer,
     tool_inputs: &mut ToolInputRegistry,
 ) -> Option<String> {
+    if msg.is_unanswered_turn_boundary() {
+        return None;
+    }
     let mut out = String::new();
 
     match msg.role {
@@ -313,8 +316,8 @@ pub(crate) fn format_connected_line_with_config(
 // reports from one definition). `format_model_report` gained a `config`
 // parameter there so it stays a pure formatter: the caller loads the config.
 pub(crate) use commands::reports::{
-    format_acp_compact_report, format_model_report, format_model_switch_report,
-    format_sandbox_report,
+    format_acp_compact_report, format_compaction_notice, format_compaction_report_with_messages,
+    format_model_report, format_model_switch_report, format_sandbox_report,
 };
 
 pub(crate) fn format_permissions_report(mode: &str) -> String {
@@ -515,7 +518,11 @@ pub(crate) fn format_compact_report(
     resulting_messages: usize,
     skipped: bool,
     summary_source: &runtime::CompactionSummarySource,
+    report: Option<&runtime::CompactionReport>,
 ) -> String {
+    if let Some(report) = report {
+        return format_compaction_report_with_messages(report, removed, resulting_messages);
+    }
     if skipped {
         format!(
             "Compact
@@ -2061,8 +2068,8 @@ pub(crate) struct TurnStatus<'a> {
 /// the total prompt sent this turn:
 /// - `cache_read_input_tokens` — served from the KV cache (a hit; cheap).
 /// - `cache_creation_input_tokens` — written into the cache this turn (a miss
-///   being cached; billed at a premium — a spike here means the prefix changed
-///   and a large span was re-cached, i.e. a cache "break").
+///   being cached; billed at a premium. A spike can reflect a cold start,
+///   prefix growth, expiry or mutation; usage alone does not prove the cause).
 /// - `input_tokens` — fresh, uncached prompt tokens.
 ///
 /// Both percentages are taken over the prompt total (output tokens are a
@@ -2086,9 +2093,14 @@ fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<StyledLine> {
         return None;
     }
 
-    // Round to nearest percent.
-    let hit_pct = (read * 100 + prompt_total / 2) / prompt_total;
-    let write_pct = (creation * 100 + prompt_total / 2) / prompt_total;
+    let efficiency = engine_core::cache_metrics::cache_efficiency(read, creation, fresh);
+    // The shared calculation also supplies monitor reports. This compact slot
+    // shows read/write shares of all prompt tokens; cached-prefix reuse is a
+    // separate metric with a different denominator.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let hit_pct = efficiency.read_share_pct.unwrap_or(0.0).round() as u64;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let write_pct = efficiency.write_share_pct.unwrap_or(0.0).round() as u64;
 
     let theme = crate::render::theme();
     let hit_color = if hit_pct >= 80 {
@@ -2122,6 +2134,14 @@ fn format_cache_efficiency_segment(usage: &TokenUsage) -> Option<StyledLine> {
 /// kept compact (`turn 3`, `3.2k tokens`) so the line stays single-row even at
 /// narrow widths.
 pub(crate) fn turn_status_line(status: &TurnStatus<'_>) -> StyledLine {
+    turn_status_line_with_context_estimate(status, false)
+}
+
+/// A missing provider anchor uses the full next-request estimate, marked `≈`.
+pub(crate) fn turn_status_line_with_context_estimate(
+    status: &TurnStatus<'_>,
+    estimated_context: bool,
+) -> StyledLine {
     let &TurnStatus {
         model,
         turn,
@@ -2169,7 +2189,10 @@ pub(crate) fn turn_status_line(status: &TurnStatus<'_>) -> StyledLine {
     // Context-window usage: current occupancy / model window. Uses the same
     // occupancy metric as auto-compaction (see format_context_usage_segment).
     if let (Some(used), Some(window)) = (context_tokens, context_window) {
-        if let Some(segment) = format_context_usage_segment(used, window) {
+        if let Some(mut segment) = format_context_usage_segment(used, window) {
+            if estimated_context {
+                segment = segment.replacen("ctx ", "ctx ≈", 1);
+            }
             segments.push(segment);
         }
     }
@@ -2180,6 +2203,16 @@ pub(crate) fn turn_status_line(status: &TurnStatus<'_>) -> StyledLine {
     if let Some(segment) = format_cache_efficiency_segment(usage) {
         line.push(" · ");
         line.append(segment);
+    }
+    if turn > 1 {
+        let total = engine_core::cache_metrics::cache_efficiency(
+            u64::from(cumulative_usage.cache_read_input_tokens),
+            u64::from(cumulative_usage.cache_creation_input_tokens),
+            u64::from(cumulative_usage.input_tokens),
+        );
+        if let Some(share) = total.read_share_pct {
+            line.push(format!(" · Σ⚡{share:.0}%"));
+        }
     }
     if let Some(branch) = branch.filter(|b| !b.is_empty()) {
         line.push(" · ");
@@ -2205,7 +2238,7 @@ fn cost_for(usage: &TokenUsage, model: &str) -> Option<String> {
         let pricing = runtime::pricing_for_model(model)
             .unwrap_or_else(runtime::ModelPricing::default_sonnet_tier);
         let est = usage
-            .estimate_cost_usd_with_pricing(pricing)
+            .estimate_cost_usd_with_pricing(pricing)?
             .total_cost_usd();
         (est > 0.0).then(|| format!("~{}", format_usd_compact(est)))
     }
@@ -2647,10 +2680,18 @@ pub(crate) fn format_context_report(
     let grid_cols = grid_width * 2 - 1;
 
     // Legend, to the right of the grid.
+    let estimate_marker = if usage
+        .provider_context_tokens
+        .is_some_and(|tokens| tokens > 0)
+    {
+        ""
+    } else {
+        "≈"
+    };
     let mut legend: Vec<String> = vec![
         format!("{dim}{}{reset}", usage.model),
         format!(
-            "{dim}{}/{} tokens ({:.0}%){reset}",
+            "{dim}{estimate_marker}{}/{} tokens ({:.0}%){reset}",
             format_context_tokens(total),
             format_context_tokens(window),
             context_percent(total, window)
@@ -3855,8 +3896,7 @@ mod tests {
         // with the replacement applied in place, not just the literal
         // fragment. Otherwise the rendered diff lies about which line is
         // changing and the line number is off-by-one.
-        let original =
-            "fn header() {}\n\nfn caller() {\n    let x = 1;\n    old_function();\n    return x;\n}\n";
+        let original = "fn header() {}\n\nfn caller() {\n    let x = 1;\n    old_function();\n    return x;\n}\n";
         let preview =
             format_edit_diff_preview(original, "old_function()", "new_function()", "").unwrap();
         let plain = strip_ansi(&preview);

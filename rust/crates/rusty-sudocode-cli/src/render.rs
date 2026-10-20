@@ -1213,6 +1213,10 @@ pub struct MarkdownStreamState {
 }
 
 impl MarkdownStreamState {
+    pub(crate) fn pending_source(&self) -> &str {
+        &self.pending
+    }
+
     #[must_use]
     pub fn push(&mut self, renderer: &TerminalRenderer, delta: &str) -> Option<String> {
         self.pending.push_str(delta);
@@ -1491,6 +1495,12 @@ fn line_closes_fence(line: &str, opener: FenceMarker) -> bool {
 /// exclusively for status glyphs. Hard-wraps text at the terminal width so the
 /// terminal never soft-wraps into column 0. Pure terminal-UI state — shared by
 /// the streaming renderers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResponsePosition {
+    is_started: bool,
+    visible_col: usize,
+}
+
 pub(crate) struct ResponseGlyphState {
     started: bool,
     pub(crate) visible_col: usize,
@@ -1500,6 +1510,20 @@ pub(crate) struct ResponseGlyphState {
 }
 
 impl ResponseGlyphState {
+    pub(crate) fn position(&self, is_new_block: bool) -> ResponsePosition {
+        ResponsePosition {
+            is_started: self.started,
+            visible_col: if is_new_block { 0 } else { self.visible_col },
+        }
+    }
+
+    pub(crate) fn from_position(width: usize, position: ResponsePosition) -> Self {
+        let mut state = Self::new(width);
+        state.started = position.is_started;
+        state.visible_col = position.visible_col;
+        state
+    }
+
     pub(crate) fn new(terminal_width: usize) -> Self {
         Self {
             started: false,

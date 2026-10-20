@@ -137,13 +137,16 @@ impl Directory {
     /// asks for a qualifier rather than guessing. A name found nowhere still
     /// routes to the primary via the caller's own offline-delivery rules — see
     /// `NotFound`, which the caller maps to the primary for durable-inbox sends.
-    #[must_use]
-    pub fn route(&self, to: &str) -> Routed<'_> {
+    /// # Errors
+    /// An explicit namespace is unavailable, or discovery in a member fails.
+    pub fn route(&self, to: &str) -> Result<Routed<'_>, String> {
         if let Some((label, _bare)) = split_qualifier(to) {
             if let Some(member) = self.members.iter().find(|m| m.label == label) {
-                return Routed::One(member);
+                return Ok(Routed::One(member));
             }
-            return Routed::NotFound;
+            return Err(format!(
+                "namespace '{label}' is not attached to this session"
+            ));
         }
         // One namespace cannot be ambiguous, so do not enumerate it: a send then
         // costs no directory read, and the single-namespace case (standalone or
@@ -151,23 +154,24 @@ impl Directory {
         // directory wrapped it. Enumeration happens ONLY to disambiguate a name
         // across several namespaces, which only exists with several members.
         if let [only] = self.members.as_slice() {
-            return Routed::One(only);
+            return Ok(Routed::One(only));
         }
-        let present: Vec<&Member> = self
-            .members
-            .iter()
-            .filter(|m| {
-                m.mailbox
-                    .list_recipients()
-                    .map(|r| r.iter().any(|n| n == to))
-                    .unwrap_or(false)
-            })
-            .collect();
-        match present.as_slice() {
+        let mut present = Vec::new();
+        for member in &self.members {
+            if member
+                .mailbox
+                .list_recipients()?
+                .iter()
+                .any(|name| name == to)
+            {
+                present.push(member);
+            }
+        }
+        Ok(match present.as_slice() {
             [] => Routed::NotFound,
             [one] => Routed::One(one),
             many => Routed::Ambiguous(many.iter().map(|m| m.label).collect()),
-        }
+        })
     }
 
     /// The bare recipient name with any `label:` qualifier stripped — what the
@@ -279,7 +283,7 @@ mod tests {
         let (m1, r1) = member_with("local", "me", &["alice"]);
         let (m2, r2) = member_with("nexus", "me", &["carol"]);
         let dir = Directory::new(vec![m1, m2]);
-        match dir.route("carol") {
+        match dir.route("carol").unwrap() {
             Routed::One(m) => assert_eq!(m.label, "nexus"),
             _ => panic!("carol is only in nexus"),
         }
@@ -292,7 +296,7 @@ mod tests {
         let (m1, r1) = member_with("local", "me", &["shared"]);
         let (m2, r2) = member_with("nexus", "me", &["shared"]);
         let dir = Directory::new(vec![m1, m2]);
-        match dir.route("shared") {
+        match dir.route("shared").unwrap() {
             Routed::Ambiguous(labels) => assert_eq!(labels, vec!["local", "nexus"]),
             _ => panic!("shared is in both, must be ambiguous"),
         }
@@ -305,7 +309,7 @@ mod tests {
         let (m1, r1) = member_with("local", "me", &["shared"]);
         let (m2, r2) = member_with("nexus", "me", &["shared"]);
         let dir = Directory::new(vec![m1, m2]);
-        match dir.route("nexus:shared") {
+        match dir.route("nexus:shared").unwrap() {
             Routed::One(m) => assert_eq!(m.label, "nexus"),
             _ => panic!("qualified route must pick nexus"),
         }
@@ -322,7 +326,7 @@ mod tests {
         let (m1, r1) = member_with("local", "me", &["alice"]);
         let (m2, r2) = member_with("nexus", "me", &["carol"]);
         let dir = Directory::new(vec![m1, m2]);
-        assert!(matches!(dir.route("nobody"), Routed::NotFound));
+        assert!(matches!(dir.route("nobody").unwrap(), Routed::NotFound));
         let _ = std::fs::remove_dir_all(r1);
         let _ = std::fs::remove_dir_all(r2);
     }
@@ -334,7 +338,7 @@ mod tests {
         // where an offline peer's first message waits.
         let (m1, r1) = member_with("local", "me", &["alice"]);
         let dir = Directory::new(vec![m1]);
-        match dir.route("whoever") {
+        match dir.route("whoever").unwrap() {
             Routed::One(m) => assert_eq!(m.label, "local"),
             _ => panic!("a single namespace always routes to itself"),
         }

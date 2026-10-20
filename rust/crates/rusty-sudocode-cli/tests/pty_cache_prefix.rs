@@ -1,10 +1,13 @@
 //! Capture the actual HTTP payload after provider conversion while driving the
 //! real CLI through a PTY. No assertion treats mock usage as a real cache hit.
 mod common;
+#[path = "support/request_evidence.rs"]
+mod request_evidence;
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -16,16 +19,39 @@ use serde_json::{json, Value};
 use std::fmt::Write as _;
 
 const COMPACT: &str = "Create a concise checkpoint";
+const RESPONSE_LOG_ONLY: &str = "RESPONSE_LOG_ONLY_MUST_STAY_OUT_OF_CONTEXT";
 const WAIT: Duration = Duration::from_secs(30);
+const DIAGNOSTIC_SSE: usize = 1;
+const DIAGNOSTIC_JSON: usize = 2;
+const DIAGNOSTIC_BETA: &str = "cache-diagnosis-2026-04-07";
+
+#[inline]
+fn response_body_paths(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "gz"))
+        .collect()
+}
+
+#[derive(Clone)]
+struct CapturedRequest {
+    body: Value,
+    beta: Vec<String>,
+    client_id: String,
+    logical_id: String,
+}
 
 struct Capture {
     url: String,
-    requests: Arc<Mutex<Vec<Value>>>,
-    attempt_ids: Arc<Mutex<Vec<(String, String)>>>,
+    requests: Arc<Mutex<Vec<CapturedRequest>>>,
     return_gateway_id: Arc<AtomicBool>,
     retry_next: Arc<AtomicBool>,
     pressure_next: Arc<AtomicBool>,
     thinking_blocks: Arc<AtomicBool>,
+    diagnostic_shape: Arc<AtomicUsize>,
+    rejections: Arc<Mutex<VecDeque<String>>>,
+    external_append: Arc<Mutex<Option<(std::path::PathBuf, String)>>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -36,14 +62,18 @@ impl Capture {
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let attempt_ids = Arc::new(Mutex::new(Vec::new()));
-        let wire_ids = Arc::clone(&attempt_ids);
         let return_gateway_id = Arc::new(AtomicBool::new(false));
         let return_id = Arc::clone(&return_gateway_id);
         let retry_next = Arc::new(AtomicBool::new(false));
         let pressure_next = Arc::new(AtomicBool::new(false));
         let thinking_blocks = Arc::new(AtomicBool::new(false));
         let thinking = Arc::clone(&thinking_blocks);
+        let diagnostic_shape = Arc::new(AtomicUsize::new(0));
+        let shape = Arc::clone(&diagnostic_shape);
+        let rejections = Arc::new(Mutex::new(VecDeque::new()));
+        let failures = Arc::clone(&rejections);
+        let external_append = Arc::new(Mutex::new(None));
+        let append = Arc::clone(&external_append);
         let stop = Arc::new(AtomicBool::new(false));
         let (captured, retry, pressure, stopped) = (
             Arc::clone(&requests),
@@ -55,7 +85,8 @@ impl Capture {
             while !stopped.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((socket, _)) => serve(
-                        socket, &captured, &retry, &pressure, &thinking, &wire_ids, &return_id,
+                        socket, &captured, &retry, &pressure, &thinking, &return_id, &shape,
+                        &failures, &append,
                     ),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -67,18 +98,25 @@ impl Capture {
         Self {
             url,
             requests,
-            attempt_ids,
             return_gateway_id,
             retry_next,
             pressure_next,
             thinking_blocks,
+            diagnostic_shape,
+            rejections,
+            external_append,
             stop,
             thread: Some(worker),
         }
     }
 
     fn bodies(&self) -> Vec<Value> {
-        self.requests.lock().unwrap().clone()
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.body.clone())
+            .collect()
     }
 }
 
@@ -89,7 +127,7 @@ impl Drop for Capture {
     }
 }
 
-fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>, String, String)> {
+fn read_request(socket: &TcpStream) -> Option<(String, CapturedRequest)> {
     let mut reader = BufReader::new(socket.try_clone().unwrap());
     let mut first = String::new();
     if reader.read_line(&mut first).unwrap_or(0) == 0 {
@@ -98,6 +136,7 @@ fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>, String, String)>
     let mut length = 0;
     let mut client_id = String::new();
     let mut logical_id = String::new();
+    let mut beta = Vec::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap() == 0 {
@@ -115,27 +154,44 @@ fn read_request(socket: &TcpStream) -> Option<(String, Vec<u8>, String, String)>
             } else if key.eq_ignore_ascii_case("x-request-id") {
                 logical_id = value.trim().to_string();
             }
+            if key.eq_ignore_ascii_case("anthropic-beta") {
+                beta.push(value.trim().to_string());
+            }
         }
     }
     let mut bytes = vec![0; length];
     reader.read_exact(&mut bytes).unwrap();
-    Some((first, bytes, client_id, logical_id))
+    Some((
+        first,
+        CapturedRequest {
+            body: if bytes.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&bytes).unwrap()
+            },
+            beta,
+            client_id,
+            logical_id,
+        },
+    ))
 }
 
 fn serve(
     mut socket: TcpStream,
-    captured: &Mutex<Vec<Value>>,
+    captured: &Mutex<Vec<CapturedRequest>>,
     retry: &AtomicBool,
     pressure: &AtomicBool,
     thinking: &AtomicBool,
-    attempt_ids: &Mutex<Vec<(String, String)>>,
     return_gateway_id: &AtomicBool,
+    diagnostic_shape: &AtomicUsize,
+    rejections: &Mutex<VecDeque<String>>,
+    external_append: &Mutex<Option<(std::path::PathBuf, String)>>,
 ) {
     socket.set_nonblocking(false).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let Some((first, bytes, client_id, logical_id)) = read_request(&socket) else {
+    let Some((first, captured_request)) = read_request(&socket) else {
         return;
     };
     if !first.starts_with("POST ") || first.contains("count_tokens") {
@@ -147,11 +203,14 @@ fn serve(
         respond(&mut socket, "200 OK", "application/json", body);
         return;
     }
-    let request: Value = serde_json::from_slice(&bytes).unwrap();
-    attempt_ids.lock().unwrap().push((client_id, logical_id));
+    let request = captured_request.body.clone();
+    let binding = captured_request
+        .beta
+        .iter()
+        .any(|header| header.contains("thinking-binding-controls-2026-08-01"));
     let number = {
         let mut all = captured.lock().unwrap();
-        all.push(request.clone());
+        all.push(captured_request);
         all.len()
     };
     if retry.swap(false, Ordering::Relaxed) {
@@ -163,17 +222,56 @@ fn serve(
         );
         return;
     }
+    if let Some(message) = rejections.lock().unwrap().pop_front() {
+        if let Some((path, record)) = external_append.lock().unwrap().take() {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(record.as_bytes())
+                .unwrap();
+        }
+        respond(
+            &mut socket,
+            "400 Bad Request",
+            "application/json",
+            &json!({
+                "type":"error", "error":{"type":"invalid_request_error", "message":message}
+            })
+            .to_string(),
+        );
+        return;
+    }
     let content = response_content(&request, number);
     let usage = json!({"input_tokens": if pressure.swap(false, Ordering::Relaxed) { 990_000 } else { 2_000 },"output_tokens":100});
     let tool_use = content["type"] == "tool_use";
     let stop_reason = if tool_use { "tool_use" } else { "end_turn" };
+    let shape = diagnostic_shape.load(Ordering::Relaxed);
+    let diagnostics = json!({"marker":"缓存诊断 → café", "comparison":"fixture-only"});
+    if shape == DIAGNOSTIC_JSON {
+        let mut body = json!({"type":"message", "id":format!("reply_{number}"),
+            "role":"assistant", "model":request["model"], "content":[content],
+            "stop_reason":stop_reason, "usage":usage, "diagnostics":diagnostics});
+        if binding {
+            body["input_transformations"] = json!([]);
+        }
+        respond_fragmented(
+            &mut socket,
+            "200 OK",
+            "application/json",
+            &serde_json::to_string_pretty(&body).unwrap(),
+        );
+        return;
+    }
     let start = if tool_use {
         json!({"type":"tool_use","id":content["id"],"name":content["name"],"input":{}})
     } else {
         json!({"type":"text","text":""})
     };
     let delta = if tool_use {
-        json!({"type":"input_json_delta","partial_json":content["input"].to_string()})
+        // Live providers emit whitespace inside tool arguments. Their durable
+        // object representation must not look like an external history edit.
+        json!({"type":"input_json_delta","partial_json":serde_json::to_string_pretty(&content["input"]).unwrap()})
     } else {
         json!({"type":"text_delta","text":content["text"]})
     };
@@ -205,6 +303,18 @@ fn serve(
         ),
         ("message_stop", json!({"type":"message_stop"})),
     ];
+    if binding {
+        events[0].1["message"]["input_transformations"] = json!([]);
+        if number == 4 {
+            events[4].1["input_transformations"] = json!([{
+                "type":"thinking_dropped", "reason":"model_binding_mismatch",
+                "path":"messages.1.content.0", "signature":"never-log-provider-blocks"
+            }]);
+        }
+    }
+    if shape == DIAGNOSTIC_SSE {
+        events[0].1["message"]["diagnostics"] = diagnostics;
+    }
     if block_index > 0 {
         let mut prefix = Vec::new();
         for (index, block) in thinking_fixture(number).into_iter().enumerate() {
@@ -229,24 +339,42 @@ fn serve(
         }
         events.splice(1..1, prefix);
     }
-    respond_events(
-        &mut socket,
-        events,
-        return_gateway_id.load(Ordering::Relaxed),
-    );
-}
-
-fn respond_events(socket: &mut TcpStream, events: Vec<(&str, Value)>, return_id: bool) {
-    let mut body = String::new();
+    let mut body = format!(": {RESPONSE_LOG_ONLY}\n\n");
     for (event, data) in events {
-        write!(body, "event: {event}\ndata: {data}\n\n").unwrap();
+        if shape == DIAGNOSTIC_SSE {
+            // Legal multi-line SSE data, JSON whitespace and CRLF framing.
+            write!(body, "event: {event}\r\n").unwrap();
+            for line in serde_json::to_string_pretty(&data).unwrap().lines() {
+                write!(body, "data: {line}\r\n").unwrap();
+            }
+            body.push_str("\r\n");
+        } else {
+            write!(body, "event: {event}\ndata: {data}\n\n").unwrap();
+        }
     }
-    let status = if return_id {
+    let status = if return_gateway_id.load(Ordering::Relaxed) {
         "200 OK\r\nx-client-request-id: gateway-authoritative-id"
     } else {
         "200 OK"
     };
-    respond(socket, status, "text/event-stream", &body);
+    if shape == DIAGNOSTIC_SSE {
+        respond_fragmented(&mut socket, status, "text/event-stream", &body);
+    } else {
+        respond(&mut socket, status, "text/event-stream", &body);
+    }
+}
+
+fn respond_fragmented(socket: &mut TcpStream, status: &str, mime: &str, body: &str) {
+    socket.set_nodelay(true).unwrap();
+    write!(socket, "HTTP/1.1 {status}\r\nContent-Type: {mime}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
+    // HTTP chunks deliberately split UTF-8 codepoints as well as SSE/JSON.
+    for bytes in body.as_bytes().chunks(2) {
+        write!(socket, "{:x}\r\n", bytes.len()).unwrap();
+        socket.write_all(bytes).unwrap();
+        socket.write_all(b"\r\n").unwrap();
+        socket.flush().unwrap();
+    }
+    socket.write_all(b"0\r\n\r\n").unwrap();
 }
 
 fn thinking_fixture(number: usize) -> Vec<Value> {
@@ -282,6 +410,25 @@ fn thinking_blocks_survive_turns_and_resume_without_merging_or_dropping() {
     let capture = Capture::new();
     capture.thinking_blocks.store(true, Ordering::Relaxed);
     let path = fixture(&env, &capture);
+    let mut legacy = Session::load_from_path(&path).unwrap();
+    legacy
+        .push_message(ConversationMessage::assistant(vec![
+            ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: Some(String::new()),
+            },
+            ContentBlock::Thinking {
+                thinking: "Legacy unsigned reasoning.".into(),
+                signature: Some(String::new()),
+            },
+            ContentBlock::Text {
+                text: "LEGACY_UNSIGNED_ANSWER".into(),
+            },
+        ]))
+        .unwrap();
+    legacy.save_to_path(&path).unwrap();
+    // The fixture writer must hand the session to the resumed CLI exclusively.
+    drop(legacy);
     let mut cli = spawn(&env, &path);
     turn(&mut cli, "First signed response.");
     turn(&mut cli, "Replay the signed response.");
@@ -293,6 +440,796 @@ fn thinking_blocks_survive_turns_and_resume_without_merging_or_dropping() {
     let requests = capture.bodies();
     assert_thinking_replayed(&requests[2], 1);
     assert_thinking_replayed(&requests[2], 2);
+    for request in &requests {
+        let blocks: Vec<_> = request["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().unwrap())
+            .collect();
+        assert!(blocks
+            .iter()
+            .any(|block| block["text"] == "LEGACY_UNSIGNED_ANSWER"));
+        assert!(
+            blocks.iter().all(|block| {
+                block["type"] != "thinking"
+                    || block["signature"].as_str().is_some_and(|s| !s.is_empty())
+            }),
+            "unsigned legacy thinking must not invalidate the resumed request"
+        );
+    }
+}
+
+fn unanswered_turn_fixture(
+    env: &TestEnv,
+    capture: &Capture,
+    tail: &str,
+) -> (std::path::PathBuf, Vec<ConversationMessage>) {
+    let path = fixture(env, capture);
+    let mut original = Session::load_from_path(&path).unwrap();
+    original
+        .push_user_text("Inspect the OLD_TASK profile.")
+        .unwrap();
+    if tail != "user" {
+        original
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: Some("old-tool-signature".into()),
+                },
+                ContentBlock::Text {
+                    text: "OLD_TASK\ncourse\nInspecting the old profile.".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "old-profile-call".into(),
+                    name: "PowerShell".into(),
+                    input: r#"{"command":"echo OLD_TASK"}"#.into(),
+                    thought_signature: None,
+                },
+            ]))
+            .unwrap();
+        original
+            .push_message(ConversationMessage::tool_result(
+                "old-profile-call",
+                "PowerShell",
+                r#"{"stdout":"OLD_TASK done","exit_code":0}"#,
+                false,
+            ))
+            .unwrap();
+    }
+    if tail == "complete" {
+        original
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "The old task is complete.".into(),
+            }]))
+            .unwrap();
+    }
+    original.save_to_path(&path).unwrap();
+    (path, original.messages)
+}
+
+#[test]
+fn resumed_unanswered_turns_end_before_new_requests_without_rewriting_history() {
+    for (mode, tail) in [
+        ("off", "tool"),
+        ("queue", "tool"),
+        ("off", "user"),
+        ("off", "complete"),
+    ] {
+        let env = TestEnv::new_mock("unanswered-turn-boundary");
+        let capture = Capture::new();
+        let (path, original_messages) = unanswered_turn_fixture(&env, &capture, tail);
+        let expected_sentinels = usize::from(tail != "complete");
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "Start a different task: NEW_TASK first.");
+        turn(&mut cli, "Continue NEW_TASK with the previous answer.");
+        exit(&mut cli);
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        common::expect_screen_settled(
+            &cli,
+            |screen| {
+                screen.contains("Continue NEW_TASK") && !screen.contains("No response requested.")
+            },
+            WAIT,
+            "internal turn marker stays out of replay",
+        );
+        turn(&mut cli, "Recall NEW_TASK after restarting.");
+        exit(&mut cli);
+        let requests = capture.bodies();
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            let messages = request["messages"].as_array().unwrap();
+            let sentinels: Vec<_> = messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| {
+                    message["role"] == "assistant"
+                        && message["content"].as_array().is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block["type"] == "text" && block["text"] == "No response requested."
+                            })
+                        })
+                })
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(
+                sentinels.len(),
+                expected_sentinels,
+                "{mode}/{tail}: missing or duplicated turn boundary"
+            );
+            if let Some(&index) = sentinels.first() {
+                assert_eq!(messages[index - 1]["role"], "user");
+                assert_eq!(messages[index + 1]["role"], "user");
+                assert!(messages[index + 1]["content"]
+                    .to_string()
+                    .contains("NEW_TASK first"));
+                if tail == "tool" {
+                    assert_eq!(
+                        messages[index - 1]["content"][0]["tool_use_id"],
+                        "old-profile-call"
+                    );
+                    assert!(messages[index - 1]["content"]
+                        .to_string()
+                        .contains("OLD_TASK done"));
+                }
+            }
+        }
+        for pair in requests.windows(2) {
+            fixed_prefix(&pair[0], &pair[1]);
+            history_prefix(&pair[0], &pair[1]);
+        }
+        let persisted = Session::load_from_path(&path).unwrap();
+        assert_eq!(
+            &persisted.messages[..original_messages.len()],
+            &original_messages,
+            "old signed history or tool results changed"
+        );
+        assert_eq!(
+            persisted
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == runtime::MessageRole::Assistant
+                        && message.blocks
+                            == vec![ContentBlock::Text {
+                                text: "No response requested.".into(),
+                            }]
+                })
+                .count(),
+            expected_sentinels
+        );
+    }
+}
+
+fn repair_archives(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let prefix = format!(
+        "{}.before-thinking-repair-",
+        path.file_name().unwrap().to_str().unwrap()
+    );
+    std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
+        .collect()
+}
+
+fn without_thinking(mut messages: Value) -> Value {
+    for message in messages.as_array_mut().unwrap() {
+        if message["role"] == "assistant" {
+            message["content"].as_array_mut().unwrap().retain(|block| {
+                block["type"] != "thinking" && block["type"] != "redacted_thinking"
+            });
+        }
+    }
+    messages
+}
+
+#[test]
+fn rejected_thinking_is_archived_once_and_new_signatures_survive_resume() {
+    for mode in ["off", "queue"] {
+        let env = TestEnv::new_mock("thinking-repair-resume");
+        let capture = Capture::new();
+        capture.thinking_blocks.store(true, Ordering::Relaxed);
+        let path = fixture(&env, &capture);
+        let config_path = env.config_home().join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] =
+            json!("claude-opus-5-5");
+        config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":["thinking-binding-controls-2026-08-01"],"thinking":{"block_binding":{"prefix_mismatch_behavior":"error"}}});
+        std::fs::write(config_path, config.to_string()).unwrap();
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "discover CronList");
+        assert_eq!(capture.bodies().len(), 2);
+        let before = Session::load_from_path(&path).unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+        capture.rejections.lock().unwrap().push_back("Invalid `signature` in `thinking` block. The block is bound to a different conversation.".into());
+        turn(
+            &mut cli,
+            "Keep the discovered tool result after signature repair.",
+        );
+        assert_eq!(
+            capture.bodies().len(),
+            4,
+            "one rejection and exactly one repaired request"
+        );
+        let requests = capture.bodies();
+        assert!(requests
+            .iter()
+            .all(|body| body["thinking"]["block_binding"]["prefix_mismatch_behavior"] == "error"));
+        assert!(capture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.beta == ["thinking-binding-controls-2026-08-01"]));
+        fixed_prefix(&requests[2], &requests[3]);
+        assert_eq!(
+            without_thinking(without_cache_markers(requests[2]["messages"].clone())),
+            without_cache_markers(requests[3]["messages"].clone())
+        );
+        let archives = repair_archives(&path);
+        assert_eq!(archives.len(), 1);
+        let archived_bytes = std::fs::read(&archives[0]).unwrap();
+        assert!(
+            archived_bytes.starts_with(&before_bytes),
+            "archive retains the original durable bytes and appended prompt"
+        );
+        let archived = Session::load_from_path(&archives[0]).unwrap();
+        assert_eq!(
+            &archived.messages[..before.messages.len()],
+            before.messages.as_slice()
+        );
+        let repaired = Session::load_from_path(&path).unwrap();
+        for (old, new) in before.messages.iter().zip(&repaired.messages) {
+            let mut expected = old.clone();
+            if expected.role == runtime::MessageRole::Assistant {
+                expected.blocks.retain(|block| {
+                    !matches!(
+                        block,
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                    )
+                });
+            }
+            assert_eq!(
+                &expected, new,
+                "text, tool records and usage stay unchanged"
+            );
+        }
+        turn(
+            &mut cli,
+            "Keep the new signed response on the next request.",
+        );
+        assert_thinking_replayed(capture.bodies().last().unwrap(), 4);
+        exit(&mut cli);
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "Keep the new signed response after restart.");
+        assert_thinking_replayed(capture.bodies().last().unwrap(), 4);
+        assert_eq!(repair_archives(&path).len(), 1);
+        exit(&mut cli);
+        let log = std::fs::read_to_string(env.workspace_root().join("cache-prefix-requests.jsonl"))
+            .unwrap();
+        let events: Vec<Value> = log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event"] == "thinking_history_repaired")
+                .count(),
+            1
+        );
+        let acks: Vec<_> = events
+            .iter()
+            .filter(|e| e["event"] == "thinking_input_transformations")
+            .collect();
+        assert!((5..=6).contains(&acks.len()));
+        let final_updates: Vec<_> = acks
+            .iter()
+            .filter(|e| e["attributes"]["count"] == 1)
+            .collect();
+        assert_eq!(final_updates.len(), 1);
+        assert_eq!(
+            final_updates[0]["attributes"]["transformations"],
+            json!([{
+                "type":"thinking_dropped", "reason":"model_binding_mismatch",
+                "path":"messages.1.content.0"
+            }])
+        );
+        assert!(!log.contains("never-log-provider-blocks"));
+    }
+}
+
+#[test]
+fn thinking_repair_is_bounded_and_unrelated_bad_requests_preserve_history() {
+    for (message, attempts, archives) in [
+        (
+            "Invalid `signature` in `thinking` block. recovery-test-rejection",
+            2,
+            1,
+        ),
+        ("invalid max_tokens recovery-test-rejection", 1, 0),
+    ] {
+        let env = TestEnv::new_mock("thinking-repair-bounded");
+        let capture = Capture::new();
+        let path = fixture(&env, &capture);
+        capture
+            .rejections
+            .lock()
+            .unwrap()
+            .extend([message.to_string(), message.to_string()]);
+        let mut cli = spawn(&env, &path);
+        cli.send("Continue despite the deliberately rejected request.\r")
+            .unwrap();
+        cli.expect("recovery-test-rejection").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "rejected request completed");
+        assert_eq!(capture.bodies().len(), attempts);
+        assert_eq!(repair_archives(&path).len(), archives);
+        exit(&mut cli);
+    }
+}
+
+#[test]
+fn thinking_repair_preserves_a_concurrent_transcript_append() {
+    let env = TestEnv::new_mock("thinking-repair-concurrent");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let record = json!({"type":"message","message":{
+        "role":"user", "blocks":[{"type":"text","text":"EXTERNAL_APPEND_MUST_SURVIVE"}]
+    }})
+    .to_string()
+        + "\n";
+    *capture.external_append.lock().unwrap() = Some((path.clone(), record));
+    capture
+        .rejections
+        .lock()
+        .unwrap()
+        .push_back("Invalid `signature` in `thinking` block.".into());
+    let mut cli = spawn(&env, &path);
+    cli.send("Continue while another writer appends history.\r")
+        .unwrap();
+    cli.expect("Thinking repair preserved history").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "concurrent edit preserved");
+    assert_eq!(capture.bodies().len(), 1);
+    assert!(repair_archives(&path).is_empty());
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("EXTERNAL_APPEND_MUST_SURVIVE"));
+    let session = Session::load_from_path(&path).unwrap();
+    assert!(session.messages.iter().flat_map(|message| &message.blocks).any(|block|
+        matches!(block,ContentBlock::Thinking {signature:Some(signature),..} if signature == "signed-prefix-0")));
+    drop(cli);
+}
+
+#[test]
+fn invalid_beta_configuration_sends_no_request_and_can_be_corrected() {
+    let env = TestEnv::new_mock("thinking-beta-configuration");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    for (betas, error) in [
+        (json!([42]), "must be an array of strings"),
+        (json!(["invalid beta"]), "invalid beta name"),
+    ] {
+        config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":betas});
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        let mut cli = env.spawn(&["--resume", path.to_str().unwrap()]);
+        cli.expect(error).unwrap();
+        assert_ne!(cli.expect_eof().unwrap(), 0);
+        assert!(capture.bodies().is_empty());
+    }
+    config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":[]});
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "Continue after correcting the beta list.");
+    exit(&mut cli);
+    assert_eq!(capture.bodies().len(), 1);
+    assert!(capture.requests.lock().unwrap()[0].beta.is_empty());
+}
+
+#[test]
+fn adaptive_thinking_and_effort_stay_fixed_across_compaction_and_resume() {
+    for model in [
+        "claude-opus-4-8",
+        "vendor/claude-opus-4-8",
+        "claude-opus-5-5",
+        "vendor/claude-opus-5-5",
+    ] {
+        let env = TestEnv::new_mock("adaptive-cache-prefix");
+        let capture = Capture::new();
+        capture.thinking_blocks.store(true, Ordering::Relaxed);
+        let path = fixture(&env, &capture);
+        let config_path = env.config_home().join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!(model);
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        let start = || {
+            let cli = env.spawn(&[
+                "--resume",
+                path.to_str().unwrap(),
+                "--effort",
+                if model.contains("4-8") {
+                    "xhigh"
+                } else {
+                    "max"
+                },
+                "--permission-mode",
+                "read-only",
+            ]);
+            common::expect_input_line_cleared(&cli, WAIT, "adaptive resume ready");
+            cli
+        };
+        let mut cli = start();
+        turn(&mut cli, "Continue with adaptive thinking.");
+        let baseline = capture.bodies()[0].clone();
+        assert_eq!(baseline["model"], model);
+        assert_eq!(
+            baseline["thinking"],
+            json!({"type":"adaptive","display":"summarized"})
+        );
+        assert_eq!(
+            baseline["output_config"]["effort"],
+            if model.contains("4-8") {
+                "xhigh"
+            } else {
+                "max"
+            }
+        );
+        assert!(baseline.get("reasoning_effort").is_none());
+        turn(&mut cli, "Continue the next step.");
+        assert_thinking_replayed(&capture.bodies()[1], 1);
+        let response_dir = Session::response_captures_dir_for(
+            &path,
+            &Session::load_from_path(&path).unwrap().session_id,
+        )
+        .unwrap();
+        common::expect_screen(
+            &cli,
+            |_| {
+                let bodies = response_body_paths(&response_dir);
+                bodies.len() == 2
+                    && bodies.iter().all(|path| {
+                        std::fs::read(path.with_extension("").with_extension("json"))
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                            .is_some_and(|metadata| metadata["gzip_complete"] == true)
+                    })
+            },
+            WAIT,
+            "two background response logs finalized",
+        );
+        let before_compact: Vec<_> = response_body_paths(&response_dir)
+            .into_iter()
+            .map(|path| {
+                let bytes = std::fs::read(&path).unwrap();
+                let mut body = String::new();
+                flate2::read::GzDecoder::new(bytes.as_slice())
+                    .read_to_string(&mut body)
+                    .unwrap();
+                assert!(body.contains(RESPONSE_LOG_ONLY));
+                (path, bytes)
+            })
+            .collect();
+        assert_eq!(before_compact.len(), 2);
+        assert!(!common::screen_tail(&cli, 12000).contains(RESPONSE_LOG_ONLY));
+        cli.send("/compact\r").unwrap();
+        cli.expect("Messages removed").unwrap_or_else(|error| {
+            panic!(
+                "compaction did not complete: {error}; {}",
+                common::screen_tail(&cli, 12000)
+            )
+        });
+        common::expect_input_line_cleared(&cli, WAIT, "adaptive compaction finished");
+        turn(&mut cli, "Continue after compaction.");
+        exit(&mut cli);
+        let bodies_before_restart = response_body_paths(&response_dir).len();
+        let settings_path = env.config_home().join("settings.json");
+        std::fs::write(&settings_path, r#"{"responseRecording":{"enabled":false}}"#).unwrap();
+        let mut cli = start();
+        turn(&mut cli, "Continue after restart.");
+        exit(&mut cli);
+        assert_eq!(
+            response_body_paths(&response_dir).len(),
+            bodies_before_restart
+        );
+        std::fs::write(&settings_path, r#"{"responseRecording":{"enabled":true}}"#).unwrap();
+        let mut cli = start();
+        turn(&mut cli, "Continue after enabling response logs again.");
+        exit(&mut cli);
+        assert_eq!(
+            response_body_paths(&response_dir).len(),
+            bodies_before_restart + 1
+        );
+        let requests = capture.bodies();
+        assert!(requests.iter().any(|r| r.to_string().contains(COMPACT)));
+        for request in &requests[1..] {
+            fixed_prefix(&baseline, request);
+        }
+        for request in &requests {
+            assert!(!request.to_string().contains(RESPONSE_LOG_ONLY));
+        }
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains(RESPONSE_LOG_ONLY));
+        for (path, bytes) in before_compact {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert_thinking_replayed(requests.last().unwrap(), requests.len() - 1);
+    }
+}
+
+#[test]
+fn adaptive_hidden_thinking_keeps_signed_history_and_uses_provider_default_effort() {
+    let env = TestEnv::new_mock("adaptive-hidden-thinking");
+    let capture = Capture::new();
+    capture.thinking_blocks.store(true, Ordering::Relaxed);
+    let path = fixture(&env, &capture);
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!("claude-opus-5-5");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    std::fs::write(
+        env.config_home().join("settings.json"),
+        r#"{"thinking":false}"#,
+    )
+    .unwrap();
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "Thinking display is hidden.");
+    turn(&mut cli, "Keep the hidden signed response.");
+    exit(&mut cli);
+    let requests = capture.bodies();
+    for request in &requests {
+        assert_eq!(
+            request["thinking"],
+            json!({"type":"adaptive","display":"omitted"})
+        );
+        assert_eq!(request["output_config"]["effort"], "medium");
+        assert!(request.get("reasoning_effort").is_none());
+    }
+    assert_thinking_replayed(&requests[1], 1);
+}
+
+#[test]
+fn opus48_thinking_can_be_disabled_and_reenabled_after_resume() {
+    let env = TestEnv::new_mock("opus48-thinking-toggle");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!("claude-opus-4-8");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    for is_enabled in [true, false, true] {
+        std::fs::write(
+            env.config_home().join("settings.json"),
+            json!({"thinking": is_enabled}).to_string(),
+        )
+        .unwrap();
+        let mut cli = spawn(&env, &path);
+        turn(&mut cli, "Continue with the current thinking setting.");
+        exit(&mut cli);
+        let request = capture.bodies().pop().unwrap();
+        if is_enabled {
+            assert_eq!(
+                request["thinking"],
+                json!({"type":"adaptive","display":"summarized"})
+            );
+        } else {
+            assert!(request.get("thinking").is_none());
+        }
+        assert_eq!(request["model"], "claude-opus-4-8");
+        assert_eq!(request["output_config"]["effort"], "high");
+    }
+}
+
+#[test]
+fn effort_changes_preserve_signed_history_and_max_is_session_scoped() {
+    let env = TestEnv::new_mock("effort-cache-prefix");
+    let capture = Capture::new();
+    capture.thinking_blocks.store(true, Ordering::Relaxed);
+    let path = fixture(&env, &capture);
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] = json!("claude-opus-4-8");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let mut cli = spawn(&env, &path);
+    for level in ["xhigh", "max", "low"] {
+        cli.send(&format!("/effort {level}\r")).unwrap();
+        cli.expect(&format!("Effective: {level}")).unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "effort applied");
+        turn(&mut cli, "Continue with the selected effort.");
+        assert_eq!(
+            capture.bodies().last().unwrap()["output_config"]["effort"],
+            level
+        );
+        let settings: Value = serde_json::from_slice(
+            &std::fs::read(env.config_home().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings["effortLevel"],
+            if level == "max" { "xhigh" } else { level }
+        );
+    }
+    cli.send("/effort max\r").unwrap();
+    cli.expect("this session only").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "session max applied");
+    cli.send("/compact\r").unwrap();
+    cli.expect("Messages removed").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "max compaction complete");
+    turn(&mut cli, "Continue after checkpoint.");
+    exit(&mut cli);
+    let before_resume = capture.bodies();
+    assert!(before_resume
+        .iter()
+        .any(|body| body.to_string().contains(COMPACT)));
+    for pair in before_resume[..3].windows(2) {
+        for key in ["model", "system", "tools", "metadata", "thinking"] {
+            assert_eq!(pair[0][key], pair[1][key], "effort rewrote {key}");
+        }
+        history_prefix(&pair[0], &pair[1]);
+    }
+    assert_thinking_replayed(&before_resume[1], 1);
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "Continue after restart using persisted effort.");
+    exit(&mut cli);
+    let requests = capture.bodies();
+    assert_eq!(requests.last().unwrap()["output_config"]["effort"], "low");
+    history_prefix(before_resume.last().unwrap(), requests.last().unwrap());
+    assert_thinking_replayed(requests.last().unwrap(), before_resume.len());
+}
+
+#[test]
+fn tool_input_objects_and_legacy_strings_survive_cli_resume_without_number_loss() {
+    for legacy in [false, true] {
+        let env = TestEnv::new_mock("tool-input-history");
+        let capture = Capture::new();
+        let path = fixture(&env, &capture);
+        let input = json!({"fraction":0.375,"exponent":1.25e-7,"large":18446744073709551615u64,"nested":{"label":"缓存 → café 😀","list":[true,null,0.0625]}});
+        let raw_input = input.to_string().replace('😀', r"\ud83d\ude00");
+        let mut session = Session::load_from_path(&path).unwrap();
+        session
+            .push_user_text("Inspect the original sensor sample.")
+            .unwrap();
+        session
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: "history-input".into(),
+                    name: "sensor".into(),
+                    input: raw_input.clone(),
+                    thought_signature: None,
+                },
+            ]))
+            .unwrap();
+        session
+            .push_message(ConversationMessage::tool_result(
+                "history-input",
+                "sensor",
+                "sample=0.375",
+                false,
+            ))
+            .unwrap();
+        session.save_to_path(&path).unwrap();
+        drop(session);
+        if legacy {
+            let raw = std::fs::read_to_string(&path).unwrap();
+            let rewritten: Vec<String> = raw
+                .lines()
+                .map(|line| {
+                    let mut row: Value = serde_json::from_str(line).unwrap();
+                    if let Some(blocks) = row["message"]["blocks"].as_array_mut() {
+                        for block in blocks {
+                            if block["id"] == "history-input" {
+                                block["input"] = json!(raw_input);
+                            }
+                        }
+                    }
+                    row.to_string()
+                })
+                .collect();
+            std::fs::write(&path, rewritten.join("\n") + "\n").unwrap();
+        }
+        let mut cli = spawn(&env, &path);
+        turn(&mut cli, "Continue from the stored sample.");
+        exit(&mut cli);
+        let mut cli = spawn(&env, &path);
+        turn(&mut cli, "Continue after process restart.");
+        exit(&mut cli);
+        let requests = capture.bodies();
+        assert_eq!(requests.len(), 2);
+        history_prefix(&requests[0], &requests[1]);
+        for request in requests {
+            let block = request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|message| message["content"].as_array().unwrap())
+                .find(|block| block["id"] == "history-input")
+                .unwrap();
+            assert_eq!(block["input"], input);
+        }
+    }
+}
+
+#[test]
+fn model_picker_selects_effort_and_cancel_keeps_the_original_choice() {
+    for mode in ["off", "queue"] {
+        let env = TestEnv::new_mock("model-effort-picker");
+        let capture = Capture::new();
+        capture.thinking_blocks.store(true, Ordering::Relaxed);
+        let path = fixture(&env, &capture);
+        let config_path = env.config_home().join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        for model in ["claude-opus-4-8", "claude-sonnet-4-6", "claude-opus-4-5"] {
+            let mut entry = config["models"]["claude-sonnet"].clone();
+            entry["alias"] = json!(model);
+            entry["providers"]["api-key"]["model"] = json!(model);
+            config["models"][model] = entry;
+        }
+        std::fs::write(config_path, config.to_string()).unwrap();
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "Continue before adjusting the model.");
+        let before = capture.bodies()[0].clone();
+        cli.send("/model\r").unwrap();
+        cli.expect("Select model").unwrap();
+        cli.send("claude-opus-4-8\r").unwrap();
+        cli.expect("Select effort").unwrap_or_else(|error| {
+            panic!(
+                "effort picker: {error}\n{}",
+                cli.render(|screen| screen.contents())
+            )
+        });
+        cli.send("\x1b").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "effort selection cancelled");
+        turn(&mut cli, "Continue after cancelling the selection.");
+        let cancelled = capture.bodies()[1].clone();
+        fixed_prefix(&before, &cancelled);
+        history_prefix(&before, &cancelled);
+
+        cli.send("/model\r").unwrap();
+        cli.expect("Select model").unwrap();
+        cli.send("claude-opus-4-8\r").unwrap();
+        cli.expect("Select effort").unwrap();
+        cli.send("xhigh\r").unwrap();
+        cli.expect("Effective: xhigh").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "model and effort selected");
+        turn(&mut cli, "Continue using the selected model and effort.");
+        let selected = capture.bodies()[2].clone();
+        assert_eq!(selected["model"], "claude-opus-4-8");
+        assert_eq!(selected["output_config"]["effort"], "xhigh");
+        assert_thinking_replayed(&selected, 1);
+        history_prefix(&cancelled, &selected);
+        cli.send("/model claude-sonnet-4-6\r").unwrap();
+        cli.expect("Model updated").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "legacy model selected");
+        turn(
+            &mut cli,
+            "Continue with a model that does not support xhigh.",
+        );
+        assert_eq!(capture.bodies()[3]["output_config"]["effort"], "high");
+        cli.send("/model claude-opus-4-5\r").unwrap();
+        cli.expect("Model updated").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "Opus 4.5 selected");
+        turn(&mut cli, "Continue with Opus 4.5's effort ladder.");
+        assert_eq!(capture.bodies()[4]["output_config"]["effort"], "high");
+        cli.send("/model claude-opus-4-8\r").unwrap();
+        cli.expect("Model updated").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "Opus 4.8 restored");
+        turn(&mut cli, "Restore the original effort preference.");
+        assert_eq!(capture.bodies()[5]["output_config"]["effort"], "xhigh");
+        exit(&mut cli);
+    }
 }
 
 fn response_content(request: &Value, number: usize) -> Value {
@@ -371,14 +1308,142 @@ fn fixture(env: &TestEnv, capture: &Capture) -> std::path::PathBuf {
 }
 
 fn spawn(env: &TestEnv, path: &std::path::Path) -> PtySession {
-    let cli = env.spawn(&[
-        "--resume",
-        path.to_str().unwrap(),
-        "--permission-mode",
-        "danger-full-access",
-    ]);
+    spawn_with_env(env, path, &[])
+}
+
+fn spawn_with_env(env: &TestEnv, path: &std::path::Path, extra: &[(&str, &str)]) -> PtySession {
+    let log = env.workspace_root().join("cache-prefix-requests.jsonl");
+    let mut variables = vec![("SCODE_LOG_PATH", log.to_str().unwrap())];
+    variables.extend_from_slice(extra);
+    let cli = env.spawn_with_env(
+        &[
+            "--resume",
+            path.to_str().unwrap(),
+            "--permission-mode",
+            "danger-full-access",
+        ],
+        &variables,
+    );
     common::expect_input_line_cleared(&cli, WAIT, "resume ready");
     cli
+}
+
+#[test]
+fn cache_diagnostics_survive_resume_without_crossing_session_boundaries() {
+    for shape in [DIAGNOSTIC_SSE, DIAGNOSTIC_JSON] {
+        let env = TestEnv::new_mock("cache-diagnosis-resume");
+        let capture = Capture::new();
+        capture.diagnostic_shape.store(shape, Ordering::Relaxed);
+        let path = fixture(&env, &capture);
+        let dump = env.workspace_root().join("diagnosis-dumps");
+        let dump = dump.to_str().unwrap();
+        let run = |path: &std::path::Path, enabled| {
+            let mut cli = spawn_with_env(
+                &env,
+                path,
+                &[
+                    (
+                        "SUDOCODE_CACHE_DIAGNOSTICS",
+                        if enabled { "1" } else { "0" },
+                    ),
+                    ("SUDOCODE_DUMP_REQUESTS", dump),
+                ],
+            );
+            turn(&mut cli, "Continue the recorded decisions.");
+            exit(&mut cli);
+        };
+        run(&path, false);
+        let cache_root = env.config_home().join("cache/prompt-cache");
+        let diagnosis_paths = || {
+            std::fs::read_dir(&cache_root)
+                .unwrap()
+                .map(|entry| entry.unwrap().path().join("cache-diagnostics.json"))
+                .filter(|path| path.is_file())
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            diagnosis_paths().is_empty(),
+            "disabled diagnostics must not write state"
+        );
+        run(&path, true);
+        run(&path, true); // A fresh process, not merely another request.
+        let other_path = env.workspace_root().join("independent.jsonl");
+        Session::new()
+            .with_workspace_root(env.workspace_root())
+            .save_to_path(&other_path)
+            .unwrap();
+        run(&other_path, true);
+        run(&path, false);
+        run(&path, true);
+        let requests = capture.requests.lock().unwrap().clone();
+        assert_eq!(
+            requests.len(),
+            6,
+            "diagnostics must not add or retry requests"
+        );
+        for index in [0, 4] {
+            assert!(requests[index].body.get("diagnostics").is_none());
+            assert!(requests[index]
+                .beta
+                .iter()
+                .all(|header| !header.contains(DIAGNOSTIC_BETA)));
+        }
+        for (index, previous) in [
+            (1, Value::Null),
+            (2, json!("reply_2")),
+            (3, Value::Null),
+            (5, json!("reply_3")),
+        ] {
+            assert_eq!(
+                requests[index].body["diagnostics"],
+                json!({"previous_message_id":previous})
+            );
+            assert_eq!(
+                requests[index].beta.len(),
+                1,
+                "beta values must be merged, not duplicate headers"
+            );
+            assert_eq!(
+                requests[index].beta[0]
+                    .split(',')
+                    .filter(|value| value.trim() == DIAGNOSTIC_BETA)
+                    .count(),
+                1
+            );
+        }
+        fixed_prefix(&requests[1].body, &requests[2].body);
+        history_prefix(&requests[1].body, &requests[2].body);
+        let mut ids: Vec<_> = diagnosis_paths()
+            .iter()
+            .map(|path| {
+                serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()
+                    ["message_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        ids.sort();
+        assert_eq!(ids, ["reply_4", "reply_6"]);
+        let diagnoses: Vec<_> = std::fs::read_dir(dump)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .ends_with("-cache-diagnosis.json")
+            })
+            .map(|path| serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap())
+            .collect();
+        assert_eq!(diagnoses.len(), 4);
+        for diagnosis in diagnoses {
+            assert_eq!(
+                diagnosis["diagnostics"]["marker"], "缓存诊断 → café",
+                "UTF-8 must survive arbitrary HTTP chunks"
+            );
+        }
+    }
 }
 
 fn turn(cli: &mut PtySession, text: &str) {
@@ -611,6 +1676,19 @@ fn retry_and_automatic_compaction_preserve_session_fields() {
     let mut cli = spawn(&env, &path);
     turn(&mut cli, "Begin the next step.");
     capture.retry_next.store(true, Ordering::Relaxed);
+    turn(&mut cli, "Continue the retry step.");
+    let accepted = request_evidence::accepted_messages(
+        &env.workspace_root().join("cache-prefix-requests.jsonl"),
+    );
+    assert_eq!(
+        accepted.len(),
+        2,
+        "a failed HTTP attempt is not an extra completed model request"
+    );
+    assert_eq!(
+        accepted,
+        vec![capture.bodies()[0].clone(), capture.bodies()[2].clone()]
+    );
     capture.pressure_next.store(true, Ordering::Relaxed);
     turn(&mut cli, "Continue and checkpoint if needed.");
     turn(&mut cli, "Continue after the checkpoint.");
@@ -627,7 +1705,13 @@ fn retry_and_automatic_compaction_preserve_session_fields() {
     for request in &requests[1..] {
         fixed_prefix(&requests[0], request);
     }
-    let attempts = capture.attempt_ids.lock().unwrap();
+    let attempts: Vec<_> = capture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| (request.client_id.clone(), request.logical_id.clone()))
+        .collect();
     let ids: std::collections::HashSet<_> = attempts.iter().map(|(id, _)| id).collect();
     assert_eq!(
         ids.len(),
@@ -693,7 +1777,13 @@ fn streaming_ledger_prefers_the_returned_gateway_id() {
     let rows = cache_ledger_rows(&env);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["gateway_request_id"], "gateway-authoritative-id");
-    let attempts = capture.attempt_ids.lock().unwrap();
+    let attempts: Vec<_> = capture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| (request.client_id.clone(), request.logical_id.clone()))
+        .collect();
     assert_ne!(attempts[0].0, "gateway-authoritative-id");
 }
 

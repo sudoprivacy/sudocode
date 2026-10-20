@@ -82,15 +82,17 @@ pub fn agent_workspace(pid: &str) -> String {
 /// creation is idempotent and leaves an existing entry alone.
 pub fn provision_stream_transcript(kernel: &Kernel, path: &str) {
     use kernel::abc::meta_store::DT_STREAM;
+    let ctx = OperationContext::new("test-provisioner", "root", true, None, true);
     let parent = path.rsplit_once('/').map_or("/", |(dir, _)| dir);
     let _ = kernel.sys_setattr(
-        parent, 1, // DT_DIR
+        parent, &ctx, 1, // DT_DIR
         "", None, None, None, "balanced", "root", false, 0, None, None, None, None, None, None,
         None, None, None, None, None,
     );
     kernel
         .sys_setattr(
             path,
+            &ctx,
             DT_STREAM as i32,
             "",
             None,
@@ -190,6 +192,7 @@ pub fn mount_model(
 ) -> tempfile::TempDir {
     use kernel::hal::object_store_provider::{ObjectStoreProvider, ObjectStoreProviderArgs};
     use kernel::kernel::convenience::{KernelConvenience, MountOptions};
+    let ctx = OperationContext::new("test-provisioner", "root", true, None, true);
     let storage = tempfile::tempdir().expect("model storage");
     kernel
         .bring_up_services(vec![llm_mount::service_decl()])
@@ -219,7 +222,7 @@ pub fn mount_model(
     kernel
         .mount(
             "/model",
-            MountOptions::new("model").with_backend(built.backend.expect("model backend")),
+            MountOptions::new(&ctx, "model").with_backend(built.backend.expect("model backend")),
         )
         .expect("mount model");
     storage

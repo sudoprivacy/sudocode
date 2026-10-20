@@ -24,33 +24,40 @@ printf 'fake deb\n' > "$out"
 BIN
 chmod +x "$fake_dpkg"
 
-SCODE_DPKG_DEB="$fake_dpkg" \
-SCODE_TEST_CAPTURE_ROOT="$TMP/package-root" \
-"$ROOT/packaging/linux/deb/build-deb.sh" \
-  --version 0.1.12 \
-  --binary "$fake_bin" \
-  --output "$TMP/dist"
-
-deb="$TMP/dist/scode_0.1.12_amd64.deb"
-test -f "$deb"
-test -x "$TMP/package-root/usr/bin/scode"
-test -x "$TMP/package-root/usr/bin/scode-setup"
-test -x "$TMP/package-root/usr/lib/scode/scode-setup"
-grep -q 'Package: scode' "$TMP/package-root/DEBIAN/control"
-grep -q 'Version: 0.1.12' "$TMP/package-root/DEBIAN/control"
-
-if command -v dpkg-deb >/dev/null 2>&1; then
+for arch in amd64 arm64; do
+  SCODE_DPKG_DEB="$fake_dpkg" \
+  SCODE_TEST_CAPTURE_ROOT="$TMP/package-root" \
   "$ROOT/packaging/linux/deb/build-deb.sh" \
-    --version 0.1.12 \
+    --version 0.1.12 --arch "$arch" \
     --binary "$fake_bin" \
-    --output "$TMP/real-dist"
-  real_deb="$TMP/real-dist/scode_0.1.12_amd64.deb"
-  dpkg-deb --contents "$real_deb" | grep -q './usr/bin/scode$'
-  dpkg-deb --contents "$real_deb" | grep -q './usr/bin/scode-setup$'
-  dpkg-deb --contents "$real_deb" | grep -q './usr/lib/scode/scode-setup$'
-  dpkg-deb --info "$real_deb" | grep -q 'Package: scode'
-  dpkg-deb --info "$real_deb" | grep -q 'Version: 0.1.12'
-fi
+    --output "$TMP/dist"
+
+  deb="$TMP/dist/scode_0.1.12_${arch}.deb"
+  test -f "$deb"
+  test -x "$TMP/package-root/usr/bin/scode"
+  test -x "$TMP/package-root/usr/bin/scode-setup"
+  test -x "$TMP/package-root/usr/lib/scode/scode-setup"
+  grep -q 'Package: scode' "$TMP/package-root/DEBIAN/control"
+  grep -q 'Version: 0.1.12' "$TMP/package-root/DEBIAN/control"
+
+  if command -v dpkg-deb >/dev/null 2>&1; then
+    "$ROOT/packaging/linux/deb/build-deb.sh" \
+      --version 0.1.12 --arch "$arch" \
+      --binary "$fake_bin" \
+      --output "$TMP/real-dist"
+    real_deb="$TMP/real-dist/scode_0.1.12_${arch}.deb"
+    dpkg-deb --contents "$real_deb" | grep -q './usr/bin/scode$'
+    dpkg-deb --contents "$real_deb" | grep -q './usr/bin/scode-setup$'
+    dpkg-deb --contents "$real_deb" | grep -q './usr/lib/scode/scode-setup$'
+    dpkg-deb --info "$real_deb" | grep -q 'Package: scode'
+    dpkg-deb --info "$real_deb" | grep -q 'Version: 0.1.12'
+  fi
+
+  grep -q "Architecture: $arch" "$TMP/package-root/DEBIAN/control"
+  if [ "$arch" = arm64 ]; then
+    grep -q 'libc6 (>= 2.35), libgcc-s1' "$TMP/package-root/DEBIAN/control"
+  fi
+done
 
 setup_home="$TMP/home"
 mkdir -p "$setup_home"

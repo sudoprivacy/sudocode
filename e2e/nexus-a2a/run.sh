@@ -34,7 +34,7 @@ AUTHON_PORT="${NEXUS_A2A_HOST_PORT:-2143}"
 AUTHON_ZONE="${NEXUS_A2A_ZONE:-sharedzone}"
 ENDPOINT="https://127.0.0.1:${AUTHON_PORT}"
 RUST_DIR="${RUST_DIR:-$(cd ../../rust && pwd)}"
-CARGO_TEST=(cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test mailbox_nexus_live)
+CARGO_TEST=(cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p runtime --test mailbox_nexus_live)
 
 # A downloaded binary needs no image built by hand, which is what kept this
 # harness off CI: building `nexusd-cluster` is a nexus-repo job and wants a
@@ -50,8 +50,12 @@ AUTHON_NEXUSD_BIN="$NEXUSD_BIN"
 AUTHON_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/scode-a2a-nexusd.XXXXXX")"
 AUTHON_DAEMON_PID=
 cleanup() {
-  [ -n "$AUTHON_DAEMON_PID" ] && kill "$AUTHON_DAEMON_PID" 2>/dev/null || true
-  rm -rf "$AUTHON_DATA_DIR" 2>/dev/null || true
+  authon_stop
+  if [ -z "${NEXUS_A2A_KEEP_WORK:-}" ]; then
+    rm -rf "$AUTHON_DATA_DIR" 2>/dev/null || true
+  else
+    echo "== work dir kept: $AUTHON_DATA_DIR =="
+  fi
 }
 trap cleanup EXIT
 mkdir -p "$AUTHON_DATA_DIR"/{data,id}
@@ -67,9 +71,7 @@ authon_wait_log "Static topology applied" 45
 # workaround: a credential is not a network resource. One bundle serves the
 # identity-agnostic transport tests; the duet mints its own participants below.
 echo "== 2. stop, for the offline mint =="
-kill "$AUTHON_DAEMON_PID" 2>/dev/null || true
-wait "$AUTHON_DAEMON_PID" 2>/dev/null || true
-AUTHON_DAEMON_PID=
+authon_stop
 
 echo "== 3. mint a CA-signed agent bundle for the client =="
 CLIENT_BUNDLE="$(authon_mint "live-probe")" || { daemon_logs; exit 1; }
@@ -114,6 +116,14 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
 # peer from both in ONE listing, each tagged with where it was found. The union
 # the Directory exists for, proven against a real daemon rather than a temp dir -
 # so a regression that silently drops a namespace from `agent_list` fails here.
+# /agents and /sessions are mounted from one zone; a router that drops the mount
+# prefix aliases them, and `readdir /agents` then returns session ids. The daemon
+# version comes from the nexus-vfs lock, so pin the invariant here: a bump or
+# rollback past the fix must fail loudly instead of degrading every agent_list.
+echo "== [deterministic] /agents and /sessions are distinct namespaces =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_agents_and_sessions_are_not_the_same_namespace -- --ignored --nocapture
+
 echo "== [deterministic] agent_list unions local + nexus peers =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_directory_unions_local_and_nexus_peers -- --ignored --nocapture
@@ -129,8 +139,12 @@ echo "== [deterministic] two scode processes, one daemon =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
   NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$(authon_mint "team-lead")" \
   NEXUS_A2A_TEST_SENDER_CREDENTIAL="$(authon_mint "duet-sender")" \
-  cargo test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
+  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
   --test pty_agent_duet -- --nocapture
+
+echo "== [deterministic] a silent connection errors, then recovers =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
 
 # A daemon that is alive and SILENT - the failure a unit test cannot construct.
 #

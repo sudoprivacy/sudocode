@@ -1,7 +1,7 @@
 //! Image input and screenshot feedback exercised through the real CLI in a PTY.
 //! Assertions inspect captured provider requests, including exact image bytes,
 //! tool-result ordering, permission failures, session replay, and text-only rejection.
-//! The ignored browser case additionally requires installed suh and Chrome.
+//! The ignored browser case additionally requires installed ai-dev-browser and Chrome.
 //!
 //! Run normal coverage with `cargo test --test pty_image_handling`; add
 //! `-- --include-ignored` to exercise the local browser as well.
@@ -466,25 +466,30 @@ fn serial_read_attaches_image() {
 /// External prerequisites are optional for a scode installation. An explicit
 /// run fails if they are absent; it never silently skips the actual browser.
 #[test]
-#[ignore = "requires independently installed suh and Chrome"]
+#[ignore = "requires ai-dev-browser and Chrome"]
 fn real_browser_screenshot_reaches_model_as_pixels() {
     use base64::Engine as _;
     let env = TestEnv::new("browser-image-feedback");
-    let lookup = std::process::Command::new("sh")
-        .args(["-c", "command -v suh"])
+    let python = std::env::var("SCODE_BROWSER_PYTHON").unwrap_or_else(|_| "python3".into());
+    let lookup = std::process::Command::new(&python)
+        .args(["-c", "import ai_dev_browser"])
         .output()
-        .unwrap();
+        .expect("set SCODE_BROWSER_PYTHON to an interpreter with ai-dev-browser installed");
     assert!(
         lookup.status.success(),
-        "install suh before explicitly running this test"
+        "install ai-dev-browser in SCODE_BROWSER_PYTHON before explicitly running this test"
     );
-    let suh = String::from_utf8(lookup.stdout).unwrap().trim().to_owned();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let quoted = format!("'{}'", suh.replace('\'', "'\\''"));
+    let python = if cfg!(windows) {
+        python.replace('\\', "/")
+    } else {
+        python
+    };
+    let quoted = format!("'{}'", python.replace('\'', "'\\''"));
     fs::write(env.workspace_root().join("capture.sh"), format!(
-        "set -eu\ntrap \"{quoted} browser browser_stop --port {port}\" EXIT\n{quoted} browser browser_start --headless --silent-stderr --port {port} --url 'data:text/html,<title>Pixel feedback</title><h1 style=\"color:red\">SCREENSHOT-917</h1>'\n{quoted} browser page_wait_ready --port {port}\n{quoted} browser page_screenshot --port {port} --path screen.png\n"
+        "set -eu\ntrap \"{quoted} -m ai_dev_browser.tools.browser_stop --port {port}\" EXIT\n{quoted} -m ai_dev_browser.tools.browser_start --headless true --silent-stderr --port {port} --url 'data:text/html,<title>Pixel feedback</title><h1 style=\"color:red\">SCREENSHOT-917</h1>'\n{quoted} -m ai_dev_browser.tools.page_wait_ready --port {port}\n{quoted} -m ai_dev_browser.tools.page_screenshot --port {port} --path screen.png\n"
     )).unwrap();
     let prompt = env.prompt("Run bash capture.sh to take a real browser screenshot, then use Read on screen.png to inspect its pixels and describe what you see. Do not inspect capture.sh or page HTML.", "browser_image_roundtrip");
     let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
@@ -495,7 +500,12 @@ fn real_browser_screenshot_reaches_model_as_pixels() {
         "{}",
         sess.render(|s| s.contents())
     );
-    let png = fs::read(env.workspace_root().join("screen.png")).expect("actual screenshot file");
+    let png = fs::read(env.workspace_root().join("screen.png")).unwrap_or_else(|error| {
+        panic!(
+            "actual screenshot missing: {error}; PTY: {}",
+            sess.render(|screen| screen.contents())
+        )
+    });
     assert!(png.starts_with(b"\x89PNG"));
     if env.is_mock() {
         let encoded = base64::engine::general_purpose::STANDARD.encode(png);

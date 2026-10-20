@@ -3,11 +3,11 @@ mod common;
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::TestEnv;
 use serde_json::{json, Value};
@@ -25,13 +25,57 @@ enum ResponseKind {
     AlwaysEmptyThinking,
     InvalidRequestWithStatusDigits,
     MissingModel,
+    MissingModelUnavailable,
+    MissingModelCodeUnavailable,
+    MissingModelCodeOnlyUnavailable,
+    OverloadedThenComplete,
     RefusedStream,
     RefusedJson,
     RefusedAfterText,
     RefusedTail,
+    UsageAtStart,
+    ChatDoneKeepAlive,
+    ChatTotalOnly,
+    ResponsesDoneKeepAlive,
+    NativeHeartbeat,
+    ChatHeartbeat,
+    ChatAnnotations,
+    ResponsesHeartbeat,
+    AlwaysHeartbeat,
+    HeartbeatAfterOverload,
+    ToolThenHeartbeat,
+    NativePartial,
+    ChatPartial,
+    ResponsesPartial,
+    NativeSlow,
+    ChatSlow,
+    ResponsesSlow,
+    FiniteHeartbeat,
+    SignedCapture,
+    GeminiCapture,
+    CapturePaced,
+    CaptureBurst,
 }
 
 impl ResponseKind {
+    const fn api_format(self) -> Option<&'static str> {
+        match self {
+            Self::ChatDoneKeepAlive
+            | Self::ChatTotalOnly
+            | Self::MissingModelCodeUnavailable
+            | Self::ChatHeartbeat
+            | Self::ChatAnnotations
+            | Self::HeartbeatAfterOverload
+            | Self::ChatPartial
+            | Self::ChatSlow => Some("openai-completions"),
+            Self::ResponsesDoneKeepAlive
+            | Self::ResponsesHeartbeat
+            | Self::ResponsesPartial
+            | Self::ResponsesSlow => Some("openai-responses"),
+            _ => None,
+        }
+    }
+
     const fn is_refused(self) -> bool {
         matches!(
             self,
@@ -45,7 +89,19 @@ struct StreamProvider {
     stopped: Arc<AtomicBool>,
     requests: Arc<AtomicUsize>,
     terminal_connection_state: Arc<AtomicUsize>,
+    bodies: Arc<Mutex<Vec<Value>>>,
     worker: Option<thread::JoinHandle<()>>,
+}
+
+fn peer_closed(socket: &TcpStream) -> bool {
+    match socket.peek(&mut [0]) {
+        Ok(0) => true,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        _ => false,
+    }
 }
 
 impl StreamProvider {
@@ -60,6 +116,8 @@ impl StreamProvider {
         let terminal_state = terminal_connection_state.clone();
         let stop = stopped.clone();
         let count = requests.clone();
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let captured = bodies.clone();
         let worker = thread::spawn(move || {
             'connections: while !stop.load(Ordering::SeqCst) {
                 let Ok((mut socket, _)) = listener.accept() else {
@@ -92,14 +150,20 @@ impl StreamProvider {
                 }
                 let mut body = vec![0; length];
                 input.read_exact(&mut body).unwrap();
-                if !first.starts_with("POST /v1/messages ") {
+                if !first.starts_with("POST ") {
                     let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"data\":[]}");
                     continue;
                 }
                 let index = count.fetch_add(1, Ordering::SeqCst);
                 let request: Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(request["stream"], true);
-                if let Some(response) = error_response(kind) {
+                if !matches!(kind, ResponseKind::GeminiCapture) {
+                    assert_eq!(request["stream"], true);
+                }
+                captured.lock().unwrap().push(request.clone());
+                if liveness_response(&mut socket, kind, index, &stop) {
+                    continue;
+                }
+                if let Some(response) = error_response(kind, index) {
                     let _ = socket.write_all(response.as_bytes());
                     continue;
                 }
@@ -113,6 +177,51 @@ impl StreamProvider {
                 let mut body = refusal_body(kind).unwrap_or_else(|| {
                     response_body(!matches!(kind, ResponseKind::Interrupted), empty)
                 });
+                match kind {
+                    ResponseKind::GeminiCapture => body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"STREAM_BODY_VERIFIED\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":8}}\n\n".to_string(),
+                    ResponseKind::SignedCapture => body = signed_capture_body(),
+                    ResponseKind::CapturePaced => {
+                        body = padded_capture_body("SSE_LOG_ONLY_PADDING", 512);
+                    }
+                    ResponseKind::CaptureBurst => {
+                        body = padded_capture_body("SSE_BURST_CAPTURE_PADDING", 8192);
+                    }
+                    ResponseKind::UsageAtStart => {
+                        body = body.replace(
+                            "\"input_tokens\":12,\"output_tokens\":0",
+                            "\"input_tokens\":12,\"output_tokens\":7,\"cache_creation_input_tokens\":3,\"cache_read_input_tokens\":5,\"cost_units\":17,\"cost_currency\":\"sudo_point\"",
+                        ).replace("\"output_tokens\":8", "\"output_tokens\":0");
+                    }
+                    ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly => {
+                        body = concat!(
+                            "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{\"content\":\"STREAM_BODY_VERIFIED\"}}]}\n\n",
+                            "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                            "data: {\"id\":\"chat\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\n",
+                            "data: [DONE]\n\n",
+                        ).into();
+                        if matches!(kind, ResponseKind::ChatTotalOnly) && index == 0 {
+                            body = body.replace(
+                                "\"prompt_tokens\":12,\"completion_tokens\":8",
+                                "\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":25",
+                            );
+                        }
+                        if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+                            body = body.replace(
+                                "\"prompt_tokens\":12,\"completion_tokens\":8",
+                                "\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":5}",
+                            );
+                        }
+                    }
+                    ResponseKind::ResponsesDoneKeepAlive => {
+                        body = concat!(
+                            "event: response.created\ndata: {\"id\":\"response\",\"model\":\"sonnet\"}\n\n",
+                            "event: response.output_text.delta\ndata: {\"delta\":\"STREAM_BODY_VERIFIED\"}\n\n",
+                            "event: response.output_text.done\ndata: {}\n\n",
+                            "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8,\"total_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":5}}}}\n\n",
+                        ).into();
+                    }
+                    _ => {}
+                }
                 if empty
                     && matches!(
                         kind,
@@ -138,51 +247,80 @@ impl StreamProvider {
                     ResponseKind::Interrupted
                         | ResponseKind::Complete
                         | ResponseKind::StopReasonKeepAlive
+                        | ResponseKind::ChatDoneKeepAlive
+                        | ResponseKind::ChatTotalOnly
+                        | ResponseKind::ResponsesDoneKeepAlive
                 ) {
                     128
                 } else {
                     0
                 };
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len() + missing);
+                if matches!(kind, ResponseKind::CapturePaced) {
+                    socket.set_nodelay(true).unwrap();
+                    for bytes in response.as_bytes().chunks(1024) {
+                        if socket.write_all(bytes).is_err() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    continue;
+                }
+                if matches!(kind, ResponseKind::SignedCapture) {
+                    // Split a UTF-8 code point and the terminal frame across
+                    // separate packets; capture must preserve their raw bytes.
+                    let split = response.find("诊断").unwrap() + 1;
+                    let tail = response.find("event: message_stop").unwrap();
+                    let bytes = response.as_bytes();
+                    socket.write_all(&bytes[..split]).unwrap();
+                    thread::sleep(Duration::from_millis(20));
+                    socket.write_all(&bytes[split..tail]).unwrap();
+                    thread::sleep(Duration::from_millis(20));
+                    let _ = socket.write_all(&bytes[tail..]);
+                    continue;
+                }
                 if matches!(kind, ResponseKind::DelayedTerminal) {
                     let split = response.find("event: message_stop").unwrap();
                     socket.write_all(response[..split].as_bytes()).unwrap();
                     socket
                         .set_read_timeout(Some(Duration::from_millis(250)))
                         .unwrap();
-                    let closed = match socket.peek(&mut [0]) {
-                        Ok(0) => true,
-                        Err(error) => !matches!(
-                            error.kind(),
-                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ),
-                        _ => false,
-                    };
+                    let closed = peer_closed(&socket);
                     terminal_state.store(if closed { 2 } else { 1 }, Ordering::SeqCst);
                     let _ = socket.write_all(response[split..].as_bytes());
                     continue;
                 }
-                let _ = socket.write_all(response.as_bytes());
-                if matches!(kind, ResponseKind::StopReasonKeepAlive) {
-                    // No terminal event or HTTP EOF: only the client's bounded
-                    // logical-stop recovery can let the user finish this turn.
+                if matches!(
+                    kind,
+                    ResponseKind::ChatDoneKeepAlive | ResponseKind::ChatTotalOnly
+                ) {
+                    let split = response
+                        .find("data: {\"id\":\"chat\",\"choices\":[],\"usage\"")
+                        .unwrap();
+                    socket.write_all(response[..split].as_bytes()).unwrap();
+                    // Observe that the client stays connected after the
+                    // logical stop, before sending the separate usage tail.
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(250)))
+                        .unwrap();
+                    let closed = peer_closed(&socket);
+                    terminal_state.store(if closed { 2 } else { 1 }, Ordering::SeqCst);
+                    let _ = socket.write_all(response[split..].as_bytes());
+                } else {
+                    let _ = socket.write_all(response.as_bytes());
+                }
+                if matches!(
+                    kind,
+                    ResponseKind::StopReasonKeepAlive
+                        | ResponseKind::ChatDoneKeepAlive
+                        | ResponseKind::ChatTotalOnly
+                        | ResponseKind::ResponsesDoneKeepAlive
+                ) {
+                    // Keep the HTTP body open after a logical/protocol stop.
                     socket
                         .set_read_timeout(Some(Duration::from_millis(100)))
                         .unwrap();
-                    while !stop.load(Ordering::SeqCst) {
-                        match socket.peek(&mut [0]) {
-                            Ok(0) => break,
-                            Err(error)
-                                if !matches!(
-                                    error.kind(),
-                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                                ) =>
-                            {
-                                break
-                            }
-                            _ => {}
-                        }
-                    }
+                    while !stop.load(Ordering::SeqCst) && !peer_closed(&socket) {}
                 }
             }
         });
@@ -191,6 +329,7 @@ impl StreamProvider {
             stopped,
             requests,
             terminal_connection_state,
+            bodies,
             worker: Some(worker),
         }
     }
@@ -203,17 +342,36 @@ impl Drop for StreamProvider {
     }
 }
 
-fn error_response(kind: ResponseKind) -> Option<String> {
-    let (status, message) = match kind {
-        ResponseKind::MissingModel => ("404 Not Found", "selected deployment absent"),
+fn error_response(kind: ResponseKind, index: usize) -> Option<String> {
+    let (status, error) = match kind {
+        ResponseKind::MissingModel => (
+            "404 Not Found",
+            json!({"type":"invalid_request_error","message":"selected deployment absent"}),
+        ),
         ResponseKind::InvalidRequestWithStatusDigits => (
             "400 Bad Request",
-            "invalid max_tokens; diagnostic id: 404-429-502-503",
+            json!({"type":"invalid_request_error","message":"invalid max_tokens; diagnostic id: 404-429-502-503"}),
+        ),
+        ResponseKind::MissingModelUnavailable => (
+            "503 Service Unavailable",
+            json!({"type":"model_not_found","message":"selected model is not available"}),
+        ),
+        ResponseKind::MissingModelCodeUnavailable => (
+            "503 Service Unavailable",
+            json!({"type":"invalid_request_error","code":"model_not_found","message":"selected model is not available"}),
+        ),
+        ResponseKind::MissingModelCodeOnlyUnavailable => (
+            "503 Service Unavailable",
+            json!({"code":"model_not_found","message":"selected model is not available"}),
+        ),
+        ResponseKind::OverloadedThenComplete if index == 0 => (
+            "503 Service Unavailable",
+            json!({"type":"overloaded_error","message":"Please retry after a brief wait"}),
         ),
         _ => return None,
     };
-    let body = json!({"error":{"type":"invalid_request_error","message":message}}).to_string();
-    Some(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
+    let body = json!({"error":error}).to_string();
+    Some(format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nRequest-Id: req_provider_error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))
 }
 
 fn response_body(terminal: bool, empty: bool) -> String {
@@ -247,6 +405,449 @@ fn response_body(terminal: bool, empty: bool) -> String {
     body
 }
 
+const CAPTURE_TEXT: &str = "STREAM_BODY_VERIFIED\n\ncourse\n\nI will inspect the profile.";
+
+#[inline]
+fn padded_capture_body(label: &str, repetitions: usize) -> String {
+    let mut body = response_body(true, false);
+    let marker = body.find("event: message_delta").unwrap();
+    let padding = format!(": {}\n\n", label.repeat(56)).repeat(repetitions);
+    body.insert_str(marker, &padding);
+    body
+}
+
+fn signed_capture_body() -> String {
+    let body = response_body(true, false)
+        .replace("\"index\":0", "\"index\":1")
+        .replace(
+            "STREAM_BODY_VERIFIED",
+            "STREAM_BODY_VERIFIED\\n\\ncourse\\n\\nI will inspect the profile.",
+        );
+    let split = body.find("event: content_block_start").unwrap();
+    let mut prefix = body[..split].to_string();
+    prefix.push_str(": diagnostic heartbeat\r\n\r\n");
+    for event in [
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"诊断 reasoning"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"diagnostic-signature"}}),
+        json!({"type":"content_block_stop","index":0}),
+    ] {
+        write!(
+            &mut prefix,
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap()
+        )
+        .unwrap();
+    }
+    prefix.push_str(&body[split..]);
+    prefix
+}
+
+fn assert_capture_session(path: &std::path::Path, expected: usize) {
+    let session = runtime::Session::load_from_path(path).unwrap();
+    let assistants: Vec<_> = session
+        .messages
+        .iter()
+        .filter(|message| message.role == runtime::MessageRole::Assistant)
+        .collect();
+    assert_eq!(assistants.len(), expected);
+    for message in assistants {
+        assert!(message.blocks.iter().any(|block| matches!(block,
+            runtime::ContentBlock::Text { text } if text == CAPTURE_TEXT)));
+        assert!(message.blocks.iter().any(|block| matches!(block,
+            runtime::ContentBlock::Thinking { thinking, signature }
+            if thinking == "诊断 reasoning" && signature.as_deref() == Some("diagnostic-signature"))));
+    }
+}
+
+fn assert_raw_capture_files(directory: &std::path::Path, expected: usize, log: &std::path::Path) {
+    let sse: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .collect();
+    assert_eq!(sse.len(), expected);
+    let events: Vec<Value> = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for path in sse {
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(&path).unwrap())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(
+            decoded,
+            signed_capture_body().as_bytes(),
+            "retain exact body bytes including heartbeat, UTF-8 and separate signed blocks"
+        );
+        let metadata: Value = serde_json::from_slice(
+            &std::fs::read(path.with_extension("").with_extension("json")).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            metadata["end_reason"].as_str(),
+            Some("http_eof" | "body_reader_dropped")
+        ));
+        assert_eq!(metadata["gzip_complete"], true);
+        assert_eq!(metadata["saved_all_observed_bytes"], true);
+        assert!(events.iter().any(|event| event["event"] == "request_debug"
+            && event["attributes"]["request_id"] == metadata["response"]["request_id"]));
+    }
+}
+
+#[test]
+fn raw_stream_capture_preserves_signed_content_through_resume() {
+    let env = TestEnv::new("raw-stream-resume");
+    if env.is_live() {
+        return;
+    } // Deliberately fragmented protocol fixture.
+    let provider = StreamProvider::new(ResponseKind::SignedCapture);
+    configure_peer(&env, &provider, ResponseKind::SignedCapture);
+    let log = env.workspace_root().join("capture-events.jsonl");
+    let variables = [("SCODE_LOG_PATH", log.to_str().unwrap())];
+    let mut cli = env.spawn_with_env(&["--print", "Report the stream result"], &variables);
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let screen = common::expect_screen(
+        &cli,
+        |screen| screen.contains("STREAM_BODY_VERIFIED"),
+        env.timeout(),
+        "recorded response rendered",
+    );
+    assert!(screen.contains("course"));
+    let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
+    let path = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.message_count > 0)
+        .unwrap()
+        .path;
+    assert_capture_session(&path, 1);
+    let session = runtime::Session::load_from_path(&path).unwrap();
+    let directory =
+        runtime::Session::response_captures_dir_for(&path, &session.session_id).unwrap();
+    assert_raw_capture_files(&directory, 1, &log);
+
+    let mut resumed = env.spawn_with_env(&["--resume"], &variables);
+    common::expect_input_line_cleared(&resumed, env.timeout(), "resumed capture prompt");
+    resumed.send("Continue the stream result\r").unwrap();
+    common::expect_screen(
+        &resumed,
+        |_| {
+            runtime::Session::load_from_path(&path).is_ok_and(|session| {
+                session
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == runtime::MessageRole::Assistant)
+                    .count()
+                    == 2
+            })
+        },
+        env.timeout(),
+        "resumed response persisted",
+    );
+    common::expect_input_line_cleared(&resumed, env.timeout(), "resumed response complete");
+    resumed.send("/exit\r").unwrap();
+    assert_eq!(resumed.expect_eof().unwrap(), 0);
+    assert_capture_session(&path, 2);
+    assert_raw_capture_files(&directory, 2, &log);
+    let bodies = provider.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    let assistant = bodies[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap();
+    assert!(assistant["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|block| block["type"] == "thinking" && block["signature"] == "diagnostic-signature"));
+    assert!(assistant["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|block| block["type"] == "text" && block["text"] == CAPTURE_TEXT));
+}
+
+#[test]
+fn raw_stream_capture_can_be_disabled_or_budget_limited() {
+    for configuration in [json!({"enabled":false}), json!({"maxSessionBytes":1})] {
+        let env = TestEnv::new("raw-stream-disabled");
+        if env.is_live() {
+            return;
+        }
+        let provider = StreamProvider::new(ResponseKind::SignedCapture);
+        configure_peer(&env, &provider, ResponseKind::SignedCapture);
+        set_response_recording(&env, configuration);
+        let mut cli = env.spawn(&["--print", "Report the stream result"]);
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+        common::expect_screen(
+            &cli,
+            |screen| screen.contains("STREAM_BODY_VERIFIED"),
+            env.timeout(),
+            "uncaptured response rendered",
+        );
+        let (path, directory) = capture_session_paths(&env);
+        assert_capture_session(&path, 1);
+        assert!(
+            !directory.exists() || std::fs::read_dir(directory).unwrap().next().is_none(),
+            "disabled or exhausted recording must save no body"
+        );
+    }
+}
+
+#[test]
+fn raw_stream_capture_write_failure_preserves_turn() {
+    let env = TestEnv::new("raw-stream-write-failure");
+    if env.is_live() {
+        return;
+    }
+    let provider = StreamProvider::new(ResponseKind::SignedCapture);
+    configure_peer(&env, &provider, ResponseKind::SignedCapture);
+    let mut cli = env.spawn(&[]);
+    common::expect_input_line_cleared(&cli, env.timeout(), "capture failure prompt");
+    let (_, blocked) = capture_session_paths(&env);
+    std::fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+    std::fs::write(&blocked, "preserve-existing-file").unwrap();
+    cli.send("Report the stream result\r").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| screen.contains("STREAM_BODY_VERIFIED"),
+        env.timeout(),
+        "capture failure must preserve real response",
+    );
+    common::expect_input_line_cleared(&cli, env.timeout(), "capture failure turn complete");
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    assert_eq!(
+        std::fs::read_to_string(blocked).unwrap(),
+        "preserve-existing-file"
+    );
+}
+
+fn set_response_recording(env: &TestEnv, recording: Value) {
+    let path = env.config_home().join("settings.json");
+    let mut settings: Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => panic!("read fixture settings: {error}"),
+    };
+    settings["responseRecording"] = recording;
+    std::fs::write(path, settings.to_string()).unwrap();
+}
+
+fn capture_session_paths(env: &TestEnv) -> (std::path::PathBuf, std::path::PathBuf) {
+    let path = runtime::SessionStore::from_cwd(env.workspace_root())
+        .unwrap()
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .path;
+    let session = runtime::Session::load_from_path(&path).unwrap();
+    let directory =
+        runtime::Session::response_captures_dir_for(&path, &session.session_id).unwrap();
+    (path, directory)
+}
+
+#[test]
+fn raw_stream_capture_keeps_streaming_and_resume_responsive() {
+    let mut cases = [
+        ("response-log-perf-off", false, 0),
+        ("response-log-perf-on", true, 0),
+        ("response-log-perf-history", true, 1000),
+    ];
+    let order = std::env::var("SCODE_TEST_RESPONSE_LOG_PERF_ORDER")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    cases.rotate_left(order % 3);
+    if order >= 3 {
+        cases.reverse();
+    }
+    for (label, enabled, old_logs) in cases {
+        let env = TestEnv::new_mock(label);
+        let provider = StreamProvider::new(ResponseKind::CapturePaced);
+        configure_peer(&env, &provider, ResponseKind::CapturePaced);
+        set_response_recording(&env, json!({"enabled":enabled}));
+        let seed = runtime::Session::new().with_workspace_root(env.workspace_root());
+        let session_id = seed.session_id.clone();
+        let path = runtime::SessionStore::from_cwd(env.workspace_root())
+            .unwrap()
+            .create_handle(&seed.session_id)
+            .path;
+        seed.save_to_path(&path).unwrap();
+        let directory =
+            runtime::Session::response_captures_dir_for(&path, &seed.session_id).unwrap();
+        drop(seed);
+        if old_logs > 0 {
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&vec![b'x'; 64 * 1024]).unwrap();
+            let old_body = encoder.finish().unwrap();
+            for index in 0..old_logs {
+                std::fs::write(directory.join(format!("old-{index}.sse.gz")), &old_body).unwrap();
+            }
+        }
+        let started = Instant::now();
+        let mut cli = env.spawn(&["--resume", &session_id]);
+        common::expect_input_line_cleared(&cli, env.timeout(), "resume performance prompt");
+        let ready_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let sent = Instant::now();
+        cli.send("Report the stream result\r").unwrap();
+        common::expect_screen(
+            &cli,
+            |screen| screen.contains("STREAM_BODY_VERIFIED"),
+            env.timeout(),
+            "first streamed text",
+        );
+        let first_text_ms = sent.elapsed().as_secs_f64() * 1000.0;
+        common::expect_screen(
+            &cli,
+            |_| {
+                runtime::Session::load_from_path(&path).is_ok_and(|session| {
+                    session
+                        .messages
+                        .iter()
+                        .any(|message| message.role == runtime::MessageRole::Assistant)
+                })
+            },
+            env.timeout(),
+            "paced response persisted",
+        );
+        common::expect_input_line_cleared(&cli, env.timeout(), "paced response prompt");
+        let response_ms = sent.elapsed().as_secs_f64() * 1000.0;
+        assert!(!common::screen_tail(&cli, 12000).contains("SSE_LOG_ONLY_PADDING"));
+        let ending = Instant::now();
+        cli.send("/exit\r").unwrap();
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+        let exit_ms = ending.elapsed().as_secs_f64() * 1000.0;
+        let bodies: Vec<_> = std::fs::read_dir(&directory)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "gz")
+                    && !path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("old-")
+            })
+            .collect();
+        assert_eq!(bodies.len(), usize::from(enabled));
+        if let Some(body) = bodies.first() {
+            let mut raw = String::new();
+            flate2::read::GzDecoder::new(std::fs::File::open(body).unwrap())
+                .read_to_string(&mut raw)
+                .unwrap();
+            assert!(raw.contains("SSE_LOG_ONLY_PADDING"));
+            assert!(raw.contains("event: message_stop"));
+            let metadata: Value = serde_json::from_slice(
+                &std::fs::read(body.with_extension("").with_extension("json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(metadata["saved_all_observed_bytes"], true);
+        }
+        println!(
+            "RESPONSE_LOG_PERFORMANCE {}",
+            json!({"case":label,"enabled":enabled,"old_logs":old_logs,"ready_ms":ready_ms,"first_text_ms":first_text_ms,"response_ms":response_ms,"exit_ms":exit_ms})
+        );
+    }
+}
+
+#[test]
+fn raw_stream_capture_burst_preserves_output_and_reports_any_missing_evidence() {
+    let env = TestEnv::new_mock("response-log-burst");
+    let provider = StreamProvider::new(ResponseKind::CaptureBurst);
+    configure_peer(&env, &provider, ResponseKind::CaptureBurst);
+    let mut cli = env.spawn(&["--print", "Report the stream result"]);
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    common::expect_screen(
+        &cli,
+        |screen| screen.contains("STREAM_BODY_VERIFIED"),
+        env.timeout(),
+        "burst response rendered",
+    );
+    let (path, directory) = capture_session_paths(&env);
+    let session = runtime::Session::load_from_path(&path).unwrap();
+    assert!(session.messages.iter().flat_map(|m| &m.blocks).any(|block|
+        matches!(block, runtime::ContentBlock::Text { text } if text == "STREAM_BODY_VERIFIED")));
+    let body = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .unwrap();
+    let mut saved = Vec::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(&body).unwrap())
+        .read_to_end(&mut saved)
+        .unwrap();
+    let metadata: Value = serde_json::from_slice(
+        &std::fs::read(body.with_extension("").with_extension("json")).unwrap(),
+    )
+    .unwrap();
+    let expected = padded_capture_body("SSE_BURST_CAPTURE_PADDING", 8192);
+    assert_eq!(
+        saved,
+        &expected.as_bytes()[..saved.len()],
+        "background batches preserve a contiguous wire prefix"
+    );
+    assert_eq!(metadata["gzip_complete"], true);
+    assert_eq!(metadata["observed_bytes"], expected.len());
+    assert_eq!(metadata["saved_bytes"], saved.len());
+    if saved.len() == expected.len() {
+        assert_eq!(metadata["saved_all_observed_bytes"], true);
+        assert!(metadata["capture_error"].is_null());
+    } else {
+        assert_eq!(metadata["saved_all_observed_bytes"], false);
+        assert_eq!(metadata["truncated"], true);
+        assert_eq!(
+            metadata["capture_error"],
+            "response_capture_queue_saturated"
+        );
+    }
+}
+
+#[test]
+fn raw_stream_capture_truncation_preserves_complete_assistant() {
+    let env = TestEnv::new("raw-stream-truncated");
+    if env.is_live() {
+        return;
+    }
+    let provider = StreamProvider::new(ResponseKind::SignedCapture);
+    configure_peer(&env, &provider, ResponseKind::SignedCapture);
+    set_response_recording(&env, json!({"maxResponseBytes":80}));
+    let mut cli = env.spawn(&["--print", "Report the stream result"]);
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let (path, directory) = capture_session_paths(&env);
+    assert_capture_session(&path, 1);
+    let body = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .unwrap();
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(&body).unwrap())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded, &signed_capture_body().as_bytes()[..80]);
+    let metadata: Value = serde_json::from_slice(
+        &std::fs::read(body.with_extension("").with_extension("json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(metadata["saved_all_observed_bytes"], false);
+    assert_eq!(metadata["gzip_complete"], true);
+    assert_eq!(metadata["saved_bytes"], 80);
+}
+
 fn refusal_body(kind: ResponseKind) -> Option<String> {
     if !kind.is_refused() {
         return None;
@@ -264,6 +865,71 @@ fn refusal_body(kind: ResponseKind) -> Option<String> {
     Some(body)
 }
 
+#[test]
+fn raw_stream_capture_records_each_streaming_protocol() {
+    for (kind, marker) in [
+        (ResponseKind::ChatDoneKeepAlive, "data: [DONE]"),
+        (
+            ResponseKind::ResponsesDoneKeepAlive,
+            "event: response.completed",
+        ),
+        (ResponseKind::GeminiCapture, "\"candidates\""),
+    ] {
+        let env = TestEnv::new("raw-stream-protocols");
+        if env.is_live() {
+            return;
+        }
+        let provider = StreamProvider::new(kind);
+        configure_peer(&env, &provider, kind);
+        let mut cli = env.spawn(&["--print", "Report the stream result"]);
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+        common::expect_screen(
+            &cli,
+            |screen| screen.contains("STREAM_BODY_VERIFIED"),
+            env.timeout(),
+            "actual adapter response",
+        );
+        let (_, directory) = capture_session_paths(&env);
+        let body = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "gz"))
+            .unwrap();
+        let mut raw = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(&body).unwrap())
+            .read_to_string(&mut raw)
+            .unwrap();
+        assert!(
+            raw.contains(marker),
+            "save the real protocol before normalization: {raw}"
+        );
+        assert!(raw.contains("STREAM_BODY_VERIFIED"));
+        let metadata: Value = serde_json::from_slice(
+            &std::fs::read(body.with_extension("").with_extension("json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["gzip_complete"], true);
+        assert_eq!(metadata["saved_all_observed_bytes"], true);
+    }
+}
+
+fn configure_peer(env: &TestEnv, provider: &StreamProvider, kind: ResponseKind) {
+    let path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
+    if matches!(kind, ResponseKind::GeminiCapture) {
+        config["auth_modes"]["api-key"]["gemini"] =
+            json!({"baseUrl":provider.url,"apiKey":"test-pty-key"});
+        config["models"]["sonnet"] = json!({"alias":"sonnet","providers":{"api-key":{"provider":"gemini","model":"gemini-2.5-flash"}}});
+    }
+    if let Some(format) = kind.api_format() {
+        config["models"]["sonnet"] = json!({"alias":"sonnet", "providers":{"api-key":{
+            "provider":"anthropic", "model":"sonnet", "api":format
+        }}});
+    }
+    std::fs::write(path, config.to_string()).unwrap();
+}
+
 // render takes a closure over screens with different lifetimes.
 #[allow(clippy::redundant_closure_for_method_calls)]
 fn check_response(kind: ResponseKind) {
@@ -272,22 +938,47 @@ fn check_response(kind: ResponseKind) {
         return;
     } // the peer must produce the specified protocol fault
     let provider = StreamProvider::new(kind);
-    let path = env.config_home().join("sudocode.json");
-    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
-    std::fs::write(path, config.to_string()).unwrap();
+    configure_peer(&env, &provider, kind);
     let log_path = env.workspace_root().join("provider-events.jsonl");
+    let mut args = vec!["--permission-mode", "read-only"];
+    if !matches!(kind, ResponseKind::OverloadedThenComplete) {
+        args.push("--print");
+    }
+    args.push("Report the stream result");
+    if matches!(
+        kind,
+        ResponseKind::ChatTotalOnly | ResponseKind::UsageAtStart
+    ) {
+        args.extend(["--output-format", "json"]);
+    }
     let mut cli = env.spawn_with_env(
+        &args,
         &[
-            "--permission-mode",
-            "read-only",
-            "--print",
-            "Report the stream result",
+            ("SCODE_LOG_PATH", log_path.to_str().unwrap()),
+            ("SUDOCODE_API_READ_TIMEOUT", "2"),
         ],
-        &[("SCODE_LOG_PATH", log_path.to_str().unwrap())],
     );
     cli.set_default_timeout(common::at_least(Duration::from_secs(45)));
-    let exit = cli.expect_eof().unwrap();
+    let is_missing_model = matches!(
+        kind,
+        ResponseKind::MissingModelUnavailable
+            | ResponseKind::MissingModelCodeUnavailable
+            | ResponseKind::MissingModelCodeOnlyUnavailable
+    );
+    if is_missing_model {
+        cli.set_default_timeout(common::at_least(Duration::from_secs(15)));
+    }
+    if matches!(kind, ResponseKind::OverloadedThenComplete) {
+        cli.expect(r"retry 1/8 .* 503")
+            .expect("a transient 503 must report its retry");
+    }
+    let exit = cli.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "stream did not complete: {error}; requests={}\n{}",
+            provider.requests.load(Ordering::SeqCst),
+            common::screen_tail(&cli, 12000)
+        )
+    });
     if matches!(
         kind,
         ResponseKind::AlwaysEmpty | ResponseKind::AlwaysEmptyThinking
@@ -308,6 +999,191 @@ fn check_response(kind: ResponseKind) {
         env.timeout(),
         "complete process output",
     );
+    if is_missing_model {
+        assert_ne!(exit, 0, "missing model must fail: {screen}");
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            1,
+            "never retry a configuration problem"
+        );
+        assert!(screen.contains("model_not_found"), "{screen}");
+        assert!(screen.contains("req_provider_error"), "{screen}");
+        assert!(
+            common::screen_contains(&screen, "selected model is not available"),
+            "{screen}"
+        );
+        assert!(!screen.contains("retry 1/8"), "{screen}");
+        return;
+    }
+    if matches!(
+        kind,
+        ResponseKind::UsageAtStart
+            | ResponseKind::ChatDoneKeepAlive
+            | ResponseKind::ChatTotalOnly
+            | ResponseKind::ResponsesDoneKeepAlive
+    ) {
+        assert_eq!(exit, 0, "{screen}");
+        assert_progress_trace(&log_path);
+        let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
+        let path = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.message_count > 0)
+            .unwrap()
+            .path;
+        let session = runtime::Session::load_from_path(&path).unwrap();
+        let usage = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == runtime::MessageRole::Assistant)
+            .unwrap()
+            .usage
+            .expect("persist the provider's actual usage");
+        if matches!(kind, ResponseKind::ChatTotalOnly) {
+            assert_eq!(usage.input_tokens, 0, "never infer input allocation");
+            assert_eq!(usage.output_tokens, 0, "never infer output allocation");
+            assert_eq!(
+                usage.total_tokens(),
+                25,
+                "retain the provider's actual total"
+            );
+            assert_eq!(usage.reported_total_tokens, Some(25));
+            assert!(!usage.has_complete_token_breakdown());
+            assert!(runtime::UsageTracker::from_session(&session)
+                .current_context_usage()
+                .is_none());
+            assert!(usage
+                .estimate_cost_usd_with_pricing(runtime::ModelPricing::default_sonnet_tier())
+                .is_none());
+            assert!(
+                common::screen_contains(&screen, "\"total_tokens\":25"),
+                "{screen}"
+            );
+            assert!(
+                common::screen_contains(&screen, "\"token_breakdown_complete\":false"),
+                "{screen}"
+            );
+            assert!(
+                !common::screen_contains(&screen, "\"cost_units\":null"),
+                "unknown bills stay omitted"
+            );
+            assert!(
+                !common::screen_contains(&screen, "\"cost_currency\":null"),
+                "unknown currencies stay omitted"
+            );
+            assert_eq!(provider.requests.load(Ordering::SeqCst), 1);
+            let events: Vec<Value> = std::fs::read_to_string(&log_path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert!(events.iter().any(|event| event["event"] == "response_usage"
+                && event["attributes"]["reported_total_tokens"] == 25));
+
+            // A second real CLI process must restore the total-only receipt,
+            // add a fully allocated response, and recover its context anchor.
+            let mut resumed =
+                env.spawn_with_env(&["--permission-mode", "read-only", "--resume"], &[]);
+            common::expect_input_line_cleared(&resumed, env.timeout(), "resumed usage prompt");
+            resumed.send("Continue the stream result").unwrap();
+            common::expect_input_line(
+                &resumed,
+                "Continue the stream result",
+                env.timeout(),
+                "resume input",
+            );
+            resumed.send("\r").unwrap();
+            common::expect_screen(
+                &resumed,
+                |_| {
+                    runtime::Session::load_from_path(&path).is_ok_and(|session| {
+                        session
+                            .messages
+                            .iter()
+                            .filter(|message| message.role == runtime::MessageRole::Assistant)
+                            .count()
+                            == 2
+                    })
+                },
+                env.timeout(),
+                "persist the resumed response",
+            );
+            common::expect_input_line_cleared(&resumed, env.timeout(), "resumed turn complete");
+            resumed.send("/exit").unwrap();
+            common::expect_input_line(&resumed, "/exit", env.timeout(), "exit input");
+            resumed.send("\r").unwrap();
+            assert_eq!(resumed.expect_eof().unwrap(), 0);
+            let restored = runtime::Session::load_from_path(&path).unwrap();
+            assert_eq!(
+                restored
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == runtime::MessageRole::Assistant)
+                    .count(),
+                2,
+                "resume must update the original transcript"
+            );
+            let tracker = runtime::UsageTracker::from_session(&restored);
+            assert_eq!(tracker.cumulative_usage().total_tokens(), 45);
+            assert_eq!(tracker.cumulative_usage().known_total_tokens(), 20);
+            assert!(!tracker.cumulative_usage().has_complete_token_breakdown());
+            assert_eq!(tracker.current_context_usage(), Some(12));
+            assert_eq!(provider.requests.load(Ordering::SeqCst), 2);
+            return;
+        }
+        if matches!(
+            kind,
+            ResponseKind::ChatDoneKeepAlive | ResponseKind::ResponsesDoneKeepAlive
+        ) {
+            assert_eq!(usage.input_tokens, 7, "cached input is counted separately");
+            assert_eq!(usage.cache_read_input_tokens, 5);
+            assert_eq!(usage.context_tokens(), Some(12));
+            assert_eq!(usage.total_tokens(), 20, "never double-count cached tokens");
+            assert!(usage.has_complete_token_breakdown());
+        } else {
+            assert_eq!(usage.input_tokens, 12);
+        }
+        assert_eq!(
+            usage.output_tokens,
+            if matches!(kind, ResponseKind::UsageAtStart) {
+                7
+            } else {
+                8
+            }
+        );
+        if matches!(kind, ResponseKind::UsageAtStart) {
+            assert!(
+                common::screen_contains(&screen, "\"cost_units\":17"),
+                "{screen}"
+            );
+            assert!(
+                common::screen_contains(&screen, "\"cost_currency\":\"sudo_point\""),
+                "{screen}"
+            );
+            assert_eq!(usage.cache_creation_input_tokens, 3);
+            assert_eq!(usage.cache_read_input_tokens, 5);
+            assert_eq!(usage.cost_units, Some(17));
+            assert_eq!(
+                usage.cost_currency,
+                Some(runtime::UsageCostCurrency::SudoPoint)
+            );
+        }
+        if matches!(kind, ResponseKind::ChatDoneKeepAlive) {
+            assert_eq!(
+                provider.terminal_connection_state.load(Ordering::SeqCst),
+                1,
+                "read the independently framed usage tail after finish_reason"
+            );
+        }
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            1,
+            "never regenerate a completed response"
+        );
+        return;
+    }
     if matches!(
         kind,
         ResponseKind::Complete
@@ -316,6 +1192,7 @@ fn check_response(kind: ResponseKind) {
             | ResponseKind::StopReasonKeepAlive
             | ResponseKind::EmptyThenComplete
             | ResponseKind::EmptyThinkingThenComplete
+            | ResponseKind::OverloadedThenComplete
     ) {
         assert_eq!(exit, 0, "{screen}");
         assert!(screen.contains("STREAM_BODY_VERIFIED"), "{screen}");
@@ -327,7 +1204,9 @@ fn check_response(kind: ResponseKind) {
             provider.requests.load(Ordering::SeqCst),
             if matches!(
                 kind,
-                ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
+                ResponseKind::EmptyThenComplete
+                    | ResponseKind::EmptyThinkingThenComplete
+                    | ResponseKind::OverloadedThenComplete
             ) {
                 2
             } else {
@@ -384,6 +1263,48 @@ fn check_response(kind: ResponseKind) {
             "{screen}"
         );
     }
+}
+
+fn assert_progress_trace(log_path: &std::path::Path) {
+    let events: Vec<Value> = std::fs::read_to_string(log_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let request_id = events
+        .iter()
+        .find(|event| event["event"] == "request_debug")
+        .unwrap()["attributes"]["request_id"]
+        .as_str()
+        .unwrap();
+    let rows: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "response_stream_progress")
+        .map(|event| &event["attributes"])
+        .collect();
+    assert!(
+        rows.len() >= 3,
+        "headers, bytes and completion must be observable"
+    );
+    assert_eq!(rows[0]["bytes_read"], 0);
+    assert_eq!(rows[0]["finished"], false);
+    let last = rows.last().unwrap();
+    assert_eq!(last["finished"], true);
+    assert!(last["bytes_read"].as_u64().unwrap() > 0);
+    assert!(last["normalized_events"].as_u64().unwrap() > 0);
+    for row in rows {
+        assert_eq!(
+            row["request_id"], request_id,
+            "transport, progress and usage share the client ID"
+        );
+        assert!(row.get("body").is_none() && row.get("content").is_none());
+        assert!(
+            !row.to_string().contains("STREAM_BODY_VERIFIED"),
+            "progress is metadata only"
+        );
+    }
+    assert!(events.iter().any(|event| event["event"] == "response_usage"
+        && event["attributes"]["request_id"] == request_id));
 }
 
 fn assert_refusal_screen(screen: &str) {
@@ -498,4 +1419,358 @@ fn explicit_refusal_after_partial_text_cannot_succeed() {
 #[test]
 fn explicit_refusal_in_unterminated_tail_is_not_retried_as_truncation() {
     check_response(ResponseKind::RefusedTail);
+}
+
+#[test]
+fn initial_usage_survives_a_zero_filled_terminal_snapshot() {
+    check_response(ResponseKind::UsageAtStart);
+}
+
+#[test]
+fn chat_done_finishes_without_http_eof_and_preserves_usage() {
+    check_response(ResponseKind::ChatDoneKeepAlive);
+}
+
+#[test]
+fn responses_completed_finishes_without_http_eof_and_preserves_usage() {
+    check_response(ResponseKind::ResponsesDoneKeepAlive);
+}
+
+#[test]
+fn reported_total_survives_print_persistence_and_resume_without_inventing_a_breakdown() {
+    check_response(ResponseKind::ChatTotalOnly);
+}
+
+#[test]
+fn typed_missing_model_503_fails_once_with_the_provider_reason() {
+    check_response(ResponseKind::MissingModelUnavailable);
+}
+
+#[test]
+fn openai_missing_model_code_503_fails_once_with_the_provider_reason() {
+    check_response(ResponseKind::MissingModelCodeUnavailable);
+}
+
+#[test]
+fn code_only_missing_model_503_fails_once_with_the_provider_reason() {
+    check_response(ResponseKind::MissingModelCodeOnlyUnavailable);
+}
+
+#[test]
+fn ordinary_503_retries_visibly_and_completes() {
+    check_response(ResponseKind::OverloadedThenComplete);
+}
+
+fn liveness_response(
+    socket: &mut TcpStream,
+    kind: ResponseKind,
+    index: usize,
+    stop: &AtomicBool,
+) -> bool {
+    let is_live = matches!(
+        kind,
+        ResponseKind::NativeHeartbeat
+            | ResponseKind::ChatHeartbeat
+            | ResponseKind::ChatAnnotations
+            | ResponseKind::ResponsesHeartbeat
+            | ResponseKind::AlwaysHeartbeat
+            | ResponseKind::HeartbeatAfterOverload
+            | ResponseKind::ToolThenHeartbeat
+            | ResponseKind::NativePartial
+            | ResponseKind::ChatPartial
+            | ResponseKind::ResponsesPartial
+            | ResponseKind::NativeSlow
+            | ResponseKind::ChatSlow
+            | ResponseKind::ResponsesSlow
+            | ResponseKind::FiniteHeartbeat
+    );
+    if !is_live {
+        return false;
+    }
+    if matches!(kind, ResponseKind::HeartbeatAfterOverload) && index == 0 {
+        let body = r#"{"error":{"type":"overloaded_error","message":"temporarily overloaded"}}"#;
+        let _ = write!(socket, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        return true;
+    }
+    let tool_turn = matches!(kind, ResponseKind::ToolThenHeartbeat) && index == 0;
+    let partial = matches!(
+        kind,
+        ResponseKind::NativePartial | ResponseKind::ChatPartial | ResponseKind::ResponsesPartial
+    );
+    let slow = matches!(
+        kind,
+        ResponseKind::NativeSlow | ResponseKind::ChatSlow | ResponseKind::ResponsesSlow
+    );
+    let heartbeat = matches!(
+        kind,
+        ResponseKind::AlwaysHeartbeat | ResponseKind::FiniteHeartbeat
+    ) || (matches!(
+        kind,
+        ResponseKind::HeartbeatAfterOverload | ResponseKind::ToolThenHeartbeat
+    ) && index == 1)
+        || (matches!(
+            kind,
+            ResponseKind::NativeHeartbeat
+                | ResponseKind::ChatHeartbeat
+                | ResponseKind::ChatAnnotations
+                | ResponseKind::ResponsesHeartbeat
+        ) && index == 0);
+    let mut prefix = String::new();
+    let mut tail: String;
+    let mut deltas = Vec::new();
+    match kind.api_format() {
+        Some("openai-completions") => {
+            for text in ["STREAM_", "BODY_", "VERIFIED"] {
+                deltas.push(format!(
+                    "data: {}\n\n",
+                    json!({"id":"chat","choices":[{"delta":{"content":text}}]})
+                ));
+            }
+            tail = "data: {\"id\":\"chat\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"chat\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\ndata: [DONE]\n\n".into();
+        }
+        Some("openai-responses") => {
+            prefix =
+                "event: response.created\ndata: {\"id\":\"live\",\"model\":\"sonnet\"}\n\n".into();
+            for text in ["STREAM_", "BODY_", "VERIFIED"] {
+                deltas.push(format!(
+                    "event: response.output_text.delta\ndata: {}\n\n",
+                    json!({"delta":text})
+                ));
+            }
+            tail = "event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":8}}}\n\n".into();
+        }
+        _ => {
+            prefix = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"live\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"sonnet\",\"content\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".into();
+            for text in ["STREAM_", "BODY_", "VERIFIED"] {
+                deltas.push(format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}})));
+            }
+            tail = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":8}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".into();
+        }
+    }
+    if tool_turn {
+        prefix = prefix[..prefix.find("event: content_block_start").unwrap()].to_owned();
+        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"once\",\"name\":\"bash\",\"input\":{}}}\n\n");
+        prefix.push_str(&format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json!({"command":"sleep 3; echo once >> once.txt"}).to_string()}})));
+        tail = tail.replace("end_turn", "tool_use");
+        deltas.clear();
+    }
+    let body = format!("{prefix}{}{tail}", deltas.join(""));
+    let length = if heartbeat || partial {
+        1_000_000
+    } else {
+        body.len()
+    };
+    if write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n").is_err() { return true; }
+    if !heartbeat {
+        let _ = socket.write_all(prefix.as_bytes());
+        for delta in &deltas {
+            if slow {
+                thread::sleep(Duration::from_millis(900));
+            }
+            if socket.write_all(delta.as_bytes()).is_err() {
+                return true;
+            }
+        }
+        if !partial {
+            let _ = socket.write_all(tail.as_bytes());
+        }
+    }
+    if heartbeat || partial {
+        socket
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let started = std::time::Instant::now();
+        while !stop.load(Ordering::SeqCst) && !peer_closed(socket) {
+            if matches!(kind, ResponseKind::FiniteHeartbeat)
+                && started.elapsed() >= Duration::from_secs(3)
+            {
+                let _ = socket.write_all(body.as_bytes());
+                break;
+            }
+            let frame: &[u8] = if matches!(kind, ResponseKind::ChatAnnotations) {
+                b"data: {\"id\":\"\",\"model\":\"\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"content_filter_results\":{}}]}\n\n"
+            } else {
+                b": ping\n\n"
+            };
+            if socket.write_all(frame).is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+    true
+}
+
+fn check_liveness(
+    kind: ResponseKind,
+    read_timeout: &str,
+    expected_requests: usize,
+    is_success: bool,
+) {
+    let env = TestEnv::new_mock("stream-liveness");
+    let provider = StreamProvider::new(kind);
+    configure_peer(&env, &provider, kind);
+    let log = env.workspace_root().join("stream-events.jsonl");
+    let is_tool = matches!(kind, ResponseKind::ToolThenHeartbeat);
+    let interactive = matches!(
+        kind,
+        ResponseKind::NativeHeartbeat
+            | ResponseKind::ChatHeartbeat
+            | ResponseKind::ChatAnnotations
+            | ResponseKind::ResponsesHeartbeat
+            | ResponseKind::HeartbeatAfterOverload
+            | ResponseKind::NativePartial
+            | ResponseKind::ChatPartial
+            | ResponseKind::ResponsesPartial
+    );
+    let mut args = vec![
+        "--permission-mode",
+        if is_tool {
+            "danger-full-access"
+        } else {
+            "read-only"
+        },
+    ];
+    if !interactive {
+        args.push("--print");
+    }
+    args.push("Report the stream result");
+    let mut cli = env.spawn_with_env(
+        &args,
+        &[
+            ("SUDOCODE_API_READ_TIMEOUT", read_timeout),
+            ("SCODE_LOG_PATH", log.to_str().unwrap()),
+        ],
+    );
+    cli.set_default_timeout(common::at_least(Duration::from_secs(30)));
+    let code = cli.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "stream liveness: {error}; requests={}\n{}",
+            provider.requests.load(Ordering::SeqCst),
+            common::screen_tail(&cli, 6000)
+        )
+    });
+    assert_eq!(code == 0, is_success, "{}", common::screen_tail(&cli, 6000));
+    assert_eq!(provider.requests.load(Ordering::SeqCst), expected_requests);
+    let screen = common::expect_screen(
+        &cli,
+        |s| {
+            common::screen_contains(
+                s,
+                if is_success {
+                    "STREAM_BODY_VERIFIED"
+                } else if interactive {
+                    "automatic replay disabled"
+                } else {
+                    "runtime_error:"
+                },
+            )
+        },
+        common::DEFAULT_TIMEOUT,
+        "complete liveness result",
+    );
+    let bodies = provider.bodies.lock().unwrap();
+    if expected_requests > 1 {
+        let first = usize::from(is_tool);
+        assert!(
+            bodies[first..].iter().all(|body| body == &bodies[first]),
+            "safe replay must preserve the request bytes"
+        );
+    }
+    if is_tool {
+        assert_eq!(
+            std::fs::read_to_string(env.workspace_root().join("once.txt")).unwrap(),
+            "once\n",
+            "completed tools are never executed twice"
+        );
+        assert!(bodies[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"))));
+    }
+    if matches!(
+        kind,
+        ResponseKind::NativePartial | ResponseKind::ChatPartial | ResponseKind::ResponsesPartial
+    ) {
+        assert!(common::screen_contains(
+            &screen,
+            "automatic replay disabled"
+        ));
+        assert_eq!(
+            screen.matches("STREAM_BODY_VERIFIED").count(),
+            1,
+            "partial output is not repeated"
+        );
+    }
+    if matches!(kind, ResponseKind::HeartbeatAfterOverload) {
+        assert!(
+            common::screen_contains(&screen, "retry 2/8"),
+            "one shared retry sequence: {screen}"
+        );
+        let attempts: Vec<_> = std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| event["event"] == "request_started")
+            .map(|event| event["attributes"]["attempt"].as_u64().unwrap())
+            .collect();
+        assert_eq!(attempts, [1, 2, 3]);
+    }
+}
+
+#[test]
+fn heartbeat_only_streams_replay_before_the_first_provider_event() {
+    for kind in [
+        ResponseKind::NativeHeartbeat,
+        ResponseKind::ChatHeartbeat,
+        ResponseKind::ChatAnnotations,
+        ResponseKind::ResponsesHeartbeat,
+    ] {
+        check_liveness(kind, "2", 2, true);
+    }
+}
+
+#[test]
+fn partial_provider_output_is_not_replayed() {
+    for kind in [
+        ResponseKind::NativePartial,
+        ResponseKind::ChatPartial,
+        ResponseKind::ResponsesPartial,
+    ] {
+        check_liveness(kind, "2", 1, false);
+    }
+}
+
+#[test]
+fn active_provider_events_outlive_the_idle_timeout() {
+    for kind in [
+        ResponseKind::NativeSlow,
+        ResponseKind::ChatSlow,
+        ResponseKind::ResponsesSlow,
+    ] {
+        check_liveness(kind, "2", 1, true);
+    }
+}
+
+#[test]
+fn completed_tool_survives_an_empty_continuation_replay() {
+    check_liveness(ResponseKind::ToolThenHeartbeat, "2", 3, true);
+}
+
+#[test]
+fn http_retries_and_stream_replay_share_one_attempt_sequence() {
+    check_liveness(ResponseKind::HeartbeatAfterOverload, "2", 3, true);
+}
+
+#[test]
+fn empty_stream_replay_is_bounded_once() {
+    check_liveness(ResponseKind::AlwaysHeartbeat, "2", 2, false);
+}
+
+#[test]
+fn zero_read_timeout_preserves_a_long_empty_wait() {
+    check_liveness(ResponseKind::FiniteHeartbeat, "0", 1, true);
 }

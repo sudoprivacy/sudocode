@@ -1281,7 +1281,7 @@ pub fn spawn_local_poller(
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    static SCOPED_DIRECTORY: std::cell::RefCell<Option<Arc<crate::directory::Directory>>> =
+    static SCOPED_MAILBOX: std::cell::RefCell<Option<Arc<Mailbox>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1310,17 +1310,14 @@ thread_local! {
 /// changed, so two tests in one binary needing different conventions would be in
 /// each other's way. A test gives its executor a mailbox like the host does.
 pub struct MailboxScope {
-    previous: Option<Arc<crate::directory::Directory>>,
+    previous: Option<Arc<Mailbox>>,
 }
 
 impl MailboxScope {
-    /// Enter `directory` as this thread's addressing set until the guard drops.
-    ///
-    /// One member is the standalone / nexus-only case; several is a session
-    /// attached to more than one namespace at once.
+    /// Enter `mailbox` as this thread's peer namespace until the guard drops.
     #[must_use]
-    pub fn enter(directory: Arc<crate::directory::Directory>) -> Self {
-        let previous = SCOPED_DIRECTORY.with(|cell| cell.borrow_mut().replace(directory));
+    pub fn enter(mailbox: Arc<Mailbox>) -> Self {
+        let previous = SCOPED_MAILBOX.with(|cell| cell.borrow_mut().replace(mailbox));
         Self { previous }
     }
 }
@@ -1328,64 +1325,35 @@ impl MailboxScope {
 impl Drop for MailboxScope {
     fn drop(&mut self) {
         let previous = self.previous.take();
-        SCOPED_DIRECTORY.with(|cell| {
+        SCOPED_MAILBOX.with(|cell| {
             *cell.borrow_mut() = previous;
         });
     }
 }
 
-/// The mailbox to send through: the one this thread is scoped onto, else
-/// workspace-local JSONL.
+/// The mailbox to send through and enumerate: the session's peer namespace
+/// this thread is scoped onto, else workspace-local JSONL.
 ///
 /// Two levels, and the second is the contract rather than a fallback: a session
-/// that has a mailbox hands it to its dispatcher, which scopes the thread running
-/// the tool; a plain `scode` with no nexus configured has always delivered to
-/// `.sudocode-inbox/` in the workspace, and still does — through this same call,
-/// resolved one level down. Being one code path is what stops the two drifting.
+/// hands its peer mailbox to its dispatcher, which scopes the thread running the
+/// tool; a caller with no session scope (a sub-agent, a test) delivers to
+/// `.sudocode-inbox/` in its workspace through this same call. Being one code
+/// path is what stops the two drifting.
 ///
-/// `self_id` is empty on the ambient fallback deliberately. It serves two
-/// purposes on a `Mailbox` — filling an envelope's `from`, and filtering your own
-/// writes out of a poll — and neither applies: `send` always supplies `from`, and
-/// this handle is never polled. A receiver builds its own with its real identity.
+/// The fallback's identity is derived rather than left empty: a conversation is
+/// addressed by its PAIR, so a nameless side has no conversation to be in and
+/// the chat-list entry would come out as `…/conversations/` with no leaf.
+/// `local_agent_name` is the derivation the host uses for its own scoped
+/// mailbox, so the two agree instead of nearly agreeing.
 #[must_use]
 pub fn sending_mailbox() -> Arc<Mailbox> {
-    // The primary member of the thread's directory, or the ambient fallback.
-    // `send`'s unqualified / local-pid paths and every caller that needs one
-    // mailbox (its `self_id`, its convention) use this; cross-namespace
-    // discovery and routing use `scoped_directory()` instead.
-    scoped_directory().primary_mailbox()
-}
-
-/// The thread's addressing set: every namespace this session is attached to.
-///
-/// One member in the standalone / nexus-only case, several when a session is
-/// attached to more than one at once. The ambient fallback (no scope installed)
-/// is a single workspace-local member, so a caller that never set a directory —
-/// a sub-agent, a test — still gets a valid one-namespace answer.
-#[must_use]
-pub fn scoped_directory() -> Arc<crate::directory::Directory> {
-    if let Some(directory) = SCOPED_DIRECTORY.with(|cell| cell.borrow().clone()) {
-        return directory;
+    if let Some(mailbox) = SCOPED_MAILBOX.with(|cell| cell.borrow().clone()) {
+        return mailbox;
     }
-    // Ambient fallback with no scoped mailbox: workspace-rooted, so a
-    // coordinator/sub-agent send stays per-workspace (a sub-agent belongs to its
-    // parent scode; different scodes must not cross-talk). The standalone
-    // same-machine pair uses a scoped mailbox rooted at `local_pair_root()`,
-    // installed by the host — this fallback is not that path.
-    //
-    // The identity is DERIVED rather than left empty. It used to be empty, on
-    // the reasoning that a real identity rides the scoped mailbox and this one
-    // only needed to address a recipient. A conversation is addressed by its
-    // PAIR, so a nameless side has no conversation to be in: the id degenerates
-    // and the chat-list entry comes out as `…/conversations/` with no leaf.
-    // `local_agent_name` is the same derivation the host uses when it builds
-    // the scoped mailbox, so the two agree instead of nearly agreeing.
     let root = crate::current_workspace_root_or_default();
     let self_id = local_agent_name(None, &root);
-    let mailbox = Arc::new(Mailbox::workspace_local(&root, self_id));
-    Arc::new(crate::directory::Directory::single("local", mailbox))
+    Arc::new(Mailbox::workspace_local(&root, self_id))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

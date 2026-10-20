@@ -796,10 +796,10 @@ fn ensure_a2a_receiver(
 ) {
     let mailbox = match &registry.hosted_factory {
         Some(factory) => factory.mailbox(),
-        None => engine_host::nexus_a2a::session()
+        None => engine_host::peer::node()
             .ok()
             .flatten()
-            .map(|session| session.mailbox()),
+            .map(engine_host::peer::Node::mailbox),
     };
     let Some(mailbox) = mailbox else {
         return;

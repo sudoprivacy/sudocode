@@ -55,10 +55,10 @@ pub mod tool_executor;
 /// `_meta` layering). Which prompt the model sees is an engine input.
 pub mod prompt;
 
-/// Process-singleton standalone nexus-A2A session (send + receive) the engine
-/// build path dials. The renderer starts the receive poller; the tool executor
-/// gets the send half.
-pub mod nexus_a2a;
+/// The session's one peer namespace: the nexus node when one is attached, else
+/// the same-machine pair root. The tool executor sends through it and the host
+/// starts its receiver on it.
+pub mod peer;
 
 /// Runtime construction: the `BuiltRuntime` wrapper, the `RuntimeConfig` /
 /// `RuntimePluginState` inputs, and the `build_runtime*` chain (plugins, MCP,

@@ -1542,8 +1542,8 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             name: "agent_list",
             description: concat!(
                 "List reachable peer Agents and this session's subagent tasks. ",
-                "Copy a row's `send_to` exactly into `send.to`. A peer address selects ",
-                "its namespace and queues messages durably, including while offline. ",
+                "Copy a row's `send_to` exactly into `send.to`. A peer address queues ",
+                "messages durably, including while that peer is offline. ",
                 "A subagent address selects that task; `task_id` is its task handle. ",
                 "An omitted `active` means runtime liveness is unknown. ",
                 "Read-only discovery; it starts nothing."
@@ -2313,9 +2313,6 @@ pub struct AgentListRow {
     pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// The peer namespace for this address; subagent rows carry none.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub sources: Vec<String>,
 }
 
 /// Collect the addressable agents this session can reach, plus the workers it
@@ -2333,12 +2330,13 @@ pub fn collect_agent_list(
     active_only: bool,
     fs: &dyn FsBackend,
 ) -> Result<Vec<AgentListRow>, String> {
-    let directory = runtime::mailbox::scoped_directory();
+    let mailbox = runtime::mailbox::sending_mailbox();
     // Surface an enumeration failure instead of swallowing it: `list_recipients`
     // returns `Err` precisely so "I could not read a namespace" stays distinct
-    // from "no one is there". Across every namespace the session is attached to,
-    // merged and tagged with where each was found.
-    let peers = directory.list_recipients()?;
+    // from "no one is there". The namespace reports presence including this
+    // session itself, and an agent is not its own peer.
+    let mut peers = mailbox.list_recipients()?;
+    peers.retain(|name| name != mailbox.self_id());
     // The sub-agent store is a local dir; a read failure there is soft — an empty
     // worker list is a reasonable degrade, and the peers above are the tool's point.
     let subagents = list_agent_snapshots_from_store_with(true, fs).unwrap_or_default();
@@ -2357,11 +2355,11 @@ pub fn collect_agent_list(
 }
 
 /// Pure core of [`collect_agent_list`], sources injected so it is testable
-/// without a real backend. `peers` are addressable recipients from the
-/// directory, which owns namespace identities and excludes self per namespace.
-/// `subagents` are saved snapshots; `active_tasks` supplies runtime evidence.
+/// without a real backend. `peers` are the addressable names in the session's
+/// peer namespace, self excluded. `subagents` are saved snapshots;
+/// `active_tasks` supplies runtime evidence.
 pub fn merge_agent_list(
-    peers: &[runtime::directory::Recipient],
+    peers: &[String],
     subagents: Vec<AgentSnapshot>,
     active_tasks: &std::collections::BTreeSet<String>,
     active_only: bool,
@@ -2372,23 +2370,19 @@ pub fn merge_agent_list(
     // Source 1: addressable peers in the mailbox namespace. Liveness is not
     // knowable from the namespace alone (a remote backend does not report it),
     // so `active` is left `None` — the row is addressable, not "running".
-    for recipient in peers {
-        if recipient.name.is_empty() {
+    for name in peers {
+        if name.is_empty() {
             continue;
         }
-        for source in &recipient.sources {
-            let send_to = format!("{source}:{}", recipient.name);
-            rows.entry(("peer".into(), send_to.clone()))
-                .or_insert_with(|| AgentListRow {
-                    name: recipient.name.clone(),
-                    send_to,
-                    active: None,
-                    kind: "peer".to_string(),
-                    task_id: None,
-                    role: None,
-                    sources: vec![(*source).to_string()],
-                });
-        }
+        rows.entry(("peer".into(), name.clone()))
+            .or_insert_with(|| AgentListRow {
+                name: name.clone(),
+                send_to: name.clone(),
+                active: None,
+                kind: "peer".to_string(),
+                task_id: None,
+                role: None,
+            });
     }
 
     // Source 2: sub-agents this process spawned (running/backgrounded).
@@ -2406,7 +2400,6 @@ pub fn merge_agent_list(
                 kind: "subagent".to_string(),
                 task_id: Some(snap.agent_id.clone()),
                 role,
-                sources: Vec::new(),
             });
     }
 
@@ -3125,20 +3118,20 @@ fn run_send_message(
     if input.to.trim().is_empty() {
         return Err("to must not be empty".to_string());
     }
-    if input.to.contains('@') {
-        return Err(
-            "to must be a bare teammate name or \"*\" — there is only one team per session"
-                .to_string(),
-        );
+    if input.to.contains(['@', ':', '/', '\\']) {
+        return Err(format!(
+            "to must be an agent name exactly as `agent_list` shows it in `send_to`, or \"*\"; \
+             got '{}'",
+            input.to
+        ));
     }
     // Resolve once: a task exiting after this decision must not change its
     // destination into the peer namespace during this send.
-    let task_root =
-        if input.to != "*" && runtime::directory::Directory::bare_name(&input.to) == input.to {
-            resolve_task_destination(&input.to, fs.as_ref())?
-        } else {
-            None
-        };
+    let task_root = if input.to == "*" {
+        None
+    } else {
+        resolve_task_destination(&input.to, fs.as_ref())?
+    };
 
     // Optional task-framing: when the caller supplied context/constraints/
     // acceptance (a task hand-off, not a chat message) and `message` is plain
@@ -3162,43 +3155,19 @@ fn run_send_message(
     // The standalone session mailbox lives under the config home so separate
     // scode processes can talk across workspaces; using it for a spawned pid
     // reports a successful send into a conversation the worker never drains.
-    let directory = runtime::mailbox::scoped_directory();
+    let peer = runtime::mailbox::sending_mailbox();
     let mailbox = if let Some(root) = task_root {
         // A running in-process subagent reads the workspace-local mailbox, not
-        // any addressable namespace — its task ID identifies this worker.
+        // the peer namespace — its task ID identifies this worker.
         std::sync::Arc::new(runtime::mailbox::Mailbox::workspace_at(
             Arc::clone(fs),
             std::path::Path::new(&root),
-            directory.self_id().to_string(),
+            peer.self_id().to_string(),
         ))
-    } else if input.to == "*" {
-        // Broadcast enumerates below through the primary's namespace; keep the
-        // primary mailbox as the handle its loop uses.
-        directory.primary_mailbox()
     } else {
-        // Route to the namespace that can address the recipient. A name in one
-        // namespace resolves there; a name in several must be qualified
-        // (`local:x` / `nexus:x`) so delivery is never silently to the wrong
-        // one; a name found nowhere falls to the primary, whose durable inbox
+        // A name with no presence yet still lands in its durable inbox, which
         // holds the message until that peer first runs.
-        use runtime::directory::Routed;
-        match directory.route(&input.to)? {
-            Routed::One(member) => {
-                input.to = runtime::directory::Directory::bare_name(&input.to).to_string();
-                std::sync::Arc::clone(&member.mailbox)
-            }
-            Routed::Ambiguous(labels) => {
-                return Err(format!(
-                    "'{}' is addressable in more than one namespace ({}). \
-                     Re-send with a qualifier, e.g. `{}:{}`.",
-                    input.to,
-                    labels.join(", "),
-                    labels[0],
-                    input.to
-                ));
-            }
-            Routed::NotFound => directory.primary_mailbox(),
-        }
+        peer
     };
     let sender = resolve_sender(&input, &mailbox);
 
@@ -6262,9 +6231,7 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
         runtime::mailbox::Mailbox::workspace(Arc::clone(&job.fs), job.manifest.agent_id.clone())
             .map_err(|error| error.to_string())?,
     );
-    let _directory = runtime::mailbox::MailboxScope::enter(Arc::new(
-        runtime::directory::Directory::single("local", Arc::clone(&mailbox)),
-    ));
+    let _mailbox = runtime::mailbox::MailboxScope::enter(Arc::clone(&mailbox));
     let mut conv_runtime =
         build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
     // Accumulate telemetry across every multi-turn iteration so a
@@ -8279,7 +8246,7 @@ struct SubagentToolExecutor {
     /// is a standalone CLI's own disk; a co-hosted parent hands down its kernel,
     /// so a sub-agent's writes pass the same hooks its parent's do.
     fs: Arc<dyn FsBackend>,
-    directory: Arc<runtime::directory::Directory>,
+    mailbox: Arc<runtime::mailbox::Mailbox>,
 }
 
 impl SubagentToolExecutor {
@@ -8287,7 +8254,7 @@ impl SubagentToolExecutor {
         Self {
             allowed_tools,
             fs: runtime::host_fs_arc().clone(),
-            directory: runtime::mailbox::scoped_directory(),
+            mailbox: runtime::mailbox::sending_mailbox(),
             enforcer: None,
             abort_signal: None,
         }
@@ -8342,7 +8309,7 @@ impl ToolExecutor for SubagentToolExecutor {
         let fs = Arc::clone(&self.fs);
         let ctx = ctx.clone();
         let workspace = WorkspaceRootHandoff::capture();
-        let directory = Arc::clone(&self.directory);
+        let mailbox = Arc::clone(&self.mailbox);
         // Like the parent executor, keep blocking tools off the async polling
         // thread. Otherwise a batch of sub-agent reads still executes serially
         // and prevents cancellation from being observed during a slow call.
@@ -8353,7 +8320,7 @@ impl ToolExecutor for SubagentToolExecutor {
             if abort.as_ref().is_some_and(HookAbortSignal::is_aborted) {
                 return Err(ToolError::new("tool cancelled before execution"));
             }
-            let _directory = runtime::mailbox::MailboxScope::enter(directory);
+            let _mailbox = runtime::mailbox::MailboxScope::enter(mailbox);
             execute_tool_with_enforcer(
                 enforcer.as_ref(),
                 &tool_name,
@@ -10373,19 +10340,9 @@ mod tests {
 
     #[test]
     fn merge_agent_list_lists_peers_and_running_subagents() {
-        // Peers come from the directory (recipients tagged with their namespace),
-        // not a probed filename.
-        use runtime::directory::Recipient;
-        let peers = vec![
-            Recipient {
-                name: "alice".to_string(),
-                sources: vec!["local"],
-            },
-            Recipient {
-                name: "bob".to_string(),
-                sources: vec!["nexus"],
-            },
-        ];
+        // Peers are the names in the session's one peer namespace, not a probed
+        // filename.
+        let peers = vec!["alice".to_string(), "bob".to_string()];
 
         // one running sub-agent (own name, distinct from peers)
         let subagents = vec![super::AgentSnapshot {
@@ -10406,15 +10363,12 @@ mod tests {
         // A peer is addressable; liveness is unknown from the namespace → None.
         assert_eq!(by["alice"].active, None, "peer liveness unknown");
         assert_eq!(by["alice"].kind, "peer");
-        assert_eq!(
-            by["alice"].sources,
-            vec!["local".to_string()],
-            "peer carries its namespace"
-        );
-        assert_eq!(by["bob"].sources, vec!["nexus".to_string()]);
         assert!(by["alice"].task_id.is_none());
-        assert_eq!(by["alice"].send_to, "local:alice");
-        assert_eq!(by["bob"].send_to, "nexus:bob");
+        assert_eq!(
+            by["alice"].send_to, "alice",
+            "a peer is addressed by its bare name"
+        );
+        assert_eq!(by["bob"].send_to, "bob");
         assert_eq!(by["bob"].active, None);
         // A running sub-agent is positively active, with its pid + role.
         assert_eq!(by["researcher"].active, Some(true));

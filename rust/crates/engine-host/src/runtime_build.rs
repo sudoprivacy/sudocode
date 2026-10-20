@@ -602,15 +602,18 @@ pub(crate) fn build_runtime_with_plugin_state(
     // above this line is identical for both hosts; this is the line that
     // decides whether a write lands on local disk or in the kernel.
     let tool_registry = tool_registry.with_fs(Arc::clone(&host.fs));
-    // Resolve the standalone nexus-A2A session once (fail loud on a partial
-    // config or a dial failure). `None` when A2A is off — the fast path that
-    // leaves scode behaviour unchanged. Held as `Option<&'static Session>`
-    // (Copy) and reused below to advertise, prompt, and wire the send half.
-    let a2a = match crate::nexus_a2a::session() {
-        Ok(a2a) => a2a,
-        Err(error) => {
-            shutdown_mcp_state_best_effort(&mcp_state);
-            return Err(Box::new(std::io::Error::other(error)));
+    // Resolve this session's one peer namespace (fail loud on a partial node
+    // config or a dial failure). A co-hosted agent has none to resolve: its
+    // daemon injected the mailbox it lives in.
+    let peer = if host.mailbox.is_some() {
+        None
+    } else {
+        match crate::peer::attach(&host.resolved_agent_name()) {
+            Ok(peer) => Some(peer),
+            Err(error) => {
+                shutdown_mcp_state_best_effort(&mcp_state);
+                return Err(Box::new(std::io::Error::other(error)));
+            }
         }
     };
     // per-session injected MCP tools bypass the global --allowed-tools gate:
@@ -635,7 +638,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     // wired below; the co-host advertises the same tool the same way. The tool
     // exists either way — absent A2A it delivers to the workspace mailbox — so
     // this line controls reachability under a restriction, nothing more.
-    if a2a.is_some() {
+    if peer.as_ref().is_some_and(crate::peer::Peer::is_node) {
         if let Some(allowed) = config.allowed_tools.as_mut() {
             allowed.extend(["send".to_string()]);
         }
@@ -703,21 +706,12 @@ pub(crate) fn build_runtime_with_plugin_state(
         }
         // A2A: teach the model its identity + how to reply, so a receiving loop
         // knows it can `send` back to a named peer and doesn't echo the message
-        // framing. Every receive path renders the shared REPL section; nexus adds
-        // its network note (via `peer_system_prompt`), standalone uses the same
-        // local identity the `send` routing below resolves.
-        if host.mailbox.is_some() {
-            // A host that supplied its own mailbox also drives delivery, and the
-            // prose describing that framing travels with the driver rather than
-            // being guessed here — the co-host's messages arrive wrapped in
-            // `[message from <sender>]`, which only its loop knows to emit.
-        } else if let Some(session) = a2a {
-            system_prompt.append_dynamic_section(session.peer_system_prompt());
-        } else {
-            let self_name = host.resolved_agent_name();
-            system_prompt.append_dynamic_section(runtime::agent_mailbox::repl_a2a_prompt_section(
-                &self_name,
-            ));
+        // framing. A host that supplied its own mailbox also drives delivery, and
+        // the prose describing that framing travels with the driver rather than
+        // being guessed here — the co-host's messages arrive wrapped in
+        // `[message from <sender>]`, which only its loop knows to emit.
+        if let Some(peer) = &peer {
+            system_prompt.append_dynamic_section(peer.prompt_section());
         }
         system_prompt
     };
@@ -769,53 +763,16 @@ pub(crate) fn build_runtime_with_plugin_state(
         tool_registry.clone(),
         mcp_state.clone(),
     );
-    // Hand the dispatcher this session's mailbox: the ONE place local-versus-nexus
-    // is decided. Everything that sends resolves the same handle, so a recipient
-    // name means the same destination to the `send` tool, to a sub-agent reporting
-    // back, and to the receiver tailing its own inbox.
-    //
-    // No A2A session means no nexus configured, and the resolver answers with
-    // workspace-local JSONL — the same code path rather than a fallback branch,
-    // which is what stops the two from drifting.
-    // Collect every namespace this session is attached to into ONE directory —
-    // the single place local-versus-nexus is decided. `agent_list` enumerates
-    // across the whole set and `send` routes within it, so a recipient name
-    // means the same destination to the `send` tool, to a sub-agent reporting
-    // back, and to the receiver tailing its own inbox. A one-member directory is
-    // the standalone or nexus-only case and behaves exactly as the lone mailbox
-    // did; several members is a session on more than one namespace at once.
-    use runtime::directory::{Directory, Member};
-    let directory = if let Some(mailbox) = host.mailbox.clone() {
-        // A co-hosted managed agent lives inside the daemon over its own backend;
-        // there is no same-machine pair beside it, so its one namespace is it.
-        Directory::new(vec![Member {
-            label: "nexus",
-            mailbox,
-        }])
-    } else {
-        // A standalone session always has the same-machine pair namespace (a peer
-        // scode in another folder tails the shared pair root); when nexus is also
-        // configured its namespace is added, so both are discoverable at once
-        // without the model choosing. The pair member is primary: it carries the
-        // session's identity and the unqualified `self_id`.
-        let self_name = host.resolved_agent_name();
-        let local = std::sync::Arc::new(runtime::mailbox::Mailbox::workspace_local(
-            &runtime::mailbox::local_pair_root(),
-            self_name,
-        ));
-        let mut members = vec![Member {
-            label: "local",
-            mailbox: local,
-        }];
-        if let Some(a2a_session) = a2a {
-            members.push(Member {
-                label: "nexus",
-                mailbox: a2a_session.mailbox(),
-            });
-        }
-        Directory::new(members)
-    };
-    tool_executor.set_directory(std::sync::Arc::new(directory));
+    // Hand the dispatcher this session's peer mailbox, so a recipient name means
+    // the same destination to the `send` tool, to a sub-agent reporting back,
+    // and to the receiver tailing its own inbox.
+    if let Some(mailbox) = host
+        .mailbox
+        .clone()
+        .or_else(|| peer.as_ref().map(crate::peer::Peer::mailbox))
+    {
+        tool_executor.set_mailbox(mailbox);
+    }
     let session_tracer = client.session_tracer().cloned();
     let mut runtime = ConversationRuntime::new_with_features(
         session,

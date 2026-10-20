@@ -40,7 +40,7 @@ fn discovered_agent_list_address_delivers_to_the_peer() {
             .find(|row| row["kind"] == "peer" && row["name"] == UNIFIED_SEND_RECIPIENT)
             .expect("discovery must return the fixture peer");
         let address = peer_row["send_to"].as_str().unwrap();
-        assert_eq!(address, format!("local:{UNIFIED_SEND_RECIPIENT}"));
+        assert_eq!(address, UNIFIED_SEND_RECIPIENT);
         complete_turn(
             &mut cli,
             &format!(

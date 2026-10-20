@@ -3494,40 +3494,20 @@ fn run_repl_iocraft_dispatch(
         })
         .expect("spawn input bridge");
 
-    // Both transports share the coordinator's delivery and shutdown boundary.
-    let mailbox_abort = runtime::HookAbortSignal::new();
-    let mut mailbox_pollers = Vec::new();
-    if let Ok(Some(a2a_session)) = engine_host::nexus_a2a::session() {
-        mailbox_pollers.push(engine_host::nexus_a2a::spawn_poller(
-            a2a_session,
-            mailbox_abort.clone(),
-            peer_turn_sink(coord_tx.clone(), mailbox_abort.clone()),
-        ));
-    }
-
-    // Local same-machine mailbox poller: picks up messages that a peer scode
-    // (or a sub-agent) writes to this process's inbox via the `send` tool.
-    // Rooted at the shared per-machine pair root and keyed by the name the LIVE
-    // SESSION answers to, so two scode processes started in different folders
-    // can converse. Complements the nexus A2A poller above — together they
-    // close the receive loop for both local and cross-machine messaging.
+    // The session's one receiver, on the same peer namespace its `send` tool
+    // writes through, sharing the coordinator's delivery and shutdown boundary.
     //
-    // The name comes from the session rather than being re-derived here: the
-    // session already resolved it (config `agentName`, else derived from its
-    // workspace) and signs outbound messages with it, and a second derivation
-    // from the process directory is how a peer's reply arrives at an inbox
-    // nothing is polling.
-    {
-        let self_name = session_agent_name;
-        let root = runtime::mailbox::local_pair_root();
-        mailbox_pollers.push(runtime::mailbox::spawn_local_poller(
-            root,
-            self_name,
-            mailbox_abort.clone(),
-            peer_turn_sink(coord_tx.clone(), mailbox_abort.clone()),
-        ));
-    }
-
+    // Keyed by the name the LIVE SESSION answers to rather than re-derived
+    // here: the session already resolved it (config `agentName`, else derived
+    // from its workspace) and signs outbound messages with it, and a second
+    // derivation from the process directory is how a peer's reply arrives at
+    // an inbox nothing is polling. `attach` reuses the node dial the session
+    // build already made, so it cannot newly fail here.
+    let mailbox_abort = runtime::HookAbortSignal::new();
+    let mailbox_receiver = engine_host::peer::attach(&session_agent_name)?.spawn_receiver(
+        mailbox_abort.clone(),
+        peer_turn_sink(coord_tx.clone(), mailbox_abort.clone()),
+    );
     // Coordinator loop on the current thread. All events arrive through
     // `coord_rx` — no timeout-based polling needed.
     let mut turn_active = false;
@@ -3951,9 +3931,7 @@ fn run_repl_iocraft_dispatch(
     mailbox_abort.abort();
     drop(coord_rx);
     coord.lock().unwrap().clear();
-    for poller in mailbox_pollers {
-        let _ = poller.join();
-    }
+    let _ = mailbox_receiver.join();
 
     // Persist the session before shutting down the REPL — the UI thread may
     // still be alive and the shared CLI mutex must remain accessible.

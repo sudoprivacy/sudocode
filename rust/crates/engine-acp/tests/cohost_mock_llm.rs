@@ -635,11 +635,10 @@ fn a_cohost_subagent_consumes_a_followup_during_its_first_model_response() {
                 }
                 task.clone_from(&tasks[0].agent_id);
                 let _workspace = WorkspaceRootScope::enter(workspace);
-                let _directory =
-                    MailboxScope::enter(Arc::new(runtime::directory::Directory::single(
-                        "nexus",
-                        Arc::new(Mailbox::daemon_absolute(Arc::clone(&fs), agent.into())),
-                    )));
+                let _mailbox = MailboxScope::enter(Arc::new(Mailbox::daemon_absolute(
+                    Arc::clone(&fs),
+                    agent.into(),
+                )));
                 tools::GlobalToolRegistry::builtin().with_fs(fs).execute(
                     "send",
                     &json!({"to":task,"summary":"resume child","message":format!(

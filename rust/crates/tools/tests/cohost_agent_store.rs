@@ -155,9 +155,9 @@ fn a_live_cohost_task_receives_followups_only_through_its_session_filesystem() {
     kernel.register_service_hook(&hook, Box::new(DeniedTaskSender));
     fs.create_dir_all(&workspace.to_string_lossy()).unwrap();
     let _workspace = WorkspaceRootScope::enter(&workspace);
-    let _directory = MailboxScope::enter(Arc::new(runtime::directory::Directory::single(
-        "nexus",
-        Arc::new(Mailbox::daemon_absolute(Arc::clone(&fs), AGENT.into())),
+    let _mailbox = MailboxScope::enter(Arc::new(Mailbox::daemon_absolute(
+        Arc::clone(&fs),
+        AGENT.into(),
     )));
     let task = format!("cohost-followup-{}", std::process::id());
     let abort = HookAbortSignal::new();

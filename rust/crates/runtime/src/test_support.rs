@@ -89,4 +89,18 @@ impl ObjectStore for MemObjectStore {
             .cloned()
             .ok_or_else(|| StorageError::NotFound(content_id.to_string()))
     }
+
+    /// Path-addressed, like the production host-fs backend: a rename moves the
+    /// bytes from one key to the other, replacing whatever the destination held.
+    fn rename(&self, old_path: &str, new_path: &str) -> Result<(), StorageError> {
+        let mut blobs = self
+            .blobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let data = blobs
+            .remove(old_path)
+            .ok_or_else(|| StorageError::NotFound(old_path.to_string()))?;
+        blobs.insert(new_path.to_string(), data);
+        Ok(())
+    }
 }

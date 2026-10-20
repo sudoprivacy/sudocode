@@ -12,12 +12,11 @@
 //! in a comment while nothing exercised it. The two live next to each other so
 //! the claim is checked rather than asserted.
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
+use kernel::abc::object_store::ObjectStore;
 use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::DT_LINK;
 use kernel::{Permission, PermissionProvider};
@@ -26,88 +25,10 @@ use runtime::{
     KernelFsBackend, Session, SessionStore,
 };
 
-/// Minimal in-memory content backend so a fresh `Kernel` can round-trip
-/// regular-file bytes (dirents fall through to the global metastore; only
-/// content needs a store). Mirrors the kernel's own `TestObjectStore`.
-#[derive(Default)]
-struct MemStore {
-    blobs: Mutex<HashMap<String, Vec<u8>>>,
-}
-
-impl ObjectStore for MemStore {
-    fn name(&self) -> &str {
-        "mem"
-    }
-
-    fn write_content(
-        &self,
-        content: &[u8],
-        content_id: &str,
-        _ctx: &OperationContext,
-        offset: u64,
-    ) -> Result<WriteResult, StorageError> {
-        let mut b = self.blobs.lock().unwrap();
-        let mut data = if offset > 0 {
-            b.get(content_id).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let start = offset as usize;
-        if start > data.len() {
-            data.resize(start, 0);
-        }
-        let end = start + content.len();
-        if end > data.len() {
-            data.resize(end, 0);
-        }
-        data[start..end].copy_from_slice(content);
-        let size = data.len() as u64;
-        b.insert(content_id.to_string(), data);
-        Ok(WriteResult {
-            content_id: content_id.to_string(),
-            version: content_id.to_string(),
-            size,
-        })
-    }
-
-    fn read_content(
-        &self,
-        content_id: &str,
-        _ctx: &OperationContext,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .cloned()
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
-    }
-
-    fn get_content_size(&self, content_id: &str) -> Result<u64, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .map(|d| d.len() as u64)
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
-    }
-
-    /// Path-addressed like `path_local`: a rename moves the bytes from one key
-    /// to the other, replacing whatever the destination held.
-    fn rename(&self, old_path: &str, new_path: &str) -> Result<(), StorageError> {
-        let mut blobs = self.blobs.lock().unwrap();
-        let data = blobs
-            .remove(old_path)
-            .ok_or_else(|| StorageError::NotFound(old_path.into()))?;
-        blobs.insert(new_path.to_string(), data);
-        Ok(())
-    }
-}
-
 /// A fresh kernel with a content-capable root mount.
 fn kernel_with_root_backend() -> Arc<Kernel> {
     let kernel = Arc::new(Kernel::new());
-    let backend: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
+    let backend: Arc<dyn ObjectStore> = Arc::new(runtime::test_support::MemObjectStore::default());
     kernel
         .vfs_router_arc()
         .add_mount("/", "root", Some(backend), false);
@@ -815,7 +736,7 @@ fn a_cohosted_agents_plan_lives_in_its_own_workspace() {
 #[test]
 fn a_path_outside_all_mounts_reads_a_transparent_error() {
     let kernel = Arc::new(Kernel::new());
-    let backend: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
+    let backend: Arc<dyn ObjectStore> = Arc::new(runtime::test_support::MemObjectStore::default());
     // Mount a SUBTREE, not `/`, so `/elsewhere` is genuinely unmounted.
     kernel
         .vfs_router_arc()

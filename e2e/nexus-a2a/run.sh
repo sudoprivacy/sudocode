@@ -124,6 +124,12 @@ echo "== [deterministic] /agents and /sessions are distinct namespaces =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_agents_and_sessions_are_not_the_same_namespace -- --ignored --nocapture
 
+# Rename is the node's own Rename: a file is replaced in one step, and a stream
+# is refused rather than copied into a new regular file behind the caller's back.
+echo "== [deterministic] rename is native: files replace, streams refuse =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_rename_replaces_files_and_refuses_streams -- --ignored --nocapture
+
 echo "== [deterministic] agent_list unions local + nexus peers =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_directory_unions_local_and_nexus_peers -- --ignored --nocapture

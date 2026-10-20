@@ -4,8 +4,9 @@ pub mod proto {
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
 use proto::{
-    CallRequest, DeleteRequest, LockRequest, ReadRequest, ReaddirRequest, SetattrRequest,
-    StatRequest, StreamReadAtRequest, StreamWriteRequest, UnlockRequest, WriteRequest,
+    CallRequest, DeleteRequest, LockRequest, ReadRequest, ReaddirRequest, RenameRequest,
+    SetattrRequest, StatRequest, StreamReadAtRequest, StreamWriteRequest, UnlockRequest,
+    WriteRequest,
 };
 use std::io;
 use std::sync::mpsc;
@@ -71,6 +72,14 @@ enum VfsOp {
     },
     Delete {
         path: String,
+        auth_token: String,
+        resp: mpsc::SyncSender<io::Result<()>>,
+    },
+    /// `sys_rename`: one metadata move on the node. The node refuses stream and
+    /// pipe entries and cross-mount moves; those refusals are the answer.
+    Rename {
+        path: String,
+        new_path: String,
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<()>>,
     },
@@ -245,7 +254,7 @@ impl NexusVfsClient {
                         // rather than as the failure it was. It holds by
                         // inspection today — no `?`, no early `return`, no
                         // panic path (`grpc_result` is a total match over
-                        // `Result`) — and an eighth arm must keep it. A guard
+                        // `Result`) — and every new arm must keep it. A guard
                         // object was considered and rejected: `resp` is bound
                         // inside each variant's pattern, so enforcing it
                         // structurally means reshaping `VfsOp` to hoist the
@@ -353,6 +362,36 @@ impl NexusVfsClient {
                                             Err(vfs_err(&r.error_payload))
                                         } else {
                                             Ok(())
+                                        }
+                                    }));
+                                }
+                                VfsOp::Rename {
+                                    path,
+                                    new_path,
+                                    auth_token,
+                                    resp,
+                                } => {
+                                    let unhandled = format!(
+                                        "Nexus did not rename {path} to {new_path}: no backend \
+                                         handled the path or its VFS lock timed out"
+                                    );
+                                    let r = client
+                                        .rename(deadlined(
+                                            RenameRequest {
+                                                path,
+                                                new_path,
+                                                auth_token,
+                                            },
+                                            OP_DEADLINE,
+                                        ))
+                                        .await;
+                                    let _ = resp.send(grpc_result(r, |r| {
+                                        if r.is_error {
+                                            Err(vfs_err(&r.error_payload))
+                                        } else if r.hit {
+                                            Ok(())
+                                        } else {
+                                            Err(io::Error::other(unhandled))
                                         }
                                     }));
                                 }
@@ -625,6 +664,22 @@ impl NexusVfsClient {
         self.tx
             .send(VfsOp::Delete {
                 path: path.to_owned(),
+                auth_token: auth_token.to_owned(),
+                resp: resp_tx,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+    }
+
+    /// Rename `path` to `new_path` on the node, replacing an existing file at
+    /// the destination in one operation. Stream, pipe and cross-mount renames
+    /// are refused by the node and returned as errors, never emulated.
+    pub fn rename(&self, path: &str, new_path: &str, auth_token: &str) -> io::Result<()> {
+        let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::Rename {
+                path: path.to_owned(),
+                new_path: new_path.to_owned(),
                 auth_token: auth_token.to_owned(),
                 resp: resp_tx,
             })

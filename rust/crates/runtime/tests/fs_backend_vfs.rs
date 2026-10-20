@@ -91,6 +91,17 @@ impl ObjectStore for MemStore {
             .map(|d| d.len() as u64)
             .ok_or_else(|| StorageError::NotFound(content_id.into()))
     }
+
+    /// Path-addressed like `path_local`: a rename moves the bytes from one key
+    /// to the other, replacing whatever the destination held.
+    fn rename(&self, old_path: &str, new_path: &str) -> Result<(), StorageError> {
+        let mut blobs = self.blobs.lock().unwrap();
+        let data = blobs
+            .remove(old_path)
+            .ok_or_else(|| StorageError::NotFound(old_path.into()))?;
+        blobs.insert(new_path.to_string(), data);
+        Ok(())
+    }
 }
 
 /// A fresh kernel with a content-capable root mount.
@@ -395,6 +406,36 @@ fn dt_stream_append_frames_read_back_deframed() {
     assert_eq!(second, b"{\"b\":2}\n");
     assert!(after_second > cursor);
     assert!(!eof);
+}
+
+#[test]
+fn rename_replaces_a_file_in_one_step_and_refuses_a_stream() {
+    // `rename` is the kernel's own sys_rename. Temp-then-rename replaces the
+    // destination in one operation, and a DT_STREAM is identity-bound: the
+    // kernel refuses to move it, so nothing may copy its frames into a new
+    // regular file and delete the original.
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.write("/ws/manifest.json", b"old").unwrap();
+    fs.write("/ws/manifest.json.tmp", b"new").unwrap();
+    fs.rename("/ws/manifest.json.tmp", "/ws/manifest.json")
+        .unwrap();
+    assert_eq!(fs.read("/ws/manifest.json").unwrap(), b"new");
+    assert!(!fs.exists("/ws/manifest.json.tmp").unwrap());
+
+    let stream = "/ws/log.jsonl";
+    kernel
+        .create_stream(stream, 64 * 1024)
+        .expect("create DT_STREAM");
+    fs.append(stream, b"frame\n").unwrap();
+    let error = fs.rename(stream, "/ws/moved.jsonl").unwrap_err();
+    assert!(
+        error.to_string().contains("rename not supported"),
+        "the kernel's refusal surfaces unchanged: {error}"
+    );
+    assert!(fs.is_append_stream(stream).unwrap());
+    assert_eq!(fs.read(stream).unwrap(), b"frame\n");
+    assert!(!fs.exists("/ws/moved.jsonl").unwrap());
 }
 
 #[test]

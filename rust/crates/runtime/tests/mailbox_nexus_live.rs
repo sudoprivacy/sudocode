@@ -222,6 +222,43 @@ fn live_filesystem_stream_read_and_append_preserve_all_frames() {
 
 #[test]
 #[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
+fn live_rename_replaces_files_and_refuses_streams() {
+    use runtime::fs_backend::NexusVfsFsBackend;
+    use runtime::FsBackend;
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").unwrap();
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let fs = NexusVfsFsBackend::from_arc(dial(&endpoint), auth);
+    let dir = format!("/sessions/rename-probe-{}", fresh());
+
+    // Temp-then-rename over an existing file: one Rename on the node.
+    let target = format!("{dir}/manifest.json");
+    let temp = format!("{target}.tmp");
+    fs.write(&target, b"old").unwrap();
+    fs.write(&temp, b"new").unwrap();
+    fs.rename(&temp, &target).unwrap();
+    assert_eq!(fs.read(&target).unwrap(), b"new");
+    assert!(!fs.exists(&temp).unwrap());
+    fs.write_atomic(&target, b"atomic").unwrap();
+    assert_eq!(fs.read(&target).unwrap(), b"atomic");
+
+    // A DT_STREAM is identity-bound: the node refuses to move it, and the
+    // client must not emulate the move by copying frames into a new file.
+    let stream = format!("{dir}/transcript.jsonl");
+    let moved = format!("{dir}/moved.jsonl");
+    fs.create_append_log(&stream, 0).unwrap();
+    fs.append(&stream, b"frame\n").unwrap();
+    let error = fs.rename(&stream, &moved).unwrap_err();
+    assert!(
+        error.to_string().contains("rename not supported"),
+        "the node's refusal surfaces unchanged: {error}"
+    );
+    assert!(fs.is_append_stream(&stream).unwrap());
+    assert!(!fs.exists(&moved).unwrap());
+}
+
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
 fn live_inbox_roundtrip() {
     let endpoint =
         std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");

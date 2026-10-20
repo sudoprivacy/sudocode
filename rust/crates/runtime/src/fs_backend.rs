@@ -1611,11 +1611,21 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        // No native rename syscall — compose from read + write + delete.
-        let data = self.read(from)?;
-        self.write(to, &data)?;
-        self.delete(from)?;
-        Ok(())
+        let from = &self.to_kernel(from)?;
+        let to = &self.to_kernel(to)?;
+        self.kernel
+            .sys_rename(from, to, &self.ctx)
+            .map_err(kernel_err)
+            .and_then(|result| {
+                if result.hit {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(format!(
+                        "Nexus did not rename {from} to {to}: no backend handled the path \
+                         or its VFS lock timed out"
+                    )))
+                }
+            })
     }
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {
@@ -1966,10 +1976,12 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        let data = self.read(from)?;
-        self.write(to, &data)?;
-        self.delete(from)?;
-        Ok(())
+        self.client.rename(from, to, &self.auth_token)
+    }
+
+    fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        // The node's sys_write replaces the object in one call — no temp file.
+        self.write(path, data)
     }
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {

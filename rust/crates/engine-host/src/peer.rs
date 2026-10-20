@@ -12,19 +12,21 @@
 //! filesystem. A co-hosted agent never calls this: its daemon injects the
 //! mailbox it lives in.
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 
 use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::fs_backend::NexusVfsFsBackend;
 use runtime::mailbox::Mailbox;
 use runtime::nexus_mailbox::Config;
+use runtime::FsBackend;
 use runtime::HookAbortSignal;
 
 /// Blocking-tail wait per receive iteration on the node.
 const INBOX_WAIT_MS: u64 = 500;
 
-/// The connected node session, dialled at most once per process.
+/// A connected, verified node session for one agent.
 pub struct Node {
     config: Config,
     mailbox: Arc<Mailbox>,
@@ -32,7 +34,7 @@ pub struct Node {
 
 /// Where this session's peers are.
 pub enum Peer {
-    Node(&'static Node),
+    Node(Arc<Node>),
     /// The same-machine pair root, as the session's own agent name.
     Disk(String),
 }
@@ -95,31 +97,53 @@ impl Peer {
     }
 }
 
-static NODE: OnceLock<Result<Option<Node>, String>> = OnceLock::new();
+/// Each agent's attach decision, made once per process: the node it attached
+/// to, or `None` for the disk namespace. Keyed by agent because a host can run
+/// sessions under several identities, each with its own credential. A failed
+/// attach is not cached, so the next session reports the failure again.
+static NODES: OnceLock<Mutex<HashMap<String, Option<Arc<Node>>>>> = OnceLock::new();
 
-/// The node this process is attached to, dialled exactly once. `None` when no
-/// node is configured; an incomplete configuration or a failed dial is an
-/// error, never a silent fall back to disk.
-pub fn node() -> Result<Option<&'static Node>, String> {
-    NODE.get_or_init(|| match Config::from_env()? {
-        None => Ok(None),
+/// The node `agent` is attached to, from this machine's node record.
+///
+/// `None` when the machine has no node. Otherwise the credential is loaded,
+/// the node is dialled, and `/agents` is read once, so an unreachable node, a
+/// failed handshake or a missing mount is reported here rather than on the
+/// session's first message. It is never a silent fall back to disk.
+///
+/// # Errors
+/// The node record or credential is unusable, or the node cannot be reached.
+pub fn node(agent: &str) -> Result<Option<Arc<Node>>, String> {
+    let mut nodes = NODES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(decided) = nodes.get(agent) {
+        return Ok(decided.clone());
+    }
+    let decided = match Config::from_node_record(agent)? {
+        None => None,
         Some(config) => {
             let client = config.connect()?;
             // Cert-only auth: the client cert IS the authorization (the node
             // derives identity from its SAN), so no per-request token is sent.
             let backend = NexusVfsFsBackend::from_arc(client, String::new());
+            backend.readdir("/agents").map_err(|error| {
+                format!(
+                    "this machine's node at {} is not usable as '{agent}': reading /agents \
+                     failed: {error}",
+                    config.endpoint
+                )
+            })?;
             let mailbox = Arc::new(Mailbox::daemon_absolute(
                 Arc::new(backend),
                 config.agent.clone(),
             ));
-            Ok(Some(Node { config, mailbox }))
+            Some(Arc::new(Node { config, mailbox }))
         }
-    })
-    .as_ref()
-    .map(Option::as_ref)
-    .map_err(Clone::clone)
+    };
+    nodes.insert(agent.to_string(), decided.clone());
+    Ok(decided)
 }
-
 impl Node {
     #[must_use]
     pub fn mailbox(&self) -> Arc<Mailbox> {
@@ -131,9 +155,9 @@ impl Node {
 /// under `agent_name`.
 ///
 /// # Errors
-/// A node is configured but cannot be reached.
+/// The machine has a node but it is unusable for `agent_name`.
 pub fn attach(agent_name: &str) -> Result<Peer, String> {
-    Ok(match node()? {
+    Ok(match node(agent_name)? {
         Some(node) => Peer::Node(node),
         None => Peer::Disk(agent_name.to_string()),
     })

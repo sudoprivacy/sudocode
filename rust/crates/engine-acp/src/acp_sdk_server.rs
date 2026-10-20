@@ -796,10 +796,14 @@ fn ensure_a2a_receiver(
 ) {
     let mailbox = match &registry.hosted_factory {
         Some(factory) => factory.mailbox(),
-        None => engine_host::peer::node()
-            .ok()
-            .flatten()
-            .map(engine_host::peer::Node::mailbox),
+        // The session build already attached this session's agent, so this
+        // reads the cached decision rather than dialling again.
+        None => registry
+            .lock_sessions()
+            .get(session_id)
+            .map(|entry| entry.engine.agent_name())
+            .and_then(|agent| engine_host::peer::node(&agent).ok().flatten())
+            .map(|node| node.mailbox()),
     };
     let Some(mailbox) = mailbox else {
         return;

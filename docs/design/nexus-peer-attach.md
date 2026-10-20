@@ -72,9 +72,9 @@ Which path a reader uses is decided once, when it acquires the reader, by `FsLoc
 2. **`false`, conditional write supported.** The new owner claims the cursor first:
    - It reads the register (token T0), then writes a fence `{holder, epoch+1, read_offset}` with `expected = T0`.
    - Only after `Committed` does it read or deliver.
-   - On `Conflict`, it re-reads and either claims again or yields.
    - On `Unknown`, it re-reads and proceeds only if the register shows its own fence.
-   - Every commit carries the last token. A `Conflict` on commit means ownership was lost: delivery stops and the message stays unacknowledged.
+   - Every commit carries the last token.
+   - `Conflict` means the same thing to every actor, whether a new claimer or a holder that resumed after a freeze: this attempt failed and nothing visible changed. The actor stops delivering, leaves the message unacknowledged, and goes back through acquire and claim. No actor ever gets to force a write.
    - It never falls back to an unconditional write.
 3. **`false`, no conditional write (the node until N2).** The reader keeps the plain store, and status states the weaker guarantee: "at-least-once only; the cursor may move backwards after a freeze longer than the lease". This is a declared capability gap, not a retry after a failed conditional write.
 

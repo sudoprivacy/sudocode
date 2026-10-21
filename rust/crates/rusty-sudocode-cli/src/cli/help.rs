@@ -747,6 +747,15 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "                              supported). ACP session-injected MCP servers bypass this."
     )?;
+    writeln!(out, "  --no-tools                 Disable all tool calls (-p only; conflicts with --allowedTools)")?;
+    writeln!(
+        out,
+        "  --no-memory                Disable automatic memory for this session (-p only)"
+    )?;
+    writeln!(
+        out,
+        "  --literal-input            Treat input as text without loading @image files (-p only)"
+    )?;
     writeln!(
         out,
         "  --system-prompt TEXT       Replace the built-in system prompt (identity + behaviour"

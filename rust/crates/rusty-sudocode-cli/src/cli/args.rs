@@ -78,6 +78,18 @@ struct Cli {
     #[arg(long = "allowedTools", alias = "allowed-tools", global = true)]
     allowed_tools: Vec<String>,
 
+    /// Disable every tool in print mode, including injected MCP and peer tools.
+    #[arg(long, global = true, conflicts_with = "allowed_tools")]
+    no_tools: bool,
+
+    /// Disable automatic memory reads and writes for this print-mode session.
+    #[arg(long, global = true)]
+    no_memory: bool,
+
+    /// Treat print-mode input as text; do not load @image references from disk.
+    #[arg(long, global = true)]
+    literal_input: bool,
+
     /// Enable compact output
     #[arg(long, global = true)]
     compact: bool,
@@ -609,6 +621,15 @@ fn standalone_model(model: &str, flag: Option<&str>) -> String {
 /// Convert the parsed `Cli` struct into the application's `CliAction`.
 #[allow(clippy::too_many_lines)]
 fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
+    if cli.no_tools && !cli.print {
+        return Err("--no-tools requires -p/--print".into());
+    }
+    if cli.no_memory && !cli.print {
+        return Err("--no-memory requires -p/--print".into());
+    }
+    if cli.literal_input && !cli.print {
+        return Err("--literal-input requires -p/--print".into());
+    }
     if cli.include_partial_messages {
         return Err(
             "--include-partial-messages is not supported; use complete stream-json messages".into(),
@@ -641,7 +662,11 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
     } else {
         cli.permission_mode
     };
-    let allowed_tools = normalize_allowed_tools(&cli.allowed_tools)?;
+    let allowed_tools = if cli.no_tools {
+        Some(AllowedToolSet::new())
+    } else {
+        normalize_allowed_tools(&cli.allowed_tools)?
+    };
     let permission_mode = permission_mode_override
         .unwrap_or_else(|| crate::startup::measure("permission_config", default_permission_mode));
 
@@ -653,6 +678,12 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
             prompt: cli.prompt_words.join(" "),
             model: standalone_model(&model, model_flag_raw.as_deref()),
             allowed_tools,
+            memory: if cli.no_memory {
+                runtime::memory::MemoryMode::Disabled
+            } else {
+                runtime::memory::MemoryMode::Enabled
+            },
+            literal_input: cli.literal_input,
             permission_mode,
             reasoning_effort: cli.reasoning_effort,
             auth_mode,

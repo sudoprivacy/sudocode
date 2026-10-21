@@ -259,6 +259,7 @@ impl SystemPrompt {
 pub struct SessionPromptSnapshot {
     pub prompt: SystemPrompt,
     pub memory_enabled: bool,
+    pub tools_enabled: bool,
     pub workspace_root: String,
     pub agent_name: String,
 }
@@ -270,12 +271,14 @@ impl SessionPromptSnapshot {
         &self,
         base: &SystemPrompt,
         memory_enabled: bool,
+        tools_enabled: bool,
         workspace_root: &str,
         agent_name: &str,
     ) -> bool {
         self.workspace_root == workspace_root
             && self.agent_name == agent_name
             && self.memory_enabled == memory_enabled
+            && self.tools_enabled == tools_enabled
             && (!base.sections.explicit_override
                 || self.prompt.static_sections() == base.static_sections())
     }
@@ -295,6 +298,7 @@ impl SessionPromptSnapshot {
                 "memory_enabled".into(),
                 JsonValue::Bool(self.memory_enabled),
             ),
+            ("tools_enabled".into(), JsonValue::Bool(self.tools_enabled)),
         ]))
     }
 
@@ -319,6 +323,13 @@ impl SessionPromptSnapshot {
         Ok(Self {
             prompt: SystemPrompt::from_json(prompt)?,
             memory_enabled,
+            // Older snapshots always included tool/skill/agent catalogs.
+            tools_enabled: match object.get("tools_enabled") {
+                None => true,
+                Some(value) => value
+                    .as_bool()
+                    .ok_or_else(|| JsonError::new("invalid snapshot tools mode"))?,
+            },
             workspace_root: text("workspace_root")?,
             agent_name: text("agent_name")?,
         })

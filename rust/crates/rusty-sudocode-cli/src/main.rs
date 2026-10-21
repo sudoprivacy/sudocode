@@ -4374,12 +4374,37 @@ impl LiveCli {
         reasoning_effort: Option<String>,
         auth_mode: Option<AuthMode>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // The engine always builds with tools enabled for the interactive
-        // REPL; `enable_tools=false` is a non-interactive one-shot knob the
-        // seam doesn't model (SessionEngine is single-purpose here).
-        let _ = enable_tools;
-        let system_prompt = startup::measure("system_prompt", build_system_prompt)?;
+        Self::new_with_memory(
+            model,
+            enable_tools,
+            allowed_tools,
+            permission_mode,
+            reasoning_effort,
+            auth_mode,
+            runtime::memory::MemoryMode::Enabled,
+        )
+    }
+
+    fn new_with_memory(
+        model: String,
+        enable_tools: bool,
+        allowed_tools: Option<AllowedToolSet>,
+        permission_mode: PermissionMode,
+        reasoning_effort: Option<String>,
+        auth_mode: Option<AuthMode>,
+        memory: runtime::memory::MemoryMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        // An explicit empty allow-list is a persistent deny-all policy, also
+        // retained by SessionEngine when resuming or rebuilding the runtime.
+        let allowed_tools = if enable_tools {
+            allowed_tools
+        } else {
+            Some(AllowedToolSet::new())
+        };
         let cwd = env::current_dir()?;
+        let system_prompt = startup::measure("system_prompt", || {
+            engine_host::prompt::build_system_prompt_for_with_memory(&cwd, memory)
+        })?;
         let sudocode_config =
             startup::measure("auth_config", || require_sudocode_config_for_cwd(&cwd))
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -4402,9 +4427,7 @@ impl LiveCli {
                     &cwd,
                     &mcp_servers,
                     runtime::SystemPromptOverrides::default(),
-                    // The REPL always uses memory; the per-session switch is an
-                    // ACP-client knob (`_meta.sudocode.memory`).
-                    runtime::memory::MemoryMode::Enabled,
+                    memory,
                     system_prompt,
                     model.clone(),
                     Some(model),

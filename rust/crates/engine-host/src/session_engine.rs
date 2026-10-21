@@ -214,7 +214,13 @@ impl SessionEngine {
         prompt.extend_dynamic_sections(host_prompt_sections.clone());
         config.system_prompt = prompt;
         let permission_mode = config.permission_mode;
-        let allowed_tools = config.allowed_tools.clone();
+        let allowed_tools = if config.enable_tools {
+            config.allowed_tools.clone()
+        } else {
+            // Preserve the host's deny-all setting across model switches and
+            // resume; rebuilding must never restore tools implicitly.
+            Some(AllowedToolSet::new())
+        };
         let auth_mode = config.auth_mode;
         let memory = config.memory;
         let runtime = build_engine_runtime(

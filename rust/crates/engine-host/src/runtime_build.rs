@@ -587,6 +587,19 @@ pub(crate) fn build_runtime_with_plugin_state(
     runtime_plugin_state: RuntimePluginState,
     session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
+    // None means unrestricted; an explicitly empty list means deny all. Apply
+    // this to both the provider definitions and the executor, before any
+    // session-injected tools can widen the list. A provider may issue a tool
+    // call even when the request advertised no tools.
+    if !config.enable_tools
+        || config
+            .allowed_tools
+            .as_ref()
+            .is_some_and(AllowedToolSet::is_empty)
+    {
+        config.enable_tools = false;
+        config.allowed_tools = Some(AllowedToolSet::new());
+    }
     // Persist the model in session metadata so resumed sessions can report it.
     if session.model.is_none() {
         session.model = Some(config.model.clone());
@@ -623,7 +636,11 @@ pub(crate) fn build_runtime_with_plugin_state(
     // normalizes server names the same way the tool index does (e.g.
     // `github.com` -> `mcp__github_com__`), so non-alphanumeric server names
     // are matched correctly.
-    if let Some(allowed) = config.allowed_tools.as_mut() {
+    if let Some(allowed) = config
+        .allowed_tools
+        .as_mut()
+        .filter(|_| config.enable_tools)
+    {
         if let Some(mcp_state) = &mcp_state {
             let tools = mcp_state
                 .lock()
@@ -638,7 +655,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     // wired below; the co-host advertises the same tool the same way. The tool
     // exists either way — absent A2A it delivers to the workspace mailbox — so
     // this line controls reachability under a restriction, nothing more.
-    if peer.as_ref().is_some_and(crate::peer::Peer::is_node) {
+    if config.enable_tools && peer.as_ref().is_some_and(crate::peer::Peer::is_node) {
         if let Some(allowed) = config.allowed_tools.as_mut() {
             allowed.extend(["send".to_string()]);
         }
@@ -658,11 +675,16 @@ pub(crate) fn build_runtime_with_plugin_state(
     };
     let workspace_root = host.fs.working_root()?;
     let agent_name = host.resolved_agent_name();
-    let deferred_section = tool_registry.deferred_tools_prompt_section();
+    let deferred_section = if config.enable_tools {
+        tool_registry.deferred_tools_prompt_section()
+    } else {
+        String::new()
+    };
     let system_prompt = if let Some(snapshot) = session.prompt_snapshot().filter(|snapshot| {
         snapshot.compatible_with(
             &config.system_prompt,
             config.memory.is_enabled(),
+            config.enable_tools,
             &workspace_root,
             &agent_name,
         ) && snapshot
@@ -694,10 +716,12 @@ pub(crate) fn build_runtime_with_plugin_state(
         // Discover resources where commands and the Skill tool resolve them.
         // Trusted daemon credentials continue to use config_root; a project's
         // installed skills belong to the session's actual project directory.
-        system_prompt.extend_dynamic_sections(cwd_prompt_sections(
-            &host.shell_root,
-            Some(&plugin_load_outcome),
-        ));
+        if config.enable_tools {
+            system_prompt.extend_dynamic_sections(cwd_prompt_sections(
+                &host.shell_root,
+                Some(&plugin_load_outcome),
+            ));
+        }
         // Deferred tools listing: inject `<available-deferred-tools>` so the
         // model knows which tools exist beyond the core set visible in the API
         // `tools` array. Discovery via ToolSearch, direct execution by name.
@@ -710,7 +734,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         // the prose describing that framing travels with the driver rather than
         // being guessed here — the co-host's messages arrive wrapped in
         // `[message from <sender>]`, which only its loop knows to emit.
-        if let Some(peer) = &peer {
+        if let Some(peer) = peer.as_ref().filter(|_| config.enable_tools) {
             system_prompt.append_dynamic_section(peer.prompt_section());
         }
         system_prompt
@@ -718,6 +742,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     session.set_prompt_snapshot(runtime::SessionPromptSnapshot {
         prompt: system_prompt.clone(),
         memory_enabled: config.memory.is_enabled(),
+        tools_enabled: config.enable_tools,
         workspace_root,
         agent_name,
     });

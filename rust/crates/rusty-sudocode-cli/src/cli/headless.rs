@@ -29,6 +29,8 @@ pub(crate) struct HeadlessOptions {
     pub prompt: String,
     pub model: String,
     pub allowed_tools: Option<AllowedToolSet>,
+    pub memory: runtime::memory::MemoryMode,
+    pub literal_input: bool,
     pub permission_mode: runtime::PermissionMode,
     pub reasoning_effort: Option<String>,
     pub auth_mode: Option<engine_core::AuthMode>,
@@ -273,13 +275,17 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
         stage = "startup_error";
         crate::run_stale_base_preflight(options.base_commit.as_deref());
         tools::declare_finite_task_mode();
-        let cli = LiveCli::new(
+        let cli = LiveCli::new_with_memory(
             options.model,
-            true,
+            !options
+                .allowed_tools
+                .as_ref()
+                .is_some_and(AllowedToolSet::is_empty),
             options.allowed_tools,
             options.permission_mode,
             options.reasoning_effort,
             options.auth_mode,
+            options.memory,
         )?;
         let execution = (|| -> Result<(), Error> {
             if let Some(reference) = options.resume {
@@ -302,7 +308,11 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                     "session_id":session, "model":cli.lifecycle.current_model(), "partial_messages":false}),
                 )?;
             }
-            let blocks = runtime::image_input::prompt_blocks(&prompt, &runtime::StdFsBackend)?;
+            let blocks = if options.literal_input {
+                vec![runtime::ContentBlock::Text { text: prompt }]
+            } else {
+                runtime::image_input::prompt_blocks(&prompt, &runtime::StdFsBackend)?
+            };
             cli.engine_handle.commands.send(EngineCommand::Prompt {
                 blocks,
                 context: None,

@@ -51,6 +51,7 @@ impl Fixture {
             .env_clear()
             .env("HOME", self.dir.path().join("home"))
             .env("SUDO_CODE_CONFIG_HOME", self.dir.path().join("config"))
+            .env("SUDOCODE_MEMORY_DIR", self.dir.path().join("memory"))
             .env("NO_COLOR", "1")
             .args(["--auth", "api-key"])
             .stdin(Stdio::null())
@@ -94,6 +95,199 @@ fn json_output(out: &Output) -> Value {
         )
     })
 }
+#[test]
+fn no_tools_rejects_provider_tool_calls_even_with_full_permissions() {
+    let f = Fixture::new();
+    for scenario in ["read_file_roundtrip", "write_file_denied"] {
+        let out = f.run(
+            &[
+                "-p",
+                &format!("{SCENARIO_PREFIX}{scenario}"),
+                "--no-tools",
+                "--model",
+                "sonnet",
+                "--permission-mode",
+                "danger-full-access",
+                "--output-format=json",
+            ],
+            None,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!f.dir.path().join("generated/denied.txt").exists());
+    }
+    let requests = f.runtime.block_on(f.server.captured_requests());
+    assert_eq!(
+        requests.len(),
+        4,
+        "both forged calls must reach the executor gate"
+    );
+    for request in &requests {
+        let body: Value = serde_json::from_str(&request.raw_body).unwrap();
+        assert!(body["tools"].is_null() || body["tools"].as_array().is_some_and(Vec::is_empty));
+        assert!(
+            !request.raw_body.contains("alpha parity line"),
+            "file content leaked"
+        );
+    }
+    for request in [&requests[1], &requests[3]] {
+        assert!(
+            request.raw_body.contains("not enabled"),
+            "missing execution denial"
+        );
+        assert!(request.raw_body.contains("\"is_error\":true"));
+    }
+}
+
+#[test]
+fn no_tools_survives_resume_and_rejects_conflicting_flags() {
+    let f = Fixture::new();
+    let out = f.run(
+        &[
+            "-p",
+            &format!("{SCENARIO_PREFIX}single_turn_text"),
+            "--no-tools",
+            "--model",
+            "sonnet",
+            "--output-format=json",
+        ],
+        None,
+    );
+    assert!(out.status.success());
+    let result = json_output(&out);
+    let out = f.run(
+        &[
+            "-p",
+            &format!("{SCENARIO_PREFIX}write_file_denied"),
+            "--no-tools",
+            "--resume",
+            result["session_id"].as_str().unwrap(),
+            "--model",
+            "sonnet",
+            "--permission-mode",
+            "danger-full-access",
+            "--output-format=json",
+        ],
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!f.dir.path().join("generated/denied.txt").exists());
+    let requests = f.runtime.block_on(f.server.captured_requests());
+    for request in &requests {
+        let body: Value = serde_json::from_str(&request.raw_body).unwrap();
+        assert!(body["tools"].is_null() || body["tools"].as_array().is_some_and(Vec::is_empty));
+    }
+    assert!(requests.last().unwrap().raw_body.contains("not enabled"));
+    for args in [
+        vec!["--no-tools", "task"],
+        vec![
+            "-p",
+            "task",
+            "--no-tools",
+            "--allowedTools",
+            "read_file",
+            "--output-format=json",
+        ],
+    ] {
+        let out = f.run(&args, None);
+        assert!(!out.status.success());
+    }
+    assert_eq!(
+        requests.len(),
+        f.runtime.block_on(f.server.captured_requests()).len()
+    );
+}
+
+#[test]
+fn no_memory_excludes_existing_memory_and_preserves_it_across_resume() {
+    let f = Fixture::new();
+    let memory = f.dir.path().join("memory");
+    fs::create_dir_all(&memory).unwrap();
+    let entry = "---\nname: private-fact\ndescription: a private fact\nmetadata:\n  type: project\n---\n\nprivate-memory-marker-7813\n";
+    let index = "- [Private fact](fact.md) — private-memory-marker-7813\n";
+    fs::write(memory.join("fact.md"), entry).unwrap();
+    fs::write(memory.join("MEMORY.md"), index).unwrap();
+    let task = format!("{SCENARIO_PREFIX}single_turn_text");
+    let flags = ["-p", &task, "--model", "sonnet", "--output-format=json"];
+    let out = f.run(&flags, None);
+    assert!(out.status.success());
+    let session = json_output(&out);
+    let requests = f.runtime.block_on(f.server.captured_requests());
+    assert!(requests
+        .last()
+        .unwrap()
+        .raw_body
+        .contains("private-memory-marker-7813"));
+    let mut disabled = flags.to_vec();
+    disabled.extend([
+        "--no-memory",
+        "--no-tools",
+        "--resume",
+        session["session_id"].as_str().unwrap(),
+    ]);
+    let out = f.run(&disabled, None);
+    assert!(out.status.success());
+    let out = f.run(&disabled, None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let requests = f.runtime.block_on(f.server.captured_requests());
+    assert_eq!(requests.len(), 3);
+    for request in &requests[1..] {
+        assert!(!request.raw_body.contains("private-memory-marker-7813"));
+        assert!(!request.raw_body.contains("# auto memory"));
+    }
+    assert_eq!(fs::read_to_string(memory.join("fact.md")).unwrap(), entry);
+    assert_eq!(fs::read_to_string(memory.join("MEMORY.md")).unwrap(), index);
+    assert_eq!(fs::read_dir(memory).unwrap().count(), 2);
+    let out = f.run(&["--no-memory", "task"], None);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn literal_input_does_not_read_file_references() {
+    let f = Fixture::new();
+    let task = format!("{SCENARIO_PREFIX}single_turn_text @nonexistent-image.png");
+    let out = f.run(
+        &[
+            "-p",
+            &task,
+            "--literal-input",
+            "--no-tools",
+            "--no-memory",
+            "--model",
+            "sonnet",
+            "--output-format=json",
+        ],
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let requests = f.runtime.block_on(f.server.captured_requests());
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].raw_body.contains("@nonexistent-image.png"));
+    let body: Value = serde_json::from_str(&requests[0].raw_body).unwrap();
+    for message in body["messages"].as_array().unwrap() {
+        for content in message["content"].as_array().unwrap() {
+            assert_ne!(content["type"], "image");
+        }
+    }
+    let out = f.run(&["--literal-input", "task"], None);
+    assert!(!out.status.success());
+}
+
 #[test]
 fn text_tools_and_flags_after_prompt() {
     let f = Fixture::new();
@@ -544,6 +738,49 @@ fn project_skill_is_discovered_and_really_read() {
         .contains("HEADLESS_SKILL_LOADED"));
     let requests = f.runtime.block_on(f.server.captured_requests());
     assert!(requests[0].raw_body.contains("Headless discovery probe"));
+}
+
+#[test]
+fn tool_catalogs_follow_the_current_policy_when_resuming() {
+    let f = Fixture::new();
+    let skill = f.dir.path().join(".agents/skills/available-only/SKILL.md");
+    fs::create_dir_all(skill.parent().unwrap()).unwrap();
+    fs::write(
+        skill,
+        "---\nname: available-only\ndescription: Tool catalog marker 2184\n---\nSkill body.\n",
+    )
+    .unwrap();
+    let task = format!("{SCENARIO_PREFIX}single_turn_text");
+    let flags = [
+        "-p",
+        &task,
+        "--model",
+        "sonnet",
+        "--no-memory",
+        "--output-format=json",
+    ];
+    let out = f.run(&flags, None);
+    assert!(out.status.success());
+    let value = json_output(&out);
+    let mut resume = flags.to_vec();
+    resume.extend(["--resume", value["session_id"].as_str().unwrap()]);
+    let mut disabled = resume.clone();
+    disabled.push("--no-tools");
+    let out = f.run(&disabled, None);
+    assert!(out.status.success());
+    let out = f.run(&resume, None);
+    assert!(out.status.success());
+    let requests = f.runtime.block_on(f.server.captured_requests());
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[0].raw_body.contains("Tool catalog marker 2184"),
+        "{}",
+        requests[0].raw_body
+    );
+    assert!(!requests[1].raw_body.contains("Tool catalog marker 2184"));
+    assert!(!requests[1].raw_body.contains("<available-agent-types>"));
+    assert!(!requests[1].raw_body.contains("<available-deferred-tools>"));
+    assert!(requests[2].raw_body.contains("Tool catalog marker 2184"));
 }
 
 #[test]

@@ -829,6 +829,33 @@ For inherited pipes with no producer, redirect stdin from `/dev/null` (Windows:
 `NUL`). TTY stdin is never read, including for permission or broad-directory
 confirmation. Use `--allow-broad-cwd` explicitly when appropriate.
 
+Text-only integrations can explicitly disable tools, automatic memory, and
+image-file expansion. These options require print mode:
+
+```sh
+scode -p --no-tools --no-memory --literal-input --output-format json -- "Summarize this text"
+```
+
+- `--no-tools` advertises no tools and rejects all tool execution, even if the
+  provider emits a tool call or full-access permission mode is selected. It
+  conflicts with `--allowedTools`. Internally an explicit empty allow-list is
+  deny-all; session-injected MCP and peer tools cannot widen it on a rebuild.
+  Tool, skill and agent-type catalogs are omitted from the system prompt while
+  tools are disabled, including when resuming a tool-enabled session.
+  Existing non-empty allow-lists keep their session-injected MCP behavior.
+- `--no-memory` disables the automatic memory provider for this invocation,
+  including a resumed session and its runtime rebuilds. Existing memory files
+  remain unchanged. It does not erase facts already present in a transcript or
+  prevent file tools from reading files when tools remain enabled.
+- `--literal-input` leaves `@image.png` references as text instead of loading
+  local image files. Normal print-mode input expansion remains the default.
+
+These are execution options, not a persisted session permission grant. Pass
+them again when launching a resumed invocation. Workspace instructions, skills,
+configured plugins/hooks, and model configuration still apply; integrations
+requiring isolation must provide a controlled workspace/configuration and their
+own process, filesystem and network boundaries.
+
 Output contracts (schema version 1):
 
 - `text`: only the last complete assistant answer on stdout; errors on stderr
@@ -889,4 +916,3 @@ Nexus, and the model server are measured separately when assessing a complete
 deployment. Apple/Spark measurements require workloads on that hardware.
 RSS includes shared pages; unique memory across several processes requires a
 measure such as proportional set size (PSS).
-

@@ -2347,20 +2347,22 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
         },
         peer_abort.clone(),
     );
-    let announcer = std::sync::Mutex::new(editor.borrow_mut().external_printer());
+    // The notice is written straight to the terminal rather than through
+    // rustyline's external printer. On Unix that printer makes rustyline
+    // `select()` on the raw tty before every key while its own read buffer
+    // already holds the rest of a fast burst of input, so typed or pasted text
+    // stalls after its first character.
     let peer_receiver = engine_host::peer::attach(&cli.lifecycle.agent_name())?.spawn_receiver(
         peer_abort.clone(),
         move |message| {
-            if let Some(printer) = announcer
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_mut()
-            {
-                let _ = printer.print(format!(
-                    "Message from {} is waiting; it runs before the next prompt (press Enter)",
-                    message.from
-                ));
-            }
+            let mut out = io::stdout().lock();
+            let _ = write!(
+                out,
+                "\r\nMessage from {} is waiting; it runs before the next prompt (press Enter)\r\n",
+                message.from
+            );
+            let _ = out.flush();
+            drop(out);
             deliver(message)
         },
     );

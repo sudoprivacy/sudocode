@@ -295,14 +295,6 @@ pub struct LineEditor {
 }
 
 impl LineEditor {
-    /// A printer another thread can write to while this editor reads a line,
-    /// without tearing the line being typed. `None` where the terminal offers
-    /// none.
-    pub fn external_printer(&mut self) -> Option<Box<dyn rustyline::ExternalPrinter + Send>> {
-        let printer = self.editor.create_external_printer().ok()?;
-        Some(Box::new(printer))
-    }
-
     /// The count of turns waiting to run at the next prompt. While it is above
     /// zero, Enter on an empty line returns an empty submission so they can run.
     pub fn waiting_turns(&self) -> Arc<AtomicUsize> {

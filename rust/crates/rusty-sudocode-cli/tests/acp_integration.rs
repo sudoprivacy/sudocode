@@ -7764,3 +7764,132 @@ $stamp = '{{0}}:{{1}}' -f $PID, (Get-Process -Id $PID).StartTime.ToUniversalTime
     client.shutdown().await;
     workspace.cleanup();
 }
+
+/// Pin the agent name a session started in `dir` answers to.
+fn pin_agent_name(dir: &Path, agent: &str) {
+    let settings = dir.join(".nexus").join("sudocode");
+    fs::create_dir_all(&settings).expect("create project settings");
+    fs::write(
+        settings.join("settings.json"),
+        json!({ "agentName": agent }).to_string(),
+    )
+    .expect("write project settings");
+}
+
+/// A non-hosted ACP process on a machine with no node receives its peers over
+/// the same-machine pair root, one receiver per agent it serves.
+///
+/// Two sessions in two workspaces are two agents. Each peer message reaches
+/// the session of the agent it was sent to, never the other one, and names its
+/// real sender. Each conversation's read position moves only once the turn the
+/// message started has finished.
+#[tokio::test]
+async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
+    const FIRST: &str = "acp-pair-first";
+    const SECOND: &str = "acp-pair-second";
+    const PEER: &str = "acp-pair-peer";
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("stdio-pair-receive");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let second_dir = workspace.root.join("second");
+    fs::create_dir_all(&second_dir).expect("create the second workspace");
+    pin_agent_name(&workspace.root, FIRST);
+    pin_agent_name(&second_dir, SECOND);
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let mut sessions = Vec::new();
+    for (dir, agent) in [(&workspace.root, FIRST), (&second_dir, SECOND)] {
+        let (_, created) = client
+            .send_request(
+                "session/new",
+                json!({"cwd": dir.to_string_lossy(), "mcpServers": []}),
+            )
+            .await;
+        let peer = &created["result"]["_meta"]["sudocode"]["peer"];
+        assert_eq!(
+            peer["agent"], agent,
+            "session/new reports its agent: {created}"
+        );
+        assert_eq!(
+            peer["namespace"], "disk",
+            "with no node record the peers are on the pair root: {created}"
+        );
+        let id = created["result"]["sessionId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("session/new returned no sessionId: {created}"))
+            .to_string();
+        sessions.push((agent, id));
+    }
+
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+    let peer = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string());
+    for (agent, _) in &sessions {
+        peer.send(runtime::agent_mailbox::MailboxEnvelope {
+            from: PEER.to_string(),
+            to: (*agent).to_string(),
+            body: format!("for {agent} PARITY_SCENARIO:single_turn_text"),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: runtime::agent_mailbox::kinds::MESSAGE.to_string(),
+            request_id: None,
+        })
+        .expect("the peer writes on the pair root");
+    }
+
+    let mut delivered: Vec<Value> = Vec::new();
+    while delivered.len() < sessions.len() {
+        let (_, update) = client
+            .recv_until(Duration::from_secs(30), |msg| {
+                msg["method"] == "session/update"
+                    && msg["params"]["update"]["sessionUpdate"] == "user_message_chunk"
+                    && msg["params"]["_meta"]["sudocode"]["a2a"]["from"] == PEER
+            })
+            .await
+            .unwrap_or_else(|seen| {
+                panic!("a peer message never reached the client; saw {seen:#?}")
+            });
+        delivered.push(update);
+    }
+    for (agent, id) in &sessions {
+        let update = delivered
+            .iter()
+            .find(|update| update["params"]["sessionId"] == id.as_str())
+            .unwrap_or_else(|| {
+                panic!("nothing was delivered to {agent}'s session: {delivered:#?}")
+            });
+        let text = update["params"]["update"]["content"]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            text.contains(&format!("for {agent} ")),
+            "{agent}'s session got another agent's message: {text}"
+        );
+    }
+
+    for (agent, _) in &sessions {
+        let inbox = runtime::mailbox::Mailbox::workspace_local(&pair_root, (*agent).to_string());
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let position = inbox
+                .read_position(PEER)
+                .expect("read the agent's position")
+                .unwrap_or(0);
+            if position > 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{agent} never recorded the message after its turn finished"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    client.shutdown().await;
+    workspace.cleanup();
+}

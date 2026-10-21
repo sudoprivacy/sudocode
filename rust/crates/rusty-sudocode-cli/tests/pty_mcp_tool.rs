@@ -130,12 +130,29 @@ fn configure_mcp_server(workspace_root: &Path) {
     let script_path = workspace_root.join("parity-mcp-server.py");
     fs::write(&script_path, MCP_SERVER_SCRIPT).expect("mcp server script should write");
 
+    let output = std::process::Command::new(common::resolve_python())
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .expect("MCP fixture Python should resolve");
+    assert!(output.status.success(), "{output:?}");
+    let python = String::from_utf8(output.stdout).unwrap().trim().to_string();
+    assert!(Path::new(&python).is_absolute());
+    let status = std::process::Command::new(&python)
+        .env_remove("PATH")
+        .args([
+            "-c",
+            "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)",
+        ])
+        .status()
+        .expect("MCP fixture Python should start without PATH");
+    assert!(status.success());
+
     let settings_dir = workspace_root.join(".nexus").join("sudocode");
     fs::create_dir_all(&settings_dir).expect("project config dir should be created");
     let settings = serde_json::json!({
         "mcpServers": {
             "parity": {
-                "command": common::resolve_python(),
+                "command": python,
                 "args": [
                     script_path.display().to_string(),
                     workspace_root.join("parity-mcp-protocol.log").display().to_string(),

@@ -39,6 +39,9 @@ fn deferred_tool_roundtrip() {
 /// verify deferred MCP tool dispatch.
 const MCP_SERVER_SCRIPT: &str = r#"import json, sys
 
+protocol_log = open(sys.argv[1], 'a', encoding='utf-8')
+print('process start', file=protocol_log, flush=True)
+
 def read_message():
     line = sys.stdin.buffer.readline()
     if not line:
@@ -49,12 +52,16 @@ def send_message(message):
     payload = json.dumps(message).encode()
     sys.stdout.buffer.write(payload + b'\n')
     sys.stdout.buffer.flush()
+    print(f'completed response: {method} id={message["id"]} success={"result" in message}', file=protocol_log, flush=True)
 
 while True:
     request = read_message()
     if request is None:
         break
     method = request.get('method')
+    print(f'incoming method: {method} id={request.get("id")}', file=protocol_log, flush=True)
+    if 'id' not in request:
+        continue
     if method == 'initialize':
         send_message({
             'jsonrpc': '2.0',
@@ -94,7 +101,7 @@ while True:
                 'isError': False,
             },
         })
-    elif 'id' in request:
+    else:
         send_message({
             'jsonrpc': '2.0',
             'id': request['id'],
@@ -112,7 +119,10 @@ fn configure_mcp_server(workspace_root: &Path) {
         "mcpServers": {
             "parity": {
                 "command": common::resolve_python(),
-                "args": [script_path.display().to_string()],
+                "args": [
+                    script_path.display().to_string(),
+                    workspace_root.join("parity-mcp-protocol.log").display().to_string(),
+                ],
             }
         }
     });
@@ -142,7 +152,18 @@ fn deferred_mcp_tool_roundtrip() {
     );
 
     sess.expect("echo:hello from deferred mcp")
-        .expect("MCP echo response should round-trip through deferred dispatch");
+        .unwrap_or_else(|error| {
+            let protocol_log =
+                fs::read_to_string(env.workspace_root().join("parity-mcp-protocol.log"))
+                    .unwrap_or_else(|error| format!("protocol log unavailable: {error}"));
+            panic!(
+                "MCP echo response did not round-trip through deferred dispatch: {error:?}\n\
+                 A successful tools/list response with no incoming tools/call means model non-use \
+                 or a dispatch issue, not an MCP handshake failure.\n\
+                 MCP protocol log:\n{protocol_log}\nScreen tail:\n{}",
+                common::screen_tail(&sess, 5000)
+            );
+        });
 
     let exit = sess.expect_eof().expect("scode should exit");
     assert_eq!(

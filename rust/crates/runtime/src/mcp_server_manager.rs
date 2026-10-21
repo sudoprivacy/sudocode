@@ -1753,6 +1753,176 @@ mod tests {
         servers
     }
 
+    fn stdio_lifecycle_manager(failure: &str) -> McpServerManager {
+        let script = r#"
+import json, sys
+failure = sys.argv[1]
+methods = []
+initialized = False
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request['method']
+    methods.append(method)
+    if method == 'notifications/initialized':
+        assert 'id' not in request
+        assert methods == ['initialize', 'notifications/initialized']
+        initialized = True
+        continue
+    response = {'jsonrpc': '2.0', 'id': request['id']}
+    if method == 'initialize':
+        if failure == 'initialize-disconnect':
+            sys.exit(0)
+        if failure == 'initialize':
+            response['result'] = {'capabilities': {}}
+        elif failure == 'initialize-error':
+            response['error'] = {'code': -32001, 'message': 'initialize rejected'}
+        else:
+            response['result'] = {
+                'protocolVersion': request['params']['protocolVersion'],
+                'capabilities': {'tools': {}},
+                'serverInfo': {'name': 'strict-peer', 'version': '1'}
+            }
+    elif not initialized:
+        response['error'] = {'code': -32002, 'message': 'initialized notification missing'}
+    elif method == 'tools/list':
+        if failure == 'tools/list':
+            response['result'] = {'tools': 'invalid'}
+        elif failure == 'discovery-error':
+            response['error'] = {'code': -32001, 'message': 'discovery rejected'}
+        else:
+            response['result'] = {'tools': [{
+                'name': 'echo',
+                'inputSchema': {'type': 'object', 'properties': {'text': {'type': 'string'}}}
+            }]}
+    elif method == 'tools/call':
+        assert request['params']['name'] == 'echo'
+        text = request['params']['arguments']['text']
+        response['result'] = {
+            'content': [{'type': 'text', 'text': 'echo:' + text}],
+            'structuredContent': {'methods': methods},
+            'isError': False
+        }
+    print(json.dumps(response), flush=True)
+"#;
+        let mut servers = stub_servers();
+        let McpServerConfig::Stdio(config) = &mut servers.get_mut("test-server").unwrap().config
+        else {
+            unreachable!()
+        };
+        config.command = if cfg!(windows) { "python" } else { "python3" }.to_string();
+        config.args = vec![
+            "-u".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+            failure.to_string(),
+        ];
+        McpServerManager::from_servers(&servers)
+    }
+
+    #[tokio::test]
+    async fn stdio_lifecycle_initializes_discovers_and_calls_without_model() {
+        let mut manager = stdio_lifecycle_manager("");
+        let report = manager.discover_tools_best_effort().await;
+        let response = if let Some(tool) = report.tools.first() {
+            Some(
+                manager
+                    .call_tool(
+                        &tool.qualified_name,
+                        Some(serde_json::json!({"text": "regression"})),
+                    )
+                    .await,
+            )
+        } else {
+            None
+        };
+        manager.shutdown().await.unwrap();
+        assert!(
+            report.failed_servers.is_empty(),
+            "{:?}",
+            report.failed_servers
+        );
+        assert_eq!(report.tools.len(), 1);
+        assert_eq!(report.tools[0].qualified_name, "mcp__test-server__echo");
+        let response = response.unwrap().unwrap();
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.unwrap();
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(result.content[0].data["text"], "echo:regression");
+        assert_eq!(
+            result.structured_content.unwrap()["methods"],
+            serde_json::json!([
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call"
+            ])
+        );
+        let server = &manager.servers["test-server"];
+        assert_eq!(server.spawn_attempts, 0);
+        assert!(server.permanent_failure.is_none());
+    }
+
+    #[tokio::test]
+    async fn stdio_lifecycle_reports_initialize_and_discovery_failures() {
+        for (failure, method, phase) in [
+            (
+                "initialize",
+                "initialize",
+                McpLifecyclePhase::InitializeHandshake,
+            ),
+            (
+                "initialize-error",
+                "initialize",
+                McpLifecyclePhase::InitializeHandshake,
+            ),
+            ("tools/list", "tools/list", McpLifecyclePhase::ToolDiscovery),
+            (
+                "discovery-error",
+                "tools/list",
+                McpLifecyclePhase::ToolDiscovery,
+            ),
+        ] {
+            let mut manager = stdio_lifecycle_manager(failure);
+            let report = manager.discover_tools_best_effort().await;
+            manager.shutdown().await.unwrap();
+            assert!(report.tools.is_empty(), "{failure}");
+            assert_eq!(report.failed_servers.len(), 1, "{failure}");
+            let error = &report.failed_servers[0];
+            assert_eq!(error.server_name, "test-server");
+            assert_eq!(error.phase, phase, "{}", error.error);
+            assert_eq!(error.context["method"], method);
+            assert!(!error.recoverable);
+            assert!(error.error.contains(method), "{}", error.error);
+            assert!(manager.tools_with_server().is_empty());
+            if failure.ends_with("-error") {
+                assert_eq!(error.context["jsonrpc_code"], "-32001");
+                assert!(error.error.contains("rejected"));
+            } else {
+                assert!(error.error.contains("invalid response"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stdio_lifecycle_initialize_disconnect_keeps_spawn_limit_sticky() {
+        let mut manager = stdio_lifecycle_manager("initialize-disconnect");
+        for _ in 0..3 {
+            let report = manager.discover_tools_best_effort().await;
+            assert!(report.tools.is_empty());
+            assert_eq!(report.failed_servers.len(), 1);
+            let failure = &report.failed_servers[0];
+            assert_eq!(failure.phase, McpLifecyclePhase::InitializeHandshake);
+            assert_eq!(failure.context["method"], "initialize");
+            assert!(!failure.recoverable);
+            assert!(failure.error.contains("permanently disabled"));
+            let server = &manager.servers["test-server"];
+            assert_eq!(server.spawn_attempts, MCP_SPAWN_ATTEMPT_LIMIT);
+            assert!(server.permanent_failure.is_some());
+            assert!(server.process.is_none());
+        }
+        manager.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn reconnect_resets_failure_state() {
         let mut mgr = McpServerManager::from_servers(&stub_servers());

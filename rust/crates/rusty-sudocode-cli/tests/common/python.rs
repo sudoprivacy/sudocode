@@ -16,7 +16,7 @@
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-/// Command name (or absolute path) of a Python 3 interpreter that actually
+/// Absolute path of a Python 3 interpreter that actually
 /// runs. Panics with the candidates tried if none does — a loud failure beats
 /// a subprocess that silently never speaks.
 pub fn resolve_python() -> String {
@@ -31,8 +31,8 @@ fn resolve_python_uncached() -> String {
     let candidates: &[&str] = &["python3", "python"];
 
     for candidate in candidates {
-        if runs_python3(candidate) {
-            return (*candidate).to_string();
+        if let Some(path) = python3_executable(candidate) {
+            return path;
         }
     }
 
@@ -57,16 +57,32 @@ fn resolve_python_uncached() -> String {
     panic!("no working Python 3 interpreter found (tried {candidates:?} and the `py` launcher)");
 }
 
-/// `true` if running `<command> -c ...` succeeds — the check a Store alias
-/// fails, because it exits non-zero (or pops the Store) instead of executing.
-fn runs_python3(command: &str) -> bool {
-    Command::new(command)
+fn python3_executable(command: &str) -> Option<String> {
+    let output = Command::new(command)
         .args([
             "-c",
-            "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)",
+            "import sys; sys.exit(1) if sys.version_info[0] != 3 else print(sys.executable)",
         ])
-        .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    std::path::Path::new(&path).is_absolute().then_some(path)
+}
+
+#[test]
+fn resolved_python_runs_without_path_lookup() {
+    let path = resolve_python();
+    assert!(std::path::Path::new(&path).is_absolute());
+    let output = Command::new(&path)
+        .env_remove("PATH")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .expect("resolved Python should start without PATH");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), path);
+    assert!(python3_executable("nonexistent-sudocode-python-interpreter").is_none());
 }

@@ -603,9 +603,12 @@ fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
         (None, _, Some(error)) => format!("unavailable: {error}"),
         (None, _, None) => "unavailable".to_string(),
     };
-    let receiver = match peer.receiver {
-        "receiving" => "receiving",
-        "standby" => "standing by: another instance of this agent is receiving",
+    let receiver = match (peer.receiver, peer.delivery) {
+        ("receiving", "next_prompt") => {
+            "receiving; waiting messages run at the next prompt (press Enter)"
+        }
+        ("receiving", _) => "receiving",
+        ("standby", _) => "standing by: another instance of this agent is receiving",
         _ => "not running in this process",
     };
     format!(

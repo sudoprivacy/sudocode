@@ -178,6 +178,7 @@ pub fn status(agent: &str) -> runtime::mailbox::PeerStatus {
         namespace,
         endpoint,
         receiver,
+        delivery: "automatic",
         error,
     }
 }

@@ -5609,7 +5609,16 @@ impl LiveCli {
         let session = self.lifecycle.session_snapshot();
         let handle = self.lifecycle.session_handle();
         let mut context = status_context(Some(&handle.path)).expect("status context should load");
-        context.peer = Some(engine_host::peer::status(&self.lifecycle.agent_name()));
+        let mut peer = engine_host::peer::status(&self.lifecycle.agent_name());
+        // The synchronous REPL runs a received message only once the user
+        // hands the prompt back; say so rather than imply it runs on arrival.
+        if matches!(
+            input_queue::QueueMode::from_env(),
+            input_queue::QueueMode::Off
+        ) {
+            peer.delivery = "next_prompt";
+        }
+        context.peer = Some(peer);
         let report = format_status_report(
             &self.lifecycle.current_model(),
             StatusUsage {

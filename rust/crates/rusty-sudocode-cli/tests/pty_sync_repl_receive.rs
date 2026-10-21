@@ -91,6 +91,13 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // And the session says how it receives, not just that it does.
+    session.send("/status\r").expect("send /status");
+    expect_on_screen(
+        &mut session,
+        "receiving; waiting messages run at the next prompt",
+    );
+
     session.send("/exit\r").expect("exit the REPL");
     assert_eq!(session.expect_eof().expect("the REPL exits"), 0);
 }

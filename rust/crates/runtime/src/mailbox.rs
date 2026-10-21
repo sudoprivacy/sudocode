@@ -1205,6 +1205,10 @@ pub struct PeerStatus {
     /// `"receiving"`, `"standby"`, or `"none"` when this process runs no
     /// receiver for the agent.
     pub receiver: &'static str,
+    /// When a received message runs: `"automatic"` as soon as the session is
+    /// idle, or `"next_prompt"` in the synchronous REPL, which runs it once the
+    /// user hands the prompt back.
+    pub delivery: &'static str,
     /// Why attaching failed, when it did.
     pub error: Option<String>,
 }

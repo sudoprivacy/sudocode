@@ -73,7 +73,8 @@ Every receive path uses one loop: `runtime::mailbox::spawn_inbox_poller`. Delive
   - Each conversation's reader seat stays as the guard on that conversation's read position, so a tail finishing a delivery while the agent seat changes hands can't be read twice.
   - On the node the seat is unique only within one machine until nexus routes locks by zone (N1).
   - `/status` and ACP's `_meta.sudocode.peer` report the agent, its namespace and whether this process is receiving, standing by, or running no receiver.
-  - Receiving in the synchronous REPL and in non-hosted ACP sessions follows in later PR-D steps.
+  - An ACP process runs one receiver per agent it serves, on the mailbox that agent's tools send through: the hosted agent's, else the namespace the session attached to, which is the pair root when the machine has no node. A message goes to a session of the agent it was sent to, rebinding to another session of that agent if the first closes; the receiver stops, freeing the seat, once no session of the agent is left.
+  - Receiving in the synchronous REPL follows in a later PR-D step.
 
 ## Cursor fencing (S6)
 

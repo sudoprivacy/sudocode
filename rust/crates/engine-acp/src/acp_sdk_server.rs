@@ -998,6 +998,13 @@ fn session_response_meta(
                 json!({ "fileRoot": file_root, "shellRoot": shell_root }),
             );
         }
+        // A hosted agent's mailbox is injected by its daemon, not attached.
+        if registry.hosted_factory.is_none() {
+            sudocode.insert(
+                "peer".into(),
+                json!(engine_host::peer::status(&engine.agent_name())),
+            );
+        }
     }
     (!sudocode.is_empty())
         .then(|| Map::from_iter([("sudocode".into(), serde_json::Value::Object(sudocode))]))

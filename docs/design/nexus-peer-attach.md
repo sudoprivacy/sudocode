@@ -67,9 +67,13 @@ Every receive path uses one loop: `runtime::mailbox::spawn_inbox_poller`. Delive
 - **Node.** The lock is a renewable lease.
   - A renewal thread independent of the sink keeps a hung-but-alive holder alive, so a slow model turn never causes a handoff.
   - A whole-process freeze longer than the lease can hand off. That opens the window S6 closes.
-- **One receiver per identity (PR-D).** An identity-level lease at `/agents/<name>/receiver`, built on `FsBackend::try_lock`, replaces per-conversation holder fields.
-  - It is unique only within one machine until nexus routes locks by zone (N1).
-  - PR-D also brings receiving to the synchronous REPL and to non-hosted ACP sessions.
+- **One receiver per agent.** A receiver tails nothing until it holds its agent's receiver seat, `agents/<name>/receiver.lock`, taken with `FsBackend::try_lock` on the same backend as the conversations.
+  - Until then it stands by and retries once per discovery interval, so a second instance of the agent takes over when the first stops, resuming at the read position.
+  - Losing the seat stops every tail before the receiver stands by again.
+  - Each conversation's reader seat stays as the guard on that conversation's read position, so a tail finishing a delivery while the agent seat changes hands can't be read twice.
+  - On the node the seat is unique only within one machine until nexus routes locks by zone (N1).
+  - `/status` and ACP's `_meta.sudocode.peer` report the agent, its namespace and whether this process is receiving, standing by, or running no receiver.
+  - Receiving in the synchronous REPL and in non-hosted ACP sessions follows in later PR-D steps.
 
 ## Cursor fencing (S6)
 

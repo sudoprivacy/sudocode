@@ -5495,6 +5495,8 @@ impl LiveCli {
         let latest = usage.current_turn_usage();
         let session = self.lifecycle.session_snapshot();
         let handle = self.lifecycle.session_handle();
+        let mut context = status_context(Some(&handle.path)).expect("status context should load");
+        context.peer = Some(engine_host::peer::status(&self.lifecycle.agent_name()));
         let report = format_status_report(
             &self.lifecycle.current_model(),
             StatusUsage {
@@ -5505,7 +5507,7 @@ impl LiveCli {
                 estimated_tokens: self.lifecycle.estimated_tokens(),
             },
             self.lifecycle.current_permission_mode().as_str(),
-            &status_context(Some(&handle.path)).expect("status context should load"),
+            &context,
             None, // #148: REPL /status doesn't carry flag provenance
             &self.lifecycle.current_billing_account().describe(),
         );

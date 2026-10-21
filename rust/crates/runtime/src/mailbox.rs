@@ -1182,6 +1182,33 @@ pub enum ReceiverState {
     Receiving,
 }
 
+impl ReceiverState {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standby => "standby",
+            Self::Receiving => "receiving",
+        }
+    }
+}
+
+/// Where a session's peers are and whether this process receives for it: what
+/// `/status` and an ACP client are told.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PeerStatus {
+    /// The agent name the session answers to.
+    pub agent: String,
+    /// `"node"` or `"disk"`; `None` when attaching failed.
+    pub namespace: Option<&'static str>,
+    /// The node's `host:port`, when attached to one.
+    pub endpoint: Option<String>,
+    /// `"receiving"`, `"standby"`, or `"none"` when this process runs no
+    /// receiver for the agent.
+    pub receiver: &'static str,
+    /// Why attaching failed, when it did.
+    pub error: Option<String>,
+}
+
 /// Receivers running in this process: per agent name, how many are standing
 /// by and how many are receiving.
 static RECEIVER_STATES: std::sync::OnceLock<

@@ -162,3 +162,22 @@ pub fn attach(agent_name: &str) -> Result<Peer, String> {
         None => Peer::Disk(agent_name.to_string()),
     })
 }
+
+/// What `/status` and an ACP client report about `agent`'s peers.
+#[must_use]
+pub fn status(agent: &str) -> runtime::mailbox::PeerStatus {
+    let receiver = runtime::mailbox::receiver_state(agent)
+        .map_or("none", runtime::mailbox::ReceiverState::as_str);
+    let (namespace, endpoint, error) = match attach(agent) {
+        Ok(Peer::Node(node)) => (Some("node"), Some(node.config.endpoint.clone()), None),
+        Ok(Peer::Disk(_)) => (Some("disk"), None, None),
+        Err(error) => (None, None, Some(error)),
+    };
+    runtime::mailbox::PeerStatus {
+        agent: agent.to_string(),
+        namespace,
+        endpoint,
+        receiver,
+        error,
+    }
+}

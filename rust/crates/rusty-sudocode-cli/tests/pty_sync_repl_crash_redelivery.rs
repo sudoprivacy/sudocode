@@ -120,8 +120,37 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // The position moves as the turn finishes, before the REPL is back at an
+    // idle prompt, and input typed in that window can be consumed by the turn.
+    // Ask for /status until it answers: that proves the prompt is idle (so
+    // /exit will land) and that the second instance now holds the receiver.
+    assert!(
+        status_shows(
+            &mut second,
+            "receiving; waiting messages run at the next prompt"
+        ),
+        "the second instance never reported itself as the receiver:\n{}",
+        second.render(|s| s.contents())
+    );
+
     second.send("/exit\r").expect("exit the REPL");
     assert_eq!(second.expect_eof().expect("the REPL exits"), 0);
+}
+
+/// Ask `/status` until `needle` shows, retrying in case an earlier `/status` was
+/// typed while the previous turn was still winding down.
+fn status_shows(sess: &mut pty_expect::PtySession, needle: &str) -> bool {
+    for _ in 0..8 {
+        sess.send("/status\r").expect("send /status");
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < deadline {
+            if sess.render(|s| s.contents()).contains(needle) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    false
 }
 
 fn spawn_instance(env: &TestEnv) -> pty_expect::PtySession {

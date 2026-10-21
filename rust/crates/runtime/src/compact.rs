@@ -228,7 +228,9 @@ impl Default for CompactionConfig {
 
 impl CompactionConfig {
     /// Retain a token-priced suffix, with the configured message floor and
-    /// complete tool exchanges. A single large exchange is never split.
+    /// complete tool exchanges. The checkpoint planner may relax this floor
+    /// when retained image results leave no room for a useful summary. A
+    /// single exchange is never split.
     #[must_use]
     pub fn with_token_retention(mut self, session: &Session, tokens: usize) -> Self {
         let mut accumulated = 0;
@@ -395,7 +397,8 @@ pub struct CompactionReport {
     pub estimate_source: String,
 }
 
-pub(crate) const COMPACTION_POLICY_VERSION: &str = "strict-history-v1-estimator-v1";
+pub(crate) const COMPACTION_POLICY_VERSION: &str = "strict-history-v2-estimator-v1";
+const MIN_SUMMARY_HEADROOM: usize = 512;
 
 /// Immutable source, tail and Todo framing reused for all attempts of one run.
 pub(crate) struct PreparedCompaction {
@@ -416,7 +419,7 @@ pub(crate) struct CompactionAttemptOptions<'a> {
 
 impl PreparedCompaction {
     pub fn new(source: &Session, config: CompactionConfig, target: usize, ideal: usize) -> Self {
-        let keep_from = find_safe_compaction_boundary(
+        let mut keep_from = find_safe_compaction_boundary(
             source,
             source
                 .messages
@@ -425,12 +428,41 @@ impl PreparedCompaction {
             0,
         );
         let todo = render_todo_continuity_block(source.fs_handle());
-        let framing = frozen_continuation("", todo.as_deref(), keep_from < source.messages.len());
-        let fixed = estimate_message_tokens(&ConversationMessage::user_text(framing))
-            + source.messages[keep_from..]
+        let fixed_cost = |boundary| {
+            let framing =
+                frozen_continuation("", todo.as_deref(), boundary < source.messages.len());
+            estimate_message_tokens(&ConversationMessage::user_text(framing))
+                + source.messages[boundary..]
+                    .iter()
+                    .map(estimate_message_tokens)
+                    .sum::<usize>()
+        };
+        let mut fixed = fixed_cost(keep_from);
+        // The configured recent-message floor can itself exceed the target
+        // when it contains image tool results. Keep the latest complete
+        // exchange so an in-flight image remains visible, but allow older
+        // image exchanges into the summary when the floor leaves no room for
+        // a useful checkpoint. Text-only protected tails retain their floor.
+        let latest_exchange =
+            find_safe_compaction_boundary(source, source.messages.len().saturating_sub(1), 0);
+        let has_retained_image = source.messages[keep_from..].iter().any(|message| {
+            message
+                .blocks
                 .iter()
-                .map(estimate_message_tokens)
-                .sum::<usize>();
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        });
+        if has_retained_image && fixed.saturating_add(32 + MIN_SUMMARY_HEADROOM) >= target {
+            for candidate in keep_from + 1..=latest_exchange {
+                if find_safe_compaction_boundary(source, candidate, 0) != candidate {
+                    continue;
+                }
+                keep_from = candidate;
+                fixed = fixed_cost(candidate);
+                if fixed.saturating_add(32 + MIN_SUMMARY_HEADROOM) < target {
+                    break;
+                }
+            }
+        }
         Self {
             source: source.clone(),
             keep_from,
@@ -653,20 +685,7 @@ pub fn estimate_block_tokens(block: &ContentBlock) -> usize {
 fn estimate_single_block_tokens(block: &ContentBlock) -> usize {
     match block {
         ContentBlock::Text { text } => text.len() / 4 + 1,
-        ContentBlock::Image { data, .. } => {
-            let base64_len = data.len();
-            if base64_len < 50_000 {
-                85
-            } else if base64_len < 200_000 {
-                256
-            } else if base64_len < 500_000 {
-                512
-            } else if base64_len < 1_000_000 {
-                1000
-            } else {
-                base64_len / 1000
-            }
-        }
+        ContentBlock::Image { data, .. } => estimate_image_tokens(data.len()),
         ContentBlock::ToolUse { name, input, .. } => (name.len() + input.len()) / 4 + 1,
         ContentBlock::ToolResult {
             tool_name, output, ..
@@ -676,6 +695,21 @@ fn estimate_single_block_tokens(block: &ContentBlock) -> usize {
             signature,
         } => thinking.len() / 4 + signature.as_ref().map_or(0, |value| value.len() / 4 + 1),
         ContentBlock::RedactedThinking { data } => data.len() / 4 + 1,
+    }
+}
+
+/// Estimate vision tokens from encoded image size without treating the base64
+/// payload as text. Providers resize large images before tokenizing them.
+#[must_use]
+pub fn estimate_image_tokens(base64_len: usize) -> usize {
+    if base64_len < 50_000 {
+        85
+    } else if base64_len < 200_000 {
+        256
+    } else if base64_len < 500_000 {
+        512
+    } else {
+        1_000
     }
 }
 

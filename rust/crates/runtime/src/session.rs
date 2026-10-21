@@ -14,6 +14,7 @@ use crate::prompt::SessionPromptSnapshot;
 use crate::usage::{parse_usage_cost_currency, TokenUsage};
 
 const SESSION_VERSION: u32 = 1;
+const UNANSWERED_TURN_TEXT: &str = "No response requested.";
 const ROTATE_AFTER_BYTES: u64 = 256 * 1024;
 const MAX_ROTATED_FILES: usize = 3;
 /// Cold-storage retention budget (bytes) for a transcript backed by a native
@@ -732,25 +733,10 @@ impl Session {
     /// offloaded-tool-results location — shared by the writer
     /// ([`Self::tool_results_dir`]) and session-deletion GC so both always
     /// agree on the subtree to create/read/remove.
+    #[inline]
     #[must_use]
     pub fn tool_results_dir_for(session_file: &Path, session_id: &str) -> Option<PathBuf> {
-        let parent = session_file.parent()?;
-        // Per-session-directory layout (`<id>/transcript.jsonl`): the parent IS
-        // the session dir, so tool-results lives directly under it — the whole
-        // session (transcript + tool-results) is one GC-able subtree.
-        if session_file.file_name().and_then(|name| name.to_str())
-            == Some(crate::session_control::TRANSCRIPT_FILE)
-        {
-            return Some(parent.join("tool-results"));
-        }
-        // Legacy flat layout (`<id>.jsonl`): namespace under a shared
-        // `tool-results/<id>/` so managed session files sharing one dir don't
-        // collide.
-        Some(
-            parent
-                .join("tool-results")
-                .join(Self::sanitize_offload_id(session_id)),
-        )
+        Self::attachment_dir_for(session_file, session_id, "tool-results")
     }
 
     /// This session's `tool-results/<session-id>/` dir (a grandchild of the
@@ -762,6 +748,31 @@ impl Session {
     #[must_use]
     pub fn tool_results_dir(&self) -> Option<PathBuf> {
         Self::tool_results_dir_for(self.persistence_path()?, &self.session_id)
+    }
+
+    /// Raw response attachments use the same session namespace as tool blobs.
+    /// The main transcript never includes these protocol frames as messages.
+    #[inline]
+    #[must_use]
+    pub fn response_captures_dir_for(session_file: &Path, session_id: &str) -> Option<PathBuf> {
+        Self::attachment_dir_for(session_file, session_id, "responses")
+    }
+
+    /// One namespace rule for current session directories and legacy flat files.
+    #[inline]
+    fn attachment_dir_for(session_file: &Path, session_id: &str, name: &str) -> Option<PathBuf> {
+        let parent = session_file.parent()?;
+        if session_file.file_name().and_then(|name| name.to_str())
+            == Some(crate::session_control::TRANSCRIPT_FILE)
+        {
+            Some(parent.join(name))
+        } else {
+            Some(
+                parent
+                    .join(name)
+                    .join(Self::sanitize_offload_id(session_id)),
+            )
+        }
     }
 
     /// Offload a full tool-result blob to `<session-dir>/tool-results/<id>` via
@@ -860,6 +871,31 @@ impl Session {
         path: impl AsRef<Path>,
         expected_revision: Option<&str>,
     ) -> Result<(), SessionError> {
+        self.save_replacement_to_path_checked(original, path.as_ref(), expected_revision, "compact")
+    }
+
+    /// Preserve rejected signed history before installing a thinking-only repair.
+    pub fn save_thinking_repaired_to_path_checked(
+        &self,
+        original: &Session,
+        path: impl AsRef<Path>,
+        expected_revision: Option<&str>,
+    ) -> Result<(), SessionError> {
+        self.save_replacement_to_path_checked(
+            original,
+            path.as_ref(),
+            expected_revision,
+            "thinking-repair",
+        )
+    }
+
+    fn save_replacement_to_path_checked(
+        &self,
+        original: &Session,
+        path: &Path,
+        expected_revision: Option<&str>,
+        purpose: &str,
+    ) -> Result<(), SessionError> {
         let path = path.as_ref();
         let writer = self.writer_for(path)?;
         let _write = writer
@@ -878,7 +914,7 @@ impl Session {
             return Err(SessionError::SourceChanged);
         }
         let archive = format!(
-            "{}.before-compact-{}",
+            "{}.before-{purpose}-{}",
             path.display(),
             current_time_millis()
         );
@@ -1737,6 +1773,23 @@ impl ConversationMessage {
             model: None,
             duration_ms: None,
         }
+    }
+
+    /// Close an unanswered turn before a new external request, matching CC.
+    #[must_use]
+    pub(crate) fn unanswered_turn_boundary() -> Self {
+        Self::assistant(vec![ContentBlock::Text {
+            text: UNANSWERED_TURN_TEXT.into(),
+        }])
+    }
+
+    /// An internal turn marker belongs in API history, not transcript display.
+    #[must_use]
+    pub fn is_unanswered_turn_boundary(&self) -> bool {
+        self.role == MessageRole::Assistant
+            && self.model.is_none()
+            && self.usage.is_none()
+            && matches!(self.blocks.as_slice(), [ContentBlock::Text { text }] if text == UNANSWERED_TURN_TEXT)
     }
 
     #[must_use]

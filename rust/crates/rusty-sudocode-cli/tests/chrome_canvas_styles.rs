@@ -3,6 +3,8 @@
 #[path = "../src/render"]
 mod render {
     pub const RESET: &str = "\x1b[0m";
+    #[path = "hyperlink.rs"]
+    pub(crate) mod hyperlink;
     #[path = "styled_text.rs"]
     pub(crate) mod styled_text;
 }
@@ -46,10 +48,11 @@ mod repl_ui {
 
     #[test]
     fn initial_style_and_resets_reach_ansi_text_canvas() {
+        const TARGET: &str = "https://example.test/code?tags=one;two;three";
         for width in [100, 68, 78] {
             let canvas = element! {
                 ansi_text::AnsiText(
-                    content: "\x1b[1;2mBothMarker\x1b[22mIntensityReset\x1b[0mPlainAfter",
+                    content: format!("\x1b]8;;{TARGET}\x1b\\\x1b[1;2mBothMarker\x1b]8;;\x1b\\\x1b[22mIntensityReset\x1b[0mPlainAfter"),
                     initial_style: crossterm::style::ContentStyle {
                         foreground_color: Some(TerminalColor::DarkGrey),
                         ..crossterm::style::ContentStyle::default()
@@ -81,6 +84,12 @@ mod repl_ui {
                 false,
             );
             assert_style(&rendered, "PlainAfter", None, false, false, false);
+            for (_, _, hyperlink) in rendered.rich_spans(0.."BothMarker".len()) {
+                assert_eq!(hyperlink.map(AsRef::as_ref), Some(TARGET));
+            }
+            for (_, _, hyperlink) in rendered.rich_spans("BothMarker".len()..rendered.text.len()) {
+                assert!(hyperlink.is_none());
+            }
         }
     }
 

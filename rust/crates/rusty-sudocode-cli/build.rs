@@ -1,5 +1,50 @@
+use std::collections::BTreeSet;
 use std::env;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
+}
+
+fn git_path(name: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(git_output(&["rev-parse", "--git-path", name])?);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        env::current_dir().ok()?.join(path)
+    })
+}
+
+fn git_inputs() -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for name in ["HEAD", "packed-refs"] {
+        if let Some(path) = git_path(name).filter(|path| path.exists()) {
+            paths.insert(path);
+        }
+    }
+    if let Some(reference) = git_output(&["symbolic-ref", "--quiet", "HEAD"]) {
+        if let Some(mut path) = git_path(&reference) {
+            // A packed/unborn branch has no loose ref yet. Watch its nearest
+            // existing parent for creation, never a permanently missing path.
+            while !path.exists() && path.pop() {}
+            if path.exists() {
+                paths.insert(path);
+            }
+        }
+    }
+    if let Some(root) = git_output(&["rev-parse", "--show-toplevel"]) {
+        let pointer = Path::new(&root).join(".git");
+        if pointer.is_file() {
+            paths.insert(pointer);
+        }
+    }
+    paths
+}
 
 fn main() {
     // Get git SHA (short hash)
@@ -51,25 +96,12 @@ fn main() {
         });
     println!("cargo:rustc-env=BUILD_DATE={build_date}");
 
-    // Resolve the real git directory, handling worktrees where .git is a file
-    // pointing to the main repo (e.g. "gitdir: /repo/.git/worktrees/my-wt").
-    let git_dir = {
-        let dot_git = std::path::Path::new(".git");
-        if dot_git.is_file() {
-            std::fs::read_to_string(dot_git)
-                .ok()
-                .and_then(|content| {
-                    content
-                        .strip_prefix("gitdir: ")
-                        .map(|s| s.trim().to_string())
-                })
-                .unwrap_or_else(|| ".git".to_string())
-        } else {
-            ".git".to_string()
-        }
-    };
-
-    // Rerun if git state changes (works for both normal repos and worktrees)
-    println!("cargo:rerun-if-changed={git_dir}/HEAD");
-    println!("cargo:rerun-if-changed={git_dir}/refs");
+    // Cargo executes here in the nested package, not the repository root.
+    // Let Git resolve worktree/common-dir metadata and watch existing inputs.
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo:rerun-if-env-changed=BUILD_DATE");
+    for path in git_inputs() {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 }

@@ -282,6 +282,7 @@ fn serve(
         // The provider truncates it when the actual request budget is too small.
         let long_summary = mode.starts_with("long-summary");
         let truncated = mode == "truncated"
+            || (mode == "budget-truncated-then-success" && number == 1)
             || (long_summary && request["max_tokens"].as_u64().unwrap_or(0) < 10_000);
         let text = match mode {
             "empty" => String::new(),
@@ -290,6 +291,7 @@ fn serve(
             // checkpoints. The runtime must validate the installed history,
             // even when a gateway ignores the requested visible-text budget.
             "budget-weak-then-target" if number == 1 => framed_fixture_summary(8_999),
+            "budget-over-ceiling-then-success" if number == 1 => framed_fixture_summary(4_000),
             "budget-transport-fallback" if number == 3 => framed_fixture_summary(8_999),
             "budget-weak-then-target" | "budget-transport-fallback" => {
                 framed_fixture_summary(1_000)
@@ -838,6 +840,200 @@ fn immediately_repeating_a_met_compaction_skips_until_its_budget_changes() {
     // The already compacted four-message tail cannot meet a second halving,
     // so invalidating the fingerprint fails locally before billing a request.
     assert_eq!(compaction_request_count(&provider), requests);
+}
+
+#[test]
+fn compaction_can_release_an_older_image_exchange_when_recent_tail_exceeds_target() {
+    let provider = Provider::new("budget-small-output");
+    let env = budget_env("large-image-tail", &provider);
+    let mut session = Session::new().with_workspace_root(env.workspace_root());
+    session.model = Some("claude-sonnet-4-6".into());
+    session
+        .messages
+        .push(ConversationMessage::user_text(format!(
+            "Previous summary: PROJECT_ALPHA {}",
+            "s".repeat(8_000)
+        )));
+    for (id, path) in [("older-image", "older.png"), ("latest-image", "latest.png")] {
+        session.messages.push(ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: id.into(),
+                name: "read_file".into(),
+                input: json!({"path": path}).to_string(),
+                thought_signature: None,
+            },
+        ]));
+        let mut result = ConversationMessage::tool_result(
+            id,
+            "read_file",
+            format!("Image read from {path}; attached below."),
+            false,
+        );
+        result.blocks.push(ContentBlock::Image {
+            data: "AAAA".repeat(375_000),
+            mime_type: "image/png".into(),
+        });
+        session.messages.push(result);
+    }
+    let before = estimate_session_tokens(&session);
+    let path = env.workspace_root().join("history.jsonl");
+    session.save_to_path(&path).unwrap();
+
+    let (code, screen) = compact_env(&env, &path);
+    assert_eq!(code, 0, "{screen}");
+    let restored = Session::load_from_path(&path).unwrap();
+    let report = restored.last_compaction_report.as_ref().unwrap();
+    assert_eq!(report.outcome, runtime::CompactionOutcome::TargetMet);
+    assert!(estimate_session_tokens(&restored) <= before / 2);
+    assert_eq!(restored.messages.len(), 3);
+    assert!(restored.messages[1].blocks.iter().any(|block| {
+        matches!(block, ContentBlock::ToolUse { id, .. } if id == "latest-image")
+    }));
+    assert!(restored.messages[2]
+        .blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. })));
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| is_compaction_request(request))
+            .count(),
+        1
+    );
+    let source = requests
+        .iter()
+        .find(|request| is_compaction_request(request))
+        .unwrap();
+    assert!(source.to_string().contains("older.png"));
+    assert!(!source.to_string().contains("latest.png"));
+}
+
+#[test]
+fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
+    for mode in [
+        "budget-truncated-then-success",
+        "budget-over-ceiling-then-success",
+    ] {
+        let provider = Provider::new(mode);
+        let env = budget_env(mode, &provider);
+        let mut session = Session::new().with_workspace_root(env.workspace_root());
+        session.model = Some("claude-sonnet-4-6".into());
+        session.messages.push(ConversationMessage::user_text(
+            "Certificate task: ".to_owned() + &"u".repeat(8_800),
+        ));
+        session.messages.push(ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "earlier-command".into(),
+                name: "bash".into(),
+                input: "{}".into(),
+                thought_signature: None,
+            },
+        ]));
+        session.messages.push(ConversationMessage::tool_result(
+            "earlier-command",
+            "bash",
+            "p".repeat(15_800),
+            false,
+        ));
+        session.messages.push(ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "unread-image".into(),
+                name: "read_file".into(),
+                input: json!({"path":"certificate.png"}).to_string(),
+                thought_signature: None,
+            },
+        ]));
+        let mut image = ConversationMessage::tool_result(
+            "unread-image",
+            "read_file",
+            "Image read from certificate.png; attached below.",
+            false,
+        );
+        image.blocks.push(ContentBlock::Image {
+            data: "AAAA".repeat(1_382_360),
+            mime_type: "image/png".into(),
+        });
+        session.messages.push(image);
+        let before = estimate_session_tokens(&session);
+        let path = env.workspace_root().join("history.jsonl");
+        session.save_to_path(&path).unwrap();
+
+        let (code, screen) = compact_env(&env, &path);
+        assert_eq!(code, 0, "{screen}");
+        let restored = Session::load_from_path(&path).unwrap();
+        assert_eq!(
+            restored.last_compaction_report.as_ref().unwrap().outcome,
+            runtime::CompactionOutcome::TargetMet
+        );
+        assert!(estimate_session_tokens(&restored) <= before / 2);
+        assert!(restored
+            .messages
+            .iter()
+            .any(|message| message.blocks.iter().any(|block| {
+                matches!(block, ContentBlock::Image { data, .. } if data.len() == 5_529_440)
+            })));
+
+        // Resume through the CLI as well: the provider preflight must price
+        // the retained image as vision input and allow the task request.
+        let mut cli = env.spawn(&["--resume", path.to_str().unwrap()]);
+        common::expect_input_line_cleared(&cli, Duration::from_secs(30), "image resume ready");
+        let marker = common::turn_status_marker(&cli);
+        cli.send("Continue the certificate task.\r").unwrap();
+        cli.expect("ALPHA_CONTEXT_OK").unwrap();
+        common::expect_turn_complete_after(
+            &cli,
+            &marker,
+            Duration::from_secs(30),
+            "retained-image task completed",
+        );
+        cli.send("/exit\r").unwrap();
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+
+        let requests = provider.requests.lock().unwrap();
+        let checkpoints: Vec<_> = requests
+            .iter()
+            .filter(|request| is_compaction_request(request))
+            .collect();
+        assert_eq!(checkpoints.len(), 2);
+        let tasks: Vec<_> = requests
+            .iter()
+            .filter(|request| !is_compaction_request(request))
+            .collect();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["content"].as_array().is_some_and(|content| {
+                    content.iter().any(|block| {
+                        block["type"] == "image"
+                            && block["source"]["data"]
+                                .as_str()
+                                .is_some_and(|data| data.len() == 5_529_440)
+                    })
+                })
+            }));
+        assert!(checkpoints[0]["tools"].is_array());
+        assert!(checkpoints[1]["tools"].is_null());
+        let first_request = checkpoints[0].to_string();
+        let initial_cap: u64 = first_request
+            .split("This run requires the entire summary to fit within ")
+            .nth(1)
+            .unwrap()
+            .split(" tokens")
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(initial_cap >= 512);
+        if mode == "budget-truncated-then-success" {
+            assert_eq!(checkpoints[1]["max_tokens"], json!(initial_cap));
+        } else {
+            assert!(checkpoints[1]["max_tokens"].as_u64().unwrap() < initial_cap);
+        }
+    }
 }
 
 #[test]

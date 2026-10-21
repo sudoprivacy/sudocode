@@ -233,6 +233,23 @@ impl AnthropicClient {
         self.cache_ttl_1h
     }
 
+    #[must_use]
+    pub fn cache_advisor_route_key(&self) -> String {
+        let category = if self.oauth_system_prefix {
+            "subscription"
+        } else {
+            "api_key_or_gateway"
+        };
+        // Credential identity changes invalidate the client-visible route;
+        // only its opaque hash is retained, never the credential itself.
+        let credential = self
+            .auth
+            .api_key()
+            .or_else(|| self.auth.bearer_token())
+            .unwrap_or("");
+        crate::cache_route_key(&format!("{}|{category}|{credential}", self.base_url))
+    }
+
     /// Build from an `AuthSource` and an optional explicit `AuthMode`. When
     /// the mode is `Some(Subscription)` the OAuth system prefix and beta
     /// header are always applied; when `None` the legacy env-sniffer
@@ -357,6 +374,10 @@ impl AnthropicClient {
 
     #[must_use]
     pub fn with_extra_body_param(mut self, key: impl Into<String>, value: Value) -> Self {
+        let key = key.into();
+        if key == "thinking" && value.get("block_binding").is_some() {
+            self.request_profile = self.request_profile.with_beta(THINKING_BINDING_BETA);
+        }
         self.request_profile = self.request_profile.with_extra_body(key, value);
         self
     }
@@ -432,7 +453,7 @@ impl AnthropicClient {
 
         self.preflight_message_request(&request).await?;
 
-        let result = self.send_request(&request, trace_id).await?;
+        let (result, mut observation) = self.send_request(&request, trace_id).await?;
         let request_id = request_id_from_headers(result.response.headers());
         // A gateway's own correlation id, kept alongside the provider's: it is
         // what a pooling gateway records against the upstream account it chose,
@@ -444,32 +465,50 @@ impl AnthropicClient {
             ApiError::json_deserialize("Anthropic", &request.model, &body, error)
         })?;
         let refusal = crate::sse::refusal_from_response(&raw, "Anthropic", &request.model);
-        let metadata =
-            cache_diagnostics_enabled().then(|| crate::sse::MessageMetadata::from_message(&raw));
+        let metadata = (cache_diagnostics_enabled()
+            || self
+                .request_profile
+                .betas
+                .iter()
+                .any(|beta| beta == THINKING_BINDING_BETA))
+        .then(|| crate::sse::MessageMetadata::from_message(&raw));
         let mut response = serde_json::from_value::<MessageResponse>(raw).map_err(|error| {
             ApiError::json_deserialize("Anthropic", &request.model, &body, error)
         })?;
         if let Some(metadata) = metadata {
-            self.cache_diagnostics.observe(metadata);
+            record_thinking_transformations(
+                &metadata,
+                self.session_tracer(),
+                Some(&result.request_id),
+            );
+            if cache_diagnostics_enabled() {
+                self.cache_diagnostics.observe(metadata);
+            }
         }
         if response.request_id.is_none() {
             response.request_id = request_id;
         }
         response.gateway_request_id = gateway_request_id;
+        if let Some(observation) = &mut observation {
+            observation.response_completed_ms = crate::cache_observation::now_ms();
+            observation.message_starts = 1;
+            observation.completed = refusal.is_none() && response.stop_reason.is_some();
+        }
 
         if let Some(prompt_cache) = &self.prompt_cache {
             // Refused responses still incur usage, but cannot enter the completion cache.
             let record = if refusal.is_some() {
-                prompt_cache.record_usage(
+                prompt_cache.record_usage_observed(
                     &request,
                     &response.usage,
                     crate::prompt_cache::ResponseTraceIds {
                         gateway: response.gateway_request_id.clone(),
                         provider: response.request_id.clone(),
                     },
+                    observation,
                 )
             } else {
-                prompt_cache.record_response(&request, &response)
+                prompt_cache.record_response_observed(&request, &response, observation)
             };
             self.store_last_prompt_cache_record(record);
         }
@@ -503,7 +542,7 @@ impl AnthropicClient {
     ) -> Result<MessageStream, ApiError> {
         crate::request_scope::RequestScope::preflight(self.preflight_message_request(request))
             .await?;
-        let result = self
+        let (result, observation) = self
             .send_request(&request.clone().with_streaming(), trace_id)
             .await?;
         let progress = StreamProgress::new(
@@ -518,7 +557,14 @@ impl AnthropicClient {
             response: result.response,
             parser: SseParser::new()
                 .with_context("Anthropic", request.model.clone())
-                .with_message_metadata(cache_diagnostics_enabled()),
+                .with_message_metadata(
+                    cache_diagnostics_enabled()
+                        || self
+                            .request_profile
+                            .betas
+                            .iter()
+                            .any(|beta| beta == THINKING_BINDING_BETA),
+                ),
             pending: VecDeque::new(),
             done: false,
             logically_complete: false,
@@ -532,6 +578,7 @@ impl AnthropicClient {
             session_tracer: self.session_tracer().cloned(),
             cache_diagnostics: cache_diagnostics_enabled().then(|| self.cache_diagnostics.clone()),
             progress,
+            observation,
         })
     }
 
@@ -582,7 +629,13 @@ impl AnthropicClient {
         &self,
         request: &MessageRequest,
         trace_id: Option<&str>,
-    ) -> Result<crate::HttpRequestResult, ApiError> {
+    ) -> Result<
+        (
+            crate::HttpRequestResult,
+            Option<crate::CacheRequestObservation>,
+        ),
+        ApiError,
+    > {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let mut body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut body, request);
@@ -594,6 +647,17 @@ impl AnthropicClient {
             self.cache_diagnostics.apply_request(&mut body);
         }
         dump_request_body("messages", &body);
+        let mut observation =
+            runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor)
+                .then(|| {
+                    crate::CacheRequestObservation::from_body(
+                        &body,
+                        self.cache_advisor_route_key(),
+                        self.prompt_cache
+                            .as_ref()
+                            .map_or(0, PromptCache::context_segment),
+                    )
+                });
 
         let mut headers: Vec<(String, String)> =
             vec![("content-type".to_string(), "application/json".to_string())];
@@ -623,7 +687,8 @@ impl AnthropicClient {
             }
         }
 
-        self.http
+        let result = self
+            .http
             .send_json(
                 &url,
                 &headers,
@@ -633,7 +698,13 @@ impl AnthropicClient {
                 trace_id,
             )
             .await
-            .map_err(|e| enrich_bearer_auth_error(e, &self.auth))
+            .map_err(|e| enrich_bearer_auth_error(e, &self.auth))?;
+        if let Some(observation) = &mut observation {
+            observation.request_started_ms = result.request_started_ms;
+            observation.response_started_ms = result.response_started_ms;
+            observation.attempts = result.attempts;
+        }
+        Ok((result, observation))
     }
 
     /// When `oauth_system_prefix` is set, transform the `system` field into
@@ -1065,7 +1136,7 @@ pub struct MessageStream {
     gateway_request_id: Option<String>,
     /// Client-generated request ID for tracking.
     client_request_id: Option<String>,
-    response: reqwest::Response,
+    response: crate::RecordedResponse,
     parser: SseParser,
     pending: VecDeque<StreamEvent>,
     done: bool,
@@ -1089,6 +1160,7 @@ pub struct MessageStream {
     session_tracer: Option<SessionTracer>,
     cache_diagnostics: Option<CacheDiagnostics>,
     progress: StreamProgress,
+    observation: Option<crate::CacheRequestObservation>,
 }
 
 impl MessageStream {
@@ -1098,10 +1170,25 @@ impl MessageStream {
     }
 
     pub async fn next_event(&mut self) -> Result<Option<StreamEvent>, ApiError> {
+        let result = self.next_event_inner().await;
+        if (result.is_err() || matches!(&result, Ok(None))) && self.observation.is_some() {
+            // Persist consumed usage before a caller starts its retry. Waiting
+            // for Drop can put this old attempt after the successful response.
+            self.record_usage_once();
+        }
+        result
+    }
+
+    async fn next_event_inner(&mut self) -> Result<Option<StreamEvent>, ApiError> {
         loop {
             if let Some(event) = self.pending.pop_front() {
                 self.observe_event(&event);
                 return Ok(Some(event));
+            }
+
+            if let Some(error) = self.parser.take_pending_error() {
+                self.done = true;
+                return Err(error);
             }
 
             if self.done {
@@ -1118,6 +1205,7 @@ impl MessageStream {
                     Err(error @ ApiError::ProviderRefusal { .. }) => {
                         return Err(self.record_refusal(error))
                     }
+                    Err(error @ ApiError::InvalidSseFrame(_)) => return Err(error),
                     Err(_) if self.logically_complete => Vec::new(),
                     Err(error) => return Err(error),
                 };
@@ -1215,10 +1303,15 @@ impl MessageStream {
     }
 
     fn observe_message_metadata(&mut self) {
-        if let (Some(diagnostics), Some(metadata)) =
-            (&self.cache_diagnostics, self.parser.take_message_metadata())
-        {
-            diagnostics.observe(metadata);
+        if let Some(metadata) = self.parser.take_message_metadata() {
+            record_thinking_transformations(
+                &metadata,
+                self.session_tracer.as_ref(),
+                self.client_request_id.as_deref(),
+            );
+            if let Some(diagnostics) = &self.cache_diagnostics {
+                diagnostics.observe(metadata);
+            }
         }
     }
 
@@ -1226,6 +1319,9 @@ impl MessageStream {
         self.progress.observe_event(event);
         match event {
             StreamEvent::MessageStart(start) => {
+                if let Some(observation) = &mut self.observation {
+                    observation.message_starts += 1;
+                }
                 self.latest_usage
                     .get_or_insert_with(Usage::default)
                     .merge_snapshot(start.message.usage.clone());
@@ -1279,8 +1375,13 @@ impl MessageStream {
             return;
         };
         runtime::compaction_scope::record_usage(usage.token_usage());
+        let mut observation = self.observation.clone();
+        if let Some(observation) = &mut observation {
+            observation.response_completed_ms = crate::cache_observation::now_ms();
+            observation.completed = self.logically_complete;
+        }
         if let Some(prompt_cache) = &self.prompt_cache {
-            let record = prompt_cache.record_usage(
+            let record = prompt_cache.record_usage_observed(
                 &self.request,
                 &usage,
                 crate::prompt_cache::ResponseTraceIds {
@@ -1290,6 +1391,7 @@ impl MessageStream {
                     // from a `MessageResponse` the streaming path never has.
                     provider: self.request_id.clone(),
                 },
+                observation,
             );
             *self
                 .last_prompt_cache_record
@@ -1318,6 +1420,16 @@ impl MessageStream {
             );
         }
         self.usage_recorded = true;
+    }
+}
+
+impl Drop for MessageStream {
+    fn drop(&mut self) {
+        // The opt-in experiment keeps consumed usage from interrupted streams,
+        // explicitly marked incomplete; it never turns them into successes.
+        if self.observation.is_some() && !self.usage_recorded {
+            self.record_usage_once();
+        }
     }
 }
 
@@ -1479,11 +1591,23 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
             // to hide summaries; optional models omit thinking when disabled.
             // Mode and effort stay independent of the output cap so compaction
             // can reuse the ordinary turn's prefix.
-            object.insert(
-                "thinking".into(),
-                serde_json::json!({
-                    "type": "adaptive",
-                    "display": if request.thinking_enabled { "summarized" } else { "omitted" },
+            let thinking = object
+                .entry("thinking")
+                .or_insert_with(|| serde_json::json!({}));
+            if !thinking.is_object() {
+                *thinking = serde_json::json!({});
+            }
+            let thinking = thinking
+                .as_object_mut()
+                .expect("thinking object initialized");
+            thinking.remove("budget_tokens");
+            thinking.insert("type".into(), serde_json::json!("adaptive"));
+            thinking.insert(
+                "display".into(),
+                serde_json::json!(if request.thinking_enabled {
+                    "summarized"
+                } else {
+                    "omitted"
                 }),
             );
         } else if request.thinking_enabled && request.max_tokens > MIN_THINKING_BUDGET {
@@ -1542,6 +1666,51 @@ fn strip_unsupported_beta_body_fields(body: &mut Value, request: &MessageRequest
 
 /// Beta that turns on Anthropic's server-side cache diagnosis.
 const CACHE_DIAGNOSIS_BETA: &str = "cache-diagnosis-2026-04-07";
+const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
+
+/// Record acknowledgment and bounded enum/path metadata, never provider blocks.
+fn record_thinking_transformations(
+    metadata: &crate::sse::MessageMetadata,
+    tracer: Option<&SessionTracer>,
+    request_id: Option<&str>,
+) {
+    let (Some(tracer), Some(transformations)) = (
+        tracer,
+        metadata
+            .input_transformations
+            .as_ref()
+            .and_then(Value::as_array),
+    ) else {
+        return;
+    };
+    let safe: Vec<Value> = transformations
+        .iter()
+        .take(128)
+        .map(|entry| {
+            let mut safe = serde_json::Map::new();
+            for key in ["type", "reason", "path"] {
+                if let Some(value) = entry.get(key).and_then(Value::as_str).filter(|value| {
+                    value.len() <= 160
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'))
+                }) {
+                    safe.insert(key.into(), Value::String(value.into()));
+                }
+            }
+            Value::Object(safe)
+        })
+        .collect();
+    tracer.record(
+        "thinking_input_transformations",
+        serde_json::json!({
+            "request_id":request_id, "count":transformations.len(), "transformations":safe
+        })
+        .as_object()
+        .expect("metadata object")
+        .clone(),
+    );
+}
 
 /// Whether to ask the API where the prompt cache broke
 /// (`SUDOCODE_CACHE_DIAGNOSTICS=1`).

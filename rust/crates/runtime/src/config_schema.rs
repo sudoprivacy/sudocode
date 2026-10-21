@@ -234,6 +234,27 @@ const OAUTH_CHILDREN: &[FieldSchema] = &[
 
 /// All known fields in `settings.json`.
 pub const SETTINGS_SCHEMA: &[FieldSchema] = &[
+    FieldSchema::object(
+        "responseRecording",
+        &[
+            FieldSchema::leaf(
+                "enabled",
+                FieldType::Bool,
+                "Save model response bodies with sessions (default: true)",
+            ),
+            FieldSchema::leaf(
+                "maxResponseBytes",
+                FieldType::Number,
+                "Maximum raw bytes saved per response (default: 33554432)",
+            ),
+            FieldSchema::leaf(
+                "maxSessionBytes",
+                FieldType::Number,
+                "Maximum compressed response bytes per session (default: 268435456)",
+            ),
+        ],
+        "Local model response evidence",
+    ),
     FieldSchema::leaf(
         "maxSteps",
         FieldType::Number,
@@ -367,6 +388,11 @@ const TEAMMATE_MODE_OPTIONS: &[&str] = &["tmux", "in-process", "auto"];
 /// rejects keys outside that registry, so a key listed here but missing
 /// there would validate and then fail to load.
 const EXPERIMENTAL_CHILDREN: &[FieldSchema] = &[
+    FieldSchema::leaf(
+        "cacheTtlAdvisor",
+        FieldType::Bool,
+        "Record request timing and recommend TTL at context boundaries without changing requests",
+    ),
     FieldSchema::leaf(
         "coordinatorMode",
         FieldType::Bool,

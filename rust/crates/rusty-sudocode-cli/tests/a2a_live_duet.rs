@@ -41,6 +41,8 @@
 //! and this machine's config has no model by that bare name.
 
 mod common;
+#[path = "support/node_home.rs"]
+mod node_home;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -157,7 +159,11 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
 
     // ── The RECEIVER: a real REPL, parked on its own inbox ──────────────────
     let recv_cred = credential_dir(RECEIVER);
-    let mut receiver_env: Vec<(&str, &str)> = vec![
+    let receiver_home =
+        node_home::NodeHome::new("live-receiver", BROKER, RECEIVER, Path::new(&recv_cred));
+    node_home::pin_agent_name(env.workspace_root(), RECEIVER);
+    let [receiver_home_var, receiver_profile_var] = receiver_home.env();
+    let receiver_env: Vec<(&str, &str)> = vec![
         // NOT optional, and nothing says so at the failure site. The A2A
         // receiver lives on the coordinator loop, and that loop only exists in
         // the ASYNC repl: `main.rs` reads `QueueMode::from_env()` and dispatches
@@ -167,8 +173,8 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
         // `❯`, which `expect` depends on), so a receiver that does not override
         // it connects to nothing and says nothing about it.
         ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-        ("NEXUS_A2A_ENDPOINT", BROKER),
-        ("NEXUS_A2A_CREDENTIAL", recv_cred.as_str()),
+        (receiver_home_var.0, receiver_home_var.1.as_str()),
+        (receiver_profile_var.0, receiver_profile_var.1.as_str()),
     ];
 
     let mut receiver = env.spawn_with_env(&["--permission-mode", "read-only"], &receiver_env);
@@ -185,20 +191,27 @@ fn two_real_scode_processes_converse_over_the_production_broker() {
     );
 
     // ── The SENDER: another real scode, whose model decides to call `send` ──
+    // Its own workspace and home: on a node a session's identity is its own
+    // name, so two sessions sharing a workspace would be one agent.
+    let sender_side = TestEnv::new("a2a-live-sender");
     let send_cred = credential_dir(SENDER);
-    let mut sender_env: Vec<(&str, &str)> = vec![
-        ("NEXUS_A2A_ENDPOINT", BROKER),
-        ("NEXUS_A2A_CREDENTIAL", send_cred.as_str()),
+    let sender_home =
+        node_home::NodeHome::new("live-sender", BROKER, SENDER, Path::new(&send_cred));
+    node_home::pin_agent_name(sender_side.workspace_root(), SENDER);
+    let [sender_home_var, sender_profile_var] = sender_home.env();
+    let sender_env: Vec<(&str, &str)> = vec![
+        (sender_home_var.0, sender_home_var.1.as_str()),
+        (sender_profile_var.0, sender_profile_var.1.as_str()),
     ];
 
-    let prompt = env.prompt(
+    let prompt = sender_side.prompt(
         &format!(
             "Send a message to {RECEIVER} saying LIVE-DUET-PROBE over the nexus A2A network. \
              Use the send tool. Do not do anything else."
         ),
         "unified_send_roundtrip",
     );
-    let mut sending = env.spawn_with_env(
+    let mut sending = sender_side.spawn_with_env(
         &["--permission-mode", "workspace-write", &prompt],
         &sender_env,
     );

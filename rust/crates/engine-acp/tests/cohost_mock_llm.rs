@@ -1,22 +1,10 @@
 #![cfg(feature = "mailbox")]
 
-//! The co-host, proven on a scripted model — no secrets, no network.
+//! Cohost workflows through the real engine, kernel filesystem and model mount.
 //!
-//! `cohost_live_llm` is the real thing and is `#[ignore]`d for it, so until now
-//! NOTHING automatic ran a co-hosted agent: nexus's duet workflow no-ops on a
-//! missing secret, the A2A live job skips its LLM half for the same reason, and
-//! `cargo test` skipped the ignored test. The co-host was verified by compiling.
-//!
-//! This closes that. The model is `mock-anthropic-service`, which answers a
-//! scripted tool call and then a scripted reply, so the agent's whole turn —
-//! engine, tool registry, kernel-backed file tools, mailbox — runs on loopback
-//! and lands in CI.
-//!
-//! It is also the equivalence proof the two hosts were missing. The scenario
-//! (`read_file_roundtrip`) is one the CLI's own PTY suite runs: a relative
-//! `fixture.txt` read and echoed back. Same script, same engine, one host on a
-//! kernel of its own and one on the daemon's — so a behaviour proven on either
-//! side is a statement about the engine rather than about a host.
+//! Scripted HTTP responses drive file tools, delegation, runtime restoration and
+//! task followups. The same scenarios run through the CLI PTY harness.
+//! `cohost_live_llm` exercises the corresponding funded-provider workflows.
 
 #[path = "../../engine-host/tests/common/mod.rs"]
 mod common;
@@ -32,12 +20,14 @@ use common::{
 };
 use kernel::kernel::Kernel;
 use managed_harness::spawn_managed_agent;
-use runtime::mailbox::{InboxConvention, Mailbox};
-use runtime::{FsBackend, KernelFsBackend};
+use runtime::mailbox::{InboxConvention, Mailbox, MailboxScope};
+use runtime::{FsBackend, KernelFsBackend, WorkspaceRootScope};
+use serde_json::json;
 
 /// Model alias the scripted config defines. The mock does not care which model
 /// is asked for; the config has to know it, exactly as in production.
 const MODEL: &str = "claude-sonnet";
+const FOLLOWUP_TEMPLATE: &str = "cohost-followup-sender";
 
 /// What the workspace fixture says, and so what the agent's reply must carry.
 const FIXTURE_BODY: &str = "alpha parity line";
@@ -140,6 +130,15 @@ fn harness() -> &'static Harness {
             "HOST_CONFIG_INSTRUCTIONS_MUST_STAY_PRIVATE",
         )
         .unwrap();
+        let agents = config_home.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join(format!("{FOLLOWUP_TEMPLATE}.md")),
+            format!(
+                "---\nname: {FOLLOWUP_TEMPLATE}\ndescription: Followup mailbox fixture\ntools: [send]\n---\nProcess the assigned task and its followup messages.\n"
+            ),
+        )
+        .unwrap();
         std::env::set_var("SUDO_CODE_CONFIG_HOME", config_home.path());
         Harness {
             runtime,
@@ -192,6 +191,16 @@ fn run_cohost_turn(
     agent_id: &str,
     transcript_is_stream: bool,
     prompt: &str,
+) -> (String, usize, Arc<dyn FsBackend>) {
+    run_cohost_turn_with(pid, agent_id, transcript_is_stream, prompt, |_, _| Ok(()))
+}
+
+fn run_cohost_turn_with(
+    pid: &str,
+    agent_id: &str,
+    transcript_is_stream: bool,
+    prompt: &str,
+    arrange: impl FnOnce(&Arc<Kernel>, &str) -> Result<(), String>,
 ) -> (String, usize, Arc<dyn FsBackend>) {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let harness = harness();
@@ -264,6 +273,11 @@ fn run_cohost_turn(
 
     let ctx = user_ctx();
     send_prompt(&user_mb, agent_id, prompt);
+    if let Err(error) = arrange(&kernel, &workspace) {
+        handle.abort_signal.abort();
+        let _ = handle.join.join();
+        panic!("arranging the cohost workflow failed: {error}");
+    }
 
     let reply = wait_for_agent_reply(
         &kernel,
@@ -275,28 +289,61 @@ fn run_cohost_turn(
     // A send tool can deliver the reply before its turn finishes. Wait for the
     // durable receive acknowledgement before terminating the host.
     if reply.is_some() {
-        let receiver = Mailbox::daemon_absolute(Arc::clone(&user_fs), agent_id.into());
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !receiver
-            .read_position(USER)
-            .unwrap()
-            .is_some_and(|offset| offset > 0)
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "turn did not acknowledge peer input"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_for_delivery_ack(&user_fs, agent_id);
     }
     handle.abort_signal.abort();
     let _ = handle.join.join();
 
+    let asked = assert_model_traffic(
+        harness,
+        model_writes.load(Ordering::SeqCst),
+        asked_before,
+        agent_id,
+        &workspace,
+    );
+    let reply = reply.unwrap_or_else(|| {
+        let raw = user_fs.read(&transcript).map_or_else(
+            |e| format!("<unreadable: {e}>"),
+            |b| String::from_utf8_lossy(&b).into_owned(),
+        );
+        panic!("no agent reply within 60s; model asked {asked} time(s); transcript:\n{raw}")
+    });
+    let body = reply
+        .get("body")
+        .and_then(|b| b.as_str())
+        .unwrap_or_default()
+        .to_string();
+    eprintln!("[agent -> user] {body}");
+    (body, asked, user_fs)
+}
+
+fn wait_for_delivery_ack(fs: &Arc<dyn FsBackend>, agent_id: &str) {
+    let receiver = Mailbox::daemon_absolute(Arc::clone(fs), agent_id.into());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while receiver
+        .read_position(USER)
+        .unwrap()
+        .is_none_or(|offset| offset == 0)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "turn did not acknowledge peer input"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_model_traffic(
+    harness: &Harness,
+    expected: usize,
+    asked_before: usize,
+    agent_id: &str,
+    workspace: &str,
+) -> usize {
     // A prompt write schedules the provider asynchronously. Aborting the agent
     // after its mailbox reply can race that last HTTP dispatch, even though the
     // agent thread has joined. Wait for the writes already recorded by the hook
     // to reach the mock before comparing the two sides of the transport.
-    let expected = model_writes.load(Ordering::SeqCst);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut asked = harness.requests_seen() - asked_before;
     while asked < expected && std::time::Instant::now() < deadline {
@@ -322,27 +369,14 @@ fn run_cohost_turn(
             !system.contains("HOST_CONFIG_INSTRUCTIONS_MUST_STAY_PRIVATE"),
             "host instructions leaked"
         );
-        assert!(system.contains(&workspace), "workspace missing");
+        assert!(system.contains(workspace), "workspace missing");
         assert!(system.contains("Nexus filesystem"));
         assert!(
             system.contains(&format!("/agents/{agent_id}/memory")),
             "memory uses wrong namespace"
         );
     }
-    let reply = reply.unwrap_or_else(|| {
-        let raw = user_fs
-            .read(&transcript)
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .unwrap_or_else(|e| format!("<unreadable: {e}>"));
-        panic!("no agent reply within 60s; model asked {asked} time(s); transcript:\n{raw}")
-    });
-    let body = reply
-        .get("body")
-        .and_then(|b| b.as_str())
-        .unwrap_or_default()
-        .to_string();
-    eprintln!("[agent -> user] {body}");
-    (body, asked, user_fs)
+    asked
 }
 
 /// Delivery ADVANCED the agent's durable read position.
@@ -541,6 +575,108 @@ fn a_cohost_subagent_uses_the_same_model_mount_and_identity() {
         "the child must return its calculation, got {body}"
     );
     assert!(asked >= 3, "both parent and child must reach the provider");
+}
+
+#[test]
+fn a_cohost_subagent_consumes_a_followup_during_its_first_model_response() {
+    let controls = tempfile::tempdir().unwrap();
+    let ready = controls.path().join("child-ready");
+    let release = controls.path().join("child-release");
+    let first = controls.path().join("first.json");
+    std::fs::write(
+        &first,
+        json!({"document":"first child reply","start_ready":ready,"start_release":release,
+            "chunk_chars":1024,"delay_ms":1})
+        .to_string(),
+    )
+    .unwrap();
+    let child_prompt = format!(
+        "PARITY_SCENARIO:prose_preview PROSE_CONTROL:{}",
+        json!({"path":first})
+    );
+    let agent = "cohost-task-followup";
+    let prompt = format!(
+        "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
+        json!([
+            {"id":"followup_child","name":"agent_spawn","input":{
+                "agent":FOLLOWUP_TEMPLATE,"description":"cohost followup",
+                "prompt":child_prompt,"model":"inherit","run_in_background":false}},
+            {"id":"followup_reply","name":"send","input":{
+                "to":USER,"message":"cohost child complete","summary":"fixture"}}
+        ])
+    );
+    let mut task = String::new();
+    let mut workspace_path = String::new();
+    let (body, _, fs) = run_cohost_turn_with(
+        "cohost-task-followup-pid",
+        agent,
+        true,
+        &prompt,
+        |kernel, workspace| {
+            workspace_path = workspace.into();
+            let result = (|| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !ready.exists() {
+                    if std::time::Instant::now() >= deadline {
+                        return Err("child did not reach the controlled model response".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+                    Arc::clone(kernel),
+                    "test-owner",
+                    "root",
+                    agent,
+                    format!("{workspace}/another-runtime"),
+                ));
+                let tasks = tools::list_agent_snapshots_from_store_with(false, fs.as_ref())?;
+                if tasks.len() != 1 {
+                    return Err(format!("expected one live task, found {tasks:?}"));
+                }
+                task.clone_from(&tasks[0].agent_id);
+                let _workspace = WorkspaceRootScope::enter(workspace);
+                let _mailbox = MailboxScope::enter(Arc::new(Mailbox::daemon_absolute(
+                    Arc::clone(&fs),
+                    agent.into(),
+                )));
+                tools::GlobalToolRegistry::builtin().with_fs(fs).execute(
+                    "send",
+                    &json!({"to":task,"summary":"resume child","message":format!(
+                        "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}", json!([
+                            {"id":"child_followup_send","name":"send","input":{
+                                "to":USER,"message":"child VFS message","summary":"child identity"}}
+                        ])
+                    )}),
+                )?;
+                Ok(())
+            })();
+            std::fs::write(&release, "continue").unwrap();
+            result
+        },
+    );
+    assert_eq!(body, "cohost child complete");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs.read(&format!("/agents/{agent}/subagents/{task}.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["status"], "completed", "{manifest}");
+    assert_eq!(manifest["result"], "Concurrency batch done.", "{manifest}");
+    assert_eq!(manifest["toolUses"], 1, "{manifest}");
+    let peer = Mailbox::new(
+        Arc::clone(&fs),
+        USER.into(),
+        InboxConvention::new(workspace_path.clone()),
+    );
+    let (messages, _) = peer.poll_conversation(&task, 0, 0).unwrap();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert_eq!(messages[0].from, task);
+    assert_eq!(messages[0].body, "child VFS message");
+    let mailbox = Mailbox::new(fs, task, InboxConvention::new(workspace_path));
+    assert!(mailbox
+        .read_position(agent)
+        .unwrap()
+        .is_some_and(|cursor| cursor > 0));
 }
 
 fn managed_call(

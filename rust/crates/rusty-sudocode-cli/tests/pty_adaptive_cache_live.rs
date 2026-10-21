@@ -74,11 +74,25 @@ impl Drop for Evidence {
             matches!(event["event"].as_str(), Some("request_started" | "request_succeeded" | "request_failed" | "response_usage"))
         }).map(|event| {
             let attributes = &event["attributes"];
+            let error = attributes["error"].as_str().unwrap_or_default();
             json!({"event":event["event"], "request_id":attributes["request_id"],
-                "attempt":attributes["attempt"], "status":attributes["status"], "retryable":attributes["retryable"]})
+                "attempt":attributes["attempt"], "status":attributes["status"], "retryable":attributes["retryable"],
+                "http_400":error.contains("400 Bad Request"),
+                "thinking_signature_rejection":error.contains("signature") && error.contains("thinking"),
+                "prefix_rejection":error.contains("different conversation")})
         }).collect();
         let report = json!({"requests":shape, "lifecycle":lifecycle, "usage":usage});
         let mut report = report;
+        report["thinking_repairs"] = json!(events
+            .iter()
+            .filter(|e| e["event"] == "thinking_history_repaired")
+            .map(|e| e["attributes"].clone())
+            .collect::<Vec<_>>());
+        report["thinking_transformations"] = json!(events
+            .iter()
+            .filter(|e| e["event"] == "thinking_input_transformations")
+            .map(|e| e["attributes"].clone())
+            .collect::<Vec<_>>());
         report["compaction_events"] = json!(events.iter().filter(|event| event["event"].as_str().is_some_and(|name| name.contains("compact"))).map(|event| {
             json!({"event":event["event"],"outcome":event["attributes"]["outcome"],"reason":event["attributes"]["reason"],"error":event["attributes"]["error"],"attempt":event["attributes"]["attempt"]})
         }).collect::<Vec<_>>());
@@ -114,6 +128,23 @@ fn turn(cli: &mut pty_expect::PtySession, prompt: &str) {
     common::expect_input_line_cleared(cli, WAIT, "live turn complete");
 }
 
+fn assert_no_standalone_labels(session: &runtime::Session) {
+    for block in session
+        .messages
+        .iter()
+        .filter(|message| message.role == runtime::MessageRole::Assistant)
+        .flat_map(|message| &message.blocks)
+    {
+        if let runtime::ContentBlock::Text { text } = block {
+            assert!(
+                text.lines()
+                    .all(|line| !["course", "court", "card"].contains(&line.trim())),
+                "unexpected standalone label in live assistant output"
+            );
+        }
+    }
+}
+
 fn without_cache_markers(mut value: Value) -> Value {
     match &mut value {
         Value::Object(object) => {
@@ -130,6 +161,231 @@ fn without_cache_markers(mut value: Value) -> Value {
         _ => {}
     }
     value
+}
+
+/// Actual provider rejection is required here; a successful relay alone cannot
+/// prove that binding controls survived every gateway in the path.
+#[test]
+fn thinking_replay_live_repairs_edited_prefix_once_and_resumes_new_signatures() {
+    let env = common::TestEnv::new("thinking-replay-live");
+    if env.is_mock() || common::live_model() != "claude-opus-5-5" {
+        eprintln!("SKIP: requires live Opus 5.5 with signed-prefix enforcement");
+        return;
+    }
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["models"]["claude-opus-5-5"] = json!({
+        "name":"Claude Opus 5.5", "maxOutputTokens":4096,
+        "providers":{"proxy":{"provider":"sudorouter","model":"claude-opus-5-5","api":"anthropic-messages"}},
+        "extraBody":{"betas":["thinking-binding-controls-2026-08-01"],
+            "thinking":{"block_binding":{"prefix_mismatch_behavior":"error"}}}
+    });
+    std::fs::write(config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    std::fs::write(
+        env.config_home().join("settings.json"),
+        r#"{"thinking":true,"effortLevel":"high"}"#,
+    )
+    .unwrap();
+    let file = tempfile::NamedTempFile::new_in(env.workspace_root()).unwrap();
+    let nonce = format!(
+        "REPLAY-{}",
+        file.path().file_name().unwrap().to_string_lossy()
+    );
+    std::fs::write(
+        file.path(),
+        format!("nonce={nonce}\nr23=7\nr29=11\nr31=13\n"),
+    )
+    .unwrap();
+    let log = env.workspace_root().join("thinking-replay-requests.jsonl");
+    let _evidence = Evidence {
+        log: log.clone(),
+        cache: env.config_home().join("cache/prompt-cache"),
+    };
+    let variables = [("SCODE_LOG_PATH", log.to_str().unwrap())];
+    let mut cli = env.spawn_with_env(&["--permission-mode", "read-only"], &variables);
+    cli.set_default_timeout(WAIT);
+    common::expect_input_line_cleared(&cli, WAIT, "live replay ready");
+    let expected = (1..23 * 29 * 31)
+        .find(|n| n % 23 == 7 && n % 29 == 11 && n % 31 == 13)
+        .unwrap();
+    turn(&mut cli, &format!("Read {} with read_file. Using the file's r23, r29 and r31, find the smallest positive integer n satisfying n mod 23 = r23, n mod 29 = r29, n mod 31 = r31. Verify all three remainders before answering. Reply only REPLAY_START:<nonce>:<n>, replacing placeholders with the file's nonce and your computed n.", file.path().display()));
+    let path = transcript(&env.workspace_root().join(".scode")).unwrap();
+    let assert_answer = |marker: &str| {
+        let session = runtime::Session::load_from_path(&path).unwrap();
+        let text = session
+            .messages
+            .last()
+            .unwrap()
+            .blocks
+            .iter()
+            .filter_map(|block| {
+                if let runtime::ContentBlock::Text { text } = block {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(text.trim(), marker);
+        for block in session
+            .messages
+            .iter()
+            .filter(|m| m.role == runtime::MessageRole::Assistant)
+            .flat_map(|m| &m.blocks)
+        {
+            if let runtime::ContentBlock::Text { text } = block {
+                assert!(
+                    text.lines()
+                        .all(|line| !["course", "court", "card"].contains(&line.trim())),
+                    "unexpected standalone label in live assistant output"
+                );
+            }
+        }
+    };
+    assert_answer(&format!("REPLAY_START:{nonce}:{expected}"));
+    let before = runtime::Session::load_from_path(&path).unwrap();
+    assert!(before
+        .messages
+        .iter()
+        .flat_map(|m| &m.blocks)
+        .any(|block| matches!(block,
+        runtime::ContentBlock::Thinking {signature:Some(signature),..} if !signature.is_empty())));
+    std::fs::rename(file.path(), env.workspace_root().join("source-unavailable")).unwrap();
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let changed_prompt = format!("Additional session context REPLAY_CHANGED_{nonce}.");
+    let mut cli = env.spawn_with_env(
+        &[
+            "--resume",
+            path.to_str().unwrap(),
+            "--append-system-prompt",
+            &changed_prompt,
+            "--permission-mode",
+            "read-only",
+        ],
+        &variables,
+    );
+    cli.set_default_timeout(WAIT);
+    common::expect_input_line_cleared(&cli, WAIT, "live edited prefix resumed");
+    turn(&mut cli, "Using only the previous result, subtract 17 from n. Do not use tools. Return only REPLAY_REPAIRED:<same nonce>:<result>.");
+    assert_answer(&format!("REPLAY_REPAIRED:{nonce}:{}", expected - 17));
+    let archives: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".before-thinking-repair-")
+        })
+        .collect();
+    assert_eq!(
+        archives.len(),
+        1,
+        "an actual rejection must archive the original history"
+    );
+    let archived = runtime::Session::load_from_path(archives[0].path()).unwrap();
+    assert_eq!(
+        &archived.messages[..before.messages.len()],
+        before.messages.as_slice()
+    );
+    let repaired = runtime::Session::load_from_path(&path).unwrap();
+    for (original, actual) in before.messages.iter().zip(&repaired.messages) {
+        let mut expected = original.clone();
+        if expected.role == runtime::MessageRole::Assistant {
+            expected.blocks.retain(|b| {
+                !matches!(
+                    b,
+                    runtime::ContentBlock::Thinking { .. }
+                        | runtime::ContentBlock::RedactedThinking { .. }
+                )
+            });
+        }
+        assert_eq!(
+            &expected, actual,
+            "repair must retain ordinary history and usage"
+        );
+    }
+    turn(&mut cli, "Subtract 19 from REPLAY_REPAIRED above. Do not use tools. Return only REPLAY_CONTINUED:<same nonce>:<result>.");
+    assert_answer(&format!("REPLAY_CONTINUED:{nonce}:{}", expected - 36));
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let mut cli = env.spawn_with_env(
+        &[
+            "--resume",
+            path.to_str().unwrap(),
+            "--permission-mode",
+            "read-only",
+        ],
+        &variables,
+    );
+    cli.set_default_timeout(WAIT);
+    common::expect_input_line_cleared(&cli, WAIT, "live repaired session resumed");
+    turn(&mut cli, "Subtract 7 from REPLAY_CONTINUED above. Do not use tools. Return only REPLAY_RESUMED:<same nonce>:<result>.");
+    assert_answer(&format!("REPLAY_RESUMED:{nonce}:{}", expected - 43));
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let events: Vec<Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event"] == "thinking_history_repaired")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e["event"] == "request_failed"
+                && e["attributes"]["error"].as_str().is_some_and(|error| {
+                    error.contains("400 Bad Request")
+                        && error.contains("signature")
+                        && error.contains("thinking")
+                        && error.contains("different conversation")
+                }))
+            .count(),
+        1,
+        "the live upstream must actually enforce the deliberately changed prefix"
+    );
+    let accepted = requests(&log);
+    assert_eq!(
+        accepted.len(),
+        5,
+        "one tool pair, repaired recall, continuation and restart"
+    );
+    let ack: Vec<_> = events
+        .iter()
+        .filter(|e| e["event"] == "thinking_input_transformations")
+        .collect();
+    assert_eq!(
+        ack.len(),
+        5,
+        "every accepted response must acknowledge the binding beta"
+    );
+    assert!(ack.iter().all(|e| e["attributes"]["count"] == 0));
+    for body in &accepted {
+        assert_eq!(
+            body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+            "error"
+        );
+    }
+    for body in &accepted[3..] {
+        assert!(
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|m| m["content"].as_array().unwrap())
+                .any(|b| b["type"] == "thinking"
+                    && b["signature"].as_str().is_some_and(|s| !s.is_empty())),
+            "new healthy signatures must survive both continuation and restart"
+        );
+    }
 }
 
 #[test]
@@ -307,6 +563,7 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
     turn(&mut cli, &format!("Read {} with read_file, follow each next filename using read_file until END, sum only the value fields. Do not use shell commands. Reply ADAPTIVE_CHAIN_OK:<sum>.", names[0]));
     let path = transcript(&env.workspace_root().join(".scode")).expect("persisted transcript");
     let session = runtime::Session::load_from_path(&path).unwrap();
+    assert_no_standalone_labels(&session);
     assert!(session
         .messages
         .iter()
@@ -364,6 +621,7 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
     cli.send("/exit\r").unwrap();
     assert_eq!(cli.expect_eof().unwrap(), 0);
     let resumed = runtime::Session::load_from_path(&path).unwrap();
+    assert_no_standalone_labels(&resumed);
     assert!(resumed
         .messages
         .last()

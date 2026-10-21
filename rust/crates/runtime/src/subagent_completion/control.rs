@@ -87,6 +87,8 @@ impl CompletionJournal {
             if state.active_trace.is_some() {
                 return Err("trace_still_active".into());
             }
+            let _responses =
+                SessionWriter::acquire_response_archive(self.fs.as_ref(), &self.transcript)?;
             let binding = Binding {
                 version: 2,
                 session_id: state.session_id.clone(),
@@ -176,6 +178,7 @@ impl CompletionJournal {
         if probe["deleted"] != true {
             let writer = SessionWriter::acquire(fs, transcript)?;
             let _write = writer.write()?;
+            let _responses = SessionWriter::acquire_response_archive(fs, transcript)?;
             // Re-read under exclusion, not from the earlier read-only probe.
             let locked = Self::probe(fs, transcript, session_id, cwd)?;
             if locked["storageRef"] != storage_ref {

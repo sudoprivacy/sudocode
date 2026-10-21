@@ -11,6 +11,8 @@ pub struct SseParser {
     model: Option<String>,
     capture_message_metadata: bool,
     message_metadata: Option<MessageMetadata>,
+    message_started: bool,
+    pending_error: Option<ApiError>,
 }
 
 /// Provider diagnostics do not belong in the shared response/event contract.
@@ -19,9 +21,22 @@ pub struct SseParser {
 pub(crate) struct MessageMetadata {
     pub id: Option<String>,
     pub diagnostics: Option<serde_json::Value>,
+    pub input_transformations: Option<serde_json::Value>,
 }
 
 impl MessageMetadata {
+    #[inline]
+    fn merge_into(mut self, destination: &mut Option<Self>) {
+        if let Some(previous) = destination.take() {
+            self.id = self.id.or(previous.id);
+            self.diagnostics = self.diagnostics.or(previous.diagnostics);
+            self.input_transformations = self
+                .input_transformations
+                .or(previous.input_transformations);
+        }
+        *destination = Some(self);
+    }
+
     #[must_use]
     pub(crate) fn from_message(message: &serde_json::Value) -> Self {
         Self {
@@ -30,6 +45,7 @@ impl MessageMetadata {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
             diagnostics: message.get("diagnostics").cloned(),
+            input_transformations: message.get("input_transformations").cloned(),
         }
     }
 }
@@ -62,6 +78,9 @@ impl SseParser {
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<StreamEvent>, ApiError> {
+        if let Some(error) = self.take_pending_error() {
+            return Err(error);
+        }
         self.buffer.extend_from_slice(chunk);
         if body_opens_as_json(&self.buffer) {
             // Not an SSE stream at all — an upstream that ignored
@@ -76,6 +95,16 @@ impl SseParser {
 
         while let Some(frame) = self.next_frame() {
             if let Some(event) = self.parse_frame_with_context(&frame)? {
+                if let Err(error) = self.validate_message_start(&event) {
+                    if events.is_empty() {
+                        return Err(error);
+                    }
+                    // Deliver the already decoded prefix before surfacing the
+                    // failure. Socket packet boundaries must not decide whether
+                    // partial progress and its usage survive a malformed stream.
+                    self.pending_error = Some(error);
+                    break;
+                }
                 crate::client::record_compaction_stream_event(&event)?;
                 events.push(event);
             }
@@ -88,7 +117,28 @@ impl SseParser {
         &self.buffer
     }
 
+    #[inline]
+    pub(crate) fn take_pending_error(&mut self) -> Option<ApiError> {
+        self.pending_error.take()
+    }
+
+    #[inline]
+    fn validate_message_start(&mut self, event: &StreamEvent) -> Result<(), ApiError> {
+        if matches!(event, StreamEvent::MessageStart(_)) {
+            if self.message_started {
+                return Err(ApiError::InvalidSseFrame(
+                    "multiple message_start events in one response; refusing to combine responses or replay partial progress",
+                ));
+            }
+            self.message_started = true;
+        }
+        Ok(())
+    }
+
     pub fn finish(&mut self) -> Result<Vec<StreamEvent>, ApiError> {
+        if let Some(error) = self.take_pending_error() {
+            return Err(error);
+        }
         if self.buffer.is_empty() {
             return Ok(Vec::new());
         }
@@ -102,7 +152,10 @@ impl SseParser {
         // it as a retryable IncompleteStream carrying the tail, never as a
         // JSON "failed to parse ... for model X" error that blames the model.
         match self.parse_frame_with_context(&tail) {
-            Ok(Some(event)) => Ok(vec![event]),
+            Ok(Some(event)) => {
+                self.validate_message_start(&event)?;
+                Ok(vec![event])
+            }
             // Nothing SSE-shaped and no error envelope. Before giving up on
             // the bytes, check whether they are a complete message the
             // upstream sent unframed.
@@ -117,12 +170,21 @@ impl SseParser {
                     &tail,
                 ))
             }
-            Ok(None) => Ok(non_sse_message_events(
-                tail.trim(),
-                self.capture_message_metadata
-                    .then_some(&mut self.message_metadata),
-            )
-            .unwrap_or_default()),
+            Ok(None) => {
+                let mut metadata = None;
+                let events = non_sse_message_events(
+                    tail.trim(),
+                    self.capture_message_metadata.then_some(&mut metadata),
+                )
+                .unwrap_or_default();
+                for event in &events {
+                    self.validate_message_start(event)?;
+                }
+                if let Some(metadata) = metadata {
+                    metadata.merge_into(&mut self.message_metadata);
+                }
+                Ok(events)
+            }
             // An error envelope the upstream sent instead of a stream is a real
             // answer about a real problem — keep it. Rewriting it as a
             // truncation would mark a `400 invalid_request` retryable and
@@ -149,13 +211,22 @@ impl SseParser {
     fn parse_frame_with_context(&mut self, frame: &str) -> Result<Option<StreamEvent>, ApiError> {
         let provider = self.provider.as_deref().unwrap_or("unknown");
         let model = self.model.as_deref().unwrap_or("unknown");
-        parse_frame_with_metadata(
+        let mut metadata = None;
+        let event = parse_frame_with_metadata(
             frame,
             provider,
             model,
-            self.capture_message_metadata
-                .then_some(&mut self.message_metadata),
-        )
+            self.capture_message_metadata.then_some(&mut metadata),
+        )?;
+        // An invalid second start must not replace the accepted message's
+        // diagnostic identity before the caller surfaces the protocol error.
+        if self.message_started && matches!(&event, Some(StreamEvent::MessageStart(_))) {
+            return Ok(event);
+        }
+        if let Some(metadata) = metadata {
+            metadata.merge_into(&mut self.message_metadata);
+        }
+        Ok(event)
     }
 
     fn next_frame(&mut self) -> Option<String> {
@@ -363,13 +434,20 @@ fn parse_frame_with_metadata(
             return Err(error);
         }
     }
-    let observed = metadata.as_ref().and_then(|_| {
-        (raw["type"] == "message_start").then(|| MessageMetadata::from_message(&raw["message"]))
+    let observed = metadata.as_ref().and_then(|_| match raw["type"].as_str() {
+        Some("message_start") => Some(MessageMetadata::from_message(&raw["message"])),
+        // A server fallback can update transformations at the end of a stream.
+        Some("message_delta") if raw.get("input_transformations").is_some() => {
+            Some(MessageMetadata::from_message(&raw))
+        }
+        _ => None,
     });
     let event = serde_json::from_value::<StreamEvent>(raw)
         .map_err(|error| ApiError::json_deserialize(provider, model, &payload, error))?;
     if let (Some(destination), Some(observed)) = (metadata, observed) {
-        *destination = Some(observed);
+        // One HTTP chunk may contain both start and final metadata. Retain the
+        // message identity and cache diagnostics while accepting the final list.
+        observed.merge_into(destination);
     }
     Ok(Some(event))
 }

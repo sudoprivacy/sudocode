@@ -298,8 +298,23 @@ impl Mailbox {
     /// must not each decide for themselves.
     #[must_use]
     pub fn workspace_local(root: &std::path::Path, self_id: String) -> Self {
+        Self::workspace_at(Arc::new(crate::fs_backend::StdFsBackend), root, self_id)
+    }
+
+    /// A mailbox rooted at its backend's own workspace, independently of the shell.
+    ///
+    /// # Errors
+    /// The backend cannot resolve its working root.
+    pub fn workspace(fs: Arc<dyn FsBackend>, self_id: String) -> std::io::Result<Self> {
+        let root = fs.working_root()?;
+        Ok(Self::workspace_at(fs, std::path::Path::new(&root), self_id))
+    }
+
+    /// A mailbox at an explicit root in the supplied backend's namespace.
+    #[must_use]
+    pub fn workspace_at(fs: Arc<dyn FsBackend>, root: &std::path::Path, self_id: String) -> Self {
         Self::new(
-            Arc::new(crate::fs_backend::StdFsBackend),
+            fs,
             self_id,
             InboxConvention::new(
                 strip_windows_verbatim_prefix(&root.to_string_lossy()).into_owned(),
@@ -347,15 +362,14 @@ impl Mailbox {
     /// Whether the backend frames appends at `path` itself (a DT_STREAM record
     /// per append) rather than leaving framing to us (a JSONL line per append).
     ///
-    /// Asked per call, deliberately — do NOT cache it on the struct. For
-    /// `KernelFsBackend` this is a real `sys_stat`, so the answer CHANGES the
-    /// moment [`Self::ensure_conversation`] creates the stream: resolved once at
-    /// construction it would be `false` forever, and a provisioned DT_STREAM
-    /// inbox would be written and read as JSONL. The call is cheap — a string
-    /// test for the VFS backend, a constant `false` for the file one.
+    /// Classification comes from the backend's current entry type. Errors
+    /// propagate to the caller. Polling obtains data and its cursor directly
+    /// through `tail_read` within that operation's wait budget.
     #[inline]
-    fn backend_frames(&self, path: &str) -> bool {
-        self.backend.is_append_stream(path).unwrap_or(false)
+    fn backend_frames(&self, path: &str) -> Result<bool, String> {
+        self.backend
+            .is_append_stream(path)
+            .map_err(|error| format!("classify mailbox {path}: {error}"))
     }
 
     /// A nexus A2A mailbox for `agent` over an already-dialled client.
@@ -596,7 +610,7 @@ impl Mailbox {
         // success.
         self.ensure_provisioned(&envelope.to)?;
 
-        if self.backend_frames(&path) {
+        if self.backend_frames(&path)? {
             return self
                 .backend
                 .append(&path, &envelope.to_bytes())
@@ -655,21 +669,16 @@ impl Mailbox {
         block_ms: u64,
     ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
         let path = self.transcript_path(peer);
-        let is_stream = self.backend_frames(&path);
-        let (mut messages, next) = if is_stream {
-            self.poll_stream(&path, cursor, block_ms)
-        } else {
-            self.poll_jsonl(&path, cursor, block_ms)
-        }?;
+        let (mut messages, next) = self.poll_tail(&path, cursor, block_ms)?;
         // Session control has its own generation-aware codec and consumer.
         // All peer consumers skip those frames while advancing past them.
         messages.retain(|message| message.kind != a2a::session::SESSION_KIND);
         Ok((messages, next))
     }
 
-    /// DT_STREAM: one frame per `tail_read`, drain burst non-blocking
-    /// after the first blocking read (same pattern as `nexus_mailbox::poll_new`).
-    fn poll_stream(
+    /// Drain backend-owned chunks without a separate type lookup. A chunk is
+    /// either a complete envelope frame or a batch of JSONL envelope records.
+    fn poll_tail(
         &self,
         path: &str,
         mut cursor: u64,
@@ -687,7 +696,11 @@ impl Mailbox {
             if eof {
                 break;
             }
-            if let Some(env) = MailboxEnvelope::from_bytes(&data) {
+            let envelopes = MailboxEnvelope::from_bytes(&data).map_or_else(
+                || crate::agent_mailbox::parse_envelope_lines(&data),
+                |envelope| vec![envelope],
+            );
+            for env in envelopes {
                 if !env.from.is_empty() && env.from != self.self_id && !env.body.is_empty() {
                     out.push(env);
                 }
@@ -700,45 +713,13 @@ impl Mailbox {
         Ok((out, cursor))
     }
 
-    /// JSONL: `tail_read` returns raw bytes, split by newline.
-    fn poll_jsonl(
-        &self,
-        path: &str,
-        cursor: u64,
-        block_ms: u64,
-    ) -> Result<(Vec<MailboxEnvelope>, u64), String> {
-        let (data, next, _eof) = self
-            .backend
-            .tail_read(path, cursor, block_ms)
-            .map_err(|e| format!("mailbox poll {path}@{cursor}: {e}"))?;
-        if data.is_empty() {
-            return Ok((vec![], next));
-        }
-        let text = String::from_utf8_lossy(&data);
-        let out: Vec<MailboxEnvelope> = text
-            .lines()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    return None;
-                }
-                let env = MailboxEnvelope::from_bytes(trimmed.as_bytes())?;
-                if env.from.is_empty() || env.from == self.self_id || env.body.is_empty() {
-                    return None;
-                }
-                Some(env)
-            })
-            .collect();
-        Ok((out, next))
-    }
-
     /// Read the whole conversation with `peer` (batch read). Primarily for the
     /// coordinator's multi-turn loop, which drains between turns.
     pub fn read_conversation(&self, peer: &str) -> Result<Vec<MailboxEnvelope>, String> {
         let path = self.transcript_path(peer);
-        let is_stream = self.backend_frames(&path);
+        let is_stream = self.backend_frames(&path)?;
         if is_stream {
-            let (envs, _cursor) = self.poll_stream(&path, 0, 0)?;
+            let (envs, _cursor) = self.poll_tail(&path, 0, 0)?;
             Ok(envs)
         } else {
             // Through the backend, for the same reason the write is: the
@@ -756,7 +737,8 @@ impl Mailbox {
     ///
     /// # Errors
     ///
-    /// An `Err` when the namespace cannot be enumerated, or when an entry's
+    /// A namespace whose directory has not been created yet has no recipients.
+    /// An `Err` when an existing namespace cannot be enumerated, or when an entry's
     /// presence cannot be determined — never an empty list, and never a silently
     /// shortened one. The difference matters to every caller: a broadcast over "no
     /// recipients" reports success having delivered nothing, and an agent told it
@@ -764,10 +746,11 @@ impl Mailbox {
     /// has to remember to ask first.
     pub fn list_recipients(&self) -> Result<Vec<String>, String> {
         let dir = self.convention.agents_dir();
-        let entries = self
-            .backend
-            .readdir(&dir)
-            .map_err(|e| format!("list recipients at {dir}: {e}"))?;
+        let entries = match self.backend.readdir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(format!("list recipients at {dir}: {error}")),
+        };
         // A recipient is an agent that ANNOUNCED presence, and presence is a
         // `conversations` subdir under `agents_dir/<name>/` (the
         // `ensure_presence` contract). Filter to that shape so infrastructure
@@ -973,15 +956,7 @@ impl ConversationReader {
     }
 
     fn acquire(self) -> Result<Option<OwnedReader>, String> {
-        let lock_path = format!("{}.lock", self.path);
-        if let Some((dir, _)) = self.path.rsplit_once('/') {
-            self.backend
-                .create_dir_all(dir)
-                .map_err(|e| format!("create reader directory {dir}: {e}"))?;
-        }
-        let Some(lock) = self
-            .backend
-            .try_lock(&lock_path, READER_LEASE_MS)
+        let Some(lease) = HeldLease::try_acquire(&self.backend, &format!("{}.lock", self.path))
             .map_err(|e| format!("claim reader {}: {e}", self.path))?
         else {
             return Ok(None);
@@ -992,13 +967,46 @@ impl ConversationReader {
             lease_expires_at: now_ms() + READER_LEASE_MS,
             read_offset: offset,
         })?;
+        Ok(Some(OwnedReader {
+            reader: self,
+            lease,
+            offset,
+        }))
+    }
+}
+
+/// An exclusive backend lock, renewed on its own thread for as long as this
+/// value lives.
+///
+/// Renewal is independent of what the holder is doing, because a model turn can
+/// block for longer than the lease. Once a renewal fails the lease stays
+/// invalid and the holder must stop acting on it. Dropping stops the renewal
+/// thread first and only then releases the lock.
+struct HeldLease {
+    lock: Arc<dyn crate::fs_backend::FsLock>,
+    stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    valid: Arc<std::sync::atomic::AtomicBool>,
+    renewer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HeldLease {
+    fn try_acquire(backend: &Arc<dyn FsBackend>, lock_path: &str) -> Result<Option<Self>, String> {
+        if let Some((dir, _)) = lock_path.rsplit_once('/') {
+            backend
+                .create_dir_all(dir)
+                .map_err(|e| format!("create directory {dir}: {e}"))?;
+        }
+        let Some(lock) = backend
+            .try_lock(lock_path, READER_LEASE_MS)
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
         let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let worker_stop = Arc::clone(&stop);
         let worker_valid = Arc::clone(&valid);
         let worker_lock = Arc::clone(&lock);
-        // Renewal is independent of the sink: a model turn can block for longer
-        // than the lease. No cursor writes occur on the renewal thread.
         let renewer = std::thread::Builder::new()
             .name("mailbox-lease".into())
             .spawn(move || {
@@ -1024,54 +1032,35 @@ impl ConversationReader {
                     }
                 }
             })
-            .map_err(|e| format!("start reader lease renewal: {e}"))?;
-        Ok(Some(OwnedReader {
-            reader: self,
+            .map_err(|e| format!("start lease renewal: {e}"))?;
+        Ok(Some(Self {
             lock,
             stop,
             valid,
             renewer: Some(renewer),
-            offset,
         }))
     }
-}
 
-struct OwnedReader {
-    reader: ConversationReader,
-    lock: Arc<dyn crate::fs_backend::FsLock>,
-    stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-    valid: Arc<std::sync::atomic::AtomicBool>,
-    renewer: Option<std::thread::JoinHandle<()>>,
-    offset: u64,
-}
-
-impl OwnedReader {
     fn is_valid(&self) -> bool {
         self.valid.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    fn commit(&mut self, offset: u64) -> Result<(), String> {
-        if !self.is_valid()
-            || !self
-                .lock
-                .renew()
-                .map_err(|e| format!("renew reader: {e}"))?
-        {
+    /// Renew now, ahead of a write that relies on still holding the lock.
+    /// `Ok(false)` means it was lost and marks the lease invalid for good.
+    fn confirm(&self) -> std::io::Result<bool> {
+        if !self.is_valid() {
+            return Ok(false);
+        }
+        let held = self.lock.renew()?;
+        if !held {
             self.valid
                 .store(false, std::sync::atomic::Ordering::Release);
-            return Err("reader ownership lost; delivery remains unacknowledged".into());
         }
-        self.reader.store(&ReaderRegister {
-            holder: self.reader.holder.clone(),
-            lease_expires_at: now_ms() + READER_LEASE_MS,
-            read_offset: offset,
-        })?;
-        self.offset = offset;
-        Ok(())
+        Ok(held)
     }
 }
 
-impl Drop for OwnedReader {
+impl Drop for HeldLease {
     fn drop(&mut self) {
         let (mutex, wake) = &*self.stop;
         *mutex
@@ -1085,6 +1074,34 @@ impl Drop for OwnedReader {
     }
 }
 
+struct OwnedReader {
+    reader: ConversationReader,
+    lease: HeldLease,
+    offset: u64,
+}
+
+impl OwnedReader {
+    fn is_valid(&self) -> bool {
+        self.lease.is_valid()
+    }
+
+    fn commit(&mut self, offset: u64) -> Result<(), String> {
+        if !self
+            .lease
+            .confirm()
+            .map_err(|e| format!("renew reader: {e}"))?
+        {
+            return Err("reader ownership lost; delivery remains unacknowledged".into());
+        }
+        self.reader.store(&ReaderRegister {
+            holder: self.reader.holder.clone(),
+            lease_expires_at: now_ms() + READER_LEASE_MS,
+            read_offset: offset,
+        })?;
+        self.offset = offset;
+        Ok(())
+    }
+}
 /// A pending delivery. Only acknowledge after the consumer durably records its
 /// successful turn; filtering or enqueueing alone does not consume the batch.
 pub struct UnreadBatch {
@@ -1133,6 +1150,129 @@ impl Mailbox {
             holder: instance_id(),
         }
     }
+
+    /// Claim this agent's one receiver seat, `agents/<self>/receiver.lock`.
+    ///
+    /// `None` while another instance of the same agent holds it. Without this
+    /// seat, two instances of one agent each claim whichever conversations they
+    /// reach first, and one agent's messages end up answered by two sessions.
+    fn claim_receiver(&self) -> Result<Option<HeldLease>, String> {
+        let path = format!(
+            "{}/{}/receiver.lock",
+            self.convention.agents_dir(),
+            self.self_id
+        );
+        HeldLease::try_acquire(&self.backend, &path).map_err(|e| {
+            format!(
+                "claim the receiver seat for {} at {path}: {e}",
+                self.self_id
+            )
+        })
+    }
+}
+
+/// What a receiver in this process is doing for its agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverState {
+    /// Another instance of the agent holds its receiver seat; this one waits to
+    /// take over.
+    Standby,
+    /// This instance holds the agent's receiver seat and tails its
+    /// conversations.
+    Receiving,
+}
+
+impl ReceiverState {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standby => "standby",
+            Self::Receiving => "receiving",
+        }
+    }
+}
+
+/// Where a session's peers are and whether this process receives for it: what
+/// `/status` and an ACP client are told.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PeerStatus {
+    /// The agent name the session answers to.
+    pub agent: String,
+    /// `"node"` or `"disk"`; `None` when attaching failed.
+    pub namespace: Option<&'static str>,
+    /// The node's `host:port`, when attached to one.
+    pub endpoint: Option<String>,
+    /// `"receiving"`, `"standby"`, or `"none"` when this process runs no
+    /// receiver for the agent.
+    pub receiver: &'static str,
+    /// Why attaching failed, when it did.
+    pub error: Option<String>,
+}
+
+/// Receivers running in this process: per agent name, how many are standing
+/// by and how many are receiving.
+static RECEIVER_STATES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (usize, usize)>>,
+> = std::sync::OnceLock::new();
+
+fn receiver_states(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, (usize, usize)>> {
+    RECEIVER_STATES
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What this process does to receive as `agent`: `None` when it runs no
+/// receiver for that agent. Receiving outranks standby when it runs several.
+#[must_use]
+pub fn receiver_state(agent: &str) -> Option<ReceiverState> {
+    match receiver_states().get(agent) {
+        Some((_, receiving)) if *receiving > 0 => Some(ReceiverState::Receiving),
+        Some((standby, _)) if *standby > 0 => Some(ReceiverState::Standby),
+        _ => None,
+    }
+}
+
+/// One receiver's entry in [`receiver_state`], withdrawn when it stops.
+struct ReceiverStateEntry {
+    agent: String,
+    state: Option<ReceiverState>,
+}
+
+impl ReceiverStateEntry {
+    fn set(&mut self, state: ReceiverState) {
+        if self.state == Some(state) {
+            return;
+        }
+        let mut states = receiver_states();
+        let counts = states.entry(self.agent.clone()).or_default();
+        match self.state.replace(state) {
+            Some(ReceiverState::Standby) => counts.0 -= 1,
+            Some(ReceiverState::Receiving) => counts.1 -= 1,
+            None => {}
+        }
+        match state {
+            ReceiverState::Standby => counts.0 += 1,
+            ReceiverState::Receiving => counts.1 += 1,
+        }
+    }
+}
+
+impl Drop for ReceiverStateEntry {
+    fn drop(&mut self) {
+        let mut states = receiver_states();
+        if let Some(counts) = states.get_mut(&self.agent) {
+            match self.state {
+                Some(ReceiverState::Standby) => counts.0 -= 1,
+                Some(ReceiverState::Receiving) => counts.1 -= 1,
+                None => {}
+            }
+            if *counts == (0, 0) {
+                states.remove(&self.agent);
+            }
+        }
+    }
 }
 
 /// Spawn the background receiver: one parked tail per conversation, each
@@ -1171,6 +1311,14 @@ impl Mailbox {
 ///
 /// `sink` is shared by every tail, so it must be `Sync`: it is one consumer
 /// receiving from all conversations, not one per peer.
+///
+/// An agent has one receiver at a time, wherever it runs. The receiver tails
+/// nothing until it holds the agent's receiver seat ([`Mailbox::claim_receiver`]);
+/// until then it stands by and retries, so a second instance of the agent takes
+/// over when the first stops. Each conversation's reader seat still guards that
+/// conversation's read position, so a tail finishing a delivery while the agent
+/// seat changes hands cannot be read twice. [`receiver_state`] reports which of
+/// the two this process is doing.
 pub fn spawn_inbox_poller(
     mailbox: Arc<Mailbox>,
     block_ms: u64,
@@ -1188,40 +1336,77 @@ pub fn spawn_inbox_poller(
             if let Err(e) = mailbox.ensure_presence() {
                 eprintln!("[{label}] announcing this agent failed: {e}");
             }
-            let mut tailing: std::collections::HashMap<String, std::thread::JoinHandle<()>> =
-                std::collections::HashMap::new();
+            let mut state = ReceiverStateEntry {
+                agent: mailbox.self_id().to_string(),
+                state: None,
+            };
             while !abort.is_aborted() {
-                match mailbox.list_conversations() {
-                    Ok(peers) => {
-                        for peer in peers {
-                            if tailing.contains_key(&peer) {
-                                continue;
-                            }
-                            let tail = spawn_conversation_tail(
-                                Arc::clone(&mailbox),
-                                peer.clone(),
-                                block_ms,
-                                label,
-                                abort.clone(),
-                                Arc::clone(&sink),
-                            );
-                            tailing.insert(peer, tail);
-                        }
+                state.set(ReceiverState::Standby);
+                let seat = match mailbox.claim_receiver() {
+                    Ok(Some(seat)) => seat,
+                    Ok(None) => {
+                        sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
+                        continue;
                     }
-                    Err(e) => eprintln!("[{label}] listing conversations failed: {e}"),
-                }
-                sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
-            }
-            // Joining is what makes the returned handle mean "the receiver has
-            // stopped". Without it the caller's join returns while N tails are
-            // still delivering into a sink it believes is finished with.
-            for (_, tail) in tailing {
-                let _ = tail.join();
+                    Err(e) => {
+                        eprintln!("[{label}] {e}");
+                        sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
+                        continue;
+                    }
+                };
+                state.set(ReceiverState::Receiving);
+                receive_while_seated(&mailbox, &seat, block_ms, label, &abort, &sink);
             }
         })
         .expect("spawn inbox receiver thread")
 }
 
+/// Discover and tail this agent's conversations for as long as `seat` holds.
+///
+/// Returns once the receiver is aborted or the seat is lost, after every tail
+/// it started has stopped: a tail outliving its seat would keep delivering for
+/// an agent this instance no longer receives for.
+fn receive_while_seated(
+    mailbox: &Arc<Mailbox>,
+    seat: &HeldLease,
+    block_ms: u64,
+    label: &'static str,
+    abort: &crate::HookAbortSignal,
+    sink: &Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
+) {
+    let tails_stop = crate::HookAbortSignal::new();
+    let mut tailing: std::collections::HashMap<String, std::thread::JoinHandle<()>> =
+        std::collections::HashMap::new();
+    while !abort.is_aborted() && seat.is_valid() {
+        match mailbox.list_conversations() {
+            Ok(peers) => {
+                for peer in peers {
+                    if tailing.contains_key(&peer) {
+                        continue;
+                    }
+                    let tail = spawn_conversation_tail(
+                        Arc::clone(mailbox),
+                        peer.clone(),
+                        block_ms,
+                        label,
+                        tails_stop.clone(),
+                        Arc::clone(sink),
+                    );
+                    tailing.insert(peer, tail);
+                }
+            }
+            Err(e) => eprintln!("[{label}] listing conversations failed: {e}"),
+        }
+        sleep_unless_aborted(abort, CONVERSATION_DISCOVERY_MS);
+    }
+    // Joining is what makes the receiver's handle mean "the receiver has
+    // stopped". Without it the caller's join returns while N tails are still
+    // delivering into a sink it believes is finished with.
+    tails_stop.abort();
+    for (_, tail) in tailing {
+        let _ = tail.join();
+    }
+}
 /// One conversation's tail: hold the reader seat, park on the transcript,
 /// deliver, commit.
 fn spawn_conversation_tail(
@@ -1298,7 +1483,7 @@ pub fn spawn_local_poller(
 // ---------------------------------------------------------------------------
 
 thread_local! {
-    static SCOPED_DIRECTORY: std::cell::RefCell<Option<Arc<crate::directory::Directory>>> =
+    static SCOPED_MAILBOX: std::cell::RefCell<Option<Arc<Mailbox>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1327,17 +1512,14 @@ thread_local! {
 /// changed, so two tests in one binary needing different conventions would be in
 /// each other's way. A test gives its executor a mailbox like the host does.
 pub struct MailboxScope {
-    previous: Option<Arc<crate::directory::Directory>>,
+    previous: Option<Arc<Mailbox>>,
 }
 
 impl MailboxScope {
-    /// Enter `directory` as this thread's addressing set until the guard drops.
-    ///
-    /// One member is the standalone / nexus-only case; several is a session
-    /// attached to more than one namespace at once.
+    /// Enter `mailbox` as this thread's peer namespace until the guard drops.
     #[must_use]
-    pub fn enter(directory: Arc<crate::directory::Directory>) -> Self {
-        let previous = SCOPED_DIRECTORY.with(|cell| cell.borrow_mut().replace(directory));
+    pub fn enter(mailbox: Arc<Mailbox>) -> Self {
+        let previous = SCOPED_MAILBOX.with(|cell| cell.borrow_mut().replace(mailbox));
         Self { previous }
     }
 }
@@ -1345,64 +1527,35 @@ impl MailboxScope {
 impl Drop for MailboxScope {
     fn drop(&mut self) {
         let previous = self.previous.take();
-        SCOPED_DIRECTORY.with(|cell| {
+        SCOPED_MAILBOX.with(|cell| {
             *cell.borrow_mut() = previous;
         });
     }
 }
 
-/// The mailbox to send through: the one this thread is scoped onto, else
-/// workspace-local JSONL.
+/// The mailbox to send through and enumerate: the session's peer namespace
+/// this thread is scoped onto, else workspace-local JSONL.
 ///
 /// Two levels, and the second is the contract rather than a fallback: a session
-/// that has a mailbox hands it to its dispatcher, which scopes the thread running
-/// the tool; a plain `scode` with no nexus configured has always delivered to
-/// `.sudocode-inbox/` in the workspace, and still does — through this same call,
-/// resolved one level down. Being one code path is what stops the two drifting.
+/// hands its peer mailbox to its dispatcher, which scopes the thread running the
+/// tool; a caller with no session scope (a sub-agent, a test) delivers to
+/// `.sudocode-inbox/` in its workspace through this same call. Being one code
+/// path is what stops the two drifting.
 ///
-/// `self_id` is empty on the ambient fallback deliberately. It serves two
-/// purposes on a `Mailbox` — filling an envelope's `from`, and filtering your own
-/// writes out of a poll — and neither applies: `send` always supplies `from`, and
-/// this handle is never polled. A receiver builds its own with its real identity.
+/// The fallback's identity is derived rather than left empty: a conversation is
+/// addressed by its PAIR, so a nameless side has no conversation to be in and
+/// the chat-list entry would come out as `…/conversations/` with no leaf.
+/// `local_agent_name` is the derivation the host uses for its own scoped
+/// mailbox, so the two agree instead of nearly agreeing.
 #[must_use]
 pub fn sending_mailbox() -> Arc<Mailbox> {
-    // The primary member of the thread's directory, or the ambient fallback.
-    // `send`'s unqualified / local-pid paths and every caller that needs one
-    // mailbox (its `self_id`, its convention) use this; cross-namespace
-    // discovery and routing use `scoped_directory()` instead.
-    scoped_directory().primary_mailbox()
-}
-
-/// The thread's addressing set: every namespace this session is attached to.
-///
-/// One member in the standalone / nexus-only case, several when a session is
-/// attached to more than one at once. The ambient fallback (no scope installed)
-/// is a single workspace-local member, so a caller that never set a directory —
-/// a sub-agent, a test — still gets a valid one-namespace answer.
-#[must_use]
-pub fn scoped_directory() -> Arc<crate::directory::Directory> {
-    if let Some(directory) = SCOPED_DIRECTORY.with(|cell| cell.borrow().clone()) {
-        return directory;
+    if let Some(mailbox) = SCOPED_MAILBOX.with(|cell| cell.borrow().clone()) {
+        return mailbox;
     }
-    // Ambient fallback with no scoped mailbox: workspace-rooted, so a
-    // coordinator/sub-agent send stays per-workspace (a sub-agent belongs to its
-    // parent scode; different scodes must not cross-talk). The standalone
-    // same-machine pair uses a scoped mailbox rooted at `local_pair_root()`,
-    // installed by the host — this fallback is not that path.
-    //
-    // The identity is DERIVED rather than left empty. It used to be empty, on
-    // the reasoning that a real identity rides the scoped mailbox and this one
-    // only needed to address a recipient. A conversation is addressed by its
-    // PAIR, so a nameless side has no conversation to be in: the id degenerates
-    // and the chat-list entry comes out as `…/conversations/` with no leaf.
-    // `local_agent_name` is the same derivation the host uses when it builds
-    // the scoped mailbox, so the two agree instead of nearly agreeing.
     let root = crate::current_workspace_root_or_default();
     let self_id = local_agent_name(None, &root);
-    let mailbox = Arc::new(Mailbox::workspace_local(&root, self_id));
-    Arc::new(crate::directory::Directory::single("local", mailbox))
+    Arc::new(Mailbox::workspace_local(&root, self_id))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

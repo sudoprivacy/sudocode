@@ -76,10 +76,93 @@ This runner is a funded manual acceptance test and is excluded from default CI.
 
 ## Diagnose a resumed history
 
+### Recover a real interrupted tool turn
+
+This journey creates fresh data and needs no personal session fixture:
+
+```powershell
+python e2e/thinking/run.py C:/path/to/scode.exe --model claude-opus-4-8 --preserve-thinking --thinking-display summarized --effort high --check-context --crash-after-read --artifacts C:/path/to/artifacts
+```
+
+The model actually reads an old-task file. The recording proxy pauses its next
+request after the tool result is durable, without forwarding that final-answer
+request upstream. The runner forcefully stops only its own CLI process, resumes
+the session with a new file task, checks the exact fresh answer, exits normally,
+makes the new file unavailable, and restarts again to check persisted recall.
+It also verifies the old signed history, system, tools, thinking, effort and
+routing identity before funding the new task's first request. The first new
+turn must close the unanswered tool turn. Four real inference requests are
+expected; no tool output is fabricated. Existing history and compaction flags
+cannot be combined with this fresh crash fixture.
+
+The pre-crash response supplies the signed thinking being tested: adaptive
+thinking may skip a later simple Read. The native Opus 4.8 journey passed with
+four HTTP 200 responses, exact answers, the original signature after both
+restarts, and cache reads on all three later requests. The executable preceding
+the boundary fix failed after its first real Read, before the proxy funded the
+new task. A cheaper Sonnet 4.6 run also passed under the runner's explicit
+adaptive profile; it does not certify Sonnet's native CLI thinking defaults.
+
+Windows crash simulation sends one terminating signal to the runner's owned
+CLI process and waits for observed exit before reopening the durable session.
+
+### Replay a private history
+
 `--history-fixture <session.jsonl>` copies saved message rows into the isolated
 session. The original file stays unchanged and its SHA-256 is recorded and
 checked. `--history-messages 8` limits the copy to the first eight messages.
 No personal conversation fixture is committed to this repository.
+
+### Unanswered turns and old-task contamination
+
+When a saved history ends with a user prompt or a completed tool result, the
+next user request must start a new turn. CC 2.1.301's actual resume request
+inserts an assistant `No response requested.` sentinel in this case. Its local
+`src/utils/conversationRecovery.ts` implements the same rule. The
+[Messages API reference](https://platform.claude.com/docs/en/api/typescript/messages/create)
+explains that consecutive user messages are combined into a single turn.
+
+An Opus 4.8 control kept the same 23 historical messages, tools, system prompt,
+adaptive thinking, effort and route. Without the sentinel, two requests added
+old profile/build claims after the correct file answer. Adding only the sentinel
+made both intervening requests return exactly the requested answer. Native CC
+also completed the imported-history Read journey correctly. Replacing static
+agent guidance or changing high to xhigh alone did not fix the old-task prose.
+These controls locate a continuation defect; they do not establish the first
+historical `course` token's origin. All four sentinel controls produced zero
+new standalone labels.
+
+The shared runtime appends the sentinel before a new external turn when the
+previous turn is unanswered. It preserves existing history, including tool
+results and signed thinking, and leaves in-flight tool continuations alone.
+The portable PTY regression
+`resumed_unanswered_turns_end_before_new_requests_without_rewriting_history`
+resumes a tool tail in both renderers, starts and continues a new task, exits,
+resumes again, and verifies the exact old history and stable wire prefix. It
+also covers a plain unanswered user prompt and a completed turn that needs no
+sentinel. It runs in the ordinary workspace CI suite.
+
+The shared CLI replay formatter omits this internal marker, as CC's
+`AssistantTextMessage` does. Its model/usage provenance distinguishes it from
+model output; the durable record and API message remain present. The PTY
+journey checks the restored task text on screen in both renderers while the
+internal marker stays absent from scrollback.
+
+The fixed executable passed this funded Read/answer/restart workflow with the
+same old history on Opus 4.8, both through a controlled route and through normal
+gateway routing. Both runs made three successful API requests, replayed signed
+thinking, returned exact answers, and generated no standalone labels or old-task
+prose. All four later requests had positive cache reads. The previous messages
+remained an exact prefix after removing cache markers; system, tools, thinking,
+effort and routing identity stayed unchanged. The new regression fails against
+the pre-fix executable and passes all four cases against the fixed executable.
+
+A separate 117-message history with 164 old standalone labels still produced
+new `course` text when the new request was only `continue`: both controls without
+the sentinel and one of two controls with it reproduced the label. These were
+raw provider response captures; none of the proposed tools were executed. The
+sentinel therefore fixes the demonstrated new-task contamination without
+establishing that a heavily polluted history can safely continue unchanged.
 
 The copied history redacts API keys from every proxy profile in the selected
 config, including inactive profiles. Startup records the replacement count.

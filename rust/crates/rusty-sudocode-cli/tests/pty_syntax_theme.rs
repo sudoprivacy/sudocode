@@ -41,6 +41,12 @@ fn showcase(light: bool, truecolor: bool, no_color: bool) {
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
             ("COLORFGBG", if light { "0;15" } else { "15;0" }),
             ("TERM", "xterm-256color"),
+            // The captured palette includes visible link destinations. Pin
+            // fallback presentation instead of inheriting the parent's host.
+            ("TERM_PROGRAM", "unknown"),
+            ("WT_SESSION", ""),
+            ("VTE_VERSION", ""),
+            ("KONSOLE_VERSION", ""),
             ("COLORTERM", if truecolor { "truecolor" } else { "" }),
             ("NO_COLOR", if no_color { "1" } else { "" }),
         ],

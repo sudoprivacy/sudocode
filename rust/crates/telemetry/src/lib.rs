@@ -10,6 +10,11 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+mod response_capture;
+pub use response_capture::{
+    ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder,
+};
+
 const SUDOCLAW_LOG_ROTATE_AFTER_BYTES: u64 = 10 * 1024 * 1024; // 10MB
 const SUDOCLAW_LOG_MAX_ROTATED_FILES: usize = 3;
 
@@ -653,6 +658,7 @@ pub struct SessionTracer {
     session_id: String,
     sequence: Arc<AtomicU64>,
     sink: Arc<dyn TelemetrySink>,
+    response_archive: Option<Arc<dyn ResponseArchive>>,
 }
 
 impl Debug for SessionTracer {
@@ -670,12 +676,46 @@ impl SessionTracer {
             session_id: session_id.into(),
             sequence: Arc::new(AtomicU64::new(0)),
             sink,
+            response_archive: None,
         }
     }
 
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    #[must_use]
+    pub fn with_response_archive(mut self, archive: Arc<dyn ResponseArchive>) -> Self {
+        self.response_archive = Some(archive);
+        self
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn has_response_archive(&self) -> bool {
+        self.response_archive.is_some()
+    }
+
+    pub fn begin_response_capture(
+        &self,
+        metadata: ResponseCaptureMetadata,
+    ) -> Option<Box<dyn ResponseRecorder>> {
+        let archive = self.response_archive.as_ref()?;
+        let request_id = metadata.request_id.clone();
+        match archive.begin(metadata) {
+            Ok(recorder) => Some(recorder),
+            Err(error) => {
+                self.record(
+                    "response_capture_unavailable",
+                    serde_json::Map::from_iter([
+                        ("request_id".into(), Value::String(request_id)),
+                        ("reason".into(), Value::String(error.to_string())),
+                    ]),
+                );
+                None
+            }
+        }
     }
 
     pub fn record(&self, name: impl Into<String>, attributes: Map<String, Value>) {

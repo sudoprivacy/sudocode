@@ -796,10 +796,14 @@ fn ensure_a2a_receiver(
 ) {
     let mailbox = match &registry.hosted_factory {
         Some(factory) => factory.mailbox(),
-        None => engine_host::nexus_a2a::session()
-            .ok()
-            .flatten()
-            .map(|session| session.mailbox()),
+        // The session build already attached this session's agent, so this
+        // reads the cached decision rather than dialling again.
+        None => registry
+            .lock_sessions()
+            .get(session_id)
+            .map(|entry| entry.engine.agent_name())
+            .and_then(|agent| engine_host::peer::node(&agent).ok().flatten())
+            .map(|node| node.mailbox()),
     };
     let Some(mailbox) = mailbox else {
         return;
@@ -992,6 +996,13 @@ fn session_response_meta(
             sudocode.insert(
                 "workspace".into(),
                 json!({ "fileRoot": file_root, "shellRoot": shell_root }),
+            );
+        }
+        // A hosted agent's mailbox is injected by its daemon, not attached.
+        if registry.hosted_factory.is_none() {
+            sudocode.insert(
+                "peer".into(),
+                json!(engine_host::peer::status(&engine.agent_name())),
             );
         }
     }

@@ -83,6 +83,7 @@
 //! the engine side.
 
 mod attachment;
+pub mod cache_advisor;
 pub mod cache_metrics;
 pub mod cache_report;
 mod engine_client;

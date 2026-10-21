@@ -3,7 +3,7 @@
 //! Brand accents remain amber. Transcript syntax and inline-code colors come
 //! from the same bundled Catppuccin assets as Codex, without local overrides.
 
-use crossterm::style::Color;
+use crossterm::style::{Color, ContentStyle};
 
 use super::{ansi_fg, code_theme, terminal_palette, ColorSupport};
 
@@ -140,6 +140,25 @@ impl ColorTheme {
         }
     }
 
+    /// A neutral selection surface with its own readable foreground. Ordinary
+    /// text stays on the terminal's default surface; limited-color terminals
+    /// keep the textual selector instead of assuming a background palette.
+    pub fn selection_style(&self, support: ColorSupport) -> ContentStyle {
+        if matches!(support, ColorSupport::TrueColor | ColorSupport::Ansi256) {
+            ContentStyle {
+                foreground_color: Some(Color::AnsiValue(if self.light_background {
+                    234
+                } else {
+                    255
+                })),
+                background_color: Some(Color::AnsiValue(self.code_bg)),
+                ..ContentStyle::default()
+            }
+        } else {
+            ContentStyle::default()
+        }
+    }
+
     /// Diff markers and fills are shared by Edit previews and shell patches.
     pub(super) fn diff_sign_color(&self, sign: char, support: ColorSupport) -> Option<Color> {
         match (sign, support) {
@@ -196,6 +215,11 @@ impl ColorTheme {
             self.soft_green(support)
         };
         ansi_fg(support.color(color))
+    }
+
+    /// Brand animation uses the existing logo role, independently of status.
+    pub fn logo_fg(&self) -> String {
+        ansi_fg(ColorSupport::detect().color(self.logo))
     }
 
     /// Inline-code and file-link foreground from the selected syntax asset.

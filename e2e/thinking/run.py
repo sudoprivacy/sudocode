@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import select
+import signal
 import shutil
 import tempfile
 import threading
@@ -70,6 +71,11 @@ parser.add_argument(
     help="Require one compaction before Read",
 )
 parser.add_argument(
+    "--crash-after-read",
+    action="store_true",
+    help="Crash after a real Read result, then resume with a different task",
+)
+parser.add_argument(
     "--require-replay-label",
     choices=("course", "court", "card"),
     help="Require this historical label before any API message request",
@@ -90,6 +96,8 @@ parser.add_argument(
     help="Keep request bodies, SSE and screens in a fresh child directory",
 )
 args = parser.parse_args()
+if args.crash_after_read and (args.history_fixture or args.expect_compaction):
+    parser.error("--crash-after-read creates its own fresh history")
 if os.name != "nt":
     parser.error("this acceptance runner requires Windows ConPTY")
 if not args.binary.is_file():
@@ -141,7 +149,7 @@ if history_bytes is not None:
     if not history_rows:
         parser.error("history fixture must contain saved message rows")
     history_rows = redact_history(history_rows)
-maintenance_requests = int(args.expect_compaction)
+setup_requests = int(args.expect_compaction) + int(args.crash_after_read)
 code = "LIVE-" + secrets.token_hex(5)
 fixture_root = Path(os.environ["PUBLIC"]).resolve()
 temporary = tempfile.TemporaryDirectory(prefix="scode-" + code + "-", dir=fixture_root)
@@ -194,6 +202,21 @@ origin = target.scheme + "://" + target.netloc
 records = []
 errors = []
 lock = threading.Lock()
+seed_result_ready = threading.Event()
+seed_crash_released = threading.Event()
+crash_boundary_checked = False
+
+
+def without_cache_markers(value):
+    if isinstance(value, dict):
+        return {
+            key: without_cache_markers(child)
+            for key, child in value.items()
+            if key != "cache_control"
+        }
+    if isinstance(value, list):
+        return [without_cache_markers(child) for child in value]
+    return value
 
 
 def parse_sse(payload):
@@ -233,6 +256,44 @@ class Proxy(BaseHTTPRequestHandler):
             return
         is_message = method == "POST" and self.path.split("?")[0].endswith("/messages")
         if is_message:
+            if args.crash_after_read and len(records) == 1:
+                if not seed_crash_released.is_set():
+                    (workspace / "unfinished-request-client.json").write_bytes(raw)
+                    seed_result_ready.set()
+                    # No paid final-answer request: the real tool result is
+                    # already persisted before the CLI starts this HTTP call.
+                    seed_crash_released.wait(90)
+                    self.close_connection = True
+                    return
+                global crash_boundary_checked
+                previous = json.loads(
+                    (workspace / "unfinished-request-client.json").read_bytes()
+                )
+                current = json.loads(raw)
+                old = without_cache_markers(previous["messages"])
+                new = without_cache_markers(current["messages"])
+                index = len(old)
+                is_preserved = new[:index] == old and all(
+                    without_cache_markers(previous.get(key))
+                    == without_cache_markers(current.get(key))
+                    for key in (
+                        "model", "system", "tools", "thinking", "output_config", "metadata"
+                    )
+                )
+                is_closed = (
+                    len(new) > index + 1
+                    and new[index]["role"] == "assistant"
+                    and new[index]["content"]
+                    == [{"type": "text", "text": "No response requested."}]
+                    and new[index + 1]["role"] == "user"
+                )
+                if not (is_preserved and is_closed):
+                    errors.append(
+                        "crashed request context changed or new task has no turn boundary"
+                    )
+                    self.send_error(400, "unanswered turn boundary check failed")
+                    return
+                crash_boundary_checked = True
             with lock:
                 number = len(records)
                 assert number < 5, "request budget exhausted"
@@ -481,13 +542,59 @@ def send(text):
 
 def close():
     if proc and proc.isalive():
-        send("/exit")
+        try:
+            send("/exit")
+        except EOFError:
+            pass
         deadline = time.monotonic() + 8
         while proc.isalive() and time.monotonic() < deadline:
             drain()
             time.sleep(0.05)
         if proc.isalive():
-            proc.terminate(force=True)
+            crash_owned_cli()
+
+
+def crash_owned_cli():
+    # On Windows, os.kill with SIGTERM calls TerminateProcess. Send it once:
+    # pywinpty.terminate sends SIGINT then SIGTERM and can reopen an exited PID.
+    try:
+        os.kill(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        deadline = time.monotonic() + 5
+        while proc.isalive() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if proc.isalive():
+            raise
+    deadline = time.monotonic() + 5
+    while proc.isalive() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not proc.isalive(), "owned CLI did not stop after the simulated crash"
+
+
+def crash_after_real_read():
+    legacy = workspace / "old-task.txt"
+    old_code = "LEGACY-" + code
+    legacy.write_text(f"code={old_code}\na=11\nb=23\n", encoding="utf-8")
+    send(
+        f"Read {json.dumps(legacy.as_posix())} with the Read tool. "
+        "Then return LEGACY_DONE <code from file> sum=<a+b>."
+    )
+    wait(seed_result_ready.is_set)
+    pending = json.loads((workspace / "unfinished-request-client.json").read_bytes())
+    assert pending["messages"][-1]["role"] == "user"
+    assert any(
+        block.get("type") == "tool_result" and old_code in json.dumps(block)
+        for block in pending["messages"][-1]["content"]
+    ), "seed request did not contain the actual old file's Read result"
+    (workspace / "before-crash-screen.txt").write_text(visible(), encoding="utf-8")
+    crash_owned_cli()
+    seed_crash_released.set()
+    saved = [json.loads(line) for line in session.read_text("utf-8").splitlines()]
+    messages = [row["message"] for row in saved if row.get("type") == "message"]
+    assert messages[-1]["role"] in ("tool", "user")
+    assert any(block.get("type") == "tool_result" for block in messages[-1]["blocks"])
+    assert old_code in json.dumps(messages[-1]), "real tool result was not durable before the crash"
+    start()
 
 
 try:
@@ -507,7 +614,8 @@ try:
                 "history_messages": len(history_rows),
                 "history_sha256": history_hash,
                 "history_credential_redactions": history_credential_redactions,
-                "expected_compactions": maintenance_requests,
+                "expected_compactions": int(args.expect_compaction),
+                "crash_after_real_read": args.crash_after_read,
                 "upstream_channel": args.upstream_channel,
                 "drop_global_cache_scope": args.drop_global_cache_scope,
                 "live_api_inference": True,
@@ -516,6 +624,8 @@ try:
         flush=True,
     )
     start()
+    if args.crash_after_read:
+        crash_after_real_read()
     if history_rows:
         assert not records, "startup unexpectedly made an API message request"
         replay = visible()
@@ -550,7 +660,10 @@ try:
         resume_expected += f" context={context_nonce}"
     send(read_prompt)
     wait(lambda: f"READ_DONE {code} sum={a + b}" in visible())
-    wait(lambda: len(records) >= 2 and all(r.get("completed") for r in records))
+    wait(
+        lambda: len(records) >= setup_requests + 2
+        and all(r.get("completed") for r in records)
+    )
     (workspace / "read-screen.txt").write_text(visible(), encoding="utf-8")
     if context_nonce:
         original = json.loads((workspace / "request-0-client.json").read_bytes())
@@ -560,11 +673,11 @@ try:
         assert context_nonce not in json.dumps(original["messages"]), (
             "nonce must come from project instructions, not the user prompt"
         )
-        assert len(records) == maintenance_requests + 2, (
+        assert len(records) == setup_requests + 2, (
             "project context check required extra tool or retry requests"
         )
         blocks, _, _ = parse_sse(
-            (workspace / f"response-{maintenance_requests + 1}.sse").read_bytes()
+            (workspace / f"response-{setup_requests + 1}.sse").read_bytes()
         )
         answer = "".join(block.get("text", "") for block in blocks).strip()
         assert answer == read_expected, (
@@ -573,6 +686,10 @@ try:
     close()
     fixture.rename(workspace / "values.unavailable")
     start()
+    if args.crash_after_read:
+        assert "No response requested." not in visible(), (
+            "internal turn boundary leaked into restored scrollback"
+        )
     resume_prompt = (
         "Use the saved sum, subtract 17, and return only RESUME_DONE "
         "<same code> value=<result>. Do not use tools."
@@ -585,10 +702,14 @@ try:
         )
     send(resume_prompt)
     wait(lambda: f"RESUME_DONE {code} value={a + b - 17}" in visible())
-    wait(lambda: len(records) >= 3 and all(r.get("completed") for r in records))
+    wait(
+        lambda: len(records) >= setup_requests + 3
+        and all(r.get("completed") for r in records)
+    )
     (workspace / "resume-screen.txt").write_text(visible(), encoding="utf-8")
     close()
-    assert len(records) == maintenance_requests + 3, "unexpected tool or retry requests"
+    assert len(records) == setup_requests + 3, "unexpected tool or retry requests"
+    assert not args.crash_after_read or crash_boundary_checked
     if args.expect_compaction:
         compact_request = json.loads((workspace / "request-0-client.json").read_bytes())
         assert "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools." in json.dumps(
@@ -605,11 +726,19 @@ try:
             "compaction must return a complete summary"
         )
     first_blocks, _, _ = parse_sse(
-        (workspace / f"response-{maintenance_requests}.sse").read_bytes()
+        (workspace / f"response-{setup_requests}.sse").read_bytes()
     )
+    thinking_source = first_blocks
+    if args.crash_after_read:
+        # This journey exercises the signature generated before the crash.
+        # Adaptive thinking may legitimately skip a later simple Read.
+        thinking_source, _, stopped = parse_sse(
+            (workspace / "response-0.sse").read_bytes()
+        )
+        assert stopped, "seed response did not finish before the crash"
     signed_thinking = [
         b
-        for b in first_blocks
+        for b in thinking_source
         if b["type"] == "thinking"
         and b.get("signature")
         and bool(b.get("thinking")) == (args.thinking_display == "summarized")
@@ -620,7 +749,7 @@ try:
         + " signed thinking block"
     )
     second = json.loads(
-        (workspace / f"request-{maintenance_requests + 1}-client.json").read_bytes()
+        (workspace / f"request-{setup_requests + 1}-client.json").read_bytes()
     )
     results = [
         b
@@ -651,7 +780,7 @@ try:
     )
     assert intact, "signed thinking was dropped or changed before the tool continuation"
     resumed = json.loads(
-        (workspace / f"request-{maintenance_requests + 2}-client.json").read_bytes()
+        (workspace / f"request-{setup_requests + 2}-client.json").read_bytes()
     )
     if context_nonce:
         assert context_nonce in json.dumps(resumed["system"]), (
@@ -678,8 +807,8 @@ try:
         for r in records
     ), "all streams must finish"
     for number, expected in (
-        (maintenance_requests + 1, read_expected),
-        (maintenance_requests + 2, resume_expected),
+        (setup_requests + 1, read_expected),
+        (setup_requests + 2, resume_expected),
     ):
         blocks, _, _ = parse_sse((workspace / f"response-{number}.sse").read_bytes())
         answer = "".join(block.get("text", "") for block in blocks).strip()
@@ -696,6 +825,7 @@ try:
         json.dumps(
             {
                 "passed_workflow": True,
+                "real_crash_boundary_checked": crash_boundary_checked,
                 "signed_thinking_replayed": intact,
                 "thinking_display": args.thinking_display,
                 "empty_signed_thinking_replayed": (
@@ -709,6 +839,7 @@ try:
         flush=True,
     )
 finally:
+    seed_crash_released.set()
     try:
         close()
     finally:

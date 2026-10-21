@@ -58,7 +58,29 @@ pub struct EngineApiClient {
     catalog: Option<runtime::model_discovery::ModelCatalog>,
 }
 
+impl Drop for EngineApiClient {
+    fn drop(&mut self) {
+        // Covers every host, including runtimes taken out of BuiltRuntime.
+        if !api::flush_response_captures(&self.session_id, Duration::from_secs(2)) {
+            if let Some(tracer) = self.session_tracer() {
+                tracer.record("response_capture_shutdown_timeout", serde_json::Map::new());
+            }
+        }
+    }
+}
+
 impl EngineApiClient {
+    #[must_use]
+    pub fn with_response_archive(mut self, archive: Arc<dyn telemetry::ResponseArchive>) -> Self {
+        if let Some(tracer) = self.client.session_tracer().cloned() {
+            self.client = self
+                .client
+                .clone()
+                .with_session_tracer(tracer.with_response_archive(archive));
+        }
+        self
+    }
+
     /// Identity every request from this client carries, built in one place so
     /// the main loop and the subagent client cannot disagree about the routing
     /// key — a conversation split across two keys is split across two upstream
@@ -558,6 +580,21 @@ impl ApiClient for EngineApiClient {
         Some(self.session_id.as_str())
     }
 
+    fn cache_context_boundary(&mut self, segment: u64) {
+        if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
+            if let Some((cache, route, ttl)) = self.client.cache_advisor_context() {
+                cache.set_context_segment(segment);
+                crate::cache_advisor::context_boundary(
+                    &cache.paths().session_dir,
+                    segment,
+                    &self.model,
+                    &route,
+                    ttl,
+                );
+            }
+        }
+    }
+
     async fn stream_final_answer(
         &mut self,
         request: ApiRequest,
@@ -658,6 +695,8 @@ fn runtime_error_from_api(
     let message = user_visible_error(session_id, account, model, error);
     if error.is_context_window_failure() {
         RuntimeError::context_window_blocked(message)
+    } else if error.is_thinking_replay_rejected() {
+        RuntimeError::thinking_replay_rejected(message)
     } else {
         RuntimeError::new(message).retryable(error.is_retryable())
     }

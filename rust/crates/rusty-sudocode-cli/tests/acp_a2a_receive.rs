@@ -26,6 +26,9 @@
 //! `NEXUS_A2A_TEST_CREDENTIAL`). The node stamps `from` from the cert SAN, so
 //! the assertion pins the sender by the name its credential carries.
 
+#[path = "support/node_home.rs"]
+mod node_home;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -107,6 +110,8 @@ struct AcpStdio {
     /// timeout, which is what a test is supposed to report.
     lines: Receiver<String>,
     next_id: u64,
+    /// The node record the child attached through; outlives the child.
+    _node_home: node_home::NodeHome,
 }
 
 impl AcpStdio {
@@ -200,16 +205,22 @@ fn spawn_acp(
     )
     .expect("seed the isolated config home");
 
-    // The receiver dials with its OWN minted credential; its A2A name comes
-    // from the cert, so `agent` here is the name that bundle must carry.
+    // The receiver attaches through a node record in its own home, as `agent`,
+    // with its OWN minted credential: `agent` is the name that bundle carries.
     let receiver_credential = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
         .unwrap_or_else(|_| panic!("set NEXUS_A2A_TEST_RECEIVER_CREDENTIAL=<bundle for {agent}>"));
+    let node_home = node_home::NodeHome::new(
+        "acp-receiver",
+        endpoint,
+        agent,
+        std::path::Path::new(&receiver_credential),
+    );
+    node_home::pin_agent_name(workspace.path(), agent);
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
     cmd.arg("acp")
         .current_dir(workspace.path())
         .env("SUDO_CODE_CONFIG_HOME", config_home.path())
-        .env("NEXUS_A2A_ENDPOINT", endpoint)
-        .env("NEXUS_A2A_CREDENTIAL", receiver_credential)
+        .envs(node_home.env())
         .env("SUDOCODE_INTERRUPT_QUEUE_MODE", "off")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -231,6 +242,7 @@ fn spawn_acp(
         stdin,
         lines,
         next_id: 0,
+        _node_home: node_home,
     }
 }
 

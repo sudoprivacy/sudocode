@@ -7,7 +7,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::TestEnv;
 use serde_json::{json, Value};
@@ -51,6 +51,12 @@ enum ResponseKind {
     ChatSlow,
     ResponsesSlow,
     FiniteHeartbeat,
+    SignedCapture,
+    GeminiCapture,
+    CapturePaced,
+    CaptureBurst,
+    SplicedAttempts,
+    RetryUsageComplete,
 }
 
 impl ResponseKind {
@@ -152,7 +158,9 @@ impl StreamProvider {
                 }
                 let index = count.fetch_add(1, Ordering::SeqCst);
                 let request: Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(request["stream"], true);
+                if !matches!(kind, ResponseKind::GeminiCapture) {
+                    assert_eq!(request["stream"], true);
+                }
                 captured.lock().unwrap().push(request.clone());
                 if liveness_response(&mut socket, kind, index, &stop) {
                     continue;
@@ -172,6 +180,34 @@ impl StreamProvider {
                     response_body(!matches!(kind, ResponseKind::Interrupted), empty)
                 });
                 match kind {
+                    ResponseKind::SplicedAttempts | ResponseKind::RetryUsageComplete => {
+                        let fixture: Value = serde_json::from_str(include_str!(
+                            "../../../test-fixtures/retry_usage_stream.json"
+                        )).unwrap();
+                        let mut events = fixture["events"].as_array().unwrap().clone();
+                        if matches!(kind, ResponseKind::RetryUsageComplete) {
+                            events.remove(0);
+                        } else {
+                            // Partial progress from A must remain visible, but
+                            // must never be silently joined to response B.
+                            events.splice(1..1, [
+                                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"FAILED_ATTEMPT_PARTIAL"}}),
+                                json!({"type":"content_block_stop","index":0}),
+                            ]);
+                        }
+                        body = events.iter().map(|event| format!(
+                            "event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()
+                        )).collect();
+                    }
+                    ResponseKind::GeminiCapture => body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"STREAM_BODY_VERIFIED\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":8}}\n\n".to_string(),
+                    ResponseKind::SignedCapture => body = signed_capture_body(),
+                    ResponseKind::CapturePaced => {
+                        body = padded_capture_body("SSE_LOG_ONLY_PADDING", 512);
+                    }
+                    ResponseKind::CaptureBurst => {
+                        body = padded_capture_body("SSE_BURST_CAPTURE_PADDING", 8192);
+                    }
                     ResponseKind::UsageAtStart => {
                         body = body.replace(
                             "\"input_tokens\":12,\"output_tokens\":0",
@@ -242,6 +278,29 @@ impl StreamProvider {
                     0
                 };
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len() + missing);
+                if matches!(kind, ResponseKind::CapturePaced) {
+                    socket.set_nodelay(true).unwrap();
+                    for bytes in response.as_bytes().chunks(1024) {
+                        if socket.write_all(bytes).is_err() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    continue;
+                }
+                if matches!(kind, ResponseKind::SignedCapture) {
+                    // Split a UTF-8 code point and the terminal frame across
+                    // separate packets; capture must preserve their raw bytes.
+                    let split = response.find("诊断").unwrap() + 1;
+                    let tail = response.find("event: message_stop").unwrap();
+                    let bytes = response.as_bytes();
+                    socket.write_all(&bytes[..split]).unwrap();
+                    thread::sleep(Duration::from_millis(20));
+                    socket.write_all(&bytes[split..tail]).unwrap();
+                    thread::sleep(Duration::from_millis(20));
+                    let _ = socket.write_all(&bytes[tail..]);
+                    continue;
+                }
                 if matches!(kind, ResponseKind::DelayedTerminal) {
                     let split = response.find("event: message_stop").unwrap();
                     socket.write_all(response[..split].as_bytes()).unwrap();
@@ -368,6 +427,449 @@ fn response_body(terminal: bool, empty: bool) -> String {
     body
 }
 
+const CAPTURE_TEXT: &str = "STREAM_BODY_VERIFIED\n\ncourse\n\nI will inspect the profile.";
+
+#[inline]
+fn padded_capture_body(label: &str, repetitions: usize) -> String {
+    let mut body = response_body(true, false);
+    let marker = body.find("event: message_delta").unwrap();
+    let padding = format!(": {}\n\n", label.repeat(56)).repeat(repetitions);
+    body.insert_str(marker, &padding);
+    body
+}
+
+fn signed_capture_body() -> String {
+    let body = response_body(true, false)
+        .replace("\"index\":0", "\"index\":1")
+        .replace(
+            "STREAM_BODY_VERIFIED",
+            "STREAM_BODY_VERIFIED\\n\\ncourse\\n\\nI will inspect the profile.",
+        );
+    let split = body.find("event: content_block_start").unwrap();
+    let mut prefix = body[..split].to_string();
+    prefix.push_str(": diagnostic heartbeat\r\n\r\n");
+    for event in [
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"诊断 reasoning"}}),
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"diagnostic-signature"}}),
+        json!({"type":"content_block_stop","index":0}),
+    ] {
+        write!(
+            &mut prefix,
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap()
+        )
+        .unwrap();
+    }
+    prefix.push_str(&body[split..]);
+    prefix
+}
+
+fn assert_capture_session(path: &std::path::Path, expected: usize) {
+    let session = runtime::Session::load_from_path(path).unwrap();
+    let assistants: Vec<_> = session
+        .messages
+        .iter()
+        .filter(|message| message.role == runtime::MessageRole::Assistant)
+        .collect();
+    assert_eq!(assistants.len(), expected);
+    for message in assistants {
+        assert!(message.blocks.iter().any(|block| matches!(block,
+            runtime::ContentBlock::Text { text } if text == CAPTURE_TEXT)));
+        assert!(message.blocks.iter().any(|block| matches!(block,
+            runtime::ContentBlock::Thinking { thinking, signature }
+            if thinking == "诊断 reasoning" && signature.as_deref() == Some("diagnostic-signature"))));
+    }
+}
+
+fn assert_raw_capture_files(directory: &std::path::Path, expected: usize, log: &std::path::Path) {
+    let sse: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .collect();
+    assert_eq!(sse.len(), expected);
+    let events: Vec<Value> = std::fs::read_to_string(log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for path in sse {
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(&path).unwrap())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(
+            decoded,
+            signed_capture_body().as_bytes(),
+            "retain exact body bytes including heartbeat, UTF-8 and separate signed blocks"
+        );
+        let metadata: Value = serde_json::from_slice(
+            &std::fs::read(path.with_extension("").with_extension("json")).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            metadata["end_reason"].as_str(),
+            Some("http_eof" | "body_reader_dropped")
+        ));
+        assert_eq!(metadata["gzip_complete"], true);
+        assert_eq!(metadata["saved_all_observed_bytes"], true);
+        assert!(events.iter().any(|event| event["event"] == "request_debug"
+            && event["attributes"]["request_id"] == metadata["response"]["request_id"]));
+    }
+}
+
+#[test]
+fn raw_stream_capture_preserves_signed_content_through_resume() {
+    let env = TestEnv::new("raw-stream-resume");
+    if env.is_live() {
+        return;
+    } // Deliberately fragmented protocol fixture.
+    let provider = StreamProvider::new(ResponseKind::SignedCapture);
+    configure_peer(&env, &provider, ResponseKind::SignedCapture);
+    let log = env.workspace_root().join("capture-events.jsonl");
+    let variables = [("SCODE_LOG_PATH", log.to_str().unwrap())];
+    let mut cli = env.spawn_with_env(&["--print", "Report the stream result"], &variables);
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let screen = common::expect_screen(
+        &cli,
+        |screen| screen.contains("STREAM_BODY_VERIFIED"),
+        env.timeout(),
+        "recorded response rendered",
+    );
+    assert!(screen.contains("course"));
+    let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
+    let path = store
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.message_count > 0)
+        .unwrap()
+        .path;
+    assert_capture_session(&path, 1);
+    let session = runtime::Session::load_from_path(&path).unwrap();
+    let directory =
+        runtime::Session::response_captures_dir_for(&path, &session.session_id).unwrap();
+    assert_raw_capture_files(&directory, 1, &log);
+
+    let mut resumed = env.spawn_with_env(&["--resume"], &variables);
+    common::expect_input_line_cleared(&resumed, env.timeout(), "resumed capture prompt");
+    resumed.send("Continue the stream result\r").unwrap();
+    common::expect_screen(
+        &resumed,
+        |_| {
+            runtime::Session::load_from_path(&path).is_ok_and(|session| {
+                session
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == runtime::MessageRole::Assistant)
+                    .count()
+                    == 2
+            })
+        },
+        env.timeout(),
+        "resumed response persisted",
+    );
+    common::expect_input_line_cleared(&resumed, env.timeout(), "resumed response complete");
+    resumed.send("/exit\r").unwrap();
+    assert_eq!(resumed.expect_eof().unwrap(), 0);
+    assert_capture_session(&path, 2);
+    assert_raw_capture_files(&directory, 2, &log);
+    let bodies = provider.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    let assistant = bodies[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap();
+    assert!(assistant["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|block| block["type"] == "thinking" && block["signature"] == "diagnostic-signature"));
+    assert!(assistant["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|block| block["type"] == "text" && block["text"] == CAPTURE_TEXT));
+}
+
+#[test]
+fn raw_stream_capture_can_be_disabled_or_budget_limited() {
+    for configuration in [json!({"enabled":false}), json!({"maxSessionBytes":1})] {
+        let env = TestEnv::new("raw-stream-disabled");
+        if env.is_live() {
+            return;
+        }
+        let provider = StreamProvider::new(ResponseKind::SignedCapture);
+        configure_peer(&env, &provider, ResponseKind::SignedCapture);
+        set_response_recording(&env, configuration);
+        let mut cli = env.spawn(&["--print", "Report the stream result"]);
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+        common::expect_screen(
+            &cli,
+            |screen| screen.contains("STREAM_BODY_VERIFIED"),
+            env.timeout(),
+            "uncaptured response rendered",
+        );
+        let (path, directory) = capture_session_paths(&env);
+        assert_capture_session(&path, 1);
+        assert!(
+            !directory.exists() || std::fs::read_dir(directory).unwrap().next().is_none(),
+            "disabled or exhausted recording must save no body"
+        );
+    }
+}
+
+#[test]
+fn raw_stream_capture_write_failure_preserves_turn() {
+    let env = TestEnv::new("raw-stream-write-failure");
+    if env.is_live() {
+        return;
+    }
+    let provider = StreamProvider::new(ResponseKind::SignedCapture);
+    configure_peer(&env, &provider, ResponseKind::SignedCapture);
+    let mut cli = env.spawn(&[]);
+    common::expect_input_line_cleared(&cli, env.timeout(), "capture failure prompt");
+    let (_, blocked) = capture_session_paths(&env);
+    std::fs::create_dir_all(blocked.parent().unwrap()).unwrap();
+    std::fs::write(&blocked, "preserve-existing-file").unwrap();
+    cli.send("Report the stream result\r").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| screen.contains("STREAM_BODY_VERIFIED"),
+        env.timeout(),
+        "capture failure must preserve real response",
+    );
+    common::expect_input_line_cleared(&cli, env.timeout(), "capture failure turn complete");
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    assert_eq!(
+        std::fs::read_to_string(blocked).unwrap(),
+        "preserve-existing-file"
+    );
+}
+
+fn set_response_recording(env: &TestEnv, recording: Value) {
+    let path = env.config_home().join("settings.json");
+    let mut settings: Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(error) => panic!("read fixture settings: {error}"),
+    };
+    settings["responseRecording"] = recording;
+    std::fs::write(path, settings.to_string()).unwrap();
+}
+
+fn capture_session_paths(env: &TestEnv) -> (std::path::PathBuf, std::path::PathBuf) {
+    let path = runtime::SessionStore::from_cwd(env.workspace_root())
+        .unwrap()
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .path;
+    let session = runtime::Session::load_from_path(&path).unwrap();
+    let directory =
+        runtime::Session::response_captures_dir_for(&path, &session.session_id).unwrap();
+    (path, directory)
+}
+
+#[test]
+fn raw_stream_capture_keeps_streaming_and_resume_responsive() {
+    let mut cases = [
+        ("response-log-perf-off", false, 0),
+        ("response-log-perf-on", true, 0),
+        ("response-log-perf-history", true, 1000),
+    ];
+    let order = std::env::var("SCODE_TEST_RESPONSE_LOG_PERF_ORDER")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    cases.rotate_left(order % 3);
+    if order >= 3 {
+        cases.reverse();
+    }
+    for (label, enabled, old_logs) in cases {
+        let env = TestEnv::new_mock(label);
+        let provider = StreamProvider::new(ResponseKind::CapturePaced);
+        configure_peer(&env, &provider, ResponseKind::CapturePaced);
+        set_response_recording(&env, json!({"enabled":enabled}));
+        let seed = runtime::Session::new().with_workspace_root(env.workspace_root());
+        let session_id = seed.session_id.clone();
+        let path = runtime::SessionStore::from_cwd(env.workspace_root())
+            .unwrap()
+            .create_handle(&seed.session_id)
+            .path;
+        seed.save_to_path(&path).unwrap();
+        let directory =
+            runtime::Session::response_captures_dir_for(&path, &seed.session_id).unwrap();
+        drop(seed);
+        if old_logs > 0 {
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&vec![b'x'; 64 * 1024]).unwrap();
+            let old_body = encoder.finish().unwrap();
+            for index in 0..old_logs {
+                std::fs::write(directory.join(format!("old-{index}.sse.gz")), &old_body).unwrap();
+            }
+        }
+        let started = Instant::now();
+        let mut cli = env.spawn(&["--resume", &session_id]);
+        common::expect_input_line_cleared(&cli, env.timeout(), "resume performance prompt");
+        let ready_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let sent = Instant::now();
+        cli.send("Report the stream result\r").unwrap();
+        common::expect_screen(
+            &cli,
+            |screen| screen.contains("STREAM_BODY_VERIFIED"),
+            env.timeout(),
+            "first streamed text",
+        );
+        let first_text_ms = sent.elapsed().as_secs_f64() * 1000.0;
+        common::expect_screen(
+            &cli,
+            |_| {
+                runtime::Session::load_from_path(&path).is_ok_and(|session| {
+                    session
+                        .messages
+                        .iter()
+                        .any(|message| message.role == runtime::MessageRole::Assistant)
+                })
+            },
+            env.timeout(),
+            "paced response persisted",
+        );
+        common::expect_input_line_cleared(&cli, env.timeout(), "paced response prompt");
+        let response_ms = sent.elapsed().as_secs_f64() * 1000.0;
+        assert!(!common::screen_tail(&cli, 12000).contains("SSE_LOG_ONLY_PADDING"));
+        let ending = Instant::now();
+        cli.send("/exit\r").unwrap();
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+        let exit_ms = ending.elapsed().as_secs_f64() * 1000.0;
+        let bodies: Vec<_> = std::fs::read_dir(&directory)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "gz")
+                    && !path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("old-")
+            })
+            .collect();
+        assert_eq!(bodies.len(), usize::from(enabled));
+        if let Some(body) = bodies.first() {
+            let mut raw = String::new();
+            flate2::read::GzDecoder::new(std::fs::File::open(body).unwrap())
+                .read_to_string(&mut raw)
+                .unwrap();
+            assert!(raw.contains("SSE_LOG_ONLY_PADDING"));
+            assert!(raw.contains("event: message_stop"));
+            let metadata: Value = serde_json::from_slice(
+                &std::fs::read(body.with_extension("").with_extension("json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(metadata["saved_all_observed_bytes"], true);
+        }
+        println!(
+            "RESPONSE_LOG_PERFORMANCE {}",
+            json!({"case":label,"enabled":enabled,"old_logs":old_logs,"ready_ms":ready_ms,"first_text_ms":first_text_ms,"response_ms":response_ms,"exit_ms":exit_ms})
+        );
+    }
+}
+
+#[test]
+fn raw_stream_capture_burst_preserves_output_and_reports_any_missing_evidence() {
+    let env = TestEnv::new_mock("response-log-burst");
+    let provider = StreamProvider::new(ResponseKind::CaptureBurst);
+    configure_peer(&env, &provider, ResponseKind::CaptureBurst);
+    let mut cli = env.spawn(&["--print", "Report the stream result"]);
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    common::expect_screen(
+        &cli,
+        |screen| screen.contains("STREAM_BODY_VERIFIED"),
+        env.timeout(),
+        "burst response rendered",
+    );
+    let (path, directory) = capture_session_paths(&env);
+    let session = runtime::Session::load_from_path(&path).unwrap();
+    assert!(session.messages.iter().flat_map(|m| &m.blocks).any(|block|
+        matches!(block, runtime::ContentBlock::Text { text } if text == "STREAM_BODY_VERIFIED")));
+    let body = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .unwrap();
+    let mut saved = Vec::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(&body).unwrap())
+        .read_to_end(&mut saved)
+        .unwrap();
+    let metadata: Value = serde_json::from_slice(
+        &std::fs::read(body.with_extension("").with_extension("json")).unwrap(),
+    )
+    .unwrap();
+    let expected = padded_capture_body("SSE_BURST_CAPTURE_PADDING", 8192);
+    assert_eq!(
+        saved,
+        &expected.as_bytes()[..saved.len()],
+        "background batches preserve a contiguous wire prefix"
+    );
+    assert_eq!(metadata["gzip_complete"], true);
+    assert_eq!(metadata["observed_bytes"], expected.len());
+    assert_eq!(metadata["saved_bytes"], saved.len());
+    if saved.len() == expected.len() {
+        assert_eq!(metadata["saved_all_observed_bytes"], true);
+        assert!(metadata["capture_error"].is_null());
+    } else {
+        assert_eq!(metadata["saved_all_observed_bytes"], false);
+        assert_eq!(metadata["truncated"], true);
+        assert_eq!(
+            metadata["capture_error"],
+            "response_capture_queue_saturated"
+        );
+    }
+}
+
+#[test]
+fn raw_stream_capture_truncation_preserves_complete_assistant() {
+    let env = TestEnv::new("raw-stream-truncated");
+    if env.is_live() {
+        return;
+    }
+    let provider = StreamProvider::new(ResponseKind::SignedCapture);
+    configure_peer(&env, &provider, ResponseKind::SignedCapture);
+    set_response_recording(&env, json!({"maxResponseBytes":80}));
+    let mut cli = env.spawn(&["--print", "Report the stream result"]);
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let (path, directory) = capture_session_paths(&env);
+    assert_capture_session(&path, 1);
+    let body = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .unwrap();
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(std::fs::File::open(&body).unwrap())
+        .read_to_end(&mut decoded)
+        .unwrap();
+    assert_eq!(decoded, &signed_capture_body().as_bytes()[..80]);
+    let metadata: Value = serde_json::from_slice(
+        &std::fs::read(body.with_extension("").with_extension("json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(metadata["saved_all_observed_bytes"], false);
+    assert_eq!(metadata["gzip_complete"], true);
+    assert_eq!(metadata["saved_bytes"], 80);
+}
+
 fn refusal_body(kind: ResponseKind) -> Option<String> {
     if !kind.is_refused() {
         return None;
@@ -385,16 +887,79 @@ fn refusal_body(kind: ResponseKind) -> Option<String> {
     Some(body)
 }
 
+#[test]
+fn raw_stream_capture_records_each_streaming_protocol() {
+    for (kind, marker) in [
+        (ResponseKind::ChatDoneKeepAlive, "data: [DONE]"),
+        (
+            ResponseKind::ResponsesDoneKeepAlive,
+            "event: response.completed",
+        ),
+        (ResponseKind::GeminiCapture, "\"candidates\""),
+    ] {
+        let env = TestEnv::new("raw-stream-protocols");
+        if env.is_live() {
+            return;
+        }
+        let provider = StreamProvider::new(kind);
+        configure_peer(&env, &provider, kind);
+        let mut cli = env.spawn(&["--print", "Report the stream result"]);
+        assert_eq!(cli.expect_eof().unwrap(), 0);
+        common::expect_screen(
+            &cli,
+            |screen| screen.contains("STREAM_BODY_VERIFIED"),
+            env.timeout(),
+            "actual adapter response",
+        );
+        let (_, directory) = capture_session_paths(&env);
+        let body = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "gz"))
+            .unwrap();
+        let mut raw = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(&body).unwrap())
+            .read_to_string(&mut raw)
+            .unwrap();
+        assert!(
+            raw.contains(marker),
+            "save the real protocol before normalization: {raw}"
+        );
+        assert!(raw.contains("STREAM_BODY_VERIFIED"));
+        let metadata: Value = serde_json::from_slice(
+            &std::fs::read(body.with_extension("").with_extension("json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["gzip_complete"], true);
+        assert_eq!(metadata["saved_all_observed_bytes"], true);
+    }
+}
+
 fn configure_peer(env: &TestEnv, provider: &StreamProvider, kind: ResponseKind) {
     let path = env.config_home().join("sudocode.json");
     let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     config["auth_modes"]["api-key"]["anthropic"]["baseUrl"] = json!(provider.url);
+    if matches!(kind, ResponseKind::GeminiCapture) {
+        config["auth_modes"]["api-key"]["gemini"] =
+            json!({"baseUrl":provider.url,"apiKey":"test-pty-key"});
+        config["models"]["sonnet"] = json!({"alias":"sonnet","providers":{"api-key":{"provider":"gemini","model":"gemini-2.5-flash"}}});
+    }
     if let Some(format) = kind.api_format() {
         config["models"]["sonnet"] = json!({"alias":"sonnet", "providers":{"api-key":{
             "provider":"anthropic", "model":"sonnet", "api":format
         }}});
     }
     std::fs::write(path, config.to_string()).unwrap();
+}
+
+#[test]
+fn spliced_attempts_preserve_partial_progress_without_mixing_cache_usage() {
+    check_response(ResponseKind::SplicedAttempts);
+}
+
+#[test]
+fn successful_start_with_zero_cache_creation_reaches_session_accounting() {
+    check_response(ResponseKind::RetryUsageComplete);
 }
 
 // render takes a closure over screens with different lifetimes.
@@ -458,7 +1023,16 @@ fn check_response(kind: ResponseKind) {
         &cli,
         |screen| {
             if exit == 0 {
-                screen.contains("STREAM_BODY_VERIFIED")
+                screen.contains(
+                    if matches!(
+                        kind,
+                        ResponseKind::SplicedAttempts | ResponseKind::RetryUsageComplete
+                    ) {
+                        "RETRY_USAGE_SUCCESS"
+                    } else {
+                        "STREAM_BODY_VERIFIED"
+                    },
+                )
             } else {
                 common::screen_contains(screen, "runtime_error:")
             }
@@ -466,6 +1040,71 @@ fn check_response(kind: ResponseKind) {
         env.timeout(),
         "complete process output",
     );
+    if matches!(
+        kind,
+        ResponseKind::SplicedAttempts | ResponseKind::RetryUsageComplete
+    ) {
+        assert_eq!(
+            provider.requests.load(Ordering::SeqCst),
+            1,
+            "never replay a stream after partial progress escaped"
+        );
+        let store = runtime::SessionStore::from_cwd(env.workspace_root()).unwrap();
+        let path = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.message_count > 0)
+            .unwrap()
+            .path;
+        let session = runtime::Session::load_from_path(&path).unwrap();
+        let assistant = session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == runtime::MessageRole::Assistant)
+            .unwrap();
+        let usage = assistant.usage.expect("retain the observed response usage");
+        assert_eq!(usage.input_tokens, 2);
+        if matches!(kind, ResponseKind::SplicedAttempts) {
+            assert_ne!(exit, 0, "a spliced stream must fail: {screen}");
+            assert!(
+                common::screen_contains(&screen, "multiple message_start"),
+                "{screen}"
+            );
+            let saved_text: String = assistant
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    runtime::ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                saved_text.lines().next(),
+                Some("FAILED_ATTEMPT_PARTIAL"),
+                "retain A before the runtime's interruption annotation"
+            );
+            assert!(
+                !saved_text.contains("RETRY_USAGE_SUCCESS"),
+                "B must never enter saved history"
+            );
+            assert!(
+                !screen.contains("RETRY_USAGE_SUCCESS"),
+                "never present B as A: {screen}"
+            );
+            assert_eq!(usage.cache_creation_input_tokens, 5235);
+            assert_eq!(usage.cache_read_input_tokens, 124_730);
+            assert_eq!(usage.output_tokens, 0);
+        } else {
+            assert_eq!(exit, 0, "{screen}");
+            assert!(screen.contains("RETRY_USAGE_SUCCESS"), "{screen}");
+            assert_eq!(usage.cache_creation_input_tokens, 0);
+            assert_eq!(usage.cache_read_input_tokens, 129_965);
+            assert_eq!(usage.output_tokens, 1569);
+        }
+        return;
+    }
     if is_missing_model {
         assert_ne!(exit, 0, "missing model must fail: {screen}");
         assert_eq!(

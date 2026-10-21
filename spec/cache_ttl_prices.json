@@ -1,0 +1,13 @@
+{
+  "version": "anthropic-api-2026-10-20",
+  "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching#pricing",
+  "basis": "USD per million cached input tokens; reference API prices, not gateway invoices or subscription quota",
+  "models": {
+    "claude-opus-5-5": {"write_5m": 5.0, "write_1h": 8.0, "read": 0.2},
+    "claude-opus-4-8": {"write_5m": 6.25, "write_1h": 10.0, "read": 0.5},
+    "claude-opus-5": {"write_5m": 6.25, "write_1h": 10.0, "read": 0.5},
+    "claude-sonnet-5-5": {"write_5m": 2.5, "write_1h": 4.0, "read": 0.1},
+    "claude-sonnet-4-6": {"write_5m": 3.75, "write_1h": 6.0, "read": 0.3},
+    "claude-haiku-4-5-20251001": {"write_5m": 1.25, "write_1h": 2.0, "read": 0.1}
+  }
+}

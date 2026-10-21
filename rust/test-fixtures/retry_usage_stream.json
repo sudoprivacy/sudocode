@@ -1,0 +1,13 @@
+{
+  "description": "Synthetic reproduction of two upstream attempts spliced into one HTTP response; contains no production content.",
+  "events": [
+    {"type":"message_start","message":{"id":"msg_attempt_a","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":2,"output_tokens":0,"cache_creation_input_tokens":5235,"cache_read_input_tokens":124730}}},
+    {"type":"message_start","message":{"id":"msg_attempt_b","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":2,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":129965}}},
+    {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}},
+    {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"RETRY_USAGE_SUCCESS"}},
+    {"type":"content_block_stop","index":0},
+    {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1569}},
+    {"type":"message_stop"}
+  ],
+  "successful_attempt_usage": {"input_tokens":2,"output_tokens":1569,"cache_creation_input_tokens":0,"cache_read_input_tokens":129965}
+}

@@ -20,6 +20,7 @@ command-group = { workspace = true, features = ["with-tokio"] }
 chrono-tz = "0.9"
 cron = "0.12"
 futures = "0.3"
+flate2 = "1"
 # Cross-platform CSPRNG. Replaces the historical Unix-only
 # `/dev/urandom` read in oauth::generate_random_token, which broke
 # every PKCE-derived test on Windows with `Os { code: 3, kind:

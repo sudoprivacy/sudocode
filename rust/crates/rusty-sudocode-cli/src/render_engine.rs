@@ -24,6 +24,9 @@ use crate::render::{
     layout_policy::LayoutPolicy, query_terminal_width, MarkdownStreamState, ResponseGlyphState,
     SpinnerRef, TerminalRenderer, DIM, RESET,
 };
+use crate::repl_ui::prose_preview::{
+    PreviewDelta, PreviewPosition, PreviewUpdate, MAX_SOURCE_BYTES,
+};
 use crate::repl_ui::OutputSender;
 
 /// What the caller (the REPL event loop) should do after an event is rendered.
@@ -62,6 +65,8 @@ pub(crate) struct EngineEventRenderer {
     block: Option<OutputBlock>,
     spinner: Option<SpinnerRef>,
     output_writer: Option<OutputSender>,
+    /// Collect one event's history writes for a single history/preview handoff.
+    preview_output: Option<String>,
     /// `true` while inside a thinking block, so the "Reasoning…" spinner cue is
     /// raised once and lowered when real content resumes.
     thinking_active: bool,
@@ -93,6 +98,7 @@ enum OutputBlock {
 
 impl EngineEventRenderer {
     pub(crate) fn new(spinner: Option<SpinnerRef>, output_writer: Option<OutputSender>) -> Self {
+        let is_preview_enabled = output_writer.is_some();
         Self {
             markdown: MarkdownStreamState::default(),
             thinking_pending: String::new(),
@@ -102,6 +108,7 @@ impl EngineEventRenderer {
             block: None,
             spinner,
             output_writer,
+            preview_output: is_preview_enabled.then(String::new),
             thinking_active: false,
             thinking_printed: false,
             tool_inputs: crate::cli::format::ToolInputRegistry::default(),
@@ -121,7 +128,9 @@ impl EngineEventRenderer {
             return;
         }
         self.layout.observe(text);
-        if let Some(writer) = self.output_writer.as_mut() {
+        if let Some(output) = self.preview_output.as_mut() {
+            output.push_str(text);
+        } else if let Some(writer) = self.output_writer.as_mut() {
             let _ = write!(writer, "{text}").and_then(|()| writer.flush());
         } else {
             let _ = crate::render::output::write_stdout(text);
@@ -192,7 +201,10 @@ impl EngineEventRenderer {
         } else {
             // Without an interactive live region, retain a bounded log line.
             let text = crate::render::text_layout::truncate_to_width(&text, query_terminal_width());
-            self.write_block(&text, OutputBlock::Activity);
+            self.write_block(
+                &format!("  {DIM}\u{27f3} {text}{RESET}"),
+                OutputBlock::Activity,
+            );
         }
         self.resume_spinner();
     }
@@ -233,12 +245,12 @@ impl EngineEventRenderer {
                 );
                 self.resume_spinner();
                 if let Some(spinner) = &self.spinner {
-                    spinner.set_retry(*attempt, *max_retries, reason.clone());
+                    spinner.set_retry(*attempt, *max_retries, reason);
                 }
             }
             RetryEvent::Resumed => {
                 if let Some(spinner) = &self.spinner {
-                    spinner.set_thinking(true);
+                    spinner.set_thinking(false);
                 }
             }
         }
@@ -286,6 +298,65 @@ impl EngineEventRenderer {
     }
 
     pub(crate) fn render(&mut self, event: EngineEvent) -> RenderOutcome {
+        if self.preview_output.is_none() {
+            return self.render_event(event);
+        }
+        let delta = match &event {
+            EngineEvent::TextDelta { text } if !text.is_empty() => {
+                Some(PreviewDelta::from_source(text))
+            }
+            _ => None,
+        };
+        // Asynchronous output leaves the provider's Markdown state intact.
+        // Publish its history together with the repositioned mutable preview.
+        let outcome = self.render_event(event);
+        self.publish_preview(delta);
+        outcome
+    }
+
+    fn publish_preview(&mut self, delta: Option<PreviewDelta>) {
+        let output = self.preview_output.as_mut().expect("preview enabled");
+        if output.is_empty() && delta.is_none() {
+            return;
+        }
+        let committed = std::mem::take(output);
+        let is_new_block = self.block != Some(OutputBlock::Assistant);
+        let position = PreviewPosition {
+            response: self.glyph.position(is_new_block),
+            gap: if is_new_block {
+                self.layout.before_block()
+            } else {
+                ""
+            },
+        };
+        let preview = if self.markdown.pending_source().is_empty() {
+            PreviewUpdate::Clear
+        } else if committed.is_empty() {
+            PreviewUpdate::Append {
+                delta: delta.unwrap_or_else(|| PreviewDelta::Text(String::new())),
+                position,
+            }
+        } else if delta.is_none() {
+            PreviewUpdate::Reposition(position)
+        } else {
+            let source = self.markdown.pending_source();
+            let is_frozen = source.len() > MAX_SOURCE_BYTES;
+            PreviewUpdate::Reset {
+                source: if is_frozen {
+                    String::new()
+                } else {
+                    source.to_string()
+                },
+                position,
+                is_frozen,
+            }
+        };
+        if let Some(writer) = &self.output_writer {
+            writer.assistant_update(committed, preview);
+        }
+    }
+
+    fn render_event(&mut self, event: EngineEvent) -> RenderOutcome {
         match event {
             EngineEvent::TextDelta { text } => {
                 self.end_thinking();
@@ -449,8 +520,8 @@ impl EngineEventRenderer {
             }
             EngineEvent::PermissionRequest { id, request } => RenderOutcome::NeedPermission { id, request },
             EngineEvent::QuestionRequest { id, request } => RenderOutcome::NeedQuestion { id, request },
-            // No direct terminal effect: lifecycle/state/telemetry events. The
-            // spinner already tracks progress from the deltas above.
+            // No transcript output: the REPL event bridge projects lifecycle
+            // into live chrome; deltas above update response progress and phase.
             EngineEvent::PermissionDenied { .. }
             | EngineEvent::TurnStarted { .. }
             | EngineEvent::State(_)
@@ -473,17 +544,26 @@ impl EngineEventRenderer {
     }
 }
 
+impl Drop for EngineEventRenderer {
+    fn drop(&mut self) {
+        // Cancellation can drop the consumer before TurnComplete is received.
+        // Preserve the visible partial response and clear it in the same batch.
+        if self.preview_output.is_some() && !self.markdown.pending_source().is_empty() {
+            self.end_thinking();
+            self.flush_markdown();
+            self.write_out(self.layout.before_block());
+            self.publish_preview(None);
+        }
+    }
+}
+
 /// Format a live tool-progress event for the terminal. This is the render half
 /// of the CLI `ToolExecutor`'s old `make_bash_progress_callback` /
 /// `make_mcp_progress_callback`: the executor now reports structured data
 /// (`ToolProgressEvent`) and the ANSI/glyph formatting lives here, above the
 /// seam. External output is text, never terminal cursor or screen control.
 fn format_tool_progress(progress: &ToolProgressEvent) -> String {
-    let summary = |text: &str| {
-        crate::render::styled_text::StyledText::from_ansi(text)
-            .text
-            .replace(['\r', '\n', '\t'], " ")
-    };
+    use crate::render::text_layout::single_line as summary;
     match progress {
         ToolProgressEvent::Bash {
             last_line,
@@ -496,7 +576,7 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
                 format!("{total_bytes} B")
             };
             format!(
-                "  {DIM}\u{27f3} {}  ({total_lines} lines, {bytes_display}){RESET}",
+                "{} ({total_lines} lines, {bytes_display})",
                 summary(last_line)
             )
         }
@@ -513,9 +593,9 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
                 _ => String::new(),
             };
             if let Some(msg) = message {
-                format!("  {DIM}\u{27f3} {}{status}{RESET}", summary(msg))
+                format!("{}{status}", summary(msg))
             } else {
-                format!("  {DIM}\u{27f3} progress: {progress:.0}{status}{RESET}")
+                format!("progress: {progress:.0}{status}")
             }
         }
     }
@@ -531,7 +611,7 @@ fn format_tool_progress(progress: &ToolProgressEvent) -> String {
 ///
 /// ```text
 /// [hook PreToolUse] bash: echo hook-observed
-/// ⠙ 🦀 Thinking... [claude-sonnet-4-6] (0.4s)          ] bash: echo hook-observed
+/// ⠙ 🦀 Working... [claude-sonnet-4-6] (0.4s)           ] bash: echo hook-observed
 /// ```
 ///
 /// Every other event in this renderer already went through `write_out`, which

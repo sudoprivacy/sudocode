@@ -22,21 +22,11 @@ impl CommandGroupBuilder<'_, tokio::process::Command> {
 	///         .expect("ls command failed to start");
 	/// ```
 	pub fn spawn(&mut self) -> std::io::Result<AsyncGroupChild> {
-		#[cfg(tokio_unstable)]
-		{
-			self.command.process_group(0);
-		}
+		use std::os::unix::process::CommandExt;
 
-		#[cfg(not(tokio_unstable))]
-		unsafe {
-			use nix::unistd::{setpgid, Pid};
-			use std::io::Error;
-			self.command.pre_exec(|| {
-				setpgid(Pid::this(), Pid::from_raw(0))
-					.map_err(Error::from)
-					.map(|_| ())
-			});
-		}
+		// Share std's process-group configuration with the synchronous backend.
+		// A pre_exec callback unnecessarily forces the fork/exec fallback.
+		self.command.as_std_mut().process_group(0);
 
 		self.command.spawn().map(AsyncGroupChild::new)
 	}

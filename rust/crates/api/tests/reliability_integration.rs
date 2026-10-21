@@ -3,6 +3,7 @@
 //! 2. transient gateway errors delivered as HTTP 400 were never retried,
 //! 3. non-SSE error responses (HTML pages, bare JSON) were silently dropped.
 
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +14,156 @@ use api::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+
+fn retry_usage_events() -> Vec<serde_json::Value> {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../test-fixtures/retry_usage_stream.json"
+    ))
+    .unwrap();
+    fixture["events"].as_array().unwrap().clone()
+}
+
+fn native_event_body(events: &[serde_json::Value]) -> String {
+    let mut body = String::new();
+    for event in events {
+        write!(
+            body,
+            "event: {}\ndata: {event}\n\n",
+            event["type"].as_str().unwrap()
+        )
+        .unwrap();
+    }
+    body
+}
+
+/// A gateway cannot silently restart an already visible Anthropic message.
+/// Exercise the actual HTTP transport, parser, provider and shared collector.
+#[tokio::test]
+async fn spliced_attempts_are_rejected_before_their_usage_can_be_combined() {
+    let events = retry_usage_events();
+    let trailing_start = native_event_body(&events[1..2]);
+    let bodies = [
+        native_event_body(&events),
+        format!(
+            "{}{}",
+            native_event_body(&events[..1]),
+            trailing_start.trim_end()
+        ),
+        format!(
+            "{}{}",
+            native_event_body(&events[1..]),
+            trailing_start.trim_end()
+        ),
+        format!(
+            "{}{}",
+            native_event_body(&events[..1]),
+            events[1]["message"]
+        ),
+        format!(
+            "{}{}",
+            native_event_body(&events[1..]),
+            events[1]["message"]
+        ),
+    ];
+    for body in bodies {
+        let (addr, hits) =
+            spawn_scripted_server(vec![http_response("200 OK", "text/event-stream", &body)]).await;
+        let client = api::ProviderClient::Anthropic(
+            AnthropicClient::new("test-key").with_base_url(format!("http://{addr}")),
+        );
+        let mut stream = client
+            .stream_message(&sample_request(), None)
+            .await
+            .unwrap();
+        let error = stream
+            .collect_response("claude-opus-5-5")
+            .await
+            .expect_err("two attempts must never become one successful response");
+        assert!(
+            error.to_string().contains("multiple message_start"),
+            "{error}"
+        );
+        assert!(
+            !error.is_retryable(),
+            "never replay a partially visible response"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// A real HTTP failure before any message starts remains safely retryable.
+/// Explicit zero cache creation in the successful start must remain zero.
+#[tokio::test]
+async fn separate_http_retry_keeps_only_the_successful_response_snapshot() {
+    let events = retry_usage_events();
+    let (addr, hits) = spawn_scripted_server(vec![
+        http_response(
+            "502 Bad Gateway",
+            "application/json",
+            r#"{"error":{"type":"api_error","message":"Upstream request failed"}}"#,
+        ),
+        http_response(
+            "200 OK",
+            "text/event-stream",
+            &native_event_body(&events[1..]),
+        ),
+    ])
+    .await;
+    let client = api::ProviderClient::Anthropic(
+        AnthropicClient::new("test-key")
+            .with_base_url(format!("http://{addr}"))
+            .with_retry_policy(2, Duration::from_millis(1), Duration::from_millis(2)),
+    );
+    let mut stream = client
+        .stream_message(&sample_request(), None)
+        .await
+        .unwrap();
+    let response = stream.collect_response("claude-opus-5-5").await.unwrap();
+    assert_eq!(response.usage.input_tokens, 2);
+    assert_eq!(response.usage.output_tokens, 1569);
+    assert_eq!(response.usage.cache_creation_input_tokens, 0);
+    assert_eq!(response.usage.cache_read_input_tokens, 129_965);
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+/// Output deltas are cumulative snapshots, while omitted input fields retain
+/// the first start's input/cache accounting throughout a single message.
+#[tokio::test]
+async fn cumulative_output_deltas_keep_the_single_message_input_snapshot() {
+    let mut events = retry_usage_events();
+    events.remove(1);
+    let terminal = events.len() - 2;
+    for output in [40, 20] {
+        events.insert(
+            terminal,
+            serde_json::json!({
+                "type":"message_delta", "delta":{}, "usage":{"output_tokens":output}
+            }),
+        );
+    }
+    let terminal = events.len() - 2;
+    events[terminal]["usage"]["output_tokens"] = serde_json::json!(60);
+    events.push(serde_json::json!({"type":"message_stop"}));
+    let (addr, hits) = spawn_scripted_server(vec![http_response(
+        "200 OK",
+        "text/event-stream",
+        &native_event_body(&events),
+    )])
+    .await;
+    let client = api::ProviderClient::Anthropic(
+        AnthropicClient::new("test-key").with_base_url(format!("http://{addr}")),
+    );
+    let mut stream = client
+        .stream_message(&sample_request(), None)
+        .await
+        .unwrap();
+    let response = stream.collect_response("claude-opus-5-5").await.unwrap();
+    assert_eq!(response.usage.input_tokens, 2);
+    assert_eq!(response.usage.output_tokens, 60);
+    assert_eq!(response.usage.cache_creation_input_tokens, 5235);
+    assert_eq!(response.usage.cache_read_input_tokens, 124_730);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
 
 /// Read an entire HTTP request (headers + content-length body) so the client
 /// never sees the connection close mid-write (which would surface as a

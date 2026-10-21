@@ -2,14 +2,31 @@ mod adapter;
 
 pub(super) use adapter::{ui_color, AnsiText, RichText};
 
-#[cfg(test)]
 use crate::render::styled_text::StyledText;
 #[cfg(test)]
 use adapter::contents;
 #[cfg(test)]
 use crossterm::style::{Attribute, Color as TerminalColor, ContentStyle};
-#[cfg(test)]
 use iocraft::prelude::*;
+
+/// Paint allocated text only when it has rows. An overflow-hidden, zero-height
+/// View still updates, measures and draws its children in iocraft, so clipping
+/// empty slots is not a substitute for leaving their text subtree unmounted.
+/// Explicit slot keys keep adjacent stateful widgets independent of visibility.
+pub(super) fn row_text(
+    key: &'static str,
+    content: std::sync::Arc<StyledText>,
+    rows: usize,
+) -> Option<Element<'static, View>> {
+    (rows > 0).then(|| {
+        element! {
+            View(key, height: u32::try_from(rows).expect("allocated rows fit terminal geometry"),
+                flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                RichText(content)
+            }
+        }
+    })
+}
 
 #[cfg(test)]
 mod tests {

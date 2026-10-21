@@ -480,6 +480,27 @@ impl ApiError {
             _ => false,
         }
     }
+
+    /// Only explicit pre-stream signature failures permit discarding thinking.
+    /// `PartialStream` deliberately does not recurse: replay could repeat effects.
+    #[must_use]
+    pub fn is_thinking_replay_rejected(&self) -> bool {
+        match self {
+            Self::Api {
+                status, message, ..
+            } if status.as_u16() == 400 => {
+                let text = message.as_deref().unwrap_or_default().to_ascii_lowercase();
+                let normalized = text.replace(['`', '\'', '"'], "");
+                (normalized.contains("invalid signature") && normalized.contains("thinking"))
+                    || (normalized.contains("invalid data")
+                        && normalized.contains("redacted_thinking"))
+                    || (normalized.contains("thinking.signature")
+                        && normalized.contains("field required"))
+            }
+            Self::RetriesExhausted { last_error, .. } => last_error.is_thinking_replay_rejected(),
+            _ => false,
+        }
+    }
 }
 
 impl Display for ApiError {

@@ -221,7 +221,7 @@ fn doctor_command_runs_as_a_local_shell_entrypoint() {
     assert!(stdout.contains("Config"));
     assert!(stdout.contains("Workspace"));
     assert!(stdout.contains("Sandbox"));
-    assert!(!stdout.contains("Thinking"));
+    assert!(!stdout.contains("Thinking") && !stdout.contains("Working..."));
 
     fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
 }
@@ -256,7 +256,7 @@ fn local_subcommand_help_does_not_fall_through_to_runtime_or_provider_calls() {
         doctor_stdout.contains("local-only health report"),
         "doctor --help should contain subcommand description: {doctor_stdout}"
     );
-    assert!(!doctor_stdout.contains("Thinking"));
+    assert!(!doctor_stdout.contains("Thinking") && !doctor_stdout.contains("Working..."));
 
     assert_success(&status_help);
     let status_stdout = String::from_utf8(status_help.stdout).expect("stdout should be utf8");
@@ -264,7 +264,7 @@ fn local_subcommand_help_does_not_fall_through_to_runtime_or_provider_calls() {
         status_stdout.contains("Status"),
         "status --help should contain help topic header: {status_stdout}"
     );
-    assert!(!status_stdout.contains("Thinking"));
+    assert!(!status_stdout.contains("Thinking") && !status_stdout.contains("Working..."));
 
     let doctor_stderr = String::from_utf8(doctor_help.stderr).expect("stderr should be utf8");
     let status_stderr = String::from_utf8(status_help.stderr).expect("stderr should be utf8");

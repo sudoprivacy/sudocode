@@ -956,15 +956,7 @@ impl ConversationReader {
     }
 
     fn acquire(self) -> Result<Option<OwnedReader>, String> {
-        let lock_path = format!("{}.lock", self.path);
-        if let Some((dir, _)) = self.path.rsplit_once('/') {
-            self.backend
-                .create_dir_all(dir)
-                .map_err(|e| format!("create reader directory {dir}: {e}"))?;
-        }
-        let Some(lock) = self
-            .backend
-            .try_lock(&lock_path, READER_LEASE_MS)
+        let Some(lease) = HeldLease::try_acquire(&self.backend, &format!("{}.lock", self.path))
             .map_err(|e| format!("claim reader {}: {e}", self.path))?
         else {
             return Ok(None);
@@ -975,13 +967,46 @@ impl ConversationReader {
             lease_expires_at: now_ms() + READER_LEASE_MS,
             read_offset: offset,
         })?;
+        Ok(Some(OwnedReader {
+            reader: self,
+            lease,
+            offset,
+        }))
+    }
+}
+
+/// An exclusive backend lock, renewed on its own thread for as long as this
+/// value lives.
+///
+/// Renewal is independent of what the holder is doing, because a model turn can
+/// block for longer than the lease. Once a renewal fails the lease stays
+/// invalid and the holder must stop acting on it. Dropping stops the renewal
+/// thread first and only then releases the lock.
+struct HeldLease {
+    lock: Arc<dyn crate::fs_backend::FsLock>,
+    stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    valid: Arc<std::sync::atomic::AtomicBool>,
+    renewer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HeldLease {
+    fn try_acquire(backend: &Arc<dyn FsBackend>, lock_path: &str) -> Result<Option<Self>, String> {
+        if let Some((dir, _)) = lock_path.rsplit_once('/') {
+            backend
+                .create_dir_all(dir)
+                .map_err(|e| format!("create directory {dir}: {e}"))?;
+        }
+        let Some(lock) = backend
+            .try_lock(lock_path, READER_LEASE_MS)
+            .map_err(|e| e.to_string())?
+        else {
+            return Ok(None);
+        };
         let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let worker_stop = Arc::clone(&stop);
         let worker_valid = Arc::clone(&valid);
         let worker_lock = Arc::clone(&lock);
-        // Renewal is independent of the sink: a model turn can block for longer
-        // than the lease. No cursor writes occur on the renewal thread.
         let renewer = std::thread::Builder::new()
             .name("mailbox-lease".into())
             .spawn(move || {
@@ -1007,54 +1032,35 @@ impl ConversationReader {
                     }
                 }
             })
-            .map_err(|e| format!("start reader lease renewal: {e}"))?;
-        Ok(Some(OwnedReader {
-            reader: self,
+            .map_err(|e| format!("start lease renewal: {e}"))?;
+        Ok(Some(Self {
             lock,
             stop,
             valid,
             renewer: Some(renewer),
-            offset,
         }))
     }
-}
 
-struct OwnedReader {
-    reader: ConversationReader,
-    lock: Arc<dyn crate::fs_backend::FsLock>,
-    stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-    valid: Arc<std::sync::atomic::AtomicBool>,
-    renewer: Option<std::thread::JoinHandle<()>>,
-    offset: u64,
-}
-
-impl OwnedReader {
     fn is_valid(&self) -> bool {
         self.valid.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    fn commit(&mut self, offset: u64) -> Result<(), String> {
-        if !self.is_valid()
-            || !self
-                .lock
-                .renew()
-                .map_err(|e| format!("renew reader: {e}"))?
-        {
+    /// Renew now, ahead of a write that relies on still holding the lock.
+    /// `Ok(false)` means it was lost and marks the lease invalid for good.
+    fn confirm(&self) -> std::io::Result<bool> {
+        if !self.is_valid() {
+            return Ok(false);
+        }
+        let held = self.lock.renew()?;
+        if !held {
             self.valid
                 .store(false, std::sync::atomic::Ordering::Release);
-            return Err("reader ownership lost; delivery remains unacknowledged".into());
         }
-        self.reader.store(&ReaderRegister {
-            holder: self.reader.holder.clone(),
-            lease_expires_at: now_ms() + READER_LEASE_MS,
-            read_offset: offset,
-        })?;
-        self.offset = offset;
-        Ok(())
+        Ok(held)
     }
 }
 
-impl Drop for OwnedReader {
+impl Drop for HeldLease {
     fn drop(&mut self) {
         let (mutex, wake) = &*self.stop;
         *mutex
@@ -1068,6 +1074,34 @@ impl Drop for OwnedReader {
     }
 }
 
+struct OwnedReader {
+    reader: ConversationReader,
+    lease: HeldLease,
+    offset: u64,
+}
+
+impl OwnedReader {
+    fn is_valid(&self) -> bool {
+        self.lease.is_valid()
+    }
+
+    fn commit(&mut self, offset: u64) -> Result<(), String> {
+        if !self
+            .lease
+            .confirm()
+            .map_err(|e| format!("renew reader: {e}"))?
+        {
+            return Err("reader ownership lost; delivery remains unacknowledged".into());
+        }
+        self.reader.store(&ReaderRegister {
+            holder: self.reader.holder.clone(),
+            lease_expires_at: now_ms() + READER_LEASE_MS,
+            read_offset: offset,
+        })?;
+        self.offset = offset;
+        Ok(())
+    }
+}
 /// A pending delivery. Only acknowledge after the consumer durably records its
 /// successful turn; filtering or enqueueing alone does not consume the batch.
 pub struct UnreadBatch {
@@ -1116,6 +1150,102 @@ impl Mailbox {
             holder: instance_id(),
         }
     }
+
+    /// Claim this agent's one receiver seat, `agents/<self>/receiver.lock`.
+    ///
+    /// `None` while another instance of the same agent holds it. Without this
+    /// seat, two instances of one agent each claim whichever conversations they
+    /// reach first, and one agent's messages end up answered by two sessions.
+    fn claim_receiver(&self) -> Result<Option<HeldLease>, String> {
+        let path = format!(
+            "{}/{}/receiver.lock",
+            self.convention.agents_dir(),
+            self.self_id
+        );
+        HeldLease::try_acquire(&self.backend, &path).map_err(|e| {
+            format!(
+                "claim the receiver seat for {} at {path}: {e}",
+                self.self_id
+            )
+        })
+    }
+}
+
+/// What a receiver in this process is doing for its agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverState {
+    /// Another instance of the agent holds its receiver seat; this one waits to
+    /// take over.
+    Standby,
+    /// This instance holds the agent's receiver seat and tails its
+    /// conversations.
+    Receiving,
+}
+
+/// Receivers running in this process: per agent name, how many are standing
+/// by and how many are receiving.
+static RECEIVER_STATES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, (usize, usize)>>,
+> = std::sync::OnceLock::new();
+
+fn receiver_states(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, (usize, usize)>> {
+    RECEIVER_STATES
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What this process does to receive as `agent`: `None` when it runs no
+/// receiver for that agent. Receiving outranks standby when it runs several.
+#[must_use]
+pub fn receiver_state(agent: &str) -> Option<ReceiverState> {
+    match receiver_states().get(agent) {
+        Some((_, receiving)) if *receiving > 0 => Some(ReceiverState::Receiving),
+        Some((standby, _)) if *standby > 0 => Some(ReceiverState::Standby),
+        _ => None,
+    }
+}
+
+/// One receiver's entry in [`receiver_state`], withdrawn when it stops.
+struct ReceiverStateEntry {
+    agent: String,
+    state: Option<ReceiverState>,
+}
+
+impl ReceiverStateEntry {
+    fn set(&mut self, state: ReceiverState) {
+        if self.state == Some(state) {
+            return;
+        }
+        let mut states = receiver_states();
+        let counts = states.entry(self.agent.clone()).or_default();
+        match self.state.replace(state) {
+            Some(ReceiverState::Standby) => counts.0 -= 1,
+            Some(ReceiverState::Receiving) => counts.1 -= 1,
+            None => {}
+        }
+        match state {
+            ReceiverState::Standby => counts.0 += 1,
+            ReceiverState::Receiving => counts.1 += 1,
+        }
+    }
+}
+
+impl Drop for ReceiverStateEntry {
+    fn drop(&mut self) {
+        let mut states = receiver_states();
+        if let Some(counts) = states.get_mut(&self.agent) {
+            match self.state {
+                Some(ReceiverState::Standby) => counts.0 -= 1,
+                Some(ReceiverState::Receiving) => counts.1 -= 1,
+                None => {}
+            }
+            if *counts == (0, 0) {
+                states.remove(&self.agent);
+            }
+        }
+    }
 }
 
 /// Spawn the background receiver: one parked tail per conversation, each
@@ -1154,6 +1284,14 @@ impl Mailbox {
 ///
 /// `sink` is shared by every tail, so it must be `Sync`: it is one consumer
 /// receiving from all conversations, not one per peer.
+///
+/// An agent has one receiver at a time, wherever it runs. The receiver tails
+/// nothing until it holds the agent's receiver seat ([`Mailbox::claim_receiver`]);
+/// until then it stands by and retries, so a second instance of the agent takes
+/// over when the first stops. Each conversation's reader seat still guards that
+/// conversation's read position, so a tail finishing a delivery while the agent
+/// seat changes hands cannot be read twice. [`receiver_state`] reports which of
+/// the two this process is doing.
 pub fn spawn_inbox_poller(
     mailbox: Arc<Mailbox>,
     block_ms: u64,
@@ -1171,40 +1309,77 @@ pub fn spawn_inbox_poller(
             if let Err(e) = mailbox.ensure_presence() {
                 eprintln!("[{label}] announcing this agent failed: {e}");
             }
-            let mut tailing: std::collections::HashMap<String, std::thread::JoinHandle<()>> =
-                std::collections::HashMap::new();
+            let mut state = ReceiverStateEntry {
+                agent: mailbox.self_id().to_string(),
+                state: None,
+            };
             while !abort.is_aborted() {
-                match mailbox.list_conversations() {
-                    Ok(peers) => {
-                        for peer in peers {
-                            if tailing.contains_key(&peer) {
-                                continue;
-                            }
-                            let tail = spawn_conversation_tail(
-                                Arc::clone(&mailbox),
-                                peer.clone(),
-                                block_ms,
-                                label,
-                                abort.clone(),
-                                Arc::clone(&sink),
-                            );
-                            tailing.insert(peer, tail);
-                        }
+                state.set(ReceiverState::Standby);
+                let seat = match mailbox.claim_receiver() {
+                    Ok(Some(seat)) => seat,
+                    Ok(None) => {
+                        sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
+                        continue;
                     }
-                    Err(e) => eprintln!("[{label}] listing conversations failed: {e}"),
-                }
-                sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
-            }
-            // Joining is what makes the returned handle mean "the receiver has
-            // stopped". Without it the caller's join returns while N tails are
-            // still delivering into a sink it believes is finished with.
-            for (_, tail) in tailing {
-                let _ = tail.join();
+                    Err(e) => {
+                        eprintln!("[{label}] {e}");
+                        sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
+                        continue;
+                    }
+                };
+                state.set(ReceiverState::Receiving);
+                receive_while_seated(&mailbox, &seat, block_ms, label, &abort, &sink);
             }
         })
         .expect("spawn inbox receiver thread")
 }
 
+/// Discover and tail this agent's conversations for as long as `seat` holds.
+///
+/// Returns once the receiver is aborted or the seat is lost, after every tail
+/// it started has stopped: a tail outliving its seat would keep delivering for
+/// an agent this instance no longer receives for.
+fn receive_while_seated(
+    mailbox: &Arc<Mailbox>,
+    seat: &HeldLease,
+    block_ms: u64,
+    label: &'static str,
+    abort: &crate::HookAbortSignal,
+    sink: &Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
+) {
+    let tails_stop = crate::HookAbortSignal::new();
+    let mut tailing: std::collections::HashMap<String, std::thread::JoinHandle<()>> =
+        std::collections::HashMap::new();
+    while !abort.is_aborted() && seat.is_valid() {
+        match mailbox.list_conversations() {
+            Ok(peers) => {
+                for peer in peers {
+                    if tailing.contains_key(&peer) {
+                        continue;
+                    }
+                    let tail = spawn_conversation_tail(
+                        Arc::clone(mailbox),
+                        peer.clone(),
+                        block_ms,
+                        label,
+                        tails_stop.clone(),
+                        Arc::clone(sink),
+                    );
+                    tailing.insert(peer, tail);
+                }
+            }
+            Err(e) => eprintln!("[{label}] listing conversations failed: {e}"),
+        }
+        sleep_unless_aborted(abort, CONVERSATION_DISCOVERY_MS);
+    }
+    // Joining is what makes the receiver's handle mean "the receiver has
+    // stopped". Without it the caller's join returns while N tails are still
+    // delivering into a sink it believes is finished with.
+    tails_stop.abort();
+    for (_, tail) in tailing {
+        let _ = tail.join();
+    }
+}
 /// One conversation's tail: hold the reader seat, park on the transcript,
 /// deliver, commit.
 fn spawn_conversation_tail(

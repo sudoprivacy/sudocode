@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rustyline::completion::{Completer, FilenameCompleter, Pair};
@@ -72,8 +73,11 @@ impl ConditionalEventHandler for DownArrowHandler {
 }
 
 /// Accept the line only when it contains non-whitespace text.
-/// When the line is empty, Enter is a no-op.
-struct AcceptNonEmpty;
+/// When the line is empty, Enter is a no-op, unless turns are waiting to run
+/// at the prompt: then an empty Enter hands the prompt back so they can.
+struct AcceptNonEmpty {
+    waiting_turns: Arc<AtomicUsize>,
+}
 
 impl ConditionalEventHandler for AcceptNonEmpty {
     fn handle(
@@ -83,7 +87,7 @@ impl ConditionalEventHandler for AcceptNonEmpty {
         _positive: bool,
         ctx: &EventContext<'_>,
     ) -> Option<Cmd> {
-        if ctx.line().trim().is_empty() {
+        if ctx.line().trim().is_empty() && self.waiting_turns.load(Ordering::Acquire) == 0 {
             Some(Cmd::Noop)
         } else {
             Some(Cmd::AcceptLine)
@@ -286,9 +290,24 @@ pub struct LineEditor {
     pending_exit_at: Option<std::time::Instant>,
     /// Shared image map populated by the `ImagePasteHandler`.
     images: ImageMap,
+    /// How many turns are waiting to run at the next prompt.
+    waiting_turns: Arc<AtomicUsize>,
 }
 
 impl LineEditor {
+    /// A printer another thread can write to while this editor reads a line,
+    /// without tearing the line being typed. `None` where the terminal offers
+    /// none.
+    pub fn external_printer(&mut self) -> Option<Box<dyn rustyline::ExternalPrinter + Send>> {
+        let printer = self.editor.create_external_printer().ok()?;
+        Some(Box::new(printer))
+    }
+
+    /// The count of turns waiting to run at the next prompt. While it is above
+    /// zero, Enter on an empty line returns an empty submission so they can run.
+    pub fn waiting_turns(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.waiting_turns)
+    }
     #[must_use]
     pub fn new(prompt: impl Into<String>, completions: Vec<(String, String)>) -> Self {
         let config = Config::builder()
@@ -300,9 +319,12 @@ impl LineEditor {
         editor.set_helper(Some(SlashCommandHelper::new(completions)));
         editor.bind_sequence(KeyEvent(KeyCode::Char('J'), Modifiers::CTRL), Cmd::Newline);
         editor.bind_sequence(KeyEvent(KeyCode::Enter, Modifiers::SHIFT), Cmd::Newline);
+        let waiting_turns = Arc::new(AtomicUsize::new(0));
         editor.bind_sequence(
             KeyEvent(KeyCode::Enter, Modifiers::NONE),
-            EventHandler::Conditional(Box::new(AcceptNonEmpty)),
+            EventHandler::Conditional(Box::new(AcceptNonEmpty {
+                waiting_turns: Arc::clone(&waiting_turns),
+            })),
         );
 
         // ↑: beginning-of-line first, then history.
@@ -344,6 +366,7 @@ impl LineEditor {
             editor,
             pending_exit_at: None,
             images,
+            waiting_turns,
         }
     }
 

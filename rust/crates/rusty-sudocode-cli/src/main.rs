@@ -2327,29 +2327,43 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     SYNC_REPL_EDITOR.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&editor)));
     println!("{}", cli.startup_banner());
 
-    // The A2A receiver lives on the coordinator loop, and that loop exists only
-    // in the async REPL. Reaching the SYNC one attached to a node means the
-    // session dialled it and provisioned its inbox, and then nothing ever polls
-    // it — peer messages cannot arrive. An inbox nobody reads looks exactly like
-    // an inbox nobody has written to, so this says which one it is.
-    //
-    // `SUDOCODE_INTERRUPT_QUEUE_MODE` is about input queueing and has no
-    // business deciding whether A2A works. Until the sync REPL can carry a
-    // receiver the coupling stands, but it should at least be visible rather
-    // than silent. Switching modes automatically is the wrong fix: the sync
-    // REPL is the one that reprints `❯` after each turn, which is what the PTY
-    // harness matches on.
-    //
-    // Both `off` and the EMPTY string land here — see `QueueMode::from_str`.
-    if engine_host::peer::attach(&cli.lifecycle.agent_name()).is_ok_and(|peer| peer.is_node()) {
-        eprintln!(
-            "warning: this session is attached to its machine's Nexus node, but this REPL \
-             mode cannot RECEIVE peer messages (sending still works). Unset \
-             SUDOCODE_INTERRUPT_QUEUE_MODE, or set it to `queue`, for the REPL that carries \
-             the receiver."
-        );
-    }
-
+    // The session's one receiver, on the same peer namespace its `send` tool
+    // writes through, as in the async REPL. Peer messages run as turns at the
+    // prompt boundary: rustyline cannot be interrupted from another thread, so
+    // a message that arrives while the prompt waits is announced at once and
+    // runs when the user next presses Enter. Its read position does not move
+    // until its turn has run.
+    let (peer_tx, pending_peer_turns) = mpsc::channel::<PendingPeerTurn>();
+    let peer_abort = runtime::HookAbortSignal::new();
+    // Counted before it is queued, so the count is never zero while a message
+    // is: Enter on an empty prompt must not be a no-op with one waiting.
+    let waiting_turns = editor.borrow().waiting_turns();
+    let queued = Arc::clone(&waiting_turns);
+    let deliver = peer_turn_sink(
+        peer_tx,
+        move |message, receipt| {
+            queued.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            (message, receipt)
+        },
+        peer_abort.clone(),
+    );
+    let announcer = std::sync::Mutex::new(editor.borrow_mut().external_printer());
+    let peer_receiver = engine_host::peer::attach(&cli.lifecycle.agent_name())?.spawn_receiver(
+        peer_abort.clone(),
+        move |message| {
+            if let Some(printer) = announcer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            {
+                let _ = printer.print(format!(
+                    "Message from {} is waiting; it runs before the next prompt (press Enter)",
+                    message.from
+                ));
+            }
+            deliver(message)
+        },
+    );
     // Render existing messages and seed editor history from user prompts.
     // Same code path for new sessions (messages empty → no-op) and resumed
     // sessions (messages present → render + populate history).
@@ -2395,6 +2409,7 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
     let session_start = Instant::now();
 
     loop {
+        run_pending_peer_turns(&mut cli, &pending_peer_turns, &waiting_turns);
         editor
             .borrow_mut()
             .set_completions(cli.repl_completion_candidates().unwrap_or_default());
@@ -2414,6 +2429,11 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                     .into_values()
                     .map(|(data, mime_type)| runtime::ContentBlock::Image { data, mime_type })
                     .collect();
+                // An empty line only comes back while peer messages wait: the
+                // user handing the prompt back so they run, at the loop's top.
+                if trimmed.is_empty() && cli.pending_images.borrow().is_empty() {
+                    continue;
+                }
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {
                     cli.persist_session()?;
                     break;
@@ -2472,6 +2492,12 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    // Dropping the queue refuses whatever is still waiting, which unblocks the
+    // receiver so it can be joined; those messages stay unread.
+    peer_abort.abort();
+    drop(pending_peer_turns);
+    let _ = peer_receiver.join();
 
     // Release the shared editor from the thread-local before this thread's frame
     // unwinds.
@@ -2695,19 +2721,52 @@ enum CoordinatorEvent {
 ///
 /// Refuse delivery when the coordinator drops the receipt or shuts down. In
 /// particular, closing the engine must not acknowledge an interrupted turn.
-fn peer_turn_sink(
-    tx: mpsc::Sender<CoordinatorEvent>,
+///
+/// `wrap` packs the message and its receipt into whatever the REPL's loop
+/// receives, so both REPLs share this one acknowledgement rule.
+fn peer_turn_sink<E: Send + 'static>(
+    tx: mpsc::Sender<E>,
+    wrap: impl Fn(runtime::agent_mailbox::MailboxEnvelope, mpsc::Sender<()>) -> E + Send + Sync,
     stop: runtime::HookAbortSignal,
 ) -> impl Fn(&runtime::agent_mailbox::MailboxEnvelope) -> bool + Send + Sync {
     move |msg| {
         let (ack_tx, ack_rx) = mpsc::channel();
-        if tx
-            .send(CoordinatorEvent::PeerMessage(msg.clone(), ack_tx))
-            .is_err()
-        {
+        if tx.send(wrap(msg.clone(), ack_tx)).is_err() {
             return false;
         }
         ack_rx.recv().is_ok() && !stop.is_aborted()
+    }
+}
+
+/// A peer message waiting for the synchronous REPL, with its receipt.
+type PendingPeerTurn = (runtime::agent_mailbox::MailboxEnvelope, mpsc::Sender<()>);
+
+/// Run every peer message that has arrived as its own turn, acknowledging each
+/// only once its turn has finished. A turn that fails leaves its message
+/// unread, to be delivered again. `waiting` counts the messages queued and not
+/// yet taken here.
+fn run_pending_peer_turns(
+    cli: &mut LiveCli,
+    pending: &mpsc::Receiver<PendingPeerTurn>,
+    waiting: &std::sync::atomic::AtomicUsize,
+) {
+    while let Ok((message, receipt)) = pending.try_recv() {
+        waiting.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        let prompt = tools::compose_next_turn_from_envelopes(&[message]);
+        println!(
+            "{}",
+            cli::received::render_prompt(
+                &prompt,
+                render::query_terminal_width(),
+                &render::TerminalRenderer::new(),
+            )
+        );
+        match cli.run_turn_interactive(&prompt) {
+            Ok(()) => {
+                let _ = receipt.send(());
+            }
+            Err(e) => eprintln!("{}{e}{}", ansi_fg(theme().error), RESET),
+        }
     }
 }
 
@@ -3504,7 +3563,11 @@ fn run_repl_iocraft_dispatch(
     let mailbox_abort = runtime::HookAbortSignal::new();
     let mailbox_receiver = engine_host::peer::attach(&session_agent_name)?.spawn_receiver(
         mailbox_abort.clone(),
-        peer_turn_sink(coord_tx.clone(), mailbox_abort.clone()),
+        peer_turn_sink(
+            coord_tx.clone(),
+            CoordinatorEvent::PeerMessage,
+            mailbox_abort.clone(),
+        ),
     );
     // Coordinator loop on the current thread. All events arrive through
     // `coord_rx` — no timeout-based polling needed.

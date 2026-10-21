@@ -14,6 +14,8 @@
 //! absent an endpoint, these tests report that transport acceptance was skipped.
 
 mod common;
+#[path = "support/node_home.rs"]
+mod node_home;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -192,10 +194,20 @@ fn run_duet(transport: &Transport, offline: bool) {
             receiver: endpoint, ..
         } => endpoint,
     };
+    // The receiver attaches the way a machine does: a node record in its home
+    // and a session named for the credential the node minted.
+    let receiver_home = node_home::NodeHome::new(
+        "duet-receiver",
+        receiver_endpoint,
+        RECEIVER,
+        Path::new(&receiver_credential),
+    );
+    node_home::pin_agent_name(&workspace, RECEIVER);
+    let [receiver_home_var, receiver_profile_var] = receiver_home.env();
     let receiver_env_vars = vec![
         ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-        ("NEXUS_A2A_ENDPOINT", receiver_endpoint.as_str()),
-        ("NEXUS_A2A_CREDENTIAL", receiver_credential.as_str()),
+        (receiver_home_var.0, receiver_home_var.1.as_str()),
+        (receiver_profile_var.0, receiver_profile_var.1.as_str()),
     ];
     let start_receiver = || {
         let mut receiver =
@@ -219,9 +231,10 @@ fn run_duet(transport: &Transport, offline: bool) {
     // watched for is gone, the position having moved into the conversation.
 
     // ── 3. The SENDER: another real scode, whose model calls `send` ────────
-    // Locally it must share the receiver's workspace, because that is what the
-    // local convention is keyed on. Over nexus it gets its own.
-    let prompt = env.prompt(
+    // Its own workspace and home: on a node a session's identity is its own
+    // name, so two sessions sharing a workspace would be one agent.
+    let sender_env = TestEnv::new("duet-sender");
+    let prompt = sender_env.prompt(
         &format!(
             "Use send to message {RECEIVER}. The message body must be exactly \
              \"hello from unified send\" (lowercase, without a period). \
@@ -229,24 +242,30 @@ fn run_duet(transport: &Transport, offline: bool) {
         ),
         transport.scenario(),
     );
-    let sender_credential = std::env::var("NEXUS_A2A_TEST_SENDER_CREDENTIAL")
-        .expect("set NEXUS_A2A_TEST_SENDER_CREDENTIAL=<minted bundle dir>");
-    let mut sender_env_vars = Vec::new();
-    match transport {
+    let sender_endpoint = match transport {
         Transport::OneNode { endpoint }
         | Transport::TwoNodes {
             sender: endpoint, ..
-        } => {
-            sender_env_vars.push(("NEXUS_A2A_ENDPOINT", endpoint.as_str()));
-            sender_env_vars.push(("NEXUS_A2A_CREDENTIAL", sender_credential.as_str()));
-        }
-    }
+        } => endpoint,
+    };
+    let sender_home = node_home::NodeHome::new(
+        "duet-sender",
+        sender_endpoint,
+        &sender_name,
+        Path::new(&sender_credential),
+    );
+    node_home::pin_agent_name(sender_env.workspace_root(), &sender_name);
+    let [sender_home_var, sender_profile_var] = sender_home.env();
+    let sender_env_vars = vec![
+        (sender_home_var.0, sender_home_var.1.as_str()),
+        (sender_profile_var.0, sender_profile_var.1.as_str()),
+    ];
     // No `--allowedTools send`. Narrowing the tool set changes which channel the
     // proxy gateway picks: with one tool allowed, `api.sudorouter.ai` answers
     // `500 … 分组 auto 下模型 <model> 的可用渠道不存在` on every retry, for models
     // it serves fine with the full set. The flag is not load-bearing — the mock
     // scenario issues the call and the live prompt names it.
-    let mut sending = env.spawn_with_env(
+    let mut sending = sender_env.spawn_with_env(
         &["--permission-mode", "workspace-write", &prompt],
         &sender_env_vars,
     );
@@ -307,11 +326,12 @@ fn run_duet(transport: &Transport, offline: bool) {
     }
     let mut receiver = receiver.expect("receiver starts after durable delivery");
 
-    // The sender is on nexus, so nothing may be written to the workspace: the
+    // The sender is on nexus, so nothing may be written to its workspace: the
     // failure being guarded is the ambient fallback writing a local file while
     // the tool still answers "sent". "Arrived" has to mean it arrived at the
     // daemon and nowhere else.
-    let workspace_inbox = runtime::agent_mailbox::inbox_path_under(&workspace, RECEIVER);
+    let workspace_inbox =
+        runtime::agent_mailbox::inbox_path_under(sender_env.workspace_root(), RECEIVER);
     assert!(
         !workspace_inbox.exists(),
         "[{}] the sender is on nexus, so nothing may be written to {}",

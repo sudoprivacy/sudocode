@@ -182,9 +182,20 @@ if [ -n "${SUDOROUTER_API_KEY:-}" ] && [ -n "${SCODE_BIN:-}" ]; then
     NEXUS_A2A_TEST_SPAWN="$R" NEXUS_A2A_TEST_MODEL="$MODEL" \
     "${CARGO_TEST[@]}" live_spawn_cohost -- --ignored --nocapture
   sleep 8
-  NEXUS_A2A_ENDPOINT="$ENDPOINT" NEXUS_A2A_CREDENTIAL="$SELF_BUNDLE" \
+  # scode attaches the way a machine does: a node record in its home and a
+  # session named for the credential minted for it. The config home stays the
+  # real one, so the proxy credentials still resolve.
+  SELF_HOME="$AUTHON_DATA_DIR/self-home"
+  SELF_WS="$AUTHON_DATA_DIR/self-workspace"
+  mkdir -p "$SELF_HOME/.nexus/run" "$SELF_HOME/agents/$SELF" "$SELF_WS/.nexus/sudocode"
+  cp "$SELF_BUNDLE"/* "$SELF_HOME/agents/$SELF/"
+  printf '{"version":1,"endpoint":"%s","agents_dir":"%s","role":"founder","zone":"%s"}\n' \
+    "${ENDPOINT#*://}" "$SELF_HOME/agents" "$AUTHON_ZONE" > "$SELF_HOME/.nexus/run/node.json"
+  printf '{"agentName":"%s"}\n' "$SELF" > "$SELF_WS/.nexus/sudocode/settings.json"
+  ( cd "$SELF_WS" && SUDO_CODE_CONFIG_HOME="${SUDO_CODE_CONFIG_HOME:-$HOME/.nexus/sudocode}" \
+    HOME="$SELF_HOME" USERPROFILE="$SELF_HOME" \
     "$SCODE_BIN" --auth proxy --model "$MODEL" --permission-mode danger-full-access \
-    --print "Call send once: to=$R message='reply with exactly one word: PONG' summary='ping'. Then stop."
+    --print "Call send once: to=$R message='reply with exactly one word: PONG' summary='ping'. Then stop." )
   echo "   polling ${SELF}'s inbox for the co-host reply..."
   got=
   for i in $(seq 1 30); do

@@ -200,6 +200,7 @@ pub struct RuntimeFeatureConfig {
     provider_fallbacks: ProviderFallbackConfig,
     /// Enable extended thinking for models that support it (default: true).
     thinking: bool,
+    response_recording: crate::response_archive::ResponseRecordingConfig,
     /// `experimental` section: feature-flag key -> enabled. Keys are
     /// validated against `crate::experiments::Experiment` at parse time.
     experiments: BTreeMap<String, bool>,
@@ -996,6 +997,9 @@ impl ConfigLoader {
             sandbox: parse_optional_sandbox_config(&merged_value)?,
             provider_fallbacks: parse_optional_provider_fallbacks(&merged_value)?,
             thinking: parse_optional_thinking(&merged_value),
+            response_recording: crate::response_archive::ResponseRecordingConfig::parse(
+                merged.get("responseRecording"),
+            )?,
             experiments: parse_optional_experiments(&merged_value)?,
         };
 
@@ -1200,6 +1204,11 @@ impl RuntimeConfig {
 }
 
 impl RuntimeFeatureConfig {
+    #[must_use]
+    pub fn response_recording(&self) -> &crate::response_archive::ResponseRecordingConfig {
+        &self.response_recording
+    }
+
     /// Maximum tool rounds per user turn; absent means unlimited.
     #[must_use]
     pub fn max_steps(&self) -> Option<u32> {

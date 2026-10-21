@@ -7,7 +7,9 @@ pub const CLAUDE_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 #[must_use]
 pub fn claude_levels(model: &str) -> &'static [&'static str] {
     let model = model.to_ascii_lowercase();
-    if model.contains("opus-4-6") || model.contains("sonnet-4-6") {
+    if model.contains("opus-4-5") {
+        &["low", "medium", "high"]
+    } else if model.contains("opus-4-6") || model.contains("sonnet-4-6") {
         &["low", "medium", "high", "max"]
     } else if [
         "opus-4-7",

@@ -171,8 +171,15 @@ fn bash_progress_is_live_then_clears_without_entering_history() {
     common::expect_screen(
         &sess,
         |s| {
-            s.lines()
-                .any(|l| l.contains('⟳') && l.contains("PROGRESS-FIRST"))
+            s.lines().any(|line| {
+                line.chars()
+                    .take(4)
+                    .all(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
+                    && line.contains("界👩🏽‍💻")
+                    && line.contains('…')
+                    && line.contains("[claude")
+                    && line.contains("s)")
+            })
         },
         Duration::from_secs(60),
         "live tool progress",
@@ -185,7 +192,12 @@ fn bash_progress_is_live_then_clears_without_entering_history() {
         "completed tool",
     );
     assert!(
-        !screen.contains('⟳'),
+        !screen.lines().any(|line| {
+            line.chars()
+                .take(4)
+                .all(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
+                && line.contains("界👩🏽‍💻")
+        }),
         "transient progress leaked into history: {screen}"
     );
     assert!(
@@ -197,6 +209,44 @@ fn bash_progress_is_live_then_clears_without_entering_history() {
         "prior history was erased: {screen}"
     );
     finish(&mut sess);
+}
+
+#[cfg(unix)]
+#[test]
+fn one_shot_progress_discards_controls_without_escape_sequences() {
+    let env = TestEnv::new_mock("render-progress-controls");
+    std::fs::write(
+        env.workspace_root().join("progress.sh"),
+        r"sleep 1.1; printf 'CONTROL-A\010\007CONTROL-B\013CONTROL-C\014CONTROL-D\n'; while test ! -f release-progress; do sleep 0.1; done; printf 'CONTROL-RESULT\n'; printf finished > progress-finished",
+    )
+    .expect("progress script");
+    let calls = serde_json::json!([{
+        "id": "toolu_progress_controls", "name": "bash", "input": {"command":"sh progress.sh"}
+    }]);
+    let prompt = format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}");
+    let mut sess = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
+    sess.resize(60, 140).expect("resize");
+    let _release_files = ReleaseFiles {
+        root: env.workspace_root().to_path_buf(),
+        release: &["release-progress"],
+        finished: "progress-finished",
+    };
+    common::expect_screen(
+        &sess,
+        |screen| {
+            screen.lines().any(|line| {
+                line.contains('⟳') && line.contains("CONTROL-ACONTROL-BCONTROL-CCONTROL-D")
+            })
+        },
+        common::DEFAULT_TIMEOUT,
+        "one-shot progress stays on one row without executing terminal controls",
+    );
+    assert!(
+        !env.workspace_root().join("progress-finished").exists(),
+        "the completed card must not satisfy the progress assertion"
+    );
+    std::fs::write(env.workspace_root().join("release-progress"), "release").expect("release tool");
+    assert_eq!(sess.expect_eof().expect("one-shot completed"), 0);
 }
 
 #[cfg(unix)]

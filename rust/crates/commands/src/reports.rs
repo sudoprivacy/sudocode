@@ -438,6 +438,8 @@ pub struct StatusContext {
     /// captured here and every field that doesn't depend on runtime config is
     /// still populated. Top-level JSON output then reports `status: "degraded"`.
     pub config_load_error: Option<String>,
+    /// The session's peers, when a live session reports them.
+    pub peer: Option<runtime::mailbox::PeerStatus>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -490,6 +492,7 @@ pub fn status_context(
         session_lifecycle: classify_session_lifecycle_for(&cwd),
         sandbox_status,
         config_load_error,
+        peer: None,
     })
 }
 
@@ -587,7 +590,31 @@ pub fn format_status_report(
         ),
         format_sandbox_report(&context.sandbox_status),
     ]);
+    if let Some(peer) = &context.peer {
+        blocks.push(format_peer_report(peer));
+    }
     blocks.join("\n\n")
+}
+
+fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
+    let namespace = match (peer.namespace, &peer.endpoint, &peer.error) {
+        (Some("node"), Some(endpoint), _) => format!("node {endpoint}"),
+        (Some(_), _, _) => "same-machine pair root".to_string(),
+        (None, _, Some(error)) => format!("unavailable: {error}"),
+        (None, _, None) => "unavailable".to_string(),
+    };
+    let receiver = match peer.receiver {
+        "receiving" => "receiving",
+        "standby" => "standing by: another instance of this agent is receiving",
+        _ => "not running in this process",
+    };
+    format!(
+        "Peers
+  Agent            {}
+  Namespace        {namespace}
+  Receiver         {receiver}",
+        peer.agent
+    )
 }
 
 // ===========================================================================
@@ -1115,6 +1142,7 @@ pub fn render_doctor_report(build: &BuildInfo) -> Result<DoctorReport, Box<dyn s
         session_lifecycle: classify_session_lifecycle_for(&cwd),
         sandbox_status: resolve_sandbox_status(sandbox_config.sandbox(), &cwd),
         config_load_error: config.as_ref().err().map(ToString::to_string),
+        peer: None,
     };
     Ok(DoctorReport {
         checks: vec![

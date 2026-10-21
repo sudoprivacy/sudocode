@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthChar;
 
 // Lowest matching row: a todo/queued label can also occur in scrollback above
 // the live chrome. Coordinates use terminal columns, not UTF-8 byte offsets.
-fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
+fn surface_attributes(sess: &PtySession, needle: &str) -> Option<(String, String, bool, bool)> {
     sess.render(|screen| {
         // Search logical text across wrapping, but retain physical coordinates
         // for the cell assertion. rows() alone misses a needle split by a
@@ -41,8 +41,39 @@ fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
         let (start, _) = text.rmatch_indices(needle.as_str()).next()?;
         let (_, row, col) = positions.iter().find(|(byte, _, _)| *byte == start)?;
         let cell = screen.raw().cell(*row, *col)?;
-        Some((format!("{:?}", cell.fgcolor()), cell.bold(), cell.dim()))
+        Some((
+            format!("{:?}", cell.fgcolor()),
+            format!("{:?}", cell.bgcolor()),
+            cell.bold(),
+            cell.dim(),
+        ))
     })
+}
+
+fn attributes(sess: &PtySession, needle: &str) -> Option<(String, bool, bool)> {
+    surface_attributes(sess, needle).map(|(foreground, _, bold, dim)| (foreground, bold, dim))
+}
+
+fn expect_surface(sess: &PtySession, needle: &str, foreground: &str, background: &str) {
+    let expected = (
+        terminal_palette::expected_color(foreground),
+        terminal_palette::expected_color(background),
+        false,
+        false,
+    );
+    let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
+    loop {
+        let actual = surface_attributes(sess, needle);
+        if actual.as_ref() == Some(&expected) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{needle:?}: expected surface {expected:?}, got {actual:?}; screen:\n{}",
+            sess.render(|screen| screen.raw().contents())
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn expect_style(sess: &PtySession, needle: &str, expected: (&str, bool, bool)) {
@@ -206,7 +237,15 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             "question at ordinary terminal width",
         );
         for (label, color, bold) in [
-            ("InheritedTitle", "Idx(14)", false),
+            (
+                "InheritedTitle",
+                if background == "0;15" {
+                    "Idx(94)"
+                } else {
+                    "Idx(214)"
+                },
+                false,
+            ),
             ("RedTitle", "Idx(1)", false),
             ("DefaultTitle", "Default", false),
             ("BoldTitle", "Default", true),
@@ -225,6 +264,117 @@ fn question_title_resets_restore_terminal_foreground_not_parent_color() {
             "question answer returns to ordinary input",
         );
         exit(&mut sess);
+    }
+}
+
+#[test]
+fn question_focus_surface_moves_without_recoloring_ordinary_text() {
+    for (background, no_color, selected_fg, selected_bg, primary, muted) in [
+        (
+            "15;0", false, "Idx(255)", "Idx(236)", "Idx(214)", "Idx(247)",
+        ),
+        ("0;15", false, "Idx(234)", "Idx(255)", "Idx(94)", "Idx(241)"),
+        ("15;0", true, "Default", "Default", "Default", "Default"),
+    ] {
+        for option_count in [2, 10] {
+            let env = TestEnv::new("question-focus-surface");
+            let mut sess = env.spawn_with_env(
+                &["--permission-mode", "workspace-write"],
+                &[
+                    ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+                    ("NO_COLOR", if no_color { "1" } else { "" }),
+                    ("TERM", "xterm-256color"),
+                    ("COLORTERM", "truecolor"),
+                    ("COLORFGBG", background),
+                ],
+            );
+            sess.resize(40, 600).unwrap();
+            settle_chrome(&sess);
+            let mut options = vec![
+                "FirstSurfaceChoice".to_string(),
+                "SecondSurfaceChoice".to_string(),
+            ];
+            options.extend((2..option_count).map(|index| format!("OtherSurfaceChoice{index}")));
+            let input = serde_json::json!({
+                "title": "SurfaceQuestionTitle",
+                "question": "Choose a readable surface",
+                "options": options,
+            });
+            let calls = serde_json::json!([{
+                "id": "surface_question", "name": "AskUserQuestion", "input": input,
+            }]);
+            let prompt = if env.is_mock() {
+                format!("PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{calls}")
+            } else {
+                format!("Call AskUserQuestion once with exactly this input, then answer briefly after I choose: {input}")
+            };
+            sess.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+            common::expect_input_line(
+                &sess,
+                &prompt,
+                common::LIVE_TURN_BUDGET,
+                "complete surface question prompt",
+            );
+            sess.send("\r").unwrap();
+            let first_marker = if option_count == 2 {
+                "> [1]"
+            } else {
+                "> FirstSurfaceChoice"
+            };
+            let second_marker = if option_count == 2 {
+                "> [2]"
+            } else {
+                "> SecondSurfaceChoice"
+            };
+            common::expect_screen(
+                &sess,
+                |screen| screen.contains(first_marker),
+                common::LIVE_TURN_BUDGET,
+                "initial selected surface",
+            );
+            sess.resize(40, 100).unwrap();
+            expect_style(&sess, "SurfaceQuestionTitle", (primary, false, false));
+            expect_style(&sess, first_marker, (primary, !no_color, false));
+            expect_style(
+                &sess,
+                if option_count == 2 {
+                    "navigate"
+                } else {
+                    "items"
+                },
+                (muted, false, false),
+            );
+            expect_surface(&sess, "Choose a readable surface", "Default", "Default");
+            expect_surface(&sess, "FirstSurfaceChoice", selected_fg, selected_bg);
+            expect_surface(&sess, "SecondSurfaceChoice", "Default", "Default");
+            sess.send("\x1b[B").unwrap();
+            expect_style(&sess, second_marker, (primary, !no_color, false));
+            expect_surface(&sess, "FirstSurfaceChoice", "Default", "Default");
+            expect_surface(&sess, "SecondSurfaceChoice", selected_fg, selected_bg);
+            let marker = common::turn_status_marker(&sess);
+            sess.send("\r").unwrap();
+            common::expect_turn_complete_after(
+                &sess,
+                &marker,
+                common::LIVE_TURN_BUDGET,
+                "selected surface answer completes",
+            );
+            sess.send("NeutralAfterSurface").unwrap();
+            common::expect_input_line(
+                &sess,
+                "NeutralAfterSurface",
+                common::DEFAULT_TIMEOUT,
+                "draft after closing selected surface",
+            );
+            expect_surface(&sess, "NeutralAfterSurface", "Default", "Default");
+            sess.send("\x15").unwrap();
+            common::expect_input_line_cleared(
+                &sess,
+                common::DEFAULT_TIMEOUT,
+                "clear neutral draft",
+            );
+            exit(&mut sess);
+        }
     }
 }
 
@@ -594,7 +744,11 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
             );
             sess.resize(40, 100).unwrap();
             sess.expect("❯").expect("input ready");
-            for (rows, width) in [(40, 100), (40, 60), (12, 60), (40, 100)] {
+            // Eight rows force the three-item panel to use the summary-only
+            // projection. Its spans must match the full panel, and items
+            // must reappear with their styles on expansion. A single item
+            // may still fit; its zero-open quantity remains covered.
+            for (rows, width) in [(40, 100), (40, 60), (8, 60), (40, 100)] {
                 resize_idle_chrome(&mut sess, rows, width);
                 for label in [" todos (", " done, ", " open)"] {
                     expect_style(&sess, label, (muted, false, false));
@@ -609,6 +763,35 @@ fn todo_summary_scopes_every_count_and_label_in_both_themes() {
                 if statuses.len() > 1 {
                     expect_style(&sess, "1 in progress", ("Default", true, false));
                     expect_style(&sess, " in progress, ", (muted, false, false));
+                }
+                let visible = sess.render(|screen| {
+                    screen
+                        .raw()
+                        .rows(0, screen.raw().size().1)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                });
+                if rows == 8 {
+                    if statuses.len() > 1 {
+                        assert!(
+                            !visible.contains("Task 0"),
+                            "folded completed item: {visible}"
+                        );
+                        assert!(
+                            !visible.contains("Working 1"),
+                            "folded active item: {visible}"
+                        );
+                        assert!(
+                            !visible.contains("Task 2"),
+                            "folded pending item: {visible}"
+                        );
+                    }
+                } else {
+                    expect_style(&sess, "Task 0", ("Default", false, true));
+                    if statuses.len() > 1 {
+                        expect_style(&sess, "Working 1", ("Default", true, false));
+                        expect_style(&sess, "Task 2", ("Default", false, false));
+                    }
                 }
             }
             exit(&mut sess);

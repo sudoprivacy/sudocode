@@ -13,7 +13,7 @@
 //!
 //! ```text
 //! [PendingSlot]   ← in-flight tools and queued messages
-//! [StatusSlot]    ← spinner | turn_result | tips | empty
+//! [StatusSlot]    ← activity | turn_result | tips | empty
 //! [TodoSlot]      ← todo summary and items | empty
 //! ──── separator ────
 //! [InputSlot]     ← hint | text_input | question_panel
@@ -21,23 +21,32 @@
 //! [FooterSlot]    ← hint (3s) > turn_active > minimal > full
 //! ```
 
-use std::fmt::Write as FmtWrite;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::render::activity::{ActivityState, ToolActivity};
 use commands::suggest_slash_commands;
 use crossterm::style::Color as TerminalColor;
+use engine_events::EngineState;
 use iocraft::prelude::*;
 
 mod ansi_text;
+mod choice_text;
+mod input_history;
+mod layout;
+mod prompt_text;
 mod queued_message;
 mod tasks;
 use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
-use ansi_text::{AnsiText, PromptTextView, RichText};
+use ansi_text::{row_text, AnsiText, RichText};
+use choice_text::ChoiceText;
+use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
+use prompt_text::PromptTextCache;
+pub(crate) mod prose_preview;
+use prose_preview::{PreviewUpdate, ProsePreview};
 use tasks::{TaskBrowser, TaskFocus};
 
 // ── stderr redirect ───────────────────────────────────────────────────
@@ -141,192 +150,15 @@ mod stderr_redirect {
     }
 }
 
-// ── TurnPhase + SpinnerState ───────────────────────────────────────────
-
-/// Phase of the current agent turn — drives spinner icon/label selection.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TurnPhase {
-    Thinking,
-    Reasoning,
-    Retry {
-        attempt: u32,
-        max_retries: u32,
-        reason: String,
-    },
-    Paused,
-}
-
-/// Shared state for the spinner, read by the render thread and written
-/// by the runner thread.
-#[derive(Clone)]
-pub struct SpinnerState {
-    pub(crate) progress: Arc<crate::render::spinner_progress::SpinnerProgress>,
-    phase: Arc<Mutex<TurnPhase>>,
-    active: Arc<AtomicBool>,
-    start_time: Arc<Mutex<Instant>>,
-    label: Arc<Mutex<String>>,
-    model: Arc<Mutex<Option<String>>>,
-    token_budget: Arc<Mutex<Option<u32>>>,
-}
-
-impl SpinnerState {
-    /// Create a new inactive spinner state.
-    #[must_use]
-    pub fn new_inactive() -> Self {
-        Self {
-            progress: Arc::new(crate::render::spinner_progress::SpinnerProgress::new()),
-            phase: Arc::new(Mutex::new(TurnPhase::Thinking)),
-            active: Arc::new(AtomicBool::new(false)),
-            start_time: Arc::new(Mutex::new(Instant::now())),
-            label: Arc::new(Mutex::new(String::new())),
-            model: Arc::new(Mutex::new(None)),
-            token_budget: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    /// Reset and activate for a new turn.
-    pub fn start_turn(&self, label: &str, model: Option<&str>, token_budget: Option<u32>) {
-        self.progress.reset();
-        *self.phase.lock().unwrap() = TurnPhase::Thinking;
-        *self.start_time.lock().unwrap() = Instant::now();
-        *self.label.lock().unwrap() = label.to_string();
-        *self.model.lock().unwrap() = model.map(ToString::to_string);
-        *self.token_budget.lock().unwrap() = token_budget;
-        self.active.store(true, Ordering::SeqCst);
-    }
-
-    /// Deactivate after a turn ends.
-    pub fn stop_turn(&self) {
-        self.active.store(false, Ordering::SeqCst);
-    }
-
-    /// Read the current turn phase.
-    pub fn phase(&self) -> TurnPhase {
-        self.phase.lock().unwrap().clone()
-    }
-
-    /// Convenience: check whether the current phase is `Paused`.
-    pub fn is_paused(&self) -> bool {
-        *self.phase.lock().unwrap() == TurnPhase::Paused
-    }
-
-    /// Return a clone of the phase `Arc` for sharing with other threads.
-    pub fn phase_arc(&self) -> Arc<Mutex<TurnPhase>> {
-        Arc::clone(&self.phase)
-    }
-
-    /// Render the current spinner frame as a colored ANSI string.
-    /// Returns empty string when inactive or paused.
-    pub fn render_frame(&self, frame_index: usize) -> String {
-        if !self.active.load(Ordering::SeqCst) {
-            return String::new();
-        }
-
-        let current_phase = self.phase.lock().unwrap().clone();
-        if current_phase == TurnPhase::Paused {
-            return String::new();
-        }
-
-        let is_reasoning = current_phase == TurnPhase::Reasoning;
-        let is_retry = matches!(current_phase, TurnPhase::Retry { .. });
-
-        let (frame, current_label): (String, String) = if is_retry {
-            if let TurnPhase::Retry {
-                attempt,
-                max_retries,
-                ref reason,
-            } = current_phase
-            {
-                (
-                    "\u{27f3}".to_string(),
-                    format!("Retry {attempt}/{max_retries}: {reason}"),
-                )
-            } else {
-                unreachable!()
-            }
-        } else if is_reasoning {
-            let reasoning_frames: &[&str] = &["\u{25d0}", "\u{25d3}", "\u{25d1}", "\u{25d2}"];
-            (
-                reasoning_frames[frame_index % reasoning_frames.len()].to_string(),
-                "\u{1f9e0} Reasoning...".to_string(),
-            )
-        } else {
-            let thinking_frames: &[&str] = &[
-                "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
-                "\u{2827}", "\u{2807}", "\u{280f}",
-            ];
-            let label = self.label.lock().unwrap();
-            (
-                thinking_frames[frame_index % thinking_frames.len()].to_string(),
-                label.clone(),
-            )
-        };
-
-        let elapsed = self.start_time.lock().unwrap().elapsed().as_secs_f64();
-
-        let mut line = format!("{frame} {current_label}");
-        if let Some(ref m) = *self.model.lock().unwrap() {
-            let _ = write!(line, " [{m}]");
-        }
-        let _ = write!(line, " ({elapsed:.1}s)");
-
-        let bytes = self.progress.response_bytes();
-        let token_budget = *self.token_budget.lock().unwrap();
-        if bytes > 0 && elapsed >= 1.0 {
-            let approx_tokens = bytes / 4;
-            if let Some(budget) = token_budget {
-                let pct = (f64::from(approx_tokens) / f64::from(budget) * 100.0).min(100.0);
-                let fmt_t = format_compact_tokens(approx_tokens);
-                let fmt_b = format_compact_tokens(budget);
-                let _ = write!(line, " \u{2193} {fmt_t} / {fmt_b} ({pct:.0}%)");
-                if approx_tokens >= 2000 && elapsed > 5.0 {
-                    let rate = f64::from(approx_tokens) / elapsed;
-                    let remaining = f64::from(budget.saturating_sub(approx_tokens));
-                    let eta_secs = remaining / rate;
-                    let _ = if eta_secs >= 60.0 {
-                        write!(line, " ~{:.0}m", eta_secs / 60.0)
-                    } else {
-                        write!(line, " ~{eta_secs:.0}s")
-                    };
-                }
-            } else {
-                let _ = if approx_tokens >= 1000 {
-                    write!(
-                        line,
-                        " \u{2193} {:.1}k tokens",
-                        f64::from(approx_tokens) / 1000.0
-                    )
-                } else {
-                    write!(line, " \u{2193} {approx_tokens} tokens")
-                };
-            }
-        }
-
-        let color =
-            crate::render::theme().spinner_fg(is_retry || self.progress.is_stalled(is_reasoning));
-        format!("{color}{line}{}", crate::render::RESET)
-    }
-}
-
-fn format_compact_tokens(tokens: u32) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M", f64::from(tokens) / 1_000_000.0)
-    } else if tokens >= 1_000 {
-        format!("{:.1}k", f64::from(tokens) / 1_000.0)
-    } else {
-        tokens.to_string()
-    }
-}
-
 // ── ChromeSlot enums ──────────────────────────────────────────────────
 
 /// ChromeSlot: status area above the separator. One variant renders at a time.
 ///
-/// Priority: Spinner > TurnResult > Tips > Empty.
+/// Priority: Activity > TurnResult > Tips > Empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StatusSlot {
-    /// Animated progress during a turn.
-    Spinner(String),
+    /// Running model, tool, or retry activity; input panels own waiting states.
+    Active(String),
     /// Turn result (tokens/cost/ctx). Cleared when the next turn starts.
     TurnResult(Arc<StyledText>),
     /// First-run tips. Dismissed on first submit.
@@ -490,13 +322,24 @@ impl FuzzySelectState {
 
     fn format_panel(&self) -> String {
         let mut lines = Vec::new();
+        let theme = crate::render::theme();
+        let support = crate::render::ColorSupport::detect();
+        let caption = ChoiceText::new(theme, support, false);
         let total = self.filtered.len();
         if self.filter.is_empty() {
-            lines.push(format!("{} items  {}", total, self.question.prompt));
+            lines.push(format!(
+                "{}{}",
+                caption.muted(&format!("{total} items  ")),
+                self.question.prompt
+            ));
         } else {
             lines.push(format!(
-                "{total} match  {} (filter: {})",
-                self.question.prompt, self.filter
+                "{}{}{}{}{}",
+                caption.muted(&format!("{total} match  ")),
+                self.question.prompt,
+                caption.muted(" (filter: "),
+                self.filter,
+                caption.muted(")"),
             ));
         }
         let end = (self.scroll + FUZZY_WINDOW_SIZE).min(self.filtered.len());
@@ -504,19 +347,20 @@ impl FuzzySelectState {
             let abs_vi = self.scroll + vi;
             let option = &self.question.options[oi];
             let selector = if abs_vi == self.cursor { ">" } else { " " };
+            let choice = ChoiceText::new(theme, support, abs_vi == self.cursor);
             let marker = if option.recommended {
-                format!(
-                    " {}(recommended){}",
-                    crate::render::DIM,
-                    crate::render::RESET
-                )
+                choice.muted(" (recommended)")
             } else {
                 String::new()
             };
-            lines.push(format!("{selector} {}{marker}", option.label));
+            lines.push(format!(
+                "{}{}{marker}",
+                choice.prefix(&format!("{selector} ")),
+                choice.body(&option.label)
+            ));
         }
         if end < self.filtered.len() {
-            lines.push(format!("  … {} more", self.filtered.len() - end));
+            lines.push(caption.muted(&format!("  … {} more", self.filtered.len() - end)));
         }
         if self.question.allow_custom_input && !self.filter.is_empty() && self.filtered.is_empty() {
             let hint = self
@@ -525,11 +369,7 @@ impl FuzzySelectState {
                 .as_deref()
                 .filter(|hint| !hint.is_empty())
                 .unwrap_or("no match — press Enter to use what you typed");
-            lines.push(format!(
-                "{}  {hint}{}",
-                crate::render::DIM,
-                crate::render::RESET
-            ));
+            lines.push(caption.muted(&format!("  {hint}")));
         }
         lines.join("\n")
     }
@@ -545,6 +385,7 @@ impl FuzzySelectState {
 #[derive(Clone, Debug)]
 pub struct ToolCard {
     pub id: String,
+    name: String,
     input: String,
     status: crate::cli::format::ToolStatus,
     content: Arc<crate::cli::format::ToolCardContent>,
@@ -554,6 +395,7 @@ impl ToolCard {
     fn new(id: String, name: &str, input: &str) -> Self {
         Self {
             id,
+            name: crate::cli::format::ToolKind::visible_name(name).to_string(),
             input: input.to_string(),
             status: crate::cli::format::ToolStatus::Queued,
             // Parsing and syntax highlighting happen once per tool event,
@@ -874,14 +716,21 @@ fn format_question_panel(
     custom_input: &str,
 ) -> String {
     let mut lines = Vec::new();
+    let theme = crate::render::theme();
+    let support = crate::render::ColorSupport::detect();
+    let caption = ChoiceText::new(theme, support, false);
     lines.push(format!(
-        "{}/{}  {}",
-        question.index + 1,
-        question.total.max(1),
+        "{}{}",
+        caption.muted(&format!(
+            "{}/{}  ",
+            question.index + 1,
+            question.total.max(1)
+        )),
         question.prompt
     ));
     for (index, option) in question.options.iter().enumerate() {
         let selector = if index == selected_index { ">" } else { " " };
+        let choice = ChoiceText::new(theme, support, index == selected_index);
         let marker = if option.recommended {
             " (recommended)"
         } else {
@@ -893,11 +742,10 @@ fn format_question_panel(
             .filter(|description| !description.is_empty())
             .map_or(String::new(), |description| format!(" - {description}"));
         lines.push(format!(
-            "{selector} [{}] {}{}{}",
-            index + 1,
-            option.label,
-            marker,
-            description
+            "{}{}{}",
+            choice.prefix(&format!("{selector} [{}] ", index + 1)),
+            choice.body(&option.label),
+            choice.muted(&format!("{marker}{description}")),
         ));
     }
     let max_digit = question.options.len().min(9);
@@ -907,6 +755,7 @@ fn format_question_panel(
     // question did not opt in, the row is omitted.
     if question.allow_custom_input {
         let on_row = selected_index == question.options.len();
+        let choice = ChoiceText::new(theme, support, on_row);
         let selector = if on_row { ">" } else { " " };
         let body = if custom_input.is_empty() {
             let hint = question
@@ -916,20 +765,19 @@ fn format_question_panel(
                 .unwrap_or("type your own answer");
             if on_row {
                 // Show a caret so it reads as an active field once selected.
-                format!(
-                    "\u{2588} {}{hint}{}",
-                    crate::render::DIM,
-                    crate::render::RESET
-                )
+                format!("{}{}", choice.body("\u{2588} "), choice.muted(hint),)
             } else {
-                format!("{}{hint}{}", crate::render::DIM, crate::render::RESET)
+                choice.muted(hint)
             }
         } else if on_row {
-            format!("{custom_input}\u{2588}")
+            choice.body(&format!("{custom_input}\u{2588}"))
         } else {
-            custom_input.to_string()
+            choice.body(custom_input)
         };
-        lines.push(format!("{selector} [+] {body}"));
+        lines.push(format!(
+            "{}{body}",
+            choice.prefix(&format!("{selector} [+] "))
+        ));
     }
     let arrow_hint = if question.back_value.is_some() {
         "\u{2190}\u{2192} back/open \u{00b7} "
@@ -941,11 +789,14 @@ fn format_question_panel(
     } else {
         ""
     };
-    lines.push(format!(
-        "{}  {arrow_hint}\u{2191}\u{2193} navigate \u{00b7} 1-{max_digit} quick select{custom_hint} \u{00b7} Enter confirm{}",
-        crate::render::DIM,
-        crate::render::RESET,
-    ));
+    let digit_hint = if max_digit >= 2 {
+        format!(" \u{00b7} 1-{max_digit} quick select")
+    } else {
+        String::new()
+    };
+    lines.push(caption.muted(&format!(
+        "  {arrow_hint}\u{2191}\u{2193} navigate{digit_hint}{custom_hint} \u{00b7} Enter confirm",
+    )));
     lines.join("\n")
 }
 
@@ -953,6 +804,11 @@ fn format_question_panel(
 /// (which need a trailing newline) from raw byte chunks (which already
 /// include their own newlines from the markdown renderer).
 enum OutputMsg {
+    /// One event's stable history and replacement live prose, in order.
+    AssistantUpdate {
+        committed: String,
+        preview: PreviewUpdate,
+    },
     /// Complete line — `StdoutHandle::println` will append `\n`.
     Line(String),
     /// Raw chunk — `StdoutHandle::print`, no extra newline.
@@ -1030,6 +886,12 @@ impl OutputSender {
         let _ = self.tx.send(OutputMsg::ToolProgress(text));
     }
 
+    pub(crate) fn assistant_update(&self, committed: String, preview: PreviewUpdate) {
+        let _ = self
+            .tx
+            .send(OutputMsg::AssistantUpdate { committed, preview });
+    }
+
     pub fn println(&self, text: &str) {
         let _ = self.tx.send(OutputMsg::Line(text.to_string()));
     }
@@ -1100,7 +962,7 @@ pub struct ReplHandle {
     pub output: OutputSender,
     pub ui: UiCommandSender,
     pub input_rx: Receiver<InputEvent>,
-    pub spinner: SpinnerState,
+    pub spinner: ActivityState,
     ui_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -1135,7 +997,7 @@ impl ReplHandle {
         OutputSender,
         UiCommandSender,
         Receiver<InputEvent>,
-        SpinnerState,
+        ActivityState,
         Box<dyn FnOnce()>,
     ) {
         let join_fn = {
@@ -1213,23 +1075,16 @@ pub enum PendingItem {
 ///
 /// A pure projection of `items` — it never commits to scrollback (the render
 /// engine commits finished tool cards; the coordinator echoes flushed messages).
-/// Height budget mirrors the task panel: `min(10, max(3, rows-14))`, hidden
-/// entirely on a very short terminal.
-fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: usize) -> String {
+/// The layout owner budgets the resulting projection alongside all other slots.
+/// `max_lines` bounds full tool cards, not the terminal height.
+fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: usize) -> String {
     use crate::render::{DIM, RESET};
 
     if items.is_empty() {
         return String::new();
     }
-    // Same budget family as render_todo_panel; hide on a very short terminal
-    // rather than crowding out the prompt.
-    if term_rows <= 10 {
-        return String::new();
-    }
-    let max_lines = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
     let support = crate::render::ColorSupport::detect();
     let theme = crate::render::theme();
-
     // Messages are one line each and always shown; reserve their space first so
     // tool cards (multi-line) can never crowd a queued message out.
     let message_count = items
@@ -1303,21 +1158,14 @@ fn render_pending_overlay(items: &[PendingItem], term_rows: usize, term_width: u
 ///
 /// - Header: count summary with done/in_progress/open breakdown
 /// - Each visible todo: icon + label (completed = strikethrough+dim, in_progress = bold activeForm)
-/// - Truncation: dynamic based on terminal height (CC: `min(10, max(3, rows - 14))`)
+/// - Full projection bounds item count; shared layout owns terminal height.
 /// - Priority order: in_progress > pending > completed; hidden summary
-fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
+fn render_todo_panel(todos: &[runtime::Todo], max_display: usize) -> String {
     use crate::render::{ansi_fg, theme, BOLD, DIM, RESET};
 
     if todos.is_empty() {
         return String::new();
     }
-
-    // Dynamic max display: CC uses min(10, max(3, rows - 14)).
-    // When terminal is very short (≤10 rows), hide entirely.
-    if term_rows <= 10 {
-        return String::new();
-    }
-    let max_display = 10usize.min(3usize.max(term_rows.saturating_sub(14)));
 
     let t = theme();
     let success = ansi_fg(t.success);
@@ -1350,6 +1198,11 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
 
     let mut lines = Vec::with_capacity(todos.len() + 2);
     lines.push(header.to_string());
+
+    // Summary and full view derive their counts/styles from the same source.
+    if max_display == 0 {
+        return lines.join("\n");
+    }
 
     // Sort by priority: in_progress first, then pending, then completed.
     let mut sorted: Vec<&runtime::Todo> = todos.iter().collect();
@@ -1417,11 +1270,12 @@ fn render_todo_panel(todos: &[runtime::Todo], term_rows: usize) -> String {
 /// Context passed to `ReplApp` via `ContextProvider`.
 struct ReplContext {
     tasks: Arc<Mutex<TaskBrowser>>,
+    prose_preview: Arc<Mutex<ProsePreview>>,
     output_rx: Arc<Mutex<Receiver<OutputMsg>>>,
     terminal_handoff: Arc<Mutex<Option<TerminalHandoff>>>,
     ui_rx: Arc<Mutex<Receiver<UiCommand>>>,
     input_tx: SyncSender<InputEvent>,
-    spinner: SpinnerState,
+    spinner: ActivityState,
     permission_mode: String,
     tips_line: String,
     stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>>,
@@ -1451,6 +1305,8 @@ pub type UpArrowDequeueHook = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 #[component]
 fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let ctx = hooks.use_context::<ReplContext>();
+    let prose_preview = ctx.prose_preview.clone();
+    let prose_preview_for_future = ctx.prose_preview.clone();
     let output_rx = Arc::clone(&ctx.output_rx);
     let terminal_handoff = Arc::clone(&ctx.terminal_handoff);
     let terminal_handoff_for_future = Arc::clone(&ctx.terminal_handoff);
@@ -1464,7 +1320,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let todo_items_for_future = Arc::clone(&ctx.todo_items);
     let pending = Arc::clone(&ctx.pending);
     let pending_for_future = Arc::clone(&ctx.pending);
-    let pending_for_dequeue = Arc::clone(&ctx.pending);
     let dequeue_hook = ctx.dequeue_hook.clone();
     let tasks = Arc::clone(&ctx.tasks);
     let tasks_for_future = Arc::clone(&ctx.tasks);
@@ -1474,12 +1329,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // use_terminal_size must be called before use_future and use_terminal_events
     // to maintain consistent hook ordering.
     let (term_width, term_height) = hooks.use_terminal_size();
+    let input_frame = hooks.use_input_frame();
 
     let (stdout, _stderr) = hooks.use_output();
     let mut system = hooks.use_context_mut::<SystemContext>();
     let mut input_value = hooks.use_state(String::new);
     let mut frame = hooks.use_state(|| 0usize);
-    let mut spinner_text = hooks.use_state(String::new);
+    let mut foreground_state = hooks.use_state(|| EngineState::Idle);
     let mut tool_progress = hooks.use_state(|| None::<String>);
     let mut turn_result = hooks.use_state(|| None::<Arc<StyledText>>);
     let mut has_submitted = hooks.use_state(|| false);
@@ -1503,21 +1359,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Never persisted — the real content goes into the submitted message.
     let mut paste_store = hooks.use_state(|| std::collections::HashMap::<u32, String>::new());
     let mut next_paste_id = hooks.use_state(|| 1u32);
-    let mut text_input_handle = hooks.use_ref_default::<TextInputHandle>();
-    // Where the cursor was when the user pressed the key, which is not where
-    // `text_input_handle` reads during a key handler: `TextInput` is a child
-    // component, and children drain their terminal events before this one
-    // does, so by the time Up/Down is handled here the cursor has already
-    // been moved a line. Deciding against the moved position collapses the
-    // first tier away (an Up from the second line would land on the first
-    // line and immediately jump to offset 0). Recorded once per render,
-    // below, which is the state the next keypress starts from.
-    let mut cursor_at_last_render = hooks.use_state(|| 0usize);
-    // Whether a `TextInput` was mounted by the *previous* render. The
-    // handle outlives the component it points at, so on the frame the slot
-    // flips back from a question panel it still refers to the states of the
-    // `TextInput` that was torn down — reading those panics inside iocraft.
-    let mut text_input_was_mounted = hooks.use_state(|| false);
+    let mut input_reviewable = hooks.use_state(|| true);
+    let mut measurements = hooks.use_ref_default::<Measurements>();
+    let prompt_renderer = hooks.use_ref(crate::render::TerminalRenderer::new);
+    let mut prompt_text = hooks.use_ref_default::<PromptTextCache>();
+    // Stay mounted at zero height so the handle never references torn-down state.
+    let mut review_handle = hooks.use_ref_default::<ScrollViewHandle>();
 
     // Clone handles for the future (StdoutHandle is Clone).
     let stdout_for_future = stdout.clone();
@@ -1533,6 +1380,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         let mut task_clock_tick = Instant::now();
         loop {
             smol::Timer::after(Duration::from_millis(80)).await;
+            let mut is_preview_changed = false;
 
             // Drain stderr redirect — route captured text through stdout
             // so it appears in the iocraft scrollback instead of corrupting
@@ -1553,6 +1401,16 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(rx) = output_rx_for_future.lock() {
                 loop {
                     let (text, terminated) = match rx.try_recv() {
+                        Ok(OutputMsg::AssistantUpdate { committed, preview }) => {
+                            prose_preview_for_future
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .update(preview);
+                            is_preview_changed = true;
+                            // use_output queues history for the same presentation
+                            // as the newly rendered preview, never an empty frame.
+                            (committed, false)
+                        }
                         Ok(OutputMsg::Line(text)) => (text, true),
                         Ok(OutputMsg::Raw(text)) => (text, false),
                         Ok(OutputMsg::ToolProgress(text)) => {
@@ -1591,6 +1449,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 .set(Some((message, Instant::now() + Duration::from_secs(3))));
                         }
                         Ok(UiCommand::ShowQuestion(question)) => {
+                            review_handle.write().scroll_to_top();
                             tasks_for_future
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1613,8 +1472,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             input_value.set(String::new());
                         }
                         Ok(UiCommand::ClearQuestion) => {
+                            let is_plain_input = matches!(*input_slot.read(), InputSlot::TextInput);
                             input_slot.set(InputSlot::TextInput);
-                            input_value.set(String::new());
+                            if !is_plain_input {
+                                input_value.set(String::new());
+                            }
                         }
                         Ok(UiCommand::SetTurnResult(text)) => {
                             turn_result.set(Some(text));
@@ -1713,7 +1575,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Some(deadline) = todo_hide_deadline {
                 if Instant::now() >= deadline {
                     if let Ok(mut items) = todo_items_for_future.lock() {
-                        items.clear();
+                        if !items.is_empty() {
+                            items.clear();
+                            frame.set(frame.get().wrapping_add(1));
+                        }
                     }
                     todo_hide_deadline = None;
                 }
@@ -1728,29 +1593,19 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 footer_hint.set(None);
             }
 
-            // Update spinner.  When a new turn starts (spinner becomes
-            // active), clear the previous turn's result — the spinner
-            // takes priority in the StatusSlot and the old result is stale.
-            //
-            // Only mutate state when it actually changes. `render_frame`
-            // returns "" whenever the spinner is inactive (idle), so the old
-            // unconditional `frame.set(idx+1)` + `spinner_text.set("")` churned
-            // identical state on every 80ms idle tick. Per iocraft's render
-            // model an unconditional `State::set` — even to the same value —
-            // resolves `component.wait()` and can starve `term.wait()`, dropping
-            // keyboard events (the failure mode guarded by
-            // `iocraft_repl_keyboard_input_not_frozen`). Leaving idle ticks
-            // untouched keeps key-event distribution alive between renders.
+            // One lifecycle snapshot drives the status and footer. Animate
+            // only Running; waiting hides the row, Idle changes no UI state.
+            // Identical idle State::set calls starve keyboard delivery in iocraft.
             let idx = frame.get();
-            let text = spinner_for_future.render_frame(idx);
-            if !text.is_empty() {
+            let state = spinner_for_future.engine_state();
+            if state == EngineState::Running || is_preview_changed {
                 frame.set(idx.wrapping_add(1));
-                if turn_result.read().is_some() {
-                    turn_result.set(None);
-                }
             }
-            if *spinner_text.read() != text {
-                spinner_text.set(text);
+            if state != EngineState::Idle && turn_result.read().is_some() {
+                turn_result.set(None);
+            }
+            if foreground_state.get() != state {
+                foreground_state.set(state);
             }
         }
     });
@@ -1760,6 +1615,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let stdout_for_events = stdout.clone();
 
     hooks.use_terminal_events({
+        let input_frame = input_frame.clone();
         move |event| match event {
             TerminalEvent::Key(KeyEvent {
                 code,
@@ -1768,6 +1624,29 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ..
             }) if kind != KeyEventKind::Release => {
                 let current_slot = input_slot.read().clone();
+                // Never submit or edit contents that cannot be reviewed. The
+                // mounted editor preserves its buffer/cursor while unfocused.
+                if (!input_reviewable.get() || !input_frame.is_current())
+                    && code != KeyCode::Esc
+                    && !(code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    return;
+                }
+                if matches!(current_slot, InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)) {
+                    let mut review = review_handle.write();
+                    let page = i32::from(review.viewport_height()).saturating_sub(1).max(1);
+                    match code {
+                        KeyCode::PageUp => { review.scroll_by(-page); return; }
+                        KeyCode::PageDown => { review.scroll_by(page); return; }
+                        KeyCode::Home if modifiers.contains(KeyModifiers::CONTROL) => {
+                            review.scroll_to_top(); return;
+                        }
+                        KeyCode::End if modifiers.contains(KeyModifiers::CONTROL) => {
+                            review.scroll_to_bottom(); return;
+                        }
+                        _ => {}
+                    }
+                }
                 // Dismiss InputSlot::Hint on any keypress.
                 if matches!(current_slot, InputSlot::Hint(_)) {
                     input_slot.set(InputSlot::TextInput);
@@ -1999,110 +1878,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             input_value.set(String::new());
                         }
                     }
-                    // ── Up/Down — TextInput: CC-parity two-step arrow keys ──
-                    //
-                    // Behavior mirrors rustyline's UpArrowHandler / DownArrowHandler
-                    // (src/input.rs).  Three tiers per direction:
-                    //
-                    //   Up:  1) cursor NOT on first logical line  → pass-through
-                    //            (TextInput moves to previous line)
-                    //        2) cursor on first line, not at pos 0 → move to 0
-                    //        3) cursor at pos 0 (or empty)         → history prev
-                    //
-                    //   Down: 1) cursor NOT on last logical line   → pass-through
-                    //            (TextInput moves to next line)
-                    //         2) cursor on last line, not at end   → move to end
-                    //         3) cursor at end (or empty)          → history next
-                    //
-                    // "Logical line" = delimited by '\n'.  TextInput normalises
-                    // platform newlines, so this is cross-platform safe.
-                    KeyCode::Up if matches!(current_slot, InputSlot::TextInput) => {
-                        if history_cursor.get().is_some() {
-                            let h = history.read();
-                            let c = history_cursor.get().unwrap_or(0);
-                            let nc = c.saturating_sub(1);
-                            if !h.is_empty() {
-                                input_value.set(h[nc].clone());
-                                history_cursor.set(Some(nc));
-                            }
-                        } else {
-                            let val = input_value.read().clone();
-                            let cursor_pos = cursor_at_last_render.get().min(val.len());
-                            let on_first_line = !val.get(..cursor_pos)
-                                .unwrap_or(&val)
-                                .contains('\n');
-                            if val.is_empty() {
-                                // Empty buffer: `↑` first tries to recall queued
-                                // HUMAN messages. One press pulls back ALL of
-                                // them at once (joined in submit order,
-                                // oldest-at-top), skipping any a2a/peer items
-                                // which stay queued — mirroring Claude Code's
-                                // `popAllEditable`. If nothing human is queued,
-                                // fall through to walking prompt history.
-                                if let Some(recalled) =
-                                    dequeue_hook.as_ref().and_then(|hook| hook())
-                                {
-                                    let cursor_offset = recalled.len();
-                                    input_value.set(recalled);
-                                    text_input_handle.write().set_cursor_offset(cursor_offset);
-                                    // Remove ALL human chips from the overlay to
-                                    // match the items just popped; peer chips
-                                    // stay.
-                                    if let Ok(mut pending) = pending_for_dequeue.lock() {
-                                        pending.retain(|p| {
-                                            !matches!(
-                                                p,
-                                                PendingItem::QueuedMessage { is_human: true, .. }
-                                            )
-                                        });
-                                    }
-                                } else {
-                                    let h = history.read();
-                                    if !h.is_empty() {
-                                        saved_input.set(val);
-                                        input_value.set(h[h.len() - 1].clone());
-                                        history_cursor.set(Some(h.len() - 1));
-                                    }
-                                }
-                            } else if on_first_line && cursor_pos == 0 {
-                                let h = history.read();
-                                if !h.is_empty() {
-                                    saved_input.set(val);
-                                    input_value.set(h[h.len() - 1].clone());
-                                    history_cursor.set(Some(h.len() - 1));
-                                }
-                            } else if on_first_line {
-                                text_input_handle.write().set_cursor_offset(0);
-                            }
-                            // else: not on first line — TextInput handles
-                            // cursor movement to the line above.
-                        }
-                    }
-                    KeyCode::Down if matches!(current_slot, InputSlot::TextInput) => {
-                        if let Some(c) = history_cursor.get() {
-                            let h = history.read();
-                            if c + 1 < h.len() {
-                                input_value.set(h[c + 1].clone());
-                                history_cursor.set(Some(c + 1));
-                            } else {
-                                input_value.set(saved_input.read().clone());
-                                history_cursor.set(None);
-                            }
-                        } else {
-                            let val = input_value.read().clone();
-                            let cursor_pos = cursor_at_last_render.get().min(val.len());
-                            let on_last_line = !val.get(cursor_pos..)
-                                .unwrap_or_default()
-                                .contains('\n');
-                            if on_last_line && cursor_pos < val.len() {
-                                text_input_handle.write().set_cursor_offset(val.len());
-                            }
-                            // else if on_last_line && at end: nothing to do
-                            // (no "forward history" in CC).
-                            // else: not on last line — TextInput handles
-                            // cursor movement to the line below.
-                        }
-                    }
                     // ── Digit shortcut — DialPad only ─────────────────
                     // Only when NOT composing free text: an empty custom-input
                     // buffer AND the cursor not parked on the `[+]` row. Once you
@@ -2183,11 +1958,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
                         // TextInput applies this edit before the next queued key.
-                        // The parent retains ownership of history metadata.
                         if !matches!(current_slot, InputSlot::TextInput) {
                             input_value.set(String::new());
+                            history_cursor.set(None);
                         }
-                        history_cursor.set(None);
                     }
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         let now = Instant::now();
@@ -2252,6 +2026,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // not mounted, so route the paste into the active buffer here using
             // the SAME normalize/placeholder logic (DRY).
             TerminalEvent::Paste(pasted) => {
+                if !input_reviewable.get() || !input_frame.is_current() {
+                    return;
+                }
                 let current_slot = input_slot.read().clone();
                 match &current_slot {
                     InputSlot::DialPad(q)
@@ -2284,35 +2061,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     });
 
-    // Snapshot the cursor for the next keypress to decide against. Guarded:
-    // an unconditional `State::set` — even to the same value — resolves
-    // `component.wait()` and can starve `term.wait()`, dropping keystrokes
-    // (the failure mode `iocraft_repl_keyboard_input_not_frozen` guards).
-    // Only while the text input is the live slot: in the question slots no
-    // `TextInput` is mounted, so the handle still reports the offset it had
-    // when one last was, and snapshotting that would set state on renders it
-    // has no business touching.
-    // Snapshot the cursor for the next keypress to decide against. Guarded
-    // twice: only while a `TextInput` is the live slot *and* one was already
-    // mounted a frame ago (see `text_input_was_mounted`), and only set when
-    // the value actually changed — an unconditional `State::set` resolves
-    // `component.wait()` and can starve `term.wait()`, dropping keystrokes
-    // (the failure mode `iocraft_repl_keyboard_input_not_frozen` guards).
-    let text_input_is_live = matches!(*input_slot.read(), InputSlot::TextInput)
-        && !tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_panel();
-    if text_input_is_live && text_input_was_mounted.get() {
-        let live_cursor = text_input_handle.read().cursor_offset();
-        if cursor_at_last_render.get() != live_cursor {
-            cursor_at_last_render.set(live_cursor);
-        }
-    }
-    if text_input_was_mounted.get() != text_input_is_live {
-        text_input_was_mounted.set(text_input_is_live);
-    }
-
     // Exit check: `system` was obtained before the event handler and is
     // NOT captured by the Send closure. The exit flag is set inside the
     // closure; we check it here outside the closure.
@@ -2342,19 +2090,37 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
 
     // ── Derive ChromeSlots from state ──────────────────────────────────
-    let st = spinner_text.read().clone();
+    let activity_state = foreground_state.get();
+    let w = usize::from(term_width);
     let val = input_value.read().clone();
     let current_input_slot = input_slot.read().clone();
     let submitted = *has_submitted.read();
 
-    // StatusSlot: Spinner > TurnResult > Tips > Empty
-    let status_slot = if !st.is_empty() {
+    // StatusSlot: Activity > TurnResult > Tips > Empty
+    let status_slot = if activity_state == EngineState::Running {
         // Reuse the existing status row and shared column layout. No additional
         // live rows can spill into scrollback as tool output grows.
-        let text = tool_progress.read().as_ref().map_or(st, |text| {
-            crate::render::text_layout::truncate_to_width(text, term_width as usize)
-        });
-        StatusSlot::Spinner(text)
+        let progress = tool_progress.read();
+        let pending = pending.lock().unwrap();
+        let mut tools = ToolActivity {
+            progress: progress.as_deref(),
+            ..Default::default()
+        };
+        for item in pending.iter() {
+            if let PendingItem::Tool(card) = item {
+                if card.status == crate::cli::format::ToolStatus::Running {
+                    tools.count += 1;
+                    tools.name.get_or_insert(&card.name);
+                }
+            }
+        }
+        // Format with the same iocraft width snapshot as the other chrome,
+        // including the very first frame after a resize.
+        StatusSlot::Active(spinner.render_frame(frame.get(), activity_state, tools, w))
+    } else if activity_state == EngineState::AwaitingInput {
+        // The existing question/approval panel owns this interaction. No
+        // animation or duplicate waiting instruction above InputSlot.
+        StatusSlot::Empty
     } else if let Some(ref tr) = *turn_result.read() {
         StatusSlot::TurnResult(tr.clone())
     } else if !submitted {
@@ -2366,7 +2132,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // FooterSlot: Hint > TurnActive > Minimal > Full
     let footer_slot = if let Some((ref msg, _)) = *footer_hint.read() {
         FooterSlot::Hint(msg.clone())
-    } else if matches!(status_slot, StatusSlot::Spinner(_)) {
+    } else if activity_state != EngineState::Idle {
         FooterSlot::TurnActive
     } else if submitted {
         FooterSlot::Minimal
@@ -2396,50 +2162,48 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     let perm = permission_mode.clone();
-    let w = term_width as usize;
     let sep = "\u{2500}".repeat(w);
     let mut browser = tasks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let footer_text = browser.footer(&format_footer_text(&footer_slot, &perm), w);
-    let task_panel = browser
-        .is_panel()
-        .then(|| browser.panel(w, term_height as usize));
+    // Keep task affordances in compact chrome, not just a generic footer label.
+    let footer_summary = browser.footer("compact · enlarge to expand", w);
+    let task_panel = browser.is_panel().then(|| browser.panel(w, usize::MAX));
     let task_focus = browser.focus;
     drop(browser);
 
-    // Merge TodoSlot into the upper separator as a single
-    // multi-line Text element so the element tree structure stays
-    // identical (avoids iocraft hook-index shifts).
-    let todo_line = if task_panel.is_some() {
-        String::new()
+    let todos = if task_panel.is_some() {
+        Vec::new()
     } else {
         todo_items
             .lock()
-            .ok()
-            .map(|items| render_todo_panel(&items, term_height as usize))
+            .map(|items| items.clone())
             .unwrap_or_default()
     };
-
-    // PendingSlot: queued/running tool cards and queued messages
-    // (human `❯` / inbound `Message from …`) in one ordered overlay, in arrival order.
-    // Built as one multi-line string so the element tree keeps a fixed shape
-    // (empty string when nothing pending) — same hook-index rationale as the
-    // todo panel. A pure overlay: it never commits to scrollback (the render
-    // engine commits finished tool cards; the coordinator echoes flushed
-    // messages).
-    let pending_text = if task_panel.is_some() {
-        String::new()
+    // PendingSlot projects tools and queued messages in arrival order. It
+    // never commits history: completed cards and flushed messages have their
+    // existing transcript owners.
+    let pending_items = if task_panel.is_some() {
+        Vec::new()
     } else {
         pending
             .lock()
-            .ok()
-            .map(|items| render_pending_overlay(&items, term_height as usize, w))
+            .map(|items| items.clone())
             .unwrap_or_default()
     };
-
-    // Slots choose their semantic initial style. The decoder owns explicit
-    // resets; the UI adapter must not repaint reset spans with a parent color.
+    let queued = pending_items
+        .iter()
+        .filter(|item| matches!(item, PendingItem::QueuedMessage { .. }))
+        .count();
+    let running = pending_items.len() - queued;
+    let pending_summary = if pending_items.is_empty() {
+        String::new()
+    } else {
+        format!("{running} running · {queued} queued")
+    };
+    // Decode semantic initial styles before measurement. Painting consumes the
+    // same spans, so explicit resets never acquire a parent fallback color.
     let chrome_has_color =
         crate::render::ColorSupport::detect() != crate::render::ColorSupport::NoColor;
     let chrome_theme = crate::render::theme();
@@ -2451,49 +2215,214 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let chrome_border = chrome_has_color
         .then_some(chrome_theme.border)
         .and_then(ansi_text::ui_color);
-    // Keep question presentation unchanged here; finer selection roles are a
-    // separate design step, not a reason to retain the reset bug.
-    let question_style = chrome_style(TerminalColor::Cyan);
+    let question_style = chrome_style(chrome_theme.primary);
+    let status_text = match &status_slot {
+        StatusSlot::Active(s) => ansi(s),
+        StatusSlot::TurnResult(s) => s.clone(),
+        StatusSlot::Tips => ansi_with_style(&tips_text, chrome_muted),
+        StatusSlot::Empty => Default::default(),
+    };
+    let status_summary = match &status_slot {
+        StatusSlot::Active(_) => "Status: turn active",
+        StatusSlot::TurnResult(_) => "Status: last turn (collapsed)",
+        StatusSlot::Tips => "Status: tips (collapsed)",
+        StatusSlot::Empty => "",
+    };
+    let heading = ansi_with_style(
+        question
+            .and_then(|q| q.title.as_ref())
+            .map(|title| format!("[{title}]"))
+            .unwrap_or_default(),
+        question_style,
+    );
+    let body = prompt_text.write().render(
+        &prompt_renderer.read(),
+        question.and_then(|q| q.description.as_ref()),
+        w,
+    );
+    let mut controls = if let Some(panel) = task_panel.clone() {
+        ansi(panel)
+    } else {
+        ansi(panel_text.unwrap_or_default())
+    };
 
+    // Match the editor's reserved cursor column and trailing empty lines.
+    // This memo invalidates only on draft/width, never spinner or task ticks.
+    let desired_text_rows = hooks.use_memo(
+        {
+            let content = format!("{val}\u{2588}");
+            move || {
+                element! { Text(content) }
+                    .render(Some(w.saturating_sub(3).max(1)))
+                    .height()
+                    .max(1)
+            }
+        },
+        (&val, w),
+    );
+    let mut measured = measurements.write();
+    measured.begin(w);
+    let heading_rows = measured.rows(&heading);
+    let body_rows = measured.rows(&body);
+    let mut controls_rows = measured.rows(&controls);
+    let input_row_count = if task_panel.is_some() {
+        0
+    } else {
+        match &current_input_slot {
+            InputSlot::TextInput => desired_text_rows,
+            InputSlot::Hint(text) => measured.rows(&ansi(text)),
+            InputSlot::DialPad(_) => 0,
+            InputSlot::FuzzySelect(fs) => {
+                measured.rows(&ansi(format!("{prompt_label}{}", fs.filter)))
+            }
+        }
+    };
+    let layout = ChromeLayout::allocate(
+        w,
+        term_height as usize,
+        heading_rows + body_rows + controls_rows + input_row_count,
+        [
+            Slot {
+                minimum_full_rows: 0,
+                full: ansi(render_pending_overlay(&pending_items, 10, w)),
+                summary: ansi(pending_summary),
+            },
+            Slot {
+                // Retain main's stable spinner/result height while the
+                // shared allocator owns all slot and prose row accounting.
+                minimum_full_rows: if status_text.text.is_empty() {
+                    0
+                } else {
+                    128usize.div_ceil(w.max(1))
+                },
+                full: status_text,
+                summary: ansi(status_summary),
+            },
+            Slot {
+                minimum_full_rows: 0,
+                full: ansi(render_todo_panel(&todos, 10)),
+                summary: ansi(render_todo_panel(&todos, 0)),
+            },
+            Slot {
+                minimum_full_rows: 0,
+                full: ansi_with_style(footer_text, chrome_muted),
+                summary: ansi_with_style(
+                    match &footer_slot {
+                        FooterSlot::Hint(hint) => hint.clone(),
+                        _ => footer_summary,
+                    },
+                    chrome_muted,
+                ),
+            },
+        ],
+        format!(
+            "{running} tools · {queued} queued · {} todos · {} status",
+            todos.len(),
+            usize::from(!matches!(status_slot, StatusSlot::Empty))
+        ),
+        &mut measured,
+    );
+    if task_panel.is_some() {
+        // The browser chooses its visible rows from the shared allocation.
+        // Its lazy output cache survives both projections; fixed controls are
+        // still checked below rather than being clipped or blindly operable.
+        controls = ansi(
+            tasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .panel(w, layout.input_rows),
+        );
+        controls_rows = measured.rows(&controls);
+    }
+    let input_layout = InputLayout::allocate(
+        layout.input_rows,
+        [heading_rows, body_rows, controls_rows, input_row_count],
+        &mut measured,
+    );
+    measured.end();
+    drop(measured);
+    let input_warning = layout.warning.clone().or_else(|| {
+        ((!matches!(current_input_slot, InputSlot::TextInput) || task_panel.is_some())
+            && !input_layout.fits_controls)
+            .then(|| "Enlarge terminal to review; Esc cancels".to_string())
+    });
+    let reviewable = input_warning.is_none();
+    input_frame.set_enabled(reviewable);
+    if input_reviewable.get() != reviewable {
+        input_reviewable.set(reviewable);
+    }
+    let visible = if reviewable {
+        input_layout
+    } else {
+        InputLayout::default()
+    };
+    let review_hint = if visible.hint > 0 {
+        let offset = usize::try_from(review_handle.read().scroll_offset())
+            .unwrap_or(0)
+            .min(body_rows.saturating_sub(visible.body));
+        layout::review_hint(offset, visible.body, body_rows)
+    } else {
+        String::new()
+    };
+    let row_height = |rows: usize| {
+        u32::try_from(rows).expect("allocated chrome rows fit the terminal's u16 geometry")
+    };
+
+    let preview_text = (|| {
+        let mut state = prose_preview
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.is_active()
+            || !reviewable
+            || task_panel.is_some()
+            || !matches!(&current_input_slot, InputSlot::TextInput)
+        {
+            return None;
+        }
+        state.layout(w, layout.preview_rows)
+    })();
+    let preview_rows = preview_text
+        .as_ref()
+        .map_or(0, |text| text.text.lines().count());
+    let slot_width = Size::Length(u32::from(term_width));
     element! {
-        View(flex_direction: FlexDirection::Column) {
-            // PendingSlot: tools + queued messages, arrival order. Rendered only
-            // when non-empty — an empty `Text` is not zero-height in iocraft
-            // (its measure clamps to `height.max(1)`), so an always-present slot
-            // left a stray blank line above the status when nothing was pending.
-            // Match the StatusSlot pattern below: `None` renders zero rows.
-            #(if pending_text.is_empty() {
-                None
-            } else {
-                Some(element! { AnsiText(content: pending_text) })
-            })
-            // StatusSlot
-            #(match &status_slot {
-                StatusSlot::Spinner(s) => Some(AnyElement::from(element! { AnsiText(content: s.clone()) })),
-                StatusSlot::TurnResult(s) => Some(AnyElement::from(element! { RichText(content: s.clone()) })),
-                StatusSlot::Tips => Some(AnyElement::from(element! { AnsiText(content: tips_text.clone(), initial_style: chrome_muted) })),
-                StatusSlot::Empty => None,
-            })
-            // Each slot owns its semantic styles. The separator's grey must
-            // not become a fallback for neutral Todo quantities or labels.
-            #(if todo_line.is_empty() {
-                None
-            } else {
-                Some(element! { AnsiText(content: todo_line) })
-            })
-            Text(content: sep.clone(), color: chrome_border)
-            // InputSlot
-            #(question.and_then(|question| question.title.as_ref()).map(|title| element! {
-                AnsiText(content: format!("[{title}]"), initial_style: question_style)
+        View(width: u32::from(term_width), flex_direction: FlexDirection::Column,
+            max_height: u32::from(term_height.saturating_sub(1)), overflow: Overflow::Hidden) {
+            // Keep the preview parent mounted across streaming handoff so it
+            // cannot shift the editor's component identity.
+            View(flex_direction: FlexDirection::Column, width: slot_width,
+                height: Size::Length(row_height(preview_rows))) {
+                #(preview_text.map(|text| element! { RichText(content: text, wrap: TextWrap::NoWrap, width: slot_width) }))
+            }
+            #(row_text("pending", layout.pending.content, layout.pending.rows))
+            #(row_text("status", layout.status.content, layout.status.rows))
+            // TodoSlot owns semantic spans; separator grey is not its
+            // fallback for terminal-foreground counts or descriptions.
+            #(row_text("todo", layout.todo.content, layout.todo.rows))
+            #((layout.separators > 0).then(|| element! {
+                View(height: row_height(layout.separators), flex_shrink: 0.0) {
+                    Text(content: sep.clone(), color: chrome_border, wrap: TextWrap::NoWrap)
+                }
             }))
-            #(question.and_then(|question| question.description.as_ref()).map(|description| element! {
-                PromptTextView(content: Some(description.clone()), width: w)
+            #((!reviewable && layout.input_rows > 0).then(|| element! {
+                View(height: row_height(layout.input_rows), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                    Text(content: input_warning.unwrap_or_default(), color: chrome_has_color.then_some(chrome_theme.warning).and_then(ansi_text::ui_color))
+                }
             }))
-            #(if let Some(panel) = task_panel.clone() {
-                Some(element! { AnsiText(content: panel) })
-            } else {
-                panel_text.map(|panel| element! { AnsiText(content: panel, initial_style: question_style) })
-            })
+            #(row_text("heading", heading, visible.heading))
+            // Stateful owners stay mounted for their handle's entire lifetime,
+            // including between questions. Only their stateless text can be
+            // omitted; a handle outliving its ScrollView references dead State.
+            View(height: row_height(visible.body), flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                ScrollView(handle: Some(review_handle), auto_scroll: false, scrollbar: Some(false), keyboard_scroll: Some(false)) {
+                    #((body_rows > 0).then(|| element! { RichText(content: body) }))
+                }
+            }
+            #(row_text("review-hint", ansi_with_style(review_hint, chrome_muted), visible.hint))
+            #(row_text("controls", controls, visible.controls))
+            // The editor stays mounted even with zero allocated rows so a
+            // shrink/grow cannot discard its cursor, draft or edit ownership.
+            View(height: row_height(visible.editor), flex_shrink: 0.0, overflow: Overflow::Hidden) {
             #(if task_panel.is_some() {
                 element! { View(flex_direction: FlexDirection::Row) {} }
             } else if let InputSlot::Hint(ref hint_text) = current_input_slot {
@@ -2523,6 +2452,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             } else {
                 let tasks_for_edit = Arc::clone(&tasks);
+                let mut input_history = input_history::InputHistory {
+                    history,
+                    selected: history_cursor,
+                    saved_input,
+                    dequeue: dequeue_hook.clone(),
+                    pending: Arc::clone(&pending),
+                };
                 let on_edit: TextInputEditHandler = Box::new(move |event, current, cursor| {
                     // Read focus at event time: several keys can arrive before
                     // the next render. TextInput remains the only draft editor.
@@ -2536,14 +2472,21 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if browser.focus == TaskFocus::Footer && edits_draft {
                         browser.close();
                     }
-                    if browser.focus != TaskFocus::Input {
+                    if !reviewable || browser.focus != TaskFocus::Input
+                        || !matches!(*input_slot.read(), InputSlot::TextInput) {
                         return Some(TextInputEdit { value: input_value.read().clone(), cursor_offset: cursor });
                     }
                     drop(browser);
+                    if let Some(edit) = input_history.edit(event, current, cursor) {
+                        return Some(edit);
+                    }
                     match event {
-                        TerminalEvent::Key(KeyEvent { code: KeyCode::Char('u'), modifiers, .. })
-                            if modifiers.contains(KeyModifiers::CONTROL) => Some(TextInputEdit {
-                                value: String::new(), cursor_offset: 0,
+                        // The parent owns submission. TextInput must not
+                        // insert a newline at a middle cursor before Enter is
+                        // handled there; Shift+Enter remains an editor event.
+                        TerminalEvent::Key(KeyEvent { code: KeyCode::Enter, modifiers, .. })
+                            if !modifiers.contains(KeyModifiers::SHIFT) => Some(TextInputEdit {
+                                value: current.to_owned(), cursor_offset: cursor,
                             }),
                         TerminalEvent::Paste(pasted) => {
                             let mut id = next_paste_id.get();
@@ -2559,14 +2502,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                 });
                 element! {
-                    View(flex_direction: FlexDirection::Row) {
-                        Text(content: prompt_label)
+                    View(flex_direction: FlexDirection::Row, height: 100pct, width: 100pct) {
+                        View(width: 2, flex_shrink: 0.0) { Text(content: prompt_label) }
                         TextInput(
                             value: val,
-                            has_focus: matches!(task_focus, TaskFocus::Input | TaskFocus::Footer),
+                            has_focus: reviewable && matches!(task_focus, TaskFocus::Input | TaskFocus::Footer),
                             multiline: true,
-                            auto_grow: true,
-                            handle: Some(text_input_handle.clone()),
+                            auto_grow: false,
                             on_edit: Some(on_edit),
                             on_change: move |new_val: String| {
                                 input_value.set(new_val);
@@ -2575,10 +2517,15 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                 }
             })
+            }
             // Separator
-            Text(content: sep, color: chrome_border)
+            #((layout.separators > 0).then(|| element! {
+                View(height: row_height(layout.separators), flex_shrink: 0.0) {
+                    Text(content: sep, color: chrome_border, wrap: TextWrap::NoWrap)
+                }
+            }))
             // FooterSlot
-            AnsiText(content: footer_text, initial_style: chrome_muted)
+            #(row_text("footer", layout.footer.content, layout.footer.rows))
         }
     }
 }
@@ -2606,13 +2553,14 @@ pub fn spawn_repl_ui(
     let (output_tx, output_rx) = mpsc::sync_channel::<OutputMsg>(512);
     let (ui_tx, ui_rx) = mpsc::sync_channel::<UiCommand>(16);
     let (input_tx, input_rx) = mpsc::sync_channel::<InputEvent>(16);
-    let spinner = SpinnerState::new_inactive();
+    let spinner = ActivityState::new();
 
     let stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>> =
         Arc::new(Mutex::new(None));
 
     let ctx = ReplContext {
         tasks: Arc::new(Mutex::new(TaskBrowser::default())),
+        prose_preview: Arc::new(Mutex::new(ProsePreview::default())),
         output_rx: Arc::new(Mutex::new(output_rx)),
         terminal_handoff: Arc::new(Mutex::new(None)),
         ui_rx: Arc::new(Mutex::new(ui_rx)),
@@ -2701,12 +2649,13 @@ mod tests {
     }
 
     #[test]
-    fn pending_overlay_hidden_on_short_terminal() {
-        // ≤10 rows: hide entirely rather than crowd out the prompt.
-        assert_eq!(
-            render_pending_overlay(&[PendingItem::Tool(tool_card("1", "bash"))], 8, 80),
-            ""
-        );
+    fn pending_overlay_reports_tools_when_cards_have_no_budget() {
+        let plain = strip_ansi(&render_pending_overlay(
+            &[PendingItem::Tool(tool_card("1", "bash"))],
+            0,
+            80,
+        ));
+        assert!(plain.contains("+1 more tools"), "{plain}");
     }
 
     #[test]
@@ -2750,13 +2699,13 @@ mod tests {
 
     #[test]
     fn pending_overlay_collapses_overflow_beyond_height_budget() {
-        // rows=24 → budget min(10,max(3,10)) = 10 lines. Each card is 3 lines
+        // The full projection has a ten-line card budget. Each card is 3 lines
         // (╭─ / │ / ╰─ — bash with a "{}" input has a $ body line), so ~3 cards
         // fit and the rest collapse into a "+N more pending" line.
         let items: Vec<PendingItem> = (0..8)
             .map(|i| PendingItem::Tool(tool_card(&i.to_string(), "bash")))
             .collect();
-        let plain = strip_ansi(&render_pending_overlay(&items, 24, 80));
+        let plain = strip_ansi(&render_pending_overlay(&items, 10, 80));
         assert!(
             plain.contains("more tools"),
             "expected overflow summary: {plain}"
@@ -2839,10 +2788,22 @@ mod tests {
 
     #[test]
     fn question_panel_marks_selected_option() {
-        let panel = format_question_panel(&question_with_options(), 1, "");
+        let panel =
+            StyledText::from_ansi(&format_question_panel(&question_with_options(), 1, "")).text;
 
         assert!(panel.contains(" [1] Project (recommended)"));
         assert!(panel.contains("> [2] User"));
+    }
+
+    #[test]
+    fn question_hints_only_offer_active_digit_shortcuts() {
+        let mut question = question_with_options();
+        let panel = StyledText::from_ansi(&format_question_panel(&question, 0, "")).text;
+        assert!(panel.contains("1-2 quick select"));
+        question.options.truncate(1);
+        let panel = StyledText::from_ansi(&format_question_panel(&question, 0, "")).text;
+        assert!(!panel.contains("quick select"));
+        assert!(panel.contains("Enter confirm"));
     }
 
     #[test]
@@ -2854,7 +2815,12 @@ mod tests {
         // Cursor on the `[+]` row (index == options.len()) marks it; empty buffer
         // shows a caret + the hint. This is the row Up/Down reach and typing
         // fills in-place.
-        let panel = format_question_panel(&question, question.options.len(), "");
+        let panel = StyledText::from_ansi(&format_question_panel(
+            &question,
+            question.options.len(),
+            "",
+        ))
+        .text;
         assert!(panel.contains("> [+]"));
         assert!(panel.contains("type a comment"));
         assert!(panel.contains("  [1] Project"));
@@ -2868,9 +2834,14 @@ mod tests {
 
         // With a non-empty buffer, the `[+]` row renders the typed text (with a
         // caret when selected) instead of the hint — no slot switch needed.
-        let on_row = format_question_panel(&question, question.options.len(), "hi there");
+        let on_row = StyledText::from_ansi(&format_question_panel(
+            &question,
+            question.options.len(),
+            "hi there",
+        ))
+        .text;
         assert!(on_row.contains("> [+] hi there"));
-        let off_row = format_question_panel(&question, 0, "hi there");
+        let off_row = StyledText::from_ansi(&format_question_panel(&question, 0, "hi there")).text;
         assert!(off_row.contains("[+] hi there"));
         assert!(!off_row.contains("type your own answer"));
     }

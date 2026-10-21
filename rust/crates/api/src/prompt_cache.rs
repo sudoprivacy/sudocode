@@ -188,6 +188,8 @@ pub struct CacheBreakEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptCacheRequestRow {
     pub at_unix_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<crate::CacheRequestObservation>,
     /// The gateway's correlation id, absent when talking straight to a provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gateway_request_id: Option<String>,
@@ -240,6 +242,15 @@ pub struct PromptCache {
 }
 
 impl PromptCache {
+    pub fn set_context_segment(&self, segment: u64) {
+        self.lock().context_segment = segment;
+    }
+
+    #[must_use]
+    pub fn context_segment(&self) -> u64 {
+        self.lock().context_segment
+    }
+
     #[must_use]
     pub fn new(session_id: impl Into<String>) -> Self {
         Self::with_config(PromptCacheConfig::new(session_id))
@@ -256,6 +267,7 @@ impl PromptCache {
                 paths,
                 stats,
                 previous,
+                context_segment: 0,
             })),
         }
     }
@@ -320,6 +332,16 @@ impl PromptCache {
         request: &MessageRequest,
         response: &MessageResponse,
     ) -> PromptCacheRecord {
+        self.record_response_observed(request, response, None)
+    }
+
+    #[must_use]
+    pub fn record_response_observed(
+        &self,
+        request: &MessageRequest,
+        response: &MessageResponse,
+        observation: Option<crate::CacheRequestObservation>,
+    ) -> PromptCacheRecord {
         self.record_usage_internal(
             request,
             &response.usage,
@@ -328,6 +350,7 @@ impl PromptCache {
                 provider: response.request_id.clone(),
             },
             Some(response),
+            observation,
         )
     }
 
@@ -346,7 +369,18 @@ impl PromptCache {
         usage: &Usage,
         ids: ResponseTraceIds,
     ) -> PromptCacheRecord {
-        self.record_usage_internal(request, usage, ids, None)
+        self.record_usage_observed(request, usage, ids, None)
+    }
+
+    #[must_use]
+    pub fn record_usage_observed(
+        &self,
+        request: &MessageRequest,
+        usage: &Usage,
+        ids: ResponseTraceIds,
+        observation: Option<crate::CacheRequestObservation>,
+    ) -> PromptCacheRecord {
+        self.record_usage_internal(request, usage, ids, None, observation)
     }
 
     fn record_usage_internal(
@@ -360,12 +394,26 @@ impl PromptCache {
         // cannot supply is what made `provider_request_id` unreachable for all
         // real traffic.
         completion_entry: Option<&MessageResponse>,
+        mut observation: Option<crate::CacheRequestObservation>,
     ) -> PromptCacheRecord {
         let request_hash = request_hash_hex(request);
         let mut inner = self.lock();
         let previous = inner.previous.clone();
         let current = TrackedPromptState::from_usage(request, usage);
-        let cache_break = detect_cache_break(&inner.config, previous.as_ref(), &current);
+        let complete = observation.as_ref().is_none_or(|o| o.completed);
+        let cache_break = complete
+            .then(|| detect_cache_break(&inner.config, previous.as_ref(), &current))
+            .flatten();
+        if let Some(observation) = &mut observation {
+            observation.client_prefix_compatible = previous.as_ref().map(|before| {
+                before.fingerprint_version == current.fingerprint_version
+                    && before.model_hash == current.model_hash
+                    && before.system_hash == current.system_hash
+                    && before.tools_hash == current.tools_hash
+                    && common_prefix_len(&before.message_hashes, &current.message_hashes)
+                        == before.message_hashes.len()
+            });
+        }
 
         inner.stats.tracked_requests += 1;
         apply_usage_to_stats(&mut inner.stats, usage, &request_hash, "api-response");
@@ -385,11 +433,14 @@ impl PromptCache {
             }
         }
 
-        inner.previous = Some(current);
+        if complete {
+            inner.previous = Some(current);
+        }
         append_request_row(
             &inner.paths,
             &PromptCacheRequestRow {
                 at_unix_secs: now_unix_secs(),
+                observation,
                 gateway_request_id: ids.gateway,
                 provider_request_id: ids.provider,
                 model: request.model.clone(),
@@ -421,6 +472,7 @@ impl PromptCache {
 
 #[derive(Debug)]
 struct PromptCacheInner {
+    context_segment: u64,
     config: PromptCacheConfig,
     paths: PromptCachePaths,
     stats: PromptCacheStats,

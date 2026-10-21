@@ -47,6 +47,48 @@ fn assert_active_session(child: &mut pty_expect::PtySession, session: &str) {
     );
 }
 
+fn record_response(
+    child: &mut pty_expect::PtySession,
+    env: &common::TestEnv,
+    path: &Path,
+    prompt: &str,
+) -> PathBuf {
+    let session = runtime::Session::load_from_path(path).unwrap();
+    let count = session
+        .messages
+        .iter()
+        .filter(|message| message.role == runtime::MessageRole::Assistant)
+        .count();
+    let directory = runtime::Session::response_captures_dir_for(path, &session.session_id).unwrap();
+    child.send(&format!("{prompt}\r")).unwrap();
+    common::expect_screen(
+        child,
+        |_| {
+            let persisted = runtime::Session::load_from_path(path).is_ok_and(|session| {
+                session
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == runtime::MessageRole::Assistant)
+                    .count()
+                    > count
+            });
+            let complete = std::fs::read_dir(&directory)
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .filter_map(|entry| std::fs::read(entry.path()).ok())
+                .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .any(|metadata| metadata["gzip_complete"] == true);
+            persisted && complete
+        },
+        env.timeout(),
+        "persisted answer and finalized raw response",
+    );
+    common::expect_input_line_cleared(child, env.timeout(), "response completed");
+    directory
+}
+
 #[test]
 fn session_picker_filters_switches_and_returns_to_the_prompt() {
     let env = common::TestEnv::new("iocraft-session-picker");
@@ -104,8 +146,22 @@ fn session_delete_can_cancel_then_confirm_without_force() {
     common::expect_input_line_cleared(&child, common::DEFAULT_TIMEOUT, "session prompt");
     command(&mut child, "/session fork delete-target", "Session forked");
     let (target, path) = branch_session(env.workspace_root(), "delete-target");
+    let prompt = env.prompt("What is 2+2?", "single_turn_text");
+    let target_responses = record_response(&mut child, &env, &path, &prompt);
+    assert!(
+        target_responses.exists(),
+        "save the target session's real response"
+    );
     command(&mut child, "/session fork keep-current", "Session forked");
     let (current, current_path) = branch_session(env.workspace_root(), "keep-current");
+    let current_responses = record_response(&mut child, &env, &current_path, &prompt);
+    let current_bodies: Vec<_> = std::fs::read_dir(&current_responses)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "gz"))
+        .map(|path| (path.clone(), std::fs::read(path).unwrap()))
+        .collect();
+    assert!(!current_bodies.is_empty());
 
     for cancel in ["\x1b", "\r"] {
         child.send(&format!("/session delete {target}\r")).unwrap();
@@ -113,6 +169,10 @@ fn session_delete_can_cancel_then_confirm_without_force() {
         child.send(cancel).unwrap();
         common::expect_input_line_cleared(&child, env.timeout(), "cancel returns to prompt");
         assert!(path.exists(), "cancel must preserve the saved session");
+        assert!(
+            target_responses.exists(),
+            "cancel must preserve response evidence"
+        );
         assert_active_session(&mut child, &current);
     }
     child.send(&format!("/session delete {target}\r")).unwrap();
@@ -121,7 +181,18 @@ fn session_delete_can_cancel_then_confirm_without_force() {
     child.expect("Session deleted").unwrap();
     common::expect_input_line_cleared(&child, common::DEFAULT_TIMEOUT, "session prompt");
     assert!(!path.exists());
+    assert!(
+        !target_responses.exists(),
+        "delete the selected session's response attachments"
+    );
     assert!(current_path.exists());
+    for (path, bytes) in current_bodies {
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            bytes,
+            "preserve the other session's exact evidence"
+        );
+    }
     assert_active_session(&mut child, &current);
     child.send("/exit\r").unwrap();
     assert_eq!(child.expect_eof().unwrap(), 0);

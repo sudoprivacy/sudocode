@@ -218,6 +218,13 @@ Add the fields to the model entry in `sudocode.json`:
   `reasoning_effort`, …). Everything else is inserted as given. The list
   is `RESERVED_REQUEST_BODY_KEYS` in
   `rust/crates/api/src/types.rs`.
+- **Anthropic beta headers.** For `anthropic-messages`, `extraBody.betas`
+  is an explicit array of beta names sent in the `anthropic-beta` header,
+  replacing the default list. Required OAuth authentication is retained.
+  For example, `"betas": ["thinking-binding-controls-2026-08-01"]`
+  avoids legacy betas that a strict gateway may reject. Configuring
+  `thinking.block_binding` also adds its required binding beta. Beta names
+  are validated before sending; `betas` never enters the Messages JSON body.
 - **Absent means unchanged.** A model without `extraBody` sends exactly
   the payload it sent before this field existed.
 - Applies to the `openai-completions` and `openai-responses` wire
@@ -358,6 +365,19 @@ deadline preserves the confirmed completion and records usage exactly once.
 This is not an unconditional delay; normally the terminal event arrives
 immediately. Interrupted content before a logical end and explicit refusals
 still fail the turn.
+
+The opt-in thinking-binding diagnostic records `input_transformations` from
+both `message_start` and the final `message_delta`, including updates after a
+server fallback. It records bounded type, reason and path metadata without
+logging provider reasoning or signatures. It does not delete blocks merely
+because a different serving model could not read them.
+
+Changing effort still uses the top-level setting and restarts the prompt cache.
+Native Claude Code can append effort-only system messages instead. A real
+Opus 5.5 control through a private transparent copy of the current Bedrock
+bridge rejected that form even with the required beta in both the header and
+`anthropic_beta` body array. This client does not claim cache-preserving effort
+changes on that route. See the [provider's per-message effort contract](https://platform.claude.com/docs/en/build-with-claude/effort#per-message-effort-beta).
 
 ## Adding a model
 

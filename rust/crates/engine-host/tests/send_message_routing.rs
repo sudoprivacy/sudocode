@@ -177,9 +177,7 @@ fn nexus_executor() -> (CliToolExecutor, Appends, Provisions) {
         SESSION_AGENT.to_string(),
         InboxConvention::new(String::new()),
     ));
-    executor.set_directory(Arc::new(runtime::directory::Directory::single(
-        "nexus", mailbox,
-    )));
+    executor.set_mailbox(mailbox);
     (executor, appends, provisions)
 }
 

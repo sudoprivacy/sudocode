@@ -1,8 +1,9 @@
 name: Rendering performance
 
 on:
-  # The workflow and evaluator run from the protected base. Candidate code runs
-  # only in the measurement job, with read permissions and no persisted token.
+  # Automatic PR checks use the protected base. An approved administrator may
+  # also dispatch this workflow for a selected PR. Candidate execution has read
+  # permissions; its measurement harness always comes from the PR base.
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
@@ -12,6 +13,10 @@ on:
         type: choice
         options: [core, stress]
         default: core
+      pull_request:
+        description: 'Optional same-repository PR; dispatch from its current head branch'
+        type: string
+        default: ''
   workflow_call:
     inputs:
       profile:
@@ -25,12 +30,31 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: render-performance-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  group: render-performance-${{ github.event.pull_request.number || inputs.pull_request || github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
+  contract:
+    name: Rendering policy live PR contract
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await require('./e2e/terminal-resize/policy-contract.cjs')({
+              github, context, core, root: process.cwd(),
+            });
+
   policy:
     name: Rendering benchmark policy
+    needs: contract
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -40,6 +64,9 @@ jobs:
       baseline: ${{ steps.policy.outputs.baseline }}
       head: ${{ steps.policy.outputs.head }}
       is_needed: ${{ steps.policy.outputs.is_needed }}
+      trusted: ${{ steps.policy.outputs.trusted }}
+      repository: ${{ steps.policy.outputs.repository }}
+      pull_number: ${{ steps.policy.outputs.pull_number }}
     steps:
       - name: Mark the candidate gate pending
         if: github.event_name == 'pull_request_target'
@@ -63,6 +90,19 @@ jobs:
             await require('./e2e/terminal-resize/policy-review.cjs')({
               github, context, core, root: process.cwd(), output: 'selected-policy',
             });
+      - name: Mark the approved manual PR gate pending
+        if: github.event_name == 'workflow_dispatch' && inputs.pull_request != ''
+        uses: actions/github-script@v7
+        env:
+          SCODE_RENDER_HEAD: ${{ steps.policy.outputs.head }}
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha: process.env.SCODE_RENDER_HEAD,
+              context: 'render performance', state: 'pending',
+              description: 'Approval verified; waiting for real A/A calibration and A/B measurements',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
       - uses: actions/upload-artifact@v4
         with:
           name: rendering-policy
@@ -78,7 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ needs.policy.outputs.trusted }}
           path: trusted
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -88,7 +128,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          repository: ${{ needs.policy.outputs.repository }}
           ref: ${{ needs.policy.outputs.head }}
           path: candidate
           persist-credentials: false
@@ -152,27 +192,67 @@ jobs:
 
   status:
     name: Publish rendering gate
-    if: always() && github.event_name == 'pull_request_target'
-    needs: [policy, measure]
+    if: always() && !cancelled() && (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.pull_request != ''))
+    needs: [contract, policy, measure]
     runs-on: ubuntu-24.04
     permissions:
       statuses: write
+      pull-requests: read
+      contents: read
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
       - uses: actions/github-script@v7
         env:
           POLICY_RESULT: ${{ needs.policy.result }}
           MEASURE_RESULT: ${{ needs.measure.result }}
           IS_NEEDED: ${{ needs.policy.outputs.is_needed }}
+          SCODE_RENDER_HEAD: ${{ needs.policy.outputs.head }}
+          SCODE_RENDER_PR: ${{ needs.policy.outputs.pull_number }}
+          SCODE_RENDER_BASE: ${{ needs.policy.outputs.trusted }}
         with:
           script: |
-            const success = process.env.POLICY_RESULT === 'success'
+            const pullNumber = Number(process.env.SCODE_RENDER_PR
+              || context.payload.pull_request?.number || context.payload.inputs?.pull_request);
+            const head = process.env.SCODE_RENDER_HEAD
+              || context.payload.pull_request?.head.sha || context.sha;
+            if (!Number.isSafeInteger(pullNumber) || pullNumber < 1)
+              throw new Error('A valid PR number is required to publish the rendering gate');
+            const current = await github.rest.pulls.get({
+              ...context.repo, pull_number: pullNumber,
+            });
+            if (current.data.head.sha !== head)
+              throw new Error('PR advanced; only measurements of its current head may publish the gate');
+            let success = process.env.POLICY_RESULT === 'success'
               && (process.env.MEASURE_RESULT === 'success'
                 || (process.env.IS_NEEDED === 'false' && process.env.MEASURE_RESULT === 'skipped'));
+            let approvalError;
+            if (success) {
+              try {
+                const approval = await require('./e2e/terminal-resize/policy-review.cjs')({
+                  github, context, core, root: process.cwd(), output: 'final-rendering-approval',
+                });
+                if (approval.head !== head || approval.base !== process.env.SCODE_RENDER_BASE)
+                  throw new Error('PR base or head changed after the measured artifacts were selected');
+              } catch (error) {
+                success = false;
+                approvalError = error;
+              }
+            }
             await github.rest.repos.createCommitStatus({
-              ...context.repo, sha: context.payload.pull_request.head.sha,
+              ...context.repo, sha: head,
               context: 'render performance', state: success ? 'success' : 'failure',
               description: success ? (process.env.IS_NEEDED === 'false'
                 ? 'No runtime or benchmark changes' : 'Release A/A calibration and A/B budgets passed')
                 : 'Policy, calibration or performance failed; inspect artifacts',
               target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
             });
+            if (approvalError) core.setFailed(approvalError.message);
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rendering-final-approval
+          path: final-rendering-approval
+          if-no-files-found: ignore

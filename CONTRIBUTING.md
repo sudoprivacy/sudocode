@@ -514,6 +514,55 @@ the canonical changes. Keep calculations in this shared contract instead of
 adding separate percentages or TTL price formulas to a renderer or monitor.
 Changes to measurement do not enable telemetry or automatic TTL selection.
 
+### Experimental TTL advice
+
+Enable `"experimental": {"cacheTtlAdvisor": true}` in settings, or set
+`SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR=1` for the process. This experiment
+collects local metadata and **never changes the outgoing TTL**, including
+explicit `cache_ttl_1h` overrides. It sends no keepalive or extra model calls.
+Use `scode cache stats --output-format json` to inspect `ttl_advisor` per
+session. The text report points to this view without adding terminal warnings.
+
+The existing request ledger gains request-start, response-start and logical
+completion times, final client cache-marker TTLs (including the default 5m),
+context segment, opaque route/settings keys, HTTP attempt count and completion
+coverage. Compaction requests are distinguished. Upstream TTL remains unknown:
+client markers do not prove a gateway's effective policy. Interrupted streams
+retain consumed usage with `completed=false`; retried, restarted, mixed-TTL and
+legacy samples are excluded from the advisor, rather than counted as clean
+successes. Prefix compatibility reuses the existing local fingerprints.
+An empty-response fallback opens a separate request scope. Its consumed partial
+usage is recorded before the replacement, and incomplete responses never advance
+the successful prefix state. Missing or legacy rows break reuse adjacency.
+
+One recommendation is frozen at session creation/resume and each committed
+compaction. Resume of the same model/route/configuration and segment reuses the
+decision. An empty new session keeps its configured TTL until there is enough
+history at a later boundary. This does not reset cumulative session usage.
+Training reads at most a 512 KiB ledger tail and only completed history available
+before that boundary; derived state retains at most 16 decisions. No full prompt,
+tool payload, URL or credential is added. Public advice omits correlation keys.
+
+Recommendations compare two explicit scenarios using request-start intervals
+and token-weighted reusable prefixes. Within each scenario, matching client
+prefixes are assumed to survive on the same upstream until that TTL; actual
+hits under that same requested TTL are preserved even beyond a timing cutoff.
+Unknown routing, eviction and boundary jitter mean these are **hypothetical
+costs, not measured savings or expiry attribution**. The first request, context
+changes and policy transitions are conservatively charged a full cached-input
+write. Uncached input and output are excluded because their cost is common to
+the compared policies. Reference model prices and their date/source live in
+`spec/cache_ttl_prices.json`; unknown models keep the configured TTL. These
+prices do not establish gateway billing or subscription-quota economics.
+
+The first version requires eight eligible intervals and a 10% scenario-cost
+margin to suggest changing TTL; otherwise it preserves the configured choice.
+Those are experimental decision thresholds, not statistical confidence bounds.
+`forward_comparison` scores only later requests with a previously frozen
+decision, against both fixed baselines using the same scenario assumptions and
+the shared generated cost function. It does not fit the policy to those later
+requests. Auto-application needs a separate decision after credible validation.
+
 Main turns, subagent turns, and compaction share
 `api::session_message_request`. Add session-level request fields there rather
 than assembling another request in a caller. `SystemPrompt` uses copy-on-write
@@ -634,16 +683,14 @@ typos) unless the PR description opts out. Larger changes go through
 review comments.
 
 Once approved, a maintainer merges with **`--merge`** (not squash)
-to preserve the feature-branch commit history. The "Block Merge
-Commits in PR" CI check requires your branch to include the latest
-`main` and have a linear PR history. Update with `git fetch origin`,
-`git rebase origin/main`, resolve any conflicts, and
-`git push --force-with-lease` for an already-pushed branch. Preserve the
-feature commits and their authors while rebasing. The check examines the
-actual PR head and rejects every merge commit introduced by the PR,
-including merges of `main`. Existing merge commits already in `main`
-remain valid. It also rejects new conflict markers and runs for every PR
-regardless of changed paths.
+to preserve the feature-branch commit history. The "Verify PR history"
+CI check requires your branch to include the latest `main`. Update with
+`git fetch origin`, `git merge origin/main`, resolve any conflicts, and
+`git push`. Preserve the existing commits and their authors; do not rebase
+or squash already-published history. The check examines the actual PR head,
+accepts merge commits, rejects new conflict markers, and runs for every PR
+regardless of changed paths. Its implementation is
+[`check_pr_history.py`](.github/scripts/check_pr_history.py).
 Strict branch protection also requires the PR to remain up to date
 and pass the required CI checks before merging, including for admins.
 

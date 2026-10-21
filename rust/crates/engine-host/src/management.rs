@@ -116,27 +116,7 @@ fn handle_slash_command(
                 )
             }
         }
-        SlashCommand::Status => {
-            let _scope = WorkspaceRootScope::enter(cwd);
-            let snapshot = engine.session_snapshot();
-            let tracker = UsageTracker::from_session(&snapshot);
-            let handle = engine.session_handle();
-            let account = engine.current_billing_account();
-            format_status_report(
-                &engine.current_model(),
-                StatusUsage {
-                    message_count: snapshot.messages.len(),
-                    turns: tracker.turns(),
-                    latest: tracker.current_turn_usage(),
-                    cumulative: tracker.cumulative_usage(),
-                    estimated_tokens: 0,
-                },
-                default_permission_mode().as_str(),
-                &status_context(Some(&handle.path)).map_err(|e| e.to_string())?,
-                None,
-                &account.describe(),
-            )
-        }
+        SlashCommand::Status => status_report(engine, cwd)?,
         SlashCommand::Cost => {
             let usage = UsageTracker::from_session(&engine.session_snapshot()).cumulative_usage();
             format!(
@@ -196,6 +176,30 @@ fn git_diff_report(cwd: &Path) -> Result<String, String> {
         format!("**Unstaged:**\n```diff\n{unstaged}```")
     };
     Ok(format!("{staged}{unstaged}"))
+}
+
+fn status_report(engine: &SessionEngine, cwd: &Path) -> Result<String, String> {
+    let _scope = WorkspaceRootScope::enter(cwd);
+    let snapshot = engine.session_snapshot();
+    let tracker = UsageTracker::from_session(&snapshot);
+    let handle = engine.session_handle();
+    let account = engine.current_billing_account();
+    let mut context = status_context(Some(&handle.path)).map_err(|e| e.to_string())?;
+    context.peer = Some(crate::peer::status(&engine.agent_name()));
+    Ok(format_status_report(
+        &engine.current_model(),
+        StatusUsage {
+            message_count: snapshot.messages.len(),
+            turns: tracker.turns(),
+            latest: tracker.current_turn_usage(),
+            cumulative: tracker.cumulative_usage(),
+            estimated_tokens: 0,
+        },
+        default_permission_mode().as_str(),
+        &context,
+        None,
+        &account.describe(),
+    ))
 }
 
 fn model_report(engine: &SessionEngine, cwd: &Path, model: Option<&str>) -> Result<String, String> {

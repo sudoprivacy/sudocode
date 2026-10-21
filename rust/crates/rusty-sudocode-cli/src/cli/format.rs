@@ -71,6 +71,9 @@ pub(crate) fn render_message(
     renderer: &crate::render::TerminalRenderer,
     tool_inputs: &mut ToolInputRegistry,
 ) -> Option<String> {
+    if msg.is_unanswered_turn_boundary() {
+        return None;
+    }
     let mut out = String::new();
 
     match msg.role {
@@ -721,6 +724,31 @@ pub(crate) enum ToolKind {
 }
 
 impl ToolKind {
+    /// Canonical visible name shared by cards and foreground status.
+    #[inline]
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Bash => "Bash",
+            Self::Read => "Read",
+            Self::Write => "Write",
+            Self::Edit => "Edit",
+            Self::Glob => "Glob",
+            Self::Grep => "Grep",
+            Self::WebSearch => "WebSearch",
+            Self::Skill => "Skill",
+            Self::ReadToolOutput => "ReadToolOutput",
+        }
+    }
+
+    /// Canonicalize known tools while preserving names of extension tools.
+    #[inline]
+    pub(crate) fn visible_name(name: &str) -> &str {
+        match Self::from_name(name) {
+            Some(kind) => kind.display_name(),
+            None => name,
+        }
+    }
+
     /// Parse a wire tool name (either spelling). `None` for tools without a
     /// bespoke card — they fall through to the generic renderer.
     pub(crate) fn from_name(name: &str) -> Option<Self> {
@@ -1071,6 +1099,7 @@ pub(crate) fn first_visible_line(text: &str) -> &str {
 
 /// One theme role for every tool identity, independent of execution status.
 fn tool_label(name: &str) -> String {
+    let name = ToolKind::visible_name(name);
     format!("{}{name}{RESET}", theme().tool_name_fg())
 }
 

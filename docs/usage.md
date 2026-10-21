@@ -45,6 +45,13 @@ replacement text. Pasting inserts at the cursor and preserves text on either
 side. Long or multiline pastes appear as compact placeholders; submitting the
 prompt expands them back to the original content, including subsequent typing.
 
+`Up` first moves to the start of the logical line, then walks prompt history;
+`Down` moves to its end or restores the saved draft from history. Real newlines,
+not terminal wrapping, define these boundaries. Navigation and subsequent
+typing share the editor's current buffer and cursor, even in one key burst;
+no redraw is required between them. On an empty draft, `Up` recalls queued
+human messages before history, leaving inbound peer messages queued.
+
 ## Global and project directories
 
 All native config paths resolve through `runtime::config`. The same roots own
@@ -162,6 +169,16 @@ scode
 The REPL accepts prose and slash commands. Tab completion expands slash
 command names, model aliases, permission modes, and recent session IDs.
 
+The live status follows the foreground engine lifecycle. A four-cell amber
+animation approximates the Sudoprivacy logo in one row. Model work
+shows `Thinking...` or `Reasoning...`, with model, elapsed time and tokens.
+Foreground tools use the same row and show available progress first. Quiet
+tools show `Running Bash…` or `Running 2 tools…`. Long descriptions truncate
+before the time/token details.
+Questions and approvals stop the animation and use the existing input panel;
+there is no additional waiting row. After the turn ends, the normal result and
+footer return. Background work keeps its separate task summary in the footer.
+
 `/memory` opens the discovered instruction file in `$VISUAL`, then `$EDITOR`,
 or `vi` when neither is set. With several instruction files, type to filter
 the file picker, press Enter to edit, or Esc to cancel. With none, it creates
@@ -180,6 +197,19 @@ Assistant responses start with a bold text bullet (`•`, U+2022); continuation
 lines use a two-column margin. The marker is a text character rather than an
 emoji-capable record symbol, avoiding emoji font fallback for this prefix.
 
+Unfinished ordinary paragraphs stream above the live status area by default.
+Finalized text
+moves into native scrollback in the same presentation as preview removal,
+and a draft typed during the response stays available. Parallel tool output
+keeps unfinished Markdown formatting intact. The preview keeps
+at most 8 KiB of source and fits around the input; longer paragraphs freeze
+their preview until finalization, which still retains the entire response.
+Code, tables, lists, headings and emoji with ambiguous terminal widths use
+the existing complete-block rendering path. On Windows, this also applies to
+combining sequences whose widths legacy console hosts cannot reliably preserve;
+the original Unicode text is retained without normalization. A clipped paragraph or an
+unusually long result summary can still change its visible position.
+
 The live UI retains the existing formatter colors and supported text styles:
 tool-card borders show status without extra icons: muted while waiting for
 hooks, approval, or an execution slot; amber while running; the code theme's
@@ -196,9 +226,10 @@ Bash commands that cannot fit the title are preserved in the card body. Long
 list items keep their continuation lines aligned with the item text, including
 in session replay. Replayed message blocks have one blank separator.
 
-In the live REPL UI, Bash and MCP progress replaces the existing live
-status row; it does not append partial output or spinner summaries to terminal
-history. The completed tool card retains its normal output preview. Progress
+In the live REPL UI, Bash and MCP progress takes priority in the existing
+status row; input requests take priority over activity. It does not append partial
+output or spinner summaries to terminal history. The completed tool card
+retains its normal output preview. Progress
 is laid out with the same column and grapheme rules as other terminal text;
 external cursor/screen commands cannot take ownership of the live region.
 Paths without a live UI retain bounded progress log lines. Buffered answer and
@@ -233,6 +264,11 @@ old history. Normal snapshots fold them into ordinary messages. Reading an
 append log that still contains these records requires a version that supports
 streamed tool execution; this includes native append streams retaining earlier
 snapshots. Ordinary rewritten transcript snapshots remain compatible.
+
+A second `message_start` in the same upstream response is a protocol error.
+Sudo Code preserves received partial progress and stops without replaying the
+request or combining usage from the two responses. HTTP failures before a
+response starts remain eligible for the normal transport retry policy.
 
 Incoming peer messages appear in a separate `Message from <peer>` frame with
 muted content and a blue peer name. This presentation does not alter the
@@ -281,11 +317,36 @@ terminal foreground, inline code and file links use the syntax theme's green,
 and web links are blue and underlined. Inline code omits literal backticks;
 fenced code has no extra frame or background. Amber remains the UI brand accent.
 
+Markdown web links use terminal-native OSC 8 hyperlinks. Supported terminals
+show the label (for example `[PR #891](https://github.com/sudoprivacy/sudocode/pull/891)`);
+unknown terminals and multiplexers also retain the destination. Pipes and dumb
+terminals keep readable text. `NO_COLOR` removes color and text styling while
+preserving supported links. Only bounded HTTP(S) destinations become hyperlinks;
+file references keep their existing path display. The terminal owns click gestures,
+selection and copying: ordinary selection copies visible text, not the hidden URL.
+
+Links share the structured text and layout implementation across scrollback,
+resumed history and interactive Markdown prompts. They do not add model tools,
+network lookups, system-prompt instructions or mouse capture.
+
 Plan approval and model question descriptions use the same Markdown renderer
 as assistant answers and transcript replay. Both choice widgets and the legacy
 REPL preserve headings, lists, code, tables, and links. Plain configuration and
 permission descriptions keep their literal text. The live prompt caches its
 formatted document until the source or terminal width changes.
+
+Live slots share one row budget. InputSlot has priority: when a long draft or
+small window leaves insufficient space, PendingSlot, StatusSlot, TodoSlot and
+FooterSlot fold into explicit summaries rather than silently disappearing.
+Growing the window restores their full contents. Long drafts scroll within the
+same editor, preserving the complete text and cursor.
+
+Long question and plan descriptions scroll independently of their choices:
+PgUp/PgDn pages the body and Ctrl+Home/End jumps to its start/end. The choice
+controls stay visible. If the terminal is too small to show those controls
+safely, an enlargement warning replaces the panel; confirmation and hidden
+edits are disabled, but Esc/Ctrl-C can still cancel. Resizing does not answer a
+question, alter the saved plan, or clear conversation history.
 
 `write_plan` saves the complete Markdown document, including Context,
 Constraints, and Acceptance Criteria, before presenting it for review. The

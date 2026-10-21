@@ -1,65 +1,21 @@
-//! Two `scode` processes converse, over every transport a message can take.
+//! Two real `scode` processes exchange durable A2A messages over Nexus.
 //!
-//! ## One workflow, two nexus transports
+//! The fixture uses one daemon, or two Raft-connected daemons when a peer
+//! endpoint is supplied. Both processes authenticate with minted credentials.
+//! Conversation layout and indexing follow the shared Mailbox contract.
 //!
-//! | transport | path an envelope takes | reach |
-//! |---|---|---|
-//! | nexus, one node | `/agents/<to>/chat-with-me` on that node | one machine |
-//! | nexus, two nodes | the same stream, replicated by raft | the cross-machine case |
+//! The sender calls `send`; the receiver surfaces its exact message in the
+//! REPL and commits its own reader position. The offline journey starts the
+//! receiver after the message is stored and verifies that inspecting delivery
+//! leaves its unread position intact.
 //!
-//! The standalone same-machine (no-daemon) pair is covered deterministically by
-//! `runtime/tests/same_machine_pair.rs`; this test is the nexus, real-binary
-//! duet.
-//!
-//! The steps and the dependencies between them do not change with the
-//! transport, so this is one test rather than near-copies that would
-//! drift. What changes is which mailbox the assertions read and, for the local
-//! case, how the sender gets a name — see [`Transport`].
-//!
-//! ## What it covers that nothing else does
-//!
-//! `send_message_routing.rs` proves which destination a recipient's name
-//! resolves to, against a recording backend, and covers the tool's spellings.
-//! `mailbox_nexus_live` proves a real `nexusd-cluster` moves an envelope and
-//! wakes a parked tail, by driving `Mailbox` directly. Neither runs what a user
-//! runs: two real binaries, one calling the `send` tool and one whose REPL
-//! receiver is parked waiting.
-//!
-//! That seam is where the failure this path exists because of lived — a `send`
-//! that answered "Message sent to <peer>'s inbox" while writing a local file —
-//! so a test that drives the transport but not the tool, or the tool but not
-//! the receiver, is blind to half of it.
-//!
-//! ## The workflow
-//!
-//! 1. provision the receiver's inbox — over nexus a send to an unprovisioned
-//!    stream fails, so this is a prerequisite rather than setup
-//! 2. start the RECEIVER: a real `scode` REPL, and wait until it has recorded
-//!    where it starts reading. A first-ever receiver seeks to the tail rather
-//!    than replaying a backlog, so a message sent before that seek lands behind
-//!    the cursor and is never delivered — establishing "listening" is part of
-//!    the workflow
-//! 3. run the SENDER: another real `scode`, whose model calls `send`
-//! 4. the receiver's screen shows it, which is the whole chain: the tool
-//!    resolved the peer's path, the transport carried it, the parked receiver
-//!    woke, and the REPL surfaced it
-//! 5. read the envelope back and check what crossed — `from`, the summary, and
-//!    that the cursor advanced past a consumed message
-//!
-//! Step 4 is the one no client-side read can stand in for: a delivered message
-//! nobody surfaces looks like success from the sender's side.
-//!
-//! ## Dual mode
-//!
-//! Mock by default (CI-safe, no key), live under `SCODE_TEST_BACKEND=live` with
-//! a real model choosing to call the tool. The nexus transports need a daemon:
-//! `e2e/nexus-a2a/run.sh` sets `NEXUS_A2A_TEST_ENDPOINT`, and
-//! `e2e/nexus-a2a/run-cross-node.sh` adds `NEXUS_A2A_TEST_PEER_ENDPOINT` for the
-//! two-node case. Absent a daemon those cases return early rather than
-//! pretending to have checked; the workspace-file case needs nothing and always
-//! runs.
+//! Mock models run by default. `SCODE_TEST_BACKEND=live` lets a funded model
+//! choose the tool call. `e2e/nexus-a2a/run.sh` supplies the daemon and credentials;
+//! absent an endpoint, these tests report that transport acceptance was skipped.
 
 mod common;
+#[path = "support/node_home.rs"]
+mod node_home;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -238,10 +194,20 @@ fn run_duet(transport: &Transport, offline: bool) {
             receiver: endpoint, ..
         } => endpoint,
     };
+    // The receiver attaches the way a machine does: a node record in its home
+    // and a session named for the credential the node minted.
+    let receiver_home = node_home::NodeHome::new(
+        "duet-receiver",
+        receiver_endpoint,
+        RECEIVER,
+        Path::new(&receiver_credential),
+    );
+    node_home::pin_agent_name(&workspace, RECEIVER);
+    let [receiver_home_var, receiver_profile_var] = receiver_home.env();
     let receiver_env_vars = vec![
         ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
-        ("NEXUS_A2A_ENDPOINT", receiver_endpoint.as_str()),
-        ("NEXUS_A2A_CREDENTIAL", receiver_credential.as_str()),
+        (receiver_home_var.0, receiver_home_var.1.as_str()),
+        (receiver_profile_var.0, receiver_profile_var.1.as_str()),
     ];
     let start_receiver = || {
         let mut receiver =
@@ -265,9 +231,10 @@ fn run_duet(transport: &Transport, offline: bool) {
     // watched for is gone, the position having moved into the conversation.
 
     // ── 3. The SENDER: another real scode, whose model calls `send` ────────
-    // Locally it must share the receiver's workspace, because that is what the
-    // local convention is keyed on. Over nexus it gets its own.
-    let prompt = env.prompt(
+    // Its own workspace and home: on a node a session's identity is its own
+    // name, so two sessions sharing a workspace would be one agent.
+    let sender_env = TestEnv::new("duet-sender");
+    let prompt = sender_env.prompt(
         &format!(
             "Use send to message {RECEIVER}. The message body must be exactly \
              \"hello from unified send\" (lowercase, without a period). \
@@ -275,24 +242,30 @@ fn run_duet(transport: &Transport, offline: bool) {
         ),
         transport.scenario(),
     );
-    let sender_credential = std::env::var("NEXUS_A2A_TEST_SENDER_CREDENTIAL")
-        .expect("set NEXUS_A2A_TEST_SENDER_CREDENTIAL=<minted bundle dir>");
-    let mut sender_env_vars = Vec::new();
-    match transport {
+    let sender_endpoint = match transport {
         Transport::OneNode { endpoint }
         | Transport::TwoNodes {
             sender: endpoint, ..
-        } => {
-            sender_env_vars.push(("NEXUS_A2A_ENDPOINT", endpoint.as_str()));
-            sender_env_vars.push(("NEXUS_A2A_CREDENTIAL", sender_credential.as_str()));
-        }
-    }
+        } => endpoint,
+    };
+    let sender_home = node_home::NodeHome::new(
+        "duet-sender",
+        sender_endpoint,
+        &sender_name,
+        Path::new(&sender_credential),
+    );
+    node_home::pin_agent_name(sender_env.workspace_root(), &sender_name);
+    let [sender_home_var, sender_profile_var] = sender_home.env();
+    let sender_env_vars = vec![
+        (sender_home_var.0, sender_home_var.1.as_str()),
+        (sender_profile_var.0, sender_profile_var.1.as_str()),
+    ];
     // No `--allowedTools send`. Narrowing the tool set changes which channel the
     // proxy gateway picks: with one tool allowed, `api.sudorouter.ai` answers
     // `500 … 分组 auto 下模型 <model> 的可用渠道不存在` on every retry, for models
     // it serves fine with the full set. The flag is not load-bearing — the mock
     // scenario issues the call and the live prompt names it.
-    let mut sending = env.spawn_with_env(
+    let mut sending = sender_env.spawn_with_env(
         &["--permission-mode", "workspace-write", &prompt],
         &sender_env_vars,
     );
@@ -329,17 +302,36 @@ fn run_duet(transport: &Transport, offline: bool) {
             inbox.read_position(&expected_from).unwrap().unwrap_or(0),
             initial_position
         );
-        let (stored, _) = inbox.poll_conversation(&expected_from, tail, 0).unwrap();
-        assert!(stored.iter().any(|message| message.from == expected_from));
+        // Append acknowledges Raft commit; the receiver's node can still be
+        // applying it. Use the existing delivery budget and blocking tail.
+        let (stored, _) = inbox
+            .poll_conversation(
+                &expected_from,
+                tail,
+                u64::try_from(BUDGET.as_millis()).unwrap(),
+            )
+            .unwrap();
+        assert!(
+            stored.iter().any(|message| message.from == expected_from),
+            "[{}] no durable envelope from {expected_from}: {stored:?}\nsender:\n{}",
+            transport.label(),
+            common::screen_tail(&sending, 6000)
+        );
+        assert_eq!(
+            inbox.read_position(&expected_from).unwrap().unwrap_or(0),
+            initial_position,
+            "inspecting durable delivery must not acknowledge it for the offline receiver"
+        );
         receiver = Some(start_receiver());
     }
     let mut receiver = receiver.expect("receiver starts after durable delivery");
 
-    // The sender is on nexus, so nothing may be written to the workspace: the
+    // The sender is on nexus, so nothing may be written to its workspace: the
     // failure being guarded is the ambient fallback writing a local file while
     // the tool still answers "sent". "Arrived" has to mean it arrived at the
     // daemon and nowhere else.
-    let workspace_inbox = runtime::agent_mailbox::inbox_path_under(&workspace, RECEIVER);
+    let workspace_inbox =
+        runtime::agent_mailbox::inbox_path_under(sender_env.workspace_root(), RECEIVER);
     assert!(
         !workspace_inbox.exists(),
         "[{}] the sender is on nexus, so nothing may be written to {}",

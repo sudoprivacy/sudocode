@@ -1,127 +1,30 @@
-//! UI adapters for structured text and external ANSI content.
-//! The canvas owns terminal writes; control sequences are never replayed.
-//! Foregrounds, backgrounds and attributes use the same spans as scrollback.
+mod adapter;
+
+pub(super) use adapter::{ui_color, AnsiText, RichText};
 
 use crate::render::styled_text::StyledText;
+#[cfg(test)]
+use adapter::contents;
+#[cfg(test)]
 use crossterm::style::{Attribute, Color as TerminalColor, ContentStyle};
 use iocraft::prelude::*;
 
-#[derive(Default, Props)]
-pub(super) struct AnsiTextProps {
-    pub content: String,
-    pub initial_style: ContentStyle,
-}
-
-#[component]
-pub(super) fn AnsiText(props: &AnsiTextProps) -> impl Into<AnyElement<'static>> {
-    let text = StyledText::from_ansi_with_style(&props.content, props.initial_style);
-    element! { MixedText(contents: contents(&text)) }
-}
-
-#[derive(Default, Props)]
-pub(super) struct RichTextProps {
-    pub content: std::sync::Arc<StyledText>,
-}
-
-#[component]
-pub(super) fn RichText(props: &RichTextProps) -> impl Into<AnyElement<'static>> {
-    element! { MixedText(contents: contents(&props.content)) }
-}
-
-#[derive(Default, Props)]
-pub(super) struct PromptTextViewProps {
-    pub content: Option<runtime::PromptText>,
-    pub width: usize,
-}
-
-struct PromptTextCache {
-    source: runtime::PromptText,
-    width: usize,
-    rendered: std::sync::Arc<StyledText>,
-}
-
-/// One derived document per mounted prompt, invalidated only by source or width.
-/// Ref updates do not schedule a repaint (unlike State), so spinner ticks and
-/// typing cannot reparse the plan or starve the terminal event loop.
-#[component]
-pub(super) fn PromptTextView(
-    props: &PromptTextViewProps,
-    mut hooks: Hooks,
-) -> impl Into<AnyElement<'static>> {
-    let renderer = hooks.use_ref(crate::render::TerminalRenderer::new);
-    let mut cache = hooks.use_ref_default::<Option<PromptTextCache>>();
-    let content = props.content.as_ref().map(|source| {
-        let mut cache = cache.write();
-        if !cache
-            .as_ref()
-            .is_some_and(|cached| cached.width == props.width && cached.source.same_source(source))
-        {
-            *cache = Some(PromptTextCache {
-                source: source.clone(),
-                width: props.width,
-                rendered: std::sync::Arc::new(
-                    renderer.read().render_prompt_text(source, props.width),
-                ),
-            });
+/// Paint allocated text only when it has rows. An overflow-hidden, zero-height
+/// View still updates, measures and draws its children in iocraft, so clipping
+/// empty slots is not a substitute for leaving their text subtree unmounted.
+/// Explicit slot keys keep adjacent stateful widgets independent of visibility.
+pub(super) fn row_text(
+    key: &'static str,
+    content: std::sync::Arc<StyledText>,
+    rows: usize,
+) -> Option<Element<'static, View>> {
+    (rows > 0).then(|| {
+        element! {
+            View(key, height: u32::try_from(rows).expect("allocated rows fit terminal geometry"),
+                flex_shrink: 0.0, overflow: Overflow::Hidden) {
+                RichText(content)
+            }
         }
-        cache.as_ref().unwrap().rendered.clone()
-    });
-    element! {
-        View(flex_direction: FlexDirection::Column) {
-            #(content.map(|content| element! { RichText(content) }))
-        }
-    }
-}
-
-fn contents(text: &StyledText) -> Vec<MixedTextContent> {
-    text.spans(0..text.text.len())
-        .map(|(style, text)| {
-            let has = |attr| style.attributes.has(attr);
-            let mut span = MixedTextContent::default();
-            span.text = text.replace('\t', " ").replace('\r', "");
-            span.color = style.foreground_color.and_then(ui_color);
-            span.background_color = style.background_color.and_then(ui_color);
-            span.weight = if has(Attribute::Bold) {
-                Weight::Bold
-            } else {
-                Weight::Normal
-            };
-            span.dim = has(Attribute::Dim);
-            span.italic = has(Attribute::Italic);
-            span.decoration = if has(Attribute::Underlined) {
-                TextDecoration::Underline
-            } else {
-                TextDecoration::None
-            };
-            span.invert = has(Attribute::Reverse);
-            span.strikethrough = has(Attribute::CrossedOut);
-            span
-        })
-        .collect()
-}
-
-// iocraft and the CLI use different crossterm versions. Convert at the UI boundary.
-pub(super) fn ui_color(color: TerminalColor) -> Option<Color> {
-    Some(match color {
-        TerminalColor::Reset => return None,
-        TerminalColor::Black => Color::Black,
-        TerminalColor::DarkGrey => Color::DarkGrey,
-        TerminalColor::Red => Color::Red,
-        TerminalColor::DarkRed => Color::DarkRed,
-        TerminalColor::Green => Color::Green,
-        TerminalColor::DarkGreen => Color::DarkGreen,
-        TerminalColor::Yellow => Color::Yellow,
-        TerminalColor::DarkYellow => Color::DarkYellow,
-        TerminalColor::Blue => Color::Blue,
-        TerminalColor::DarkBlue => Color::DarkBlue,
-        TerminalColor::Magenta => Color::Magenta,
-        TerminalColor::DarkMagenta => Color::DarkMagenta,
-        TerminalColor::Cyan => Color::Cyan,
-        TerminalColor::DarkCyan => Color::DarkCyan,
-        TerminalColor::White => Color::White,
-        TerminalColor::Grey => Color::Grey,
-        TerminalColor::Rgb { r, g, b } => Color::Rgb { r, g, b },
-        TerminalColor::AnsiValue(n) => Color::AnsiValue(n),
     })
 }
 
@@ -246,7 +149,10 @@ mod tests {
                     40,
                     width,
                 );
-                let text = StyledText::from_ansi(&overlay);
+                let canvas = element! { AnsiText(content: overlay) }.render(Some(width));
+                let mut wire = Vec::new();
+                canvas.write_ansi(&mut wire).unwrap();
+                let text = StyledText::from_ansi(std::str::from_utf8(&wire).unwrap());
                 let spans = contents(&text);
                 assert!(text.text.starts_with("↳ queued: "));
                 assert!(!spans.is_empty());
@@ -273,7 +179,11 @@ mod tests {
             active_form: "Finishing parser".into(),
         }];
         let panel = super::super::render_todo_panel(&todos, 40);
-        let text = StyledText::from_ansi(&format!("{panel}\nPlainSample"));
+        let canvas =
+            element! { AnsiText(content: format!("{panel}\nPlainSample")) }.render(Some(100));
+        let mut wire = Vec::new();
+        canvas.write_ansi(&mut wire).unwrap();
+        let text = StyledText::from_ansi(std::str::from_utf8(&wire).unwrap());
         let spans = contents(&text);
         let label = spans
             .iter()
@@ -283,11 +193,14 @@ mod tests {
         assert_eq!(label.weight, Weight::Normal);
         assert!(label.dim);
         assert!(label.strikethrough);
-        let plain = spans.last().unwrap();
-        assert!(plain.text.ends_with("PlainSample"));
-        assert_eq!(plain.color, None);
-        assert_eq!(plain.weight, Weight::Normal);
-        assert!(!plain.dim);
-        assert!(!plain.strikethrough);
+        let plain_start = text.text.rfind("PlainSample").unwrap();
+        assert_eq!(text.text[plain_start..].trim_end(), "PlainSample");
+        for (style, _) in text.spans(plain_start..text.text.len()) {
+            assert_eq!(style.foreground_color, None);
+            assert_eq!(style.background_color, None);
+            assert!(!style.attributes.has(Attribute::Bold));
+            assert!(!style.attributes.has(Attribute::Dim));
+            assert!(!style.attributes.has(Attribute::CrossedOut));
+        }
     }
 }

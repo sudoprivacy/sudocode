@@ -416,7 +416,7 @@ impl Provider for OpenAiCompatClient {
 pub struct MessageStream {
     request_id: Option<String>,
     client_request_id: String,
-    response: reqwest::Response,
+    response: crate::RecordedResponse,
     parser: MessageStreamParser,
     pending: VecDeque<StreamEvent>,
     done: bool,
@@ -430,7 +430,7 @@ impl MessageStream {
     fn chat(
         request_id: Option<String>,
         client_request_id: String,
-        response: reqwest::Response,
+        response: crate::RecordedResponse,
         provider: impl Into<String>,
         model: String,
         session_tracer: Option<telemetry::SessionTracer>,
@@ -460,7 +460,7 @@ impl MessageStream {
     fn responses(
         request_id: Option<String>,
         client_request_id: String,
-        response: reqwest::Response,
+        response: crate::RecordedResponse,
         model: String,
         session_tracer: Option<telemetry::SessionTracer>,
     ) -> Self {

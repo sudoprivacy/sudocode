@@ -1,14 +1,8 @@
-//! A co-hosted agent's sub-agent store lives in the VFS it says it lives in.
+//! Cohost task stores and followup conversations use their owning VFS.
 //!
-//! The root moved into the agent's own subtree (`/agents/<name>/subagents`) while
-//! every read and write around it was still `std::fs` — which on a Linux daemon
-//! aims that path at the filesystem root and on Windows at the current drive. The
-//! directory the store reported and the directory it used were two different
-//! places, and nothing failed loudly about it.
-//!
-//! So this drives the real `prepare_agent_job` against a real `Kernel`: the store
-//! is created, the manifest is written and the first output file is laid down, and
-//! all three are asserted INSIDE the VFS and absent from the host.
+//! A real Kernel, the production tool dispatcher and the task receive loop
+//! verify saved-task rejection, followup delivery and durable acknowledgement.
+//! A native file blocks host-directory writes at the workspace path.
 
 use std::sync::Arc;
 
@@ -17,12 +11,36 @@ use runtime::{FsBackend, KernelFsBackend};
 
 const AGENT: &str = "scode-agent";
 
+struct DeniedTaskSender;
+
+impl kernel::core::dispatch::NativeInterceptHook for DeniedTaskSender {
+    fn name(&self) -> &'static str {
+        "task-sender-authorization"
+    }
+
+    fn mutating_path_suffixes(&self) -> &'static [&'static str] {
+        &["/transcript"]
+    }
+
+    fn on_pre(
+        &self,
+        context: &kernel::core::dispatch::HookContext,
+    ) -> Result<kernel::core::dispatch::HookOutcome, String> {
+        if let kernel::core::dispatch::HookContext::Write(write) = context {
+            if write.identity.agent_id == "blocked-sender" {
+                return Err("blocked-sender may not write the task transcript".into());
+            }
+        }
+        Ok(kernel::core::dispatch::HookOutcome::Pass)
+    }
+}
+
 /// A kernel whose `/agents` subtree can hold content, and one co-hosted agent's
 /// filesystem over it.
-fn cohost_fs() -> (Arc<Kernel>, Arc<dyn FsBackend>) {
+fn cohost_fs(workspace_root: impl Into<String>) -> (Arc<Kernel>, Arc<dyn FsBackend>) {
     let kernel = Arc::new(Kernel::new());
     kernel.vfs_router_arc().add_mount(
-        "/agents",
+        "/",
         "root",
         Some(Arc::new(runtime::test_support::MemObjectStore::default())),
         false,
@@ -32,14 +50,14 @@ fn cohost_fs() -> (Arc<Kernel>, Arc<dyn FsBackend>) {
         "test-owner",
         "root",
         AGENT,
-        "/proc/7/workspace".to_string(),
+        workspace_root,
     ));
     (kernel, fs)
 }
 
 #[test]
 fn a_cohosted_agents_subagent_store_is_written_into_its_own_vfs_subtree() {
-    let (_kernel, fs) = cohost_fs();
+    let (_kernel, fs) = cohost_fs("/proc/7/workspace");
 
     let manifest =
         tools::testing::prepare_agent_job_on(Arc::clone(&fs), "general-purpose", "do the thing")
@@ -87,4 +105,119 @@ fn a_cohosted_agents_subagent_store_is_written_into_its_own_vfs_subtree() {
         "the store should list the job it just prepared; got {:?}",
         snapshots.iter().map(|s| &s.agent_id).collect::<Vec<_>>()
     );
+
+    let registry = tools::GlobalToolRegistry::builtin().with_fs(Arc::clone(&fs));
+    let send = serde_json::json!({
+        "to": manifest.agent_id,
+        "message": "must not become a peer message",
+        "summary": "saved task",
+    });
+    let error = registry.execute("send", &send).unwrap_err();
+    assert!(error.contains("no active runtime"), "{error}");
+
+    fs.write(&manifest.manifest_file, b"{invalid manifest")
+        .unwrap();
+    let error = registry.execute("send", &send).unwrap_err();
+    assert!(error.contains("invalid agent"), "{error}");
+    assert!(!fs
+        .exists(&format!(
+            "/agents/{AGENT}/conversations/{}",
+            manifest.agent_id
+        ))
+        .unwrap());
+}
+
+#[test]
+fn a_live_cohost_task_receives_followups_only_through_its_session_filesystem() {
+    use runtime::mailbox::{Mailbox, MailboxScope};
+    use runtime::{HookAbortSignal, WorkspaceRootScope};
+    use std::io::Write;
+
+    let workspace = std::env::temp_dir().join(format!(
+        "scode-cohost-task-mailbox-{}-{}.guard",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&workspace)
+        .unwrap()
+        .write_all(b"host sentinel")
+        .unwrap();
+    let (kernel, fs) = cohost_fs(workspace.to_string_lossy().into_owned());
+    let hook = kernel
+        .enlist_hook_only_service("task-sender-authorization")
+        .unwrap();
+    kernel.register_service_hook(&hook, Box::new(DeniedTaskSender));
+    fs.create_dir_all(&workspace.to_string_lossy()).unwrap();
+    let _workspace = WorkspaceRootScope::enter(&workspace);
+    let _mailbox = MailboxScope::enter(Arc::new(Mailbox::daemon_absolute(
+        Arc::clone(&fs),
+        AGENT.into(),
+    )));
+    let task = format!("cohost-followup-{}", std::process::id());
+    let abort = HookAbortSignal::new();
+    tools::register_agent_runtime(&task, abort.clone(), fs.working_root().unwrap()).unwrap();
+    let blocked_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+        Arc::clone(&kernel),
+        "test-owner",
+        "root",
+        "blocked-sender",
+        "/another-runtime",
+    ));
+    let denied = tools::GlobalToolRegistry::builtin()
+        .with_fs(blocked_fs)
+        .execute(
+            "send",
+            &serde_json::json!({
+                "to":task,"message":"must not be delivered","summary":"denied caller",
+            }),
+        )
+        .unwrap_err();
+    assert!(denied.contains("blocked-sender"), "{denied}");
+    let registry = tools::GlobalToolRegistry::builtin().with_fs(Arc::clone(&fs));
+    let mailbox = Mailbox::workspace(Arc::clone(&fs), task.clone()).unwrap();
+    let mut prompts = Vec::new();
+    let mut positions_during_turn = Vec::new();
+    let result = tools::testing::run_multi_turn_loop_in_mailbox_for_test(
+        &mailbox,
+        abort,
+        "first turn".into(),
+        4,
+        |prompt| {
+            if prompts.is_empty() {
+                registry.execute(
+                    "send",
+                    &serde_json::json!({
+                        "to": task, "message": "continue inside VFS", "summary": "followup",
+                    }),
+                )?;
+            } else {
+                positions_during_turn.push(mailbox.read_position(AGENT)?.unwrap_or(0));
+            }
+            prompts.push(prompt);
+            Ok(format!("turn {} complete", prompts.len()))
+        },
+    );
+    let consumed = mailbox.read_position(AGENT).unwrap().unwrap_or(0);
+    let unread = mailbox.read_pending().unwrap().messages().count();
+    let persisted = fs.read(&mailbox.transcript_path(AGENT)).unwrap();
+    tools::unregister_agent_abort_signal(&task);
+    let sentinel = std::fs::read(&workspace).unwrap();
+    std::fs::remove_file(&workspace).unwrap();
+    assert_eq!(sentinel, b"host sentinel");
+    let persisted = String::from_utf8(persisted).unwrap();
+    assert!(persisted.contains("continue inside VFS"));
+    assert!(!persisted.contains("must not be delivered"));
+    assert_eq!(result.unwrap(), "turn 2 complete");
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("continue inside VFS"));
+    assert!(prompts[1].contains(AGENT));
+    assert_eq!(positions_during_turn, vec![0]);
+    assert!(consumed > 0);
+    assert_eq!(unread, 0);
 }

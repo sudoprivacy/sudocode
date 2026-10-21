@@ -302,8 +302,7 @@ pub trait FsBackend: Send + Sync + 'static {
     ///
     /// The default polls file size at 100ms intervals (cross-platform).
     /// `KernelFsBackend` overrides with the kernel's blocking `sys_read`.
-    /// `NexusVfsFsBackend` overrides with `stream_read_at` (gRPC blocking
-    /// tail).
+    /// `NexusVfsFsBackend` uses the typed Read RPC with a bounded stream wait.
     fn tail_read(
         &self,
         path: &str,
@@ -540,12 +539,46 @@ fn read_byte_tail<B: FsBackend + ?Sized>(
     cursor: u64,
     block_ms: u64,
 ) -> io::Result<(Vec<u8>, u64, bool)> {
+    read_tail_with(cursor, block_ms, |_| match backend.read(path) {
+        Ok(bytes) => Ok(TailPayload::Bytes(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(TailPayload::Bytes(Vec::new())),
+        Err(error) => Err(error),
+    })
+}
+
+enum TailPayload {
+    Bytes(Vec<u8>),
+    Frame(Vec<u8>, u64),
+}
+
+/// Byte logs poll within one wait budget; framed reads carry their own cursor.
+fn read_tail_with(
+    cursor: u64,
+    block_ms: u64,
+    mut read: impl FnMut(u64) -> io::Result<TailPayload>,
+) -> io::Result<(Vec<u8>, u64, bool)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(block_ms);
     loop {
-        let bytes = match backend.read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(error),
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let wait_ms = if block_ms == 0 {
+            0
+        } else {
+            u64::try_from(remaining.as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1)
+        };
+        let bytes = match read(wait_ms)? {
+            TailPayload::Bytes(bytes) => bytes,
+            TailPayload::Frame(bytes, next) => {
+                if next < cursor || (!bytes.is_empty() && next == cursor) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "stream read did not advance its cursor",
+                    ));
+                }
+                let eof = bytes.is_empty() && next == cursor;
+                return Ok((bytes, next, eof));
+            }
         };
         let next = bytes.len() as u64;
         if next > cursor {
@@ -1152,26 +1185,39 @@ impl<K: KernelConvenience + KernelFsAccess> KernelFsBackend<K> {
     /// fetched transparently by the kernel. Non-blocking (`timeout_ms = 0`):
     /// the walk stops at the tail rather than parking for new data.
     fn read_stream_all(&self, path: &str) -> io::Result<Vec<u8>> {
-        let mut out = Vec::new();
-        let mut offset: u64 = 0;
-        loop {
+        read_framed_contents(|offset| {
             let result = self
                 .kernel
                 .sys_read(path, &self.ctx, 0, offset)
                 .map_err(kernel_err)?;
-            match result.data {
-                Some(payload) if !payload.is_empty() => {
-                    out.extend_from_slice(&payload);
-                    match result.stream_next_offset {
-                        Some(next) if next as u64 > offset => offset = next as u64,
-                        // No forward progress (tail reached / unknown) — stop.
-                        _ => break,
-                    }
-                }
-                _ => break,
-            }
+            Ok((
+                result.data.unwrap_or_default(),
+                result.stream_next_offset.map_or(offset, |next| next as u64),
+            ))
+        })
+    }
+}
+
+/// Concatenate frame payloads through the live tail using each transport's
+/// offset read. Empty frames advance; a nonempty frame must advance too.
+fn read_framed_contents(
+    mut read: impl FnMut(u64) -> io::Result<(Vec<u8>, u64)>,
+) -> io::Result<Vec<u8>> {
+    let mut contents = Vec::new();
+    let mut offset = 0;
+    loop {
+        let (payload, next) = read(offset)?;
+        if payload.is_empty() && next == offset {
+            return Ok(contents);
         }
-        Ok(out)
+        if next <= offset {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stream read did not advance its cursor",
+            ));
+        }
+        contents.extend_from_slice(&payload);
+        offset = next;
     }
 }
 
@@ -1348,19 +1394,16 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
         {
             return read_byte_tail(self, path, cursor, block_ms);
         }
-        let result = self
-            .kernel
-            .sys_read(path, &self.ctx, block_ms, cursor)
-            .map_err(kernel_err)?;
-        match result.data {
-            Some(payload) if !payload.is_empty() => {
-                let next = result
-                    .stream_next_offset
-                    .map_or_else(|| cursor + payload.len() as u64, |offset| offset as u64);
-                Ok((payload, next, false))
-            }
-            _ => Ok((vec![], cursor, true)),
-        }
+        read_tail_with(cursor, block_ms, |wait_ms| {
+            let result = self
+                .kernel
+                .sys_read(path, &self.ctx, wait_ms, cursor)
+                .map_err(kernel_err)?;
+            Ok(TailPayload::Frame(
+                result.data.unwrap_or_default(),
+                result.stream_next_offset.map_or(cursor, |next| next as u64),
+            ))
+        })
     }
 
     fn managed_root(&self, concern: ManagedRoot) -> Option<String> {
@@ -1568,11 +1611,21 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        // No native rename syscall — compose from read + write + delete.
-        let data = self.read(from)?;
-        self.write(to, &data)?;
-        self.delete(from)?;
-        Ok(())
+        let from = &self.to_kernel(from)?;
+        let to = &self.to_kernel(to)?;
+        self.kernel
+            .sys_rename(from, to, &self.ctx)
+            .map_err(kernel_err)
+            .and_then(|result| {
+                if result.hit {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(format!(
+                        "Nexus did not rename {from} to {to}: no backend handled the path \
+                         or its VFS lock timed out"
+                    )))
+                }
+            })
     }
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {
@@ -1741,7 +1794,24 @@ impl FsBackend for NexusVfsFsBackend {
         })))
     }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
-        self.client.read(path, &self.auth_token)
+        let first = self.client.read_entry(path, 0, &self.auth_token)?;
+        if first.entry_type != i32::from(DT_STREAM) {
+            return Ok(first.data);
+        }
+        let mut first = Some(first);
+        read_framed_contents(|offset| {
+            let result = match first.take() {
+                Some(first) => first,
+                None => self.client.read_entry(path, offset, &self.auth_token)?,
+            };
+            if result.entry_type != i32::from(DT_STREAM) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream entry type changed during read",
+                ));
+            }
+            Ok((result.data, result.next_offset.unwrap_or(offset)))
+        })
     }
 
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -1749,15 +1819,8 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        // Ask the predicate rather than restating it. This branch spelled
-        // spelled the mailbox leaf on its own, so when the mailbox moved
-        // to `…/transcript` it quietly took the read-modify-write path below:
-        // every append re-read the stream through `read` (which yields its FIRST
-        // frame), concatenated the new envelope onto that, and wrote the pair
-        // back as a single frame. Two JSON objects in one frame parse as
-        // neither, so every message after the first became unreadable — sends
-        // reporting success, a receiver seeing nothing, and only a real daemon
-        // able to show it.
+        // Stream identity comes from the server's entry type and uses its
+        // atomic frame append. Ordinary files retain their byte append path.
         if self.is_append_stream(path)? {
             self.client
                 .stream_write(path, data.to_vec(), &self.auth_token)
@@ -1780,7 +1843,11 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
-        Ok(crate::mailbox::is_conversation_transcript_path(path))
+        match self.client.stat(path, &self.auth_token) {
+            Ok(stat) => Ok(stat.entry_type == i32::from(DT_STREAM)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {
@@ -1909,10 +1976,12 @@ impl FsBackend for NexusVfsFsBackend {
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        let data = self.read(from)?;
-        self.write(to, &data)?;
-        self.delete(from)?;
-        Ok(())
+        self.client.rename(from, to, &self.auth_token)
+    }
+
+    fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
+        // The node's sys_write replaces the object in one call — no temp file.
+        self.write(path, data)
     }
 
     fn canonicalize(&self, path: &str) -> io::Result<String> {
@@ -1934,15 +2003,31 @@ impl FsBackend for NexusVfsFsBackend {
         cursor: u64,
         block_ms: u64,
     ) -> io::Result<(Vec<u8>, u64, bool)> {
-        if !self.is_append_stream(path)?
-            && self.client.stat(path, &self.auth_token)?.entry_type
-                == i32::from(kernel::meta_store::DT_REG)
-        {
-            return read_byte_tail(self, path, cursor, block_ms);
-        }
-        self.client
-            .stream_read_at(path, cursor, block_ms > 0, block_ms, &self.auth_token)
-            .map(|result| (result.data, result.next_offset, result.eof))
+        read_tail_with(cursor, block_ms, |wait_ms| {
+            let result = match self
+                .client
+                .read_entry_wait(path, cursor, wait_ms, &self.auth_token)
+            {
+                Ok(result) => result,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(TailPayload::Bytes(Vec::new()));
+                }
+                Err(error) => return Err(error),
+            };
+            match result.entry_type {
+                kind if kind == i32::from(DT_STREAM) => Ok(TailPayload::Frame(
+                    result.data,
+                    result.next_offset.unwrap_or(cursor),
+                )),
+                kind if kind == i32::from(kernel::meta_store::DT_REG) => {
+                    Ok(TailPayload::Bytes(result.data))
+                }
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "tail requires a file or stream",
+                )),
+            }
+        })
     }
 }
 

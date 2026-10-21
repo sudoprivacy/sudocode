@@ -464,7 +464,7 @@ struct SseFrame {
 
 #[derive(Debug)]
 pub struct MessageStream {
-    response: reqwest::Response,
+    response: crate::RecordedResponse,
     parser: SseParser,
     pending: VecDeque<StreamEvent>,
     done: bool,

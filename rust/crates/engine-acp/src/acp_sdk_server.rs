@@ -788,30 +788,46 @@ async fn drive_prompt(
 /// Normalize peer text into the same driver used by `session/prompt`.
 /// The durable conversation cursor advances after the turn returns. The bound
 /// controller receives streaming output, approval requests and questions.
+///
+/// One receiver per agent this process serves, not one per process: sessions
+/// in different workspaces are different agents, and each hears only its own
+/// peers. A message goes to a session of the agent it was sent to, never to a
+/// session that merely happens to share the process.
 fn ensure_a2a_receiver(
     registry: &SharedSessionRegistry,
     cx: &ConnectionTo<Client>,
     config: &SdkAcpConfig,
     session_id: &str,
 ) {
+    let Some(agent) = registry.agent_of(session_id) else {
+        return;
+    };
+    // The mailbox the session's tools send through: the hosted agent's, else
+    // the peer namespace the session build attached this agent to.
     let mailbox = match &registry.hosted_factory {
         Some(factory) => factory.mailbox(),
-        None => engine_host::nexus_a2a::session()
+        None => engine_host::peer::attach(&agent)
             .ok()
-            .flatten()
-            .map(|session| session.mailbox()),
+            .map(|peer| peer.mailbox()),
     };
     let Some(mailbox) = mailbox else {
         return;
     };
-    if registry.peer_receiver_started.swap(true, Ordering::SeqCst) {
-        return;
+    let stop = HookAbortSignal::new();
+    {
+        let mut receivers = registry.lock_peer_receivers();
+        if receivers
+            .get(&agent)
+            .is_some_and(|running| !running.is_aborted())
+        {
+            return;
+        }
+        receivers.insert(agent.clone(), stop.clone());
     }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
         runtime::agent_mailbox::MailboxEnvelope,
         std::sync::mpsc::SyncSender<bool>,
     )>();
-    let stop = registry.peer_receiver_stop.clone();
     let callback_stop = stop.clone();
     let receiver = runtime::mailbox::spawn_inbox_poller(
         Arc::clone(&mailbox),
@@ -839,7 +855,7 @@ fn ensure_a2a_receiver(
     let registry = Arc::clone(registry);
     let cx = cx.clone();
     let config = config.clone();
-    let session_id = session_id.to_string();
+    let mut bound = session_id.to_string();
     tokio::spawn(async move {
         loop {
             let inbound = tokio::select! {
@@ -849,6 +865,14 @@ fn ensure_a2a_receiver(
             let Some((message, ack)) = inbound else {
                 break;
             };
+            // The session this agent's messages go to: the one bound so far
+            // while it lives, else another session of the same agent.
+            let Some(session_id) = registry.session_of_agent(&agent, &bound) else {
+                let _ = ack.send(false);
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                continue;
+            };
+            bound.clone_from(&session_id);
             if registry
                 .engine(&session_id)
                 .is_some_and(|engine| engine.tool_control().1)
@@ -993,6 +1017,10 @@ fn session_response_meta(
                 "workspace".into(),
                 json!({ "fileRoot": file_root, "shellRoot": shell_root }),
             );
+        }
+        // A hosted agent's mailbox is injected by its daemon, not attached.
+        if let (None, Some(agent)) = (&registry.hosted_factory, registry.agent_of(session_id)) {
+            sudocode.insert("peer".into(), json!(engine_host::peer::status(&agent)));
         }
     }
     (!sudocode.is_empty())
@@ -1372,8 +1400,9 @@ pub struct SessionRegistry {
     completion_routes: Mutex<HashMap<String, std::sync::Weak<Delivery>>>,
     cwd_lease: Arc<WorkspaceCwdLease>,
     hosted_factory: Option<Arc<dyn HostedSessionFactory>>,
-    peer_receiver_started: AtomicBool,
-    peer_receiver_stop: HookAbortSignal,
+    /// The peer receiver running for each agent this process serves, by the
+    /// signal that stops it.
+    peer_receivers: Mutex<HashMap<String, HookAbortSignal>>,
 }
 
 /// The host chooses where a session lives; the ACP handlers and turn driver are
@@ -1397,6 +1426,10 @@ struct SessionEntry {
     /// The single-session engine this ACP session wraps — `Arc` so a turn in
     /// flight keeps it alive across a concurrent `session/close`.
     engine: Arc<SessionEngine>,
+    /// The agent this session answers as, read once at registration: the
+    /// engine's own lock is held for a whole turn, so asking it later from
+    /// under the registry lock would stall every session behind one turn.
+    agent: String,
     driver: Arc<crate::session_driver::SessionDriver>,
     /// A clone of the engine's abort signal, held here so `session/cancel` fires
     /// without taking any session lock.
@@ -1541,7 +1574,7 @@ impl SessionRegistry {
     }
 
     pub fn cancel_all(&self) {
-        self.peer_receiver_stop.abort();
+        self.stop_peer_receivers();
         for entry in self.lock_sessions().values() {
             let _ = entry.driver.send(engine_core::EngineCommand::Cancel);
             entry.abort.abort();
@@ -1549,7 +1582,7 @@ impl SessionRegistry {
     }
 
     pub fn close_all(&self) {
-        self.peer_receiver_stop.abort();
+        self.stop_peer_receivers();
         let entries: Vec<_> = self
             .lock_sessions()
             .drain()
@@ -1577,6 +1610,57 @@ impl SessionRegistry {
         self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn lock_peer_receivers(&self) -> std::sync::MutexGuard<'_, HashMap<String, HookAbortSignal>> {
+        self.peer_receivers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn stop_peer_receivers(&self) {
+        for (_, stop) in self.lock_peer_receivers().drain() {
+            stop.abort();
+        }
+    }
+
+    /// Stop `agent`'s receiver once no session of that agent is left, so its
+    /// receiver seat passes to another instance instead of being held by a
+    /// process that has nowhere to deliver.
+    fn stop_unused_peer_receiver(&self, agent: &str) {
+        let in_use = self
+            .lock_sessions()
+            .values()
+            .any(|entry| entry.agent == agent);
+        if !in_use {
+            if let Some(stop) = self.lock_peer_receivers().remove(agent) {
+                stop.abort();
+            }
+        }
+    }
+
+    /// The agent `session_id` answers as.
+    fn agent_of(&self, session_id: &str) -> Option<String> {
+        self.lock_sessions()
+            .get(session_id)
+            .map(|entry| entry.agent.clone())
+    }
+
+    /// The session `agent`'s peer messages go to: `preferred` while it is still
+    /// a session of that agent, else the longest-running other one.
+    fn session_of_agent(&self, agent: &str, preferred: &str) -> Option<String> {
+        let sessions = self.lock_sessions();
+        if sessions
+            .get(preferred)
+            .is_some_and(|entry| entry.agent == agent)
+        {
+            return Some(preferred.to_string());
+        }
+        sessions
+            .iter()
+            .filter(|(_, entry)| entry.agent == agent)
+            .min_by_key(|(_, entry)| entry.started_at)
+            .map(|(id, _)| id.clone())
     }
 
     /// Register (or re-register) a session's engine after `session/new` /
@@ -1611,6 +1695,7 @@ impl SessionRegistry {
             )
         };
         let abort = engine.abort_signal();
+        let agent = engine.agent_name();
         let driver = crate::session_driver::SessionDriver::start(
             Arc::clone(&engine),
             subagents.as_ref(),
@@ -1622,6 +1707,7 @@ impl SessionRegistry {
             session_id,
             SessionEntry {
                 engine,
+                agent,
                 driver,
                 abort,
                 lane,
@@ -1680,9 +1766,9 @@ impl SessionRegistry {
         std::time::Instant,
         Arc<crate::session_driver::SessionDriver>,
     )> {
-        self.lock_sessions()
-            .remove(session_id)
-            .map(|e| (e.engine, e.started_at, e.driver))
+        let taken = self.lock_sessions().remove(session_id)?;
+        self.stop_unused_peer_receiver(&taken.agent);
+        Some((taken.engine, taken.started_at, taken.driver))
     }
 
     /// All live sessions as `(id, cwd)` — the `session/list` response.

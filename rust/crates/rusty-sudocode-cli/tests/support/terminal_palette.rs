@@ -6,7 +6,7 @@ use std::sync::{Mutex, OnceLock};
 use pty_expect::PtySession;
 
 /// Resolve an indexed fixture color through the terminal, without consulting
-/// application output. System ConPTY can expand indices into RGB values.
+/// application output. System `ConPTY` can expand indices into RGB values.
 pub fn expected_color(expected: &str) -> String {
     match expected
         .strip_prefix("Idx(")

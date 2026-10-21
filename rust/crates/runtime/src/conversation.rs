@@ -202,6 +202,9 @@ pub type AssistantEventStream =
 /// abort signal for instant cancellation.
 #[async_trait]
 pub trait ApiClient: Send {
+    /// A new/resumed context or a durably committed compaction. Optional local
+    /// instrumentation must not change the request or reset cumulative usage.
+    fn cache_context_boundary(&mut self, _segment: u64) {}
     /// Whether this session forbids model HTTP outside its Nexus mount.
     fn requires_model_mount(&self) -> bool {
         false
@@ -857,6 +860,7 @@ pub struct RuntimeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeErrorKind {
     Generic,
+    ThinkingReplayRejected,
     /// This completion shape is unsupported; another compaction shape may work.
     CompactionPathNotSupported,
     /// A provider completed its response, but its summary cannot be installed.
@@ -867,6 +871,21 @@ enum RuntimeErrorKind {
 }
 
 impl RuntimeError {
+    /// A provider explicitly rejected historical thinking before starting a response.
+    #[must_use]
+    pub fn thinking_replay_rejected(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: RuntimeErrorKind::ThinkingReplayRejected,
+            retryable: false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_thinking_replay_rejected(&self) -> bool {
+        self.kind == RuntimeErrorKind::ThinkingReplayRejected
+    }
+
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
         Self {
@@ -1214,12 +1233,18 @@ where
     #[allow(clippy::needless_pass_by_value)]
     pub fn new_with_features(
         session: Session,
-        api_client: C,
+        mut api_client: C,
         tool_executor: T,
         permission_policy: PermissionPolicy,
         system_prompt: SystemPrompt,
         feature_config: &RuntimeFeatureConfig,
     ) -> Self {
+        api_client.cache_context_boundary(
+            session
+                .compaction
+                .as_ref()
+                .map_or(0, |c| u64::from(c.count)),
+        );
         let usage_tracker = UsageTracker::from_session(&session);
         let workspace_root = session
             .workspace_root()
@@ -1897,6 +1922,21 @@ where
         // (the status line's `+Ns`/`Σs`) and stamped onto the turn's last
         // assistant message so it persists and re-sums on resume.
         let turn_started_at = std::time::Instant::now();
+        // Match CC's resume sentinel: an unanswered prompt or tool result must
+        // not merge with a new user turn. Append it only at this outer turn
+        // boundary, never between a tool result and its in-flight continuation.
+        if self
+            .session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role != MessageRole::System)
+            .is_some_and(|message| matches!(message.role, MessageRole::User | MessageRole::Tool))
+        {
+            self.session
+                .push_message(ConversationMessage::unanswered_turn_boundary())
+                .map_err(|error| RuntimeError::new(error.to_string()))?;
+        }
         self.session
             .push_user_blocks(prepared_blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -1928,6 +1968,7 @@ where
         let mut recorded_compaction_budget_exhausted = false;
         let mut overflow_compaction: Option<AutoCompactionEvent> = None;
         let mut response_model: Option<String>;
+        let mut repaired_thinking = false;
 
         loop {
             if self.hook_abort_signal.is_aborted() {
@@ -2018,91 +2059,105 @@ where
                     "Context remains too large after compaction; history preserved. No model request sent."));
             }
 
-            let request = ApiRequest {
-                system_prompt: self.system_prompt.clone(),
-                messages: self.session.messages.clone(),
-                trace_id: self.trace_id.clone(),
-                pre_compact_discovered_tools: self
-                    .session
-                    .compaction
-                    .as_ref()
-                    .map(|c| c.pre_compact_discovered_tools.clone())
-                    .unwrap_or_default(),
-            };
-            // Race the API stream (which includes the retry loop) against
-            // the abort signal so ESC/Ctrl-C cancels even during retries.
-            let stream_result = {
-                let abort = &self.hook_abort_signal;
-                tokio::select! {
-                    biased;
-                    () = abort.cancelled() => {
-                        self.finalize_cancelled_turn(Vec::new());
-                        let turn_usage = sum_assistant_message_usage(&assistant_messages);
-                        let session_usage = self.usage_tracker.cumulative_usage();
-                        return Ok(TurnSummary {
-                            assistant_messages,
-                            tool_results,
-                            prompt_cache_events,
-                            iterations,
-                            turn_usage,
-                            session_usage,
-                            auto_compaction: None,
-                            cancelled: true,
-                            response_model: None,
-                        });
-                    }
-                    result = async {
-                        if final_answer {
-                            self.api_client.stream_final_answer(request).await
-                        } else {
-                            self.api_client.stream(request).await
-                        }
-                    } => result,
-                }
-            };
-            let stream = match stream_result {
-                Ok(stream) => stream,
-                Err(error) => {
-                    // A context-window rejection is the one request failure
-                    // the runtime can fix on its own: compact the history and
-                    // resend. Shares the turn's compaction allowance with the
-                    // proactive check above; when compaction can no longer
-                    // remove anything the error is real and must surface.
-                    if error.is_context_window_blocked() && turn_compactions < MAX_TURN_COMPACTIONS
-                    {
-                        let attempt = self
-                            .compact_in_place(
-                                forced_compaction_config(),
-                                CompactionTrigger::ProviderRejection,
-                                runtime_observer_mut(&mut observer),
-                            )
-                            .await;
-                        if self.hook_abort_signal.is_aborted()
-                            && !(attempt.is_err()
-                                && self.last_compaction_report.as_ref().is_some_and(|report| {
-                                    report.outcome == CompactionOutcome::Failed
-                                }))
-                        {
-                            return Ok(self.cancelled_summary(
+            let stream = loop {
+                let request = ApiRequest {
+                    system_prompt: self.system_prompt.clone(),
+                    messages: self.session.messages.clone(),
+                    trace_id: self.trace_id.clone(),
+                    pre_compact_discovered_tools: self
+                        .session
+                        .compaction
+                        .as_ref()
+                        .map(|c| c.pre_compact_discovered_tools.clone())
+                        .unwrap_or_default(),
+                };
+                // Race the API stream (which includes the retry loop) against
+                // the abort signal so ESC/Ctrl-C cancels even during retries.
+                let stream_result = {
+                    let abort = &self.hook_abort_signal;
+                    tokio::select! {
+                        biased;
+                        () = abort.cancelled() => {
+                            self.finalize_cancelled_turn(Vec::new());
+                            let turn_usage = sum_assistant_message_usage(&assistant_messages);
+                            let session_usage = self.usage_tracker.cumulative_usage();
+                            return Ok(TurnSummary {
                                 assistant_messages,
                                 tool_results,
                                 prompt_cache_events,
                                 iterations,
-                            ));
+                                turn_usage,
+                                session_usage,
+                                auto_compaction: None,
+                                cancelled: true,
+                                response_model: None,
+                            });
                         }
-                        if let Some(event) =
-                            attempt.map_err(|error| RuntimeError::new(error.to_string()))?
-                        {
-                            turn_compactions += 1;
-                            overflow_compaction =
-                                merge_auto_compaction(overflow_compaction, Some(event));
-                            continue;
-                        }
+                        result = async {
+                            if final_answer {
+                                self.api_client.stream_final_answer(request).await
+                            } else {
+                                self.api_client.stream(request).await
+                            }
+                        } => result,
                     }
-                    self.record_turn_failed(iterations, &error);
-                    return Err(error);
-                }
+                };
+                let stream = match stream_result {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        if error.is_thinking_replay_rejected() && !repaired_thinking {
+                            repaired_thinking = true;
+                            if self.repair_rejected_thinking()? > 0 {
+                                if let Some(observer) = observer.as_deref_mut() {
+                                    observer.on_notice("Archived session history and removed rejected thinking; retrying once.");
+                                }
+                                continue;
+                            }
+                        }
+                        // A context-window rejection is the one request failure
+                        // the runtime can fix on its own: compact the history and
+                        // resend. Shares the turn's compaction allowance with the
+                        // proactive check above; when compaction can no longer
+                        // remove anything the error is real and must surface.
+                        if error.is_context_window_blocked()
+                            && turn_compactions < MAX_TURN_COMPACTIONS
+                        {
+                            let attempt = self
+                                .compact_in_place(
+                                    forced_compaction_config(),
+                                    CompactionTrigger::ProviderRejection,
+                                    runtime_observer_mut(&mut observer),
+                                )
+                                .await;
+                            if self.hook_abort_signal.is_aborted()
+                                && !(attempt.is_err()
+                                    && self.last_compaction_report.as_ref().is_some_and(|report| {
+                                        report.outcome == CompactionOutcome::Failed
+                                    }))
+                            {
+                                return Ok(self.cancelled_summary(
+                                    assistant_messages,
+                                    tool_results,
+                                    prompt_cache_events,
+                                    iterations,
+                                ));
+                            }
+                            if let Some(event) =
+                                attempt.map_err(|error| RuntimeError::new(error.to_string()))?
+                            {
+                                turn_compactions += 1;
+                                overflow_compaction =
+                                    merge_auto_compaction(overflow_compaction, Some(event));
+                                break None;
+                            }
+                        }
+                        self.record_turn_failed(iterations, &error);
+                        return Err(error);
+                    }
+                };
+                break Some(stream);
             };
+            let Some(stream) = stream else { continue };
 
             let response = self
                 .execute_response(
@@ -2376,6 +2431,12 @@ where
     /// Install only after the owning engine has durably committed the candidate.
     pub fn install_compacted_session(&mut self, session: Session) {
         self.session = session;
+        self.api_client.cache_context_boundary(
+            self.session
+                .compaction
+                .as_ref()
+                .map_or(0, |c| u64::from(c.count)),
+        );
         self.usage_tracker.clear_context_usage();
     }
 
@@ -2898,9 +2959,14 @@ where
                         if quality_responses >= 2 || snapshot.completed_responses >= 2 {
                             return Err(CompactionError::InvalidSummary(message));
                         }
-                        // A second completed response gets a tighter visible
-                        // allowance even when changing provider request shape.
-                        cap = cap * 3 / 4;
+                        // Retrying a truncated checkpoint with fewer output
+                        // tokens only makes the next response more likely to
+                        // truncate. Keep the cap when switching to the
+                        // text-only request shape; tighten only complete but
+                        // invalid checkpoints.
+                        if !message.contains("truncated") {
+                            cap = cap * 3 / 4;
+                        }
                         continue;
                     }
                     return Err(CompactionError::ApiError(message));
@@ -3338,6 +3404,51 @@ where
                 }
             }
         }
+    }
+
+    fn repair_rejected_thinking(&mut self) -> Result<usize, RuntimeError> {
+        let (revision, usage) = self
+            .session
+            .capture_durable_revision_for_history()
+            .map_err(|error| {
+                RuntimeError::new(format!("Thinking repair preserved history: {error}"))
+            })?;
+        self.record_compaction_maintenance_usage(usage);
+        let mut candidate = self.session.clone();
+        let mut removed = 0;
+        for message in &mut candidate.messages {
+            if message.role == MessageRole::Assistant {
+                message.blocks.retain(|block| {
+                    let keep = !matches!(
+                        block,
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                    );
+                    removed += usize::from(!keep);
+                    keep
+                });
+            }
+        }
+        if removed == 0 {
+            return Ok(0);
+        }
+        if let Some(path) = self.session.persistence_path() {
+            candidate
+                .save_thinking_repaired_to_path_checked(&self.session, path, revision.as_deref())
+                .map_err(|error| {
+                    RuntimeError::new(format!("Thinking repair preserved history: {error}"))
+                })?;
+        }
+        self.session = candidate;
+        if let Some(tracer) = &self.session_tracer {
+            tracer.record(
+                "thinking_history_repaired",
+                serde_json::json!({"removed_blocks":removed})
+                    .as_object()
+                    .expect("repair metadata object")
+                    .clone(),
+            );
+        }
+        Ok(removed)
     }
 
     fn record_compaction_maintenance_usage(&mut self, new_usage: Vec<TokenUsage>) {

@@ -5,6 +5,9 @@
 
 mod common;
 
+#[path = "support/terminal_palette.rs"]
+mod terminal_palette;
+
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -61,12 +64,13 @@ fn exit(sess: &mut PtySession) {
 fn exit_with_context(sess: &mut PtySession, context: &str) {
     sess.send("\x04").expect("exit REPL");
     sess.set_default_timeout(common::at_least(Duration::from_secs(15)));
-    sess.expect_eof().unwrap_or_else(|error| {
-        panic!(
-            "{context} should exit cleanly: {error:?}\nPTY:\n{}",
-            sess.render(|screen| screen.contents())
-        )
+    let code = sess.expect_eof().unwrap_or_else(|error| {
+        // The method item cannot satisfy render's higher-ranked Screen lifetime.
+        #[allow(clippy::redundant_closure_for_method_calls)]
+        let screen = sess.render(|screen| screen.contents());
+        panic!("{context} should exit cleanly: {error:?}\nPTY:\n{screen}")
     });
+    assert_eq!(code, 0, "{context} should exit successfully");
 }
 
 fn expect_replay_input_ready(sess: &mut PtySession) {
@@ -435,6 +439,12 @@ fn complete_received_block(screen: &str) -> bool {
 
 fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     let env = TestEnv::new("a2a-received-style");
+    let colors = if no_color {
+        ["Default".to_owned(), "Default".to_owned()]
+    } else {
+        [241, 247].map(|index| terminal_palette::expected_color(&format!("Idx({index})")))
+    };
+    let muted = &colors[usize::from(background == "15;0")];
     let vars = [
         ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
         ("NO_COLOR", if no_color { "1" } else { "" }),
@@ -457,7 +467,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     );
     inject(&env, &receiver, "mac-ai", &body);
     wait_for_screen(&sess, "complete received block", complete_received_block);
-    let live = received_block(&sess, sender_color, no_color);
+    let live = received_block(&sess, sender_color, muted);
     common::expect_turn_complete_after(
         &sess,
         &marker,
@@ -473,7 +483,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     resumed.resize(80, 52).unwrap();
     wait_for_screen(&resumed, "restored received block", complete_received_block);
     assert_eq!(
-        received_block(&resumed, sender_color, no_color),
+        received_block(&resumed, sender_color, muted),
         live,
         "live and replay must use the same layout"
     );
@@ -481,7 +491,7 @@ fn receive_and_resume(background: &str, sender_color: &str, no_color: bool) {
     exit(&mut resumed);
 }
 
-fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<String> {
+fn received_block(sess: &PtySession, sender_color: &str, muted: &str) -> Vec<String> {
     sess.render(|screen| {
         // Normalize ConPTY's literal trailing blanks before locating the
         // borders as well as when comparing the live and replayed frames.
@@ -518,6 +528,7 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
             .cell(u16::try_from(start).unwrap(), 16)
             .unwrap();
         assert_eq!(format!("{:?}", header.fgcolor()), sender_color);
+        assert_eq!(format!("{:?}", header.bgcolor()), "Default");
         assert!(!header.dim(), "peer identity must keep its blue contrast");
         let body = screen
             .raw()
@@ -528,23 +539,18 @@ fn received_block(sess: &PtySession, sender_color: &str, no_color: bool) -> Vec<
             "Default",
             "plain body color"
         );
+        assert_eq!(format!("{:?}", body.bgcolor()), "Default");
         assert!(!body.bold(), "only Markdown emphasis should be bold");
         assert!(!body.dim(), "body must retain normal brightness");
         let border = screen
             .raw()
             .cell(u16::try_from(start + 1).unwrap(), 0)
             .unwrap();
-        let muted = if no_color {
-            "Default"
-        } else if sender_color == "Rgb(28, 100, 200)" {
-            "Idx(241)"
-        } else {
-            "Idx(247)"
-        };
         assert_eq!(format!("{:?}", border.fgcolor()), muted);
         for (row, col) in [(start, 0), (start, 3), (start + 1, 0), (end, 0)] {
             let cell = screen.raw().cell(u16::try_from(row).unwrap(), col).unwrap();
             assert_eq!(format!("{:?}", cell.fgcolor()), muted);
+            assert_eq!(format!("{:?}", cell.bgcolor()), "Default");
             assert!(!cell.dim(), "do not dim the muted frame a second time");
             assert!(!cell.bold(), "message chrome stays quiet");
         }
@@ -652,7 +658,7 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
 }
 
 /// A queued preview leaves editing responsive, then flushes the full body once.
-/// Width changes run in pty_chrome_resize with real xterm reflow; vt100 cannot
+/// Width changes run in `pty_chrome_resize` with real xterm reflow; vt100 cannot
 /// model resized history and mistakes abandoned preview rows for live chips.
 #[test]
 fn a2a_received_during_a_turn_shows_in_pending_overlay() {
@@ -888,10 +894,11 @@ fn pending_batch_and_two_runtimes_share_one_durable_reader() {
         std::thread::sleep(Duration::from_millis(50));
     }
     // The durable commit and the terminal repaint are separate events.
-    common::expect_screen_settled(
+    common::expect_screen(
         &first,
-        |screen| {
-            screen.contains(marker) || second.render(|screen| screen.contents().contains(marker))
+        |_| {
+            first.render(|screen| screen.contents().contains(marker))
+                || second.render(|screen| screen.contents().contains(marker))
         },
         BUDGET,
         "the consumed message reaches one terminal",

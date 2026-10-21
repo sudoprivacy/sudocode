@@ -44,7 +44,7 @@ agent-client-protocol = { version = "0.11", features = ["unstable_session_model"
 agent-client-protocol-schema = { version = "0.12", features = ["unstable_session_model", "unstable_session_close", "unstable_session_usage"] }
 agent-client-protocol-tokio = "0.11"
 axum = { version = "0.8", features = ["ws"] }
-pty-expect = { git = "https://github.com/sudoprivacy/pty-expect", rev = "78aeef007475f8ea3202c679d156ae6e2f1f8cf4" }
+pty-expect = { git = "https://github.com/sudoprivacy/pty-expect", rev = "958b04c0506d534e0b948994756f36057fe52c02" }
 serde_json = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 

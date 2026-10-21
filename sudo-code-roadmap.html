@@ -319,6 +319,91 @@ These protocol changes do not establish the
 original cause of the historical course output. Strict signature-prefix
 recovery and newer per-message effort remain separate follow-up work.</p>
 
+<h4>Unanswered turn boundaries (2026-10-19)</h4>
+<p><strong>CCB validation:</strong> native CC 2.1.301 restored the same 23-message
+history and inserted an assistant <code>No response requested.</code> after its
+last tool result. Local CC <code>src/utils/conversationRecovery.ts</code> documents
+the resume sentinel. The Anthropic Messages API combines consecutive user
+messages into one turn. In a controlled A/B/B/A sequence, adding only this
+sentinel stopped Opus 4.8 from adding old profile/build claims after a fresh
+Read result; removing it restored those claims. Static prompt replacement and
+xhigh effort alone did not fix that behavior.</p>
+<p>The shared runtime closes unanswered user/tool tails before accepting a new
+external turn, appending to existing history without rewriting signatures or
+tool results. Existing tool-loop continuations and completed turns retain their
+behavior. A portable PTY journey covers both renderers, a new task and follow-up,
+restart, durable history, sentinel uniqueness, and the request prefix.</p>
+<p>CC's <code>AssistantTextMessage</code> omits its internal sentinel. The shared
+CLI replay formatter now recognizes the synthetic marker using its role, absent
+model/usage provenance and exact single text block, while keeping the durable
+API record. Both renderer journeys assert that restored task text is visible
+and the internal marker is absent from scrollback.</p>
+<p><strong>Verification:</strong> the regression fails against the old executable
+and passes against the fix. All 21 cache-prefix PTY journeys passed. Real Opus
+4.8 completed the same polluted-history Read/answer/restart journey on both a
+controlled route and normal gateway routing: six successful requests, signed
+thinking replay, exact answers without old-task prose, positive cache reads on
+all four later requests, and unchanged system/tool/message prefixes.</p>
+<p>A fresh funded crash journey now needs no private history: the model reads
+an old-task file, the runner pauses before its next inference, kills its owned
+CLI after the tool result is durable, resumes a different file task, exits, and
+restarts again after that file is unavailable. Native Opus 4.8 passed all four
+real requests with exact answers, the pre-crash signature replayed after both
+restarts, and cache reads on all three later requests. The previous executable
+failed the boundary check before a second funded inference. Sonnet 4.6 passed
+the same journey with an explicit test-controlled adaptive profile.</p>
+<p>This finding explains new-task contamination in the 23-message history. None
+of those four controls generated a new standalone course/card/court line.
+A separate 117-message history with 164 old labels still generated course on
+one of two <code>continue</code> controls with the sentinel, so this change does
+not establish recovery from every polluted history. Proposed tools were never
+executed in that response-only experiment. The initial historical label remains
+unresolved.</p>
+
+<h4>Rejected thinking replay recovery (2026-10-19)</h4>
+<p><strong>CCB validation:</strong> read <code>src/utils/messages.ts</code>
+(<code>stripSignatureBlocks</code> and orphaned thinking normalization),
+<code>src/query.ts</code> (partial-response cleanup), and
+<code>src/services/api/claude.ts</code> (signed block replay). The installed
+official CC 2.1.301 was driven through ConPTY: after a specific HTTP 400
+invalid-thinking-signature response, it retries once with old thinking removed.
+The original tool calls, results and ordinary text remain. Healthy requests
+retain signed empty thinking. Official preserved-thinking documentation confirms
+that editing system, tools or earlier messages can invalidate later signatures.</p>
+<p><strong>Implementation:</strong> classify only explicit HTTP 400 thinking
+signature or encrypted-data rejection, before streamed output escapes. Archive
+the original durable transcript byte-for-byte and atomically replace only its
+thinking blocks, guarded by the source revision. Preserve message usage and
+tool pairs. Retry within the same iteration once per turn, report a maintenance
+notice through engine-core, and retain newly produced thinking on later turns.
+Preserve explicit <code>thinking.block_binding</code> while selecting adaptive
+thinking. The existing SSE metadata decoder records bounded, sanitized
+<code>input_transformations</code> acknowledgments. Runtime maintenance shares
+the provider's existing local trace sink. Explicit per-model
+<code>extraBody.betas</code> selects supported headers without changing defaults
+or dropping required OAuth authentication. Opus 4.5 exposes its supported
+low/medium/high effort ladder.</p>
+<p><strong>Verification:</strong> all 20 cache-prefix PTY journeys passed,
+including both renderers, exact original-history archives, bounded refusal,
+unrelated 400 errors, a concurrent transcript append, invalid beta configuration,
+and model-switch effort restoration. Real Opus 5.5 read fresh file data, solved
+a congruence problem, exited, resumed with a changed system prefix, received
+an actual HTTP 400 signature rejection, archived/repaired once, recalled the
+result after the file became unavailable, and resumed again with new signatures.
+All five successful responses acknowledged the binding beta. Real Opus 4.8
+again completed the eight-file, compaction and restart journey: 12 requests,
+positive cache reads on all 11 later requests, complete prefix reuse where
+unchanged, and no standalone course/card/court lines in assistant text.</p>
+<p><strong>Retained failures:</strong> the first live binding attempt was
+rejected because the Bedrock bridge refused two legacy default beta headers.
+An explicit beta list fixed that route configuration. A simple low-effort
+fixture produced no signed thinking, so the test required a harder task rather
+than accepting an unexercised repair. A later completed journey exposed a test
+oracle reading an absent numeric failure-status field; it now checks the actual
+400/signature/prefix error evidence. These findings do not establish the first
+historical course seed. Current CC's per-message effort remains a separate
+compatibility gap on the tested bridge.</p>
+
 <h4>PTY test principles</h4>
 
 <ol>
@@ -529,15 +614,17 @@ coverage starts fresh and is tracked here as the single source.</p>
   (3) bash streaming output → (4) MCP progress notifications.
 </div>
 
+<p><strong>CCB validation:</strong> <code>src/screens/REPL.tsx</code> derives query activity from <code>QueryGuard</code> separately from <code>showSpinner</code>, and distinguishes approval/input waiting from busy and idle. Codex's <code>BottomPane::set_task_running</code> likewise keeps task state independent of status visibility. Scode uses its existing ordered <code>EngineEvent::State</code> stream as the foreground authority. Its activity cue stays visible through streamed output, with input waiting owned by the question/approval panel; temporary legacy spinner suspension cannot change the engine lifecycle.</p>
+
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
   <tbody>
     <tr><td>Inline terminal refresh (unified render loop)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>repl_ui.rs ReplApp</code></td><td>Async REPL uses <strong>iocraft</strong> <code>render_loop()</code> — Rust equivalent of CC's Ink. Bottom chrome (spinner + separator + TextInput prompt + separator + footer) is a single iocraft component tree. <code>UseOutput::println()</code> routes turn output above the fixed chrome. Spinner ticks via <code>use_future</code> at 80ms. Keyboard input via <code>use_terminal_events</code> replaces rustyline in the async path. PR #382 removed MultiProgress; PR #383 added iocraft.</td></tr>
-    <tr><td>Spinner status line — elapsed timer</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>render.rs:207-212</code></td><td>Spinner prints <code>({elapsed:.1}s)</code> on every frame. Timer starts at turn start via <code>Instant::now()</code>. Pauses when <code>pause_flag</code> is set (during content output). Verified in code — same semantics as CC's <code>formatDuration</code>.</td></tr>
+    <tr><td>Foreground lifecycle and elapsed timer</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_foreground_activity</code></td><td><code>render/activity.rs ActivityState</code> projects <code>Running / AwaitingInput / Idle</code> from the engine event bridge. Status and footer share one lifecycle snapshot. Thinking/Reasoning and running-tool content share the existing status row, with one amber brand animation. Questions and approvals stop activity and own the existing input panel; idle restores the result/footer. Shared inline/one-shot formatters preserve elapsed time, model, tokens and ETA.</td></tr>
     <tr><td>Spinner status line — token counter (↓ N tokens)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_spinner_token_counter::status_line_shows_token_count_after_turn</code> · <code>live_spinner_shows_token_counter_during_streaming</code></td><td>Spinner shows <code>↓ N tokens</code> (bytes/4 approximation) after 1s of streaming. Shared <code>AtomicU32</code> counter incremented on each <code>TextDelta</code> in <code>api_client.rs</code>, read by spinner thread in <code>render.rs</code>.</td></tr>
-    <tr><td>Spinner status line — thinking status</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>render.rs:149-153,200-201</code></td><td>Spinner switches to <code>◐◓◑◒</code> frames + <code>🧠 Reasoning...</code> label when <code>thinking_flag</code> is set. Wired via <code>api_client.rs</code> <code>set_spinner_thinking()</code>. Distinct from CC's shimmer but serves same purpose — visually distinct thinking phase.</td></tr>
+    <tr><td>Spinner status line — reasoning status</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_render_boundaries</code> · <code>pty_chrome_styles</code></td><td>Actual thinking deltas select <code>Reasoning...</code>; other model work uses <code>Thinking...</code>. A fixed four-cell animation approximates the Sudoprivacy mark and uses the existing <code>ColorTheme.logo</code> role. Tools prioritize available progress; quiet tools show their canonical name or active count. Time and tokens share the same row. Streamed prose does not hide foreground activity. Asynchronous output suspension does not reset reasoning or retry phase. All colors use <code>ColorTheme</code>.</td></tr>
     <tr><td>Spinner status line — token budget / ETA</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>render.rs Spinner</code></td><td>When <code>max_output_tokens</code> is set (from <code>max_tokens_for_model</code>), spinner shows <code>↓ 1.2k / 16k (8%) ~3m</code>. Rate-based ETA: <code>output_tokens / elapsed</code>. Falls back to plain <code>↓ N tokens</code> when budget unknown.</td></tr>
-    <tr><td>Spinner status line — stall detection (yellow spinner)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>render.rs Spinner</code></td><td>Spinner tracks <code>last_bytes_change</code> timestamp; switches to <code>DarkYellow</code> when no new response bytes for 3s (excludes thinking phase). Same semantic as CC's <code>useStalledAnimation</code>.</td></tr>
+    <tr><td>Spinner status line — stall detection (yellow status text)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>render.rs Spinner</code></td><td>Shared <code>SpinnerProgress</code> records response, tool progress and phase activity; after response bytes arrive, status text uses <code>ColorTheme.warning</code> when no progress occurs for 3s (reasoning is exempt). The brand animation stays amber. Same semantic as CC's <code>useStalledAnimation</code>.</td></tr>
     <tr><td>Bash tool streaming output (onProgress)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>pty_bash_streaming::bash_streaming_shows_progress_for_slow_commands</code></td><td><code>execute_bash_streaming</code> in <code>bash.rs</code> pipes stdout/stderr via <code>tokio::io::BufReader</code>, reads line-by-line, calls <code>BashProgressCallback</code> every ~1s. <code>CliToolExecutor</code> installs a callback that pauses the spinner and prints the last 3 lines in dim style. Thread-local callback avoids changing <code>ToolExecutor</code> trait.</td></tr>
     <tr><td>MCP tool progress notifications</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>mcp_server_manager.rs emit_mcp_progress</code></td><td>All three transports (stdio, SSE, HTTP) now detect <code>notifications/progress</code> during <code>tools/call</code> and route them via thread-local <code>McpProgressCallback</code>. Stdio reads raw JSON to distinguish notifications (no <code>id</code>) from responses. CLI shows progress with percentage and message in dim style.</td></tr>
     <tr><td>Per-turn token usage display (post-turn)</td><td data-priority="must-have">must-have</td><td data-status="covered"><strong>Covered</strong></td><td><code>format.rs:1567-1600</code></td><td><code>format_turn_status_line_with_branch()</code> prints <code>[model] turn N · Nk tokens · $X.XX · Ns · branch</code> after every turn. Uses <code>UsageTracker::current_turn_usage()</code> with model-specific pricing via <code>pricing_for_model()</code>.</td></tr>
@@ -1805,6 +1892,17 @@ fallback. This does not add another palette or change amber activity accents.
 Real CLI regressions cover dark/light/no-color chrome, resize and neutral
 drafts, and explicit foreground/full resets inside a real question overlay.</p>
 
+<p>Question options and task focus share a neutral selection surface from
+<code>ColorTheme</code>. Amber identifies the selected marker and question
+heading; ordinary choice text keeps the default terminal foreground. Selected
+text uses a paired foreground/background, with muted hints at normal intensity.
+Dark/light selection text and accents retain at least 4.5:1 contrast against
+their surface. Limited-color terminals retain textual focus without a fill;
+<code>NO_COLOR</code> remains plain. Real PTY checks move focus between options
+and verify that the next input draft has no inherited selection background.
+Single-option questions advertise Enter confirmation without an inactive digit
+shortcut. This changes presentation, not slot allocation or input ownership.</p>
+
 <h4>Architecture context</h4>
 
 <table>
@@ -2020,6 +2118,55 @@ labels stay dim and struck through, and semantic icons keep their existing
 colors. Amber remains the identity/activity accent, not a neutral-number
 highlight. Acceptance: the existing <code>pty_chrome_styles</code> real REPL
 style checks in dark/light themes and after resize.</p>
+
+<p><strong>Shared live-slot row budget.</strong> PendingSlot, StatusSlot,
+TodoSlot, InputSlot and FooterSlot use one layout allocation while the terminal
+owner alone manages history, resize recovery and drawing. InputSlot has
+priority; other slots fold into explicit summaries and expand when space
+returns. The same structured document and iocraft primitive measure and paint
+each slot, with only current-frame measurements retained. Long drafts use the
+same bounded editor; long question/plan bodies page independently with
+PgUp/PgDn and Ctrl+Home/End. Choices remain visible; undersized controls disable
+confirmation and hidden editing, retaining cancellation. This layout does not
+change slot order, force bottom docking, replay history or replace the framework
+resize fix. Acceptance: <code>pty_chrome_budget</code>,
+<code>pty_plan_review</code>, the existing Markdown/continuation and background
+task PTYs, and <code>pty_chrome_resize</code>'s real terminal budget workflow.
+Full and folded Todo projections share the count-span formatter above;
+broader UI semantic colors and the streaming-preview position remain
+separate design discussions.</p>
+
+<p><strong>Resize input ownership.</strong> The terminal event pump stops at a
+Resize boundary and dispatches the bounded batch with the last painted frame's
+callbacks. Unix can deliver keyboard bytes before its Resize notification,
+so this barrier alone is insufficient. The terminal also records each input's
+observed dimensions and presented-frame identity; TextInput and the parent's
+confirmation/paste handlers share <code>use_input_frame()</code> admission.
+A same-size redraw cannot authorize an older observation. Geometry-crossing
+events wait for a newly presented frame and require the same input owner to
+have remained continuously enabled; ordinary visible-to-visible resizing
+must not lose typing/paste/confirmation. Parent controls declare the layout's
+reviewability with <code>set_enabled</code>, while TextInput declares focus.
+Hidden-to-visible and visible-to-hidden input remains rejected. Rapid reflow
+does not wait for an obsolete intermediate size to reappear. Cancellation remains
+available. The layout is still the sole content-visibility authority; the
+terminal owns presentation/geometry, not a second application layout registry.
+This adds one OS size query per key/paste event, without cursor queries or
+raw-event reordering; performance must be measured rather than assumed free.
+Real PTY acceptance covers immediate shrink-then-type/paste/confirm and
+hidden-input-then-grow, preserving draft bytes and the middle cursor. Framework
+CI covers Linux/macOS and both Windows ConPTY backends, including Linux-only
+identity-checked pending-readiness probes; a fixture pass does not replace
+the original failing full CLI tests.</p>
+
+<p><strong>Event-time draft navigation.</strong> TextInput owns one working
+value/cursor for a key batch. Logical-line Up/Down jumps, prompt history and
+queued-human recall apply through its edit policy before the next key, not
+through a parent render snapshot or deferred cursor request. The parent retains
+submission and panel actions; real newlines retain vertical navigation and
+peer messages remain queued. Acceptance: <code>pty_input_batch</code>'s
+single-burst Up/Home/right/edit and Down/left/edit workflow, existing history,
+queue recall and paste PTYs, and the real terminal shared-budget workflow.</p>
 
 <p><strong>External terminal ownership (#584).</strong> CCB validation:
 <code>src/commands/memory/memory.tsx</code> and

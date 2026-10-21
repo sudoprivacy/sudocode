@@ -77,7 +77,7 @@ fn compact_flag_prints_only_final_assistant_text_without_tool_call_details() {
         "compact stdout must not leak json envelopes ({stdout:?})"
     );
     assert!(
-        !stdout.contains("Thinking"),
+        !stdout.contains("Thinking") && !stdout.contains("Working..."),
         "compact stdout must not include the spinner banner ({stdout:?})"
     );
 

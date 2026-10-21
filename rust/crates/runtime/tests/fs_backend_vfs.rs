@@ -12,12 +12,11 @@
 //! in a comment while nothing exercised it. The two live next to each other so
 //! the claim is checked rather than asserted.
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
+use kernel::abc::object_store::ObjectStore;
 use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::DT_LINK;
 use kernel::{Permission, PermissionProvider};
@@ -26,77 +25,10 @@ use runtime::{
     KernelFsBackend, Session, SessionStore,
 };
 
-/// Minimal in-memory content backend so a fresh `Kernel` can round-trip
-/// regular-file bytes (dirents fall through to the global metastore; only
-/// content needs a store). Mirrors the kernel's own `TestObjectStore`.
-#[derive(Default)]
-struct MemStore {
-    blobs: Mutex<HashMap<String, Vec<u8>>>,
-}
-
-impl ObjectStore for MemStore {
-    fn name(&self) -> &str {
-        "mem"
-    }
-
-    fn write_content(
-        &self,
-        content: &[u8],
-        content_id: &str,
-        _ctx: &OperationContext,
-        offset: u64,
-    ) -> Result<WriteResult, StorageError> {
-        let mut b = self.blobs.lock().unwrap();
-        let mut data = if offset > 0 {
-            b.get(content_id).cloned().unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let start = offset as usize;
-        if start > data.len() {
-            data.resize(start, 0);
-        }
-        let end = start + content.len();
-        if end > data.len() {
-            data.resize(end, 0);
-        }
-        data[start..end].copy_from_slice(content);
-        let size = data.len() as u64;
-        b.insert(content_id.to_string(), data);
-        Ok(WriteResult {
-            content_id: content_id.to_string(),
-            version: content_id.to_string(),
-            size,
-        })
-    }
-
-    fn read_content(
-        &self,
-        content_id: &str,
-        _ctx: &OperationContext,
-    ) -> Result<Vec<u8>, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .cloned()
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
-    }
-
-    fn get_content_size(&self, content_id: &str) -> Result<u64, StorageError> {
-        self.blobs
-            .lock()
-            .unwrap()
-            .get(content_id)
-            .map(|d| d.len() as u64)
-            .ok_or_else(|| StorageError::NotFound(content_id.into()))
-    }
-}
-
 /// A fresh kernel with a content-capable root mount.
 fn kernel_with_root_backend() -> Arc<Kernel> {
     let kernel = Arc::new(Kernel::new());
-    let backend: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
+    let backend: Arc<dyn ObjectStore> = Arc::new(runtime::test_support::MemObjectStore::default());
     kernel
         .vfs_router_arc()
         .add_mount("/", "root", Some(backend), false);
@@ -375,12 +307,56 @@ fn dt_stream_append_frames_read_back_deframed() {
     );
 
     fs.append(path, b"{\"a\":1}\n").unwrap();
+    let before_empty = fs.stat(path).unwrap().len;
+    fs.append(path, b"").unwrap();
+    assert_eq!(
+        fs.stat(path).unwrap().len,
+        before_empty,
+        "empty writes are no-ops"
+    );
     fs.append(path, b"{\"b\":2}\n").unwrap();
     assert_eq!(
         fs.read(path).unwrap(),
         b"{\"a\":1}\n{\"b\":2}\n",
         "reading a DT_STREAM reproduces the appended records in order"
     );
+    let (first, cursor, eof) = fs.tail_read(path, 0, 0).unwrap();
+    assert_eq!(first, b"{\"a\":1}\n");
+    assert!(!eof);
+    let (second, after_second, eof) = fs.tail_read(path, cursor, 0).unwrap();
+    assert_eq!(second, b"{\"b\":2}\n");
+    assert!(after_second > cursor);
+    assert!(!eof);
+}
+
+#[test]
+fn rename_replaces_a_file_in_one_step_and_refuses_a_stream() {
+    // `rename` is the kernel's own sys_rename. Temp-then-rename replaces the
+    // destination in one operation, and a DT_STREAM is identity-bound: the
+    // kernel refuses to move it, so nothing may copy its frames into a new
+    // regular file and delete the original.
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.write("/ws/manifest.json", b"old").unwrap();
+    fs.write("/ws/manifest.json.tmp", b"new").unwrap();
+    fs.rename("/ws/manifest.json.tmp", "/ws/manifest.json")
+        .unwrap();
+    assert_eq!(fs.read("/ws/manifest.json").unwrap(), b"new");
+    assert!(!fs.exists("/ws/manifest.json.tmp").unwrap());
+
+    let stream = "/ws/log.jsonl";
+    kernel
+        .create_stream(stream, 64 * 1024)
+        .expect("create DT_STREAM");
+    fs.append(stream, b"frame\n").unwrap();
+    let error = fs.rename(stream, "/ws/moved.jsonl").unwrap_err();
+    assert!(
+        error.to_string().contains("rename not supported"),
+        "the kernel's refusal surfaces unchanged: {error}"
+    );
+    assert!(fs.is_append_stream(stream).unwrap());
+    assert_eq!(fs.read(stream).unwrap(), b"frame\n");
+    assert!(!fs.exists("/ws/moved.jsonl").unwrap());
 }
 
 #[test]
@@ -760,7 +736,7 @@ fn a_cohosted_agents_plan_lives_in_its_own_workspace() {
 #[test]
 fn a_path_outside_all_mounts_reads_a_transparent_error() {
     let kernel = Arc::new(Kernel::new());
-    let backend: Arc<dyn ObjectStore> = Arc::new(MemStore::default());
+    let backend: Arc<dyn ObjectStore> = Arc::new(runtime::test_support::MemObjectStore::default());
     // Mount a SUBTREE, not `/`, so `/elsewhere` is genuinely unmounted.
     kernel
         .vfs_router_arc()

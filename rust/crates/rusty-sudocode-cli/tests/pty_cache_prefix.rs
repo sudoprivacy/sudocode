@@ -4,6 +4,7 @@ mod common;
 #[path = "support/request_evidence.rs"]
 mod request_evidence;
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -18,10 +19,22 @@ use serde_json::{json, Value};
 use std::fmt::Write as _;
 
 const COMPACT: &str = "Create a concise checkpoint";
+const RESPONSE_LOG_ONLY: &str = "RESPONSE_LOG_ONLY_MUST_STAY_OUT_OF_CONTEXT";
 const WAIT: Duration = Duration::from_secs(30);
 const DIAGNOSTIC_SSE: usize = 1;
 const DIAGNOSTIC_JSON: usize = 2;
+const RESTARTED_MESSAGE: usize = 3;
+const INTERRUPTED_MESSAGE: usize = 4;
 const DIAGNOSTIC_BETA: &str = "cache-diagnosis-2026-04-07";
+
+#[inline]
+fn response_body_paths(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "gz"))
+        .collect()
+}
 
 #[derive(Clone)]
 struct CapturedRequest {
@@ -36,6 +49,8 @@ struct Capture {
     pressure_next: Arc<AtomicBool>,
     thinking_blocks: Arc<AtomicBool>,
     diagnostic_shape: Arc<AtomicUsize>,
+    rejections: Arc<Mutex<VecDeque<String>>>,
+    external_append: Arc<Mutex<Option<(std::path::PathBuf, String)>>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -52,6 +67,10 @@ impl Capture {
         let thinking = Arc::clone(&thinking_blocks);
         let diagnostic_shape = Arc::new(AtomicUsize::new(0));
         let shape = Arc::clone(&diagnostic_shape);
+        let rejections = Arc::new(Mutex::new(VecDeque::new()));
+        let failures = Arc::clone(&rejections);
+        let external_append = Arc::new(Mutex::new(None));
+        let append = Arc::clone(&external_append);
         let stop = Arc::new(AtomicBool::new(false));
         let (captured, retry, pressure, stopped) = (
             Arc::clone(&requests),
@@ -62,9 +81,9 @@ impl Capture {
         let worker = thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((socket, _)) => {
-                        serve(socket, &captured, &retry, &pressure, &thinking, &shape)
-                    }
+                    Ok((socket, _)) => serve(
+                        socket, &captured, &retry, &pressure, &thinking, &shape, &failures, &append,
+                    ),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
                     }
@@ -79,6 +98,8 @@ impl Capture {
             pressure_next,
             thinking_blocks,
             diagnostic_shape,
+            rejections,
+            external_append,
             stop,
             thread: Some(worker),
         }
@@ -138,6 +159,8 @@ fn serve(
     pressure: &AtomicBool,
     thinking: &AtomicBool,
     diagnostic_shape: &AtomicUsize,
+    rejections: &Mutex<VecDeque<String>>,
+    external_append: &Mutex<Option<(std::path::PathBuf, String)>>,
 ) {
     socket.set_nonblocking(false).unwrap();
     socket
@@ -156,6 +179,9 @@ fn serve(
         return;
     }
     let request: Value = serde_json::from_slice(&bytes).unwrap();
+    let binding = beta
+        .iter()
+        .any(|header| header.contains("thinking-binding-controls-2026-08-01"));
     let number = {
         let mut all = captured.lock().unwrap();
         all.push(CapturedRequest {
@@ -173,6 +199,26 @@ fn serve(
         );
         return;
     }
+    if let Some(message) = rejections.lock().unwrap().pop_front() {
+        if let Some((path, record)) = external_append.lock().unwrap().take() {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(record.as_bytes())
+                .unwrap();
+        }
+        respond(
+            &mut socket,
+            "400 Bad Request",
+            "application/json",
+            &json!({
+                "type":"error", "error":{"type":"invalid_request_error", "message":message}
+            })
+            .to_string(),
+        );
+        return;
+    }
     let content = response_content(&request, number);
     let usage = json!({"input_tokens": if pressure.swap(false, Ordering::Relaxed) { 990_000 } else { 2_000 },"output_tokens":100});
     let tool_use = content["type"] == "tool_use";
@@ -180,9 +226,12 @@ fn serve(
     let shape = diagnostic_shape.load(Ordering::Relaxed);
     let diagnostics = json!({"marker":"缓存诊断 → café", "comparison":"fixture-only"});
     if shape == DIAGNOSTIC_JSON {
-        let body = json!({"type":"message", "id":format!("reply_{number}"),
+        let mut body = json!({"type":"message", "id":format!("reply_{number}"),
             "role":"assistant", "model":request["model"], "content":[content],
             "stop_reason":stop_reason, "usage":usage, "diagnostics":diagnostics});
+        if binding {
+            body["input_transformations"] = json!([]);
+        }
         respond_fragmented(
             &mut socket,
             "application/json",
@@ -230,6 +279,32 @@ fn serve(
         ),
         ("message_stop", json!({"type":"message_stop"})),
     ];
+    if shape == RESTARTED_MESSAGE {
+        events.insert(
+            0,
+            (
+                "message_start",
+                json!({"type":"message_start","message":{
+                    "id":"abandoned-attempt", "type":"message", "role":"assistant", "content":[],
+                    "model":request["model"], "usage":{"input_tokens":2,
+                    "cache_creation_input_tokens":5235,"cache_read_input_tokens":124730}
+                }}),
+            ),
+        );
+    }
+    if shape == INTERRUPTED_MESSAGE {
+        events.truncate(1);
+        diagnostic_shape.store(0, Ordering::Relaxed);
+    }
+    if binding {
+        events[0].1["message"]["input_transformations"] = json!([]);
+        if number == 4 {
+            events[4].1["input_transformations"] = json!([{
+                "type":"thinking_dropped", "reason":"model_binding_mismatch",
+                "path":"messages.1.content.0", "signature":"never-log-provider-blocks"
+            }]);
+        }
+    }
     if shape == DIAGNOSTIC_SSE {
         events[0].1["message"]["diagnostics"] = diagnostics;
     }
@@ -257,7 +332,7 @@ fn serve(
         }
         events.splice(1..1, prefix);
     }
-    let mut body = String::new();
+    let mut body = format!(": {RESPONSE_LOG_ONLY}\n\n");
     for (event, data) in events {
         if shape == DIAGNOSTIC_SSE {
             // Legal multi-line SSE data, JSON whitespace and CRLF framing.
@@ -373,6 +448,391 @@ fn thinking_blocks_survive_turns_and_resume_without_merging_or_dropping() {
     }
 }
 
+fn unanswered_turn_fixture(
+    env: &TestEnv,
+    capture: &Capture,
+    tail: &str,
+) -> (std::path::PathBuf, Vec<ConversationMessage>) {
+    let path = fixture(env, capture);
+    let mut original = Session::load_from_path(&path).unwrap();
+    original
+        .push_user_text("Inspect the OLD_TASK profile.")
+        .unwrap();
+    if tail != "user" {
+        original
+            .push_message(ConversationMessage::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: String::new(),
+                    signature: Some("old-tool-signature".into()),
+                },
+                ContentBlock::Text {
+                    text: "OLD_TASK\ncourse\nInspecting the old profile.".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "old-profile-call".into(),
+                    name: "PowerShell".into(),
+                    input: r#"{"command":"echo OLD_TASK"}"#.into(),
+                    thought_signature: None,
+                },
+            ]))
+            .unwrap();
+        original
+            .push_message(ConversationMessage::tool_result(
+                "old-profile-call",
+                "PowerShell",
+                r#"{"stdout":"OLD_TASK done","exit_code":0}"#,
+                false,
+            ))
+            .unwrap();
+    }
+    if tail == "complete" {
+        original
+            .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "The old task is complete.".into(),
+            }]))
+            .unwrap();
+    }
+    original.save_to_path(&path).unwrap();
+    (path, original.messages)
+}
+
+#[test]
+fn resumed_unanswered_turns_end_before_new_requests_without_rewriting_history() {
+    for (mode, tail) in [
+        ("off", "tool"),
+        ("queue", "tool"),
+        ("off", "user"),
+        ("off", "complete"),
+    ] {
+        let env = TestEnv::new_mock("unanswered-turn-boundary");
+        let capture = Capture::new();
+        let (path, original_messages) = unanswered_turn_fixture(&env, &capture, tail);
+        let expected_sentinels = usize::from(tail != "complete");
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "Start a different task: NEW_TASK first.");
+        turn(&mut cli, "Continue NEW_TASK with the previous answer.");
+        exit(&mut cli);
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        common::expect_screen_settled(
+            &cli,
+            |screen| {
+                screen.contains("Continue NEW_TASK") && !screen.contains("No response requested.")
+            },
+            WAIT,
+            "internal turn marker stays out of replay",
+        );
+        turn(&mut cli, "Recall NEW_TASK after restarting.");
+        exit(&mut cli);
+        let requests = capture.bodies();
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            let messages = request["messages"].as_array().unwrap();
+            let sentinels: Vec<_> = messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| {
+                    message["role"] == "assistant"
+                        && message["content"].as_array().is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block["type"] == "text" && block["text"] == "No response requested."
+                            })
+                        })
+                })
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(
+                sentinels.len(),
+                expected_sentinels,
+                "{mode}/{tail}: missing or duplicated turn boundary"
+            );
+            if let Some(&index) = sentinels.first() {
+                assert_eq!(messages[index - 1]["role"], "user");
+                assert_eq!(messages[index + 1]["role"], "user");
+                assert!(messages[index + 1]["content"]
+                    .to_string()
+                    .contains("NEW_TASK first"));
+                if tail == "tool" {
+                    assert_eq!(
+                        messages[index - 1]["content"][0]["tool_use_id"],
+                        "old-profile-call"
+                    );
+                    assert!(messages[index - 1]["content"]
+                        .to_string()
+                        .contains("OLD_TASK done"));
+                }
+            }
+        }
+        for pair in requests.windows(2) {
+            fixed_prefix(&pair[0], &pair[1]);
+            history_prefix(&pair[0], &pair[1]);
+        }
+        let persisted = Session::load_from_path(&path).unwrap();
+        assert_eq!(
+            &persisted.messages[..original_messages.len()],
+            &original_messages,
+            "old signed history or tool results changed"
+        );
+        assert_eq!(
+            persisted
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == runtime::MessageRole::Assistant
+                        && message.blocks
+                            == vec![ContentBlock::Text {
+                                text: "No response requested.".into(),
+                            }]
+                })
+                .count(),
+            expected_sentinels
+        );
+    }
+}
+
+fn repair_archives(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let prefix = format!(
+        "{}.before-thinking-repair-",
+        path.file_name().unwrap().to_str().unwrap()
+    );
+    std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
+        .collect()
+}
+
+fn without_thinking(mut messages: Value) -> Value {
+    for message in messages.as_array_mut().unwrap() {
+        if message["role"] == "assistant" {
+            message["content"].as_array_mut().unwrap().retain(|block| {
+                block["type"] != "thinking" && block["type"] != "redacted_thinking"
+            });
+        }
+    }
+    messages
+}
+
+#[test]
+fn rejected_thinking_is_archived_once_and_new_signatures_survive_resume() {
+    for mode in ["off", "queue"] {
+        let env = TestEnv::new_mock("thinking-repair-resume");
+        let capture = Capture::new();
+        capture.thinking_blocks.store(true, Ordering::Relaxed);
+        let path = fixture(&env, &capture);
+        let config_path = env.config_home().join("sudocode.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["models"]["claude-sonnet"]["providers"]["api-key"]["model"] =
+            json!("claude-opus-5-5");
+        config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":["thinking-binding-controls-2026-08-01"],"thinking":{"block_binding":{"prefix_mismatch_behavior":"error"}}});
+        std::fs::write(config_path, config.to_string()).unwrap();
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "discover CronList");
+        assert_eq!(capture.bodies().len(), 2);
+        let before = Session::load_from_path(&path).unwrap();
+        let before_bytes = std::fs::read(&path).unwrap();
+        capture.rejections.lock().unwrap().push_back("Invalid `signature` in `thinking` block. The block is bound to a different conversation.".into());
+        turn(
+            &mut cli,
+            "Keep the discovered tool result after signature repair.",
+        );
+        assert_eq!(
+            capture.bodies().len(),
+            4,
+            "one rejection and exactly one repaired request"
+        );
+        let requests = capture.bodies();
+        assert!(requests
+            .iter()
+            .all(|body| body["thinking"]["block_binding"]["prefix_mismatch_behavior"] == "error"));
+        assert!(capture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.beta == ["thinking-binding-controls-2026-08-01"]));
+        fixed_prefix(&requests[2], &requests[3]);
+        assert_eq!(
+            without_thinking(without_cache_markers(requests[2]["messages"].clone())),
+            without_cache_markers(requests[3]["messages"].clone())
+        );
+        let archives = repair_archives(&path);
+        assert_eq!(archives.len(), 1);
+        let archived_bytes = std::fs::read(&archives[0]).unwrap();
+        assert!(
+            archived_bytes.starts_with(&before_bytes),
+            "archive retains the original durable bytes and appended prompt"
+        );
+        let archived = Session::load_from_path(&archives[0]).unwrap();
+        assert_eq!(
+            &archived.messages[..before.messages.len()],
+            before.messages.as_slice()
+        );
+        let repaired = Session::load_from_path(&path).unwrap();
+        for (old, new) in before.messages.iter().zip(&repaired.messages) {
+            let mut expected = old.clone();
+            if expected.role == runtime::MessageRole::Assistant {
+                expected.blocks.retain(|block| {
+                    !matches!(
+                        block,
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                    )
+                });
+            }
+            assert_eq!(
+                &expected, new,
+                "text, tool records and usage stay unchanged"
+            );
+        }
+        turn(
+            &mut cli,
+            "Keep the new signed response on the next request.",
+        );
+        assert_eq!(capture.bodies().len(), 5, "one continuation request");
+        assert_thinking_replayed(capture.bodies().last().unwrap(), 4);
+        exit(&mut cli);
+        let mut cli = spawn_with_env(&env, &path, &[("SUDOCODE_INTERRUPT_QUEUE_MODE", mode)]);
+        turn(&mut cli, "Keep the new signed response after restart.");
+        assert_eq!(capture.bodies().len(), 6, "one resumed request");
+        assert_thinking_replayed(capture.bodies().last().unwrap(), 4);
+        assert_eq!(repair_archives(&path).len(), 1);
+        exit(&mut cli);
+        let log = std::fs::read_to_string(env.workspace_root().join("cache-prefix-requests.jsonl"))
+            .unwrap();
+        let events: Vec<Value> = log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e["event"] == "thinking_history_repaired")
+                .count(),
+            1
+        );
+        let acks: Vec<_> = events
+            .iter()
+            .filter(|e| e["event"] == "thinking_input_transformations")
+            .collect();
+        assert!(
+            (5..=6).contains(&acks.len()),
+            "mode={mode}, acknowledgments={}, attributes={:?}, PTY:\n{}",
+            acks.len(),
+            acks.iter()
+                .map(|event| &event["attributes"])
+                .collect::<Vec<_>>(),
+            cli.render(|screen| screen.contents())
+        );
+        let final_updates: Vec<_> = acks
+            .iter()
+            .filter(|e| e["attributes"]["count"] == 1)
+            .collect();
+        assert_eq!(final_updates.len(), 1);
+        assert_eq!(
+            final_updates[0]["attributes"]["transformations"],
+            json!([{
+                "type":"thinking_dropped", "reason":"model_binding_mismatch",
+                "path":"messages.1.content.0"
+            }])
+        );
+        assert!(!log.contains("never-log-provider-blocks"));
+    }
+}
+
+#[test]
+fn thinking_repair_is_bounded_and_unrelated_bad_requests_preserve_history() {
+    for (message, attempts, archives) in [
+        (
+            "Invalid `signature` in `thinking` block. recovery-test-rejection",
+            2,
+            1,
+        ),
+        ("invalid max_tokens recovery-test-rejection", 1, 0),
+    ] {
+        let env = TestEnv::new_mock("thinking-repair-bounded");
+        let capture = Capture::new();
+        let path = fixture(&env, &capture);
+        capture
+            .rejections
+            .lock()
+            .unwrap()
+            .extend([message.to_string(), message.to_string()]);
+        let mut cli = spawn(&env, &path);
+        cli.send("Continue despite the deliberately rejected request.\r")
+            .unwrap();
+        cli.expect("recovery-test-rejection").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "rejected request completed");
+        assert_eq!(capture.bodies().len(), attempts);
+        assert_eq!(repair_archives(&path).len(), archives);
+        exit(&mut cli);
+    }
+}
+
+#[test]
+fn thinking_repair_preserves_a_concurrent_transcript_append() {
+    let env = TestEnv::new_mock("thinking-repair-concurrent");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let record = json!({"type":"message","message":{
+        "role":"user", "blocks":[{"type":"text","text":"EXTERNAL_APPEND_MUST_SURVIVE"}]
+    }})
+    .to_string()
+        + "\n";
+    *capture.external_append.lock().unwrap() = Some((path.clone(), record));
+    capture
+        .rejections
+        .lock()
+        .unwrap()
+        .push_back("Invalid `signature` in `thinking` block.".into());
+    let mut cli = spawn(&env, &path);
+    cli.send("Continue while another writer appends history.\r")
+        .unwrap();
+    cli.expect("Thinking repair preserved history").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "concurrent edit preserved");
+    assert_eq!(capture.bodies().len(), 1);
+    assert!(repair_archives(&path).is_empty());
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("EXTERNAL_APPEND_MUST_SURVIVE"));
+    let session = Session::load_from_path(&path).unwrap();
+    assert!(session.messages.iter().flat_map(|message| &message.blocks).any(|block|
+        matches!(block,ContentBlock::Thinking {signature:Some(signature),..} if signature == "signed-prefix-0")));
+    drop(cli);
+}
+
+#[test]
+fn invalid_beta_configuration_sends_no_request_and_can_be_corrected() {
+    let env = TestEnv::new_mock("thinking-beta-configuration");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    for (betas, error) in [
+        (json!([42]), "must be an array of strings"),
+        (json!(["invalid beta"]), "invalid beta name"),
+    ] {
+        config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":betas});
+        std::fs::write(&config_path, config.to_string()).unwrap();
+        let mut cli = env.spawn(&["--resume", path.to_str().unwrap()]);
+        cli.expect(error).unwrap();
+        assert_ne!(cli.expect_eof().unwrap(), 0);
+        assert!(capture.bodies().is_empty());
+    }
+    config["models"]["claude-sonnet"]["extraBody"] = json!({"betas":[]});
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let mut cli = spawn(&env, &path);
+    turn(&mut cli, "Continue after correcting the beta list.");
+    exit(&mut cli);
+    assert_eq!(capture.bodies().len(), 1);
+    assert!(capture.requests.lock().unwrap()[0].beta.is_empty());
+}
+
 #[test]
 fn adaptive_thinking_and_effort_stay_fixed_across_compaction_and_resume() {
     for model in [
@@ -425,18 +885,81 @@ fn adaptive_thinking_and_effort_stay_fixed_across_compaction_and_resume() {
         assert!(baseline.get("reasoning_effort").is_none());
         turn(&mut cli, "Continue the next step.");
         assert_thinking_replayed(&capture.bodies()[1], 1);
+        let response_dir = Session::response_captures_dir_for(
+            &path,
+            &Session::load_from_path(&path).unwrap().session_id,
+        )
+        .unwrap();
+        common::expect_screen(
+            &cli,
+            |_| {
+                let bodies = response_body_paths(&response_dir);
+                bodies.len() == 2
+                    && bodies.iter().all(|path| {
+                        std::fs::read(path.with_extension("").with_extension("json"))
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                            .is_some_and(|metadata| metadata["gzip_complete"] == true)
+                    })
+            },
+            WAIT,
+            "two background response logs finalized",
+        );
+        let before_compact: Vec<_> = response_body_paths(&response_dir)
+            .into_iter()
+            .map(|path| {
+                let bytes = std::fs::read(&path).unwrap();
+                let mut body = String::new();
+                flate2::read::GzDecoder::new(bytes.as_slice())
+                    .read_to_string(&mut body)
+                    .unwrap();
+                assert!(body.contains(RESPONSE_LOG_ONLY));
+                (path, bytes)
+            })
+            .collect();
+        assert_eq!(before_compact.len(), 2);
+        assert!(!common::screen_tail(&cli, 12000).contains(RESPONSE_LOG_ONLY));
         cli.send("/compact\r").unwrap();
-        cli.expect("Messages removed").unwrap();
+        cli.expect("Messages removed").unwrap_or_else(|error| {
+            panic!(
+                "compaction did not complete: {error}; {}",
+                common::screen_tail(&cli, 12000)
+            )
+        });
         common::expect_input_line_cleared(&cli, WAIT, "adaptive compaction finished");
         turn(&mut cli, "Continue after compaction.");
         exit(&mut cli);
+        let bodies_before_restart = response_body_paths(&response_dir).len();
+        let settings_path = env.config_home().join("settings.json");
+        std::fs::write(&settings_path, r#"{"responseRecording":{"enabled":false}}"#).unwrap();
         let mut cli = start();
         turn(&mut cli, "Continue after restart.");
         exit(&mut cli);
+        assert_eq!(
+            response_body_paths(&response_dir).len(),
+            bodies_before_restart
+        );
+        std::fs::write(&settings_path, r#"{"responseRecording":{"enabled":true}}"#).unwrap();
+        let mut cli = start();
+        turn(&mut cli, "Continue after enabling response logs again.");
+        exit(&mut cli);
+        assert_eq!(
+            response_body_paths(&response_dir).len(),
+            bodies_before_restart + 1
+        );
         let requests = capture.bodies();
         assert!(requests.iter().any(|r| r.to_string().contains(COMPACT)));
         for request in &requests[1..] {
             fixed_prefix(&baseline, request);
+        }
+        for request in &requests {
+            assert!(!request.to_string().contains(RESPONSE_LOG_ONLY));
+        }
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains(RESPONSE_LOG_ONLY));
+        for (path, bytes) in before_compact {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
         }
         assert_thinking_replayed(requests.last().unwrap(), requests.len() - 1);
     }
@@ -646,7 +1169,7 @@ fn model_picker_selects_effort_and_cancel_keeps_the_original_choice() {
         let config_path = env.config_home().join("sudocode.json");
         let mut config: Value =
             serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-        for model in ["claude-opus-4-8", "claude-sonnet-4-6"] {
+        for model in ["claude-opus-4-8", "claude-sonnet-4-6", "claude-opus-4-5"] {
             let mut entry = config["models"]["claude-sonnet"].clone();
             entry["alias"] = json!(model);
             entry["providers"]["api-key"]["model"] = json!(model);
@@ -693,6 +1216,16 @@ fn model_picker_selects_effort_and_cancel_keeps_the_original_choice() {
             "Continue with a model that does not support xhigh.",
         );
         assert_eq!(capture.bodies()[3]["output_config"]["effort"], "high");
+        cli.send("/model claude-opus-4-5\r").unwrap();
+        cli.expect("Model updated").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "Opus 4.5 selected");
+        turn(&mut cli, "Continue with Opus 4.5's effort ladder.");
+        assert_eq!(capture.bodies()[4]["output_config"]["effort"], "high");
+        cli.send("/model claude-opus-4-8\r").unwrap();
+        cli.expect("Model updated").unwrap();
+        common::expect_input_line_cleared(&cli, WAIT, "Opus 4.8 restored");
+        turn(&mut cli, "Restore the original effort preference.");
+        assert_eq!(capture.bodies()[5]["output_config"]["effort"], "xhigh");
         exit(&mut cli);
     }
 }
@@ -916,6 +1449,222 @@ fn turn(cli: &mut PtySession, text: &str) {
     cli.send(&format!("{text}\r")).unwrap();
     common::expect_turn_complete_after(cli, &marker, WAIT, text);
     common::expect_input_line_cleared(cli, WAIT, "turn completed");
+}
+
+fn cache_rows(directory: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(directory.join("requests.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
+    let env = TestEnv::new_mock("ttl-advisor-boundary");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let id = Session::load_from_path(&path).unwrap().session_id;
+    let directory = env.config_home().join("cache/prompt-cache").join(id);
+    let enabled = [("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1")];
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    turn(&mut cli, "First observed request.");
+    let rows = cache_rows(&directory);
+    let template = rows.last().unwrap();
+    let observation = &template["observation"];
+    let start = observation["request_started_ms"].as_u64().unwrap();
+    assert!(start <= observation["response_started_ms"].as_u64().unwrap());
+    assert!(
+        observation["response_started_ms"].as_u64().unwrap()
+            <= observation["response_completed_ms"].as_u64().unwrap()
+    );
+    let ttls = observation["requested_ttls_seconds"].as_array().unwrap();
+    assert!(!ttls.is_empty() && ttls.iter().all(|ttl| *ttl == 300));
+    assert!(observation["upstream_ttl_seconds"].is_null());
+    let original: Value =
+        serde_json::from_str(&std::fs::read_to_string(directory.join("ttl-advice.json")).unwrap())
+            .unwrap();
+    assert_eq!(original["decisions"].as_array().unwrap().len(), 1);
+    assert_eq!(original["decisions"][0]["reason"], "insufficient_evidence");
+
+    // Synthetic history, not a measurement of the fake server's cache. It is
+    // written before the boundary, so the next decision cannot see the future.
+    let mut history = String::new();
+    for index in 0..10u64 {
+        let mut row = template.clone();
+        row["gateway_request_id"] = json!(format!("fixture-{index}"));
+        row["provider_request_id"] = Value::Null;
+        let at = start - (11 - index) * 600_000;
+        row["observation"]["request_started_ms"] = json!(at);
+        row["observation"]["response_started_ms"] = json!(at + 1);
+        row["observation"]["response_completed_ms"] = json!(at + 2);
+        row["observation"]["client_prefix_compatible"] = json!(true);
+        row["cache_creation_input_tokens"] = json!(100_000);
+        row["cache_read_input_tokens"] = json!(0);
+        writeln!(history, "{row}").unwrap();
+        if index == 4 {
+            writeln!(history, "{{\"model\":\"claude-opus-5-5\"}}").unwrap();
+        }
+    }
+    for row in rows {
+        writeln!(history, "{row}").unwrap();
+    }
+    std::fs::write(directory.join("requests.jsonl"), history).unwrap();
+    turn(
+        &mut cli,
+        "History alone must not re-decide inside this context.",
+    );
+    let unchanged: Value =
+        serde_json::from_str(&std::fs::read_to_string(directory.join("ttl-advice.json")).unwrap())
+            .unwrap();
+    assert_eq!(unchanged, original);
+    cli.send("/compact\r").unwrap();
+    cli.expect("Messages removed").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "advisor compaction committed");
+    turn(&mut cli, "Continue with the configured policy.");
+    exit(&mut cli);
+    let state_path = directory.join("ttl-advice.json");
+    let after: Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(after["decisions"].as_array().unwrap().len(), 2);
+    assert_eq!(after["decisions"][1]["context_segment"], 1);
+    assert_eq!(after["decisions"][1]["suggested_ttl_seconds"], 3600);
+    assert_eq!(after["decisions"][1]["configured_ttl_seconds"], 300);
+    assert_eq!(after["decisions"][1]["reason"], "hypothetical_1h_saving");
+    assert_eq!(after["decisions"][1]["training"]["eligible_intervals"], 8);
+    let rows = cache_rows(&directory);
+    assert!(rows
+        .iter()
+        .any(|r| r["observation"]["request_kind"] == "compaction"));
+    assert_eq!(rows.last().unwrap()["observation"]["context_segment"], 1);
+    for body in capture.bodies() {
+        assert!(
+            !body.to_string().contains("\"ttl\":\"1h\""),
+            "advice must never change the wire policy"
+        );
+    }
+    let metadata = rows.last().unwrap()["observation"].to_string();
+    for secret in ["test-pty-key", "PREFIX_ORIGINAL", capture.url.as_str()] {
+        assert!(!metadata.contains(secret));
+    }
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    exit(&mut cli);
+    let resumed: Value =
+        serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
+    assert_eq!(
+        resumed, after,
+        "resume must preserve the decision and its training cutoff"
+    );
+}
+
+#[test]
+fn ttl_advisor_is_opt_in_and_marks_retried_or_restarted_streams() {
+    for mode in ["off", "retry", "restarted", "interrupted"] {
+        let env = TestEnv::new_mock("ttl-advisor-coverage");
+        let capture = Capture::new();
+        let path = fixture(&env, &capture);
+        let id = Session::load_from_path(&path).unwrap().session_id;
+        let directory = env.config_home().join("cache/prompt-cache").join(id);
+        if mode == "retry" {
+            capture.retry_next.store(true, Ordering::Relaxed);
+        }
+        if mode == "restarted" {
+            capture
+                .diagnostic_shape
+                .store(RESTARTED_MESSAGE, Ordering::Relaxed);
+        }
+        if mode == "interrupted" {
+            capture
+                .diagnostic_shape
+                .store(INTERRUPTED_MESSAGE, Ordering::Relaxed);
+        }
+        let mut cli = spawn_with_env(
+            &env,
+            &path,
+            &[
+                (
+                    "SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR",
+                    if mode == "off" { "0" } else { "1" },
+                ),
+                (
+                    "SUDOCODE_CACHE_DIAGNOSTICS",
+                    if mode == "restarted" { "1" } else { "0" },
+                ),
+            ],
+        );
+        if mode == "restarted" {
+            cli.send("Observe an invalid upstream restart.\r").unwrap();
+            common::expect_screen(
+                &cli,
+                |screen| common::screen_contains(screen, "multiple message_start"),
+                WAIT,
+                "a restarted message is a protocol failure",
+            );
+            common::expect_input_line_cleared(
+                &cli,
+                WAIT,
+                "protocol failure returned to the prompt",
+            );
+        } else {
+            turn(&mut cli, "Observe a normal reply.");
+        }
+        exit(&mut cli);
+        let rows = cache_rows(&directory);
+        let o = &rows.last().unwrap()["observation"];
+        match mode {
+            "off" => {
+                assert!(o.is_null());
+                assert!(!directory.join("ttl-advice.json").exists());
+            }
+            "retry" => assert!(o["attempts"].as_u64().unwrap() >= 2),
+            "interrupted" => {
+                assert!(
+                    rows.iter().any(|r| r["observation"]["completed"] == false
+                        && r["input_tokens"].as_u64().unwrap_or(0) > 0),
+                    "interrupted observed usage must survive separately from the retry"
+                );
+                assert_eq!(o["completed"], true);
+                assert_eq!(
+                    o["attempts"], 1,
+                    "empty-response fallback opens a distinct HTTP request scope"
+                );
+                assert_eq!(capture.bodies().len(), 2);
+                let partial = &rows.first().unwrap()["observation"];
+                assert!(
+                    partial["response_completed_ms"].as_u64().unwrap()
+                        <= o["request_started_ms"].as_u64().unwrap(),
+                    "consumed partial usage must be recorded before the fallback"
+                );
+                assert!(
+                    o["client_prefix_compatible"].is_null(),
+                    "an incomplete response must not advance the successful prefix state"
+                );
+            }
+            "restarted" => {
+                assert_eq!(
+                    o["message_starts"], 1,
+                    "reject the second start before it changes usage"
+                );
+                assert_eq!(o["completed"], false);
+                assert_eq!(rows.last().unwrap()["cache_creation_input_tokens"], 5235);
+                assert_eq!(rows.last().unwrap()["cache_read_input_tokens"], 124730);
+                let diagnostics: Value = serde_json::from_str(
+                    &std::fs::read_to_string(directory.join("cache-diagnostics.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    diagnostics["message_id"], "abandoned-attempt",
+                    "the rejected start must not replace the accepted diagnostic identity"
+                );
+                assert_eq!(
+                    capture.bodies().len(),
+                    1,
+                    "never replay an invalid upstream restart"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 fn exit(cli: &mut PtySession) {

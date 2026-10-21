@@ -40,6 +40,19 @@ workspace. `SCODE_CONPTY_BACKEND=system` runs the strict system-host diagnostic;
 it currently exposes history loss on Windows build 26300 even in static controls
 without application redraw. CI uses VS Code's bundled ConPTY.
 
+The shared-budget workflow folds Todo/status/footer details around a long draft,
+restores them on growth, hides an undersized editor without losing its middle
+cursor, rejects invisible edits, and submits every retained draft byte through
+the real shell. It checks all 70 saved history lines at each stage. This is
+layout/data preservation acceptance, not a claim that extreme-size degradation
+is free of unreachable old UI; the normal-size workflow separately checks
+duplicate-free resize.
+After extreme-size recovery, editor/picker checks locate the current InputSlot
+between the last pair of input separators. They must not confuse a retained
+obsolete frame with the current editor. History preservation still checks the
+entire buffer; the separate normal-size workflow keeps its strict single-chrome
+assertions.
+
 ## Release performance gate
 
 `pty_render_performance` reuses TestEnv, the protocol fixture and this terminal
@@ -67,6 +80,23 @@ the evaluator still comes from the base. Baselines never update automatically.
 Candidate compilation has read permissions and no persisted checkout token;
 the separate status publisher executes trusted code only.
 
+A repository administrator who authored a PR may explicitly approve **harness-only**
+changes in a GitHub `COMMENTED` review bound to the current commit. Its first line
+must be `<!-- scode-render-harness-admin-approval -->`. CI verifies the review's
+author, commit and current administrator permission. Budget and baseline changes
+still require an independent maintainer review. Approval evidence is retained in
+`approval.json`; ordinary comments and approvals of older commits do not qualify.
+
+To measure an approved same-repository PR, dispatch `render-performance.yml` from
+its current head branch with `pull_request=<number>` and `profile=core`. This uses
+the PR base's policy and measurement harness, independently builds both releases,
+and publishes the required status only after real A/A and A/B results pass. The native approval
+job and `approval.json` retain the authenticated evidence; the validator only
+reads GitHub data. Historical Actions checks and measurement results remain
+unchanged. The final publisher rejects a PR that advanced during measurement.
+The workflow also tests stale PR-event and dispatch inputs against the live GitHub
+API in a separate job with a read-only token.
+
 Initial rollout: run Rust CI's optional `render_performance` dispatch on the
 candidate branch to validate hosted A/A calibration, merge the harness, then require
 the published `render performance` status in main's branch protection. The
@@ -75,3 +105,59 @@ The
 initial budgets are local regression limits and need hosted calibration before
 claiming reliable CI protection. A failed run is investigated; reruns do not
 replace its original evidence.
+
+## Painted terminal and hyperlink acceptance
+
+`pty_hyperlinks::browser_terminal_links_and_interaction` launches the real CLI
+in an OS PTY and connects it to the pinned **browser** xterm renderer in Chromium.
+It clicks named links and checks their destinations, resizes history, reviews a
+linked model question, and sends real browser mouse down/move/up events across
+wrapped Chinese, combining characters and emoji. No programmatic selection API
+stands in for dragging. Selection must contain only visible text, must not open
+a link, and must survive output arriving while old history is selected.
+The workload includes dense links, long URLs, query semicolons, and rejected
+oversized/non-web targets. Static and streamed copies use the same document.
+
+Install with `npm ci --prefix e2e/terminal-resize`, then run
+`npx playwright install chromium` in that directory. From `rust/`:
+
+```sh
+SCODE_TEST_BACKEND=mock cargo test -p rusty-sudocode-cli --test pty_hyperlinks -- --ignored --nocapture
+```
+
+Headless Chromium still runs the DOM layout, renderer, rasterization and native
+xterm selection. `SCODE_GUI_HEADED=1` additionally displays its window. Reports
+and screenshots are retained under `SCODE_TERMINAL_LOG_DIR`. Input timing starts
+before browser keyboard dispatch and ends after xterm parses the expected cells,
+two animation frames and a PNG capture. Each typed character must change pixels.
+This is a conservative rendering/readback measurement, including automation and
+capture overhead; it does not measure physical keyboard/display scanout latency.
+Parsed-cell latency uses browser `keydown` and xterm `onWriteParsed` timestamps
+on the same clock, accepting only the event containing the expected input text.
+Each phase first samples 100 keys in five short drafts without screenshots,
+then samples 20 keys with pixel evidence. This keeps P95 from depending on only
+two scheduler-tail observations. Sampling counts and the delay schedule are
+owned by `gui-policy.json` and shared by the observer and completeness checks.
+PNG readback can delay the next WebSocket dispatch, so parsed
+latency must come from the independent burst. Both releases receive the same
+deterministic inter-key delays outside timed regions, retained in the report.
+Event completion uses a promise instead of frame polling. Raw key, PTY output,
+WebSocket receive and write-callback timestamps remain available for diagnosis;
+cross-process time origins are diagnostic only. Input checks read only the live
+viewport, so scanning old scrollback cannot become part of observer latency.
+
+Process accounting records scode separately from the dedicated Chromium process
+tree, including browser, renderer and GPU process. Browser CPU comes from CDP;
+RSS comes from OS accounting. Browser RSS sums processes (shared pages can be
+counted multiple times), and peaks are phase samples. The Node observer is
+outside that resource scope. Raw per-process samples make that distinction
+inspectable; these values must not be compared to scode's standalone RSS budget.
+
+`gui-benchmark.py` uses the core gate's paired evaluator: five A/A calibration
+pairs followed by seven alternating A/B pairs. `gui-policy.json` owns the
+additional browser budgets; the original `performance-policy.json` budgets and
+fixed baseline are unchanged. Both binaries receive identical gestures and
+workloads; only candidate hyperlink assertions differ. The browser workflow
+compares releases built from the PR base and candidate in separate target dirs,
+and uploads failures as well as successful evidence. The existing required
+`render performance` check continues comparing the original workloads.

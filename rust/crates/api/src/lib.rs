@@ -1,4 +1,6 @@
+mod cache_observation;
 mod client;
+pub use cache_observation::{local_key as cache_route_key, CacheRequestObservation};
 mod completion;
 pub mod model_discovery;
 pub use completion::{convert_messages, session_message_request};
@@ -9,6 +11,8 @@ mod nexus_transport;
 pub use nexus_transport::ModelAccess;
 mod prompt_cache;
 mod providers;
+mod recorded_response;
+pub use recorded_response::{flush_response_captures, RecordedResponse};
 mod request_scope;
 mod sse;
 mod stream_collect;

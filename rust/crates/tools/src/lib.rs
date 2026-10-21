@@ -24,9 +24,29 @@ pub mod testing {
     where
         F: FnMut(String) -> Result<String, String>,
     {
+        let mailbox = runtime::mailbox::Mailbox::workspace_local(workspace_root, agent_id.into());
         crate::run_multi_turn_loop(
-            agent_id,
-            workspace_root,
+            &mailbox,
+            abort_signal,
+            initial_prompt,
+            max_multi_turns,
+            run_turn_fn,
+        )
+    }
+
+    /// Drive the production receive loop over a caller-owned mailbox backend.
+    pub fn run_multi_turn_loop_in_mailbox_for_test<F>(
+        mailbox: &runtime::mailbox::Mailbox,
+        abort_signal: HookAbortSignal,
+        initial_prompt: String,
+        max_multi_turns: usize,
+        run_turn_fn: F,
+    ) -> Result<String, String>
+    where
+        F: FnMut(String) -> Result<String, String>,
+    {
+        crate::run_multi_turn_loop(
+            mailbox,
             abort_signal,
             initial_prompt,
             max_multi_turns,
@@ -213,7 +233,7 @@ pub mod testing {
     /// be sent to (a live pid, or any agent-name), `Err` when it is a
     /// known-terminal pid. Lets a test exercise the D1 rule without a real send.
     pub fn reject_dead_pid_for_test(to: &str) -> Result<(), String> {
-        crate::reject_dead_pid(to)
+        crate::resolve_task_destination(to, runtime::host_fs()).map(|_| ())
     }
 
     /// Test seam: does the summary-threshold gate — mirrors the
@@ -437,14 +457,9 @@ impl AgentCompletionRegistry {
 
 /// Fall back to reading the manifest from the agent store on disk.
 fn read_manifest_from_store(agent_id: &str, fs: &dyn FsBackend) -> Result<AgentOutput, String> {
-    let store = agent_store_dir(fs)?;
-    let manifest_path = store_path(&store, &format!("{agent_id}.json"), fs);
-    let contents = fs
-        .read_to_string(&manifest_path.to_string_lossy())
-        .map_err(|e| {
-            format!("agent {agent_id} not found (no in-process record, no manifest file): {e}")
-        })?;
-    let manifest: AgentOutput = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
+    let manifest = read_agent_manifest(agent_id, fs)?.ok_or_else(|| {
+        format!("agent {agent_id} not found (no in-process record, no manifest file)")
+    })?;
     if manifest.status == "completed" || manifest.status == "failed" {
         Ok(manifest)
     } else {
@@ -453,6 +468,19 @@ fn read_manifest_from_store(agent_id: &str, fs: &dyn FsBackend) -> Result<AgentO
             manifest.status
         ))
     }
+}
+
+fn read_agent_manifest(agent_id: &str, fs: &dyn FsBackend) -> Result<Option<AgentOutput>, String> {
+    let store = agent_store_dir(fs)?;
+    let manifest_path = store_path(&store, &format!("{agent_id}.json"), fs);
+    let contents = match fs.read_to_string(&manifest_path.to_string_lossy()) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read agent {agent_id} manifest: {error}")),
+    };
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|error| format!("invalid agent {agent_id} manifest: {error}"))
 }
 
 fn global_agent_registry() -> &'static AgentCompletionRegistry {
@@ -1513,13 +1541,12 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "agent_list",
             description: concat!(
-                "List every agent you can reach — including ones with no live pid. ",
-                "Each row is an agent NAME (the address) with an `active` flag: ",
-                "active agents have a live pid and receive immediately; inactive ones ",
-                "are still addressable — a message waits in their durable inbox until ",
-                "they next run. Names are the address: to message one, call ",
-                "`send({\"to\": \"<name>\", \"message\": \"...\"})`, copying the name exactly ",
-                "as a row prints it. Read-only discovery; it starts nothing."
+                "List reachable peer Agents and this session's subagent tasks. ",
+                "Copy a row's `send_to` exactly into `send.to`. A peer address queues ",
+                "messages durably, including while that peer is offline. ",
+                "A subagent address selects that task; `task_id` is its task handle. ",
+                "An omitted `active` means runtime liveness is unknown. ",
+                "Read-only discovery; it starts nothing."
             ),
             input_schema: json!({
                 "type": "object",
@@ -1988,13 +2015,8 @@ fn execute_tool_with_enforcer(
         "CronCreate" => from_value::<CronCreateInput>(input).and_then(run_cron_create),
         "CronDelete" => from_value::<CronDeleteInput>(input).and_then(run_cron_delete),
         "CronList" => run_cron_list(input.clone()),
-        // Workspace-mailbox delivery. A host that wired a nexus-A2A sender
-        // intercepts `send` before dispatch reaches here and delivers over the
-        // network instead; this arm is the local destination, not a fallback
-        // for a failed one.
-        "send" => {
-            from_value::<SendMessageInput>(&normalize_send_input(input)).and_then(run_send_message)
-        }
+        "send" => from_value::<SendMessageInput>(&normalize_send_input(input))
+            .and_then(|input| run_send_message(input, fs)),
         _ => Err(format!("unsupported tool: {name}")),
     }
 }
@@ -2273,15 +2295,13 @@ pub fn list_agent_snapshots_from_store_with(
     Ok(out)
 }
 
-/// One row of `agent_list`: an addressable agent name. `active` is
-/// `Some(true)` only with positive evidence the agent is running now (a live
-/// sub-agent pid); `Some(false)` for a spawned worker that has finished; and
-/// `None` for a peer whose liveness this session cannot answer (a remote
-/// backend does not report "is a poller live"). An addressable row is reachable
-/// regardless — a `send` waits in its durable inbox until it next runs.
+/// One addressable peer or subagent task. Peer messages use durable delivery;
+/// task liveness comes from the current process's runtime registry.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentListRow {
     pub name: String,
+    /// Exact address accepted by `send.to`.
+    pub send_to: String,
     /// `Some(true)`/`Some(false)` when known (a spawned worker); omitted when
     /// liveness is unknowable (a peer discovered through the mailbox namespace).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2290,14 +2310,9 @@ pub struct AgentListRow {
     /// scode/agent); `subagent` = a worker this process spawned.
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid: Option<String>,
+    pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    /// The namespace(s) this agent is addressable in (e.g. `["local"]`,
-    /// `["nexus"]`, or both). A name in more than one is addressed with a
-    /// `label:name` qualifier; a sub-agent row carries none.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub sources: Vec<String>,
 }
 
 /// Collect the addressable agents this session can reach, plus the workers it
@@ -2315,79 +2330,77 @@ pub fn collect_agent_list(
     active_only: bool,
     fs: &dyn FsBackend,
 ) -> Result<Vec<AgentListRow>, String> {
-    let directory = runtime::mailbox::scoped_directory();
-    let self_name = directory.self_id().to_string();
+    let mailbox = runtime::mailbox::sending_mailbox();
     // Surface an enumeration failure instead of swallowing it: `list_recipients`
     // returns `Err` precisely so "I could not read a namespace" stays distinct
-    // from "no one is there". Across every namespace the session is attached to,
-    // merged and tagged with where each was found.
-    let peers = directory.list_recipients()?;
+    // from "no one is there". The namespace reports presence including this
+    // session itself, and an agent is not its own peer.
+    let mut peers = mailbox.list_recipients()?;
+    peers.retain(|name| name != mailbox.self_id());
     // The sub-agent store is a local dir; a read failure there is soft — an empty
     // worker list is a reasonable degrade, and the peers above are the tool's point.
     let subagents = list_agent_snapshots_from_store_with(true, fs).unwrap_or_default();
-    Ok(merge_agent_list(&peers, &self_name, subagents, active_only))
+    let active_tasks = global_agent_runtimes()
+        .lock()
+        .map_err(|_| "subagent runtime registry is unavailable")?
+        .iter()
+        .filter_map(|(id, runtime)| runtime.mailbox_root.as_ref().map(|_| id.clone()))
+        .collect();
+    Ok(merge_agent_list(
+        &peers,
+        subagents,
+        &active_tasks,
+        active_only,
+    ))
 }
 
 /// Pure core of [`collect_agent_list`], sources injected so it is testable
-/// without a real backend. `peers` are addressable recipients from the
-/// directory (each tagged with the namespaces it was found in); `self_name` is
-/// filtered out (an agent is not its own peer); `subagents` are already-filtered
-/// running snapshots.
+/// without a real backend. `peers` are the addressable names in the session's
+/// peer namespace, self excluded. `subagents` are saved snapshots;
+/// `active_tasks` supplies runtime evidence.
 pub fn merge_agent_list(
-    peers: &[runtime::directory::Recipient],
-    self_name: &str,
+    peers: &[String],
     subagents: Vec<AgentSnapshot>,
+    active_tasks: &std::collections::BTreeSet<String>,
     active_only: bool,
 ) -> Vec<AgentListRow> {
     use std::collections::BTreeMap;
-    let mut rows: BTreeMap<String, AgentListRow> = BTreeMap::new();
+    let mut rows: BTreeMap<(String, String), AgentListRow> = BTreeMap::new();
 
     // Source 1: addressable peers in the mailbox namespace. Liveness is not
     // knowable from the namespace alone (a remote backend does not report it),
     // so `active` is left `None` — the row is addressable, not "running".
-    for recipient in peers {
-        if recipient.name == self_name || recipient.name.is_empty() {
-            continue; // an agent is not its own peer
+    for name in peers {
+        if name.is_empty() {
+            continue;
         }
-        let sources: Vec<String> = recipient.sources.iter().map(|s| (*s).to_string()).collect();
-        rows.entry(recipient.name.clone())
+        rows.entry(("peer".into(), name.clone()))
             .or_insert_with(|| AgentListRow {
-                name: recipient.name.clone(),
+                name: name.clone(),
+                send_to: name.clone(),
                 active: None,
                 kind: "peer".to_string(),
-                pid: None,
+                task_id: None,
                 role: None,
-                sources,
             });
     }
 
     // Source 2: sub-agents this process spawned (running/backgrounded).
     for snap in subagents {
-        let status = snap.status.trim().to_ascii_lowercase();
-        let active = status == "running" || status == "backgrounded";
+        let active = active_tasks.contains(&snap.agent_id);
         let role = snap
             .subagent_type
             .clone()
             .or_else(|| (!snap.description.is_empty()).then(|| snap.description.clone()));
-        let entry = rows
-            .entry(snap.name.clone())
+        rows.entry(("subagent".into(), snap.agent_id.clone()))
             .or_insert_with(|| AgentListRow {
                 name: snap.name.clone(),
+                send_to: snap.agent_id.clone(),
                 active: Some(active),
                 kind: "subagent".to_string(),
-                pid: Some(snap.agent_id.clone()),
-                role: role.clone(),
-                sources: Vec::new(),
+                task_id: Some(snap.agent_id.clone()),
+                role,
             });
-        // A pid-bearing (active) worker wins a name collision with a peer row.
-        if active {
-            entry.active = Some(true);
-            entry.pid = Some(snap.agent_id.clone());
-            entry.kind = "subagent".to_string();
-            if entry.role.is_none() {
-                entry.role = role;
-            }
-        }
     }
 
     let mut out: Vec<AgentListRow> = rows.into_values().collect();
@@ -2399,7 +2412,10 @@ pub fn merge_agent_list(
     out.sort_by(|a, b| {
         let ak = a.active == Some(true);
         let bk = b.active == Some(true);
-        bk.cmp(&ak).then_with(|| a.name.cmp(&b.name))
+        bk.cmp(&ak)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.kind.cmp(&b.kind))
+            .then_with(|| a.send_to.cmp(&b.send_to))
     });
     out
 }
@@ -3087,60 +3103,52 @@ fn generate_request_id(prefix: &str, target: &str) -> String {
     format!("{prefix}_{target_slug}_{ts:x}")
 }
 
-/// Refuse a send to a pid that is known-and-dead (design D1: a dead pid errors,
-/// no fallback). "Dead" is narrow on purpose: `to` must be a spawned agent id
-/// this process knows AND that has reached a terminal state — a live pid, or any
-/// agent-name (which is offline-capable, its inbox filled until it next runs),
-/// passes through untouched to the one shared send path.
-///
-/// Liveness is the in-process abort registry; terminal state is the persisted
-/// manifest. `read_manifest_from_store` returns `Ok` ONLY for a terminal
-/// (`completed`/`failed`) manifest, so its `Ok` is exactly "known and dead". A
-/// name with no manifest is not a pid at all — `Err` there means "not dead",
-/// which is why this returns `Ok(())` on that path.
-fn reject_dead_pid(to: &str) -> Result<(), String> {
-    // Live? Then it can receive — not dead.
-    let live = global_agent_abort_signals()
-        .lock()
-        .map(|m| m.contains_key(to))
-        .unwrap_or(false);
-    if live {
-        return Ok(());
+/// A known subagent task requires a live entry in this process's registry.
+/// Manifests identify saved tasks; peer names keep durable offline delivery.
+fn resolve_task_destination(to: &str, fs: &dyn FsBackend) -> Result<Option<String>, String> {
+    {
+        let runtimes = global_agent_runtimes()
+            .lock()
+            .map_err(|_| "subagent runtime registry is unavailable")?;
+        if let Some(runtime) = runtimes.get(to) {
+            return runtime
+                .mailbox_root
+                .clone()
+                .map(Some)
+                .ok_or_else(|| format!("subagent task '{to}' has no registered message endpoint"));
+        }
     }
-    // Not live. If it is a KNOWN agent id with a terminal manifest, it is a
-    // dead pid — refuse. Any other case (unknown name, non-terminal) is not a
-    // dead pid and falls through.
-    let fs = runtime::host_fs_arc();
-    if read_manifest_from_store(to, fs.as_ref()).is_ok() {
+    if read_agent_manifest(to, fs)?.is_some() {
         return Err(format!(
-            "agent '{to}' has exited — its pid is dead, so a message cannot reach it. \
-             Use `agent_list` to find a live agent, or `pid_output` to read what it left."
+            "subagent task '{to}' has no active runtime in this process. \
+             Use `agent_list` for an addressable peer, or `pid_output` for its saved result."
         ));
     }
-    Ok(())
+    Ok(None)
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn run_send_message(mut input: SendMessageInput) -> Result<String, String> {
+fn run_send_message(
+    mut input: SendMessageInput,
+    fs: &Arc<dyn FsBackend>,
+) -> Result<String, String> {
     if input.to.trim().is_empty() {
         return Err("to must not be empty".to_string());
     }
-    if input.to.contains('@') {
-        return Err(
-            "to must be a bare teammate name or \"*\" — there is only one team per session"
-                .to_string(),
-        );
+    if input.to.contains(['@', ':', '/', '\\']) {
+        return Err(format!(
+            "to must be an agent name exactly as `agent_list` shows it in `send_to`, or \"*\"; \
+             got '{}'",
+            input.to
+        ));
     }
-    // One precondition shared by every send path (plain, broadcast filters it
-    // by construction, structured): refuse a target that is a KNOWN-and-dead
-    // pid, so a message to an exited worker errors instead of provisioning a
-    // phantom inbox nobody reads and reporting success (design D1: a dead pid
-    // has no fallback). A plain agent-name — known or not — is offline-capable
-    // and falls through to the one unchanged send path; only a known-terminal
-    // agent id is refused. Not a second send path: a guard, then the same send.
-    if input.to != "*" {
-        reject_dead_pid(&input.to)?;
-    }
+    // Resolve once: a task exiting after this decision must not change its
+    // destination into the peer namespace during this send.
+    let task_root = if input.to == "*" {
+        None
+    } else {
+        resolve_task_destination(&input.to, fs.as_ref())?
+    };
 
     // Optional task-framing: when the caller supplied context/constraints/
     // acceptance (a task hand-off, not a chat message) and `message` is plain
@@ -3158,53 +3166,25 @@ fn run_send_message(mut input: SendMessageInput) -> Result<String, String> {
         }
     }
 
-    // Resolve the destination once: live in-process pids read workspace-local
+    // Resolve the destination once: live in-process tasks read workspace-local
     // conversations; named peers keep the session's shared mailbox.
-    // A running in-process sub-agent reads the workspace-local mailbox.
+    // A running in-process subagent reads the workspace-local mailbox.
     // The standalone session mailbox lives under the config home so separate
     // scode processes can talk across workspaces; using it for a spawned pid
     // reports a successful send into a conversation the worker never drains.
-    let local_pid = input.to != "*"
-        && global_agent_abort_signals()
-            .lock()
-            .map(|agents| agents.contains_key(&input.to))
-            .unwrap_or(false);
-    let directory = runtime::mailbox::scoped_directory();
-    let mailbox = if local_pid {
-        // A running in-process sub-agent reads the workspace-local mailbox, not
-        // any addressable namespace — its pid is a process handle, not a peer.
-        std::sync::Arc::new(runtime::mailbox::Mailbox::workspace_local(
-            &current_workspace_root().map_err(|e| e.to_string())?,
-            directory.self_id().to_string(),
+    let peer = runtime::mailbox::sending_mailbox();
+    let mailbox = if let Some(root) = task_root {
+        // A running in-process subagent reads the workspace-local mailbox, not
+        // the peer namespace — its task ID identifies this worker.
+        std::sync::Arc::new(runtime::mailbox::Mailbox::workspace_at(
+            Arc::clone(fs),
+            std::path::Path::new(&root),
+            peer.self_id().to_string(),
         ))
-    } else if input.to == "*" {
-        // Broadcast enumerates below through the primary's namespace; keep the
-        // primary mailbox as the handle its loop uses.
-        directory.primary_mailbox()
     } else {
-        // Route to the namespace that can address the recipient. A name in one
-        // namespace resolves there; a name in several must be qualified
-        // (`local:x` / `nexus:x`) so delivery is never silently to the wrong
-        // one; a name found nowhere falls to the primary, whose durable inbox
+        // A name with no presence yet still lands in its durable inbox, which
         // holds the message until that peer first runs.
-        use runtime::directory::Routed;
-        match directory.route(&input.to) {
-            Routed::One(member) => {
-                input.to = runtime::directory::Directory::bare_name(&input.to).to_string();
-                std::sync::Arc::clone(&member.mailbox)
-            }
-            Routed::Ambiguous(labels) => {
-                return Err(format!(
-                    "'{}' is addressable in more than one namespace ({}). \
-                     Re-send with a qualifier, e.g. `{}:{}`.",
-                    input.to,
-                    labels.join(", "),
-                    labels[0],
-                    input.to
-                ));
-            }
-            Routed::NotFound => directory.primary_mailbox(),
-        }
+        peer
     };
     let sender = resolve_sender(&input, &mailbox);
 
@@ -3415,57 +3395,96 @@ fn run_send_message(mut input: SendMessageInput) -> Result<String, String> {
     }
 }
 
-// ── Agent abort-signal registry ────────────────────────────────────
+// ── Agent runtime registry ────────────────────────────────────
 
-/// Process-wide map from `agent_id` to that subagent's
-/// [`HookAbortSignal`]. Populated by `spawn_agent_job` when a
-/// background subagent starts; consumed by
-/// `SendMessage(shutdown_request)` for live abort delivery
-/// (mirrors CC-fork's `task.abortController.abort()` path in
-/// `SendMessageTool.ts:357`).
-///
-/// Cleared by `run_spawned_agent_job` when the subagent terminates
-/// (success, error, or panic) so a subsequent SendMessage to the same
-/// (recycled) name doesn't attempt to abort a defunct signal.
-fn global_agent_abort_signals() -> &'static Mutex<HashMap<String, HookAbortSignal>> {
-    use std::sync::OnceLock;
-    static REGISTRY: OnceLock<Mutex<HashMap<String, HookAbortSignal>>> = OnceLock::new();
+/// Live in-process task endpoints and cancellation share one registry.
+struct ActiveAgentRuntime {
+    abort: HookAbortSignal,
+    mailbox_root: Option<String>,
+}
+
+fn global_agent_runtimes() -> &'static Mutex<HashMap<String, ActiveAgentRuntime>> {
+    static REGISTRY: std::sync::OnceLock<Mutex<HashMap<String, ActiveAgentRuntime>>> =
+        std::sync::OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Register a subagent's abort signal so `SendMessage(shutdown_request)`
-/// can look it up by `agent_id` and call `.abort()`. Called by
-/// `spawn_agent_job` before the runtime starts.
+/// Register cancellation without advertising a message endpoint.
 pub fn register_agent_abort_signal(agent_id: &str, signal: HookAbortSignal) {
-    if let Ok(mut guard) = global_agent_abort_signals().lock() {
-        guard.insert(agent_id.to_string(), signal);
+    if let Ok(mut guard) = global_agent_runtimes().lock() {
+        guard.insert(
+            agent_id.into(),
+            ActiveAgentRuntime {
+                abort: signal,
+                mailbox_root: None,
+            },
+        );
     }
 }
 
-/// Remove a subagent from the abort-signal registry — invoked on
-/// subagent completion so a stale entry can't abort a future agent
-/// that gets the same name.
+/// Register the task's workspace in its filesystem's path spelling.
+/// Delivery uses the caller's filesystem and authorization at this root.
+///
+/// # Errors
+/// The root is empty or the runtime registry is unavailable.
+pub fn register_agent_runtime(
+    agent_id: &str,
+    signal: HookAbortSignal,
+    mailbox_root: String,
+) -> Result<(), String> {
+    if mailbox_root.trim().is_empty() {
+        return Err("task mailbox root must not be empty".into());
+    }
+    global_agent_runtimes()
+        .lock()
+        .map_err(|_| "subagent runtime registry is unavailable")?
+        .insert(
+            agent_id.into(),
+            ActiveAgentRuntime {
+                abort: signal,
+                mailbox_root: Some(mailbox_root),
+            },
+        );
+    Ok(())
+}
+
+/// Remove the task's cancellation signal and message endpoint together.
 pub fn unregister_agent_abort_signal(agent_id: &str) {
-    if let Ok(mut guard) = global_agent_abort_signals().lock() {
+    if let Ok(mut guard) = global_agent_runtimes().lock() {
         guard.remove(agent_id);
     }
 }
 
-/// Look up `agent_id` in the abort registry and, if present, call
-/// `abort()` on its signal. Returns `true` when a signal was found and
-/// aborted, `false` when the agent isn't registered (either it
-/// finished already or was never registered).
-///
-/// Matches CC-fork's `findTeammateTaskByAgentId(agentId,
-/// appState.tasks); if (task?.abortController) task.abortController.abort()`.
+/// Cancel a registered task. Returns whether its signal was found.
 pub fn abort_registered_agent(agent_id: &str) -> bool {
-    if let Ok(guard) = global_agent_abort_signals().lock() {
-        if let Some(signal) = guard.get(agent_id) {
-            signal.abort();
+    if let Ok(guard) = global_agent_runtimes().lock() {
+        if let Some(runtime) = guard.get(agent_id) {
+            runtime.abort.abort();
             return true;
         }
     }
     false
+}
+
+struct AgentRuntimeRegistration {
+    agent_id: String,
+}
+
+impl Drop for AgentRuntimeRegistration {
+    fn drop(&mut self) {
+        unregister_agent_abort_signal(&self.agent_id);
+    }
+}
+
+fn register_agent_job(job: &AgentJob) -> Result<AgentRuntimeRegistration, String> {
+    register_agent_runtime(
+        &job.manifest.agent_id,
+        job.abort_signal.clone(),
+        job.fs.working_root().map_err(|error| error.to_string())?,
+    )?;
+    Ok(AgentRuntimeRegistration {
+        agent_id: job.manifest.agent_id.clone(),
+    })
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -4706,7 +4725,7 @@ struct AgentJob {
     fs: Arc<dyn FsBackend>,
     /// Signal wired into the subagent's `ConversationRuntime` via
     /// `with_hook_abort_signal`. Registered by name in
-    /// [`global_agent_abort_signals`] so
+    /// [`global_agent_runtimes`] so
     /// `SendMessage(shutdown_request)` can look it up and call
     /// `.abort()` for live delivery — mirrors CC-fork's
     /// `task.abortController.abort()`.
@@ -6085,6 +6104,7 @@ where
 {
     let PreparedAgent { manifest, job } = prepare_agent_job(input, ctx, Arc::clone(fs))?;
     let subagent = job.subagent.clone();
+    let registration = register_agent_job(&job)?;
     let Some(threshold) = auto_background_threshold() else {
         // Auto-bg disabled — original fully-sync path.
         let abort_signal = job.abort_signal.clone();
@@ -6097,11 +6117,9 @@ where
 
     // Auto-bg enabled: run on a worker thread + await up to threshold.
     let agent_id = manifest.agent_id.clone();
-    register_agent_abort_signal(&agent_id, job.abort_signal.clone());
     global_agent_registry().register(&agent_id);
 
     let bg_manifest = manifest.clone();
-    let bg_agent_id = agent_id.clone();
     let workspace = job.workspace.clone();
     let bg_abort_signal = job.abort_signal.clone();
     // The worker's own handle, cloned before `job` moves into the closure. A
@@ -6109,6 +6127,7 @@ where
     // stays honest about who owns the filesystem it writes through.
     let bg_fs = Arc::clone(&job.fs);
     std::thread::spawn(move || {
+        let _registration = registration;
         // Worker threads carry the parent turn's workspace root with them.
         let _workspace = workspace.enter();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work_fn(job)));
@@ -6120,7 +6139,6 @@ where
             link.emit_finished(&bg_manifest, bg_abort_signal.is_aborted(), bg_fs.as_ref());
         }
         notify_agent_completion(&bg_manifest, bg_fs.as_ref());
-        unregister_agent_abort_signal(&bg_agent_id);
     });
 
     match global_agent_registry().await_agent(&agent_id, threshold) {
@@ -6170,8 +6188,11 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
         .map_err(|_| String::from("no tokio runtime available for spawning agent"))?;
     // Register the subagent's abort signal BEFORE the thread starts so a
     // `SendMessage(shutdown_request)` racing the spawn still finds an entry.
-    register_agent_abort_signal(&job.manifest.agent_id, job.abort_signal.clone());
-    handle.spawn_blocking(move || run_spawned_agent_job(job));
+    let registration = register_agent_job(&job)?;
+    handle.spawn_blocking(move || {
+        let _registration = registration;
+        run_spawned_agent_job(job);
+    });
     Ok(())
 }
 
@@ -6179,7 +6200,6 @@ fn spawn_agent_job(job: AgentJob) -> Result<(), String> {
 fn run_spawned_agent_job(job: AgentJob) {
     // Worker threads carry the parent turn's workspace root with them.
     let _workspace = job.workspace.enter();
-    let agent_id = job.manifest.agent_id.clone();
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         run_agent_job_returning_text(&job)
     }))
@@ -6194,13 +6214,6 @@ fn run_spawned_agent_job(job: AgentJob) {
     }
     // Signal the completion registry so TaskOutput(agent_id, block=true) callers unblock.
     notify_agent_completion(&job.manifest, job.fs.as_ref());
-    // Drop the abort-signal registration LAST — a
-    // `SendMessage(shutdown_request)` arriving during teardown against
-    // an already-completed agent is silently a no-op (returns
-    // `live_abort_signaled: false`), which matches CC-fork's
-    // `findTeammateTaskByAgentId → task === undefined → warn-and-skip`
-    // branch in `SendMessageTool.ts:362`.
-    unregister_agent_abort_signal(&agent_id);
 }
 
 /// Re-read the persisted manifest and notify the global completion registry.
@@ -6240,9 +6253,13 @@ fn subagent_max_multi_turns() -> usize {
 }
 
 fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
+    let mailbox = Arc::new(
+        runtime::mailbox::Mailbox::workspace(Arc::clone(&job.fs), job.manifest.agent_id.clone())
+            .map_err(|error| error.to_string())?,
+    );
+    let _mailbox = runtime::mailbox::MailboxScope::enter(Arc::clone(&mailbox));
     let mut conv_runtime =
         build_agent_runtime(job)?.with_max_iterations(DEFAULT_AGENT_MAX_ITERATIONS);
-    let workspace_root = current_workspace_root().unwrap_or_default();
     // Accumulate telemetry across every multi-turn iteration so a
     // long coordinator-driven conversation reports one aggregated
     // `<total_tokens>` / `<tool_uses>` count in the task-notification.
@@ -6250,8 +6267,7 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
     let mut forwarder = job.subagent.as_ref().map(SubagentLink::observer);
     let mut permission_sink = job.permission_sink.clone();
     let final_text = run_multi_turn_loop(
-        &job.manifest.agent_id,
-        &workspace_root,
+        &mailbox,
         job.abort_signal.clone(),
         job.prompt.clone(),
         subagent_max_multi_turns(),
@@ -6534,8 +6550,7 @@ fn run_agent_summarizer(job: &AgentJob, final_text: &str) -> Result<String, Stri
 /// keeps sending mail forever — mirrors the tool-loop iteration cap
 /// inside a single `run_turn`.
 fn run_multi_turn_loop<F>(
-    agent_id: &str,
-    workspace_root: &std::path::Path,
+    mailbox: &runtime::mailbox::Mailbox,
     abort_signal: HookAbortSignal,
     initial_prompt: String,
     max_multi_turns: usize,
@@ -6544,15 +6559,6 @@ fn run_multi_turn_loop<F>(
 where
     F: FnMut(String) -> Result<String, String>,
 {
-    // Same mailbox the sender writes to: one conversation model, one code
-    // path. The sub-agent's inbound receive used to read a second, flat
-    // `.sudocode-inbox/<id>.jsonl` path via `agent_mailbox::read_all` while
-    // `send` wrote conversation transcripts through `Mailbox` — so a message
-    // to a running sub-agent never arrived. Draining through `Mailbox` here
-    // closes that gap and retires the divergent path. The per-peer reader
-    // register persists the read position, so there is no in-memory cursor to
-    // lose across turns or a restart.
-    let mailbox = runtime::mailbox::Mailbox::workspace_local(workspace_root, agent_id.to_string());
     let mut current_prompt = initial_prompt;
     let mut last_final_text = String::new();
     let mut pending = runtime::mailbox::PendingMessages::default();
@@ -8267,6 +8273,7 @@ struct SubagentToolExecutor {
     /// is a standalone CLI's own disk; a co-hosted parent hands down its kernel,
     /// so a sub-agent's writes pass the same hooks its parent's do.
     fs: Arc<dyn FsBackend>,
+    mailbox: Arc<runtime::mailbox::Mailbox>,
 }
 
 impl SubagentToolExecutor {
@@ -8274,6 +8281,7 @@ impl SubagentToolExecutor {
         Self {
             allowed_tools,
             fs: runtime::host_fs_arc().clone(),
+            mailbox: runtime::mailbox::sending_mailbox(),
             enforcer: None,
             abort_signal: None,
         }
@@ -8328,7 +8336,7 @@ impl ToolExecutor for SubagentToolExecutor {
         let fs = Arc::clone(&self.fs);
         let ctx = ctx.clone();
         let workspace = WorkspaceRootHandoff::capture();
-        let directory = runtime::mailbox::scoped_directory();
+        let mailbox = Arc::clone(&self.mailbox);
         // Like the parent executor, keep blocking tools off the async polling
         // thread. Otherwise a batch of sub-agent reads still executes serially
         // and prevents cancellation from being observed during a slow call.
@@ -8339,7 +8347,7 @@ impl ToolExecutor for SubagentToolExecutor {
             if abort.as_ref().is_some_and(HookAbortSignal::is_aborted) {
                 return Err(ToolError::new("tool cancelled before execution"));
             }
-            let _directory = runtime::mailbox::MailboxScope::enter(directory);
+            let _mailbox = runtime::mailbox::MailboxScope::enter(mailbox);
             execute_tool_with_enforcer(
                 enforcer.as_ref(),
                 &tool_name,
@@ -10379,23 +10387,9 @@ mod tests {
 
     #[test]
     fn merge_agent_list_lists_peers_and_running_subagents() {
-        // Peers come from the directory (recipients tagged with their namespace),
-        // not a probed filename.
-        use runtime::directory::Recipient;
-        let peers = vec![
-            Recipient {
-                name: "alice".to_string(),
-                sources: vec!["local"],
-            },
-            Recipient {
-                name: "bob".to_string(),
-                sources: vec!["nexus"],
-            },
-            Recipient {
-                name: "me".to_string(),
-                sources: vec!["local"],
-            }, // self — filtered out
-        ];
+        // Peers are the names in the session's one peer namespace, not a probed
+        // filename.
+        let peers = vec!["alice".to_string(), "bob".to_string()];
 
         // one running sub-agent (own name, distinct from peers)
         let subagents = vec![super::AgentSnapshot {
@@ -10408,30 +10402,30 @@ mod tests {
             created_at: "2026-09-23T00:00:00Z".to_string(),
         }];
 
-        let rows = super::merge_agent_list(&peers, "me", subagents, false);
+        let active_tasks = std::collections::BTreeSet::from(["pid-123".to_string()]);
+        let rows = super::merge_agent_list(&peers, subagents, &active_tasks, false);
         let by: std::collections::BTreeMap<_, _> =
             rows.iter().map(|r| (r.name.as_str(), r)).collect();
 
-        assert!(!by.contains_key("me"), "self is not its own peer");
         // A peer is addressable; liveness is unknown from the namespace → None.
         assert_eq!(by["alice"].active, None, "peer liveness unknown");
         assert_eq!(by["alice"].kind, "peer");
+        assert!(by["alice"].task_id.is_none());
         assert_eq!(
-            by["alice"].sources,
-            vec!["local".to_string()],
-            "peer carries its namespace"
+            by["alice"].send_to, "alice",
+            "a peer is addressed by its bare name"
         );
-        assert_eq!(by["bob"].sources, vec!["nexus".to_string()]);
-        assert!(by["alice"].pid.is_none());
+        assert_eq!(by["bob"].send_to, "bob");
         assert_eq!(by["bob"].active, None);
         // A running sub-agent is positively active, with its pid + role.
         assert_eq!(by["researcher"].active, Some(true));
         assert_eq!(by["researcher"].kind, "subagent");
-        assert_eq!(by["researcher"].pid.as_deref(), Some("pid-123"));
+        assert_eq!(by["researcher"].task_id.as_deref(), Some("pid-123"));
+        assert_eq!(by["researcher"].send_to, "pid-123");
         assert_eq!(by["researcher"].role.as_deref(), Some("Explore"));
 
         // active_only keeps only positively-running rows (not unknown peers).
-        let active = super::merge_agent_list(&peers, "me", Vec::new(), true);
+        let active = super::merge_agent_list(&peers, Vec::new(), &active_tasks, true);
         assert!(active.iter().all(|r| r.active == Some(true)));
         assert!(
             !active.iter().any(|r| r.name == "alice"),

@@ -79,6 +79,10 @@ The [engine boundary](rust/crates/engine-core/src/lib.rs) defines commands and
 events between the engine and renderers. The
 [crate map](rust/README.md) identifies their implementations.
 
+Saved sessions keep compressed [raw response recordings](docs/response-recording.md)
+for diagnosing streaming and protocol problems. Recordings stay beside the
+session, with size limits and an option to disable them.
+
 ### Agent communication and hosting
 
 Peer agents discover names with `agent_list` and exchange messages with `send`.

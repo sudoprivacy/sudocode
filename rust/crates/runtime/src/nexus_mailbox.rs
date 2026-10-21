@@ -13,19 +13,35 @@
 //! `stream_read_at` loop. Cursor persistence + REPL surfacing live in the
 //! caller (the cursor is ephemeral read position, never persisted here).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nexus_vfs_client::NexusVfsClient;
 
-/// gRPC target of the nexus daemon this `scode` dials (`host:port`).
-/// Its presence is the sole enable switch for standalone A2A. Topology, not
-/// identity: a credential can be carried between endpoints, so where to dial is
-/// always a separate input from who you are.
-pub const ENDPOINT_ENV: &str = "NEXUS_A2A_ENDPOINT";
-/// Path to the minted agent credential - the directory `nexusd-cluster auth
-/// mint` writes (or its `credential.json` manifest). It carries this agent's
-/// identity (name + mTLS material), so it is the single "who you are" input.
-pub const CREDENTIAL_ENV: &str = "NEXUS_A2A_CREDENTIAL";
+/// The node record version this `scode` understands.
+const NODE_RECORD_VERSION: u32 = 1;
+
+/// `<home>/.nexus/run/node.json`: where this machine's Nexus node is and where
+/// its agent credentials live.
+///
+/// The node owner publishes it once the node is verified; `scode` only reads
+/// it. Its presence is what attaches a machine to a node, so there is no other
+/// switch: no environment variable, no working-directory lookup.
+#[must_use]
+pub fn node_record_path() -> Option<PathBuf> {
+    crate::user_paths::home_dir().map(|home| home.join(".nexus").join("run").join("node.json"))
+}
+
+/// The fields of the node record `scode` reads. The record also names the
+/// node's deployment role and zone, which are the node owner's concern.
+#[derive(Debug, serde::Deserialize)]
+struct NodeRecord {
+    version: u32,
+    /// `host:port`, dialled over mTLS.
+    endpoint: String,
+    /// Absolute directory holding one credential bundle per agent name.
+    agents_dir: String,
+}
 
 /// Resolved TLS material paths for an mTLS dial (all three mandatory - the
 /// cluster serves mutual TLS, so a CA alone cannot authenticate the transport).
@@ -73,7 +89,7 @@ impl AgentCredential {
     ///
     /// # Errors
     /// Returns a message naming the path when the manifest is missing or
-    /// malformed - a wrong `NEXUS_A2A_CREDENTIAL` reports itself.
+    /// malformed.
     pub fn load(path: &str) -> Result<Self, String> {
         let p = std::path::Path::new(path);
         let (manifest_path, dir) = if p.is_dir() {
@@ -102,51 +118,88 @@ impl AgentCredential {
     }
 }
 
-/// Standalone nexus-A2A configuration, resolved from the environment.
+/// How this session reaches its machine's node: where to dial and who it is.
 ///
-/// Built by [`Config::from_env`], which returns `Ok(None)` when the feature is
-/// off (no [`ENDPOINT_ENV`]) - the fast path that leaves `scode` behaviour
-/// unchanged - and fails loud on a partial configuration (an endpoint without a
-/// credential, or a credential that cannot be loaded), never silently degrading.
+/// Built by [`Config::from_node_record`], which answers `Ok(None)` when the
+/// machine has no node and fails loud on a record that is present but unusable,
+/// never silently degrading to the disk namespace.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// gRPC target (`host:port`) - where to dial.
     pub endpoint: String,
     /// This agent's own A2A name, from the credential.
     pub agent: String,
-    /// mTLS material. `from_env` always fills this from the credential; `None`
-    /// is only the plaintext loopback dial an auth-off dev cluster allows (used
-    /// by live tests), never a silent downgrade of a credentialed session.
+    /// mTLS material from the credential; the cluster serves mutual TLS only.
     pub tls: TlsPaths,
 }
 
 impl Config {
-    /// Resolve from the environment.
+    /// Resolve this machine's node for `agent` from [`node_record_path`].
     ///
-    /// `Ok(None)` when the feature is off (no [`ENDPOINT_ENV`]). Fails loud when
-    /// an endpoint is set without a [`CREDENTIAL_ENV`], or when the credential
-    /// cannot be loaded - never a silent degrade.
+    /// `Ok(None)` when there is no record: the machine has no node. Every other
+    /// problem is an error naming the file at fault, because a present record
+    /// means the machine has joined a node and the disk namespace is no longer
+    /// where its peers are.
     ///
     /// # Errors
-    /// A message when the configuration is partial (endpoint without a
-    /// credential) or the credential path is missing/malformed.
-    pub fn from_env() -> Result<Option<Self>, String> {
-        let Some(endpoint) = non_empty_env(ENDPOINT_ENV) else {
+    /// The record is unreadable, malformed, of another version, has an endpoint
+    /// with a scheme or a relative `agents_dir`; or `agent` has no credential
+    /// there, or the credential belongs to another agent.
+    pub fn from_node_record(agent: &str) -> Result<Option<Self>, String> {
+        let Some(path) = node_record_path() else {
             return Ok(None);
         };
-        let credential_path = non_empty_env(CREDENTIAL_ENV).ok_or_else(|| {
-            format!(
-                "{ENDPOINT_ENV} is set but {CREDENTIAL_ENV} (the minted agent credential) is not"
-            )
-        })?;
-        let credential = AgentCredential::load(&credential_path)?;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("read node record {}: {error}", path.display())),
+        };
+        let record: NodeRecord = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse node record {}: {e}", path.display()))?;
+        if record.version != NODE_RECORD_VERSION {
+            return Err(format!(
+                "node record {} is version {}; this scode reads version {NODE_RECORD_VERSION}",
+                path.display(),
+                record.version
+            ));
+        }
+        if record.endpoint.contains("://") {
+            return Err(format!(
+                "node record {}: endpoint must be host:port without a scheme, got {}",
+                path.display(),
+                record.endpoint
+            ));
+        }
+        let agents_dir = Path::new(&record.agents_dir);
+        if !agents_dir.is_absolute() {
+            return Err(format!(
+                "node record {}: agents_dir must be an absolute path, got {}",
+                path.display(),
+                record.agents_dir
+            ));
+        }
+        let bundle = agents_dir.join(agent);
+        if !bundle.join(AgentCredential::MANIFEST).is_file() {
+            return Err(format!(
+                "this machine's node has no credential for agent '{agent}' at {}; \
+                 ask the node owner to mint '{agent}'",
+                bundle.display()
+            ));
+        }
+        let credential = AgentCredential::load(&bundle.to_string_lossy())?;
+        if credential.agent != agent {
+            return Err(format!(
+                "credential at {} is for agent '{}', but this session is '{agent}'",
+                bundle.display(),
+                credential.agent
+            ));
+        }
         Ok(Some(Self {
-            endpoint,
+            endpoint: record.endpoint,
             agent: credential.agent,
             tls: credential.tls,
         }))
     }
-
     /// Dial the daemon, returning a shared client. mTLS with the credential's
     /// material when [`Config::tls`] is set (the cert is the whole
     /// authorization - the node derives identity from its SAN, so no token is
@@ -180,14 +233,6 @@ impl Config {
              be on another machine; addressing it by name still reaches it."
         )
     }
-}
-
-/// Read an env var, treating unset OR empty/whitespace as absent.
-fn non_empty_env(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
 }
 
 #[cfg(test)]
@@ -232,42 +277,6 @@ mod tests {
             client_key: "agent-key.pem".into(),
             server_name: "nexus-node".into(),
         }
-    }
-
-    #[test]
-    fn from_env_off_partial_and_full() {
-        // All env cases run in ONE test fn: these NEXUS_A2A_* vars are read by
-        // no other test, so sequential mutation here is race-free even under
-        // the parallel harness.
-        let clear = || {
-            std::env::remove_var(ENDPOINT_ENV);
-            std::env::remove_var(CREDENTIAL_ENV);
-        };
-
-        clear();
-        // Off: no endpoint -> the fast Ok(None) path.
-        assert!(Config::from_env().unwrap().is_none());
-
-        // Partial: endpoint set but no credential -> fail loud.
-        std::env::set_var(ENDPOINT_ENV, "127.0.0.1:2126");
-        assert!(Config::from_env().is_err());
-
-        // A missing credential path -> fail loud (names the path).
-        std::env::set_var(CREDENTIAL_ENV, "/no/such/bundle");
-        assert!(Config::from_env().is_err());
-
-        // Full: a real bundle dir (manifest + PEMs) resolves name + TLS.
-        let bundle = write_test_bundle("operator");
-        std::env::set_var(CREDENTIAL_ENV, &bundle);
-        let cfg = Config::from_env().unwrap().unwrap();
-        assert_eq!(cfg.agent, "operator");
-        let tls = cfg.tls;
-        assert_eq!(tls.server_name, "nexus-node");
-        assert!(tls.ca_pem.ends_with("ca.pem"));
-        assert!(tls.client_cert.ends_with("agent.pem"));
-
-        clear();
-        let _ = std::fs::remove_dir_all(&bundle);
     }
 
     #[test]

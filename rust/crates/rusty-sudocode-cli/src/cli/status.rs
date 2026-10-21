@@ -100,6 +100,7 @@ pub(crate) fn status_json_value(
         "model_raw": model_raw,
         "account": account.name(),
         "account_source": account.source_label(),
+        "peer": context.peer,
         "permission_mode": permission_mode,
         "usage": {
             "messages": usage.message_count,

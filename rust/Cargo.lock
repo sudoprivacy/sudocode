@@ -189,6 +189,7 @@ name = "api"
 version = "0.2.34"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "criterion",
  "futures-util",
  "http",
@@ -1629,7 +1630,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2475,7 +2476,7 @@ dependencies = [
 [[package]]
 name = "iocraft"
 version = "0.8.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?rev=b200b76ffcf707751f80b18cd786ffda313e5f59#b200b76ffcf707751f80b18cd786ffda313e5f59"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=a43bc2a9dfc30e636bdadc9582da9e39f91f5018#a43bc2a9dfc30e636bdadc9582da9e39f91f5018"
 dependencies = [
  "async-io",
  "bitflags 2.13.1",
@@ -2491,7 +2492,7 @@ dependencies = [
 [[package]]
 name = "iocraft-macros"
 version = "0.2.4"
-source = "git+https://github.com/sudoprivacy/iocraft.git?rev=b200b76ffcf707751f80b18cd786ffda313e5f59#b200b76ffcf707751f80b18cd786ffda313e5f59"
+source = "git+https://github.com/sudoprivacy/iocraft.git?rev=a43bc2a9dfc30e636bdadc9582da9e39f91f5018#a43bc2a9dfc30e636bdadc9582da9e39f91f5018"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2512,7 +2513,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3141,7 +3142,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3857,7 +3858,7 @@ checksum = "95067976aca6421a523e491fce939a3e65249bac4b977adee0ee9771568e8aa3"
 [[package]]
 name = "pty-expect"
 version = "0.1.4"
-source = "git+https://github.com/sudoprivacy/pty-expect?rev=78aeef007475f8ea3202c679d156ae6e2f1f8cf4#78aeef007475f8ea3202c679d156ae6e2f1f8cf4"
+source = "git+https://github.com/sudoprivacy/pty-expect?rev=958b04c0506d534e0b948994756f36057fe52c02#958b04c0506d534e0b948994756f36057fe52c02"
 dependencies = [
  "portable-pty",
  "regex",
@@ -3967,7 +3968,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4421,6 +4422,7 @@ dependencies = [
  "contracts",
  "criterion",
  "cron",
+ "flate2",
  "futures",
  "getrandom 0.2.17",
  "glob",
@@ -4498,7 +4500,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4556,7 +4558,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4609,6 +4611,7 @@ dependencies = [
  "plugins",
  "pty-expect",
  "pulldown-cmark",
+ "rcgen",
  "reqwest 0.12.28",
  "runtime",
  "rustyline",
@@ -5349,7 +5352,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6267,7 +6270,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

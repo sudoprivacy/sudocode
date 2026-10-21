@@ -127,6 +127,9 @@ pub fn delete_managed_session(path: &Path) -> Result<(), Box<dyn std::error::Err
     if let Some(dir) = Session::tool_results_dir_for(path, &session_id) {
         let _ = fs::remove_dir_all(dir);
     }
+    if let Some(dir) = Session::response_captures_dir_for(path, &session_id) {
+        let _ = fs::remove_dir_all(dir);
+    }
     Ok(())
 }
 

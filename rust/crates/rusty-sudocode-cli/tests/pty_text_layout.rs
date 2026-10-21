@@ -353,7 +353,15 @@ fn release_render_input_measurement() {
     let prompt = env.prompt("Say hello", "delayed_text");
     sess.send(&format!("{prompt}\r")).expect("busy turn");
     // Wait until the request is in flight before measuring typing beside it.
-    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "submitted input");
+    common::expect_screen(
+        &sess,
+        |s| {
+            common::input_line_of(s).is_empty()
+                && (s.contains("Working...") || s.contains("Thinking..."))
+        },
+        common::DEFAULT_TIMEOUT,
+        "submitted input while foreground request is active",
+    );
     measure_keys(&mut sess, "request_in_flight");
     common::expect_screen(
         &sess,

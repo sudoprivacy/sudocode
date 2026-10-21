@@ -118,6 +118,32 @@ impl ProviderClient {
                 // carries; the reserved list covers the ones it omits when
                 // unset (e.g. `stream` when false).
                 for (key, value) in &resolved.extra_body {
+                    if key == "betas" {
+                        let mut betas: Vec<String> = serde_json::from_value(value.clone())
+                            .map_err(|_| {
+                                ApiError::Configuration(
+                                    "Anthropic extraBody.betas must be an array of strings".into(),
+                                )
+                            })?;
+                        if betas.iter().any(|beta| {
+                            beta.is_empty()
+                                || !beta
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                        }) {
+                            return Err(ApiError::Configuration(
+                                "Anthropic extraBody.betas contains an invalid beta name".into(),
+                            ));
+                        }
+                        let profile = client.request_profile().clone();
+                        if profile.betas.iter().any(|beta| beta == "oauth-2025-04-20")
+                            && !betas.iter().any(|beta| beta == "oauth-2025-04-20")
+                        {
+                            betas.push("oauth-2025-04-20".into());
+                        }
+                        client = client.with_request_profile(profile.with_betas(betas));
+                        continue;
+                    }
                     if crate::types::is_reserved_request_body_key(key) {
                         continue;
                     }
@@ -227,6 +253,20 @@ impl ProviderClient {
             Self::Gemini(client) => client.base_url(),
         };
         format!("{:?}|{base_url}", self.provider_kind())
+    }
+
+    /// Local-only advisor context; the provider remains the policy owner.
+    #[must_use]
+    pub fn cache_advisor_context(&self) -> Option<(PromptCache, String, u32)> {
+        let Self::Anthropic(client) = self else {
+            return None;
+        };
+        let cache = client.prompt_cache()?.clone();
+        Some((
+            cache,
+            client.cache_advisor_route_key(),
+            if client.cache_ttl_1h() { 3600 } else { 300 },
+        ))
     }
 
     #[must_use]

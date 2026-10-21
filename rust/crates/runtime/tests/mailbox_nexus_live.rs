@@ -36,6 +36,8 @@
 //! * **Never read a just-sent frame without blocking.** See
 //!   [`DELIVERY_WAIT_MS`].
 
+#[path = "common/paused_transport.rs"]
+mod paused_transport;
 #[path = "common/session_controller.rs"]
 mod session_controller;
 use session_controller::Controller;
@@ -141,6 +143,118 @@ fn fresh() -> u64 {
         .unwrap_or_default()
         .as_nanos() as u64;
     nanos.wrapping_add(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
+fn live_filesystem_stream_read_and_append_preserve_all_frames() {
+    use runtime::fs_backend::NexusVfsFsBackend;
+    use runtime::FsBackend;
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").unwrap();
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let client = dial(&endpoint);
+    let fs = NexusVfsFsBackend::from_arc(Arc::clone(&client), auth);
+    let path = format!("/sessions/vfs-probe-{}/transcript.jsonl", fresh());
+    fs.create_append_log(&path, 0).unwrap();
+    assert!(fs.is_append_stream(&path).unwrap());
+    assert!(!fs.is_append_stream(&format!("{path}.missing")).unwrap());
+    assert_eq!(fs.read(&path).unwrap(), Vec::<u8>::new());
+
+    let mut expected = Vec::new();
+    let large_frame = vec![b'x'; 128 * 1024];
+    for payload in [b"first\n".as_slice(), b"", &large_frame, b"last\n"] {
+        fs.append(&path, payload).unwrap();
+        expected.extend_from_slice(payload);
+    }
+    // A write can return before Raft applies it. Wait for the exact complete
+    // content and verify every intermediate read preserves the committed prefix.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let actual = fs.read(&path).unwrap();
+        assert!(expected.starts_with(&actual), "stream content changed");
+        if actual == expected {
+            break;
+        }
+        assert!(Instant::now() < deadline, "stream read lost later frames");
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut cursor = 0;
+    // Empty appends are no-ops in both the memory and WAL stream backends.
+    for expected_frame in [b"first\n".as_slice(), &large_frame, b"last\n"] {
+        let (data, next, eof) = fs.tail_read(&path, cursor, 0).unwrap();
+        assert_eq!(data, expected_frame);
+        assert!(next > cursor, "every committed frame advances its cursor");
+        assert!(!eof);
+        cursor = next;
+    }
+    assert_eq!(
+        fs.tail_read(&path, cursor, 0).unwrap(),
+        (Vec::new(), cursor, true)
+    );
+
+    let ordinary = format!("/conversations/vfs-probe-{}/transcript", fresh());
+    fs.write(&ordinary, b"ordinary ").unwrap();
+    assert!(!fs.is_append_stream(&ordinary).unwrap());
+    fs.append(&ordinary, b"file").unwrap();
+    assert_eq!(fs.read(&ordinary).unwrap(), b"ordinary file");
+    assert_eq!(
+        fs.tail_read(&ordinary, 9, 0).unwrap(),
+        (b"file".to_vec(), 13, false)
+    );
+    assert_eq!(
+        fs.tail_read(&ordinary, 13, 0).unwrap(),
+        (Vec::new(), 13, true)
+    );
+
+    // The server remains authoritative if the entry changes type at this path.
+    fs.delete(&path).unwrap();
+    fs.write(&path, b"replacement").unwrap();
+    assert!(!fs.is_append_stream(&path).unwrap());
+    fs.append(&path, b" bytes").unwrap();
+    assert_eq!(fs.read(&path).unwrap(), b"replacement bytes");
+    assert_eq!(
+        fs.tail_read(&path, 0, 0).unwrap(),
+        (b"replacement bytes".to_vec(), 17, false)
+    );
+}
+
+#[test]
+#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT"]
+fn live_rename_replaces_files_and_refuses_streams() {
+    use runtime::fs_backend::NexusVfsFsBackend;
+    use runtime::FsBackend;
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").unwrap();
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let fs = NexusVfsFsBackend::from_arc(dial(&endpoint), auth);
+    let dir = format!("/sessions/rename-probe-{}", fresh());
+
+    // Temp-then-rename over an existing file: one Rename on the node.
+    let target = format!("{dir}/manifest.json");
+    let temp = format!("{target}.tmp");
+    fs.write(&target, b"old").unwrap();
+    fs.write(&temp, b"new").unwrap();
+    fs.rename(&temp, &target).unwrap();
+    assert_eq!(fs.read(&target).unwrap(), b"new");
+    assert!(!fs.exists(&temp).unwrap());
+    fs.write_atomic(&target, b"atomic").unwrap();
+    assert_eq!(fs.read(&target).unwrap(), b"atomic");
+
+    // A DT_STREAM is identity-bound: the node refuses to move it, and the
+    // client must not emulate the move by copying frames into a new file.
+    let stream = format!("{dir}/transcript.jsonl");
+    let moved = format!("{dir}/moved.jsonl");
+    fs.create_append_log(&stream, 0).unwrap();
+    fs.append(&stream, b"frame\n").unwrap();
+    let error = fs.rename(&stream, &moved).unwrap_err();
+    assert!(
+        error.to_string().contains("rename not supported"),
+        "the node's refusal surfaces unchanged: {error}"
+    );
+    assert!(fs.is_append_stream(&stream).unwrap());
+    assert!(!fs.exists(&moved).unwrap());
 }
 
 #[test]
@@ -1003,6 +1117,66 @@ fn live_a_silent_server_errors_and_then_recovers() {
     }
 }
 
+/// Keep the real mTLS connection open and stop forwarding bytes on every OS.
+#[test]
+#[ignore = "requires the harness's real mTLS Nexus daemon"]
+fn live_a_silent_transport_errors_and_then_recovers() {
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set daemon endpoint");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let transport = paused_transport::PausedTransport::new(&endpoint).unwrap();
+    let client = dial(&transport.endpoint());
+    let direct = dial(&endpoint);
+    let me = "scode-silent-transport-probe";
+    let mailbox = mailbox(&client, me, &auth);
+    mailbox.ensure_conversation(PROBE_PEER).unwrap();
+    let (_, tail) = mailbox.poll_conversation(PROBE_PEER, 0, 0).unwrap();
+
+    transport.set_paused(true);
+    direct
+        .stat(&mailbox.transcript_path(PROBE_PEER), &auth)
+        .expect("daemon remains responsive");
+    let started = Instant::now();
+    let result = mailbox.poll_conversation(PROBE_PEER, tail, 500);
+    let elapsed = started.elapsed();
+    transport.set_paused(false);
+    assert!(result.is_err(), "paused connection returned {result:?}");
+    let error = format!("{result:?}").to_ascii_lowercase();
+    assert!(
+        error.contains("timeout") || error.contains("deadline"),
+        "wrong failure: {result:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(500),
+        "connection closed before its wait expired"
+    );
+    assert!(!format!("{result:?}").contains("vfs worker sent no reply"));
+    assert!(
+        elapsed < Duration::from_secs(7),
+        "request exceeded its deadline: {elapsed:?}"
+    );
+
+    send_to(&direct, PROBE_PEER, me, "transport recovered", &auth).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match mailbox.poll_conversation(PROBE_PEER, tail, 500) {
+            Ok((messages, next))
+                if messages
+                    .iter()
+                    .any(|message| message.body == "transport recovered") =>
+            {
+                assert!(next > tail);
+                println!("SILENT TRANSPORT OK: timed out after {elapsed:?}, recovered at {next}");
+                break;
+            }
+            result => assert!(
+                Instant::now() < deadline,
+                "connection failed to recover: {result:?}"
+            ),
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Send `sig` to `pid`. Unix-only by construction: `SIGSTOP` has no Windows
 /// equivalent that leaves the socket open, which is the whole point of the
 /// injection, so the harness only sets the pid where it works.
@@ -1089,94 +1263,6 @@ fn live_agent_list_sees_every_peer_from_either_node() {
             );
         }
     }
-}
-
-/// One session attached to BOTH a local same-machine pair and a nexus daemon
-/// sees every peer from both in ONE `agent_list`, each tagged with where it was
-/// found — the cross-namespace discovery the Directory exists for, against a
-/// real daemon rather than a temp dir.
-///
-/// The single-node endpoint suffices: the point is the UNION of two namespaces
-/// in one listing, not replication between nexus nodes (that is the test above).
-#[test]
-#[ignore = "requires a running nexusd-cluster; set NEXUS_A2A_TEST_ENDPOINT + NEXUS_A2A_TEST_CERT_DIR"]
-fn live_directory_unions_local_and_nexus_peers() {
-    use runtime::directory::{Directory, Member};
-
-    let endpoint =
-        std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set NEXUS_A2A_TEST_ENDPOINT=host:port");
-    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
-    let run = fresh();
-
-    // A nexus peer announces itself on the daemon.
-    let nexus_peer = format!("union-nexus-{run}");
-    let client = dial(&endpoint);
-    mailbox(&client, &nexus_peer, &auth)
-        .ensure_presence()
-        .expect("announce the nexus peer");
-
-    // A local peer announces itself in a same-machine pair root (a second scode
-    // in another folder is exactly this).
-    let pair_root = std::env::temp_dir().join(format!("scode-union-{run}"));
-    std::fs::create_dir_all(&pair_root).expect("make the local pair root");
-    let local_peer = format!("union-local-{run}");
-    Mailbox::workspace_local(&pair_root, local_peer.clone())
-        .ensure_presence()
-        .expect("announce the local peer");
-
-    // The session: its own identity on each namespace, local primary + nexus.
-    let me = format!("union-self-{run}");
-    let directory = Directory::new(vec![
-        Member {
-            label: "local",
-            mailbox: Arc::new(Mailbox::workspace_local(&pair_root, me.clone())),
-        },
-        Member {
-            label: "nexus",
-            mailbox: Arc::new(Mailbox::over_nexus(
-                Arc::clone(&client),
-                me.clone(),
-                auth.clone(),
-            )),
-        },
-    ]);
-
-    // Poll: nexus presence is not instantaneous. Assert BOTH peers appear, each
-    // tagged with the one namespace it lives in.
-    let deadline = Instant::now() + Duration::from_millis(DELIVERY_WAIT_MS);
-    let mut recips = Vec::new();
-    while Instant::now() < deadline {
-        recips = directory
-            .list_recipients()
-            .expect("enumerate the directory");
-        let has_local = recips.iter().any(|r| r.name == local_peer);
-        let has_nexus = recips.iter().any(|r| r.name == nexus_peer);
-        if has_local && has_nexus {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-
-    let local_row = recips
-        .iter()
-        .find(|r| r.name == local_peer)
-        .unwrap_or_else(|| panic!("the local peer must appear; listing was {recips:?}"));
-    assert_eq!(
-        local_row.sources,
-        vec!["local"],
-        "the local peer is tagged local-only"
-    );
-    let nexus_row = recips
-        .iter()
-        .find(|r| r.name == nexus_peer)
-        .unwrap_or_else(|| panic!("the nexus peer must appear; listing was {recips:?}"));
-    assert_eq!(
-        nexus_row.sources,
-        vec!["nexus"],
-        "the nexus peer is tagged nexus-only"
-    );
-
-    let _ = std::fs::remove_dir_all(&pair_root);
 }
 
 /// `/agents` and `/sessions` are DIFFERENT namespaces, not two names for one.

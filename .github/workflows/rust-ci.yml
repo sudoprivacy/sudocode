@@ -210,6 +210,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reuse unchanged CLI builds and refresh Git metadata
+        env:
+          BUILD_METADATA_EVIDENCE: ${{ runner.temp }}/scode-build-metadata
+        run: python ../e2e/build-metadata/run.py
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
@@ -296,6 +303,11 @@ jobs:
           SCODE_TEST_BACKEND: mock
           SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
         run: cargo test -p rusty-sudocode-cli --test pty_chrome_resize -- --ignored --nocapture
+      - name: Preserve streaming prose handoff, native history and drafts
+        env:
+          SCODE_TEST_BACKEND: mock
+          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
+        run: cargo test -p rusty-sudocode-cli --test pty_prose_preview -- --ignored --nocapture
       - name: Answer palette queries through the ready Unix terminal peer
         if: runner.os != 'Windows'
         env:
@@ -523,9 +535,21 @@ jobs:
           python-version: "3.12"
       - name: Build release CLI for startup acceptance
         run: cargo build --release -p rusty-sudocode-cli --bin scode
+      - name: PTY response logs preserve release streaming and resume
+        env:
+          SCODE_TEST_BACKEND: mock
+        run: cargo test --release -p rusty-sudocode-cli --test pty_model_stream_close raw_stream_capture_keeps_streaming_and_resume_responsive -- --exact --nocapture
       - name: Check complete process startup budget
         shell: bash
         run: python ../e2e/startup/run.py --bin target/release/scode${{ runner.os == 'Windows' && '.exe' || '' }} --budget-ms 100 --report target/startup.json
+      - name: Retain Windows release CLI for local acceptance
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scode-windows-ci-${{ github.sha }}
+          path: rust/target/release/scode.exe
+          if-no-files-found: error
+          retention-days: 3
       - uses: actions/upload-artifact@v4
         if: always()
         with:

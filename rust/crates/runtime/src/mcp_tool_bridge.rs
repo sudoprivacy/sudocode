@@ -388,6 +388,9 @@ mod tests {
             "                'serverInfo': {'name': LABEL, 'version': '1.0.0'}",
             "            }",
             "        })",
+            "    elif method == 'notifications/initialized':",
+            "        assert 'id' not in request",
+            "        continue",
             "    elif method == 'tools/list':",
             "        send_message({",
             "            'jsonrpc': '2.0',",
@@ -618,7 +621,12 @@ mod tests {
         let log = fs::read_to_string(&log_path).expect("read log");
         assert_eq!(
             log.lines().collect::<Vec<_>>(),
-            vec!["initialize", "tools/list", "tools/call"]
+            vec![
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call"
+            ]
         );
 
         cleanup_script(&script_path);

@@ -169,7 +169,16 @@ impl McpStdioProcess {
         id: JsonRpcId,
         params: McpInitializeParams,
     ) -> io::Result<JsonRpcResponse<McpInitializeResult>> {
-        self.request(id, "initialize", Some(params)).await
+        let response: JsonRpcResponse<McpInitializeResult> =
+            self.request(id, "initialize", Some(params)).await?;
+        if response.error.is_none() && response.result.is_some() {
+            self.write_jsonrpc_message(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }))
+            .await?;
+        }
+        Ok(response)
     }
 
     pub async fn list_tools(
@@ -429,6 +438,11 @@ mod tests {
             r"}).encode()",
             r"sys.stdout.buffer.write(response + b'\n')",
             "sys.stdout.buffer.flush()",
+            "if os.environ.get('MCP_WAIT_FOR_INITIALIZED') == '1':",
+            "    notification = json.loads(sys.stdin.buffer.readline().decode())",
+            "    assert notification['jsonrpc'] == '2.0'",
+            "    assert notification['method'] == 'notifications/initialized'",
+            "    assert 'id' not in notification",
             "",
         ]
         .join("\n");
@@ -476,6 +490,9 @@ mod tests {
             "                'serverInfo': {'name': 'fake-mcp', 'version': '0.2.0'}",
             "            }",
             "        })",
+            "    elif method == 'notifications/initialized':",
+            "        assert 'id' not in request",
+            "        continue",
             "    elif method == 'tools/list':",
             "        send_message({",
             "            'jsonrpc': '2.0',",
@@ -627,6 +644,9 @@ mod tests {
             "                'serverInfo': {'name': LABEL, 'version': '1.0.0'}",
             "            }",
             "        })",
+            "    elif method == 'notifications/initialized':",
+            "        assert 'id' not in request",
+            "        continue",
             "    elif method == 'tools/list':",
             "        send_message({",
             "            'jsonrpc': '2.0',",
@@ -814,7 +834,10 @@ mod tests {
             .expect("runtime");
         runtime.block_on(async {
             let script_path = write_jsonrpc_script();
-            let transport = script_transport(&script_path);
+            let transport = script_transport_with_env(
+                &script_path,
+                BTreeMap::from([("MCP_WAIT_FOR_INITIALIZED".to_string(), "1".to_string())]),
+            );
             let mut process = McpStdioProcess::spawn(&transport).expect("spawn transport directly");
 
             let response = process
@@ -1354,7 +1377,14 @@ mod tests {
             let log = fs::read_to_string(&log_path).expect("read log");
             assert_eq!(
                 log.lines().collect::<Vec<_>>(),
-                vec!["initialize", "tools/list", "initialize", "tools/call"]
+                vec![
+                    "initialize",
+                    "notifications/initialized",
+                    "tools/list",
+                    "initialize",
+                    "notifications/initialized",
+                    "tools/call",
+                ]
             );
 
             manager.shutdown().await.expect("shutdown");
@@ -1403,7 +1433,13 @@ mod tests {
             let log = fs::read_to_string(&log_path).expect("read log");
             assert_eq!(
                 log.lines().collect::<Vec<_>>(),
-                vec!["initialize", "initialize-hang", "initialize", "tools/list"]
+                vec![
+                    "initialize",
+                    "initialize-hang",
+                    "initialize",
+                    "notifications/initialized",
+                    "tools/list",
+                ]
             );
 
             manager.shutdown().await.expect("shutdown");
@@ -1486,10 +1522,12 @@ mod tests {
                 log.lines().collect::<Vec<_>>(),
                 vec![
                     "initialize",
+                    "notifications/initialized",
                     "tools/list",
                     "tools/call",
                     "tools/call-disconnect",
                     "initialize",
+                    "notifications/initialized",
                     "tools/call",
                 ]
             );
@@ -1852,7 +1890,12 @@ mod tests {
             assert_eq!(log.lines().filter(|line| *line == "initialize").count(), 1);
             assert_eq!(
                 log.lines().collect::<Vec<_>>(),
-                vec!["initialize", "tools/list", "tools/call"]
+                vec![
+                    "initialize",
+                    "notifications/initialized",
+                    "tools/list",
+                    "tools/call",
+                ]
             );
 
             manager.shutdown().await.expect("shutdown");

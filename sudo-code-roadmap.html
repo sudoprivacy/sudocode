@@ -2187,6 +2187,46 @@ and keyboard input.</p>
   <li><strong>No <code>ratatui</code> dependency.</strong> Even behind a feature flag — its presence in <code>Cargo.lock</code> is itself the slippery slope toward the alternate-screen path the rule above forbids.</li>
 </ol>
 
+<h4>Codex CLI UX review · 2026-10-20</h4>
+
+<p><strong>CCB validation.</strong> At <code>236d99ed</code>, read
+<code>src/components/permissions/ExitPlanModePermissionRequest/ExitPlanModePermissionRequest.tsx</code>
+and <code>src/components/ScrollKeybindingHandler.tsx</code>. CCB separates a
+scrollable plan body from sticky decisions in its fullscreen presentation;
+its inline path renders the body with the dialog. The reusable contract is
+independent reading and decision ownership. Scode keeps its inline terminal
+contract and native history; fullscreen scrolling is outside this comparison.</p>
+
+<p><strong>Codex reference.</strong> Local <code>openai/codex</code> main was
+fast-forwarded to <code>e18a20d6eb6f5ede32a69fb56e3fe276d5e9d914</code>.
+Read <code>tui/src/chatwidget/streaming.rs</code>,
+<code>chatwidget/plan_implementation.rs</code>, <code>transcript_view.rs</code>,
+<code>transcript_view/{input,follow_control,search,layout,disclosure}.rs</code>,
+<code>history_cell/markdown_render_cache.rs</code> and
+<code>bottom_pane/{mod,view_stack,chat_composer}.rs</code> under <code>codex-rs/</code>.
+Codex commits proposed plans to conversation history and separately presents
+implementation choices. Its reading anchors survive reflow, search scans
+bounded chunks, and retained layouts have both entry and byte limits.</p>
+
+<table>
+  <thead><tr><th>Priority</th><th>Next user workflow</th><th>Current gap and implementation direction</th><th>Performance acceptance</th></tr></thead>
+  <tbody>
+    <tr><td>Next</td><td>Keep an unfinished composer draft when a question takes focus</td><td>Codex keeps composer state under its bottom-pane views. Scode clears input_value when ShowQuestion and ClearQuestion run. Reproduce a question arriving during a Unicode draft/paste, then separate composer state from temporary answer state, including cursor ownership.</td><td>Reuse the same draft and paste store; no duplicate editor loop. Preserve bytes and cursor through answer, cancellation, pager handoff and resize.</td></tr>
+    <tr><td>Next</td><td>Search prior prompts while preserving an unfinished draft</td><td>Codex documents Ctrl-R preview and cancellation restoring the original draft. Scode help advertises Ctrl-R, but the async input dispatcher and iocraft TextInput do not expose a reverse-search path. Confirm through a PTY before implementing one owner over the existing prompt history.</td><td>No history parsing or allocation on ordinary typing; bounded matches, exact draft/paste restoration on cancel, unchanged input latency and idle writes.</td></tr>
+    <tr><td>Next</td><td>Inspect complete historical tool output and diffs</td><td>Current cards truncate results and retain full source in the session. Add on-demand inspection through existing terminal pager ownership and persisted tool identities. Compare against Codex disclosure without retaining a second conversation viewport.</td><td>Load details only on request; release them on close. Measure large outputs, pager exit, cancellation and RSS growth.</td></tr>
+    <tr><td>Later</td><td>Find text in the current conversation, including collapsed tool results</td><td>Current /search targets workspace files. Use an unambiguous conversation action over existing session records; Codex's bounded incremental search is a useful reference. Keep file search semantics.</td><td>Bound bytes scanned per input turn, support cancellation and large sessions, keep stable result identities and avoid a permanent duplicate text index.</td></tr>
+    <tr><td>Later</td><td>Edit a proposed plan in an external editor and review the changed source</td><td>CCB exposes an editor action. Reuse scode's existing editor handoff and the engine's saved-plan comparison; a changed file requires fresh review. Verify CLI and ACP retain the same approval semantics.</td><td>No polling while idle; restore terminal, draft and cancellation after editor failure. Measure reopen latency on long documents.</td></tr>
+  </tbody>
+</table>
+
+<p>Native links (#957), foreground activity (#996), and shared live-slot
+allocation (#900) are present in the current baseline; extend their owners.
+For every renderer candidate, use the unchanged release performance policy,
+A/A calibration and paired A/B runs. Standard workloads guard typing, CPU,
+RSS, idle writes, resize, paste and cancellation; add long-review functional
+coverage separately. A missing measurement remains unverified. This source
+review does not claim a fresh Codex-versus-scode performance comparison.</p>
+
 <h4>Module layout after Phase 0</h4>
 
 <pre><code>crates/rusty-sudocode-cli/src/
@@ -2409,6 +2449,40 @@ remove the session-lifetime exclusions together after their replacement passes.<
 <li>Accept real concurrent CLI processes, independent cohost runtimes, and
 browser/desktop → Moss → pod execution before publishing concurrency support.</li>
 </ol>
+<h3 id="contract-zone-p1a">Contract-zone P1a — runtime zone context</h3>
+
+<p id="contract-zone-p1a-sources">External ticket anchor: SW-20260915-002 §8.11 (P1a).
+The zone context is the runtime's answer to "what may this process touch":
+every file operation through a kernel backend passes a ResourceRef
+authorization before any syscall, and the authority behind that check has
+exactly three trusted sources.</p>
+
+<ul>
+<li><strong>Planted descriptor</strong> (<code>for_agent_descriptor</code>):
+the ManagedAgentService plants the agent's descriptor; its zone id passes the
+owner validator, and its delegation reference and resource scope ride every
+authorization. This is the co-hosted agent's backend, and the subject its
+ReBAC evaluation carries is the agent, not its owner.</li>
+<li><strong>Host environment</strong> (<code>host_zone_once</code>): the
+subprocess runner injects zone metadata through the environment; the
+in-process kernel treats its injector — this process's parent — as the trust
+position, enforces the injected scope, and keeps a partial or invalid
+injection fail-closed rather than widening it into root.</li>
+<li><strong>Standalone-local</strong> (<code>for_standalone_session</code>):
+a CLI session acts for itself on a host the user booted; agent-identity
+context (not system), trusted-local zone defaulting to the legacy root
+namespace.</li>
+</ul>
+
+<p id="contract-zone-p1a-fail-closed">Everything else fails closed. The raw
+<code>KernelFsBackend::new</code> seam and the <code>from_arc</code> /
+<code>over_nexus</code> remote constructors refuse every operation before any
+RPC leaves the process — env or descriptor metadata is not a credential the
+VFS server can verify. The remote paths that perform IO are the mTLS ones,
+where the transport itself is the server-verified authorization. Status:
+landed on the contract-zone line with the fail-closed authorization suite
+restored; the dependency rides nexus-vfs <code>feat/contract-zone</code>
+until its v0.8.16 tag.</p>
 
 <h3 id="agent-runtime-tasks">Implementation and acceptance tasks</h3>
 

@@ -448,6 +448,12 @@ impl EngineEventRenderer {
                 is_error,
             } => {
                 let input = self.tool_inputs.take(&id);
+                // Footer advice is rendered once in its slot; traces and
+                // headless/ACP tool results retain the complete tool record.
+                if !is_error && name == "set_tip" && self.output_writer.is_some() {
+                    self.resume_spinner();
+                    return RenderOutcome::Continue;
+                }
                 self.write_block(&format_tool_result(&name, &input, &output, is_error), OutputBlock::Tool);
                 self.resume_spinner();
                 RenderOutcome::Continue

@@ -132,7 +132,12 @@ fn assert_styles(sess: &PtySession, expected: &[(&str, bool, bool)]) -> String {
                 let samples = expected
                     .iter()
                     .map(|(needle, _, _)| {
-                        let row = rows.iter().rposition(|row| row.contains(needle))?;
+                        // User input and the running tool's summary may quote
+                        // the same Markdown after the document entered history.
+                        let row = rows.iter().rposition(|row| {
+                            row.contains(needle)
+                                && !matches!(row.trim_start().chars().next(), Some('❯' | '╭' | '│'))
+                        })?;
                         let byte = rows[row].find(needle)?;
                         let col = rows[row][..byte].width();
                         let row = row.try_into().ok()?;

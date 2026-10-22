@@ -126,7 +126,12 @@ pub fn node(agent: &str) -> Result<Option<Arc<Node>>, String> {
             let client = config.connect()?;
             // Cert-only auth: the client cert IS the authorization (the node
             // derives identity from its SAN), so no per-request token is sent.
-            let backend = NexusVfsFsBackend::from_arc(client, String::new());
+            // Cert-only auth: the client cert IS the authorization (the node
+            // derives identity from its SAN), so no per-request token is sent.
+            // That transport is a server-verified credential, so the backend
+            // takes the mTLS (trusted-local) shape — the fail-closed
+            // `from_arc` is for references the server never sees.
+            let backend = NexusVfsFsBackend::from_arc_mtls(client, String::new(), "root");
             backend.readdir("/agents").map_err(|error| {
                 format!(
                     "this machine's node at {} is not usable as '{agent}': reading /agents \
@@ -178,6 +183,7 @@ pub fn status(agent: &str) -> runtime::mailbox::PeerStatus {
         namespace,
         endpoint,
         receiver,
+        delivery: "automatic",
         error,
     }
 }

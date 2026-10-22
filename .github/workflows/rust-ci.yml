@@ -314,6 +314,11 @@ jobs:
           SCODE_TEST_BACKEND: mock
           SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
         run: cargo test -p rusty-sudocode-cli --test pty_codex_colors -- --ignored --nocapture
+      - name: Preserve full review documents in native scrollback
+        env:
+          SCODE_TEST_BACKEND: mock
+          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
+        run: cargo test -p rusty-sudocode-cli --test pty_review_scrollback -- --ignored --nocapture
       - name: Retain terminal buffer and wire traces
         if: always()
         uses: actions/upload-artifact@v4

@@ -1,9 +1,39 @@
 //! Delivery receipts against the actual kernel and host filesystem adapters.
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
 use runtime::mailbox::Mailbox;
+use runtime::zone_context::ENV_NEXUS_RESOURCE_SCOPE;
 use runtime::KernelFsBackend;
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
+
+/// A planted descriptor carrying a resource scope that admits the daemon
+/// mail world — the `/agents` chat-list indexes and the flat
+/// `/conversations` transcript store they point into — the authority a
+/// co-hosted agent actually runs with, so the fail-closed zone contract
+/// admits the kernel round-trips this suite asserts.
+fn planted(name: &str) -> AgentDescriptor {
+    let mut descriptor = AgentDescriptor {
+        pid: format!("pid-{name}"),
+        name: name.to_string(),
+        owner_id: "owner".to_string(),
+        zone_id: "root".to_string(),
+        ..AgentDescriptor::default()
+    };
+    descriptor.labels.insert(
+        ENV_NEXUS_RESOURCE_SCOPE.to_string(),
+        serde_json::json!({
+            "schema_version": 1,
+            "zone_id": "root",
+            "rules": [
+                {"capability": "zone.data.read", "resource_prefixes": ["/agents", "/conversations"]},
+                {"capability": "zone.data.write", "resource_prefixes": ["/agents", "/conversations"]}
+            ]
+        })
+        .to_string(),
+    );
+    descriptor
+}
 
 fn pair() -> (Mailbox, Mailbox) {
     let kernel = Arc::new(Kernel::new());
@@ -14,18 +44,18 @@ fn pair() -> (Mailbox, Mailbox) {
         false,
     );
     let sender = Mailbox::daemon_absolute(
-        Arc::new(KernelFsBackend::for_agent(
+        Arc::new(KernelFsBackend::for_agent_descriptor(
             Arc::clone(&kernel),
-            "owner",
-            "root",
-            "sender",
+            &planted("sender"),
             "/",
         )),
         "sender".into(),
     );
     let receiver = Mailbox::daemon_absolute(
-        Arc::new(KernelFsBackend::for_agent(
-            kernel, "owner", "root", "receiver", "/",
+        Arc::new(KernelFsBackend::for_agent_descriptor(
+            kernel,
+            &planted("receiver"),
+            "/",
         )),
         "receiver".into(),
     );

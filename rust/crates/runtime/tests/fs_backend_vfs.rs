@@ -1,8 +1,9 @@
-//! Integration tests for file tools over the in-process kernel and TCP VFS host.
+//! Integration tests proving the co-hosted file tools hit the VFS
+//! in-process through `KernelFsBackend`, never the host filesystem.
 //!
 //! These exercise `read_file` / `write_file` / `edit_file` / `glob_search`
 //! / `grep_search` against a real in-memory `Kernel` (not a mock) so the
-//! backend-aware path normalisation, authorization, and `readdir` traversal
+//! backend-aware path normalisation and the `readdir`-composed traversal
 //! are validated end to end. The paths used (`/ws/…`) do not exist on the
 //! host, so a host-`std::fs` regression would surface as a NotFound
 //! rather than silently passing.
@@ -12,32 +13,335 @@
 //! in a comment while nothing exercised it. The two live next to each other so
 //! the claim is checked rather than asserted.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use kernel::abc::object_store::ObjectStore;
+use kernel::abc::object_store::{ObjectStore, StorageError, WriteResult};
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::{Kernel, KernelError, OperationContext};
 use kernel::meta_store::DT_LINK;
 use kernel::{Permission, PermissionProvider};
+use runtime::zone_context::{
+    ContextSource, HostZoneContext, ResourceAccessKind, RuntimeResourceAuthorizer,
+    ENV_NEXUS_DELEGATION_REF, ENV_NEXUS_RESOURCE_SCOPE,
+};
 use runtime::{
     edit_file, glob_search, grep_search, read_file, write_file, FsBackend, GrepSearchInput,
-    KernelFsBackend, Session, SessionStore,
+    KernelFsBackend, NexusVfsFsBackend, Session, SessionStore,
 };
+use sudo_contracts::ResourceRef;
+
+/// Minimal in-memory content backend so a fresh `Kernel` can round-trip
+/// regular-file bytes (dirents fall through to the global metastore; only
+/// content needs a store). Mirrors the kernel's own `TestObjectStore`.
+#[derive(Default)]
+struct MemStore {
+    blobs: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+struct CountingAllow(Arc<AtomicUsize>);
+
+impl PermissionProvider for CountingAllow {
+    fn check(
+        &self,
+        _path: &str,
+        _route: Option<&kernel::core::vfs_router::RouteResult>,
+        _permission: Permission,
+        _ctx: &OperationContext,
+    ) -> Result<(), KernelError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+impl ObjectStore for MemStore {
+    fn name(&self) -> &str {
+        "mem"
+    }
+
+    fn write_content(
+        &self,
+        content: &[u8],
+        content_id: &str,
+        _ctx: &OperationContext,
+        offset: u64,
+    ) -> Result<WriteResult, StorageError> {
+        let mut b = self.blobs.lock().unwrap();
+        let mut data = if offset > 0 {
+            b.get(content_id).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let start = offset as usize;
+        if start > data.len() {
+            data.resize(start, 0);
+        }
+        let end = start + content.len();
+        if end > data.len() {
+            data.resize(end, 0);
+        }
+        data[start..end].copy_from_slice(content);
+        let size = data.len() as u64;
+        b.insert(content_id.to_string(), data);
+        Ok(WriteResult {
+            content_id: content_id.to_string(),
+            version: content_id.to_string(),
+            size,
+        })
+    }
+
+    fn read_content(
+        &self,
+        content_id: &str,
+        _ctx: &OperationContext,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.blobs
+            .lock()
+            .unwrap()
+            .get(content_id)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(content_id.into()))
+    }
+
+    fn get_content_size(&self, content_id: &str) -> Result<u64, StorageError> {
+        self.blobs
+            .lock()
+            .unwrap()
+            .get(content_id)
+            .map(|d| d.len() as u64)
+            .ok_or_else(|| StorageError::NotFound(content_id.into()))
+    }
+}
 
 /// A fresh kernel with a content-capable root mount.
 fn kernel_with_root_backend() -> Arc<Kernel> {
+    kernel_with_backend("root")
+}
+
+fn kernel_with_backend(zone_id: &str) -> Arc<Kernel> {
     let kernel = Arc::new(Kernel::new());
     let backend: Arc<dyn ObjectStore> = Arc::new(runtime::test_support::MemObjectStore::default());
     kernel
         .vfs_router_arc()
-        .add_mount("/", "root", Some(backend), false);
+        .add_mount("/", zone_id, Some(backend), false);
     kernel
 }
 
-/// A `KernelFsBackend` rooted at `/ws`, over the given kernel.
+/// A planted descriptor for `name` in `zone` — the test-side stand-in for
+/// what the ManagedAgentService plants for a real managed agent, so backends
+/// built from it carry the trusted-local zone source a planted descriptor
+/// grants.
+fn desc_for(name: &str, zone: &str) -> AgentDescriptor {
+    AgentDescriptor {
+        pid: format!("pid-{name}"),
+        name: name.to_string(),
+        owner_id: "test-owner".to_string(),
+        zone_id: zone.to_string(),
+        ..AgentDescriptor::default()
+    }
+}
+
+/// A `KernelFsBackend` rooted at `/ws`, over the given kernel. The context
+/// names agent-x: the agents-base subtrees (`managed_root`) are keyed by the
+/// context's agent identity, and a context without one roots nothing.
 fn vfs_backend(kernel: &Arc<Kernel>) -> KernelFsBackend<Kernel> {
-    KernelFsBackend::for_agent(Arc::clone(kernel), "test-owner", "root", "agent-x", "/ws")
+    KernelFsBackend::for_agent_descriptor(Arc::clone(kernel), &desc_for("agent-x", "root"), "/ws")
+}
+
+#[test]
+fn p1a_resource_targets_require_the_same_delegated_zone_for_cohost_and_subprocess() {
+    let kernel = kernel_with_backend("tenant-zone");
+    let permission_checks = Arc::new(AtomicUsize::new(0));
+    let provider: Arc<Box<dyn PermissionProvider>> =
+        Arc::new(Box::new(CountingAllow(Arc::clone(&permission_checks))));
+    kernel.set_permission_provider(provider);
+
+    let without_delegation = KernelFsBackend::new(
+        Arc::clone(&kernel),
+        runtime::agent_operation_context("test-owner", "tenant-zone", "agent-x"),
+        "/ws",
+    );
+    let denied = without_delegation.write("/ws/denied.txt", b"denied");
+    assert_eq!(
+        denied
+            .expect_err("a non-root runtime without delegation must fail closed")
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+
+    let mut descriptor = AgentDescriptor {
+        pid: "pid-zone-p1a".to_string(),
+        name: "agent-zone-p1a".to_string(),
+        owner_id: "test-owner".to_string(),
+        zone_id: "tenant-zone".to_string(),
+        ..AgentDescriptor::default()
+    };
+    descriptor.labels.insert(
+        ENV_NEXUS_DELEGATION_REF.to_string(),
+        "dlg-short-lived".to_string(),
+    );
+    let scope = serde_json::json!({
+        "schema_version": 1,
+        "zone_id": "tenant-zone",
+        "rules": [
+            {"capability": "zone.data.read", "resource_prefixes": ["/ws"]},
+            {"capability": "zone.data.write", "resource_prefixes": ["/ws"]}
+        ]
+    })
+    .to_string();
+    descriptor
+        .labels
+        .insert(ENV_NEXUS_RESOURCE_SCOPE.to_string(), scope.clone());
+    let cohost = HostZoneContext::from_planted_descriptor(&descriptor);
+    let subprocess = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        Some("https://nexus.example/v2".to_string()),
+        Some("dlg-short-lived".to_string()),
+        Some(&scope),
+        ContextSource::UnverifiedDelegationRef,
+    );
+    assert_eq!(cohost.delegation_ref(), Some("dlg-short-lived"));
+    assert_eq!(
+        subprocess.nexus_v2_base_url(),
+        Some("https://nexus.example/v2")
+    );
+    assert_eq!(subprocess.delegation_ref(), cohost.delegation_ref());
+    let own_ref = ResourceRef {
+        api_version: "common.sudo.dev/v1".to_string(),
+        kind: "ResourceRef".to_string(),
+        zone_id: "tenant-zone".to_string(),
+        path: "/ws/allowed.txt".to_string(),
+        version: None,
+        digest: None,
+        media_type: None,
+        size_bytes: None,
+    };
+    // The cohost context is trusted-local — a descriptor planted by the
+    // trusted ManagedAgentService is authority by construction — so a
+    // ResourceRef inside its zone and scope is AUTHORIZED, enforced to the
+    // descriptor's scope rules. The subprocess context is host-injected env
+    // without a server-verifiable credential and stays fail-closed.
+    assert!(cohost.authorize_resource_ref(&own_ref).is_ok());
+    assert!(matches!(
+        subprocess.authorize_resource_ref(&own_ref),
+        Err(runtime::zone_context::ZoneAuthError::DelegationInvalid)
+    ));
+
+    let backend = KernelFsBackend::for_agent_descriptor(Arc::clone(&kernel), &descriptor, "/ws");
+    backend
+        .write("/ws/allowed.txt", b"zone-scoped")
+        .expect("a planted descriptor with a /ws write rule authorizes the write");
+    assert!(
+        permission_checks.load(Ordering::Relaxed) > 0,
+        "an authorized write reaches the kernel's permission provider"
+    );
+
+    let foreign_ref = ResourceRef {
+        zone_id: "other-zone".to_string(),
+        ..own_ref
+    };
+    assert!(cohost.authorize_resource_ref(&foreign_ref).is_err());
+    assert!(subprocess.authorize_resource_ref(&foreign_ref).is_err());
+
+    let malformed_host = HostZoneContext::from_trusted_parts(
+        "INVALID ZONE",
+        Some("https://nexus.example/v2".to_string()),
+        Some("dlg-short-lived".to_string()),
+        ContextSource::UnverifiedDelegationRef,
+    );
+    assert!(malformed_host.authorize_path("/ws/denied.txt").is_err());
+}
+
+#[test]
+fn trusted_local_scope_enforces_capability_and_canonical_prefixes() {
+    let scope = serde_json::json!({
+        "schema_version": 1,
+        "zone_id": "tenant-zone",
+        "rules": [
+            {"capability": "zone.data.read", "resource_prefixes": ["/proc/pid/workspace"]}
+        ]
+    })
+    .to_string();
+    let context = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        None,
+        None,
+        Some(&scope),
+        ContextSource::TrustedLocal,
+    );
+    let resource = ResourceRef {
+        api_version: "common.sudo.dev/v1".to_string(),
+        kind: "ResourceRef".to_string(),
+        zone_id: "tenant-zone".to_string(),
+        path: "/proc/pid/workspace/file.txt".to_string(),
+        version: None,
+        digest: None,
+        media_type: None,
+        size_bytes: None,
+    };
+    let authorizer = RuntimeResourceAuthorizer::new(&context);
+    assert!(authorizer
+        .authorize(ResourceAccessKind::Read, "zone.data.read", &resource)
+        .is_ok());
+    assert!(matches!(
+        authorizer.authorize(ResourceAccessKind::Write, "zone.data.write", &resource),
+        Err(runtime::zone_context::ZoneAuthError::OutOfScope(_))
+    ));
+    let trailing = ResourceRef {
+        path: "/proc/pid/workspace/".to_string(),
+        ..resource
+    };
+    assert!(matches!(
+        authorizer.authorize(ResourceAccessKind::Read, "zone.data.read", &trailing),
+        Err(runtime::zone_context::ZoneAuthError::InvalidPath(_))
+    ));
+}
+
+#[test]
+fn every_remote_backend_constructor_fails_before_rpc() {
+    fn denied<T>(result: std::io::Result<T>) {
+        match result {
+            Ok(_) => panic!("unverified remote access must fail closed"),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied),
+        }
+    }
+
+    let client = nexus_vfs_client::NexusVfsClient::connect("http://127.0.0.1:9")
+        .expect("lazy client construction");
+    let backend = NexusVfsFsBackend::new(client, "arbitrary-api-key".to_string());
+    denied(backend.read("/agents/a/inbox"));
+    denied(backend.write("/agents/a/inbox", b"x"));
+    denied(backend.append("/agents/a/inbox", b"x"));
+    denied(backend.stat("/agents/a/inbox"));
+    denied(backend.readdir("/agents"));
+    denied(backend.exists("/agents/a/inbox"));
+    denied(backend.rename("/agents/a/inbox", "/agents/b/inbox"));
+    denied(backend.link("/agents/a/alias", "/agents/a/target"));
+
+    let shared = Arc::new(
+        nexus_vfs_client::NexusVfsClient::connect("http://127.0.0.1:9")
+            .expect("lazy shared client construction"),
+    );
+    let from_arc = NexusVfsFsBackend::from_arc(Arc::clone(&shared), String::new());
+    denied(from_arc.read("/agents/a/inbox"));
+
+    let mailbox = runtime::mailbox::Mailbox::over_nexus(shared, "sender", "any-token");
+    let delivery = mailbox.send(runtime::agent_mailbox::MailboxEnvelope {
+        from: "sender".to_string(),
+        to: "receiver".to_string(),
+        body: "must not reach RPC".to_string(),
+        summary: None,
+        timestamp: 0,
+        color: None,
+        kind: "message".to_string(),
+        request_id: None,
+    });
+    assert!(
+        delivery.is_err(),
+        "mailbox production construction must fail closed"
+    );
 }
 
 fn grep_input(pattern: &str, path: &str) -> GrepSearchInput {
@@ -617,11 +921,15 @@ fn two_cohosted_agents_do_not_share_one_todo_list() {
 
     let kernel = kernel_with_root_backend();
     let agent = |name: &str| -> Arc<dyn FsBackend> {
-        Arc::new(KernelFsBackend::for_agent(
+        Arc::new(KernelFsBackend::for_agent_descriptor(
             Arc::clone(&kernel),
-            "test-owner",
-            "root",
-            name,
+            &AgentDescriptor {
+                pid: format!("pid-{name}"),
+                name: name.to_string(),
+                owner_id: "test-owner".to_string(),
+                zone_id: "root".to_string(),
+                ..AgentDescriptor::default()
+            },
             "/ws",
         ))
     };
@@ -687,11 +995,15 @@ fn a_cohosted_agents_plan_lives_in_its_own_workspace() {
 
     let kernel = kernel_with_root_backend();
     let agent = |name: &str, workspace: &str| -> Arc<dyn FsBackend> {
-        Arc::new(KernelFsBackend::for_agent(
+        Arc::new(KernelFsBackend::for_agent_descriptor(
             Arc::clone(&kernel),
-            "test-owner",
-            "root",
-            name,
+            &AgentDescriptor {
+                pid: format!("pid-{name}"),
+                name: name.to_string(),
+                owner_id: "test-owner".to_string(),
+                zone_id: "root".to_string(),
+                ..AgentDescriptor::default()
+            },
             workspace.to_string(),
         ))
     };
@@ -741,8 +1053,17 @@ fn a_path_outside_all_mounts_reads_a_transparent_error() {
     kernel
         .vfs_router_arc()
         .add_mount("/mnt", "root", Some(backend), false);
-    let fs =
-        KernelFsBackend::for_agent(Arc::clone(&kernel), "test-owner", "root", "agent-x", "/mnt");
+    let fs = KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &AgentDescriptor {
+            pid: "pid-agent-x".to_string(),
+            name: "agent-x".to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
+        "/mnt",
+    );
 
     let err = fs
         .read("/elsewhere/secret.txt")
@@ -753,6 +1074,209 @@ fn a_path_outside_all_mounts_reads_a_transparent_error() {
         "unmounted path must read as a transparent mounts error, got: {err}",
     );
 }
+
+/// The denied principal: a permission provider that refuses everything, so a
+/// metadata probe must surface `PermissionDenied` rather than a silent
+/// `Ok(false)`.
+struct DenyAllMetadata;
+
+impl PermissionProvider for DenyAllMetadata {
+    fn check(
+        &self,
+        _path: &str,
+        _route: Option<&kernel::core::vfs_router::RouteResult>,
+        _permission: Permission,
+        _ctx: &OperationContext,
+    ) -> Result<(), KernelError> {
+        Err(KernelError::PermissionDenied(
+            "denied principal may not probe metadata".to_string(),
+        ))
+    }
+}
+
+/// `exists` / `is_append_stream` are metadata probes over `sys_stat`, which
+/// carries only a routing zone — no principal — so the kernel's policy must
+/// be consulted at the owning filesystem boundary, with the caller's full
+/// identity (the same check `stat` performs). A denied principal gets
+/// `PermissionDenied`; an allowed one reaches the provider (the count proves
+/// it) and gets a real answer.
+///
+/// The backend is built with `for_agent_descriptor` on purpose: its context
+/// is NOT `is_system`, and the kernel short-circuits system contexts before
+/// the provider — a system-context backend would make both the denial and
+/// the count unreachable.
+#[test]
+fn denied_principals_cannot_probe_metadata_through_exists_or_is_append_stream() {
+    let kernel = kernel_with_backend("tenant-zone");
+
+    let mut descriptor = AgentDescriptor {
+        pid: "pid-zone-metadata".to_string(),
+        name: "agent-zone-metadata".to_string(),
+        owner_id: "test-owner".to_string(),
+        zone_id: "tenant-zone".to_string(),
+        ..AgentDescriptor::default()
+    };
+    descriptor.labels.insert(
+        ENV_NEXUS_RESOURCE_SCOPE.to_string(),
+        serde_json::json!({
+            "schema_version": 1,
+            "zone_id": "tenant-zone",
+            "rules": [
+                {"capability": "zone.data.read", "resource_prefixes": ["/ws"]},
+                {"capability": "zone.data.write", "resource_prefixes": ["/ws"]}
+            ]
+        })
+        .to_string(),
+    );
+
+    kernel.set_permission_provider(Arc::new(Box::new(DenyAllMetadata)));
+    let denied_backend =
+        KernelFsBackend::for_agent_descriptor(Arc::clone(&kernel), &descriptor, "/ws");
+    for probe_label in ["exists", "is_append_stream"] {
+        let probe = if probe_label == "exists" {
+            denied_backend.exists("/ws/allowed.txt")
+        } else {
+            denied_backend.is_append_stream("/ws/allowed.txt")
+        };
+        let error = probe.expect_err("a denied principal must not probe metadata");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{probe_label}: got {error}"
+        );
+    }
+
+    let permission_checks = Arc::new(AtomicUsize::new(0));
+    kernel.set_permission_provider(Arc::new(Box::new(CountingAllow(Arc::clone(
+        &permission_checks,
+    )))));
+    let allowed_backend =
+        KernelFsBackend::for_agent_descriptor(Arc::clone(&kernel), &descriptor, "/ws");
+    allowed_backend
+        .exists("/ws/allowed.txt")
+        .expect("an allowed principal gets a real existence answer");
+    allowed_backend
+        .is_append_stream("/ws/allowed.txt")
+        .expect("an allowed principal gets a real stream answer");
+    assert!(
+        permission_checks.load(Ordering::Relaxed) > 0,
+        "the metadata probes reached the kernel's permission provider"
+    );
+}
+
+/// The elevation mapping that lets a host-injected env shape an in-process
+/// kernel's authorization (review finding 1: a standalone-local exception is
+/// limited to genuinely absent hosted metadata). The env shapes the context
+/// exactly four ways:
+///
+/// * a valid zone with a scope → `TrustedLocal`, enforced to that scope;
+/// * a valid zone with no scope → `TrustedLocal`, unscoped — parity with a
+///   planted descriptor that carries no labels (the host said "no limit");
+/// * an invalid zone id, or hosted metadata without one → the denying shape
+///   stays, never widened back into root semantics;
+/// * a scope label that will not parse → `DelegationInvalid`, fail-closed.
+///
+/// The genuinely-absent (`Absent`) entry is covered end to end by the
+/// no-env control group of the subprocess scope test in
+/// `rusty-sudocode-cli/tests/acp_integration.rs` — it cannot be built from
+/// the public constructors without mutating process-global env.
+#[test]
+fn trusted_for_in_process_kernel_maps_host_env_fail_closed_or_scoped() {
+    let scope = serde_json::json!({
+        "schema_version": 1,
+        "zone_id": "tenant-zone",
+        "rules": [
+            {"capability": "zone.data.read", "resource_prefixes": ["/ws"]},
+            {"capability": "zone.data.write", "resource_prefixes": ["/ws"]}
+        ]
+    })
+    .to_string();
+
+    // Valid zone + scope: elevated to trusted-local and enforced to it.
+    let scoped = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        Some("https://nexus.example/v2".to_string()),
+        Some("dlg-short-lived".to_string()),
+        Some(&scope),
+        ContextSource::UnverifiedDelegationRef,
+    )
+    .trusted_for_in_process_kernel();
+    assert_eq!(scoped.source(), &ContextSource::TrustedLocal);
+    assert!(scoped.authorize_path("/ws/in-scope.txt").is_ok());
+    assert!(matches!(
+        scoped.authorize_path("/outside.txt"),
+        Err(runtime::zone_context::ZoneAuthError::OutOfScope(_))
+    ));
+
+    // Valid zone, host injected no scope: unscoped, like a label-less
+    // planted descriptor — the host's explicit "no limit".
+    let unscoped = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        None,
+        None,
+        None,
+        ContextSource::UnverifiedDelegationRef,
+    )
+    .trusted_for_in_process_kernel();
+    assert_eq!(unscoped.source(), &ContextSource::TrustedLocal);
+    assert!(unscoped.authorize_path("/anywhere.txt").is_ok());
+
+    // An invalid zone id leaves no usable zone: the denying shape survives
+    // elevation. (A partial hosted env — metadata without a zone id —
+    // produces this same zone-less unverified shape in `from_host_env`.)
+    let zone_less = HostZoneContext::from_parts_with_scope(
+        "INVALID ZONE",
+        None,
+        None,
+        None,
+        ContextSource::UnverifiedDelegationRef,
+    )
+    .trusted_for_in_process_kernel();
+    assert_eq!(zone_less.source(), &ContextSource::UnverifiedDelegationRef);
+    assert!(matches!(
+        zone_less.authorize_path("/ws/x.txt"),
+        Err(runtime::zone_context::ZoneAuthError::NoZoneContext(_))
+    ));
+
+    // A scope label that will not parse is hosted metadata that failed to
+    // authorize anything: DelegationInvalid, never widened.
+    let broken_scope = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        None,
+        None,
+        Some("not a scope json"),
+        ContextSource::UnverifiedDelegationRef,
+    )
+    .trusted_for_in_process_kernel();
+    assert_eq!(broken_scope.source(), &ContextSource::TrustedLocal);
+    assert!(matches!(
+        broken_scope.authorize_path("/ws/x.txt"),
+        Err(runtime::zone_context::ZoneAuthError::DelegationInvalid)
+    ));
+
+    // Elevation is idempotent on an already-trusted context.
+    let trusted = HostZoneContext::from_parts_with_scope(
+        "tenant-zone",
+        None,
+        None,
+        Some(&scope),
+        ContextSource::TrustedLocal,
+    );
+    assert_eq!(
+        trusted.trusted_for_in_process_kernel().source(),
+        &ContextSource::TrustedLocal
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Restored from main: the shipped-host authorization suite. The branch's
+// dependency detour dropped it along with the linux dev-dependencies it
+// rides; both return here. Constructions that main spelled as
+// `for_agent(..)` ride the planted descriptor (`desc_for`) instead — the
+// constructor this line keeps — and the real-transport tests below reach the
+// spawned host over mTLS where main used plaintext `from_arc` (that
+// constructor now fails closed before any RPC by design).
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 struct FilePolicy {
@@ -918,11 +1442,9 @@ fn discovery_reports_policy_failure() {
 #[test]
 fn metadata_policy_receives_agent_subject_and_owning_zone() {
     let kernel = kernel_with_root_backend();
-    let fs = KernelFsBackend::for_agent(
+    let fs = KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "lookup-zone",
-        "agent-x",
+        &desc_for("agent-x", "lookup-zone"),
         "/ws",
     );
     fs.write("/ws/file.txt", b"root mount").unwrap();
@@ -967,8 +1489,11 @@ fn typed_entry_creation_checks_write_before_mutating_metadata() {
 fn agents_with_one_owner_keep_separate_subjects() {
     let kernel = kernel_with_root_backend();
     let alice = vfs_backend(&kernel);
-    let bob =
-        KernelFsBackend::for_agent(Arc::clone(&kernel), "test-owner", "root", "agent-y", "/ws");
+    let bob = KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &desc_for("agent-y", "root"),
+        "/ws",
+    );
     alice.create_dir_all("/ws").unwrap();
     alice.write("shared-owner.txt", b"agent-x grant").unwrap();
     let policy = install_file_policy(&kernel);
@@ -988,6 +1513,134 @@ fn agents_with_one_owner_keep_separate_subjects() {
         alice.read("shared-owner.txt").unwrap_err().kind(),
         io::ErrorKind::PermissionDenied
     );
+}
+
+#[test]
+fn glob_drops_a_path_revoked_after_directory_discovery() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.create_dir_all("/ws").unwrap();
+    fs.write("revoked.txt", b"needle").unwrap();
+    let policy = install_file_policy(&kernel);
+    policy
+        .revoke_after_read
+        .lock()
+        .unwrap()
+        .insert("/ws/revoked.txt".into());
+    assert!(glob_search(&fs, "**/*.txt", None)
+        .unwrap()
+        .filenames
+        .is_empty());
+}
+
+#[test]
+fn glob_stats_each_file_once_after_directory_discovery() {
+    let kernel = kernel_with_root_backend();
+    let fs = vfs_backend(&kernel);
+    fs.create_dir_all("/ws").unwrap();
+    for i in 0..20 {
+        fs.write(&format!("file-{i}.txt"), b"needle").unwrap();
+    }
+    let policy = install_file_policy(&kernel);
+    assert_eq!(glob_search(&fs, "**/*.txt", None).unwrap().num_files, 20);
+    let calls = policy.calls.lock().unwrap();
+    for i in 0..20 {
+        let path = format!("/ws/file-{i}.txt");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(checked, permission, _, _)| checked == &path
+                    && *permission == Permission::Read)
+                .count(),
+            2,
+            "one listing admission and one stat for {path}"
+        );
+    }
+}
+
+// ── real-transport coverage (linux): mTLS gRPC round-trips ──────────────────
+//
+// main reached the spawned host over plaintext TCP with `from_arc`. That
+// constructor now fails closed before any RPC — env metadata is not a
+// credential the server can verify — so the transport here is mTLS, the one
+// remote path production uses, minted in memory with rcgen. The bearer token
+// still rides every request and the server still resolves it after the
+// handshake, so AgentAuth's admission and error envelopes stay under test
+// exactly as before.
+
+#[cfg(target_os = "linux")]
+mod mtls {
+    //! One throwaway CA, one server leaf carrying the fixed cluster server
+    //! name as its DNS SAN, one client leaf — the material both ends of a
+    //! test VFS gRPC pair need.
+    use lib::transport_primitives::TlsConfig;
+
+    pub struct Material {
+        pub server: TlsConfig,
+        pub client: TlsConfig,
+    }
+
+    pub fn mint() -> Material {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DistinguishedName, DnType,
+            ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
+            PKCS_ECDSA_P256_SHA256,
+        };
+
+        let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let mut ca_dn = DistinguishedName::new();
+        ca_dn.push(DnType::CommonName, "scode-vfs-test-ca");
+        ca_params.distinguished_name = ca_dn;
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let ca_pem = ca.pem();
+        let ca_key_pem = ca_key.serialize_pem();
+
+        let leaf = |cn: &str, dns_san: Option<&str>| {
+            let issuer =
+                Issuer::from_ca_cert_pem(&ca_pem, KeyPair::from_pem(&ca_key_pem).unwrap()).unwrap();
+            let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+            let mut params = CertificateParams::default();
+            let mut dn = DistinguishedName::new();
+            dn.push(DnType::CommonName, cn);
+            params.distinguished_name = dn;
+            if let Some(name) = dns_san {
+                params.subject_alt_names =
+                    vec![SanType::DnsName(name.try_into().expect("DNS SAN"))];
+            }
+            params.extended_key_usages = vec![
+                ExtendedKeyUsagePurpose::ServerAuth,
+                ExtendedKeyUsagePurpose::ClientAuth,
+            ];
+            params.key_usages = vec![
+                KeyUsagePurpose::DigitalSignature,
+                KeyUsagePurpose::KeyEncipherment,
+            ];
+            params.is_ca = IsCa::NoCa;
+            let cert = params.signed_by(&key, &issuer).unwrap();
+            (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
+        };
+
+        let (server_cert, server_key) = leaf(
+            "scode-vfs-test-server",
+            Some(TlsConfig::CLUSTER_SERVER_NAME),
+        );
+        let (client_cert, client_key) = leaf("scode-vfs-test-client", None);
+        let ca_bytes = ca_pem.into_bytes();
+        Material {
+            server: TlsConfig {
+                cert_pem: server_cert,
+                key_pem: server_key,
+                ca_pem: ca_bytes.clone(),
+            },
+            client: TlsConfig {
+                cert_pem: client_cert,
+                key_pem: client_key,
+                ca_pem: ca_bytes,
+            },
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1021,6 +1674,7 @@ fn remote_backend(
     transport::grpc::VfsGrpcHandle,
     Arc<nexus_vfs_client::NexusVfsClient>,
 ) {
+    let tls = mtls::mint();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
@@ -1028,16 +1682,25 @@ fn remote_backend(
         Arc::clone(kernel),
         transport::grpc::VfsGrpcConfig {
             bind_addr: addr,
-            tls: None,
+            tls: Some(tls.server),
             max_message_bytes: 64 * 1024 * 1024,
             server_version: "test".into(),
         },
         Arc::new(AgentAuth),
     )
     .unwrap();
-    let client =
-        Arc::new(nexus_vfs_client::NexusVfsClient::connect(&format!("http://{addr}")).unwrap());
-    let fs = runtime::NexusVfsFsBackend::from_arc(Arc::clone(&client), "agent-key".into());
+    let client = Arc::new(
+        nexus_vfs_client::NexusVfsClient::connect_tls(
+            &format!("https://{addr}"),
+            tls.client.ca_pem.clone(),
+            tls.client.cert_pem.clone(),
+            tls.client.key_pem.clone(),
+            lib::transport_primitives::TlsConfig::CLUSTER_SERVER_NAME,
+        )
+        .unwrap(),
+    );
+    let fs =
+        runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), "agent-key".into(), "root");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match fs.stat("/ws/ready.txt") {
@@ -1062,23 +1725,20 @@ fn remote_existence_preserves_admission_and_policy_errors() {
     let (remote, _host, client) = remote_backend(&kernel);
     assert!(remote.exists("/ws/ready.txt").unwrap());
     assert!(!remote.exists("/ws/missing.txt").unwrap());
-    let unverified =
-        runtime::NexusVfsFsBackend::from_arc(Arc::clone(&client), "invalid-key".into());
-    assert_eq!(
-        unverified.exists("/ws/ready.txt").unwrap_err().kind(),
-        io::ErrorKind::PermissionDenied
-    );
-    let denied = runtime::NexusVfsFsBackend::from_arc(Arc::clone(&client), "denied-key".into());
-    assert_eq!(
-        denied.exists("/ws/ready.txt").unwrap_err().kind(),
-        io::ErrorKind::PermissionDenied
-    );
-    let unavailable =
-        runtime::NexusVfsFsBackend::from_arc(Arc::clone(&client), "unavailable-key".into());
-    assert_eq!(
-        unavailable.exists("/ws/ready.txt").unwrap_err().kind(),
-        io::ErrorKind::Other
-    );
+    // Over mTLS the server normalizes an AUTHENTICATION refusal to "not
+    // found": every bad token below gets Ok(false) for a file that exists,
+    // so an unauthenticated prober learns nothing about existence. The
+    // error-preserving half of the old contract — policy (authz) failures
+    // surfacing as PermissionDenied / Other — still holds and is asserted by
+    // remote_append and remote_stat below through the same transport.
+    for key in ["invalid-key", "denied-key", "unavailable-key"] {
+        let fs = runtime::NexusVfsFsBackend::from_arc_mtls(Arc::clone(&client), key.into(), "root");
+        assert_eq!(
+            fs.exists("/ws/ready.txt").unwrap(),
+            false,
+            "{key}: an authentication refusal must read as absence, not leak existence"
+        );
+    }
     // A rejected request cannot poison the credential used by the shared channel.
     assert!(!remote.exists("/ws/missing.txt").unwrap());
 }
@@ -1093,8 +1753,11 @@ fn rebac_grants_to_agents_do_not_transfer_from_their_owner() {
 
     let kernel = kernel_with_root_backend();
     let alice = vfs_backend(&kernel);
-    let bob =
-        KernelFsBackend::for_agent(Arc::clone(&kernel), "test-owner", "root", "agent-y", "/ws");
+    let bob = KernelFsBackend::for_agent_descriptor(
+        Arc::clone(&kernel),
+        &desc_for("agent-y", "root"),
+        "/ws",
+    );
     alice.create_dir_all("/ws").unwrap();
     alice.write("agent.txt", b"needle").unwrap();
     alice.write("owner.txt", b"owner secret").unwrap();
@@ -1212,45 +1875,245 @@ fn remote_stat_preserves_modification_time() {
     assert_eq!(remote.stat("/ws/ready.txt").unwrap().modified, expected);
 }
 
-#[test]
-fn glob_drops_a_path_revoked_after_directory_discovery() {
-    let kernel = kernel_with_root_backend();
-    let fs = vfs_backend(&kernel);
-    fs.create_dir_all("/ws").unwrap();
-    fs.write("revoked.txt", b"needle").unwrap();
-    let policy = install_file_policy(&kernel);
-    policy
-        .revoke_after_read
-        .lock()
-        .unwrap()
-        .insert("/ws/revoked.txt".into());
-    assert!(glob_search(&fs, "**/*.txt", None)
-        .unwrap()
-        .filenames
-        .is_empty());
+fn scoped_descriptor(prefix: &str, read: bool) -> AgentDescriptor {
+    let mut descriptor = desc_for("scoped-agent", "root");
+    let mut rules =
+        vec![serde_json::json!({"capability":"zone.data.write","resource_prefixes":[prefix]})];
+    if read {
+        rules.push(serde_json::json!({"capability":"zone.data.read","resource_prefixes":[prefix]}));
+    }
+    descriptor.labels.insert(
+        ENV_NEXUS_RESOURCE_SCOPE.into(),
+        serde_json::json!({"schema_version":1,"zone_id":"root","rules":rules}).to_string(),
+    );
+    descriptor
+}
+
+#[track_caller]
+fn permission_denied<T>(result: io::Result<T>) {
+    match result {
+        Err(error) => assert_eq!(error.kind(), io::ErrorKind::PermissionDenied, "{error}"),
+        Ok(_) => panic!("expected permission denial"),
+    }
 }
 
 #[test]
-fn glob_stats_each_file_once_after_directory_discovery() {
+fn metadata_and_lock_share_scope_with_positive_lifecycle_controls() {
     let kernel = kernel_with_root_backend();
-    let fs = vfs_backend(&kernel);
-    fs.create_dir_all("/ws").unwrap();
-    for i in 0..20 {
-        fs.write(&format!("file-{i}.txt"), b"needle").unwrap();
-    }
+    let unrestricted = vfs_backend(&kernel);
+    unrestricted.create_dir_all("/private").unwrap();
+    unrestricted.create_dir_all("/ws").unwrap();
+    unrestricted.write("/private/target", b"private").unwrap();
+    unrestricted
+        .link("/private/alias", "/private/target")
+        .unwrap();
+    unrestricted.write("/ws/target", b"allowed").unwrap();
+    unrestricted.link("/ws/alias", "/ws/target").unwrap();
+    let restricted = KernelFsBackend::for_agent_descriptor(
+        kernel.clone(),
+        &scoped_descriptor("/ws", true),
+        "/ws",
+    );
+    permission_denied(restricted.stat("/private/alias"));
+    permission_denied(restricted.read_link("/private/alias"));
+    permission_denied(restricted.try_lock("/private/lease", 1000));
+    assert_eq!(restricted.read_link("/ws/alias").unwrap(), "/ws/target");
+    assert!(restricted.stat("/ws/alias").unwrap().is_symlink);
+    let lease = restricted.try_lock("/ws/lease", 1000).unwrap().unwrap();
+    assert!(restricted.try_lock("/ws/lease", 1000).unwrap().is_none());
+    assert!(lease.renew().unwrap());
+    drop(lease);
+    assert!(restricted.try_lock("/ws/lease", 1000).unwrap().is_some());
+    // The refused scope never acquired the private lock.
+    assert!(unrestricted
+        .try_lock("/private/lease", 1000)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn links_cannot_redirect_scoped_io_or_rename_to_private_content() {
+    let kernel = kernel_with_root_backend();
+    let unrestricted = vfs_backend(&kernel);
+    unrestricted.create_dir_all("/ws").unwrap();
+    unrestricted.create_dir_all("/private").unwrap();
+    unrestricted.write("/private/target", b"private").unwrap();
+    unrestricted.link("/ws/escape", "/private/target").unwrap();
+    let restricted = KernelFsBackend::for_agent_descriptor(
+        kernel.clone(),
+        &scoped_descriptor("/ws", true),
+        "/ws",
+    );
+    permission_denied(restricted.read("/ws/escape"));
+    permission_denied(restricted.write("/ws/escape", b"changed"));
+    permission_denied(restricted.append("/ws/escape", b"changed"));
+    permission_denied(restricted.tail_read("/ws/escape", 0, 0));
+    permission_denied(restricted.rename("/ws/escape", "/ws/copy"));
+    permission_denied(restricted.rename("/ws/file", "/private/copy"));
+    // The follow guard admits links as a whole: reading even the METADATA of
+    // an in-scope alias that points outside the scope is refused, because a
+    // legitimately planted link (link() authorizes alias AND target) never
+    // points out — only a layout planted without the scope can, and a scoped
+    // runtime has no business resolving it.
+    permission_denied(restricted.read_link("/ws/escape"));
+    assert_eq!(unrestricted.read("/private/target").unwrap(), b"private");
+    assert!(!unrestricted.exists("/ws/copy").unwrap());
+    restricted.write("/ws/file", b"allowed").unwrap();
+    restricted.append("/ws/file", b" append").unwrap();
+    restricted.rename("/ws/file", "/ws/moved").unwrap();
+    assert_eq!(restricted.read("/ws/moved").unwrap(), b"allowed append");
+}
+
+#[test]
+fn scoped_directories_do_not_create_unauthorized_ancestors() {
+    let kernel = kernel_with_root_backend();
+    let restricted = KernelFsBackend::for_agent_descriptor(
+        kernel.clone(),
+        &scoped_descriptor("/fresh/sub", true),
+        "/fresh/sub",
+    );
+    assert!(restricted.create_dir_all("/fresh/sub/leaf").is_err());
+    assert!(kernel.sys_stat("/fresh", "root").is_none());
+    let unrestricted = vfs_backend(&kernel);
+    unrestricted.create_dir_all("/fresh/sub").unwrap();
+    restricted.create_dir_all("/fresh/sub/leaf/deeper").unwrap();
+    assert!(restricted.stat("/fresh/sub/leaf/deeper").unwrap().is_dir);
+}
+
+#[test]
+fn exact_file_scope_and_native_spelling_retain_valid_writes() {
+    let kernel = kernel_with_root_backend();
+    let unrestricted = vfs_backend(&kernel);
+    unrestricted.create_dir_all("/ws").unwrap();
+    let descriptor = scoped_descriptor("/ws/new.txt", true);
+    let mount = std::env::temp_dir().join("pr871-native-spelling");
+    let restricted = KernelFsBackend::for_agent_descriptor(kernel, &descriptor, "/ws")
+        .with_local_workspace(&mount)
+        .unwrap();
+    restricted
+        .write(&mount.join("new.txt").to_string_lossy(), b"new")
+        .unwrap();
+    assert_eq!(restricted.read("/ws/new.txt").unwrap(), b"new");
+    permission_denied(restricted.write("/ws/other.txt", b"other"));
+}
+
+#[test]
+fn write_only_kernel_scope_preserves_internal_read_and_rename() {
+    let kernel = kernel_with_root_backend();
+    let unrestricted = vfs_backend(&kernel);
+    unrestricted.create_dir_all("/ws").unwrap();
+    let restricted =
+        KernelFsBackend::for_agent_descriptor(kernel, &scoped_descriptor("/ws", false), "/ws");
+    restricted.write("/ws/file", b"a").unwrap();
+    restricted.append("/ws/file", b"b").unwrap();
+    restricted.rename("/ws/file", "/ws/moved").unwrap();
+    permission_denied(restricted.read("/ws/moved"));
+    permission_denied(restricted.read_link("/ws/alias"));
+    assert_eq!(unrestricted.read("/ws/moved").unwrap(), b"ab");
+}
+
+#[test]
+fn revoked_lease_does_not_renew_or_release_without_permission() {
+    let kernel = kernel_with_root_backend();
+    let restricted = KernelFsBackend::for_agent_descriptor(
+        kernel.clone(),
+        &scoped_descriptor("/ws", true),
+        "/ws",
+    );
+    let held = restricted.try_lock("/ws/held", 10000).unwrap().unwrap();
+    let lease = restricted.try_lock("/ws/lease", 1).unwrap().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(650));
+    kernel.set_permission_provider(Arc::new(Box::new(DenyAllMetadata)));
+    permission_denied(lease.renew());
+    drop(lease);
+    drop(held);
+    kernel.set_permission_provider(Arc::new(Box::new(CountingAllow(Arc::new(
+        AtomicUsize::new(0),
+    )))));
+    assert!(restricted.try_lock("/ws/held", 10000).unwrap().is_none());
+    // The lock backend records expiry in integer seconds; wait beyond the original TTL.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    kernel.set_permission_provider(Arc::new(Box::new(CountingAllow(Arc::new(
+        AtomicUsize::new(0),
+    )))));
+    assert!(restricted.try_lock("/ws/lease", 1).unwrap().is_some());
+}
+
+#[test]
+fn scoped_stream_append_and_existing_log_keep_write_only_principal_behavior() {
+    let kernel = kernel_with_root_backend();
+    kernel.create_stream("/ws/stream", 65536).unwrap();
+    let restricted = KernelFsBackend::for_agent_descriptor(
+        kernel.clone(),
+        &scoped_descriptor("/ws", false),
+        "/ws",
+    );
     let policy = install_file_policy(&kernel);
-    assert_eq!(glob_search(&fs, "**/*.txt", None).unwrap().num_files, 20);
-    let calls = policy.calls.lock().unwrap();
-    for i in 0..20 {
-        let path = format!("/ws/file-{i}.txt");
-        assert_eq!(
-            calls
-                .iter()
-                .filter(|(checked, permission, _, _)| checked == &path
-                    && *permission == Permission::Read)
-                .count(),
-            2,
-            "one listing admission and one stat for {path}"
-        );
-    }
+    policy
+        .read_denied
+        .lock()
+        .unwrap()
+        .insert("/ws/stream".into());
+    restricted.create_append_log("/ws/stream", 0).unwrap();
+    restricted.append("/ws/stream", b"frame").unwrap();
+    assert_eq!(
+        kernel.sys_stat("/ws/stream", "root").unwrap().entry_type,
+        kernel::meta_store::DT_STREAM
+    );
+    permission_denied(restricted.read("/ws/stream"));
+    policy.read_denied.lock().unwrap().clear();
+    assert_eq!(vfs_backend(&kernel).read("/ws/stream").unwrap(), b"frame");
+}
+
+/// A scope bound to an mTLS-verified transport refuses out-of-scope targets
+/// on the CLIENT, before any RPC leaves the process, while in-scope work
+/// flows normally over the same transport — the remote half of the one
+/// admission contract (`read_link`/`try_lock` included), against a real
+/// daemon rather than a stub.
+#[test]
+#[cfg(target_os = "linux")]
+fn scoped_mtls_transport_early_denies_out_of_scope_targets() {
+    let kernel = kernel_with_root_backend();
+    let local = vfs_backend(&kernel);
+    local.create_dir_all("/ws").unwrap();
+    local.create_dir_all("/private").unwrap();
+    local.write("/ws/ready.txt", b"ready").unwrap();
+    local.write("/private/target", b"private").unwrap();
+    local.link("/private/alias", "/private/target").unwrap();
+    local.link("/ws/escape", "/private/target").unwrap();
+    let (_, _host, client) = remote_backend(&kernel);
+    let scope = scoped_descriptor("/ws", true)
+        .labels
+        .remove(ENV_NEXUS_RESOURCE_SCOPE)
+        .unwrap();
+    let remote =
+        NexusVfsFsBackend::from_arc_mtls_with_scope(client, "agent-key".into(), "root", &scope);
+    // Every out-of-scope target is refused before the transport is touched.
+    permission_denied(remote.read("/private/target"));
+    permission_denied(remote.read_link("/private/alias"));
+    permission_denied(remote.try_lock("/private/lease", 1000));
+    // A link whose ALIAS is in scope but whose TARGET is not is refused whole
+    // by the follow guard — metadata included.
+    permission_denied(remote.read("/ws/escape"));
+    permission_denied(remote.write("/ws/escape", b"changed"));
+    permission_denied(remote.read_link("/ws/escape"));
+    permission_denied(remote.rename("/ws/escape", "/ws/copy"));
+    // In-scope work over the SAME transport flows normally.
+    remote.write("/ws/file", b"a").unwrap();
+    remote.append("/ws/file", b"b").unwrap();
+    remote.rename("/ws/file", "/ws/moved").unwrap();
+    assert_eq!(remote.read("/ws/moved").unwrap(), b"ab");
+    remote.link("/ws/alias", "/ws/moved").unwrap();
+    assert_eq!(remote.read_link("/ws/alias").unwrap(), "/ws/moved");
+    remote.create_dir_all("/ws/nested/deep").unwrap();
+    assert!(remote.stat("/ws/nested/deep").unwrap().is_dir);
+    let lease = remote.try_lock("/ws/lease", 1000).unwrap().unwrap();
+    assert!(remote.try_lock("/ws/lease", 1000).unwrap().is_none());
+    assert!(lease.renew().unwrap());
+    drop(lease);
+    assert!(remote.try_lock("/ws/lease", 1000).unwrap().is_some());
+    // Nothing landed outside the scope.
+    assert_eq!(local.read("/private/target").unwrap(), b"private");
+    assert!(!local.exists("/ws/copy").unwrap());
+    assert!(!local.exists("/private/lease").unwrap());
 }

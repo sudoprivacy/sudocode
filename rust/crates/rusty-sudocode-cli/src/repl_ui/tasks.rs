@@ -34,6 +34,7 @@ pub(super) struct TaskBrowser {
     entries: BTreeMap<String, Entry>,
     rows: Vec<String>,
     summary: String,
+    compact_summary: String,
     pub focus: TaskFocus,
     selected: Option<String>,
     scroll: usize,
@@ -133,6 +134,17 @@ impl TaskBrowser {
             ));
         }
         self.summary = parts.join(" · ");
+        let mut compact = Vec::new();
+        if terminals > 0 {
+            compact.push(format!("{terminals}t"));
+        }
+        if agents > 0 {
+            compact.push(format!("{agents}a"));
+        }
+        if unread > 0 {
+            compact.push(format!("+{unread}"));
+        }
+        self.compact_summary = compact.join(" ");
     }
 
     #[inline]
@@ -213,37 +225,20 @@ impl TaskBrowser {
             .cloned()
     }
 
-    pub fn footer(&self, base: &str, width: usize) -> String {
+    pub fn footer_label(&self, compact: bool) -> String {
         if !self.has_tasks() {
-            return fit(base, width);
+            return String::new();
         }
-        let compact = &self.summary;
-        let label = format!(
-            "{compact} · {}",
-            if self.focus == TaskFocus::Footer {
-                "Enter to view"
-            } else {
-                "↓ to view"
-            }
-        );
-        let available = width.saturating_sub(display_width(&label) + 3);
-        let left = fit(base, available);
-        let separator = if left.is_empty() { "" } else { " · " };
-        let label = fit(
-            &label,
-            width.saturating_sub(display_width(&left) + display_width(separator)),
-        );
-        let choice = ChoiceText::new(
-            theme(),
-            crate::render::ColorSupport::detect(),
-            self.focus == TaskFocus::Footer,
-        );
-        let label = if self.focus == TaskFocus::Footer {
-            choice.body(&label)
+        let summary = if compact {
+            &self.compact_summary
         } else {
-            choice.muted(&label)
+            &self.summary
         };
-        format!("{left}{separator}{label}")
+        if self.focus == TaskFocus::Footer {
+            format!("{summary} · Enter to view")
+        } else {
+            summary.clone()
+        }
     }
 
     /// Project inside InputSlot's allocation, not an independent terminal budget.

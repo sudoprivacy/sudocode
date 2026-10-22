@@ -378,6 +378,11 @@ impl Mailbox {
     /// backend with a convention by hand at each call site is how they end up
     /// mismatched — a `LocalJsonl` convention over a VFS backend writes lines
     /// nothing tails, and the mistake is silent.
+    ///
+    /// The underlying [`NexusVfsFsBackend::from_arc`] context is unverified
+    /// env metadata, not a server-verifiable credential: every operation
+    /// through this mailbox fails closed before any RPC. A mailbox that
+    /// performs IO needs the mTLS pairing — [`Self::over_nexus_mtls`].
     #[must_use]
     pub fn over_nexus(
         client: Arc<nexus_vfs_client::NexusVfsClient>,
@@ -388,6 +393,29 @@ impl Mailbox {
             Arc::new(crate::fs_backend::NexusVfsFsBackend::from_arc(
                 client,
                 auth_token.into(),
+            )),
+            agent.into(),
+            InboxConvention::new(String::new()),
+        )
+    }
+
+    /// The same mailbox over a connection that IS the credential: an mTLS
+    /// client certificate the daemon verifies (identity from its SAN). The
+    /// fail-closed env/delegation context behind [`Self::over_nexus`] does not
+    /// apply — the transport itself is the server-verified authorization — but
+    /// a host-injected `NEXUS_RESOURCE_SCOPE` still narrows it.
+    #[must_use]
+    pub fn over_nexus_mtls(
+        client: Arc<nexus_vfs_client::NexusVfsClient>,
+        agent: impl Into<String>,
+        auth_token: impl Into<String>,
+        zone_id: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            Arc::new(crate::fs_backend::NexusVfsFsBackend::from_arc_mtls(
+                client,
+                auth_token.into(),
+                zone_id,
             )),
             agent.into(),
             InboxConvention::new(String::new()),
@@ -1205,6 +1233,10 @@ pub struct PeerStatus {
     /// `"receiving"`, `"standby"`, or `"none"` when this process runs no
     /// receiver for the agent.
     pub receiver: &'static str,
+    /// When a received message runs: `"automatic"` as soon as the session is
+    /// idle, or `"next_prompt"` in the synchronous REPL, which runs it once the
+    /// user hands the prompt back.
+    pub delivery: &'static str,
     /// Why attaching failed, when it did.
     pub error: Option<String>,
 }

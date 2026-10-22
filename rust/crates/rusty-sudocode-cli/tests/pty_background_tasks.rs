@@ -166,7 +166,11 @@ fn close(mut session: PtySession) {
 fn background_shell_footer_and_details_keep_output_after_parent_finishes() {
     let (env, _release) = task_env("background-shell-details");
     let mut session = start(&env, &[shell("background", "echo LIVE_STDOUT; echo LIVE_STDERR >&2; while [ ! -f release ]; do sleep 0.1; done; echo FINAL_STDOUT", "Inspect background shell")]);
-    let footer = screen(&session, "1 terminal · ↓ to view");
+    let footer = screen(&session, "1 terminal");
+    assert!(
+        !footer.contains("↓ to view"),
+        "idle task summary hides its navigation hint"
+    );
     assert!(
         footer
             .lines()
@@ -183,6 +187,61 @@ fn background_shell_footer_and_details_keep_output_after_parent_finishes() {
 }
 
 #[test]
+fn urgent_tip_shares_the_footer_and_survives_task_browsing_and_resize() {
+    let (env, _release) = task_env("background-with-tip");
+    let calls = [
+        shell(
+            "with-tip",
+            "echo TIP_TASK_OUTPUT; while [ ! -f release ]; do sleep 0.1; done",
+            "Tip alongside work",
+        ),
+        json!({"id":"advice","name":"set_tip","input":{"priority":"urgent","message":"REVIEW_JOB"}}),
+    ];
+    let mut session = spawn_for_calls(&env, &calls);
+    session.resize(40, 100).unwrap();
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "tip task ready");
+    let before = common::turn_status_marker(&session);
+    send_calls(&env, &mut session, &calls);
+    expect_parent_complete(&session, &before);
+    common::expect_screen(
+        &session,
+        |s| {
+            s.rsplit_once('─').is_some_and(|(_, footer)| {
+                footer.contains("1 terminal")
+                    && footer.contains("REVIEW_JOB")
+                    && !footer.contains("↓ to view")
+            })
+        },
+        common::DEFAULT_TIMEOUT,
+        "task counts and urgent advice share one footer",
+    );
+    session.resize(40, 40).unwrap();
+    common::expect_screen_settled(
+        &session,
+        |s| {
+            s.rsplit_once('─').is_some_and(|(_, footer)| {
+                footer.contains("REVIEW_JOB") && footer.trim().lines().count() == 1
+            })
+        },
+        common::DEFAULT_TIMEOUT,
+        "urgent advice survives narrow footer",
+    );
+    session.resize(40, 100).unwrap();
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "wide input restored");
+    open(&mut session);
+    screen(&session, "TIP_TASK_OUTPUT");
+    assert!(
+        session.render(|s| s
+            .contents()
+            .rsplit_once('─')
+            .is_some_and(|(_, f)| f.contains("REVIEW_JOB"))),
+        "urgent interaction feedback remains visible while browsing"
+    );
+    fs::write(env.workspace_root().join("release"), "go").unwrap();
+    close(session);
+}
+
+#[test]
 fn failed_background_shell_exposes_unread_result_and_exit_code() {
     let (env, _release) = task_env("background-shell-failure");
     let mut session = start(
@@ -193,7 +252,7 @@ fn failed_background_shell_exposes_unread_result_and_exit_code() {
             "Failed background job",
         )],
     );
-    screen(&session, "1 new result · ↓ to view");
+    screen(&session, "1 new result");
     open(&mut session);
     screen(&session, "  FAILURE_EVIDENCE");
     screen(&session, "exit 7");
@@ -229,7 +288,7 @@ fn inspecting_running_task_does_not_acknowledge_its_future_result() {
     let before = common::turn_status_marker(&session);
     send_calls(&env, &mut session, &calls);
     // This transition includes a complete model tool call, before any local UI action.
-    screen_with_budget(&session, "1 terminal · ↓ to view", common::LIVE_TURN_BUDGET);
+    screen_with_budget(&session, "1 terminal", common::LIVE_TURN_BUDGET);
     expect_parent_complete(&session, &before);
     open(&mut session);
     screen(&session, "  PEEK_RUNNING");
@@ -238,7 +297,7 @@ fn inspecting_running_task_does_not_acknowledge_its_future_result() {
     session.send("\x1b").unwrap();
     expect_input_ready(&session, common::DEFAULT_TIMEOUT, "back at input");
     fs::write(env.workspace_root().join("release"), "go").unwrap();
-    screen(&session, "1 new result · ↓ to view");
+    screen(&session, "1 new result");
     open(&mut session);
     screen(&session, "  PEEK_FINISHED");
     close(session);
@@ -276,7 +335,7 @@ fn explicit_and_automatic_background_agents_share_the_task_browser() {
         )
         .unwrap();
         let mut session = start_agent(&env, automatic);
-        screen(&session, "1 agent · ↓ to view");
+        screen(&session, "1 agent");
         open(&mut session);
         screen(&session, "ci-ready");
         fs::write(env.workspace_root().join("ci-ready"), "ready").unwrap();
@@ -309,7 +368,7 @@ fn stopping_one_background_task_keeps_its_sibling_running() {
             shell("two", "sh two-parent.sh", "Keep this task"),
         ],
     );
-    screen(&session, "2 terminals · ↓ to view");
+    screen(&session, "2 terminals");
     let deadline = Instant::now() + Duration::from_secs(10);
     for name in ["one", "two"] {
         while fs::read_to_string(env.workspace_root().join(format!("{name}-grandchild.pid")))
@@ -437,7 +496,7 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
             "A long background terminal title with 中文 and a wide emoji 🚀",
         )],
     );
-    screen(&session, "1 terminal · ↓ to view");
+    screen(&session, "1 terminal");
     open(&mut session);
     session.resize(30, 45).unwrap();
     screen(&session, "  RESIZE_OUTPUT");
@@ -473,7 +532,7 @@ fn task_browser_resizes_and_returns_to_fast_prompt_input() {
 fn leaving_the_session_reaps_background_processes() {
     let (env, _release) = task_env("background-session-close");
     let mut session = start(&env, &[shell("background", "echo READY_FOR_CLOSE; while [ ! -f release ]; do sleep 0.1; done; echo leaked > leaked.txt", "Session-owned job")]);
-    screen(&session, "1 terminal · ↓ to view");
+    screen(&session, "1 terminal");
     session.send("/exit\r").unwrap();
     assert_eq!(session.expect_eof().unwrap(), 0);
     fs::write(env.workspace_root().join("release"), "go").unwrap();
@@ -498,7 +557,7 @@ fn exiting_during_a_foreground_tool_reaps_both_process_groups() {
             "Background cleanup fixture",
         )],
     );
-    screen(&session, "1 terminal · ↓ to view");
+    screen(&session, "1 terminal");
     send_calls(
         &env,
         &mut session,
@@ -556,7 +615,7 @@ fn release_background_task_input_measurement() {
     report_resources("background_after_wait");
     measure_keys(&mut session, "background_output");
     report_resources("background_after_input");
-    if session.render(|screen| screen.contents().contains("1 terminal · ↓ to view")) {
+    if session.render(|screen| screen.contents().contains("1 terminal")) {
         open(&mut session);
         report_resources("background_detail_before_wait");
         std::thread::sleep(Duration::from_secs(5));
@@ -580,7 +639,7 @@ fn stopping_a_background_agent_cancels_its_running_child_tool() {
     )
     .unwrap();
     let mut session = start_agent(&env, false);
-    screen(&session, "1 agent · ↓ to view");
+    screen(&session, "1 agent");
     open(&mut session);
     screen(&session, "ci-ready");
     session.send("k").unwrap();
@@ -603,7 +662,7 @@ fn stopping_a_background_agent_cancels_its_running_child_tool() {
 fn large_background_output_has_a_bounded_preview_and_a_complete_log() {
     let (env, _release) = task_env("background-bounded-output");
     let mut session = start(&env, &[shell("large", "echo LOG_PREAMBLE_STDOUT; echo LOG_PREAMBLE_STDERR >&2; echo FIRST_LOG_EVIDENCE; i=0; while [ $i -lt 2000 ]; do echo OUTPUT_FILLER_01234567890123456789; i=$((i+1)); done; echo LAST_LOG_EVIDENCE", "Large background output")]);
-    screen(&session, "1 new result · ↓ to view");
+    screen(&session, "1 new result");
     session.resize(45, 240).unwrap();
     open(&mut session);
     let view = screen(&session, "  LAST_LOG_EVIDENCE");

@@ -5,11 +5,40 @@ mod common;
 
 use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
 use a2a::session_io::SessionMailbox;
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::{Kernel, OperationContext};
+use runtime::zone_context::ENV_NEXUS_RESOURCE_SCOPE;
 use runtime::{FsBackend, KernelFsBackend};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// A planted descriptor whose resource scope admits the daemon mail world —
+/// the `/agents` chat-list indexes and the flat `/conversations` transcript
+/// store they point into — so the fail-closed zone contract lets an external
+/// peer mailbox drive the delivery this suite asserts.
+fn planted(name: &str) -> AgentDescriptor {
+    let mut descriptor = AgentDescriptor {
+        pid: format!("pid-{name}"),
+        name: name.to_string(),
+        owner_id: "test-owner".to_string(),
+        zone_id: "root".to_string(),
+        ..AgentDescriptor::default()
+    };
+    descriptor.labels.insert(
+        ENV_NEXUS_RESOURCE_SCOPE.to_string(),
+        json!({
+            "schema_version": 1,
+            "zone_id": "root",
+            "rules": [
+                {"capability": "zone.data.read", "resource_prefixes": ["/agents", "/conversations"]},
+                {"capability": "zone.data.write", "resource_prefixes": ["/agents", "/conversations"]}
+            ]
+        })
+        .to_string(),
+    );
+    descriptor
+}
 
 fn call(kernel: &Kernel, method: &str, payload: Value) -> Value {
     let ctx = OperationContext::new("test-owner", "root", false, Some("operator"), false);
@@ -116,11 +145,15 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             .unwrap()
             .contains("worker")
     );
-    let fs = KernelFsBackend::for_agent(
+    let fs = KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        "worker",
+        &AgentDescriptor {
+            pid: format!("pid-{}", started["session_id"].as_str().unwrap()),
+            name: "worker".to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
         format!(
             "/proc/{}/workspace",
             started["session_id"].as_str().unwrap()
@@ -200,12 +233,16 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     // A peer text message enters the same driver and asks the bound controller.
     let peer_path = a2a::conversation_transcript_path(&a2a::conversation_id("worker", "peer"));
     common::provision_stream_transcript(&kernel, &peer_path);
-    let peer_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let peer_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        "peer",
-        "/",
+        &AgentDescriptor {
+            pid: "pid-peer".to_string(),
+            name: "peer".to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
+        "/".to_string(),
     ));
     let peer = Arc::new(runtime::mailbox::Mailbox::daemon_absolute(
         peer_fs,
@@ -496,11 +533,9 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         a2a::conversation_transcript_path(&a2a::conversation_id("failed-worker", "failed-peer"));
     common::provision_stream_transcript(&kernel, &failed_path);
     let failed_peer = runtime::mailbox::Mailbox::daemon_absolute(
-        Arc::new(KernelFsBackend::for_agent(
+        Arc::new(KernelFsBackend::for_agent_descriptor(
             Arc::clone(&kernel),
-            "test-owner",
-            "root",
-            "failed-peer",
+            &planted("failed-peer"),
             "/",
         )),
         "failed-peer".into(),

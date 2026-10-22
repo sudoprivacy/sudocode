@@ -400,3 +400,34 @@ pub fn report(directory: &Path) -> Value {
         "forward_comparison": forward,
     })
 }
+
+/// The current boundary recommendation, using the same saved decision as stats.
+/// No ledger scan, price calculation, model call or request-policy change.
+#[must_use]
+pub fn session_tip(session_id: &str, model: &str) -> Option<crate::Tip> {
+    if !runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor)
+        || !matches!(
+            Path::new(session_id).components().next(),
+            Some(std::path::Component::Normal(_))
+        )
+        || Path::new(session_id).components().count() != 1
+    {
+        return None;
+    }
+    let decision = state(&crate::cache_root().join(session_id))
+        .decisions
+        .pop()?;
+    if decision.model != model || decision.suggested_ttl_seconds == decision.configured_ttl_seconds
+    {
+        return None;
+    }
+    let label = |ttl| if ttl == 3600 { "1h" } else { "5m" };
+    Some(crate::Tip {
+        priority: crate::TipPriority::Important,
+        message: format!(
+            "Cache TTL: consider {} (current {}; not applied)",
+            label(decision.suggested_ttl_seconds),
+            label(decision.configured_ttl_seconds)
+        ),
+    })
+}

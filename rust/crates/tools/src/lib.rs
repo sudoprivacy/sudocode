@@ -1070,14 +1070,35 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
     let mut specs = vec![
         ToolSpec {
             name: "bash",
-            description: "Execute a shell command in the current workspace.",
+            description: concat!(
+                "Executes a bash command and returns its output.\n\n",
+                "- `timeout` is in milliseconds (default 120000 for a foreground command).\n",
+                "- `run_in_background` runs the command detached: it keeps running across ",
+                "turns and notifies you when it exits. No `&` needed. Use it when you do not ",
+                "need the result immediately — you will be told when it completes, and you ",
+                "can read its output file at any time.\n",
+                "- Avoid unnecessary `sleep` commands:\n",
+                "  - Do not sleep between commands that can run immediately — just run them.\n",
+                "  - If your command is long running and you would like to be notified when ",
+                "it finishes, use `run_in_background`. No sleep needed.\n",
+                "  - If waiting on a background task or monitor you started, end your turn: ",
+                "you will be notified when it finishes or fires — do not poll.\n",
+                "  - Do not retry failing commands in a sleep loop — diagnose the root cause.\n",
+                "  - Long leading `sleep` commands block the turn and everything queued ",
+                "behind it. To wait until a condition is met, use Monitor with a loop that ",
+                "exits when it holds (e.g. `until <check>; do sleep 2; done`) — you are ",
+                "notified when the loop exits. Do not chain shorter sleeps to work around ",
+                "this.\n",
+                "- Use the Monitor tool to watch a process or log; for a one-shot ",
+                "\"wait until done\", use `run_in_background` instead."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
                     "timeout": { "type": "integer", "minimum": 1, "description": "Maximum milliseconds to wait before interrupting the command (default 120000)." },
                     "description": { "type": "string" },
-                    "run_in_background": { "type": "boolean" },
+                    "run_in_background": { "type": "boolean", "description": "Run the command detached: it keeps running across turns and notifies you when it exits. No `&` needed. Prefer this over sleeping or polling for long-running work." },
                     "dangerouslyDisableSandbox": { "type": "boolean" },
                     "namespaceRestrictions": { "type": "boolean" },
                     "isolateNetwork": { "type": "boolean" },
@@ -1085,6 +1106,33 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
                     "allowedMounts": { "type": "array", "items": { "type": "string" } }
                 },
                 "required": ["command"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::DangerFullAccess,
+        },
+        ToolSpec {
+            name: "Monitor",
+            description: concat!(
+                "Watch, monitor, or keep an eye on a process, log, or command. ",
+                "The call returns immediately with a task id and the watch keeps ",
+                "running across turns.\n\n",
+                "End your turn after starting one: you will be notified when it ",
+                "finishes or fires. Keep working — do not poll, sleep, or re-read ",
+                "its output while you wait. An event may arrive while you are ",
+                "waiting for the user; it is not their reply.\n\n",
+                "To wait until a condition is met, give it a loop that exits when ",
+                "the condition holds (e.g. `until grep -q \"Ready\" dev.log; do ",
+                "sleep 2; done`) — you are notified when the loop exits. For a ",
+                "one-shot \"wait until this command is done\", use bash with ",
+                "`run_in_background` instead."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Shell command to watch. The watch ends when it exits." },
+                    "description": { "type": "string", "description": "Short label for this watch, shown in notifications and the task panel." }
+                },
+                "required": ["command", "description"],
                 "additionalProperties": false
             }),
             required_permission: PermissionMode::DangerFullAccess,
@@ -1480,6 +1528,25 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             }),
             required_permission: PermissionMode::WorkspaceWrite,
         },
+        ToolSpec {
+            name: "set_tip",
+            description: "Show one concise, actionable tip in the current session footer. Choose priority explicitly: urgent = the user needs to act now; important = a useful recommendation; normal = optional guidance. Higher priorities take precedence. Use sparingly, not for routine progress or full answers. This does not request approval, ask a question, change configuration, or send a message to another person. Tips clear when the next turn starts; an empty message clears this priority now.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "priority": {
+                        "type": "string", "enum": ["urgent", "important", "normal"],
+                        "description": "urgent: immediate user action; important: actionable recommendation; normal: optional usage hint."
+                    },
+                    "message": {
+                        "type": "string", "maxLength": runtime::tips::MAX_TIP_CHARS,
+                        "description": "One plain-text line without control characters. Empty clears this priority."
+                    }
+                },
+                "required": ["priority", "message"], "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
         // ── pid.* tools ───────────────────────────────────────────────
         // Agent process control. `normalize_pid_input` accepts `task_id`
         // as a field alias for `pid` so older prompts still work.
@@ -1859,6 +1926,16 @@ fn execute_tool_with_enforcer(
                 .as_ref(),
             )
         }
+        "Monitor" => {
+            let monitor_input: MonitorInput = from_value(input)?;
+            // A watch runs arbitrary shell, so it is gated exactly like bash.
+            let classified_mode = classify_bash_permission(&monitor_input.command);
+            maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
+            run_monitor(
+                monitor_input,
+                ctx.and_then(|ctx| ctx.background_tasks.as_ref()),
+            )
+        }
         "read_file" => {
             maybe_enforce_permission_check(enforcer, name, input)?;
             from_value::<ReadFileInput>(input).and_then(|input| run_read_file(input, fs))
@@ -1930,6 +2007,12 @@ fn execute_tool_with_enforcer(
         }
         "AskUserQuestion" => {
             from_value::<AskUserQuestionInput>(input).and_then(run_ask_user_question)
+        }
+        "set_tip" => {
+            maybe_enforce_permission_check(enforcer, name, input)?;
+            let tip: runtime::tips::Tip = from_value(input)?;
+            tip.validate()?;
+            Ok(json!({"tip": tip}).to_string())
         }
         "TodoWrite" => {
             from_value::<TodoWriteInput>(input).and_then(|input| run_todo_write(input, fs))
@@ -2186,6 +2269,14 @@ fn run_todo_write(input: TodoWriteInput, fs: &Arc<dyn FsBackend>) -> Result<Stri
 pub fn todos_from_tool_result(output: &str) -> Option<Vec<runtime::Todo>> {
     let value: Value = serde_json::from_str(output).ok()?;
     serde_json::from_value(value.get("todos")?.clone()).ok()
+}
+
+/// Decode the bounded result of `set_tip` through the existing tool-result seam.
+pub fn tip_from_tool_result(output: &str) -> Option<runtime::tips::Tip> {
+    let value: Value = serde_json::from_str(output).ok()?;
+    let tip: runtime::tips::Tip = serde_json::from_value(value.get("tip")?.clone()).ok()?;
+    tip.validate().ok()?;
+    Some(tip)
 }
 
 fn run_pid_status(input: Value, fs: &dyn FsBackend) -> Result<String, String> {
@@ -3478,6 +3569,40 @@ fn from_value<T: for<'de> Deserialize<'de>>(input: &Value) -> Result<T, String> 
 /// Classify bash command permission based on command type and path.
 /// ROADMAP #50: Read-only commands targeting CWD paths get `WorkspaceWrite`,
 /// all others remain `DangerFullAccess`.
+/// Input for the `Monitor` tool.
+#[derive(Debug, Deserialize)]
+struct MonitorInput {
+    command: String,
+    description: String,
+}
+
+/// Start a watch and return immediately.
+///
+/// Reuses the same launcher the `bash` tool's `run_in_background` path uses, so
+/// a watch and a background command share one registry, one output owner, one
+/// cancellation contract and one process group. The only thing `Monitor` adds
+/// is the intent: the model is told to end its turn and wait to be notified.
+fn run_monitor(
+    input: MonitorInput,
+    tasks: Option<&runtime::background_tasks::BackgroundTasks>,
+) -> Result<String, String> {
+    let cwd = runtime::current_workspace_root_or_default();
+    let command = runtime::shell_command_in(&cwd, &input.command);
+    let (id, output_path) = runtime::launch_background_command(
+        command,
+        runtime::subagent_completion::ShellKind::Bash,
+        &input.command,
+        &input.description,
+        tasks,
+    )
+    .map_err(|error| format!("failed to start monitor: {error}"))?;
+    Ok(format!(
+        "Monitor started (task {id}, output {output_path}). You will be notified \
+         when it finishes or fires. Keep working — do not poll or sleep. An event \
+         may arrive while you are waiting for the user; it is not their reply."
+    ))
+}
+
 fn classify_bash_permission(command: &str) -> PermissionMode {
     // Read-only commands that are safe when targeting workspace paths
     const READ_ONLY_COMMANDS: &[&str] = &[
@@ -8515,6 +8640,7 @@ fn execute_tool_search(input: ToolSearchInput) -> ToolSearchOutput {
 /// [`GlobalToolRegistry::core_definitions`]), so the next request carries every
 /// schema and the model calls any of them directly.
 const CORE_TOOLS: &[&str] = &[
+    "set_tip",
     "bash",
     "read_file",
     "read_tool_output",

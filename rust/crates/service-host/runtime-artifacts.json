@@ -1,5 +1,6 @@
 {
   "versions": {
+    "nexusd-cluster": "0.8.21",
     "nexus-vault": "0.5.68",
     "nexus-local-connector": "0.4.64",
     "nexus-fuse-plugin": "0.6.64"

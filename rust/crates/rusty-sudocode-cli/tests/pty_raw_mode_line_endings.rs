@@ -297,7 +297,7 @@ fn chrome_remains_visible_and_interactive_after_the_stream_is_drained() {
     let mut sess = spawn_iocraft_repl(&env, "workspace-write");
 
     // The permanent footer is chrome: drawn by the renderer, never appended.
-    let footer = "/exit";
+    let footer = "Type /help for commands";
     common::expect_screen(
         &sess,
         |screen| screen.contains(footer),

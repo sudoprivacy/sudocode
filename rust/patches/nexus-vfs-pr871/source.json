@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/nexi-lab/nexus-vfs",
+  "base_commit": "c7489d3b772602d91106e8d6f65c8758e9479040",
+  "base_tag": "v0.8.22",
+  "patch_sha256": "917b004f2446580621fc69144b8a497978f2fb646877433c2ab8b3c9eca8702c"
+}

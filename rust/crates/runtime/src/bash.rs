@@ -761,6 +761,22 @@ fn launch_background_shell(
     )
 }
 
+/// Build a sandbox-aware shell command for a caller that has no
+/// `BashCommandInput` of its own (e.g. `Monitor`).
+///
+/// Exposed so background watches cannot drift from how every other command is
+/// constructed: hardcoding a shell is how `bash -lc` ended up resolving to the
+/// WSL stub on Windows instead of running anything.
+pub fn shell_command_in(cwd: &std::path::Path, command: &str) -> Command {
+    let config = ConfigLoader::default_for(cwd).load().map_or_else(
+        |_| SandboxConfig::default(),
+        |runtime_config| runtime_config.sandbox().clone(),
+    );
+    let request = config.resolve_request(None, None, None, None, None);
+    let sandbox = resolve_sandbox_status_for_request(&request, cwd);
+    prepare_command(command, cwd, &sandbox, false)
+}
+
 /// Spawn any terminal command under one output and cancellation owner.
 pub fn launch_background_command(
     mut command: Command,

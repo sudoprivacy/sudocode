@@ -8,17 +8,18 @@
 //! # ChromeSlot pattern
 //!
 //! The REPL chrome uses named slots with explicit content ownership.
-//! `StatusSlot`, `InputSlot`, and `FooterSlot` each select one enum variant;
+//! `StatusSlot` and `InputSlot` select their current view; the footer combines
+//! permission, task summary and one prioritized tip;
 //! `PendingSlot` and `TodoSlot` render their current lists and hide when empty:
 //!
 //! ```text
 //! [PendingSlot]   ← in-flight tools and queued messages
-//! [StatusSlot]    ← activity | turn_result | tips | empty
+//! [StatusSlot]    ← activity | turn_result | empty
 //! [TodoSlot]      ← todo summary and items | empty
 //! ──── separator ────
-//! [InputSlot]     ← hint | text_input | question_panel
+//! [InputSlot]     ← text_input | question_panel
 //! ──── separator ────
-//! [FooterSlot]    ← hint (3s) > turn_active > minimal > full
+//! [FooterSlot]    ← permission · tasks · one prioritized tip
 //! ```
 
 use std::io::{self, Write};
@@ -28,12 +29,12 @@ use std::time::{Duration, Instant};
 
 use crate::render::activity::{ActivityState, ToolActivity};
 use commands::suggest_slash_commands;
-use crossterm::style::Color as TerminalColor;
 use engine_events::EngineState;
 use iocraft::prelude::*;
 
 mod ansi_text;
 mod choice_text;
+mod footer;
 mod input_history;
 mod layout;
 mod prompt_text;
@@ -43,8 +44,8 @@ use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
 use ansi_text::{row_text, AnsiText, RichText};
 use choice_text::ChoiceText;
+use footer::FooterTips;
 use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
-use prompt_text::PromptTextCache;
 pub(crate) mod prose_preview;
 use prose_preview::{PreviewUpdate, ProsePreview};
 use tasks::{TaskBrowser, TaskFocus};
@@ -154,45 +155,15 @@ mod stderr_redirect {
 
 /// ChromeSlot: status area above the separator. One variant renders at a time.
 ///
-/// Priority: Activity > TurnResult > Tips > Empty.
+/// Priority: Activity > TurnResult > Empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StatusSlot {
     /// Running model, tool, or retry activity; input panels own waiting states.
     Active(String),
     /// Turn result (tokens/cost/ctx). Cleared when the next turn starts.
     TurnResult(Arc<StyledText>),
-    /// First-run tips. Dismissed on first submit.
-    Tips,
     /// Nothing — slot not rendered, saves vertical space.
     Empty,
-}
-
-/// ChromeSlot: bottom hint line. Content varies by lifecycle phase.
-///
-/// Priority (highest first): Hint > TurnActive > Minimal > Full.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum FooterSlot {
-    /// Transient hint — highest priority, auto-dismissed after 3 seconds.
-    Hint(String),
-    /// Before first submit — full hints.
-    Full,
-    /// After first submit — just permission mode + essentials.
-    Minimal,
-    /// During turn — permission mode only.
-    TurnActive,
-}
-
-fn format_footer_text(slot: &FooterSlot, perm: &str) -> String {
-    match slot {
-        FooterSlot::Hint(msg) => format!("  {msg}"),
-        FooterSlot::Full => format!(
-            "  \u{23f5}\u{23f5} {perm} \u{00b7} /help for commands \u{00b7} /exit to quit \u{00b7} Tab for /commands"
-        ),
-        FooterSlot::Minimal => format!(
-            "  \u{23f5}\u{23f5} {perm} \u{00b7} /help \u{00b7} /exit to quit"
-        ),
-        FooterSlot::TurnActive => format!("  \u{23f5}\u{23f5} {perm}"),
-    }
 }
 
 /// Maximum number of options for DialPad mode (digit-key shortcuts 1–9).
@@ -238,8 +209,6 @@ pub struct QuestionPromptView {
 /// Exactly one variant renders at a time.
 #[derive(Clone, Debug)]
 enum InputSlot {
-    /// Transient hint — dismissed on any keypress.
-    Hint(String),
     /// Normal text input with ❯ prompt.
     TextInput,
     /// ≤9 options, digit-key shortcut per item (tool approval, init).
@@ -417,7 +386,9 @@ pub enum UiCommand {
     ShowQuestion(QuestionPromptView),
     ClearQuestion,
     SetTurnResult(Arc<StyledText>),
-    ShowInputHint(String),
+    SetTip(engine_core::Tip),
+    SetCacheTip(Option<engine_core::Tip>),
+    BeginTurn,
     /// Update the `TodoSlot` panel with the current todo list.
     UpdateTodos(Vec<runtime::Todo>),
     /// A tool call started — append a running (yellow) card to the pending
@@ -481,7 +452,22 @@ impl UiCommandSender {
     }
 
     pub fn show_input_hint(&self, text: &str) {
-        let _ = self.tx.send(UiCommand::ShowInputHint(text.to_string()));
+        self.set_tip(engine_core::Tip {
+            priority: engine_core::TipPriority::Normal,
+            message: text.to_string(),
+        });
+    }
+
+    pub(crate) fn set_tip(&self, tip: engine_core::Tip) {
+        let _ = self.tx.send(UiCommand::SetTip(tip));
+    }
+
+    pub(crate) fn begin_turn(&self) {
+        let _ = self.tx.send(UiCommand::BeginTurn);
+    }
+
+    pub(crate) fn set_cache_tip(&self, tip: Option<engine_core::Tip>) {
+        let _ = self.tx.send(UiCommand::SetCacheTip(tip));
     }
 
     pub fn update_todos(&self, todos: Vec<runtime::Todo>) {
@@ -951,6 +937,8 @@ pub enum InputEvent {
         display: String,
     },
     QuestionAnswer(String),
+    /// Inspect the frozen review without answering it.
+    InspectDocument(String),
     StopBackgroundTask(String),
     /// ESC pressed — cancel the running turn.
     Abort,
@@ -1277,7 +1265,6 @@ struct ReplContext {
     input_tx: SyncSender<InputEvent>,
     spinner: ActivityState,
     permission_mode: String,
-    tips_line: String,
     stderr_redir: Arc<Mutex<Option<stderr_redirect::StderrRedirect>>>,
     /// Todo items for the `TodoSlot`. Updated by `UiCommand::UpdateTodos`
     /// in the tick loop, read during the render phase. Uses `Arc<Mutex>`
@@ -1314,7 +1301,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let input_tx = ctx.input_tx.clone();
     let spinner = ctx.spinner.clone();
     let permission_mode = ctx.permission_mode.clone();
-    let tips_text = ctx.tips_line.clone();
     let stderr_redir = Arc::clone(&ctx.stderr_redir);
     let todo_items = Arc::clone(&ctx.todo_items);
     let todo_items_for_future = Arc::clone(&ctx.todo_items);
@@ -1348,6 +1334,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut tab_candidates = hooks.use_state(Vec::<String>::new);
     let mut tab_index = hooks.use_state(|| 0usize);
     let mut footer_hint = hooks.use_state(|| None::<(String, Instant)>);
+    let mut footer_tips = hooks.use_state(FooterTips::default);
     let mut dialpad_cursor = hooks.use_state(|| 0usize);
     // Free-text buffer for a DialPad's built-in custom-input row. Every DialPad
     // has this row (empty until the question opts in via `allow_custom_input`);
@@ -1361,10 +1348,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut next_paste_id = hooks.use_state(|| 1u32);
     let mut input_reviewable = hooks.use_state(|| true);
     let mut measurements = hooks.use_ref_default::<Measurements>();
-    let prompt_renderer = hooks.use_ref(crate::render::TerminalRenderer::new);
-    let mut prompt_text = hooks.use_ref_default::<PromptTextCache>();
-    // Stay mounted at zero height so the handle never references torn-down state.
-    let mut review_handle = hooks.use_ref_default::<ScrollViewHandle>();
 
     // Clone handles for the future (StdoutHandle is Clone).
     let stdout_for_future = stdout.clone();
@@ -1449,7 +1432,18 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 .set(Some((message, Instant::now() + Duration::from_secs(3))));
                         }
                         Ok(UiCommand::ShowQuestion(question)) => {
-                            review_handle.write().scroll_to_top();
+                            // A request's immutable description belongs to
+                            // history. Only its first field presents it; the
+                            // live slot owns the current field's controls.
+                            if question.index == 0 {
+                                if let Some(description) = &question.description {
+                                    let document = prompt_text::render_document(
+                                        description,
+                                        crate::render::query_terminal_width(),
+                                    );
+                                    write_iocraft_output(&stdout_for_future, &document, true);
+                                }
+                            }
                             tasks_for_future
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1478,11 +1472,11 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 input_value.set(String::new());
                             }
                         }
+                        Ok(UiCommand::SetTip(tip)) => footer_tips.write().set(tip),
+                        Ok(UiCommand::SetCacheTip(tip)) => footer_tips.write().cache(tip),
+                        Ok(UiCommand::BeginTurn) => footer_tips.write().begin_turn(),
                         Ok(UiCommand::SetTurnResult(text)) => {
                             turn_result.set(Some(text));
-                        }
-                        Ok(UiCommand::ShowInputHint(text)) => {
-                            input_slot.set(InputSlot::Hint(text));
                         }
                         Ok(UiCommand::UpdateTodos(todos)) => {
                             if let Ok(mut items) = todo_items_for_future.lock() {
@@ -1624,32 +1618,27 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 ..
             }) if kind != KeyEventKind::Release => {
                 let current_slot = input_slot.read().clone();
+                if code == KeyCode::Char('o') && modifiers.contains(KeyModifiers::CONTROL) {
+                    let question = match &current_slot {
+                        InputSlot::DialPad(question) => Some(question),
+                        InputSlot::FuzzySelect(state) => Some(&state.question),
+                        _ => None,
+                    };
+                    if let Some(description) = question.and_then(|q| q.description.as_ref()) {
+                        let document = prompt_text::render_document(
+                            description,
+                            crate::render::query_terminal_width(),
+                        );
+                        let _ = input_tx_for_events.send(InputEvent::InspectDocument(document));
+                        return;
+                    }
+                }
                 // Never submit or edit contents that cannot be reviewed. The
                 // mounted editor preserves its buffer/cursor while unfocused.
                 if (!input_reviewable.get() || !input_frame.is_current())
                     && code != KeyCode::Esc
                     && !(code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
                 {
-                    return;
-                }
-                if matches!(current_slot, InputSlot::DialPad(_) | InputSlot::FuzzySelect(_)) {
-                    let mut review = review_handle.write();
-                    let page = i32::from(review.viewport_height()).saturating_sub(1).max(1);
-                    match code {
-                        KeyCode::PageUp => { review.scroll_by(-page); return; }
-                        KeyCode::PageDown => { review.scroll_by(page); return; }
-                        KeyCode::Home if modifiers.contains(KeyModifiers::CONTROL) => {
-                            review.scroll_to_top(); return;
-                        }
-                        KeyCode::End if modifiers.contains(KeyModifiers::CONTROL) => {
-                            review.scroll_to_bottom(); return;
-                        }
-                        _ => {}
-                    }
-                }
-                // Dismiss InputSlot::Hint on any keypress.
-                if matches!(current_slot, InputSlot::Hint(_)) {
-                    input_slot.set(InputSlot::TextInput);
                     return;
                 }
                 // One keyboard owner. Task browsing never sends a model prompt
@@ -1698,9 +1687,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // ── Enter ──────────────────────────────────────────
                     KeyCode::Enter if !modifiers.contains(KeyModifiers::SHIFT) => {
                         match &current_slot {
-                            InputSlot::Hint(_) => {
-                                input_slot.set(InputSlot::TextInput);
-                            }
                             InputSlot::DialPad(question) => {
                                 let selected = dialpad_cursor.get();
                                 let on_custom_row =
@@ -1791,7 +1777,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                             // would make a queued input look sent.
                                             let _ = input_tx_for_events.send(InputEvent::Submit { text: expanded, display });
                                         }
-                                        InputEvent::QuestionAnswer(_) | InputEvent::Abort | InputEvent::StopBackgroundTask(_) => {}
+                                        InputEvent::QuestionAnswer(_) | InputEvent::InspectDocument(_) | InputEvent::Abort | InputEvent::StopBackgroundTask(_) => {}
                                     }
                                     input_value.set(String::new());
                                     if history_cursor.get().is_some() {
@@ -1980,10 +1966,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                     }
                     KeyCode::Esc => {
-                        // In FuzzySelect/DialPad/Hint, ESC cancels. Also drop any
+                        // In FuzzySelect/DialPad, ESC cancels. Also drop any
                         // in-progress DialPad custom-input buffer.
                         dialpad_input.set(String::new());
-                        if !matches!(current_slot, InputSlot::TextInput | InputSlot::Hint(_)) {
+                        if !matches!(current_slot, InputSlot::TextInput) {
                             input_slot.set(InputSlot::TextInput);
                             input_value.set(String::new());
                             let _ = input_tx_for_events.send(InputEvent::Abort);
@@ -2095,8 +2081,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let val = input_value.read().clone();
     let current_input_slot = input_slot.read().clone();
     let submitted = *has_submitted.read();
+    let turn_active = activity_state != EngineState::Idle;
 
-    // StatusSlot: Activity > TurnResult > Tips > Empty
+    // StatusSlot: Activity > TurnResult > Empty
     let status_slot = if activity_state == EngineState::Running {
         // Reuse the existing status row and shared column layout. No additional
         // live rows can spill into scrollback as tool output grows.
@@ -2123,33 +2110,19 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         StatusSlot::Empty
     } else if let Some(ref tr) = *turn_result.read() {
         StatusSlot::TurnResult(tr.clone())
-    } else if !submitted {
-        StatusSlot::Tips
     } else {
         StatusSlot::Empty
     };
 
-    // FooterSlot: Hint > TurnActive > Minimal > Full
-    let footer_slot = if let Some((ref msg, _)) = *footer_hint.read() {
-        FooterSlot::Hint(msg.clone())
-    } else if activity_state != EngineState::Idle {
-        FooterSlot::TurnActive
-    } else if submitted {
-        FooterSlot::Minimal
-    } else {
-        FooterSlot::Full
-    };
-
-    // Both choice widgets share the same document presentation. Only the
-    // controls below it differ; neither picker interprets Markdown itself.
+    // The frozen document belongs to history; both pickers retain only controls.
     let question = match &current_input_slot {
         InputSlot::DialPad(question) => Some(question),
         InputSlot::FuzzySelect(state) => Some(&state.question),
-        InputSlot::Hint(_) | InputSlot::TextInput => None,
+        InputSlot::TextInput => None,
     };
     // InputSlot rendering
     let (panel_text, prompt_label) = match &current_input_slot {
-        InputSlot::Hint(_) | InputSlot::TextInput => (None, crate::render::PROMPT_PREFIX),
+        InputSlot::TextInput => (None, crate::render::PROMPT_PREFIX),
         InputSlot::DialPad(q) => (
             Some(format_question_panel(
                 q,
@@ -2166,9 +2139,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut browser = tasks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let footer_text = browser.footer(&format_footer_text(&footer_slot, &perm), w);
-    // Keep task affordances in compact chrome, not just a generic footer label.
-    let footer_summary = browser.footer("compact · enlarge to expand", w);
+    let footer_text = Arc::new(footer_tips.read().render(
+        &perm,
+        &browser,
+        submitted,
+        turn_active,
+        footer_hint.read().as_ref().map(|(text, _)| text.as_str()),
+        w,
+    ));
+    let footer_summary = Arc::new(footer_tips.read().render(
+        "compact · enlarge to expand",
+        &browser,
+        submitted,
+        turn_active,
+        footer_hint.read().as_ref().map(|(text, _)| text.as_str()),
+        w,
+    ));
     let task_panel = browser.is_panel().then(|| browser.panel(w, usize::MAX));
     let task_focus = browser.focus;
     drop(browser);
@@ -2211,34 +2197,36 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         foreground_color: chrome_has_color.then_some(color),
         ..crossterm::style::ContentStyle::default()
     };
-    let chrome_muted = chrome_style(chrome_theme.muted);
     let chrome_border = chrome_has_color
         .then_some(chrome_theme.border)
         .and_then(ansi_text::ui_color);
+    let chrome_muted = chrome_style(chrome_theme.muted);
     let question_style = chrome_style(chrome_theme.primary);
     let status_text = match &status_slot {
         StatusSlot::Active(s) => ansi(s),
         StatusSlot::TurnResult(s) => s.clone(),
-        StatusSlot::Tips => ansi_with_style(&tips_text, chrome_muted),
         StatusSlot::Empty => Default::default(),
     };
     let status_summary = match &status_slot {
         StatusSlot::Active(_) => "Status: turn active",
         StatusSlot::TurnResult(_) => "Status: last turn (collapsed)",
-        StatusSlot::Tips => "Status: tips (collapsed)",
         StatusSlot::Empty => "",
     };
     let heading = ansi_with_style(
         question
-            .and_then(|q| q.title.as_ref())
-            .map(|title| format!("[{title}]"))
+            .map(|q| {
+                let title = q.title.as_ref().map(|title| format!("[{title}]"));
+                if q.description.is_some() {
+                    format!(
+                        "{} · Ctrl+O view full text",
+                        title.as_deref().unwrap_or("Review document")
+                    )
+                } else {
+                    title.unwrap_or_default()
+                }
+            })
             .unwrap_or_default(),
         question_style,
-    );
-    let body = prompt_text.write().render(
-        &prompt_renderer.read(),
-        question.and_then(|q| q.description.as_ref()),
-        w,
     );
     let mut controls = if let Some(panel) = task_panel.clone() {
         ansi(panel)
@@ -2263,14 +2251,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut measured = measurements.write();
     measured.begin(w);
     let heading_rows = measured.rows(&heading);
-    let body_rows = measured.rows(&body);
     let mut controls_rows = measured.rows(&controls);
     let input_row_count = if task_panel.is_some() {
         0
     } else {
         match &current_input_slot {
             InputSlot::TextInput => desired_text_rows,
-            InputSlot::Hint(text) => measured.rows(&ansi(text)),
             InputSlot::DialPad(_) => 0,
             InputSlot::FuzzySelect(fs) => {
                 measured.rows(&ansi(format!("{prompt_label}{}", fs.filter)))
@@ -2280,7 +2266,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let layout = ChromeLayout::allocate(
         w,
         term_height as usize,
-        heading_rows + body_rows + controls_rows + input_row_count,
+        heading_rows + controls_rows + input_row_count,
         [
             Slot {
                 minimum_full_rows: 0,
@@ -2305,14 +2291,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             },
             Slot {
                 minimum_full_rows: 0,
-                full: ansi_with_style(footer_text, chrome_muted),
-                summary: ansi_with_style(
-                    match &footer_slot {
-                        FooterSlot::Hint(hint) => hint.clone(),
-                        _ => footer_summary,
-                    },
-                    chrome_muted,
-                ),
+                full: footer_text,
+                summary: footer_summary,
             },
         ],
         format!(
@@ -2336,8 +2316,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
     let input_layout = InputLayout::allocate(
         layout.input_rows,
-        [heading_rows, body_rows, controls_rows, input_row_count],
-        &mut measured,
+        [heading_rows, controls_rows, input_row_count],
     );
     measured.end();
     drop(measured);
@@ -2355,14 +2334,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         input_layout
     } else {
         InputLayout::default()
-    };
-    let review_hint = if visible.hint > 0 {
-        let offset = usize::try_from(review_handle.read().scroll_offset())
-            .unwrap_or(0)
-            .min(body_rows.saturating_sub(visible.body));
-        layout::review_hint(offset, visible.body, body_rows)
-    } else {
-        String::new()
     };
     let row_height = |rows: usize| {
         u32::try_from(rows).expect("allocated chrome rows fit the terminal's u16 geometry")
@@ -2410,27 +2381,12 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
             }))
             #(row_text("heading", heading, visible.heading))
-            // Stateful owners stay mounted for their handle's entire lifetime,
-            // including between questions. Only their stateless text can be
-            // omitted; a handle outliving its ScrollView references dead State.
-            View(height: row_height(visible.body), flex_shrink: 0.0, overflow: Overflow::Hidden) {
-                ScrollView(handle: Some(review_handle), auto_scroll: false, scrollbar: Some(false), keyboard_scroll: Some(false)) {
-                    #((body_rows > 0).then(|| element! { RichText(content: body) }))
-                }
-            }
-            #(row_text("review-hint", ansi_with_style(review_hint, chrome_muted), visible.hint))
             #(row_text("controls", controls, visible.controls))
             // The editor stays mounted even with zero allocated rows so a
             // shrink/grow cannot discard its cursor, draft or edit ownership.
             View(height: row_height(visible.editor), flex_shrink: 0.0, overflow: Overflow::Hidden) {
             #(if task_panel.is_some() {
                 element! { View(flex_direction: FlexDirection::Row) {} }
-            } else if let InputSlot::Hint(ref hint_text) = current_input_slot {
-                element! {
-                    View(flex_direction: FlexDirection::Row) {
-                        AnsiText(content: hint_text.clone(), initial_style: chrome_muted)
-                    }
-                }
             } else if matches!(current_input_slot, InputSlot::DialPad(_)) {
                 // DialPad: no input row — all interaction is via
                 // arrow keys and digit shortcuts shown in the panel.
@@ -2567,7 +2523,6 @@ pub fn spawn_repl_ui(
         input_tx: input_tx.clone(),
         spinner: spinner.clone(),
         permission_mode: permission_mode.to_string(),
-        tips_line: "Type /help for commands \u{00b7} /status for live context \u{00b7} /resume latest jumps back to the newest session \u{00b7} /diff then /commit to ship \u{00b7} Tab for /command completions".to_string(),
         stderr_redir: Arc::clone(&stderr_redir),
         todo_items: Arc::new(Mutex::new(todo_items)),
         pending: Arc::new(Mutex::new(Vec::new())),

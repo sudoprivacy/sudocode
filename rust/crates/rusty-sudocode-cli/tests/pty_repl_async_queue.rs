@@ -44,27 +44,53 @@ fn async_repl_processes_single_turn_and_exits() {
         &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
     );
 
-    // Startup: the async dispatcher prints the same startup banner as the sync
-    // path (via `run_repl_iocraft_dispatch`) + the iocraft render loop renders
-    // the `❯` prompt. If either dropped, we'd see a hang / EOF here.
-    sess.expect("❯").expect("async REPL should render prompt");
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "async input ready");
 
     let prompt = env.prompt("What is 2+2? Answer briefly.", "single_turn_text");
-    sess.send(&format!("{prompt}\r"))
-        .expect("send prompt into async REPL");
+    let before = common::turn_status_marker(&sess);
+    sess.send(&format!("\x1b[200~{prompt}\x1b[201~"))
+        .expect("type prompt into async REPL");
+    common::expect_input_line(
+        &sess,
+        &prompt,
+        common::DEFAULT_TIMEOUT,
+        "complete async prompt rendered before submission",
+    );
+    sess.send("\r").expect("submit async prompt");
+    common::expect_turn_complete_after(
+        &sess,
+        &before,
+        common::DEFAULT_TIMEOUT,
+        "async turn completes before exit",
+    );
+    common::expect_input_line_cleared(&sess, common::DEFAULT_TIMEOUT, "async input restored");
 
-    // The mock has a fixed response. Live models need not use the same
-    // wording, so a rendered non-empty answer is sufficient for this dispatch
-    // smoke test.
+    // A bare "4" can match a startup path or session ID before a request has
+    // even been submitted. Assert the actual response and captured request.
     if env.is_mock() {
-        sess.expect("4")
-            .expect("async REPL should stream the mock LLM answer through the runner thread");
-    } else {
-        sess.expect("turn 1")
-            .expect("async REPL should complete the live turn through the runner thread");
+        common::expect_screen(
+            &sess,
+            |screen| screen.contains("The answer is 4"),
+            common::DEFAULT_TIMEOUT,
+            "async mock answer is rendered",
+        );
+        let requests = env.captured_message_bodies();
+        assert_eq!(requests.len(), 1, "one async model request");
+        assert!(requests[0].contains("PARITY_SCENARIO:single_turn_text"));
+        assert!(
+            !requests[0].contains("/exit"),
+            "exit is not part of the prompt"
+        );
     }
 
-    sess.send("/exit\r").expect("send /exit");
+    sess.send("/exit").expect("type /exit");
+    common::expect_input_line(
+        &sess,
+        "/exit",
+        common::DEFAULT_TIMEOUT,
+        "exit command rendered before submission",
+    );
+    sess.send("\r").expect("submit /exit");
 
     // Generous timeout: CI runners (esp. macos-latest) are slower to reap
     // child processes than the local dev box. 30 s comfortably covers the

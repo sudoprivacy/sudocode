@@ -101,6 +101,7 @@ pub use engine_events;
 pub use engine_events::{
     EngineCommand, EngineEvent, EngineState, PromptContext, RequestId, TurnComplete,
 };
+pub use runtime::tips::{Tip, TipPriority};
 // Cost fields accepted by the session tracer exposed through EngineApiClient.
 pub use telemetry::{UsageCost, UsageTokens};
 

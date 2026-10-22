@@ -76,6 +76,7 @@ pub fn coordinator_allowed_tools() -> BTreeSet<&'static str> {
         "grep_search",
         // Coordinator's own to-do bookkeeping
         "TodoWrite",
+        "set_tip",
         "AskUserQuestion",
         "StructuredOutput",
         "ToolSearch",

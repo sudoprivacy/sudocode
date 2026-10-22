@@ -1466,7 +1466,10 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
     let path = fixture(&env, &capture);
     let id = Session::load_from_path(&path).unwrap().session_id;
     let directory = env.config_home().join("cache/prompt-cache").join(id);
-    let enabled = [("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1")];
+    let enabled = [
+        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+    ];
     let mut cli = spawn_with_env(&env, &path, &enabled);
     turn(&mut cli, "First observed request.");
     let rows = cache_rows(&directory);
@@ -1521,6 +1524,16 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
     cli.send("/compact\r").unwrap();
     cli.expect("Messages removed").unwrap();
     common::expect_input_line_cleared(&cli, WAIT, "advisor compaction committed");
+    common::expect_screen(
+        &cli,
+        |screen| {
+            screen
+                .rsplit_once('─')
+                .is_some_and(|(_, footer)| footer.contains("Cache TTL: consider 1h"))
+        },
+        WAIT,
+        "boundary advice in the shared footer",
+    );
     turn(&mut cli, "Continue with the configured policy.");
     exit(&mut cli);
     let state_path = directory.join("ttl-advice.json");

@@ -73,9 +73,10 @@ async function run(config) {
     await wait(() => fixture.lines().join('\n').includes('LinkBodyEND.'));
     // Replayed history can contain a prompt before the live input slot exists.
     // Start idle/interaction measurements only after a complete, quiet UI frame.
+    // Contextual tips replace startup help; the permission prefix remains stable.
     await page.waitForFunction(cols => fixture.frames > 0 && !fixture.pending
       && fixture.viewport().split('\n').some(row => row === '─'.repeat(cols))
-      && fixture.viewport().includes('/exit to quit')
+      && fixture.viewport().split('\n').some(row => /^\s*⏵⏵ danger-full-access(?:\s|$)/u.test(row))
       && performance.now() - fixture.lastData >= 300, config.cols);
     const screen = page.locator('.xterm-screen');
     const painted = async () => {

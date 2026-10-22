@@ -84,6 +84,7 @@ pub mod subagent_events;
 pub mod summary_compression;
 pub mod task_packet;
 mod time;
+pub mod tips;
 pub mod todo_store;
 pub mod tool_concurrency;
 pub mod tool_names;
@@ -93,12 +94,13 @@ mod usage;
 pub mod user_paths;
 pub mod worker_boot;
 pub mod workspace_root;
+pub mod zone_context;
 
 pub use bash::{
     clear_bash_progress_callback, execute_bash, execute_bash_with_abort,
     execute_bash_with_progress, execute_bash_with_tasks, launch_background_command,
-    set_bash_progress_callback, shell_process_group, BashCommandInput, BashCommandOutput,
-    BashProgress, BashProgressCallback, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
+    set_bash_progress_callback, shell_command_in, shell_process_group, BashCommandInput,
+    BashCommandOutput, BashProgress, BashProgressCallback, DEFAULT_TOOL_SUBPROCESS_TIMEOUT_MS,
 };
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use branch_lock::{detect_branch_lock_collisions, BranchLockCollision, BranchLockIntent};

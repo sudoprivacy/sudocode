@@ -18,6 +18,7 @@ use common::{
     agent_workspace, make_desc, mount_agent_world, provision_stream_transcript, send_prompt,
     user_ctx, wait_for_agent_reply,
 };
+use kernel::core::agents::registry::AgentDescriptor;
 use kernel::kernel::Kernel;
 use managed_harness::spawn_managed_agent;
 use runtime::mailbox::{InboxConvention, Mailbox, MailboxScope};
@@ -232,11 +233,17 @@ fn run_cohost_turn_with(
     // The user's side of the VFS: plants the fixture and provisions the
     // conversation through a real `Mailbox`, so this exercises the production
     // provisioning path rather than planting entries by hand.
-    let user_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    // The user's descriptor, planted the way the trusted service plants one,
+    // so the test's writes carry the same authority a real host's would.
+    let user_fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        USER,
+        &AgentDescriptor {
+            pid: format!("pid-{USER}"),
+            name: USER.to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
         "/".to_string(),
     ));
     let workspace = agent_workspace(pid);
@@ -622,11 +629,15 @@ fn a_cohost_subagent_consumes_a_followup_during_its_first_model_response() {
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+                let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
                     Arc::clone(kernel),
-                    "test-owner",
-                    "root",
-                    agent,
+                    &kernel::core::agents::registry::AgentDescriptor {
+                        pid: format!("pid-{agent}"),
+                        name: agent.to_string(),
+                        owner_id: "test-owner".to_string(),
+                        zone_id: "root".to_string(),
+                        ..kernel::core::agents::registry::AgentDescriptor::default()
+                    },
                     format!("{workspace}/another-runtime"),
                 ));
                 let tasks = tools::list_agent_snapshots_from_store_with(false, fs.as_ref())?;
@@ -788,12 +799,16 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     )
     .unwrap();
     let agent = "resume-agent";
-    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent(
+    let fs: Arc<dyn FsBackend> = Arc::new(KernelFsBackend::for_agent_descriptor(
         Arc::clone(&kernel),
-        "test-owner",
-        "root",
-        agent,
-        "/",
+        &AgentDescriptor {
+            pid: format!("pid-{agent}"),
+            name: agent.to_string(),
+            owner_id: "test-owner".to_string(),
+            zone_id: "root".to_string(),
+            ..AgentDescriptor::default()
+        },
+        "/".to_string(),
     ));
     let mb = Arc::new(Mailbox::daemon_absolute(Arc::clone(&fs), USER.to_string()));
     let transcript = InboxConvention::new(String::new()).transcript_path(USER, agent);

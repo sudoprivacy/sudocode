@@ -138,7 +138,12 @@ fn undersized_picker_cannot_confirm_an_unseen_selection() {
         common::DEFAULT_TIMEOUT,
         "size warning",
     );
-    sess.send("\r").unwrap();
+    // ConPTY input writes and native resize calls have no shared ordering.
+    // Inspect after Enter and wait for the frozen description before growing:
+    // this proves Enter was handled while the controls were still hidden.
+    sess.expect("Enlarge terminal to review").unwrap();
+    sess.send("\r\x0f").unwrap();
+    sess.expect("Current:").unwrap();
     sess.resize(40, 80).unwrap();
     common::expect_screen_settled(
         &sess,

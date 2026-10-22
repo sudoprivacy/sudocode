@@ -117,6 +117,14 @@ impl EngineDelegate for DeferredDelegate {
             .map_err(RuntimeError::new)?
             .run_management(line, build, observer)
     }
+    fn run_direct_tool(
+        &self,
+        name: &str,
+        input: &str,
+        prompter: &mut dyn PermissionPrompter,
+    ) -> Result<(String, bool), String> {
+        self.get()?.run_direct_tool(name, input, prompter)
+    }
     fn set_trace_id(&self, trace: &str) {
         if let Ok(delegate) = self.get() {
             delegate.set_trace_id(trace);

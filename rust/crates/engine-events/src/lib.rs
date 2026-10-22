@@ -430,6 +430,16 @@ pub enum EngineCommand {
         id: RequestId,
         answers: Result<Vec<QuestionPromptAnswer>, String>,
     },
+    /// Run one tool by name for the host, outside any turn, through the same
+    /// hooks and permission policy a model's call passes. Nothing is written
+    /// to the conversation. The engine replies with
+    /// [`EngineEvent::CommandResult`] carrying `{"content", "isError"}`, or an
+    /// error when the call could not run.
+    DirectTool {
+        request_id: u64,
+        name: String,
+        input: String,
+    },
     /// Run a slash command (`/model`, `/compact`, …); the engine replies with
     /// [`EngineEvent::Notice`] (or a more specific event).
     SlashCommand {

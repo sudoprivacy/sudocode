@@ -114,6 +114,18 @@ pub trait EngineDelegate: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Run one tool by name outside any turn, through the hooks and permission
+    /// policy a model's call passes, without writing to the conversation.
+    /// Returns the tool's output and whether it failed.
+    fn run_direct_tool(
+        &self,
+        _name: &str,
+        _input: &str,
+        _prompter: &mut dyn PermissionPrompter,
+    ) -> Result<(String, bool), String> {
+        Err("this engine does not run direct tool calls".into())
+    }
+
     /// Bind a host's trace identity after turn admission succeeds.
     fn set_trace_id(&self, _trace_id: &str) {}
 
@@ -379,6 +391,30 @@ async fn drive(
             EngineCommand::BackgroundTask { action } => {
                 handle_background_task(action, &tasks, &evt_tx);
             }
+            EngineCommand::DirectTool {
+                request_id,
+                name,
+                input,
+            } => {
+                let call = DirectCall {
+                    request_id,
+                    name,
+                    input,
+                };
+                if let Some(reason) = run_direct_tool(
+                    &delegate,
+                    call,
+                    &evt_tx,
+                    &mut tcmd_rx,
+                    &next_request_id,
+                    &tasks,
+                )
+                .await
+                {
+                    shutdown = reason;
+                    break;
+                }
+            }
             // Cancellation also reaches a lifecycle operation, such as manual
             // compaction, that holds the session's shared abort signal.
             EngineCommand::Cancel => delegate.abort_signal().abort(),
@@ -575,6 +611,7 @@ async fn run_one_turn(
                     abort.abort();
                     table.cancel_all();
                 }
+                Some(EngineCommand::DirectTool { request_id, .. }) => refuse_busy(request_id, evt_tx),
                 // A Prompt arriving mid-turn is a renderer bug (renderers serialize
                 // turns). Ignore it rather than interleave.
                 Some(_) => {}
@@ -599,6 +636,104 @@ async fn run_one_turn(
                         });
                     }
                 }
+                let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
+                break;
+            }
+        }
+    }
+    shutdown
+}
+
+/// One [`EngineCommand::DirectTool`].
+struct DirectCall {
+    request_id: u64,
+    name: String,
+    input: String,
+}
+
+/// A direct call that arrives while other work holds the engine is refused, not
+/// queued: nothing ran, so the caller has a definite answer.
+fn refuse_busy(request_id: u64, sink: &EventSink) {
+    let _ = sink.send(EngineEvent::CommandResult {
+        id: request_id,
+        result: Err("the session is busy; nothing was run".into()),
+    });
+}
+
+/// Run one [`EngineCommand::DirectTool`] on a blocking task while servicing its
+/// permission prompts through the same request table a turn uses. Returns the
+/// shutdown reason if a close or disconnection arrived meanwhile.
+async fn run_direct_tool(
+    delegate: &Arc<dyn EngineDelegate>,
+    call: DirectCall,
+    evt_tx: &EventSink,
+    tcmd_rx: &mut tokio_mpsc::UnboundedReceiver<EngineCommand>,
+    next_request_id: &Arc<AtomicU64>,
+    tasks: &runtime::background_tasks::BackgroundTasks,
+) -> Option<ShutdownReason> {
+    let table = RequestTable {
+        next_id: Arc::clone(next_request_id),
+        ..RequestTable::default()
+    };
+    let abort = delegate.abort_signal();
+    abort.reset();
+    let DirectCall {
+        request_id,
+        name,
+        input,
+    } = call;
+    let worker = Arc::clone(delegate);
+    let mut prompter = PrompterAdapter {
+        tx: evt_tx.clone(),
+        table: table.clone(),
+    };
+    let mut handle =
+        tokio::task::spawn_blocking(move || worker.run_direct_tool(&name, &input, &mut prompter));
+    let mut shutdown = None;
+    loop {
+        tokio::select! {
+            biased;
+            cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
+                Some(EngineCommand::PermissionAnswer { id, decision }) => {
+                    if let Some(PendingAnswer::Permission(tx)) = table.take(id) {
+                        let _ = tx.send(decision);
+                    }
+                }
+                Some(EngineCommand::DirectTool { request_id, .. }) => refuse_busy(request_id, evt_tx),
+                Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
+                Some(EngineCommand::Completion { id, action }) => handle_completion(id, action, evt_tx),
+                Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
+                command @ (Some(EngineCommand::Close) | None) => {
+                    shutdown = Some(if command.is_some() {
+                        ShutdownReason::ExplicitClose
+                    } else {
+                        ShutdownReason::Disconnected
+                    });
+                    abort.abort();
+                    table.cancel_all();
+                }
+                Some(EngineCommand::Cancel) => {
+                    abort.abort();
+                    table.cancel_all();
+                }
+                // The host serializes turns and direct calls on one lane, so a
+                // prompt arriving here is a renderer bug. Ignore it, as a turn
+                // does, rather than interleave.
+                Some(_) => {}
+            },
+            result = &mut handle => {
+                table.cancel_all();
+                let result = match result {
+                    Ok(Ok((content, is_error))) => Ok(serde_json::json!({
+                        "content": content,
+                        "isError": is_error,
+                    })),
+                    Ok(Err(error)) => Err(error),
+                    Err(join_error) => Err(format!("direct tool call panicked: {join_error}")),
+                };
+                let _ = evt_tx.send(EngineEvent::CommandResult { id: request_id, result });
+                // A permission prompt moves the reported state; the session is
+                // idle again either way.
                 let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
                 break;
             }

@@ -280,6 +280,47 @@ pub(crate) struct ResumeToolsRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
 pub(crate) struct ResumeToolsResponse {}
 
+// ---------------------------------------------------------------------------
+// Custom extension: _sudocode/a2a/* (direct A2A requests)
+// ---------------------------------------------------------------------------
+
+/// Run the session's own `send` tool for the client, without a model turn.
+/// Plain text only, and no `sender`: the session's agent is the sender.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcRequest)]
+#[request(method = "_sudocode/a2a/send", response = DirectA2aResponse)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DirectSendRequest {
+    pub session_id: String,
+    pub to: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// ACP lets any request carry `_meta`; it is accepted and ignored.
+    #[serde(rename = "_meta", default, skip_serializing)]
+    _meta: Option<serde::de::IgnoredAny>,
+}
+
+/// Run the session's own `agent_list` tool for the client.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcRequest)]
+#[request(method = "_sudocode/a2a/agent_list", response = DirectA2aResponse)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DirectAgentListRequest {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_only: Option<bool>,
+    #[serde(rename = "_meta", default, skip_serializing)]
+    _meta: Option<serde::de::IgnoredAny>,
+}
+
+/// The tool's own result, verbatim. `isError` reports a failed call; it does
+/// not prove that nothing was sent.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DirectA2aResponse {
+    pub content: String,
+    pub is_error: bool,
+}
+
 /// `_meta.sudocode` key a client sets in `clientCapabilities` (and scode
 /// echoes in the `initialize` result) to opt into sub-agent events.
 pub const SUBAGENT_EVENTS_META_KEY: &str = "subagentEvents";
@@ -641,22 +682,8 @@ async fn drive_prompt(
                     Some(EngineEvent::ContextCommitted(context)) => committed_context = Some(context),
                     Some(EngineEvent::State(state)) => registry.report_state(state, None),
                     Some(EngineEvent::PermissionRequest { id, request }) => {
-                        let request = build_acp_permission_request(sid.clone(), &request);
-                        let driver = Arc::clone(&driver);
                         let abort = registry.abort_signal(&sid).expect("registered session abort signal");
-                        let cx_reply = cx_perm.clone();
-                        replies.push(async move {
-                            let answer = tokio::select! {
-                                biased;
-                                () = abort.cancelled() => None,
-                                answer = cx_reply.send_request(request).block_task() => Some(answer),
-                            };
-                            let decision = match answer {
-                                Some(Ok(response)) => map_permission_response(response),
-                                _ => PermissionPromptDecision::Deny { reason: "ACP permission request cancelled or failed".into() },
-                            };
-                            let _ = driver.send(engine_core::EngineCommand::PermissionAnswer { id, decision });
-                        }.boxed());
+                        replies.push(answer_permission(&sid, id, &request, &driver, abort, cx_perm.clone()));
                     }
                     Some(EngineEvent::QuestionRequest { id, request: question_req }) => {
                     let payload = AcpAskUserQuestionRequestPayload {
@@ -981,6 +1008,8 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("systemPromptOverride".to_string(), json!(true));
     sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
     sudocode_ns.insert("toolPause".to_string(), json!({ "version": 1 }));
+    // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
+    sudocode_ns.insert("directA2a".to_string(), json!({ "version": 1 }));
     // `session/new` accepts `_meta.sudocode.forkFrom` (see
     // `fork_source_from_meta`): a client that forks a conversation into a
     // new directory gates on this instead of probing.
@@ -1807,6 +1836,17 @@ impl SessionRegistry {
         Some(lane.lock_owned().await)
     }
 
+    /// The session's lane if nothing holds it now. `None` for unknown sessions
+    /// and for sessions busy with a turn or another request.
+    #[must_use]
+    pub fn try_enter_lane(&self, session_id: &str) -> Option<SessionLaneGuard> {
+        let lane = self
+            .lock_sessions()
+            .get(session_id)
+            .map(|e| Arc::clone(&e.lane))?;
+        lane.try_lock_owned().ok()
+    }
+
     /// The process-wide working-directory lease.
     #[must_use]
     pub fn cwd_lease(&self) -> Arc<WorkspaceCwdLease> {
@@ -1958,6 +1998,100 @@ struct AcpAskUserQuestionResponsePayload {
     answers: Vec<AcpAskUserQuestionAnswerPayload>,
 }
 
+/// Ask the client to decide one engine permission request, then hand the
+/// decision back to the engine. Cancelling the session denies it.
+fn answer_permission(
+    session_id: &str,
+    id: engine_core::RequestId,
+    request: &PermissionRequest,
+    driver: &Arc<crate::session_driver::SessionDriver>,
+    abort: HookAbortSignal,
+    cx: ConnectionTo<Client>,
+) -> futures::future::BoxFuture<'static, ()> {
+    let request = build_acp_permission_request(session_id.to_string(), request);
+    let driver = Arc::clone(driver);
+    async move {
+        let answer = tokio::select! {
+            biased;
+            () = abort.cancelled() => None,
+            answer = cx.send_request(request).block_task() => Some(answer),
+        };
+        let decision = match answer {
+            Some(Ok(response)) => map_permission_response(response),
+            _ => PermissionPromptDecision::Deny {
+                reason: "ACP permission request cancelled or failed".into(),
+            },
+        };
+        let _ = driver.send(engine_core::EngineCommand::PermissionAnswer { id, decision });
+    }
+    .boxed()
+}
+
+/// Run one of the session's own A2A tools for the client, outside any turn,
+/// through the hooks and permission policy a model's call passes.
+///
+/// A direct call never waits behind a turn: a busy session is a definite
+/// refusal before anything runs, so the caller never has to guess whether a
+/// queued send went out after it stopped waiting.
+async fn drive_direct_tool(
+    registry: SharedSessionRegistry,
+    session_id: String,
+    name: &'static str,
+    input: serde_json::Value,
+    cx: ConnectionTo<Client>,
+) -> Result<DirectA2aResponse, AcpError> {
+    let admitted = registry
+        .engine(&session_id)
+        .ok_or_else(|| AcpError::invalid_params(format!("unknown sessionId: {session_id}")))?;
+    let (admitted_epoch, is_paused) = admitted.tool_control();
+    if is_paused {
+        return Err(AcpError::invalid_params(
+            "Tool execution is paused by the user",
+        ));
+    }
+    let Some(_lane) = registry.try_enter_lane(&session_id) else {
+        return Err(AcpError::invalid_params(
+            "The session is busy; nothing was sent",
+        ));
+    };
+    let unchanged = registry.engine(&session_id).is_some_and(|engine| {
+        let (epoch, is_paused) = engine.tool_control();
+        !is_paused && epoch == admitted_epoch && Arc::ptr_eq(&engine, &admitted)
+    });
+    if !unchanged {
+        return Err(AcpError::invalid_params(
+            "Session control changed while the request was admitted",
+        ));
+    }
+    let driver = registry
+        .driver(&session_id)
+        .ok_or_else(|| AcpError::internal("missing engine session driver"))?;
+    let abort = registry
+        .abort_signal(&session_id)
+        .ok_or_else(|| AcpError::invalid_params("Unknown session"))?;
+    let (_listener, mut events) = driver.listen(cx.clone());
+    let reply = driver.direct_tool(name, input.to_string());
+    tokio::pin!(reply);
+    let mut replies =
+        futures::stream::FuturesUnordered::<futures::future::BoxFuture<'static, ()>>::new();
+    let value = loop {
+        tokio::select! {
+            biased;
+            _ = replies.next(), if !replies.is_empty() => {}
+            value = &mut reply => break value,
+            event = events.recv() => match event {
+                Some(EngineEvent::PermissionRequest { id, request }) => replies.push(
+                    answer_permission(&session_id, id, &request, &driver, abort.clone(), cx.clone()),
+                ),
+                Some(_) => {}
+                None => break Err("the engine session closed before replying".to_string()),
+            },
+        }
+    };
+    let value = value.map_err(AcpError::invalid_params)?;
+    serde_json::from_value(value).map_err(|e| AcpError::internal(e.to_string()))
+}
+
 /// Build an ACP `RequestPermissionRequest` from a runtime `PermissionRequest`.
 fn build_acp_permission_request(
     session_id: String,
@@ -2051,7 +2185,7 @@ pub(crate) async fn run_acp_on_transport(
     let subagent_completions = Arc::new(AtomicBool::new(false));
     let task_completions = Arc::new(AtomicBool::new(false));
 
-    Agent
+    let connection = Agent
         .builder()
         .name("scode")
         // --- initialize ---
@@ -2968,6 +3102,66 @@ pub(crate) async fn run_acp_on_transport(
             },
             on_receive_request!(),
         )
+        // --- _sudocode/a2a/* (direct A2A requests) ---
+        .on_receive_request(
+            {
+                let registry = Arc::clone(&registry);
+                async move |req: DirectSendRequest,
+                            responder: Responder<DirectA2aResponse>,
+                            cx: ConnectionTo<Client>| {
+                    let registry = Arc::clone(&registry);
+                    let mut input = json!({ "to": req.to, "message": req.message });
+                    if let Some(summary) = req.summary {
+                        input["summary"] = json!(summary);
+                    }
+                    let connection = cx.clone();
+                    cx.spawn(async move {
+                        let result =
+                            drive_direct_tool(registry, req.session_id, "send", input, connection)
+                                .await;
+                        match result {
+                            Ok(response) => responder.respond(response)?,
+                            Err(error) => responder.respond_with_error(acp_error_to_sdk(&error))?,
+                        }
+                        Ok(())
+                    })?;
+                    Ok(())
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let registry = Arc::clone(&registry);
+                async move |req: DirectAgentListRequest,
+                            responder: Responder<DirectA2aResponse>,
+                            cx: ConnectionTo<Client>| {
+                    let registry = Arc::clone(&registry);
+                    let input = match req.active_only {
+                        Some(active_only) => json!({ "active_only": active_only }),
+                        None => json!({}),
+                    };
+                    let connection = cx.clone();
+                    cx.spawn(async move {
+                        let result = drive_direct_tool(
+                            registry,
+                            req.session_id,
+                            "agent_list",
+                            input,
+                            connection,
+                        )
+                        .await;
+                        match result {
+                            Ok(response) => responder.respond(response)?,
+                            Err(error) => responder.respond_with_error(acp_error_to_sdk(&error))?,
+                        }
+                        Ok(())
+                    })?;
+                    Ok(())
+                }
+            },
+            on_receive_request!(),
+        )
         // --- catch-all for unhandled methods ---
         .on_receive_dispatch(
             async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
@@ -2985,8 +3179,14 @@ pub(crate) async fn run_acp_on_transport(
             },
             on_receive_dispatch!(),
         )
-        .connect_to(transport)
-        .await?;
+        .connect_to(transport);
+    // The handler chain is one nested generic type per request served. Erase it
+    // here, where this crate's recursion limit covers its layout, so a caller
+    // awaiting the server holds a boxed future rather than that whole type.
+    let connection: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), Error>> + Send + '_>,
+    > = Box::pin(connection);
+    connection.await?;
 
     Ok(())
 }

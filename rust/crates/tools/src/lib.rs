@@ -9582,7 +9582,7 @@ fn execute_powershell_in_session(
     let shell = detect_powershell_shell()?;
     if input.run_in_background.unwrap_or(false) {
         return launch_background_powershell(
-            shell,
+            &shell,
             &input.command,
             input.description.as_deref().unwrap_or(&input.command),
             tasks,
@@ -9590,7 +9590,7 @@ fn execute_powershell_in_session(
     }
 
     execute_shell_command(
-        shell,
+        &shell,
         &input.command,
         input.timeout,
         input.run_in_background,
@@ -9598,32 +9598,55 @@ fn execute_powershell_in_session(
     )
 }
 
-fn detect_powershell_shell() -> std::io::Result<&'static str> {
-    if command_exists("pwsh") {
-        Ok("pwsh")
-    } else if command_exists("powershell") {
-        Ok("powershell")
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "PowerShell executable not found (expected `pwsh` or `powershell` in PATH)",
-        ))
+fn detect_powershell_shell() -> std::io::Result<PathBuf> {
+    resolve_powershell_shell(
+        std::env::var_os("PATH").as_deref(),
+        &std::env::current_dir()?,
+    )
+}
+
+fn resolve_powershell_shell(
+    paths: Option<&std::ffi::OsStr>,
+    parent_cwd: &Path,
+) -> std::io::Result<PathBuf> {
+    if let Some(paths) = paths {
+        for shell in ["pwsh", "powershell"] {
+            for dir in std::env::split_paths(paths) {
+                let dir = parent_cwd.join(dir);
+                let candidate = if cfg!(windows) {
+                    dir.join(format!("{shell}.exe"))
+                } else {
+                    dir.join(shell)
+                };
+                let candidate = if candidate.is_absolute() {
+                    candidate
+                } else {
+                    std::path::absolute(candidate)?
+                };
+                let Ok(metadata) = candidate.metadata() else {
+                    continue;
+                };
+                if !metadata.is_file() {
+                    continue;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if metadata.permissions().mode() & 0o111 == 0 {
+                        continue;
+                    }
+                }
+                return Ok(candidate);
+            }
+        }
     }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "PowerShell executable not found (expected `pwsh` or `powershell` in PATH)",
+    ))
 }
 
-fn command_exists(command: &str) -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| {
-                let candidate = dir.join(command);
-                candidate.is_file()
-                    || (cfg!(windows) && dir.join(format!("{command}.exe")).is_file())
-            })
-        })
-        .unwrap_or(false)
-}
-
-fn powershell_command(shell: &str, command: &str) -> std::process::Command {
+fn powershell_command(shell: &Path, command: &str) -> std::process::Command {
     let mut process = std::process::Command::new(shell);
     process.args(["-NoProfile", "-NonInteractive", "-Command", command]);
     if let Ok(root) = current_workspace_root() {
@@ -9633,7 +9656,7 @@ fn powershell_command(shell: &str, command: &str) -> std::process::Command {
 }
 
 fn launch_background_powershell(
-    shell: &str,
+    shell: &Path,
     command: &str,
     title: &str,
     tasks: Option<&runtime::background_tasks::BackgroundTasks>,
@@ -9651,7 +9674,7 @@ fn launch_background_powershell(
 }
 
 fn execute_shell_command(
-    shell: &str,
+    shell: &Path,
     command: &str,
     timeout: Option<u64>,
     run_in_background: Option<bool>,
@@ -14323,6 +14346,166 @@ printf 'pwsh:%s' "$1"
         assert!(background_output["backgroundTaskId"].as_str().is_some());
         assert_eq!(background_output["backgroundedByUser"], true);
         assert_eq!(background_output["assistantAutoBackgrounded"], false);
+    }
+
+    fn powershell_test_candidate(dir: &Path, shell: &str) -> PathBuf {
+        fs::create_dir_all(dir).expect("create candidate directory");
+        let path = dir.join(if cfg!(windows) {
+            format!("{shell}.exe")
+        } else {
+            shell.to_string()
+        });
+        fs::write(&path, "test executable").expect("write candidate");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("make candidate executable");
+        }
+        path
+    }
+
+    #[test]
+    fn powershell_resolver_prefers_pwsh_across_path_entries() {
+        let root = temp_path("powershell-preference");
+        let first = root.join("first");
+        let second = root.join("second");
+        powershell_test_candidate(&first, "powershell");
+        let expected = powershell_test_candidate(&second, "pwsh");
+        let paths = std::env::join_paths([&first, &second]).expect("PATH");
+        assert_eq!(
+            super::resolve_powershell_shell(Some(&paths), &root).expect("resolve"),
+            expected
+        );
+        let first_pwsh = powershell_test_candidate(&first, "pwsh");
+        assert_eq!(
+            super::resolve_powershell_shell(Some(&paths), &root).expect("resolve"),
+            first_pwsh
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn powershell_resolver_anchors_relative_path_and_preserves_arguments() {
+        let root = temp_path("powershell-relative");
+        let expected = powershell_test_candidate(&root.join("bin with spaces"), "pwsh");
+        let paths = std::env::join_paths([Path::new("bin with spaces")]).expect("PATH");
+        let selected = super::resolve_powershell_shell(Some(&paths), &root).expect("resolve");
+        assert!(selected.is_absolute());
+        assert_eq!(selected, expected);
+        let command = "Write-Output 'hello world'; Write-Output \"quoted\"";
+        let process = super::powershell_command(&selected, command);
+        assert_eq!(process.get_program(), expected.as_os_str());
+        assert_eq!(
+            process.get_args().collect::<Vec<_>>(),
+            ["-NoProfile", "-NonInteractive", "-Command", command].map(std::ffi::OsStr::new)
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn powershell_resolver_rejects_missing_and_directory_candidates() {
+        let root = temp_path("powershell-missing");
+        let directory = root.join(if cfg!(windows) { "pwsh.exe" } else { "pwsh" });
+        fs::create_dir_all(directory).expect("create directory candidate");
+        let paths = std::env::join_paths([&root]).expect("PATH");
+        for paths in [None, Some(paths.as_os_str())] {
+            let error = super::resolve_powershell_shell(paths, &root).expect_err("missing shell");
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        }
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_resolver_rejects_extensionless_pwsh_and_falls_back_to_exe() {
+        let root = temp_path("powershell-extensionless");
+        let expected = powershell_test_candidate(&root, "powershell");
+        fs::write(root.join("pwsh"), "not executable").expect("extensionless candidate");
+        let paths = std::env::join_paths([&root]).expect("PATH");
+        assert_eq!(
+            super::resolve_powershell_shell(Some(&paths), &root).expect("resolve"),
+            expected
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_resolver_returns_absolute_path_for_drive_relative_entry() {
+        let _guard = env_guard();
+        let parent_cwd = std::env::current_dir().expect("cwd");
+        let unique = temp_path("powershell-drive-relative");
+        let name = unique.file_name().expect("unique name");
+        let root = parent_cwd.join(name);
+        let expected = powershell_test_candidate(&root, "pwsh");
+        let prefix = parent_cwd.components().next().expect("drive prefix");
+        let mut relative = prefix.as_os_str().to_os_string();
+        relative.push(name);
+        let paths = std::env::join_paths([PathBuf::from(relative)]).expect("PATH");
+        let selected = super::resolve_powershell_shell(Some(&paths), &parent_cwd).expect("resolve");
+        assert!(selected.is_absolute());
+        assert_eq!(selected, expected);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn powershell_resolver_rejects_non_executable_pwsh_and_falls_back() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_path("powershell-non-executable");
+        let pwsh = powershell_test_candidate(&root, "pwsh");
+        fs::set_permissions(pwsh, fs::Permissions::from_mode(0o644)).expect("remove execute bits");
+        let expected = powershell_test_candidate(&root, "powershell");
+        let paths = std::env::join_paths([&root]).expect("PATH");
+        assert_eq!(
+            super::resolve_powershell_shell(Some(&paths), &root).expect("resolve"),
+            expected
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_runs_native_exe_despite_extensionless_pwsh() {
+        let _guard = env_guard();
+        let parent_cwd = std::env::current_dir().expect("cwd");
+        let real_shell = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| parent_cwd.join(dir).join("powershell.exe"))
+                .find(|candidate| candidate.is_file())
+        });
+        let Some(real_shell) = real_shell else {
+            eprintln!("Skipping native launch: powershell.exe not available in PATH");
+            return;
+        };
+        let root = temp_path("powershell-native");
+        fs::create_dir_all(&root).expect("create directory");
+        fs::write(root.join("pwsh"), "not executable").expect("extensionless candidate");
+        let paths = std::env::join_paths([root.as_path(), real_shell.parent().expect("shell dir")])
+            .expect("PATH");
+        let selected = super::resolve_powershell_shell(Some(&paths), &parent_cwd).expect("resolve");
+        let colocated_pwsh = real_shell.with_file_name("pwsh.exe");
+        assert_eq!(
+            selected,
+            if colocated_pwsh.is_file() {
+                colocated_pwsh
+            } else {
+                real_shell
+            }
+        );
+        let result = super::execute_shell_command(
+            &selected,
+            "Write-Output 'powershell-resolver-ok'",
+            Some(10_000),
+            None,
+            None,
+        )
+        .expect("native launch");
+        fs::remove_dir_all(root).expect("cleanup");
+        assert_eq!(result.exit_code, Some(0), "{result:?}");
+        assert_eq!(result.stdout.trim(), "powershell-resolver-ok");
     }
 
     #[test]

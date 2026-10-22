@@ -1985,8 +1985,9 @@ fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
 ///    inside the bound, and the standby never takes over.
 /// 2. One seat renewal really succeeds on the node, but its reply comes back
 ///    after the bound (INJECTED delay). The holder must not count that as
-///    fresh: it gives the seat up once the reply lands, before the node would
-///    have expired it, and the standby takes over.
+///    fresh: it lets go of the seat once the reply lands, before the node
+///    would have expired it. Whoever holds the seat next holds it on a new
+///    grant.
 /// 3. The holder is cut off from the node entirely (INJECTED partition; locks
 ///    it drops are never released). It stops renewing at its own bound, the
 ///    standby gets the seat only once the node expires the lease by its TTL,
@@ -2132,12 +2133,16 @@ fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
         failures.len()
     );
 
-    // 2. A success that comes back too late is not fresh.
+    // 2. A success that comes back too late is not fresh: the holder lets go of
+    //    the seat it can no longer vouch for. It may claim the seat straight
+    //    back (a new grant is a new proof); what it must not do is keep acting
+    //    on the old one.
+    let a_released_before = a.releases().len();
     a.set(Fault::SeatRenewReturnsLate(BOUND + Duration::from_secs(1)));
     wait(
-        "B to take the seat after A's late renewal reply",
+        "A to give its seat up after the late renewal reply",
         RENEW_EVERY + BOUND + Duration::from_secs(15),
-        &|| b.holds_seat(),
+        &|| a.releases().len() > a_released_before,
     );
     let late = a
         .renewals()
@@ -2147,102 +2152,127 @@ fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
             r.outcome == Outcome::Held && r.returned.saturating_duration_since(r.requested) >= BOUND
         })
         .expect("the INJECTED late renewal");
-    let b_took = b.acquisitions()[0];
-    let (a_released, a_reached_node) = *a.releases().last().expect("A gave the seat up");
+    let (a_released, a_reached_node) = a.releases()[a_released_before];
     assert!(
         a_reached_node,
         "A was not partitioned, so its release reached the node"
     );
     assert!(
-        a_released >= late.returned && b_took >= late.returned,
-        "the seat moved before A's late reply landed"
+        a_released >= late.returned,
+        "A let go of the seat before its late reply landed"
     );
-    let b_after = b_took.saturating_duration_since(late.requested);
+    let let_go_after = a_released.saturating_duration_since(late.requested);
     assert!(
-        b_after < TTL,
-        "B took the seat {b_after:?} after A's last real renewal, at or past the TTL: \
-         the node expired a seat A should have given up"
+        let_go_after < TTL,
+        "A held the seat {let_go_after:?} after the request its last renewal proved, past the TTL"
     );
+    wait(
+        "the seat to be held again",
+        Duration::from_secs(10),
+        &|| a.holds_seat() || b.holds_seat(),
+    );
+    let regrant = a
+        .acquisitions()
+        .into_iter()
+        .chain(b.acquisitions())
+        .filter(|at| *at >= a_released)
+        .min()
+        .expect("a grant after A let go");
+    let (holder, standby, holder_label, standby_label) = if b.holds_seat() {
+        (&b, &a, "seat-b", "seat-a")
+    } else {
+        (&a, &b, "seat-a", "seat-b")
+    };
     send("m2 after a late renewal");
-    wait("B to deliver m2", Duration::from_secs(20), &|| {
-        delivered("seat-b", "m2 after a late renewal")
-    });
+    wait(
+        "the seat holder to deliver m2",
+        Duration::from_secs(20),
+        &|| delivered(holder_label, "m2 after a late renewal"),
+    );
     println!(
-        "SEAT PHASE 2 OK: A's renewal returned {:?} after it was requested; A gave the seat up and B took it {b_after:?} after that request (TTL {TTL:?})",
-        late.returned.saturating_duration_since(late.requested)
+        "SEAT PHASE 2 OK: A's renewal returned {:?} after it was requested; A let go {let_go_after:?} after that request (TTL {TTL:?}); {holder_label} holds it on a new grant {:?} later",
+        late.returned.saturating_duration_since(late.requested),
+        regrant.saturating_duration_since(a_released)
     );
 
     // 3. Partitioned holder: gives up by its bound; the node hands the seat on
     //    only at the TTL.
-    let last_real = next_real_renewal(&b, "B");
-    b.set(Fault::Partitioned);
+    let standby_grants = standby.acquisitions().len();
+    let holder_grants = holder.acquisitions().len();
+    let last_real = next_real_renewal(holder, holder_label);
+    holder.set(Fault::Partitioned);
     let cut = Instant::now();
     send("m3 during a partition");
     wait(
-        "A to take the seat from the partitioned B",
+        "the standby to take the seat from the partitioned holder",
         TTL + Duration::from_secs(15),
-        &|| a.acquisitions().len() >= 2,
+        &|| standby.acquisitions().len() > standby_grants,
     );
-    let a_took = a.acquisitions()[1];
-    let a_after = a_took.saturating_duration_since(last_real.requested);
+    let took = standby.acquisitions()[standby_grants];
+    let took_after = took.saturating_duration_since(last_real.requested);
     assert!(
-        a_after + Duration::from_millis(500) >= TTL,
-        "A took the seat {a_after:?} after B's last real renewal, before the node's TTL"
+        took_after + Duration::from_millis(500) >= TTL,
+        "{standby_label} took the seat {took_after:?} after {holder_label}'s last real renewal, before the node's TTL"
     );
-    let b_attempts: Vec<Renewal> = b
+    let cut_attempts: Vec<Renewal> = holder
         .renewals()
         .into_iter()
         .filter(|r| r.requested >= cut)
         .collect();
     assert!(
-        !b_attempts.is_empty() && b_attempts.iter().all(|r| r.outcome == Outcome::Injected),
-        "every renewal B tried while cut off must have been an INJECTED failure: {b_attempts:?}"
+        !cut_attempts.is_empty() && cut_attempts.iter().all(|r| r.outcome == Outcome::Injected),
+        "every renewal the holder tried while cut off must have been an INJECTED failure: {cut_attempts:?}"
     );
-    let b_last_try = b_attempts
+    let last_try = cut_attempts
         .last()
         .unwrap()
         .requested
         .saturating_duration_since(last_real.requested);
     assert!(
-        b_last_try <= BOUND + Duration::from_secs(1),
-        "B kept renewing {b_last_try:?} after its last real renewal, past its bound"
+        last_try <= BOUND + Duration::from_secs(1),
+        "{holder_label} kept renewing {last_try:?} after its last real renewal, past its bound"
     );
-    let (b_released, b_reached_node) = *b.releases().last().expect("B gave the seat up");
+    let (gave_up, reached_node) = *holder
+        .releases()
+        .last()
+        .expect("the holder gave the seat up");
     assert!(
-        !b_reached_node,
-        "B was partitioned, so its release never reached the node"
+        !reached_node,
+        "partitioned, so the release never reached the node"
     );
     assert!(
-        b_released < a_took,
-        "B must stop receiving before the node hands the seat on"
+        gave_up < took,
+        "the cut-off holder must stop receiving before the node hands the seat on"
     );
     wait(
-        "A to deliver what was sent during the partition",
+        "the new holder to deliver what was sent during the partition",
         Duration::from_secs(45),
-        &|| delivered("seat-a", "m3 during a partition"),
+        &|| delivered(standby_label, "m3 during a partition"),
     );
-    b.set(Fault::None);
+    holder.set(Fault::None);
     thread::sleep(Duration::from_secs(3));
     assert_eq!(
-        b.acquisitions().len(),
-        1,
-        "after reconnecting, B must find the seat taken and stand by"
+        holder.acquisitions().len(),
+        holder_grants,
+        "after reconnecting, {holder_label} must find the seat taken and stand by"
     );
     send("m4 after the partition heals");
-    wait("A to deliver m4", Duration::from_secs(20), &|| {
-        delivered("seat-a", "m4 after the partition heals")
-    });
+    wait(
+        "the new holder to deliver m4",
+        Duration::from_secs(20),
+        &|| delivered(standby_label, "m4 after the partition heals"),
+    );
     thread::sleep(Duration::from_secs(2));
     for body in ["m3 during a partition", "m4 after the partition heals"] {
         assert!(
-            !delivered("seat-b", body),
+            !delivered(holder_label, body),
             "{body:?} was delivered by the instance that lost the seat"
         );
     }
     println!(
-        "SEAT PHASE 3 OK: B's last renewal attempt {b_last_try:?} after its last real one ({} INJECTED); B stopped receiving {:?} and A took the seat {a_after:?} after it; B stood by after reconnecting",
-        b_attempts.len(),
-        b_released.saturating_duration_since(last_real.requested)
+        "SEAT PHASE 3 OK: {holder_label}'s last renewal attempt {last_try:?} after its last real one ({} INJECTED); it stopped receiving {:?} and {standby_label} took the seat {took_after:?} after it; {holder_label} stood by after reconnecting",
+        cut_attempts.len(),
+        gave_up.saturating_duration_since(last_real.requested)
     );
 
     a_stop.abort();

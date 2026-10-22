@@ -76,21 +76,7 @@ impl RegisterCursor {
         lease_expires_at: u64,
     ) -> Result<Option<(Self, u64)>, String> {
         let plain = |guarantee| -> Result<Option<(Self, u64)>, String> {
-            let previous = load_plain(backend.as_ref(), &path)?;
-            // A register a conditional writer has fenced is never written
-            // unconditionally: that is the overwrite the fence exists to
-            // refuse. Finding one here means this backend, or the replica that
-            // answered, cannot honour the fence, so the claim fails closed
-            // instead of settling for a weaker guarantee.
-            if guarantee == CursorGuarantee::AtLeastOnce
-                && previous.as_ref().is_some_and(|r| r.epoch > 0)
-            {
-                return Err(format!(
-                    "reader register {path} was written by a conditional writer, but the \
-                     backend has no conditional write here; refusing an unconditional write"
-                ));
-            }
-            let offset = previous.map_or(0, |r| r.read_offset);
+            let offset = load_plain(backend.as_ref(), &path)?.map_or(0, |r| r.read_offset);
             let cursor = Self {
                 backend: Arc::clone(&backend),
                 path: path.clone(),

@@ -1,4 +1,5 @@
-//! `/status` says where a session's peers are and whether it receives for them.
+//! `/status` says where a session's peers are, whether it receives for them,
+//! and what keeps a resumed instance from moving a read position back.
 //!
 //! An agent has one receiver at a time across every instance of it, so a
 //! session can be up and still not be the one receiving. The only way to tell
@@ -11,8 +12,11 @@ mod node_home;
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
+use runtime::agent_mailbox::MailboxEnvelope;
+use runtime::mailbox::{local_pair_root_in, Mailbox};
 
 const AGENT: &str = "status-probe";
+const PEER: &str = "status-peer";
 
 fn screen_shows_all(sess: &mut pty_expect::PtySession, needles: &[&str], budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
@@ -39,16 +43,32 @@ fn status_reports_the_disk_namespace_and_that_this_session_receives() {
     session.set_default_timeout(Duration::from_secs(30));
     session.expect("❯").expect("the REPL should start");
 
-    // The receiver claims the agent's seat on its own thread; ask again until
-    // it has, rather than racing it.
+    // The cursor guarantee is decided when a conversation is first claimed,
+    // so give the receiver one to claim.
+    Mailbox::workspace_local(&local_pair_root_in(env.config_home()), PEER.to_string())
+        .send(MailboxEnvelope {
+            from: PEER.to_string(),
+            to: AGENT.to_string(),
+            body: "status check PARITY_SCENARIO:single_turn_text".to_string(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: runtime::agent_mailbox::kinds::MESSAGE.to_string(),
+            request_id: None,
+        })
+        .expect("the peer writes on the pair root");
+
+    // The receiver claims the agent's seat and the conversation on its own
+    // thread; ask again until it has, rather than racing it.
     let expected = [
         "Peers",
         &format!("Agent            {AGENT}") as &str,
         "Namespace        same-machine pair root",
         "Receiver         receiving",
+        "Cursor           fenced: the lock excludes a frozen holder until it exits",
     ];
     let mut reported = false;
-    for _ in 0..5 {
+    for _ in 0..8 {
         session.send("/status\r").expect("send /status");
         if screen_shows_all(&mut session, &expected, Duration::from_secs(4)) {
             reported = true;

@@ -184,6 +184,8 @@ pub fn status(agent: &str) -> runtime::mailbox::PeerStatus {
         endpoint,
         receiver,
         delivery: "automatic",
+        cursor: runtime::mailbox::cursor_guarantee(agent)
+            .map_or("none", runtime::cursor_fence::CursorGuarantee::as_str),
         error,
     }
 }

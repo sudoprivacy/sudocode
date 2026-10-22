@@ -78,11 +78,12 @@ Every receive path uses one loop: `runtime::mailbox::spawn_inbox_poller`. Delive
 
 ## Cursor fencing (S6)
 
-The contract is fixed now. The node implementation waits on N2, a storage-level conditional write.
+The contract and the consumer side are in place (`runtime/src/cursor_fence.rs`). The node implementation waits on N2, a storage-level conditional write.
 
 ```
-write_if_version(path, expected: Option<Token>, data) -> Result<Outcome, io::Error>
-Outcome = Committed(Token) | Conflict { current: Option<Token> } | Unknown
+FsBackend::read_versioned(path) -> io::Result<Option<(Vec<u8>, VersionToken)>>
+FsBackend::write_if_version(path, expected: Option<&VersionToken>, data) -> io::Result<WriteOutcome>
+WriteOutcome = Committed(VersionToken) | Conflict { current: Option<VersionToken> } | Unknown
 ```
 
 - **Token.** The storage returns an opaque token. sudocode never interprets it as a content generation or a metadata version.
@@ -91,7 +92,7 @@ Outcome = Committed(Token) | Conflict { current: Option<Token> } | Unknown
 - **Unknown** means the request was sent but the commit result is not known.
 - **No conditional write.** A backend without an atomic conditional write returns `ErrorKind::Unsupported`.
 
-Which path a reader uses is decided once, when it acquires the reader, by `FsLock::fences_writes()`:
+Which path a reader uses is decided once, when it acquires the reader, by `FsBackend::fenced_locks()` and then by whether `read_versioned` is supported:
 
 1. **`true` (disk).** The holder's plain store is already isolated, so it stays a plain store.
 2. **`false`, conditional write supported.** The new owner claims the cursor first:
@@ -102,6 +103,17 @@ Which path a reader uses is decided once, when it acquires the reader, by `FsLoc
    - `Conflict` means the same thing to every actor, whether a new claimer or a holder that resumed after a freeze: this attempt failed and nothing visible changed. The actor stops delivering, leaves the message unacknowledged, and goes back through acquire and claim. No actor ever gets to force a write.
    - It never falls back to an unconditional write.
 3. **`false`, no conditional write (the node until N2).** The reader keeps the plain store, and status states the weaker guarantee: "at-least-once only; the cursor may move backwards after a freeze longer than the lease". This is a declared capability gap, not a retry after a failed conditional write.
+
+The decision is reported as `PeerStatus.cursor` (the `/status` Cursor line and ACP `_meta.sudocode.peer.cursor`): `fenced`, `fenced_cas` or `at_least_once`, or `none` until this process has claimed one of the agent's conversations. On the conditional path the register carries the claim's `epoch`; the plain store writes the register exactly as before.
+
+**Node adaptation (S6b, after N2).** The node needs a new RPC, not new fields on `Write`: an older server ignores unknown proto3 fields and would turn the write into an unconditional one. Its minimal contract:
+- `WriteIfVersion(path, content, precondition: if_gen | if_absent)` answers `Committed{gen}` or `Conflict{current_gen?}`. An older server answers UNIMPLEMENTED, which maps to `Unsupported`.
+- The compare and the commit are one linearizable step in the zone. Content and `gen` become visible together, and a conflict changes nothing.
+- `gen` increases strictly on every committed write and is never reused, even across delete and recreate.
+- `Read` returns content and `gen` from the same committed version.
+- A timeout after the request was sent is `Unknown` on the client, which settles it by reading back.
+
+`NexusVfsFsBackend` then implements the two methods, and the receivers switch to `fenced_cas` without other changes.
 
 ## Disk → node switch (S3)
 

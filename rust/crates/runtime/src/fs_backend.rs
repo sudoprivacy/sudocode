@@ -53,6 +53,24 @@ impl FsLock for HostLock {
     }
 }
 
+/// What the storage returned for one committed version of a path. Opaque:
+/// callers compare tokens for equality and hand them back, never interpret
+/// them as a content generation or a metadata version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionToken(pub Vec<u8>);
+
+/// The result of [`FsBackend::write_if_version`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteOutcome {
+    /// The write is visible, and this is the new version.
+    Committed(VersionToken),
+    /// The path was not at the expected version; nothing visible changed.
+    /// `current` is `None` when the path does not exist.
+    Conflict { current: Option<VersionToken> },
+    /// The request went out but whether it committed is not known.
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Metadata types
 // ---------------------------------------------------------------------------
@@ -134,6 +152,33 @@ pub trait FsBackend: Send + Sync + 'static {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "backend has no atomic lock",
+        ))
+    }
+    /// The content of `path` with the version it was read at, both from the
+    /// same committed version; `None` when the path does not exist.
+    ///
+    /// A backend without an atomic conditional write answers `Unsupported`.
+    fn read_versioned(&self, _path: &str) -> io::Result<Option<(Vec<u8>, VersionToken)>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend has no conditional write",
+        ))
+    }
+    /// Write `data` only if `path` is still at `expected` (`None`: only if it
+    /// does not exist), as one atomic step.
+    ///
+    /// A backend that cannot do this atomically answers `Unsupported`. It must
+    /// never fall back to an unconditional write, which would let a stale
+    /// holder overwrite the current one.
+    fn write_if_version(
+        &self,
+        _path: &str,
+        _expected: Option<&VersionToken>,
+        _data: &[u8],
+    ) -> io::Result<WriteOutcome> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "backend has no conditional write",
         ))
     }
     fn read(&self, path: &str) -> io::Result<Vec<u8>>;
@@ -457,6 +502,17 @@ impl FsBackend for Arc<dyn FsBackend> {
     }
     fn try_lock(&self, path: &str, ttl_ms: u64) -> io::Result<Option<Arc<dyn FsLock>>> {
         (**self).try_lock(path, ttl_ms)
+    }
+    fn read_versioned(&self, path: &str) -> io::Result<Option<(Vec<u8>, VersionToken)>> {
+        (**self).read_versioned(path)
+    }
+    fn write_if_version(
+        &self,
+        path: &str,
+        expected: Option<&VersionToken>,
+        data: &[u8],
+    ) -> io::Result<WriteOutcome> {
+        (**self).write_if_version(path, expected, data)
     }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         (**self).read(path)

@@ -894,6 +894,27 @@ const READER_LEASE_MS: u64 = 30_000;
 /// `block_ms` per conversation, most of them carrying no new information.
 const READER_RENEW_MS: u64 = READER_LEASE_MS / 2;
 
+/// How long before the lease TTL a holder stops claiming a lease it could not
+/// just renew, and so stops delivering.
+///
+/// The backend expires the lock `READER_LEASE_MS` after it *received* the last
+/// renewal. Timing grace from when that renewal was *requested* already keeps
+/// this process's belief behind the backend's; the margin is headroom for a
+/// delivery already in flight when the belief runs out. It is a heuristic, not
+/// a guarantee: a pause longer than this can still deliver after the backend
+/// handed the seat to a standby. Commits do not rely on it at all
+/// ([`HeldLease::confirm`] needs a fresh successful renewal), and only a fenced
+/// register write closes the commit side against arbitrary pauses.
+const LEASE_SAFETY_MARGIN_MS: u64 = 10_000;
+
+/// How soon the renewal worker tries again after a renewal attempt that failed
+/// without proving anything.
+///
+/// Waiting the normal [`READER_RENEW_MS`] would put the only retry at the TTL,
+/// which makes tolerating the error pointless; retrying quickly gives a
+/// transient failure the rest of the grace to clear.
+const RENEW_RETRY_MS: u64 = 1_000;
+
 /// How often a receiver re-lists its chat list looking for conversations it is
 /// not yet tailing.
 ///
@@ -1025,24 +1046,28 @@ enum LeaseRenewal {
     Held,
     /// Ownership is gone, or can no longer be asserted truthfully.
     Lost,
-    /// The attempt failed without proving anything; try again next tick.
+    /// The attempt failed without proving anything. The worker tries again
+    /// shortly; it never approves a write.
     Retry,
 }
 
-/// Classify a renewal result, given how long it has been since a renewal last
-/// actually succeeded.
+/// Classify a renewal result, given how long it has been since a renewal that
+/// actually succeeded was *requested*.
 ///
-/// An `Err` is retryable only while the lease's TTL has not elapsed since the
-/// last successful renewal: past that point this process cannot honestly claim
-/// to still hold the lock, so it reports `Lost` rather than keep writing. The
-/// bound is `READER_LEASE_MS` — the TTL the lock was taken with — rather than a
-/// separate retry count, so the rule states the real invariant.
+/// An `Err` is retryable only while that time plus [`LEASE_SAFETY_MARGIN_MS`]
+/// is still inside `READER_LEASE_MS`, the TTL the lock was taken with. Past
+/// that point the backend may already have expired the lock and given it to a
+/// standby, so this process reports `Lost` rather than keep writing. Measuring
+/// from the request (not the reply) and stopping a margin early keeps this
+/// process's belief inside the backend's real lease.
 fn classify_renewal(result: &std::io::Result<bool>, since_last_renew_ms: u64) -> LeaseRenewal {
     match result {
         Ok(true) => LeaseRenewal::Held,
-        Err(_) if since_last_renew_ms < READER_LEASE_MS => LeaseRenewal::Retry,
-        // `Ok(false)` is the contract's ownership-loss signal; an `Err` that has
-        // outlived the TTL means ownership can no longer be asserted truthfully.
+        Err(_) if since_last_renew_ms.saturating_add(LEASE_SAFETY_MARGIN_MS) < READER_LEASE_MS => {
+            LeaseRenewal::Retry
+        }
+        // `Ok(false)` is the contract's ownership-loss signal; an `Err` this
+        // close to the TTL means ownership can no longer be asserted truthfully.
         Ok(false) | Err(_) => LeaseRenewal::Lost,
     }
 }
@@ -1051,11 +1076,31 @@ struct HeldLease {
     lock: Arc<dyn crate::fs_backend::FsLock>,
     stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     valid: Arc<std::sync::atomic::AtomicBool>,
-    /// `now_ms()` of the last renewal that actually succeeded. Shared with the
-    /// renewal worker so both it and [`HeldLease::confirm`] judge a transient
-    /// failure against the same instant.
-    last_renewed_ms: Arc<std::sync::atomic::AtomicU64>,
+    /// When the last renewal that actually succeeded was *requested*, on the
+    /// monotonic clock. Shared with the renewal worker so both it and
+    /// [`HeldLease::confirm`] judge a transient failure against the same
+    /// instant. Monotonic so a wall-clock step cannot stretch the grace, and
+    /// taken before the call so a slow reply cannot either.
+    last_renewed: Arc<std::sync::Mutex<std::time::Instant>>,
     renewer: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Milliseconds elapsed since `last_renewed`.
+fn ms_since(last_renewed: &std::sync::Mutex<std::time::Instant>) -> u64 {
+    let at = *last_renewed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Record a renewal that succeeded, as of when it was requested.
+fn mark_renewed(
+    last_renewed: &std::sync::Mutex<std::time::Instant>,
+    requested: std::time::Instant,
+) {
+    *last_renewed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = requested;
 }
 
 impl HeldLease {
@@ -1065,6 +1110,7 @@ impl HeldLease {
                 .create_dir_all(dir)
                 .map_err(|e| format!("create directory {dir}: {e}"))?;
         }
+        let requested = std::time::Instant::now();
         let Some(lock) = backend
             .try_lock(lock_path, READER_LEASE_MS)
             .map_err(|e| e.to_string())?
@@ -1073,15 +1119,16 @@ impl HeldLease {
         };
         let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let last_renewed_ms = Arc::new(std::sync::atomic::AtomicU64::new(now_ms()));
+        let last_renewed = Arc::new(std::sync::Mutex::new(requested));
         let worker_stop = Arc::clone(&stop);
         let worker_valid = Arc::clone(&valid);
         let worker_lock = Arc::clone(&lock);
-        let worker_last_renewed = Arc::clone(&last_renewed_ms);
+        let worker_last_renewed = Arc::clone(&last_renewed);
         let renewer = std::thread::Builder::new()
             .name("mailbox-lease".into())
             .spawn(move || {
                 let (mutex, wake) = &*worker_stop;
+                let mut wait_ms = READER_RENEW_MS;
                 loop {
                     let stopped = mutex
                         .lock()
@@ -1089,7 +1136,7 @@ impl HeldLease {
                     let (stopped, _) = wake
                         .wait_timeout_while(
                             stopped,
-                            std::time::Duration::from_millis(READER_RENEW_MS),
+                            std::time::Duration::from_millis(wait_ms),
                             |stopped| !*stopped,
                         )
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1097,19 +1144,17 @@ impl HeldLease {
                         break;
                     }
                     drop(stopped);
+                    let requested = std::time::Instant::now();
                     let result = worker_lock.renew();
-                    let since = now_ms().saturating_sub(
-                        worker_last_renewed.load(std::sync::atomic::Ordering::Acquire),
-                    );
-                    match classify_renewal(&result, since) {
+                    match classify_renewal(&result, ms_since(&worker_last_renewed)) {
                         LeaseRenewal::Held => {
-                            worker_last_renewed
-                                .store(now_ms(), std::sync::atomic::Ordering::Release);
+                            mark_renewed(&worker_last_renewed, requested);
+                            wait_ms = READER_RENEW_MS;
                         }
-                        // Transient: prove nothing, keep the worker alive, and
-                        // try again on the next tick. Exiting here was the bug —
-                        // it stranded a lease that was never lost.
-                        LeaseRenewal::Retry => {}
+                        // Transient: prove nothing, keep the lease, and try
+                        // again soon rather than at the TTL. Giving up here
+                        // dropped a lease that was never lost.
+                        LeaseRenewal::Retry => wait_ms = RENEW_RETRY_MS,
                         LeaseRenewal::Lost => {
                             worker_valid.store(false, std::sync::atomic::Ordering::Release);
                             break;
@@ -1122,7 +1167,7 @@ impl HeldLease {
             lock,
             stop,
             valid,
-            last_renewed_ms,
+            last_renewed,
             renewer: Some(renewer),
         }))
     }
@@ -1134,36 +1179,31 @@ impl HeldLease {
     /// Renew now, ahead of a write that relies on still holding the lock.
     /// `Ok(false)` means it was lost and marks the lease invalid for good.
     ///
-    /// A failing *probe* is not ownership loss: the background worker owns
-    /// renewal, so while the lease TTL has not elapsed since the last
-    /// successful renewal this reports held rather than failing the caller's
-    /// commit. Turning a hiccup into a refused commit is what discarded an
-    /// already-accepted batch's offset and replayed it.
+    /// Only a renewal that succeeds right now approves the write. A failing
+    /// *probe* proves nothing either way, so it refuses this write (the
+    /// delivery stays unacknowledged and is re-read) and leaves the lease to
+    /// the worker unless the grace has also run out. Approving a write on the
+    /// strength of an earlier renewal could commit after the backend has
+    /// already handed the seat to someone else.
     fn confirm(&self) -> std::io::Result<bool> {
         if !self.is_valid() {
             return Ok(false);
         }
+        let requested = std::time::Instant::now();
         let result = self.lock.renew();
-        let since = now_ms().saturating_sub(
-            self.last_renewed_ms
-                .load(std::sync::atomic::Ordering::Acquire),
-        );
-        match classify_renewal(&result, since) {
+        match classify_renewal(&result, ms_since(&self.last_renewed)) {
             LeaseRenewal::Held => {
-                self.last_renewed_ms
-                    .store(now_ms(), std::sync::atomic::Ordering::Release);
+                mark_renewed(&self.last_renewed, requested);
                 Ok(true)
             }
-            LeaseRenewal::Retry => Ok(true),
+            // An `Err` inside the grace: refuse this write, keep the lease.
+            LeaseRenewal::Retry => result,
             LeaseRenewal::Lost => {
                 self.valid
                     .store(false, std::sync::atomic::Ordering::Release);
-                match result {
-                    // Ownership genuinely gone.
-                    Ok(_) => Ok(false),
-                    // Unprovable for longer than the TTL: surface the cause.
-                    Err(error) => Err(error),
-                }
+                // `Ok(false)` when ownership is gone; the cause when the grace
+                // ran out with the backend still unreachable.
+                result.map(|_| false)
             }
         }
     }
@@ -1712,12 +1752,15 @@ mod tests {
         }
     }
 
-    fn lease_with(lock: Arc<dyn crate::fs_backend::FsLock>, last_renewed_ms: u64) -> HeldLease {
+    fn lease_with(
+        lock: Arc<dyn crate::fs_backend::FsLock>,
+        last_renewed: std::time::Instant,
+    ) -> HeldLease {
         HeldLease {
             lock,
             stop: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
             valid: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            last_renewed_ms: Arc::new(std::sync::atomic::AtomicU64::new(last_renewed_ms)),
+            last_renewed: Arc::new(std::sync::Mutex::new(last_renewed)),
             renewer: None,
         }
     }
@@ -1742,7 +1785,7 @@ mod tests {
         // The safety property: `Ok(false)` is the contract's only ownership-loss
         // signal and must stop writes at once, however fresh the lease is.
         assert_eq!(classify_renewal(&Ok(false), 0), LeaseRenewal::Lost);
-        let lease = lease_with(ScriptedLock::new(&[Some(false)]), now_ms());
+        let lease = lease_with(ScriptedLock::new(&[Some(false)]), std::time::Instant::now());
         assert!(
             !lease.confirm().expect("confirm"),
             "genuine loss reports not-held"
@@ -1758,27 +1801,15 @@ mod tests {
             classify_renewal(&Err(std::io::Error::other("down")), READER_LEASE_MS),
             LeaseRenewal::Lost
         );
-        let stale = now_ms().saturating_sub(READER_LEASE_MS + 1);
+        let stale = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(READER_LEASE_MS + 1))
+            .expect("the monotonic clock reaches back one lease");
         let lease = lease_with(ScriptedLock::new(&[None]), stale);
         assert!(
             lease.confirm().is_err(),
             "the cause is surfaced, not masked"
         );
         assert!(!lease.is_valid());
-    }
-
-    #[test]
-    fn confirm_tolerates_a_transient_error_within_ttl() {
-        // `commit()` calls `confirm()` right before storing the offset; a failed
-        // probe inside the TTL must not refuse the commit.
-        let lease = lease_with(ScriptedLock::new(&[None]), now_ms());
-        assert!(
-            lease
-                .confirm()
-                .expect("a transient probe failure is not loss"),
-            "confirm must report held so the offset is stored"
-        );
-        assert!(lease.is_valid(), "the lease survives a hiccup");
     }
 
     fn temp_workspace(label: &str) -> String {

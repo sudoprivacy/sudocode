@@ -2152,6 +2152,19 @@ fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
             r.outcome == Outcome::Held && r.returned.saturating_duration_since(r.requested) >= BOUND
         })
         .expect("the INJECTED late renewal");
+    let after_recovery = a
+        .renewals()
+        .into_iter()
+        .find(|r| r.requested > recovered.requested)
+        .expect("a seat renewal after the recovery");
+    let interval = after_recovery
+        .requested
+        .saturating_duration_since(recovered.requested);
+    assert!(
+        interval + Duration::from_secs(1) >= RENEW_EVERY,
+        "after a successful renewal the worker must go back to its normal interval, \
+         not keep retrying every second: the next renewal came {interval:?} later"
+    );
     let (a_released, a_reached_node) = a.releases()[a_released_before];
     assert!(
         a_reached_node,
@@ -2190,7 +2203,7 @@ fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
         &|| delivered(holder_label, "m2 after a late renewal"),
     );
     println!(
-        "SEAT PHASE 2 OK: A's renewal returned {:?} after it was requested; A let go {let_go_after:?} after that request (TTL {TTL:?}); {holder_label} holds it on a new grant {:?} later",
+        "SEAT PHASE 2 OK: the worker renewed {interval:?} after its recovery (back to its normal interval); A's renewal returned {:?} after it was requested; A let go {let_go_after:?} after that request (TTL {TTL:?}); {holder_label} holds it on a new grant {:?} later",
         late.returned.saturating_duration_since(late.requested),
         regrant.saturating_duration_since(a_released)
     );

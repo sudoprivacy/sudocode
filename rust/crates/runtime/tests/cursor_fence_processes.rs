@@ -4,10 +4,11 @@
 //! Here the holder is a separate process that is actually frozen: the parent
 //! re-runs this test binary as two receivers for the same agent over
 //! [`file_cas::FileCasBackend`], parks the first one inside its commit,
-//! freezes it with SIGSTOP, ends its leases, lets the second take the
-//! conversation, and only then resumes the first. The resumed process must be
-//! fenced out: the register keeps the second receiver's position, and the
-//! message the first never recorded is delivered again rather than lost.
+//! freezes it with SIGSTOP, ends its leases, lets the second write its fence
+//! and hold its delivery, and only then resumes the first. The resumed process
+//! must be refused by the fence alone: the register keeps the second
+//! receiver's fence, the first delivers nothing more, and the message it never
+//! recorded is delivered again rather than lost.
 //!
 //! Freezing a process is Unix-only, so the scenario is ignored elsewhere; the
 //! file still compiles on every platform.
@@ -21,7 +22,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use file_cas::{expire_leases_under, FileCasBackend};
+use file_cas::{expire_leases_under, wait_while_held, FileCasBackend};
 use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::fs_backend::StdFsBackend;
 use runtime::mailbox::{spawn_inbox_poller, InboxConvention, Mailbox, ReaderRegister};
@@ -33,11 +34,13 @@ const ROOT_ENV: &str = "CURSOR_FENCE_CHILD_ROOT";
 const LABEL_ENV: &str = "CURSOR_FENCE_CHILD_LABEL";
 const EVENTS_ENV: &str = "CURSOR_FENCE_CHILD_EVENTS";
 const GATE_ENV: &str = "CURSOR_FENCE_CHILD_GATE";
+const HOLD_ENV: &str = "CURSOR_FENCE_CHILD_HOLD";
 
 /// One receiver, when this binary is re-run as a child. A no-op otherwise.
 ///
-/// Records each delivery as `<label> <body>` in the events file and accepts
-/// it, then runs until the parent kills it.
+/// Records each delivery as `<label> <body>` in the events file, holds it
+/// while the hold file (if any) exists, then accepts it. Runs until the parent
+/// kills it.
 #[test]
 fn child_receiver() {
     let Ok(root) = std::env::var(ROOT_ENV) else {
@@ -45,6 +48,7 @@ fn child_receiver() {
     };
     let label = std::env::var(LABEL_ENV).expect("child label");
     let events = PathBuf::from(std::env::var(EVENTS_ENV).expect("child events file"));
+    let hold = std::env::var(HOLD_ENV).ok().map(PathBuf::from);
     let mut backend = FileCasBackend::new();
     if let Ok(gate) = std::env::var(GATE_ENV) {
         backend = backend.with_gate(gate);
@@ -61,6 +65,9 @@ fn child_receiver() {
             .open(&events)
             .expect("open events");
         writeln!(file, "{label} {}", m.body).expect("record delivery");
+        if let Some(hold) = &hold {
+            wait_while_held(hold);
+        }
         true
     });
     loop {
@@ -72,7 +79,13 @@ fn child_receiver() {
 struct ChildReceiver(Child);
 
 impl ChildReceiver {
-    fn spawn(root: &Path, label: &str, events: &Path, gate: Option<&Path>) -> Self {
+    fn spawn(
+        root: &Path,
+        label: &str,
+        events: &Path,
+        gate: Option<&Path>,
+        hold: Option<&Path>,
+    ) -> Self {
         let mut command = Command::new(std::env::current_exe().expect("test binary"));
         command
             .args([
@@ -87,6 +100,9 @@ impl ChildReceiver {
             .stdout(Stdio::null());
         if let Some(gate) = gate {
             command.env(GATE_ENV, gate);
+        }
+        if let Some(hold) = hold {
+            command.env(HOLD_ENV, hold);
         }
         Self(command.spawn().expect("spawn child receiver"))
     }
@@ -132,10 +148,12 @@ fn register(root: &Path) -> Option<ReaderRegister> {
         .ok()
 }
 
+fn transcript_end(root: &Path) -> u64 {
+    std::fs::metadata(convention(root).transcript_path(AGENT, PEER)).map_or(0, |m| m.len())
+}
+
 fn caught_up(root: &Path, epoch: u64) -> bool {
-    let end =
-        std::fs::metadata(convention(root).transcript_path(AGENT, PEER)).map_or(0, |m| m.len());
-    register(root).is_some_and(|r| r.epoch == epoch && r.read_offset == end)
+    register(root).is_some_and(|r| r.epoch == epoch && r.read_offset == transcript_end(root))
 }
 
 fn events(path: &Path) -> Vec<String> {
@@ -160,11 +178,13 @@ fn a_frozen_process_resumed_after_losing_its_lease_cannot_move_the_cursor_back()
     let root = runtime::test_support::temp_dir_path("cursor-fence-processes");
     let gate = root.join("gate");
     std::fs::create_dir_all(&gate).unwrap();
+    let b_hold = root.join("b-hold");
     let events_file = root.join("events");
 
     send(&root, "m1");
-    let a = ChildReceiver::spawn(&root, "A", &events_file, Some(&gate));
+    let a = ChildReceiver::spawn(&root, "A", &events_file, Some(&gate), None);
     wait_until("A to take and record m1", || caught_up(&root, 1));
+    let after_m1 = transcript_end(&root);
 
     // Park A inside its next commit, then freeze the whole process there.
     std::fs::write(gate.join("hold"), b"").unwrap();
@@ -174,30 +194,49 @@ fn a_frozen_process_resumed_after_losing_its_lease_cannot_move_the_cursor_back()
     });
     a.signal("STOP");
 
-    // A stays frozen past its lease; a second instance takes the conversation.
+    // A stays frozen past its lease; a second process takes the conversation,
+    // writes its fence and is held mid-delivery.
+    std::fs::write(&b_hold, b"").unwrap();
     expire_leases_under(&root);
-    let b = ChildReceiver::spawn(&root, "B", &events_file, None);
-    wait_until("B to fence the conversation and record m2", || {
-        caught_up(&root, 2)
+    let b = ChildReceiver::spawn(&root, "B", &events_file, None, Some(&b_hold));
+    wait_until("B to fence and start delivering m2", || {
+        b_hold.with_extension("entered").exists()
     });
-    let newer = register(&root).unwrap();
+    let fence = register(&root).unwrap();
+    assert_eq!((fence.epoch, fence.read_offset), (2, after_m1));
 
     // A wakes up and finishes the write it started under its old version.
     std::fs::remove_file(gate.join("hold")).unwrap();
     a.signal("CONT");
-    std::thread::sleep(Duration::from_secs(3));
+    wait_until("A's parked write to be decided", || {
+        gate.join("left").exists()
+    });
     assert_eq!(
         register(&root).unwrap(),
-        newer,
-        "the resumed process must be fenced out, not overwrite the newer position"
+        fence,
+        "the resumed process must be refused by the fence, not record m2 over it"
     );
+
+    send(&root, "m3");
+    std::fs::remove_file(&b_hold).unwrap();
+    wait_until("B to record m2 and m3", || caught_up(&root, 2));
     let delivered = events(&events_file);
-    for expected in ["A m1", "A m2", "B m2"] {
-        assert!(
-            delivered.iter().any(|line| line == expected),
-            "missing delivery {expected:?} in {delivered:?}"
-        );
-    }
+    let by = |who: &str| -> Vec<String> {
+        delivered
+            .iter()
+            .filter_map(|line| line.strip_prefix(&format!("{who} ")).map(str::to_string))
+            .collect()
+    };
+    assert_eq!(
+        by("A"),
+        ["m1", "m2"],
+        "a fenced-out process must not go on delivering: {delivered:?}"
+    );
+    assert_eq!(
+        by("B"),
+        ["m2", "m3"],
+        "the message A never recorded is delivered again, not lost: {delivered:?}"
+    );
 
     drop((a, b));
     let _ = std::fs::remove_dir_all(&root);

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use file_cas::{expire_leases_under, FileCasBackend};
+use file_cas::{expire_leases_under, wait_while_held, FileCasBackend};
 use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::cursor_fence::CursorGuarantee;
 use runtime::fs_backend::{FsBackend, StdFsBackend};
@@ -33,10 +33,23 @@ type Seen = Arc<Mutex<Vec<(&'static str, String)>>>;
 struct Receiver {
     stop: HookAbortSignal,
     handle: Option<std::thread::JoinHandle<()>>,
+    /// Hold files this receiver may be parked on, removed before joining so a
+    /// failed assertion ends the test instead of hanging it.
+    holds: Vec<PathBuf>,
+}
+
+impl Receiver {
+    fn releasing(mut self, hold: PathBuf) -> Self {
+        self.holds.push(hold);
+        self
+    }
 }
 
 impl Drop for Receiver {
     fn drop(&mut self) {
+        for hold in &self.holds {
+            let _ = std::fs::remove_file(hold);
+        }
         self.stop.abort();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -80,8 +93,21 @@ fn start(
     who: &'static str,
     seen: &Seen,
 ) -> Receiver {
+    start_holding(backend, root, agent, who, seen, None)
+}
+
+/// [`start`], with each delivery held while `hold` exists.
+fn start_holding(
+    backend: Arc<dyn FsBackend>,
+    root: &Path,
+    agent: &str,
+    who: &'static str,
+    seen: &Seen,
+    hold: Option<PathBuf>,
+) -> Receiver {
     let stop = HookAbortSignal::new();
     let seen = Arc::clone(seen);
+    let holds = hold.iter().cloned().collect();
     let handle = spawn_inbox_poller(
         mailbox(backend, root, agent),
         200,
@@ -89,12 +115,16 @@ fn start(
         stop.clone(),
         move |m| {
             seen.lock().unwrap().push((who, m.body.clone()));
+            if let Some(hold) = &hold {
+                wait_while_held(hold);
+            }
             true
         },
     );
     Receiver {
         stop,
         handle: Some(handle),
+        holds,
     }
 }
 
@@ -139,6 +169,7 @@ fn a_holder_resumed_after_losing_its_lease_cannot_move_the_cursor_back() {
     let root = tmp_root("resumed");
     let gate = root.join("gate");
     std::fs::create_dir_all(&gate).unwrap();
+    let b_hold = root.join("b-hold");
     let seen: Seen = Arc::default();
 
     send(&root, AGENT, "m1");
@@ -148,9 +179,11 @@ fn a_holder_resumed_after_losing_its_lease_cannot_move_the_cursor_back() {
         AGENT,
         "A",
         &seen,
-    );
+    )
+    .releasing(gate.join("hold"));
     wait_until("A to take and record m1", || caught_up(&root, AGENT, 1));
     assert_eq!(cursor_guarantee(AGENT), Some(CursorGuarantee::FencedCas));
+    let after_m1 = transcript_end(&root, AGENT);
 
     // Park A's next commit after its lease check and before its write, then
     // end every lease: A is a holder frozen past its TTL at the worst moment.
@@ -159,25 +192,52 @@ fn a_holder_resumed_after_losing_its_lease_cannot_move_the_cursor_back() {
     wait_until("A to be parked in its commit", || {
         gate.join("entered").exists()
     });
-    let b = start(Arc::new(FileCasBackend::new()), &root, AGENT, "B", &seen);
+
+    // B takes over and writes its fence, then is held mid-delivery: from here
+    // on only the fence stands between A's stale write and the register.
+    std::fs::write(&b_hold, b"").unwrap();
     expire_leases_under(&root);
-    wait_until("B to fence the conversation and record m2", || {
-        caught_up(&root, AGENT, 2)
+    let b = start_holding(
+        Arc::new(FileCasBackend::new()),
+        &root,
+        AGENT,
+        "B",
+        &seen,
+        Some(b_hold.clone()),
+    );
+    wait_until("B to fence and start delivering m2", || {
+        b_hold.with_extension("entered").exists()
     });
-    let newer = register(&root, AGENT).unwrap();
+    let fence = register(&root, AGENT).unwrap();
+    assert_eq!(
+        (fence.epoch, fence.read_offset),
+        (2, after_m1),
+        "B's fence takes the next epoch at the last recorded position"
+    );
 
     // A resumes and finishes the write it started against its old version.
     std::fs::remove_file(gate.join("hold")).unwrap();
-    std::thread::sleep(Duration::from_secs(2));
+    wait_until("A's parked write to be decided", || {
+        gate.join("left").exists()
+    });
     assert_eq!(
         register(&root, AGENT).unwrap(),
-        newer,
-        "the resumed holder must be fenced out, not overwrite the newer position"
+        fence,
+        "the resumed holder must be refused by the fence, not record m2 over it"
     );
-    assert_eq!(bodies(&seen, "A"), ["m1", "m2"]);
+
+    // A was refused, so it keeps nothing: the next message goes to B alone.
+    send(&root, AGENT, "m3");
+    std::fs::remove_file(&b_hold).unwrap();
+    wait_until("B to record m2 and m3", || caught_up(&root, AGENT, 2));
+    assert_eq!(
+        bodies(&seen, "A"),
+        ["m1", "m2"],
+        "a fenced-out holder must not go on delivering"
+    );
     assert_eq!(
         bodies(&seen, "B"),
-        ["m2"],
+        ["m2", "m3"],
         "the message A never recorded is delivered again, not lost"
     );
 
@@ -201,16 +261,19 @@ fn an_unknown_commit_that_landed_is_kept_without_redelivery() {
         &seen,
     );
     wait_until("m1 recorded", || caught_up(&root, AGENT, 1));
+    let holder = register(&root, AGENT).unwrap().holder;
 
     backend.inject_unknown(true);
     send(&root, AGENT, "m2");
     wait_until("m2 recorded", || caught_up(&root, AGENT, 1));
     std::thread::sleep(Duration::from_secs(2));
+    let settled = register(&root, AGENT).unwrap();
     assert_eq!(
-        bodies(&seen, "A"),
-        ["m1", "m2"],
-        "a commit read back as this holder's own is not repeated"
+        (settled.holder, settled.epoch),
+        (holder, 1),
+        "a commit read back as this holder's own keeps the claim, with no re-fence"
     );
+    assert_eq!(bodies(&seen, "A"), ["m1", "m2"]);
 
     drop(a);
     let _ = std::fs::remove_dir_all(&root);

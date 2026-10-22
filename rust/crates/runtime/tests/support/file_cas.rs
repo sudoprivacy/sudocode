@@ -14,8 +14,10 @@
 //! - `read_versioned` / `write_if_version` keep a never-reused generation in
 //!   `<path>.ver`, compared and replaced under an OS lock on `<path>.casguard`.
 //! - A gate directory, when given, holds a conditional write while
-//!   `<gate>/hold` exists, after touching `<gate>/entered`. That parks a holder
-//!   between its lease check and its write, the window fencing has to cover.
+//!   `<gate>/hold` exists, after touching `<gate>/entered`, and touches
+//!   `<gate>/left` once the held write has returned. That parks a holder
+//!   between its lease check and its write, the window fencing has to cover,
+//!   and tells the test when the parked write has been decided.
 //! - [`FileCasBackend::inject_unknown`] makes the next conditional write answer
 //!   `Unknown`, with or without committing it.
 //!
@@ -88,16 +90,66 @@ impl FileCasBackend {
         self.unknown.store(mode, Ordering::SeqCst);
     }
 
-    fn wait_at_gate(&self) {
-        let Some(gate) = &self.gate else { return };
+    /// Park while the gate is held. Returns the gate when this call was
+    /// parked, so the caller can mark it left.
+    fn wait_at_gate(&self) -> Option<&Path> {
+        let gate = self.gate.as_deref()?;
         let hold = gate.join("hold");
         if !hold.exists() {
-            return;
+            return None;
         }
         let _ = fs::write(gate.join("entered"), b"");
         while hold.exists() {
             std::thread::sleep(Duration::from_millis(20));
         }
+        Some(gate)
+    }
+
+    fn conditional_write(
+        &self,
+        path: &str,
+        expected: Option<&VersionToken>,
+        data: &[u8],
+    ) -> io::Result<WriteOutcome> {
+        let fault = self.unknown.swap(UNKNOWN_OFF, Ordering::SeqCst);
+        if fault == UNKNOWN_WITHOUT_COMMIT {
+            return Ok(WriteOutcome::Unknown);
+        }
+        let _guard = os_lock(&sidecar(path, ".casguard"))?;
+        let current = current_generation(path)?;
+        if current.map(token).as_ref() != expected {
+            return Ok(WriteOutcome::Conflict {
+                current: current.map(token),
+            });
+        }
+        // The generation counter survives the data, so it is never reused.
+        let last = fs::read_to_string(sidecar(path, ".ver"))
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .or(current)
+            .unwrap_or(0);
+        let next = last + 1;
+        self.inner.write_atomic(path, data)?;
+        fs::write(sidecar(path, ".ver"), next.to_string())?;
+        if fault == UNKNOWN_AFTER_COMMIT {
+            return Ok(WriteOutcome::Unknown);
+        }
+        Ok(WriteOutcome::Committed(token(next)))
+    }
+}
+
+/// Hold a test receiver's delivery while `<hold>` exists, after touching
+/// `<hold>.entered`. Lets a test stop a holder after its claim and before its
+/// commit.
+pub fn wait_while_held(hold: &Path) {
+    if !hold.exists() {
+        return;
+    }
+    let mut entered = hold.as_os_str().to_owned();
+    entered.push(".entered");
+    let _ = fs::write(PathBuf::from(entered), b"");
+    while hold.exists() {
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -289,31 +341,12 @@ impl FsBackend for FileCasBackend {
                 "test backend without conditional writes",
             ));
         }
-        self.wait_at_gate();
-        let fault = self.unknown.swap(UNKNOWN_OFF, Ordering::SeqCst);
-        if fault == UNKNOWN_WITHOUT_COMMIT {
-            return Ok(WriteOutcome::Unknown);
+        let parked = self.wait_at_gate();
+        let outcome = self.conditional_write(path, expected, data);
+        if let Some(gate) = parked {
+            let _ = fs::write(gate.join("left"), b"");
         }
-        let _guard = os_lock(&sidecar(path, ".casguard"))?;
-        let current = current_generation(path)?;
-        if current.map(token).as_ref() != expected {
-            return Ok(WriteOutcome::Conflict {
-                current: current.map(token),
-            });
-        }
-        // The generation counter survives the data, so it is never reused.
-        let last = fs::read_to_string(sidecar(path, ".ver"))
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .or(current)
-            .unwrap_or(0);
-        let next = last + 1;
-        self.inner.write_atomic(path, data)?;
-        fs::write(sidecar(path, ".ver"), next.to_string())?;
-        if fault == UNKNOWN_AFTER_COMMIT {
-            return Ok(WriteOutcome::Unknown);
-        }
-        Ok(WriteOutcome::Committed(token(next)))
+        outcome
     }
 
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {

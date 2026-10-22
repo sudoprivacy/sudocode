@@ -861,9 +861,11 @@ impl Mailbox {
     }
 }
 
-/// An agent's durable position in one conversation. Legacy holder fields are
-/// retained for compatibility; exclusive ownership comes from the backend lock,
-/// never from reading and overwriting this register.
+/// An agent's durable position in one conversation. Exclusive ownership comes
+/// from the backend lock. Where that lock is an expiring lease, writes to this
+/// register are additionally fenced by a conditional write when the backend has
+/// one ([`crate::cursor_fence`]), so a holder that outlived its lease cannot
+/// overwrite a newer holder's position.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReaderRegister {
     /// The instance tailing this conversation for this agent, empty if the seat
@@ -877,6 +879,16 @@ pub struct ReaderRegister {
     /// Offset past the last envelope this agent has taken responsibility for.
     #[serde(default)]
     pub read_offset: u64,
+    /// Which claim wrote this register, on a backend whose writes are
+    /// conditional (see [`crate::cursor_fence`]). Zero, and left out of the
+    /// stored form, everywhere else.
+    #[serde(default, skip_serializing_if = "is_unfenced")]
+    pub epoch: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if signature
+fn is_unfenced(epoch: &u64) -> bool {
+    *epoch == 0
 }
 
 /// How long a claimed seat stays claimed without being renewed.
@@ -953,51 +965,37 @@ pub struct ConversationReader {
     backend: Arc<dyn FsBackend>,
     path: String,
     holder: String,
+    agent: String,
 }
 
 impl ConversationReader {
     /// The register as currently stored, or `None` if this agent has never read
     /// this conversation.
     fn load(&self) -> Result<Option<ReaderRegister>, String> {
-        match self.backend.read(&self.path) {
-            Ok(raw) if raw.is_empty() => Ok(None),
-            Ok(raw) => serde_json::from_slice(&raw)
-                .map(Some)
-                .map_err(|e| format!("reader register {}: {e}", self.path)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(format!("read reader register {}: {e}", self.path)),
-        }
+        crate::cursor_fence::load_plain(self.backend.as_ref(), &self.path)
     }
 
-    fn store(&self, register: &ReaderRegister) -> Result<(), String> {
-        // Cursor replacement must not replace the inode holding the OS lock.
-        if let Some((dir, _)) = self.path.rsplit_once('/') {
-            self.backend
-                .create_dir_all(dir)
-                .map_err(|e| format!("create reader directory {dir}: {e}"))?;
-        }
-        let raw = serde_json::to_vec(register)
-            .map_err(|e| format!("encode reader register {}: {e}", self.path))?;
-        self.backend
-            .write_atomic(&self.path, &raw)
-            .map_err(|e| format!("write reader register {}: {e}", self.path))
-    }
-
+    /// Hold the conversation's lock, then claim its register through
+    /// [`crate::cursor_fence`]. `None` while another instance holds either.
     fn acquire(self) -> Result<Option<OwnedReader>, String> {
         let Some(lease) = HeldLease::try_acquire(&self.backend, &format!("{}.lock", self.path))
             .map_err(|e| format!("claim reader {}: {e}", self.path))?
         else {
             return Ok(None);
         };
-        let offset = self.load()?.map_or(0, |r| r.read_offset);
-        self.store(&ReaderRegister {
-            holder: self.holder.clone(),
-            lease_expires_at: now_ms() + READER_LEASE_MS,
-            read_offset: offset,
-        })?;
+        let Some((cursor, offset)) = crate::cursor_fence::RegisterCursor::claim(
+            Arc::clone(&self.backend),
+            self.path,
+            self.holder,
+            now_ms() + READER_LEASE_MS,
+        )?
+        else {
+            return Ok(None);
+        };
+        record_cursor_guarantee(&self.agent, cursor.guarantee());
         Ok(Some(OwnedReader {
-            reader: self,
             lease,
+            cursor,
             offset,
         }))
     }
@@ -1184,8 +1182,8 @@ impl Drop for HeldLease {
 }
 
 struct OwnedReader {
-    reader: ConversationReader,
     lease: HeldLease,
+    cursor: crate::cursor_fence::RegisterCursor,
     offset: u64,
 }
 
@@ -1202,11 +1200,7 @@ impl OwnedReader {
         {
             return Err("reader ownership lost; delivery remains unacknowledged".into());
         }
-        self.reader.store(&ReaderRegister {
-            holder: self.reader.holder.clone(),
-            lease_expires_at: now_ms() + READER_LEASE_MS,
-            read_offset: offset,
-        })?;
+        self.cursor.commit(offset, now_ms() + READER_LEASE_MS)?;
         self.offset = offset;
         Ok(())
     }
@@ -1257,6 +1251,7 @@ impl Mailbox {
                 .reader_path(&self.self_id, peer, &self.self_id),
             backend: Arc::clone(&self.backend),
             holder: instance_id(),
+            agent: self.self_id.clone(),
         }
     }
 
@@ -1318,8 +1313,39 @@ pub struct PeerStatus {
     /// idle, or `"next_prompt"` in the synchronous REPL, which runs it once the
     /// user hands the prompt back.
     pub delivery: &'static str,
+    /// What keeps a resumed holder from moving a read position back:
+    /// `"fenced"`, `"fenced_cas"` or `"at_least_once"` (see
+    /// [`crate::cursor_fence::CursorGuarantee`]), or `"none"` until this
+    /// process has claimed a conversation for the agent.
+    pub cursor: &'static str,
     /// Why attaching failed, when it did.
     pub error: Option<String>,
+}
+
+/// The cursor guarantee each agent's readers got in this process, as decided
+/// when a conversation was last claimed.
+static CURSOR_GUARANTEES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, crate::cursor_fence::CursorGuarantee>>,
+> = std::sync::OnceLock::new();
+
+fn record_cursor_guarantee(agent: &str, guarantee: crate::cursor_fence::CursorGuarantee) {
+    CURSOR_GUARANTEES
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(agent.to_string(), guarantee);
+}
+
+/// What protects `agent`'s read positions in this process: `None` until one of
+/// its conversations has been claimed here.
+#[must_use]
+pub fn cursor_guarantee(agent: &str) -> Option<crate::cursor_fence::CursorGuarantee> {
+    CURSOR_GUARANTEES
+        .get_or_init(std::sync::Mutex::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(agent)
+        .copied()
 }
 
 /// Receivers running in this process: per agent name, how many are standing

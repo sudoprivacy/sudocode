@@ -20,6 +20,7 @@ pub mod config_validate;
 mod conversation;
 pub mod coordinator_mode;
 pub mod coordinator_notification;
+pub mod cursor_fence;
 pub mod custom_agents;
 pub mod effort;
 pub mod experiments;

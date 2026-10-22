@@ -611,11 +611,20 @@ fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
         ("standby", _) => "standing by: another instance of this agent is receiving",
         _ => "not running in this process",
     };
+    let cursor = match peer.cursor {
+        "fenced" => "fenced: the lock excludes a frozen holder until it exits",
+        "fenced_cas" => "fenced: every read position is a conditional write",
+        "at_least_once" => {
+            "at-least-once: a holder frozen past its lease may replay or move a read position back"
+        }
+        _ => "decided when this process first claims a conversation",
+    };
     format!(
         "Peers
   Agent            {}
   Namespace        {namespace}
-  Receiver         {receiver}",
+  Receiver         {receiver}
+  Cursor           {cursor}",
         peer.agent
     )
 }

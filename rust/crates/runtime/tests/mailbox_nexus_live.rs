@@ -2010,7 +2010,7 @@ fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
     const TTL: Duration = Duration::from_secs(30);
     const RENEW_EVERY: Duration = Duration::from_secs(15);
     const BOUND: Duration = Duration::from_secs(20);
-    type Seen = Arc<std::sync::Mutex<Vec<(&'static str, String)>>>;
+    type Seen = Arc<std::sync::Mutex<Vec<(&'static str, String, Instant)>>>;
 
     let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set daemon endpoint");
     let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
@@ -2034,7 +2034,10 @@ fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
         let abort = runtime::HookAbortSignal::new();
         let sink_seen = Arc::clone(&seen);
         let handle = spawn_inbox_poller(mailbox, 200, label, abort.clone(), move |m| {
-            sink_seen.lock().unwrap().push((label, m.body.clone()));
+            sink_seen
+                .lock()
+                .unwrap()
+                .push((label, m.body.clone(), Instant::now()));
             true
         });
         (probe, abort, handle)
@@ -2053,7 +2056,7 @@ fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
         seen.lock()
             .unwrap()
             .iter()
-            .any(|(who, b)| *who == by && b == body)
+            .any(|(who, b, _)| *who == by && b == body)
     };
     let send = |body: &str| send_to(&sender, peer, &agent, body, &auth).expect("send");
     let real_renewal_after = |probe: &Probe, after: Instant| -> Option<Renewal> {
@@ -2383,14 +2386,23 @@ fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
     wait("m5 to be delivered", Duration::from_secs(30), &|| {
         delivered("seat-a", stale_body) || delivered("seat-b", stale_body)
     });
-    let first_delivery = seen
+    let (m5_receiver, m5_at) = seen
         .lock()
         .unwrap()
         .iter()
-        .position(|(_, body)| body == stale_body)
+        .find(|(_, body, _)| body == stale_body)
+        .map(|(who, _, at)| (*who, *at))
         .unwrap();
-    let m5_receiver = seen.lock().unwrap()[first_delivery].0;
-    let (owner_released, owner_reached) = owner.releases()[seat_releases_before];
+    assert!(
+        m5_at >= very_late.returned,
+        "m5 was delivered by {m5_receiver} {:?} before the late reply landed, on a proof past the bound",
+        very_late.returned.saturating_duration_since(m5_at)
+    );
+    let (owner_released, owner_reached) = owner
+        .releases()
+        .get(seat_releases_before)
+        .copied()
+        .expect("the holder must give up a seat whose last proof passed the bound");
     assert!(
         owner_reached,
         "not partitioned, so the release reached the node"

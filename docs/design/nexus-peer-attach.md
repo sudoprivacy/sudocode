@@ -106,7 +106,7 @@ Which path a reader uses is decided once, when it acquires the reader, by `FsBac
 
 The decision is reported as `PeerStatus.cursor` (the `/status` Cursor line and ACP `_meta.sudocode.peer.cursor`): `fenced`, `fenced_cas` or `at_least_once`, or `none` until this process has claimed one of the agent's conversations. On the conditional path the register carries the claim's `epoch`; the plain store writes the register exactly as before.
 
-`fenced_cas` holds only while every writer of a conversation's register fences. A build without S6, or a claim that found the backend answering `Unsupported` (for example a server not yet upgraded), writes unconditionally, so a deployment must not mix those with fencing writers and count on the guarantee.
+`fenced_cas` holds only while every writer of a conversation's register fences. A claim never downgrades a register that a conditional writer has fenced (one carrying an `epoch`): if the backend, or the replica that answered, reports `Unsupported` for such a register, the claim fails instead of writing unconditionally. An epoch that cannot be incremented fails the claim the same way. A build without S6 still writes unconditionally, so a deployment must not mix those with fencing writers and count on the guarantee.
 
 **Node adaptation (S6b, after N2).** The node needs a new RPC, not new fields on `Write`: an older server ignores unknown proto3 fields and would turn the write into an unconditional one. Its minimal contract:
 - `WriteIfVersion(path, content, precondition: if_gen | if_absent)` answers `Committed{gen}` or `Conflict{current_gen?}`. An older server answers UNIMPLEMENTED, which maps to `Unsupported`.

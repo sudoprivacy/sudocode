@@ -384,3 +384,73 @@ fn the_disk_lock_keeps_its_plain_store() {
     drop(a);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_fenced_register_is_never_written_unconditionally() {
+    const AGENT: &str = "fence-no-downgrade";
+    let root = tmp_root("no-downgrade");
+
+    send(&root, AGENT, "m1");
+    mailbox(Arc::new(FileCasBackend::new()), &root, AGENT)
+        .read_unread(PEER)
+        .expect("claim the conversation")
+        .expect("m1 is waiting")
+        .acknowledge()
+        .expect("record m1");
+    let fenced = register_raw(&root, AGENT).unwrap();
+    assert_eq!(register(&root, AGENT).unwrap().epoch, 1);
+
+    // The same register, answered by something without a conditional write:
+    // an old server, or a replica that does not have it yet.
+    send(&root, AGENT, "m2");
+    let error = mailbox(
+        Arc::new(FileCasBackend::without_conditional_writes()),
+        &root,
+        AGENT,
+    )
+    .read_unread(PEER)
+    .err()
+    .expect("a fenced register must not be claimed for unconditional writes");
+    assert!(error.contains("refusing an unconditional write"), "{error}");
+    assert_eq!(
+        register_raw(&root, AGENT).unwrap(),
+        fenced,
+        "the fenced register is left exactly as it was"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_exhausted_claim_epoch_fails_closed() {
+    const AGENT: &str = "fence-epoch-exhausted";
+    let root = tmp_root("epoch-exhausted");
+    let backend = Arc::new(FileCasBackend::new());
+
+    send(&root, AGENT, "m1");
+    let exhausted = ReaderRegister {
+        epoch: u64::MAX,
+        ..ReaderRegister::default()
+    };
+    backend
+        .write_if_version(
+            &convention(&root).reader_path(AGENT, PEER, AGENT),
+            None,
+            &serde_json::to_vec(&exhausted).unwrap(),
+        )
+        .expect("seed the register");
+    let before = register_raw(&root, AGENT).unwrap();
+
+    let error = mailbox(backend, &root, AGENT)
+        .read_unread(PEER)
+        .err()
+        .expect("a claim with no next epoch must fail");
+    assert!(error.contains("epoch exhausted"), "{error}");
+    assert_eq!(
+        register_raw(&root, AGENT).unwrap(),
+        before,
+        "nothing is written when the claim cannot fence"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

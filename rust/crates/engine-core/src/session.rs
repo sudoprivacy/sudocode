@@ -731,10 +731,12 @@ async fn run_direct_tool(
                     Ok(Err(error)) => Err(error),
                     Err(join_error) => Err(format!("direct tool call panicked: {join_error}")),
                 };
-                let _ = evt_tx.send(EngineEvent::CommandResult { id: request_id, result });
                 // A permission prompt moves the reported state; the session is
-                // idle again either way.
+                // idle again either way. Say so before the reply, while the
+                // caller still holds the session's event listener, so the next
+                // turn cannot receive this call's state.
                 let _ = evt_tx.send(EngineEvent::State(EngineState::Idle));
+                let _ = evt_tx.send(EngineEvent::CommandResult { id: request_id, result });
                 break;
             }
         }

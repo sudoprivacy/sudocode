@@ -8277,6 +8277,12 @@ async fn direct_a2a_refusals_send_nothing() {
         resp["result"]["isError"], true,
         "read-only mode refuses the send: {resp}"
     );
+    assert!(
+        resp["result"]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("read-only")),
+        "the refusal is the permission policy's: {resp}"
+    );
 
     let (_, paused) = client
         .send_request("_sudocode/session/pause_tools", json!({ "sessionId": sid }))
@@ -8332,6 +8338,12 @@ async fn direct_a2a_refusals_send_nothing() {
     assert_eq!(
         resp["result"]["isError"], true,
         "a denied permission prompt refuses the send: {resp}"
+    );
+    assert!(
+        resp["result"]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("reject_once")),
+        "the refusal is the client's denial: {resp}"
     );
 
     assert!(

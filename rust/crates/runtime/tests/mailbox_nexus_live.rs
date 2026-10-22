@@ -36,6 +36,8 @@
 //! * **Never read a just-sent frame without blocking.** See
 //!   [`DELIVERY_WAIT_MS`].
 
+#[path = "common/lease_fault.rs"]
+mod lease_fault;
 #[path = "common/paused_transport.rs"]
 mod paused_transport;
 #[path = "common/session_controller.rs"]
@@ -1970,4 +1972,281 @@ fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
         after.messages().is_empty(),
         "acknowledged delivery must not replay"
     );
+}
+
+/// The receiver seat on a REAL node, through a test-only fault boundary
+/// (`common/lease_fault.rs`; every fault it causes is labelled INJECTED).
+///
+/// Two instances of one agent, each over its own real mTLS client. Three
+/// phases, each asserting what the node and the lease code actually did:
+///
+/// 1. Seat renewals fail fast for a few seconds (INJECTED). The holder keeps the
+///    seat: it retries about once a second, the next real renewal succeeds
+///    inside the bound, and the standby never takes over.
+/// 2. One seat renewal really succeeds on the node, but its reply comes back
+///    after the bound (INJECTED delay). The holder must not count that as
+///    fresh: it gives the seat up once the reply lands, before the node would
+///    have expired it, and the standby takes over.
+/// 3. The holder is cut off from the node entirely (INJECTED partition; locks
+///    it drops are never released). It stops renewing at its own bound, the
+///    standby gets the seat only once the node expires the lease by its TTL,
+///    and the cut-off instance stands by after it reconnects.
+///
+/// Mirrors the runtime's lease timing (30s TTL, renew every 15s, 10s margin,
+/// 1s retry); a change there should change this.
+#[test]
+#[ignore = "requires the harness's real mTLS Nexus daemon"]
+fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
+    use lease_fault::{Fault, FaultyBackend, Outcome, Probe, Renewal};
+    use runtime::mailbox::{spawn_inbox_poller, InboxConvention};
+
+    const TTL: Duration = Duration::from_secs(30);
+    const RENEW_EVERY: Duration = Duration::from_secs(15);
+    const BOUND: Duration = Duration::from_secs(20);
+    type Seen = Arc<std::sync::Mutex<Vec<(&'static str, String)>>>;
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set daemon endpoint");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let agent = format!("scode-seat-fault-{}", fresh());
+    let peer = "seat-fault-peer";
+    let sender = dial(&endpoint);
+    let seen: Seen = Arc::default();
+
+    let start = |label: &'static str| {
+        let probe = Probe::new();
+        let node = runtime::fs_backend::NexusVfsFsBackend::from_arc_mtls(
+            dial(&endpoint),
+            auth.clone(),
+            "root",
+        );
+        let mailbox = Arc::new(Mailbox::new(
+            Arc::new(FaultyBackend::new(Arc::new(node), Arc::clone(&probe))),
+            agent.clone(),
+            InboxConvention::new(String::new()),
+        ));
+        let abort = runtime::HookAbortSignal::new();
+        let sink_seen = Arc::clone(&seen);
+        let handle = spawn_inbox_poller(mailbox, 200, label, abort.clone(), move |m| {
+            sink_seen.lock().unwrap().push((label, m.body.clone()));
+            true
+        });
+        (probe, abort, handle)
+    };
+    let wait = |what: &str, within: Duration, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + within;
+        while !done() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {within:?} waiting for {what}"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let delivered = |by: &str, body: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|(who, b)| *who == by && b == body)
+    };
+    let send = |body: &str| send_to(&sender, peer, &agent, body, &auth).expect("send");
+    let real_renewal_after = |probe: &Probe, after: Instant| -> Option<Renewal> {
+        probe
+            .renewals()
+            .into_iter()
+            .find(|r| r.outcome == Outcome::Held && r.requested > after)
+    };
+    let next_real_renewal = |probe: &Probe, who: &str| -> Renewal {
+        let mark = Instant::now();
+        wait(
+            &format!("a real seat renewal by {who}"),
+            RENEW_EVERY + Duration::from_secs(10),
+            &|| real_renewal_after(probe, mark).is_some(),
+        );
+        real_renewal_after(probe, mark).unwrap()
+    };
+
+    let (a, a_stop, a_join) = start("seat-a");
+    wait("A to take the seat", Duration::from_secs(20), &|| {
+        a.holds_seat()
+    });
+    let (b, b_stop, b_join) = start("seat-b");
+    send("m0 warm-up");
+    wait("A to deliver the warm-up", Duration::from_secs(20), &|| {
+        delivered("seat-a", "m0 warm-up")
+    });
+    assert!(
+        b.acquisitions().is_empty(),
+        "a second instance must stand by"
+    );
+
+    // 1. Transient renewal errors: ridden out, retried quickly.
+    let t0 = next_real_renewal(&a, "A").requested;
+    let until_tick = (t0 + RENEW_EVERY.saturating_sub(Duration::from_secs(2)))
+        .saturating_duration_since(Instant::now());
+    thread::sleep(until_tick);
+    a.set(Fault::SeatRenewFailsFast);
+    let injected_since = |probe: &Probe, after: Instant| -> Vec<Renewal> {
+        probe
+            .renewals()
+            .into_iter()
+            .filter(|r| r.outcome == Outcome::Injected && r.requested > after)
+            .collect()
+    };
+    wait(
+        "three INJECTED seat renewal failures on A",
+        Duration::from_secs(10),
+        &|| injected_since(&a, t0).len() >= 3,
+    );
+    a.set(Fault::None);
+    let healed = Instant::now();
+    wait("A's next real renewal", Duration::from_secs(5), &|| {
+        real_renewal_after(&a, healed).is_some()
+    });
+    let recovered = real_renewal_after(&a, healed).unwrap();
+    let failures = injected_since(&a, t0);
+    let gaps: Vec<Duration> = failures
+        .windows(2)
+        .map(|w| w[1].requested.saturating_duration_since(w[0].requested))
+        .collect();
+    assert!(
+        gaps.iter().all(|gap| *gap < Duration::from_secs(3)),
+        "a failed renewal must be retried quickly, not at the next tick: gaps {gaps:?}"
+    );
+    let gap_to_real = recovered.requested.saturating_duration_since(t0);
+    assert!(
+        gap_to_real < BOUND,
+        "the seat renewed for real {gap_to_real:?} after the last good renewal, past the bound"
+    );
+    assert!(
+        a.holds_seat() && b.acquisitions().is_empty(),
+        "a transient renewal error must not move the seat: A holds={}, B took it at {:?}",
+        a.holds_seat(),
+        b.acquisitions()
+    );
+    send("m1 after transient errors");
+    wait("A to deliver m1", Duration::from_secs(20), &|| {
+        delivered("seat-a", "m1 after transient errors")
+    });
+    println!(
+        "SEAT PHASE 1 OK: {} INJECTED renewal failures {gaps:?} apart; real renewal {gap_to_real:?} after the last good one; seat stayed with A",
+        failures.len()
+    );
+
+    // 2. A success that comes back too late is not fresh.
+    a.set(Fault::SeatRenewReturnsLate(BOUND + Duration::from_secs(1)));
+    wait(
+        "B to take the seat after A's late renewal reply",
+        RENEW_EVERY + BOUND + Duration::from_secs(15),
+        &|| b.holds_seat(),
+    );
+    let late = a
+        .renewals()
+        .into_iter()
+        .rev()
+        .find(|r| {
+            r.outcome == Outcome::Held && r.returned.saturating_duration_since(r.requested) >= BOUND
+        })
+        .expect("the INJECTED late renewal");
+    let b_took = b.acquisitions()[0];
+    let (a_released, a_reached_node) = *a.releases().last().expect("A gave the seat up");
+    assert!(
+        a_reached_node,
+        "A was not partitioned, so its release reached the node"
+    );
+    assert!(
+        a_released >= late.returned && b_took >= late.returned,
+        "the seat moved before A's late reply landed"
+    );
+    let b_after = b_took.saturating_duration_since(late.requested);
+    assert!(
+        b_after < TTL,
+        "B took the seat {b_after:?} after A's last real renewal, at or past the TTL: \
+         the node expired a seat A should have given up"
+    );
+    send("m2 after a late renewal");
+    wait("B to deliver m2", Duration::from_secs(20), &|| {
+        delivered("seat-b", "m2 after a late renewal")
+    });
+    println!(
+        "SEAT PHASE 2 OK: A's renewal returned {:?} after it was requested; A gave the seat up and B took it {b_after:?} after that request (TTL {TTL:?})",
+        late.returned.saturating_duration_since(late.requested)
+    );
+
+    // 3. Partitioned holder: gives up by its bound; the node hands the seat on
+    //    only at the TTL.
+    let last_real = next_real_renewal(&b, "B");
+    b.set(Fault::Partitioned);
+    let cut = Instant::now();
+    send("m3 during a partition");
+    wait(
+        "A to take the seat from the partitioned B",
+        TTL + Duration::from_secs(15),
+        &|| a.acquisitions().len() >= 2,
+    );
+    let a_took = a.acquisitions()[1];
+    let a_after = a_took.saturating_duration_since(last_real.requested);
+    assert!(
+        a_after + Duration::from_millis(500) >= TTL,
+        "A took the seat {a_after:?} after B's last real renewal, before the node's TTL"
+    );
+    let b_attempts: Vec<Renewal> = b
+        .renewals()
+        .into_iter()
+        .filter(|r| r.requested >= cut)
+        .collect();
+    assert!(
+        !b_attempts.is_empty() && b_attempts.iter().all(|r| r.outcome == Outcome::Injected),
+        "every renewal B tried while cut off must have been an INJECTED failure: {b_attempts:?}"
+    );
+    let b_last_try = b_attempts
+        .last()
+        .unwrap()
+        .requested
+        .saturating_duration_since(last_real.requested);
+    assert!(
+        b_last_try <= BOUND + Duration::from_secs(1),
+        "B kept renewing {b_last_try:?} after its last real renewal, past its bound"
+    );
+    let (b_released, b_reached_node) = *b.releases().last().expect("B gave the seat up");
+    assert!(
+        !b_reached_node,
+        "B was partitioned, so its release never reached the node"
+    );
+    assert!(
+        b_released < a_took,
+        "B must stop receiving before the node hands the seat on"
+    );
+    wait(
+        "A to deliver what was sent during the partition",
+        Duration::from_secs(45),
+        &|| delivered("seat-a", "m3 during a partition"),
+    );
+    b.set(Fault::None);
+    thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        b.acquisitions().len(),
+        1,
+        "after reconnecting, B must find the seat taken and stand by"
+    );
+    send("m4 after the partition heals");
+    wait("A to deliver m4", Duration::from_secs(20), &|| {
+        delivered("seat-a", "m4 after the partition heals")
+    });
+    thread::sleep(Duration::from_secs(2));
+    for body in ["m3 during a partition", "m4 after the partition heals"] {
+        assert!(
+            !delivered("seat-b", body),
+            "{body:?} was delivered by the instance that lost the seat"
+        );
+    }
+    println!(
+        "SEAT PHASE 3 OK: B's last renewal attempt {b_last_try:?} after its last real one ({} INJECTED); B stopped receiving {:?} and A took the seat {a_after:?} after it; B stood by after reconnecting",
+        b_attempts.len(),
+        b_released.saturating_duration_since(last_real.requested)
+    );
+
+    a_stop.abort();
+    b_stop.abort();
+    a_join.join().expect("A receiver");
+    b_join.join().expect("B receiver");
 }

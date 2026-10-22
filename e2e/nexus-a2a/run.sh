@@ -143,6 +143,13 @@ echo "== [deterministic] a silent connection errors, then recovers =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
 
+# The receiver seat against the node's real lease table. The faults (fast
+# renewal errors, a late renewal reply, a partition) are injected by a test-only
+# wrapper around the real backend; the node's TTL is what the takeover waits on.
+echo "== [deterministic] the receiver seat rides out renew errors and yields by its bound =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound -- --ignored --nocapture
+
 # A daemon that is alive and SILENT - the failure a unit test cannot construct.
 #
 # A dropped connection reports itself; a stopped process holds the socket open

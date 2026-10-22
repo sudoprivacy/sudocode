@@ -103,11 +103,15 @@ impl RegisterCursor {
             None => (None, None),
         };
         let previous = previous.unwrap_or_default();
+        let epoch = previous
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| format!("reader register {path}: claim epoch exhausted"))?;
         let fence = ReaderRegister {
             holder: holder.clone(),
             lease_expires_at,
             read_offset: previous.read_offset,
-            epoch: previous.epoch + 1,
+            epoch,
         };
         let token = match backend
             .write_if_version(&path, expected.as_ref(), &encode(&path, &fence)?)

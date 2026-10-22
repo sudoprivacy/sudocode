@@ -384,3 +384,37 @@ fn the_disk_lock_keeps_its_plain_store() {
     drop(a);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn an_exhausted_claim_epoch_fails_closed() {
+    const AGENT: &str = "fence-epoch-exhausted";
+    let root = tmp_root("epoch-exhausted");
+    let backend = Arc::new(FileCasBackend::new());
+
+    send(&root, AGENT, "m1");
+    let exhausted = ReaderRegister {
+        epoch: u64::MAX,
+        ..ReaderRegister::default()
+    };
+    backend
+        .write_if_version(
+            &convention(&root).reader_path(AGENT, PEER, AGENT),
+            None,
+            &serde_json::to_vec(&exhausted).unwrap(),
+        )
+        .expect("seed the register");
+    let before = register_raw(&root, AGENT).unwrap();
+
+    let error = mailbox(backend, &root, AGENT)
+        .read_unread(PEER)
+        .err()
+        .expect("a claim with no next epoch must fail");
+    assert!(error.contains("epoch exhausted"), "{error}");
+    assert_eq!(
+        register_raw(&root, AGENT).unwrap(),
+        before,
+        "nothing is written when the claim cannot fence"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

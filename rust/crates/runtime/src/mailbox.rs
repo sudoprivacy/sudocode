@@ -1168,7 +1168,10 @@ impl HeldLease {
             .name("mailbox-lease".into())
             .spawn(move || {
                 let (mutex, wake) = &*worker_stop;
-                let mut wait_ms = READER_RENEW_MS;
+                // Every renewal is scheduled from when the last successful one
+                // was requested, never from when its reply came back: a slow
+                // reply must not push the next renewal past the TTL.
+                let mut wait_ms = READER_RENEW_MS.saturating_sub(elapsed_ms(requested));
                 loop {
                     let stopped = mutex
                         .lock()
@@ -1193,7 +1196,7 @@ impl HeldLease {
                     ) {
                         LeaseRenewal::Held => {
                             mark_renewed(&worker_last_renewed, requested);
-                            wait_ms = READER_RENEW_MS;
+                            wait_ms = READER_RENEW_MS.saturating_sub(elapsed_ms(requested));
                         }
                         // Transient: prove nothing, keep the lease, and try
                         // again soon rather than at the TTL. Giving up here
@@ -1217,8 +1220,21 @@ impl HeldLease {
         }))
     }
 
+    /// Whether the holder may still act on this lease.
+    ///
+    /// The flag records a renewal that answered "lost"; the age check covers a
+    /// renewal that has not answered at all. While one is in flight the worker
+    /// cannot clear the flag, so belief must also expire on its own once the
+    /// last successful renewal was requested longer ago than the grace allows.
     fn is_valid(&self) -> bool {
         self.valid.load(std::sync::atomic::Ordering::Acquire)
+            && within_grace(request_age_ms(
+                self.expiring,
+                *self
+                    .last_renewed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            ))
     }
 
     /// Renew now, ahead of a write that relies on still holding the lock.
@@ -1857,8 +1873,8 @@ mod tests {
             .expect("the monotonic clock reaches back one lease");
         let lease = lease_with(ScriptedLock::new(&[None]), stale);
         assert!(
-            lease.confirm().is_err(),
-            "the cause is surfaced, not masked"
+            !matches!(lease.confirm(), Ok(true)),
+            "a lease whose last proof is past the bound never approves a write"
         );
         assert!(!lease.is_valid());
     }

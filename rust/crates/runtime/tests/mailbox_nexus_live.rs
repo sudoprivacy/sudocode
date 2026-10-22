@@ -1993,6 +1993,12 @@ fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
 ///    standby gets the seat only once the node expires the lease by its TTL,
 ///    and the cut-off instance stands by after it reconnects.
 ///
+/// 4. Slow but successful renewals: a reply 3s late keeps the seat and the next
+///    renewal is timed from the request, not the reply; a reply 19s late (just
+///    inside the bound) must not extend belief in the old proof past the bound,
+///    so a message sent in that window is delivered only on a grant taken
+///    after the reply landed.
+///
 /// Mirrors the runtime's lease timing (30s TTL, renew every 15s, 10s margin,
 /// 1s retry); a change there should change this.
 #[test]
@@ -2288,6 +2294,138 @@ fn live_receiver_seat_rides_out_renew_errors_and_yields_by_its_bound() {
         gave_up.saturating_duration_since(last_real.requested)
     );
 
+    // 4. Slow but successful renewals, on whoever holds the seat now.
+    //    a) A reply 3s late is still fresh: the seat stays, and the next
+    //       renewal is timed from when the slow one was requested, not 15s
+    //       after its reply.
+    let (owner, owner_label) = (standby, standby_label);
+    let seat_releases_before = owner.releases().len();
+    let slow_mark = Instant::now();
+    owner.set(Fault::SeatRenewReturnsLate(Duration::from_secs(3)));
+    let slow_renewal = |probe: &Probe| {
+        probe.renewals().into_iter().find(|r| {
+            r.returned > slow_mark
+                && r.returned.saturating_duration_since(r.requested) >= Duration::from_secs(3)
+        })
+    };
+    wait(
+        "a 3s-late seat renewal and the renewal after it",
+        RENEW_EVERY * 2 + Duration::from_secs(10),
+        &|| {
+            slow_renewal(owner).is_some_and(|slow| {
+                owner
+                    .renewals()
+                    .iter()
+                    .any(|r| r.requested > slow.requested)
+            })
+        },
+    );
+    let slow = slow_renewal(owner).unwrap();
+    let following = owner
+        .renewals()
+        .into_iter()
+        .find(|r| r.requested > slow.requested)
+        .unwrap();
+    assert_eq!(
+        slow.outcome,
+        Outcome::Held,
+        "a 3s-late reply is still fresh"
+    );
+    let cadence = following
+        .requested
+        .saturating_duration_since(slow.requested);
+    assert!(
+        cadence < RENEW_EVERY + Duration::from_secs(1),
+        "the renewal after a slow reply must be timed from its request: it came {cadence:?} \
+         later, where 15s after the reply would be {:?}",
+        RENEW_EVERY + slow.returned.saturating_duration_since(slow.requested)
+    );
+    assert_eq!(
+        owner.releases().len(),
+        seat_releases_before,
+        "a slow but fresh renewal must not cost the seat"
+    );
+    println!(
+        "SEAT PHASE 4a OK: a seat renewal replied {:?} late and stayed fresh; the next one was requested {cadence:?} after it (from the request, not the reply); {owner_label} kept the seat",
+        slow.returned.saturating_duration_since(slow.requested)
+    );
+
+    //    b) A reply 19s late (just inside the 20s bound). Belief in the old
+    //       proof must lapse at the bound while the reply is still out, so
+    //       nothing is delivered on it; the seat is held again only on a grant
+    //       taken after the reply landed.
+    let last_proof = next_real_renewal(owner, owner_label);
+    let seat_releases_before = owner.releases().len();
+    owner.set(Fault::SeatRenewReturnsLate(Duration::from_secs(19)));
+    let stale_from = last_proof.requested + BOUND;
+    thread::sleep((stale_from + Duration::from_secs(3)).saturating_duration_since(Instant::now()));
+    let stale_body = "m5 sent while the seat's last proof is past the bound";
+    let sent_stale = Instant::now();
+    send(stale_body);
+    wait(
+        "the 19s-late renewal reply to land",
+        RENEW_EVERY + Duration::from_secs(30),
+        &|| {
+            owner.renewals().iter().any(|r| {
+                r.requested > last_proof.requested
+                    && r.returned.saturating_duration_since(r.requested) >= Duration::from_secs(19)
+            })
+        },
+    );
+    let very_late = owner
+        .renewals()
+        .into_iter()
+        .find(|r| {
+            r.requested > last_proof.requested
+                && r.returned.saturating_duration_since(r.requested) >= Duration::from_secs(19)
+        })
+        .unwrap();
+    wait("m5 to be delivered", Duration::from_secs(30), &|| {
+        delivered("seat-a", stale_body) || delivered("seat-b", stale_body)
+    });
+    let first_delivery = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .position(|(_, body)| body == stale_body)
+        .unwrap();
+    let m5_receiver = seen.lock().unwrap()[first_delivery].0;
+    let (owner_released, owner_reached) = owner.releases()[seat_releases_before];
+    assert!(
+        owner_reached,
+        "not partitioned, so the release reached the node"
+    );
+    assert!(
+        owner_released >= very_late.returned,
+        "the old seat is released once its renewal returns"
+    );
+    let regrant = a
+        .acquisitions()
+        .into_iter()
+        .chain(b.acquisitions())
+        .filter(|at| *at >= owner_released)
+        .min()
+        .expect("a grant after the old seat was released");
+    let deliverer = if m5_receiver == "seat-a" { &a } else { &b };
+    assert!(
+        deliverer
+            .acquisitions()
+            .iter()
+            .any(|at| *at >= owner_released),
+        "m5 must be delivered on a grant taken after the old seat was released"
+    );
+    println!(
+        "SEAT PHASE 4b OK: a seat renewal requested {:?} after the last proof replied {:?} late; m5 was sent {:?} past the bound and not delivered on the old proof; the old seat was released {:?} after the late reply landed and {m5_receiver} delivered m5 on a new grant {:?} after that",
+        very_late
+            .requested
+            .saturating_duration_since(last_proof.requested),
+        very_late
+            .returned
+            .saturating_duration_since(very_late.requested),
+        sent_stale.saturating_duration_since(stale_from),
+        owner_released.saturating_duration_since(very_late.returned),
+        regrant.saturating_duration_since(owner_released),
+    );
     a_stop.abort();
     b_stop.abort();
     a_join.join().expect("A receiver");

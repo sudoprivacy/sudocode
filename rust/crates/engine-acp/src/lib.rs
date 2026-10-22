@@ -6,11 +6,6 @@
 //! same cut the in-process REPL renderer follows. `AcpError` lives here (its
 //! only consumer is the CLI's ACP wiring, which names it through this crate).
 
-// The ACP server's handler chain is one nested generic type per request it
-// serves; computing its layout needs more than the default 128 levels. The
-// server boxes that future, so crates that run it need no such limit.
-#![recursion_limit = "256"]
-
 pub mod acp_sdk_server;
 pub mod acp_stdio_server;
 #[cfg(feature = "websocket")]

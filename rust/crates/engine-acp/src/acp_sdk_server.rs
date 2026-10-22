@@ -284,41 +284,45 @@ pub(crate) struct ResumeToolsResponse {}
 // Custom extension: _sudocode/a2a/* (direct A2A requests)
 // ---------------------------------------------------------------------------
 
+// Served from the catch-all dispatch rather than as typed handlers: every typed
+// handler nests the server's type one level deeper, and the chain is already at
+// the depth the compiler lays out by default in every crate that runs it.
+const DIRECT_SEND_METHOD: &str = "_sudocode/a2a/send";
+const DIRECT_AGENT_LIST_METHOD: &str = "_sudocode/a2a/agent_list";
+
 /// Run the session's own `send` tool for the client, without a model turn.
 /// Plain text only, and no `sender`: the session's agent is the sender.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcRequest)]
-#[request(method = "_sudocode/a2a/send", response = DirectA2aResponse)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct DirectSendRequest {
-    pub session_id: String,
-    pub to: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
+struct DirectSendRequest {
+    session_id: String,
+    to: String,
+    message: String,
+    #[serde(default)]
+    summary: Option<String>,
     /// ACP lets any request carry `_meta`; it is accepted and ignored.
-    #[serde(rename = "_meta", default, skip_serializing)]
+    #[serde(rename = "_meta", default)]
     _meta: Option<serde::de::IgnoredAny>,
 }
 
 /// Run the session's own `agent_list` tool for the client.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcRequest)]
-#[request(method = "_sudocode/a2a/agent_list", response = DirectA2aResponse)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct DirectAgentListRequest {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_only: Option<bool>,
-    #[serde(rename = "_meta", default, skip_serializing)]
+struct DirectAgentListRequest {
+    session_id: String,
+    #[serde(default)]
+    active_only: Option<bool>,
+    #[serde(rename = "_meta", default)]
     _meta: Option<serde::de::IgnoredAny>,
 }
 
 /// The tool's own result, verbatim. `isError` reports a failed call; it does
 /// not prove that nothing was sent.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct DirectA2aResponse {
-    pub content: String,
-    pub is_error: bool,
+struct DirectA2aResponse {
+    content: String,
+    is_error: bool,
 }
 
 /// `_meta.sudocode` key a client sets in `clientCapabilities` (and scode
@@ -2027,6 +2031,29 @@ fn answer_permission(
     .boxed()
 }
 
+/// The session, tool and tool input a direct A2A request asks for.
+fn direct_a2a_call(
+    message: agent_client_protocol::UntypedMessage,
+) -> Result<(String, &'static str, serde_json::Value), AcpError> {
+    let (method, params) = message.into_parts();
+    let invalid = |error: serde_json::Error| AcpError::invalid_params(error.to_string());
+    if method == DIRECT_SEND_METHOD {
+        let request: DirectSendRequest = serde_json::from_value(params).map_err(invalid)?;
+        let mut input = json!({ "to": request.to, "message": request.message });
+        if let Some(summary) = request.summary {
+            input["summary"] = json!(summary);
+        }
+        Ok((request.session_id, "send", input))
+    } else {
+        let request: DirectAgentListRequest = serde_json::from_value(params).map_err(invalid)?;
+        let input = request.active_only.map_or_else(
+            || json!({}),
+            |active_only| json!({ "active_only": active_only }),
+        );
+        Ok((request.session_id, "agent_list", input))
+    }
+}
+
 /// Run one of the session's own A2A tools for the client, outside any turn,
 /// through the hooks and permission policy a model's call passes.
 ///
@@ -2185,7 +2212,7 @@ pub(crate) async fn run_acp_on_transport(
     let subagent_completions = Arc::new(AtomicBool::new(false));
     let task_completions = Arc::new(AtomicBool::new(false));
 
-    let connection = Agent
+    Agent
         .builder()
         .name("scode")
         // --- initialize ---
@@ -3102,91 +3129,56 @@ pub(crate) async fn run_acp_on_transport(
             },
             on_receive_request!(),
         )
-        // --- _sudocode/a2a/* (direct A2A requests) ---
-        .on_receive_request(
-            {
-                let registry = Arc::clone(&registry);
-                async move |req: DirectSendRequest,
-                            responder: Responder<DirectA2aResponse>,
-                            cx: ConnectionTo<Client>| {
-                    let registry = Arc::clone(&registry);
-                    let mut input = json!({ "to": req.to, "message": req.message });
-                    if let Some(summary) = req.summary {
-                        input["summary"] = json!(summary);
-                    }
-                    let connection = cx.clone();
-                    cx.spawn(async move {
-                        let result =
-                            drive_direct_tool(registry, req.session_id, "send", input, connection)
-                                .await;
-                        match result {
-                            Ok(response) => responder.respond(response)?,
-                            Err(error) => responder.respond_with_error(acp_error_to_sdk(&error))?,
-                        }
-                        Ok(())
-                    })?;
-                    Ok(())
-                }
-            },
-            on_receive_request!(),
-        )
-        .on_receive_request(
-            {
-                let registry = Arc::clone(&registry);
-                async move |req: DirectAgentListRequest,
-                            responder: Responder<DirectA2aResponse>,
-                            cx: ConnectionTo<Client>| {
-                    let registry = Arc::clone(&registry);
-                    let input = match req.active_only {
-                        Some(active_only) => json!({ "active_only": active_only }),
-                        None => json!({}),
-                    };
-                    let connection = cx.clone();
-                    cx.spawn(async move {
-                        let result = drive_direct_tool(
-                            registry,
-                            req.session_id,
-                            "agent_list",
-                            input,
-                            connection,
-                        )
-                        .await;
-                        match result {
-                            Ok(response) => responder.respond(response)?,
-                            Err(error) => responder.respond_with_error(acp_error_to_sdk(&error))?,
-                        }
-                        Ok(())
-                    })?;
-                    Ok(())
-                }
-            },
-            on_receive_request!(),
-        )
-        // --- catch-all for unhandled methods ---
+        // --- catch-all: direct A2A requests, then unhandled methods ---
         .on_receive_dispatch(
-            async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
-                message @ (Dispatch::Request(_, _) | Dispatch::Notification(_)) => {
-                    message.respond_with_error(Error::method_not_found(), cx)?;
-                    Ok(Handled::Yes)
-                }
-                Dispatch::Response(result, router) => {
-                    // A cancelled turn drops its wire waiter. The SDK's default
-                    // router treats a late reply to that waiter as a connection
-                    // error; consume it without closing unrelated live turns.
-                    let _ = router.respond_with_result(result);
-                    Ok(Handled::Yes)
+            {
+                let registry = Arc::clone(&registry);
+                async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
+                    Dispatch::Request(message, responder)
+                        if matches!(
+                            message.method(),
+                            DIRECT_SEND_METHOD | DIRECT_AGENT_LIST_METHOD
+                        ) =>
+                    {
+                        let registry = Arc::clone(&registry);
+                        let connection = cx.clone();
+                        cx.spawn(async move {
+                            let result = match direct_a2a_call(message) {
+                                Ok((session_id, name, input)) => {
+                                    drive_direct_tool(registry, session_id, name, input, connection)
+                                        .await
+                                }
+                                Err(error) => Err(error),
+                            };
+                            responder.respond_with_result(
+                                result
+                                    .and_then(|response| {
+                                        serde_json::to_value(response)
+                                            .map_err(|e| AcpError::internal(e.to_string()))
+                                    })
+                                    .map_err(|error| acp_error_to_sdk(&error)),
+                            )?;
+                            Ok(())
+                        })?;
+                        Ok(Handled::Yes)
+                    }
+                    message @ (Dispatch::Request(_, _) | Dispatch::Notification(_)) => {
+                        message.respond_with_error(Error::method_not_found(), cx)?;
+                        Ok(Handled::Yes)
+                    }
+                    Dispatch::Response(result, router) => {
+                        // A cancelled turn drops its wire waiter. The SDK's default
+                        // router treats a late reply to that waiter as a connection
+                        // error; consume it without closing unrelated live turns.
+                        let _ = router.respond_with_result(result);
+                        Ok(Handled::Yes)
+                    }
                 }
             },
             on_receive_dispatch!(),
         )
-        .connect_to(transport);
-    // The handler chain is one nested generic type per request served. Erase it
-    // here, where this crate's recursion limit covers its layout, so a caller
-    // awaiting the server holds a boxed future rather than that whole type.
-    let connection: std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<(), Error>> + Send + '_>,
-    > = Box::pin(connection);
-    connection.await?;
+        .connect_to(transport)
+        .await?;
 
     Ok(())
 }

@@ -14435,11 +14435,17 @@ printf 'pwsh:%s' "$1"
     fn powershell_resolver_returns_absolute_path_for_drive_relative_entry() {
         let _guard = env_guard();
         let parent_cwd = std::env::current_dir().expect("cwd");
+        let Some(std::path::Component::Prefix(prefix)) = parent_cwd.components().next() else {
+            return;
+        };
+        if !matches!(prefix.kind(), std::path::Prefix::Disk(_)) {
+            eprintln!("Skipping drive-relative test: cwd has no ordinary drive-letter prefix");
+            return;
+        }
         let unique = temp_path("powershell-drive-relative");
         let name = unique.file_name().expect("unique name");
         let root = parent_cwd.join(name);
         let expected = powershell_test_candidate(&root, "pwsh");
-        let prefix = parent_cwd.components().next().expect("drive prefix");
         let mut relative = prefix.as_os_str().to_os_string();
         relative.push(name);
         let paths = std::env::join_paths([PathBuf::from(relative)]).expect("PATH");

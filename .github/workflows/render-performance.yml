@@ -114,6 +114,8 @@ jobs:
     needs: policy
     if: needs.policy.outputs.is_needed == 'true'
     runs-on: ubuntu-24.04
+    env:
+      CARGO_BUILD_JOBS: '1'
     timeout-minutes: ${{ (github.event_name == 'schedule' || inputs.profile == 'stress') && 180 || 120 }}
     steps:
       - uses: actions/checkout@v4
@@ -129,7 +131,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ needs.policy.outputs.repository }}
-          ref: ${{ needs.policy.outputs.head }}
+          # Diagnostic only: profile the exact failed production-source commit.
+          ref: 1769e1b2baf9f36d7168247c7d09a70929dc5e74
           path: candidate
           persist-credentials: false
       - uses: actions/download-artifact@v4
@@ -153,11 +156,11 @@ jobs:
           rustc --version > "$RUNNER_TEMP/render-toolchain.txt"
           # Same-version path crates in different checkouts can reuse stale Cargo
           # artifacts. Keep every checkout isolated, including the trusted driver.
-          cargo build --locked --release --manifest-path baseline/rust/Cargo.toml --target-dir "$RUNNER_TEMP/render-build/baseline" -p rusty-sudocode-cli
+          nice -n 10 cargo build --locked --release --manifest-path baseline/rust/Cargo.toml --target-dir "$RUNNER_TEMP/render-build/baseline" -p rusty-sudocode-cli
           cp "$RUNNER_TEMP/render-build/baseline/release/scode" "$RUNNER_TEMP/scode-baseline"
-          cargo build --locked --release --manifest-path candidate/rust/Cargo.toml --target-dir "$RUNNER_TEMP/render-build/candidate" -p rusty-sudocode-cli
+          nice -n 10 cargo build --locked --release --manifest-path candidate/rust/Cargo.toml --target-dir "$RUNNER_TEMP/render-build/candidate" -p rusty-sudocode-cli
           cp "$RUNNER_TEMP/render-build/candidate/release/scode" "$RUNNER_TEMP/scode-candidate"
-          cargo test --locked --release --manifest-path trusted/rust/Cargo.toml --target-dir "$RUNNER_TEMP/render-build/trusted" -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/render-driver.jsonl"
+          nice -n 10 cargo test --locked --release --manifest-path trusted/rust/Cargo.toml --target-dir "$RUNNER_TEMP/render-build/trusted" -p rusty-sudocode-cli --test pty_render_performance --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/render-driver.jsonl"
           python3 - <<'PY'
           import json, os
           from pathlib import Path
@@ -167,24 +170,22 @@ jobs:
           with open(os.environ['GITHUB_ENV'], 'a') as stream:
               stream.write('SCODE_RENDER_DRIVER=' + drivers[0] + '\n')
           PY
-      - name: Calibrate and compare fixed workloads
-        env:
-          RENDER_PROFILE: ${{ github.event_name == 'schedule' && 'stress' || inputs.profile || 'core' }}
+      - name: Collect RSS mappings (diagnostic only, no gate verdict)
         run: |
-          python3 trusted/e2e/terminal-resize/benchmark.py \
+          python3 trusted/.github/scripts/render-rss-diagnostic.py \
             --driver "$SCODE_RENDER_DRIVER" \
             --base "$RUNNER_TEMP/scode-baseline" \
             --candidate "$RUNNER_TEMP/scode-candidate" \
             --policy selected-policy/performance-policy.json \
-            --profile "$RENDER_PROFILE" --output "$RUNNER_TEMP/render-results"
+            --output "$RUNNER_TEMP/render-rss-diagnostic"
       - name: Preserve partial measurements and approval evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rendering-measurements
+          name: rendering-rss-diagnostic
           retention-days: 14
           path: |
-            ${{ runner.temp }}/render-results
+            ${{ runner.temp }}/render-rss-diagnostic
             ${{ runner.temp }}/render-toolchain.txt
             ${{ runner.temp }}/render-driver.jsonl
             selected-policy

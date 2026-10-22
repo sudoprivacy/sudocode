@@ -9,6 +9,14 @@ function resources(pid) {
     const raw = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
     const stat = raw.slice(raw.lastIndexOf(')') + 2).trim().split(/\s+/);
     const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+    // Isolated diagnostic branch only. This does not publish a performance verdict.
+    if (process.env.SCODE_RSS_DIAGNOSTIC) {
+      fs.appendFileSync(process.env.SCODE_RSS_DIAGNOSTIC, JSON.stringify({
+        at: new Date().toISOString(), pid, status,
+        rollup: fs.readFileSync(`/proc/${pid}/smaps_rollup`, 'utf8'),
+        mappings: fs.readFileSync(`/proc/${pid}/smaps`, 'utf8'),
+      }) + '\n');
+    }
     const ticks = Number(execFileSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).trim());
     return { cpu_ms: (Number(stat[11]) + Number(stat[12])) * 1000 / ticks,
       rss_mib: Number(status.match(/^VmRSS:\s+(\d+)/m)?.[1]) / 1024,

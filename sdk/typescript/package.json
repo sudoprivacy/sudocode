@@ -1,0 +1,85 @@
+{
+  "name": "@sudocode/acp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared scode ACP client and portable MCP bridge",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.cjs"
+    },
+    "./scodeAcp": {
+      "types": "./dist/scodeAcp.d.ts",
+      "default": "./dist/index.cjs"
+    },
+    "./scodeA2a": {
+      "types": "./dist/scodeA2a.d.ts",
+      "default": "./dist/index.cjs"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "default": "./dist/index.cjs"
+    },
+    "./codexCallback": {
+      "types": "./dist/codexCallback.d.ts",
+      "default": "./dist/index.cjs"
+    }
+  },
+  "bin": {
+    "scode-acp-bridge": "./dist/server.cjs"
+  },
+  "files": [
+    "dist/*.cjs",
+    "dist/*.d.ts",
+    "manifest.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@agentclientprotocol/sdk": "1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@agentclientprotocol/sdk": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "build": "tsc --emitDeclarationOnly && node scripts/build.cjs",
+    "check": "tsc --noEmit -p tsconfig.test.json",
+    "test": "npm run build && npm run check && node dist/testing/acpIntegration.cjs && node test/portable.cjs",
+    "pack:runtime": "node scripts/pack.cjs",
+    "test:native": "node scripts/native.cjs"
+  },
+  "devDependencies": {
+    "@agentclientprotocol/sdk": "1.9.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@types/node": "20.19.43",
+    "@types/ws": "8.18.1",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3",
+    "ws": "8.21.0",
+    "zod": "4.6.7"
+  },
+  "typesVersions": {
+    "*": {
+      "scodeAcp": [
+        "dist/scodeAcp.d.ts"
+      ],
+      "scodeA2a": [
+        "dist/scodeA2a.d.ts"
+      ],
+      "mcp": [
+        "dist/mcp.d.ts"
+      ],
+      "codexCallback": [
+        "dist/codexCallback.d.ts"
+      ]
+    }
+  }
+}

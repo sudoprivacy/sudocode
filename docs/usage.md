@@ -76,6 +76,28 @@ remain readable. Existing files keep their names; no duplicate config file or
 automatic migration is introduced. The account selection (`auth_profile`)
 remains owned by global `settings.json` and project `settings.local.json`.
 
+### Standalone sessions and the local Nexus node
+
+Standalone `scode` reads `~/.nexus/run/node.json` when selecting its peer
+namespace. With a readable record and credential files for this agent,
+starting or resuming a session does not wait for the node to answer. Ordinary
+model and workspace work can continue while the node is offline. The receiver
+retries its existing node connection, and A2A tools report node IO errors;
+they do not redirect messages to a disk inbox. An uncertain send result must
+not be retried automatically.
+
+While claiming the receiver seat, an unchanged connection error is printed
+once; a different error or a new outage after a successful receiver-seat check
+is reported again. Connection retries continue without repeatedly scrolling the
+input area.
+
+This does not start Nexus or mint an agent credential. A missing record still
+selects the same-machine disk namespace. Record parsing, missing credential
+files and credential identity mismatches still stop startup; a lazy client is
+not proof that TLS authentication will succeed. Changing an already running session
+from disk to node remains an explicit handoff. Receiver ownership and a selected
+node endpoint in `/status` are not proof that a remote peer is online.
+
 ### CLI packages
 
 Install a package directory, or symlink its **whole package root**, under

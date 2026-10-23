@@ -3,6 +3,14 @@
 `scode` speaks the **Agent Communication Protocol (ACP)** natively, in two
 transports that share a single handler chain.
 
+## TypeScript client and MCP bridge
+
+The [shared TypeScript package](../sdk/typescript/README.md) provides the ACP
+connection, direct A2A helpers, a standalone stdio MCP bridge and an optional
+Codex callback adapter. It can be installed independently of Hydra and uses
+the full scode executable. The package guide owns installation, config,
+source/checksum receipts and existing-thread handoff limits.
+
 ## Transports
 
 ```bash

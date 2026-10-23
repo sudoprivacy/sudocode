@@ -2486,6 +2486,20 @@ until its v0.8.16 tag.</p>
 
 <h3 id="agent-runtime-tasks">Implementation and acceptance tasks</h3>
 
+<p><strong>Standalone startup while the node is offline.</strong>
+With an existing readable node record and credential, constructing the session's
+peer client does not perform a network probe. Ordinary startup and resume keep
+the node namespace while the receiver retries and A2A operations report their
+actual errors. Receiver-seat retries print an unchanged error once, reset that
+diagnostic after a successful receiver-seat check, and retain the existing retry
+interval. PTY acceptance requires usable input after a completed offline turn
+and covers both renderers, restored history and a
+failed real send without a disk inbox. Record parsing, missing credential files
+and identity mismatches still fail startup; representing those conditions as
+A2A unavailable, and explicit
+disk-to-node handoff, remain follow-up work. This does not provision a service
+or change cohost ownership.</p>
+
 <table>
 <thead><tr><th>Task</th><th>Implementation evidence</th><th>Next acceptance</th></tr></thead>
 <tbody>

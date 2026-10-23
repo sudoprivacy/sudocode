@@ -20,13 +20,12 @@ use runtime::agent_mailbox::MailboxEnvelope;
 use runtime::fs_backend::NexusVfsFsBackend;
 use runtime::mailbox::Mailbox;
 use runtime::nexus_mailbox::Config;
-use runtime::FsBackend;
 use runtime::HookAbortSignal;
 
 /// Blocking-tail wait per receive iteration on the node.
 const INBOX_WAIT_MS: u64 = 500;
 
-/// A connected, verified node session for one agent.
+/// A configured node session for one agent. Connectivity is established by IO.
 pub struct Node {
     config: Config,
     mailbox: Arc<Mailbox>,
@@ -105,13 +104,13 @@ static NODES: OnceLock<Mutex<HashMap<String, Option<Arc<Node>>>>> = OnceLock::ne
 
 /// The node `agent` is attached to, from this machine's node record.
 ///
-/// `None` when the machine has no node. Otherwise the credential is loaded,
-/// the node is dialled, and `/agents` is read once, so an unreachable node, a
-/// failed handshake or a missing mount is reported here rather than on the
-/// session's first message. It is never a silent fall back to disk.
+/// `None` when the machine has no node. Otherwise the credential is loaded and
+/// a lazy client is created. Network availability is not a session-startup
+/// dependency: the receiver and tools report their own node IO failures and
+/// keep using this same namespace. They never silently fall back to disk.
 ///
 /// # Errors
-/// The node record or credential is unusable, or the node cannot be reached.
+/// The node record or credential is unusable, or the client cannot be built.
 pub fn node(agent: &str) -> Result<Option<Arc<Node>>, String> {
     let mut nodes = NODES
         .get_or_init(Mutex::default)
@@ -126,19 +125,10 @@ pub fn node(agent: &str) -> Result<Option<Arc<Node>>, String> {
             let client = config.connect()?;
             // Cert-only auth: the client cert IS the authorization (the node
             // derives identity from its SAN), so no per-request token is sent.
-            // Cert-only auth: the client cert IS the authorization (the node
-            // derives identity from its SAN), so no per-request token is sent.
             // That transport is a server-verified credential, so the backend
             // takes the mTLS (trusted-local) shape — the fail-closed
             // `from_arc` is for references the server never sees.
             let backend = NexusVfsFsBackend::from_arc_mtls(client, String::new(), "root");
-            backend.readdir("/agents").map_err(|error| {
-                format!(
-                    "this machine's node at {} is not usable as '{agent}': reading /agents \
-                     failed: {error}",
-                    config.endpoint
-                )
-            })?;
             let mailbox = Arc::new(Mailbox::daemon_absolute(
                 Arc::new(backend),
                 config.agent.clone(),

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use common::TestEnv;
 use serde_json::{json, Value};
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum ResponseKind {
     Interrupted,
     Complete,
@@ -1757,7 +1757,54 @@ fn check_liveness(
         )
     });
     assert_eq!(code == 0, is_success, "{}", common::screen_tail(&cli, 6000));
-    assert_eq!(provider.requests.load(Ordering::SeqCst), expected_requests);
+    let actual_requests = provider.requests.load(Ordering::SeqCst);
+    let diagnostic = if actual_requests == expected_requests {
+        String::new()
+    } else {
+        // Preserve the failing protocol and real retry events. A count alone
+        // cannot distinguish an HTTP retry from a safe stream replay.
+        let events: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|event| {
+                event["event"].as_str().is_some_and(|name| {
+                    name.starts_with("request_")
+                        || name.contains("retry")
+                        || name.contains("stream")
+                })
+            })
+            .map(|event| {
+                let attrs = event["attributes"]
+                    .as_object()
+                    .map(|attrs| {
+                        attrs
+                            .iter()
+                            .filter(|(key, _)| {
+                                matches!(
+                                    key.as_str(),
+                                    "attempt"
+                                        | "status"
+                                        | "error"
+                                        | "reason"
+                                        | "elapsed_ms"
+                                        | "request_id"
+                                )
+                            })
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect::<serde_json::Map<_, _>>()
+                    })
+                    .unwrap_or_default();
+                json!({"event": event["event"], "attributes": attrs})
+            })
+            .take(64)
+            .collect();
+        format!(
+            "kind={kind:?}; events={events:?}\n{}",
+            common::screen_tail(&cli, 6000)
+        )
+    };
+    assert_eq!(actual_requests, expected_requests, "{diagnostic}");
     let screen = common::expect_screen(
         &cli,
         |s| {

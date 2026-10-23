@@ -46,6 +46,7 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
     );
     session.set_default_timeout(BUDGET);
     session.expect("❯").expect("the REPL should start");
+    common::expect_input_line_cleared(&session, BUDGET, "sync receiver ready");
 
     let pair_root = local_pair_root_in(env.config_home());
     Mailbox::workspace_local(&pair_root, PEER.to_string())
@@ -78,6 +79,7 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
     );
 
     // Enter hands the prompt back, and the waiting message runs as a turn.
+    let marker = common::turn_status_marker(&session);
     session.send("\r").expect("press Enter");
     if env.is_mock() {
         expect_on_screen(&mut session, "The answer is 4");
@@ -91,12 +93,18 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // A committed reader is not a re-armed prompt. Wait for this actual turn
+    // and the ready input row before submitting the next command.
+    common::expect_turn_complete_after(&session, &marker, BUDGET, "peer turn completed");
+    common::expect_input_line_cleared(&session, BUDGET, "status at ready prompt");
+
     // And the session says how it receives, not just that it does.
     session.send("/status\r").expect("send /status");
     expect_on_screen(
         &mut session,
         "receiving; waiting messages run at the next prompt",
     );
+    common::expect_input_line_cleared(&session, BUDGET, "status completed");
 
     session.send("/exit\r").expect("exit the REPL");
     assert_eq!(session.expect_eof().expect("the REPL exits"), 0);

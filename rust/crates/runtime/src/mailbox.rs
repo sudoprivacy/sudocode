@@ -1398,20 +1398,29 @@ pub fn spawn_inbox_poller(
                 agent: mailbox.self_id().to_string(),
                 state: None,
             };
+            // Keep retrying an offline node without repainting the terminal
+            // with the same error on every discovery tick. A changed error or
+            // a new outage after a successful receiver-seat check is reported again.
+            let mut last_claim_error = None;
             while !abort.is_aborted() {
                 state.set(ReceiverState::Standby);
                 let seat = match mailbox.claim_receiver() {
                     Ok(Some(seat)) => seat,
                     Ok(None) => {
+                        last_claim_error = None;
                         sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
                         continue;
                     }
                     Err(e) => {
-                        eprintln!("[{label}] {e}");
+                        if last_claim_error.as_ref() != Some(&e) {
+                            eprintln!("[{label}] {e}");
+                            last_claim_error = Some(e);
+                        }
                         sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
                         continue;
                     }
                 };
+                last_claim_error = None;
                 state.set(ReceiverState::Receiving);
                 receive_while_seated(&mailbox, &seat, block_ms, label, &abort, &sink);
             }

@@ -1,0 +1,43 @@
+name: ACP client package
+on:
+  pull_request:
+    paths:
+      - 'sdk/typescript/**'
+      - '.github/workflows/acp-client.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'sdk/typescript/**'
+      - '.github/workflows/acp-client.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    name: Package integration (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdk/typescript/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run pack:runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scode-acp-${{ matrix.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: sdk/typescript/artifacts/*

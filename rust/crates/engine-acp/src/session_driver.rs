@@ -305,12 +305,14 @@ impl SessionDriver {
 
     /// Run one tool for the client outside any turn and wait for its reply for
     /// as long as it takes. The call can wait on a permission prompt, so a
-    /// fixed timeout would abandon a call that may still run.
+    /// fixed timeout would abandon a call that may still run. Only a command
+    /// the engine never received is a refusal; once sent, a lost reply leaves
+    /// the outcome unknown.
     pub(crate) async fn direct_tool(
         self: &Arc<Self>,
         name: &str,
         input: String,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, engine_core::DirectToolError> {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::channel();
         self.requests
@@ -329,8 +331,9 @@ impl SessionDriver {
                 .and_then(|reply| {
                     reply.map_err(|_| "the engine session closed before replying".to_string())
                 })
-                .and_then(|reply| reply),
-            Err(error) => Err(error),
+                .and_then(|reply| reply)
+                .map_err(engine_core::DirectToolError::Unknown),
+            Err(error) => Err(engine_core::DirectToolError::Refused(error)),
         };
         self.requests
             .lock()

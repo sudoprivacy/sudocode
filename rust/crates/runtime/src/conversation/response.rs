@@ -239,7 +239,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// result — because no model asked for the call. The scheduler still needs
     /// a parent message for the call's dispatch context; it is built here and
     /// dropped with the scheduler. Returns the tool's output and whether it
-    /// failed.
+    /// failed. A call cancelled after it was admitted is an error even when a
+    /// partial result exists: the tool may have run, so no result is reported
+    /// as if it were final.
     #[allow(clippy::await_holding_lock)]
     pub async fn run_tool_call(
         &mut self,
@@ -248,6 +250,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         mut prompter: Option<&mut dyn PermissionPrompter>,
     ) -> Result<(String, bool), RuntimeError> {
         const CALL_ID: &str = "direct";
+        const CANCELLED: &str = "the call was cancelled after it was admitted and may have run";
         let abort = self.hook_abort_signal.for_current_turn();
         self.tool_executor_mut().set_abort_signal(abort.clone());
         let no_observer: Option<&mut dyn RuntimeObserver> = None;
@@ -276,14 +279,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 biased;
                 () = abort.cancelled() => {
                     scheduler.cancel();
-                    match std::iter::from_fn(|| scheduler.take_update())
-                        .find_map(|update| match update {
-                            tool_execution::ToolUpdate::Completed { message, .. } => Some(message),
-                            tool_execution::ToolUpdate::Started { .. } => None,
-                        }) {
-                        Some(message) => break message,
-                        None => return Err(RuntimeError::new("the tool call was cancelled")),
-                    }
+                    return Err(RuntimeError::new(CANCELLED));
                 }
                 update = scheduler.next(&mut prompter) => {
                     if let tool_execution::ToolUpdate::Completed { message, .. } = update {
@@ -292,6 +288,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 }
             }
         };
+        if abort.is_aborted() {
+            return Err(RuntimeError::new(CANCELLED));
+        }
         completed
             .blocks
             .into_iter()

@@ -122,8 +122,10 @@ pub trait EngineDelegate: Send + Sync + 'static {
         _name: &str,
         _input: &str,
         _prompter: &mut dyn PermissionPrompter,
-    ) -> Result<(String, bool), String> {
-        Err("this engine does not run direct tool calls".into())
+    ) -> Result<(String, bool), DirectToolError> {
+        Err(DirectToolError::Refused(
+            "this engine does not run direct tool calls".into(),
+        ))
     }
 
     /// Bind a host's trace identity after turn admission succeeds.
@@ -644,6 +646,17 @@ async fn run_one_turn(
     shutdown
 }
 
+/// Why a direct tool call has no result. Only a refusal proves that nothing
+/// ran; a caller must not resend after `Unknown` as if it had been refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectToolError {
+    /// Refused before the tool could run.
+    Refused(String),
+    /// Admitted, then failed, cancelled or lost its result: the tool may have
+    /// run.
+    Unknown(String),
+}
+
 /// One [`EngineCommand::DirectTool`].
 struct DirectCall {
     request_id: u64,
@@ -656,7 +669,7 @@ struct DirectCall {
 fn refuse_busy(request_id: u64, sink: &EventSink) {
     let _ = sink.send(EngineEvent::CommandResult {
         id: request_id,
-        result: Err("the session is busy; nothing was run".into()),
+        result: Ok(serde_json::json!({ "refused": "the session is busy; nothing was run" })),
     });
 }
 
@@ -728,7 +741,10 @@ async fn run_direct_tool(
                         "content": content,
                         "isError": is_error,
                     })),
-                    Ok(Err(error)) => Err(error),
+                    Ok(Err(DirectToolError::Refused(reason))) => {
+                        Ok(serde_json::json!({ "refused": reason }))
+                    }
+                    Ok(Err(DirectToolError::Unknown(detail))) => Err(detail),
                     Err(join_error) => Err(format!("direct tool call panicked: {join_error}")),
                 };
                 // A permission prompt moves the reported state; the session is

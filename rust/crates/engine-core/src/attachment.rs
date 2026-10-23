@@ -2,7 +2,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::subagent_completion::CompletionState;
-use crate::{EngineDelegate, EngineHandle, EngineSession};
+use crate::{DirectToolError, EngineDelegate, EngineHandle, EngineSession};
 use engine_events::{ContentBlock, ImageInputPolicy, PermissionMode, TurnComplete};
 use runtime::{
     HookAbortSignal, PermissionPrompter, QuestionPrompter, RuntimeError, RuntimeObserver,
@@ -191,8 +191,10 @@ impl EngineDelegate for DeferredDelegate {
         name: &str,
         input: &str,
         prompter: &mut dyn PermissionPrompter,
-    ) -> Result<(String, bool), String> {
-        self.get()?.run_direct_tool(name, input, prompter)
+    ) -> Result<(String, bool), DirectToolError> {
+        self.get()
+            .map_err(DirectToolError::Refused)?
+            .run_direct_tool(name, input, prompter)
     }
     fn set_trace_id(&self, trace: &str) {
         if let Ok(delegate) = self.get() {

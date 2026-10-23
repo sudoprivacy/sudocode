@@ -34,7 +34,7 @@ use agent_client_protocol_schema::{
     UnstructuredCommandInput, Usage,
 };
 use engine_core::engine_events::CompletionAction;
-use engine_core::{AuthMode, EngineDelegate, EngineEvent};
+use engine_core::{AuthMode, DirectToolError, EngineDelegate, EngineEvent};
 use engine_host::config::AllowedToolSet;
 use engine_host::{SessionEngine, SessionLifecycle};
 use runtime::config::{
@@ -291,15 +291,16 @@ const DIRECT_SEND_METHOD: &str = "_sudocode/a2a/send";
 const DIRECT_AGENT_LIST_METHOD: &str = "_sudocode/a2a/agent_list";
 
 /// Run the session's own `send` tool for the client, without a model turn.
-/// Plain text only, and no `sender`: the session's agent is the sender.
+/// Plain text only, and no `sender`: the session's agent is the sender. The
+/// `send` tool requires a summary with a text message, so a request without
+/// one is refused here rather than admitted to fail.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DirectSendRequest {
     session_id: String,
     to: String,
     message: String,
-    #[serde(default)]
-    summary: Option<String>,
+    summary: String,
     /// ACP lets any request carry `_meta`; it is accepted and ignored.
     #[serde(rename = "_meta", default)]
     _meta: Option<serde::de::IgnoredAny>,
@@ -2079,15 +2080,16 @@ fn answer_permission(
 /// The session, tool and tool input a direct A2A request asks for.
 fn direct_a2a_call(
     message: agent_client_protocol::UntypedMessage,
-) -> Result<(String, &'static str, serde_json::Value), AcpError> {
+) -> Result<(String, &'static str, serde_json::Value), DirectToolError> {
     let (method, params) = message.into_parts();
-    let invalid = |error: serde_json::Error| AcpError::invalid_params(error.to_string());
+    let invalid = |error: serde_json::Error| DirectToolError::Refused(error.to_string());
     if method == DIRECT_SEND_METHOD {
         let request: DirectSendRequest = serde_json::from_value(params).map_err(invalid)?;
-        let mut input = json!({ "to": request.to, "message": request.message });
-        if let Some(summary) = request.summary {
-            input["summary"] = json!(summary);
-        }
+        let input = json!({
+            "to": request.to,
+            "message": request.message,
+            "summary": request.summary,
+        });
         Ok((request.session_id, "send", input))
     } else {
         let request: DirectAgentListRequest = serde_json::from_value(params).map_err(invalid)?;
@@ -2096,6 +2098,24 @@ fn direct_a2a_call(
             |active_only| json!({ "active_only": active_only }),
         );
         Ok((request.session_id, "agent_list", input))
+    }
+}
+
+/// A direct A2A failure on the wire. A refusal is invalid params: nothing ran,
+/// so the client may correct the request and send it again. Anything after
+/// admission is an internal error whose `data.outcome` is `"unknown"`: the
+/// message may have been sent, so the client must not resend it blindly.
+fn direct_a2a_error(error: &DirectToolError) -> Error {
+    match error {
+        DirectToolError::Refused(reason) => {
+            acp_error_to_sdk(&AcpError::invalid_params(reason.clone()))
+        }
+        DirectToolError::Unknown(detail) => {
+            let mut error =
+                Error::internal_error().data(json!({ "outcome": "unknown", "detail": detail }));
+            error.message = "The call may have run; its outcome is unknown".into();
+            error
+        }
     }
 }
 
@@ -2111,36 +2131,33 @@ async fn drive_direct_tool(
     name: &'static str,
     input: serde_json::Value,
     cx: ConnectionTo<Client>,
-) -> Result<DirectA2aResponse, AcpError> {
+) -> Result<DirectA2aResponse, DirectToolError> {
+    let refuse = |reason: &str| DirectToolError::Refused(reason.to_string());
     let admitted = registry
         .engine(&session_id)
-        .ok_or_else(|| AcpError::invalid_params(format!("unknown sessionId: {session_id}")))?;
+        .ok_or_else(|| DirectToolError::Refused(format!("unknown sessionId: {session_id}")))?;
     let (admitted_epoch, is_paused) = admitted.tool_control();
     if is_paused {
-        return Err(AcpError::invalid_params(
-            "Tool execution is paused by the user",
-        ));
+        return Err(refuse("Tool execution is paused by the user"));
     }
     let Some(_lane) = registry.try_enter_lane(&session_id) else {
-        return Err(AcpError::invalid_params(
-            "The session is busy; nothing was sent",
-        ));
+        return Err(refuse("The session is busy; nothing was sent"));
     };
     let unchanged = registry.engine(&session_id).is_some_and(|engine| {
         let (epoch, is_paused) = engine.tool_control();
         !is_paused && epoch == admitted_epoch && Arc::ptr_eq(&engine, &admitted)
     });
     if !unchanged {
-        return Err(AcpError::invalid_params(
+        return Err(refuse(
             "Session control changed while the request was admitted",
         ));
     }
-    let driver = registry
-        .driver(&session_id)
-        .ok_or_else(|| AcpError::internal("missing engine session driver"))?;
-    let abort = registry
-        .abort_signal(&session_id)
-        .ok_or_else(|| AcpError::invalid_params("Unknown session"))?;
+    let (Some(driver), Some(abort)) = (
+        registry.driver(&session_id),
+        registry.abort_signal(&session_id),
+    ) else {
+        return Err(refuse("Unknown session"));
+    };
     let (_listener, mut events) = driver.listen(cx.clone());
     let reply = driver.direct_tool(name, input.to_string());
     tokio::pin!(reply);
@@ -2156,12 +2173,17 @@ async fn drive_direct_tool(
                     answer_permission(&session_id, id, &request, &driver, abort.clone(), cx.clone()),
                 ),
                 Some(_) => {}
-                None => break Err("the engine session closed before replying".to_string()),
+                None => break Err(DirectToolError::Unknown(
+                    "the engine session closed before replying".into(),
+                )),
             },
         }
     };
-    let value = value.map_err(AcpError::invalid_params)?;
-    serde_json::from_value(value).map_err(|e| AcpError::internal(e.to_string()))
+    let value = value?;
+    if let Some(reason) = value.get("refused").and_then(serde_json::Value::as_str) {
+        return Err(refuse(reason));
+    }
+    serde_json::from_value(value).map_err(|e| DirectToolError::Unknown(e.to_string()))
 }
 
 /// Build an ACP `RequestPermissionRequest` from a runtime `PermissionRequest`.
@@ -3199,9 +3221,9 @@ pub(crate) async fn run_acp_on_transport(
                                 result
                                     .and_then(|response| {
                                         serde_json::to_value(response)
-                                            .map_err(|e| AcpError::internal(e.to_string()))
+                                            .map_err(|e| DirectToolError::Unknown(e.to_string()))
                                     })
-                                    .map_err(|error| acp_error_to_sdk(&error)),
+                                    .map_err(|error| direct_a2a_error(&error)),
                             )?;
                             Ok(())
                         })?;

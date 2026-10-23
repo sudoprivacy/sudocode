@@ -153,8 +153,8 @@ Hosts check `initialize.result._meta.sudocode.directA2a.version == 1`. Two
 session requests run the session's own A2A tools for the client, without a
 model turn:
 
-- `_sudocode/a2a/send` with `{ "sessionId", "to", "message", "summary"? }`
-  runs the `send` tool. `message` is plain text. The session's agent is the
+- `_sudocode/a2a/send` with `{ "sessionId", "to", "message", "summary" }`
+  runs the `send` tool. `message` and `summary` are plain text. The session's agent is the
   sender: a `sender` field, a structured message or any other unknown field is
   refused as invalid params.
 - `_sudocode/a2a/agent_list` with `{ "sessionId", "activeOnly"? }` runs the
@@ -166,10 +166,19 @@ permission mode (a prompt arrives as `session/request_permission`, and a denial
 comes back as `isError: true`) and `--allowedTools`. Nothing is written to the
 conversation, so the model never sees the call.
 
-A direct request never waits: if the session is in a turn or another request,
-or its tools are paused, it is refused before anything runs. `isError: true`
-reports a failed call; it does not prove that nothing was delivered, so do not
-retry it blindly.
+A direct request never waits. It fails in one of two ways:
+
+- **Refused (`-32602` invalid params):** nothing ran, so the client may
+  correct the request and send it again. This covers an unknown session,
+  invalid params, paused tools, and a session busy with a turn or another
+  request.
+- **Outcome unknown (`-32603`, `error.data.outcome == "unknown"`):** the call
+  was admitted and then failed, was cancelled (`session/cancel`,
+  `pause_tools`) or lost its reply. The message may have been sent, so do not
+  resend it blindly.
+
+`isError: true` is the tool's own failure; it does not prove that nothing was
+delivered either.
 ### Per-session system prompt (`_meta.sudocode.*`)
 
 `session/new` and `session/load` accept two optional, orthogonal keys under

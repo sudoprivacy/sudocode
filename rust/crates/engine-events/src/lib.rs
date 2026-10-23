@@ -433,8 +433,9 @@ pub enum EngineCommand {
     /// Run one tool by name for the host, outside any turn, through the same
     /// hooks and permission policy a model's call passes. Nothing is written
     /// to the conversation. The engine replies with
-    /// [`EngineEvent::CommandResult`] carrying `{"content", "isError"}`, or an
-    /// error when the call could not run.
+    /// [`EngineEvent::CommandResult`]: `{"content", "isError"}` when the tool
+    /// produced a result, `{"refused": reason}` when nothing ran, and an error
+    /// when the call was admitted but its outcome is unknown.
     DirectTool {
         request_id: u64,
         name: String,

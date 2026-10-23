@@ -673,6 +673,15 @@ from version/session/tool/agent; payload freezes before the first send. Publicat
 is the deduplication cutoff: a later explicit read cannot retract an in-flight
 receipt. This does not promise exactly-once model execution.
 
+`completed` means the child turn ended; it does not guarantee a final answer.
+If a provider ends after tool use without final text, the notification explicitly
+says no final assistant response was produced and references the saved child
+transcript when available. `pid_output` keeps `result` absent, reports
+`result_status: "empty"`, and exposes `session_file` only after a successful
+save. Tool output and earlier progress text are never relabeled as a final
+answer. Normal results report `result_status: "available"`; unfinished retrieval
+reports `"pending"`.
+
 The controller replies only after committing its durable receipt:
 `{"completionId":"…","disposition":"stored"}`. A previously verified binding
 whose session has been deleted may instead reply
@@ -692,7 +701,15 @@ report `completion_journal_capacity` rather than silently dropping work.
 transcript and registered child manifests. It does **not** load engines, MCP or
 plugins, restart children, scan unrelated cwd results, or run a model. It binds
 pending deliveries and returns `{watermark,waiting,pending,unresolved,settled,
-blocked,contextRef}`. Missing terminal evidence is `execution_unconfirmed`;
+blocked,contextRef,unsettledByTrace}`. `unsettledByTrace` maps each registered
+origin trace to whether it still owns unsettled, unsuppressed background delivery,
+including blocked sources. Synchronous or fully settled traces map to `false`;
+an absent key means not observed, never proof of settlement. It is an additive
+field, absent on older agents. Controllers combine it with their own pending
+receipts and continuation state; ACK means stored, not continuation finished.
+Auto-background handoff remains recorded if the parent fails: a later human
+turn cannot erase the child's unsettled ownership or authorize its publication.
+Missing terminal evidence is `execution_unconfirmed`;
 uncommitted parent evidence is `source_context_unconfirmed`. After an interrupted
 parent, a new explicit human turn may proceed, but cannot retroactively publish
 that parent's unproven completions.
@@ -740,6 +757,10 @@ The durable terminal snapshot keeps a UTF-8 output tail of at most 24 KiB. The
 entire encoded terminal completion is bounded to 64 KiB, including XML escaping,
 JSON escaping, identity and metadata. Rendering truncates only output text and
 sets `outputTruncated`; frozen payloads and IDs are stable on retry.
+The model-facing message includes a `<terminal>` element with XML-escaped JSON
+of that same terminal metadata (`shell`, `scope`, nullable `exitCode`/`signal`,
+`termination`, `outputTruncated`), separate from `<result>` output. Any additional
+notification truncation updates both copies of `outputTruncated` before freezing.
 
 All control operations require the original absolute `cwd` and `sessionId`.
 `_sudocode/task/replay {sessionId,cwd}` without `storageRef` is a read-only binding

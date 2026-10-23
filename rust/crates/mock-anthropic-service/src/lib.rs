@@ -571,6 +571,19 @@ async fn handle_connection(
     });
 
     if scenario == Scenario::ToolConcurrency
+        && concurrency_batch_complete(&request)
+        && request.messages.iter().flat_map(|m| &m.content).any(|block| {
+            matches!(block, InputContentBlock::Text { text } if text.contains("FAIL_AFTER_TOOLS"))
+        })
+    {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"mock: parent failed after tool handoff"}}"#;
+        socket
+            .write_all(http_response("400 Bad Request", "application/json", body, &[]).as_bytes())
+            .await?;
+        return Ok(());
+    }
+
+    if scenario == Scenario::ToolConcurrency
         && request.stream
         && !concurrency_batch_complete(&request)
     {
@@ -1416,7 +1429,14 @@ fn subagent_events_step(request: &MessageRequest, scenario: Scenario) -> Subagen
             ),
         )]),
         (Scenario::SubagentToolChild | Scenario::SubagentSlowChild, Some(_)) => {
-            SubagentStep::Answer(SUBAGENT_CHILD_ANSWER.to_string())
+            let empty_final = request.messages.iter().flat_map(|m| &m.content).any(|block| {
+                matches!(block, InputContentBlock::Text { text } if text.contains("EMPTY_SUBAGENT_FINAL"))
+            });
+            SubagentStep::Answer(if empty_final {
+                String::new()
+            } else {
+                SUBAGENT_CHILD_ANSWER.to_string()
+            })
         }
         (scenario, Some(_)) => SubagentStep::Answer(format!("{} done", scenario.name())),
         (scenario, None) => SubagentStep::Answer(format!("{} has no plan", scenario.name())),

@@ -6274,6 +6274,166 @@ async fn initialize_with_completions(client: &mut AcpTestClient) {
 }
 
 #[tokio::test]
+async fn acp_completion_without_final_text_preserves_tool_evidence() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = subagent_events_workspace("empty-child-result", &server.base_url());
+    let mut client = spawn_stdio_client_danger(&workspace);
+    initialize_with_completions(&mut client).await;
+    let sid = scenario_session_new(&mut client, &workspace.root).await;
+    let calls = json!([{"id":"empty-child","name":"agent_spawn","input":{
+        "description":"empty final response", "subagent_type":"general-purpose", "model":"inherit", "run_in_background":true,
+        "prompt":format!("{SCENARIO_PREFIX}subagent_slow_child EMPTY_SUBAGENT_FINAL Read {SUBAGENT_CHILD_READ_PATH}")
+    }}]);
+    let (during, parent) = client.send_request("session/prompt", json!({"sessionId":sid,"_meta":{"traceId":"empty-root:1"},"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]})).await;
+    assert_eq!(parent["result"]["stopReason"], "end_turn", "{parent}");
+    let completion = if let Some(value) = during
+        .into_iter()
+        .find(|v| v["method"] == "_sudocode/subagent/completed")
+    {
+        value
+    } else {
+        client
+            .recv_until(SUBAGENT_EVENTS_WAIT, |v| {
+                v["method"] == "_sudocode/subagent/completed"
+            })
+            .await
+            .unwrap()
+            .1
+    };
+    let journal = frozen_completion_sources(&workspace, &sid, 1).await;
+    let manifest_path = journal["sources"]["empty-child"]["manifest_path"]
+        .as_str()
+        .unwrap();
+    let manifest: Value = serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["status"], "completed");
+    assert!(
+        manifest.get("result").is_none(),
+        "tool output is not an assistant answer: {manifest}"
+    );
+    let transcript = manifest["sessionFile"]
+        .as_str()
+        .expect("saved child transcript");
+    assert!(fs::read_to_string(transcript)
+        .unwrap()
+        .contains("notes for the sub-agent"));
+    let message = completion["params"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("No final assistant response was produced"),
+        "{message}"
+    );
+    assert!(message.contains(transcript), "{message}");
+    client.send_raw(&json!({"jsonrpc":"2.0","id":completion["id"],"result":{"completionId":completion["params"]["completionId"],"disposition":"stored"}})).await;
+    let collect = json!([{"id":"collect-child","name":"pid_output","input":{"pid":manifest["agentId"],"block":false}}]);
+    let (events, response) = client.send_request("session/prompt", json!({"sessionId":sid,"_meta":{"traceId":"empty-root:2"},"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{collect}")}]})).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let output = events
+        .iter()
+        .find_map(|e| {
+            let update = &e["params"]["update"];
+            (update["toolCallId"] == "collect-child" && update["status"] == "completed")
+                .then_some(&update["rawOutput"])
+        })
+        .expect("pid_output result");
+    assert_eq!(output["result_status"], "empty", "{output}");
+    assert_eq!(output["session_file"], transcript);
+    assert!(output.get("result").is_none());
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+#[tokio::test]
+async fn acp_completion_auto_background_failure_keeps_stop_ownership() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = subagent_events_workspace("failed-auto-background", &server.base_url());
+    let mut cmd = isolated_command(&workspace, Path::new(env!("CARGO_BIN_EXE_scode")));
+    cmd.args([
+        "--auth",
+        "api-key",
+        "--model",
+        "sonnet",
+        "--permission-mode",
+        "danger-full-access",
+        "acp",
+    ])
+    .env("SUDOCODE_AGENT_AUTO_BG_SECS", "1")
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    let stdin = child.stdin.take().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut client = AcpTestClient {
+        transport: Transport::Stdio {
+            child,
+            stdin,
+            stdout,
+        },
+        next_id: 1,
+        last_available_commands: None,
+        raw_lines: Vec::new(),
+    };
+    initialize_task_completions(&mut client).await;
+    let sid = scenario_session_new(&mut client, &workspace.root).await;
+    let calls = json!([{"id":"auto-child","name":"agent_spawn","input":{
+        "description":"auto background", "subagent_type":"general-purpose", "model":"inherit", "run_in_background":false,
+        "prompt":format!("{SCENARIO_PREFIX}subagent_slow_child Read {SUBAGENT_CHILD_READ_PATH}")
+    }}]);
+    let (events, failed) = client.send_request("session/prompt", json!({"sessionId":sid,"_meta":{"traceId":"failed-root:1"},"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}tool_concurrency FAIL_AFTER_TOOLS TOOL_BATCH:{calls}")}]})).await;
+    assert!(failed.get("error").is_some(), "{failed}");
+    assert!(
+        events
+            .iter()
+            .any(|e| e["params"]["update"]["rawOutput"]["status"] == "backgrounded"),
+        "{events:?}"
+    );
+    let (_, probe) = client
+        .send_request(
+            "_sudocode/task/replay",
+            json!({"sessionId":sid,"cwd":workspace.root}),
+        )
+        .await;
+    let storage = probe["result"]["storageRef"].clone();
+    for continued in [false, true] {
+        if continued {
+            let (_, response) = client.send_request("session/prompt", json!({"sessionId":sid,"_meta":{"traceId":"human:1"},"prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}single_turn_text")}]})).await;
+            assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        }
+        let (_, replay) = client
+            .send_request(
+                "_sudocode/task/replay",
+                json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage}),
+            )
+            .await;
+        assert_eq!(
+            replay["result"]["unsettledByTrace"]["failed-root:1"], true,
+            "{replay}"
+        );
+        assert_eq!(replay["result"]["unresolved"], 1, "{replay}");
+        assert_eq!(
+            replay["result"]["pending"], 0,
+            "failed context must not publish: {replay}"
+        );
+    }
+    let (_, suppressed) = client.send_request("_sudocode/task/suppress", json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage,"originTraceId":"failed-root:1"})).await;
+    assert_eq!(
+        suppressed["result"]["disposition"], "suppressed",
+        "{suppressed}"
+    );
+    let (_, replay) = client
+        .send_request(
+            "_sudocode/task/replay",
+            json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage}),
+        )
+        .await;
+    assert_eq!(
+        replay["result"]["unsettledByTrace"]["failed-root:1"], false,
+        "{replay}"
+    );
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+#[tokio::test]
 async fn acp_completions_retry_ack_and_exact_context() {
     let server = MockAnthropicService::spawn().await.unwrap();
     let workspace = subagent_events_workspace("completions", &server.base_url());
@@ -7106,6 +7266,16 @@ async fn acp_task_completions_terminal_replay_and_purge() {
     assert!(during
         .iter()
         .all(|v| v["method"] != "_sudocode/task/completed"));
+    let (_, running) = client
+        .send_request(
+            "_sudocode/task/replay",
+            json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage}),
+        )
+        .await;
+    assert_eq!(
+        running["result"]["unsettledByTrace"],
+        json!({"root:1":true})
+    );
     fs::write(workspace.root.join("release-task"), "go").unwrap();
     let (_, first) = client
         .recv_until(SUBAGENT_EVENTS_WAIT, |v| {
@@ -7123,6 +7293,18 @@ async fn acp_task_completions_terminal_replay_and_purge() {
         .as_str()
         .unwrap()
         .contains("TASK_DONE&lt;&amp;&gt;"));
+    let message = first["params"]["message"].as_str().unwrap();
+    for fact in [
+        "&quot;exitCode&quot;:7",
+        "&quot;signal&quot;:null",
+        "&quot;termination&quot;:&quot;exit&quot;",
+        "&quot;outputTruncated&quot;:false",
+    ] {
+        assert!(
+            message.contains(fact),
+            "missing terminal fact {fact}: {message}"
+        );
+    }
     client.send_raw(&json!({"jsonrpc":"2.0","id":first["id"],"error":{"code":-32603,"message":"receipt unavailable"}})).await;
     let (_, retry) = client
         .recv_until(SUBAGENT_EVENTS_WAIT, |v| {
@@ -7196,6 +7378,7 @@ async fn acp_task_completions_terminal_replay_and_purge() {
         )
         .await;
     assert_eq!(replay["result"]["unresolved"], 0, "{replay}");
+    assert_eq!(replay["result"]["unsettledByTrace"]["root:1"], false);
     assert_eq!(
         replay["result"]["terminalSources"][0]["stdout"],
         "TASK_DONE<&>"
@@ -7265,6 +7448,10 @@ async fn acp_task_completions_interrupted_shell_and_encoded_budget() {
     assert_eq!(completion["params"]["parentToolCallId"], "large-tool");
     assert!(serde_json::to_vec(&completion["params"]).unwrap().len() <= 65536);
     assert_eq!(completion["params"]["terminal"]["outputTruncated"], true);
+    assert!(completion["params"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("&quot;outputTruncated&quot;:true"));
     assert!(completion["params"]["message"]
         .as_str()
         .unwrap()

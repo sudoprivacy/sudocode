@@ -196,6 +196,9 @@ pub struct ReplayStatus {
     pub waiting: usize,
     pub pending: usize,
     pub unresolved: usize,
+    /// Exact source ownership for controller stop controls, including blocked
+    /// delivery. Session-wide counts cannot identify which old root is active.
+    pub unsettled_by_trace: BTreeMap<String, bool>,
     pub settled: usize,
     pub blocked: Vec<String>,
     pub context_ref: Option<ContextRef>,
@@ -514,6 +517,16 @@ impl CompletionJournal {
         }
         self.change(|state| {
             state.reducer.tool_result(id, name, output);
+            // Auto-backgrounding is observed at tool handoff, after registration.
+            // Keep that fact on the source: fail_turn removes reducer workers
+            // to block publication, but does not end the child's execution.
+            if state.reducer.workers.get(id).is_some_and(|w| w.background) {
+                if let Some(lifecycle) =
+                    state.sources.get_mut(id).and_then(|s| s.lifecycle.as_mut())
+                {
+                    lifecycle.agent.background = true;
+                }
+            }
             Self::terminal_tool_result(state, id, name, output);
             Self::publish(state)
         })
@@ -829,6 +842,30 @@ impl CompletionJournal {
                 })
                 .count(),
             unresolved: state.sources.values().filter(|s| !s.settled).count(),
+            unsettled_by_trace: state.sources.iter().fold(
+                BTreeMap::new(),
+                |mut traces, (tool, source)| {
+                    let unsettled = !source.settled
+                        && !source.suppressed
+                        && (source.payload.is_some()
+                            || source.terminal.as_ref().is_some_and(|t| t.backgrounded)
+                            || source
+                                .lifecycle
+                                .as_ref()
+                                .is_some_and(|e| e.agent.background)
+                            || state
+                                .reducer
+                                .workers
+                                .get(tool)
+                                .is_some_and(|w| w.background));
+                    // A prepared synchronous source may still hand off to the
+                    // background. Do not publish false before its prompt closes.
+                    if state.closed_traces.contains(&source.trace_id) || unsettled {
+                        *traces.entry(source.trace_id.clone()).or_default() |= unsettled;
+                    }
+                    traces
+                },
+            ),
             settled: state.sources.values().filter(|s| s.settled).count(),
             blocked: state
                 .sources

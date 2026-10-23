@@ -2690,26 +2690,30 @@ fn render_manifest_task_notification(manifest: &AgentOutput) -> String {
     );
     // Bound source fields before the shared renderer escapes XML; never cut a
     // rendered element. Keep the durable result reference when truncating.
-    let result = manifest.result.as_ref().map(|text| {
-        if text.len() <= 6144 {
-            return text.clone();
+    let result = match manifest.result.as_deref() {
+        Some(text) if text.len() <= 6144 => text.to_owned(),
+        Some(text) => {
+            let path = manifest.result_full_path.as_deref().unwrap_or(&manifest.output_file);
+            format!(
+                "{}\n[Result truncated; full result: {}]",
+                notification_excerpt(text, 6144),
+                notification_excerpt(path, 1024)
+            )
         }
-        let path = manifest
-            .result_full_path
-            .as_deref()
-            .unwrap_or(&manifest.output_file);
-        format!(
-            "{}\n[Result truncated; full result: {}]",
-            notification_excerpt(text, 6144),
-            notification_excerpt(path, 1024)
-        )
-    });
+        None => match manifest.session_file.as_deref() {
+            Some(path) => format!(
+                "No final assistant response was produced. Inspect the saved transcript (including tool results): {}",
+                notification_excerpt(path, 4096)
+            ),
+            None => "No final assistant response was produced; no saved transcript is available.".into(),
+        },
+    };
     let duration_ms = compute_notification_duration_ms(manifest);
     let view = runtime::coordinator_mode::TaskNotificationView {
         agent_id: manifest.agent_id.as_str(),
         status: normalized_status,
         summary: summary.as_str(),
-        result: result.as_deref(),
+        result: Some(&result),
         color: manifest.color.as_deref(),
         duration_ms,
         tool_uses: manifest.tool_uses,
@@ -2817,6 +2821,10 @@ struct AgentOutputView<'a> {
     retrieval_status: &'a str,
     output_file: &'a str,
     manifest_file: &'a str,
+    /// Completion is execution state; it does not guarantee an answer.
+    result_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_file: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2848,6 +2856,7 @@ fn build_agent_output_view<'a>(
         status,
         output_file,
         manifest_file,
+        session_file,
         created_at: _ignored_created_at,
         started_at: _ignored_started_at,
         completed_at: _ignored_completed_at,
@@ -2872,6 +2881,14 @@ fn build_agent_output_view<'a>(
         retrieval_status,
         output_file,
         manifest_file,
+        result_status: if result.is_some() {
+            "available"
+        } else if is_terminal_agent_status(status) {
+            "empty"
+        } else {
+            "pending"
+        },
+        session_file: session_file.as_deref(),
         result: result.as_deref(),
         error: error.as_deref(),
         result_full_path: result_full_path.as_deref(),
@@ -4710,6 +4727,14 @@ struct AgentOutput {
     output_file: String,
     #[serde(rename = "manifestFile")]
     manifest_file: String,
+    /// Set only after saving the child transcript successfully. This is evidence,
+    /// not a substitute answer when the provider ends after a tool result.
+    #[serde(
+        rename = "sessionFile",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    session_file: Option<String>,
     #[serde(rename = "createdAt")]
     created_at: String,
     #[serde(rename = "startedAt", skip_serializing_if = "Option::is_none")]
@@ -6012,6 +6037,7 @@ fn prepare_agent_job(
         status: String::from("running"),
         output_file: output_file.display().to_string(),
         manifest_file: manifest_file.display().to_string(),
+        session_file: None,
         created_at: created_at.clone(),
         started_at: Some(created_at),
         completed_at: None,
@@ -6389,9 +6415,10 @@ fn run_agent_job_returning_text(job: &AgentJob) -> Result<String, String> {
                 .saturating_add(turn_tool_uses);
             Ok(final_assistant_text(&summary))
         },
-    )?;
+    );
 
     persist_agent_session(&job.manifest, conv_runtime.session(), job.fs.as_ref());
+    let final_text = final_text?;
 
     // Fold telemetry into the on-disk manifest BEFORE any downstream
     // step (summarizer, persist) reads it, so the terminal-state
@@ -8614,6 +8641,14 @@ fn final_assistant_text(summary: &runtime::TurnSummary) -> String {
     summary
         .assistant_messages
         .last()
+        // An empty provider response after tools leaves the previous tool-use
+        // message last. Its progress text is not a final answer.
+        .filter(|message| {
+            !message
+                .blocks
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        })
         .map(|message| {
             message
                 .blocks
@@ -8926,6 +8961,18 @@ fn persist_agent_session(manifest: &AgentOutput, session: &Session, fs: &dyn FsB
     let path = agent_session_path(&store, &manifest.agent_id, fs);
     if let Err(e) = session.save_to_path(&path) {
         eprintln!("sudocode: failed to persist agent session: {e}");
+        return;
+    }
+    let outcome = (|| {
+        let raw = fs
+            .read_to_string(&manifest.manifest_file)
+            .map_err(|e| e.to_string())?;
+        let mut saved: AgentOutput = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        saved.session_file = Some(path.to_string_lossy().into_owned());
+        write_agent_manifest(&saved, fs)
+    })();
+    if let Err(e) = outcome {
+        eprintln!("sudocode: failed to record agent transcript path: {e}");
     }
 }
 

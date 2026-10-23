@@ -8,6 +8,69 @@ use runtime::{
     HookAbortSignal, PermissionPrompter, QuestionPrompter, RuntimeError, RuntimeObserver,
 };
 
+/// A non-owning barrier for the previous completion state's field teardown.
+/// A dead weak driver alone does not mean its engine has released storage.
+#[derive(Clone)]
+pub struct CompletionRetirement(Arc<RetirementState>);
+
+struct RetirementState {
+    retired: Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+impl CompletionRetirement {
+    /// Wait for the state's storage fields to drop, without retaining them.
+    #[must_use]
+    pub fn wait(&self, timeout: std::time::Duration) -> bool {
+        let retired = self
+            .0
+            .retired
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Condvar releases the mutex while waiting: another session's
+        // nonblocking retirement probe never queues behind this timeout.
+        let (retired, _) = self
+            .0
+            .changed
+            .wait_timeout_while(retired, timeout, |retired| !*retired)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *retired
+    }
+}
+
+pub(crate) struct CompletionLifetime {
+    retirement: CompletionRetirement,
+}
+
+impl Default for CompletionLifetime {
+    fn default() -> Self {
+        Self {
+            retirement: CompletionRetirement(Arc::new(RetirementState {
+                retired: Mutex::new(false),
+                changed: std::sync::Condvar::new(),
+            })),
+        }
+    }
+}
+
+impl Drop for CompletionLifetime {
+    fn drop(&mut self) {
+        *self
+            .retirement
+            .0
+            .retired
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        self.retirement.0.changed.notify_all();
+    }
+}
+
+impl CompletionLifetime {
+    pub(crate) fn retirement(&self) -> CompletionRetirement {
+        self.retirement.clone()
+    }
+}
+
 /// Installs the engine at composition time. All subsequent interaction uses
 /// the original `EngineHandle`, including cold replay followed by session/load.
 pub struct EngineAttachment {
@@ -16,6 +79,12 @@ pub struct EngineAttachment {
 }
 
 impl EngineAttachment {
+    /// Composition bookkeeping only; this does not keep an idle engine alive.
+    #[must_use]
+    pub fn completion_retirement(&self) -> CompletionRetirement {
+        self.completions.lifetime.retirement()
+    }
+
     pub fn attach(&self, delegate: Arc<dyn EngineDelegate>) -> Result<(), String> {
         let mut current = self
             .delegate
@@ -116,6 +185,14 @@ impl EngineDelegate for DeferredDelegate {
         self.get()
             .map_err(RuntimeError::new)?
             .run_management(line, build, observer)
+    }
+    fn run_direct_tool(
+        &self,
+        name: &str,
+        input: &str,
+        prompter: &mut dyn PermissionPrompter,
+    ) -> Result<(String, bool), String> {
+        self.get()?.run_direct_tool(name, input, prompter)
     }
     fn set_trace_id(&self, trace: &str) {
         if let Ok(delegate) = self.get() {

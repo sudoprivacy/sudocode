@@ -220,6 +220,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+      - name: PTY native bracketed paste
+        # Run the complete input journey on the actual OS PTY, including
+        # ConPTY. A platform exclusion cannot count as Windows acceptance.
+        env:
+          SCODE_TEST_BACKEND: mock
+        run: cargo test -p rusty-sudocode-cli --test pty_bracketed_paste -- --nocapture
       - name: PTY prefix and scoped-context contract
         # Exercise the real CLI and capture its final HTTP requests. Pin the
         # mock transport so a live-backend override cannot skip these checks.
@@ -396,6 +402,8 @@ jobs:
       # provisioned itself — here the conversation is created over gRPC by a
       # peer, which is the shape production has.
       - name: Co-host duet against a daemon built from this checkout
+        env:
+          NEXUS_A2A_COHOST_CARGO_CONFIG: ${{ github.workspace }}/.github/ci/cohost-plugin-crypto.toml
         run: e2e/nexus-a2a/run-cohost.sh
 
       - name: Checkout the VFS contract used by the co-host
@@ -411,6 +419,8 @@ jobs:
           NEXUS_SEARCH_USER_RUNTIME_BINARY: ${{ github.workspace }}/rust/target/debug/nexusd-cohost
         run: |
           test -x "$NEXUS_SEARCH_USER_RUNTIME_BINARY"
+          cargo build --locked --manifest-path .native-vfs/Cargo.toml -p nexus-search-plugin
+          stat -c 'Search fixture plugin bytes: %s' "$CARGO_TARGET_DIR/debug/libnexus_search_plugin.so"
           cargo test --locked --manifest-path .native-vfs/Cargo.toml \
             -p nexus-cluster --all-features --test user_runtime \
             signed_search_keeps_the_owner_boundary_and_reopens_committed_indexes -- --nocapture

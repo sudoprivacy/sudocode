@@ -7293,29 +7293,34 @@ async fn acp_task_completions_interrupted_shell_and_encoded_budget() {
     client.shutdown().await;
     let mut client = spawn_stdio_client_danger(&workspace);
     initialize_task_completions(&mut client).await;
-    let (_, replay) = client
-        .send_request(
-            "_sudocode/task/replay",
-            json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage}),
-        )
-        .await;
-    assert_eq!(replay["result"]["executionUnconfirmed"], 1, "{replay}");
-    let (_, suppressed) = client.send_request("_sudocode/task/suppress", json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage,"originTraceId":"root:1"})).await;
-    assert_eq!(
-        suppressed["result"]["disposition"], "suppressed",
-        "{suppressed}"
-    );
-    let (_, replay) = client
-        .send_request(
-            "_sudocode/task/replay",
-            json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage}),
-        )
-        .await;
-    assert_eq!(replay["result"]["unresolved"], 0, "{replay}");
-    assert_eq!(
-        replay["result"]["executionUnconfirmed"], 1,
-        "suppression is not termination: {replay}"
-    );
+    // No deliverable completion keeps a cold route alive here. Repeated
+    // controls must cross its engine/writer teardown, without a test sleep or
+    // retry masking a transient same-process session_writer_busy.
+    for _ in 0..32 {
+        let (_, replay) = client
+            .send_request(
+                "_sudocode/task/replay",
+                json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage}),
+            )
+            .await;
+        assert_eq!(replay["result"]["executionUnconfirmed"], 1, "{replay}");
+        let (_, suppressed) = client.send_request("_sudocode/task/suppress", json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage,"originTraceId":"root:1"})).await;
+        assert_eq!(
+            suppressed["result"]["disposition"], "suppressed",
+            "{suppressed}"
+        );
+        let (_, replay) = client
+            .send_request(
+                "_sudocode/task/replay",
+                json!({"sessionId":sid,"cwd":workspace.root,"storageRef":storage}),
+            )
+            .await;
+        assert_eq!(replay["result"]["unresolved"], 0, "{replay}");
+        assert_eq!(
+            replay["result"]["executionUnconfirmed"], 1,
+            "suppression is not termination: {replay}"
+        );
+    }
     fs::write(workspace.root.join("release-unknown"), "go").unwrap();
     timeout(Duration::from_secs(5), async {
         while !workspace.root.join("unknown-exited").exists() {
@@ -8078,6 +8083,278 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
         }
     }
 
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// Direct A2A requests (`_sudocode/a2a/*`)
+// ---------------------------------------------------------------------------
+
+/// Open a session in `dir` and return its id.
+async fn open_direct_session(client: &mut AcpTestClient, dir: &Path) -> String {
+    let (_, created) = client
+        .send_request(
+            "session/new",
+            json!({"cwd": dir.to_string_lossy(), "mcpServers": []}),
+        )
+        .await;
+    created["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("session/new returned no sessionId: {created}"))
+        .to_string()
+}
+
+async fn set_session_mode(client: &mut AcpTestClient, session_id: &str, mode: &str) {
+    let (_, resp) = client
+        .send_request(
+            "session/setPermissionMode",
+            json!({ "sessionId": session_id, "permissionMode": mode }),
+        )
+        .await;
+    assert!(
+        resp.get("error").is_none(),
+        "session/setPermissionMode {mode} should succeed: {resp}"
+    );
+}
+
+/// What `sender` has written to its conversation with `peer` on the pair root,
+/// read straight from the transcript so reading it changes nothing.
+fn conversation_log(pair_root: &Path, peer: &str, sender: &str) -> String {
+    let path = runtime::mailbox::Mailbox::workspace_local(pair_root, peer.to_string())
+        .transcript_path(sender);
+    fs::read_to_string(path).unwrap_or_default()
+}
+
+/// `_sudocode/a2a/send` runs the session's own `send` tool for the client: the
+/// message reaches the peer on the pair root from the session's agent, the
+/// model is never asked, and the model's history never sees it.
+#[tokio::test]
+async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
+    const AGENT: &str = "direct-a2a-sender";
+    const PEER: &str = "direct-a2a-peer";
+    const MARKER: &str = "DIRECT_A2A_MARKER_7c1f";
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("direct-a2a-send");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    pin_agent_name(&workspace.root, AGENT);
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+
+    let mut client = spawn_stdio_client(&workspace);
+    let (_, init) = client
+        .send_request("initialize", json!({ "protocolVersion": 1 }))
+        .await;
+    assert_eq!(
+        init["result"]["_meta"]["sudocode"]["directA2a"]["version"], 1,
+        "initialize advertises the direct A2A requests: {init}"
+    );
+    let sid = open_direct_session(&mut client, &workspace.root).await;
+    set_session_mode(&mut client, &sid, "workspace-write").await;
+
+    let before = server.captured_requests().await.len();
+    let (_, sent) = client
+        .send_request(
+            "_sudocode/a2a/send",
+            json!({
+                "sessionId": sid,
+                "to": PEER,
+                "message": format!("{MARKER} hello"),
+                "summary": "direct probe"
+            }),
+        )
+        .await;
+    assert_eq!(
+        sent["result"]["isError"], false,
+        "the send tool ran: {sent}"
+    );
+    assert!(
+        sent["result"]["content"]
+            .as_str()
+            .is_some_and(|content| !content.is_empty()),
+        "the response carries the tool's own result: {sent}"
+    );
+    let log = conversation_log(&pair_root, PEER, AGENT);
+    assert!(
+        log.contains(MARKER) && log.contains(AGENT),
+        "the peer's conversation holds the message from {AGENT}: {log}"
+    );
+
+    let (_, listed) = client
+        .send_request("_sudocode/a2a/agent_list", json!({ "sessionId": sid }))
+        .await;
+    assert_eq!(
+        listed["result"]["isError"], false,
+        "agent_list ran: {listed}"
+    );
+    let rows: Value =
+        serde_json::from_str(listed["result"]["content"].as_str().unwrap_or_default())
+            .unwrap_or_else(|e| panic!("agent_list returns the tool's JSON ({e}): {listed}"));
+    assert!(
+        rows.get("agents").is_some() && rows.get("count").is_some(),
+        "agent_list returns the tool's own rows: {rows}"
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        before,
+        "a direct call never asks the model"
+    );
+
+    // The next real turn's request carries no trace of the direct send.
+    let (_, prompted) = client
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId": sid,
+                "prompt": [{ "type": "text", "text": format!("{SCENARIO_PREFIX}single_turn_text") }]
+            }),
+        )
+        .await;
+    assert!(
+        prompted.get("error").is_none(),
+        "the prompt ran: {prompted}"
+    );
+    let requests = server.captured_requests().await;
+    let last = requests.last().expect("the prompt reached the model");
+    assert!(
+        !last.raw_body.contains(MARKER),
+        "a direct send must not enter the model's history"
+    );
+
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// Every refusal is definite and leaves the peer untouched: an unknown
+/// session, a `sender` or structured message, a mode that forbids sending,
+/// paused tools, a session busy with a turn, and a denied permission prompt.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn direct_a2a_refusals_send_nothing() {
+    const AGENT: &str = "direct-a2a-refuser";
+    const PEER: &str = "direct-a2a-untouched";
+    const MARKER: &str = "DIRECT_A2A_REFUSED_3e9a";
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("direct-a2a-refusals");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    pin_agent_name(&workspace.root, AGENT);
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let sid = open_direct_session(&mut client, &workspace.root).await;
+    let send = |session: &str, extra: Value| {
+        let mut params = json!({ "sessionId": session, "to": PEER, "message": MARKER });
+        if let (Some(params), Some(extra)) = (params.as_object_mut(), extra.as_object()) {
+            params.extend(extra.clone());
+        }
+        params
+    };
+
+    for (case, params) in [
+        ("an unknown session", send("no-such-session", json!({}))),
+        (
+            "a sender override",
+            send(&sid, json!({ "sender": "someone-else" })),
+        ),
+        (
+            "a structured message",
+            send(&sid, json!({ "message": { "type": "shutdown_request" } })),
+        ),
+    ] {
+        let (_, resp) = client.send_request("_sudocode/a2a/send", params).await;
+        assert!(
+            resp.get("error").is_some(),
+            "{case} must be refused: {resp}"
+        );
+    }
+
+    // The session starts read-only: the tool runs and the policy refuses it.
+    let (_, resp) = client
+        .send_request("_sudocode/a2a/send", send(&sid, json!({})))
+        .await;
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "read-only mode refuses the send: {resp}"
+    );
+    assert!(
+        resp["result"]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("read-only")),
+        "the refusal is the permission policy's: {resp}"
+    );
+
+    let (_, paused) = client
+        .send_request("_sudocode/session/pause_tools", json!({ "sessionId": sid }))
+        .await;
+    let epoch = paused["result"]["pauseEpoch"].clone();
+    let (_, resp) = client
+        .send_request("_sudocode/a2a/send", send(&sid, json!({})))
+        .await;
+    assert!(resp.get("error").is_some(), "paused tools refuse: {resp}");
+    let (_, resumed) = client
+        .send_request(
+            "_sudocode/session/resume_tools",
+            json!({ "sessionId": sid, "pauseEpoch": epoch }),
+        )
+        .await;
+    assert!(resumed.get("error").is_none(), "resume_tools: {resumed}");
+
+    let (prompt_id, permission_id) = park_session_on_permission_prompt(&mut client, &sid).await;
+    let (_, resp) = client
+        .send_request("_sudocode/a2a/send", send(&sid, json!({})))
+        .await;
+    assert!(
+        resp.get("error").is_some(),
+        "a session busy with a turn refuses at once: {resp}"
+    );
+    allow_permission(&mut client, &permission_id).await;
+    client
+        .recv_until(Duration::from_secs(60), |m| is_response_to(m, prompt_id))
+        .await
+        .unwrap_or_else(|seen| panic!("the parked turn never finished; saw {seen:#?}"));
+
+    set_session_mode(&mut client, &sid, "prompt").await;
+    let id = client
+        .send_request_no_wait("_sudocode/a2a/send", send(&sid, json!({})))
+        .await;
+    let (_, permission) = client
+        .recv_until(Duration::from_secs(30), |m| {
+            is_server_request(m, "session/request_permission")
+        })
+        .await
+        .unwrap_or_else(|seen| panic!("the direct send never asked; saw {seen:#?}"));
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "id": permission["id"],
+            "result": { "outcome": { "outcome": "selected", "optionId": "reject_once" } }
+        }))
+        .await;
+    let (_, resp) = client
+        .recv_until(Duration::from_secs(30), |m| is_response_to(m, id))
+        .await
+        .unwrap_or_else(|seen| panic!("the denied send never answered; saw {seen:#?}"));
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "a denied permission prompt refuses the send: {resp}"
+    );
+    assert!(
+        resp["result"]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("reject_once")),
+        "the refusal is the client's denial: {resp}"
+    );
+
+    assert!(
+        !conversation_log(&pair_root, PEER, AGENT).contains(MARKER),
+        "no refused send may reach the peer"
+    );
     client.shutdown().await;
     workspace.cleanup();
 }

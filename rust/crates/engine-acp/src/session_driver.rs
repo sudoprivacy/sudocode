@@ -56,6 +56,10 @@ pub(crate) struct SessionDriver {
 }
 
 impl SessionDriver {
+    pub(crate) fn completion_retirement(&self) -> engine_core::CompletionRetirement {
+        self.attachment.completion_retirement()
+    }
+
     fn new(
         (mut handle, attachment): (EngineHandle, EngineAttachment),
         session_id: String,
@@ -92,6 +96,14 @@ impl SessionDriver {
                     break;
                 };
                 driver.on_event(&session_id, event);
+            }
+            // No reply can follow: wake every request still waiting for one.
+            if let Some(driver) = weak.upgrade() {
+                driver
+                    .requests
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
             }
             let _ = stopped_tx.send(());
         });
@@ -289,6 +301,42 @@ impl SessionDriver {
         .await
         .map_err(|e| e.to_string())??;
         serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
+    /// Run one tool for the client outside any turn and wait for its reply for
+    /// as long as it takes. The call can wait on a permission prompt, so a
+    /// fixed timeout would abandon a call that may still run.
+    pub(crate) async fn direct_tool(
+        self: &Arc<Self>,
+        name: &str,
+        input: String,
+    ) -> Result<Value, String> {
+        let id = self.next_request.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, tx);
+        let sent = self.send(EngineCommand::DirectTool {
+            request_id: id,
+            name: name.to_string(),
+            input,
+        });
+        let result = match sent {
+            Ok(()) => tokio::task::spawn_blocking(move || rx.recv())
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|reply| {
+                    reply.map_err(|_| "the engine session closed before replying".to_string())
+                })
+                .and_then(|reply| reply),
+            Err(error) => Err(error),
+        };
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
+        result
     }
 
     /// Publish connection/protocol state and its causal event barrier together.

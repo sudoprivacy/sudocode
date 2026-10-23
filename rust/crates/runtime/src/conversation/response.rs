@@ -230,6 +230,79 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             cancelled,
         }
     }
+
+    /// Run one tool by name outside any model turn, through the gates a
+    /// model's call passes: pre-hook, the permission policy (prompting through
+    /// `prompter`), this session's own executor, post-hook.
+    ///
+    /// Nothing is written to the session — no assistant message and no tool
+    /// result — because no model asked for the call. The scheduler still needs
+    /// a parent message for the call's dispatch context; it is built here and
+    /// dropped with the scheduler. Returns the tool's output and whether it
+    /// failed.
+    #[allow(clippy::await_holding_lock)]
+    pub async fn run_tool_call(
+        &mut self,
+        name: &str,
+        input: &str,
+        mut prompter: Option<&mut dyn PermissionPrompter>,
+    ) -> Result<(String, bool), RuntimeError> {
+        const CALL_ID: &str = "direct";
+        let abort = self.hook_abort_signal.for_current_turn();
+        self.tool_executor_mut().set_abort_signal(abort.clone());
+        let no_observer: Option<&mut dyn RuntimeObserver> = None;
+        let context = self.dispatch_context(&no_observer, &prompter);
+        let executor = Arc::clone(&self.tool_executor);
+        let executor = executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut scheduler = tool_execution::ToolScheduler::new(
+            &*executor,
+            self.hook_runner.clone(),
+            self.permission_policy.clone(),
+            abort.clone(),
+            self.hook_progress_reporter.clone(),
+        );
+        scheduler.initialize_context(context);
+        let parent = ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: CALL_ID.into(),
+            name: name.into(),
+            input: input.into(),
+            thought_signature: None,
+        }]);
+        scheduler.enqueue(CALL_ID.into(), name.into(), input.into(), parent)?;
+        let completed = loop {
+            tokio::select! {
+                biased;
+                () = abort.cancelled() => {
+                    scheduler.cancel();
+                    match std::iter::from_fn(|| scheduler.take_update())
+                        .find_map(|update| match update {
+                            tool_execution::ToolUpdate::Completed { message, .. } => Some(message),
+                            tool_execution::ToolUpdate::Started { .. } => None,
+                        }) {
+                        Some(message) => break message,
+                        None => return Err(RuntimeError::new("the tool call was cancelled")),
+                    }
+                }
+                update = scheduler.next(&mut prompter) => {
+                    if let tool_execution::ToolUpdate::Completed { message, .. } = update {
+                        break message;
+                    }
+                }
+            }
+        };
+        completed
+            .blocks
+            .into_iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolResult {
+                    output, is_error, ..
+                } => Some((output, is_error)),
+                _ => None,
+            })
+            .ok_or_else(|| RuntimeError::new("the tool call produced no result"))
+    }
 }
 
 pub(super) struct ExecutedResponse {

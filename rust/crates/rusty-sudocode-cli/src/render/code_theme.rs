@@ -21,13 +21,21 @@ fn syntax_set() -> &'static SyntaxSet {
     SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
 }
 
-pub(super) fn theme(light: bool) -> &'static Theme {
-    static THEMES: OnceLock<two_face::theme::EmbeddedLazyThemeSet> = OnceLock::new();
-    THEMES.get_or_init(two_face::theme::extra).get(if light {
+fn with_theme<T>(light: bool, read: impl FnOnce(&Theme) -> T) -> T {
+    let themes = two_face::theme::extra();
+    read(themes.get(if light {
         EmbeddedThemeName::CatppuccinLatte
     } else {
         EmbeddedThemeName::CatppuccinMocha
-    })
+    }))
+}
+
+pub(super) fn theme(light: bool) -> &'static Theme {
+    // Keep the selected syntax asset, not every unused serialized theme.
+    static DARK: OnceLock<Theme> = OnceLock::new();
+    static LIGHT: OnceLock<Theme> = OnceLock::new();
+    let selected = if light { &LIGHT } else { &DARK };
+    selected.get_or_init(|| with_theme(light, Clone::clone))
 }
 
 /// Inline code uses the Markdown scope from the same theme as fenced code.
@@ -38,15 +46,19 @@ pub(super) fn inline_color(light: bool, support: ColorSupport) -> Color {
         return Color::Reset;
     }
     let color = if light { &LIGHT } else { &DARK }.get_or_init(|| {
-        let highlighter = Highlighter::new(theme(light));
-        [
-            "markup.inline.raw.string.markdown",
-            "markup.raw.inline.markdown",
-        ]
-        .iter()
-        .find_map(|name| {
-            let scope = Scope::new(name).ok()?;
-            highlighter.style_mod_for_stack(&[scope]).foreground
+        // Status and inline text need only this color. Do not retain a syntax
+        // theme/catalog until an actual code block requests highlighting.
+        with_theme(light, |theme| {
+            let highlighter = Highlighter::new(theme);
+            [
+                "markup.inline.raw.string.markdown",
+                "markup.raw.inline.markdown",
+            ]
+            .iter()
+            .find_map(|name| {
+                let scope = Scope::new(name).ok()?;
+                highlighter.style_mod_for_stack(&[scope]).foreground
+            })
         })
     });
     color.map_or(Color::Reset, |color| foreground(color, support))

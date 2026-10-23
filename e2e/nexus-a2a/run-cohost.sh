@@ -53,7 +53,11 @@ if [ -z "$BIN" ]; then
   # `--features daemon,driver-ai`: the bin is behind it so the workspace's own test and
   # clippy jobs do not compile a raft + tonic tree on three platforms (and do not
   # need `protoc`, which the macOS runners have not got).
-  cargo_in_workspace build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon,driver-ai
+  COHOST_BUILD=(cargo_in_workspace)
+  if [ -n "${NEXUS_A2A_COHOST_CARGO_CONFIG:-}" ]; then
+    COHOST_BUILD+=(--config "$NEXUS_A2A_COHOST_CARGO_CONFIG")
+  fi
+  "${COHOST_BUILD[@]}" build "${MANIFEST[@]}" -q -p nexusd-cohost --features daemon,driver-ai
   BIN="$(cargo_in_workspace metadata "${MANIFEST[@]}" --format-version 1 --no-deps \
          | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/debug/nexusd-cohost"
   [ -x "$BIN" ] || BIN="$BIN.exe"

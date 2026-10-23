@@ -714,8 +714,7 @@ impl CliToolExecutor {
                     ));
                 }
                 let mut output = ToolOutput::text(format!(
-                    "The user APPROVED the plan. Implement it now; do not wait for another \
-                     prompt or request approval of this plan again.\n\n{plan}"
+                    "The user APPROVED the plan. Implement it now.\n\n{plan}"
                 ));
                 if answer.value == "1" {
                     output.context_action = Some(ToolContextAction::RestartFromCurrentExchange);
@@ -723,7 +722,7 @@ impl CliToolExecutor {
                 Ok(output)
             }
             "4" => Err(ToolError::new(
-                "User chose to exit plan mode without executing. The plan is saved; do not implement it now — wait for further instructions.",
+                "User chose to exit plan mode without executing. The plan is saved; wait for further instructions.",
             )),
             // "3" (Keep planning) or any free-text answer is treated as a comment:
             // feed it back so the model revises the plan and calls write_plan again.

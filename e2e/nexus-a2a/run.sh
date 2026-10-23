@@ -143,6 +143,14 @@ echo "== [deterministic] a silent connection errors, then recovers =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
 
+# The baseline lease path against the node's real lease table: one renewal of a
+# conversation reader's lock is failed by a test-only wrapper (INJECTED, it never
+# reaches the node). The commit must be refused, the durable read position left
+# alone, and the reader re-acquired so the batch is redelivered and committed.
+echo "== [deterministic] a failed reader renewal refuses the commit; the reader re-acquires =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset -- --ignored --nocapture
+
 # A daemon that is alive and SILENT - the failure a unit test cannot construct.
 #
 # A dropped connection reports itself; a stopped process holds the socket open

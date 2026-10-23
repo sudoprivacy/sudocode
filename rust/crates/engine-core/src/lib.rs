@@ -87,7 +87,7 @@ pub mod cache_advisor;
 pub mod cache_metrics;
 pub mod cache_report;
 mod engine_client;
-pub use attachment::EngineAttachment;
+pub use attachment::{CompletionRetirement, EngineAttachment};
 mod session;
 pub mod subagent_completion;
 pub use engine_client::EngineApiClient;

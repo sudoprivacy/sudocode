@@ -42,6 +42,9 @@ pub struct CompletionState {
     wake: Arc<tokio::sync::Notify>,
     delivery: Mutex<control::DeliveryState>,
     inner: Mutex<CompletionTurn>,
+    // Fields drop in declaration order. Keep this last so retirement follows
+    // the journal/storage fields, including a worker's final state owner.
+    pub(crate) lifetime: crate::attachment::CompletionLifetime,
 }
 
 #[derive(Default)]

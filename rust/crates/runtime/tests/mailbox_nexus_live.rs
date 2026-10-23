@@ -36,6 +36,8 @@
 //! * **Never read a just-sent frame without blocking.** See
 //!   [`DELIVERY_WAIT_MS`].
 
+#[path = "common/lease_fault.rs"]
+mod lease_fault;
 #[path = "common/paused_transport.rs"]
 mod paused_transport;
 #[path = "common/session_controller.rs"]
@@ -1970,4 +1972,208 @@ fn live_reader_receipts_keep_unprocessed_messages_and_renew_while_blocked() {
         after.messages().is_empty(),
         "acknowledged delivery must not replay"
     );
+}
+
+/// BASELINE evidence on a REAL node: what the pre-#1014 lease code does when a
+/// conversation reader's renewal fails at commit time.
+///
+/// One instance of an agent over a real mTLS client, behind the test-only fault
+/// boundary (`common/lease_fault.rs`). Exactly ONE renewal of the reader's lock
+/// is failed (INJECTED: it never reaches the node), and the re-claim that follows
+/// is held back (INJECTED delay) so the window in which the position must not
+/// move is long enough to observe; everything else is real. Asserted, with
+/// monotonic instants:
+///
+/// - the failed renewal is the commit's own `confirm()`, after the message was
+///   delivered, and the commit is refused: the durable read position stays put;
+/// - the tail drops that reader, releases its lock on the node, re-acquires it,
+///   and reloads the position from the register, so the message is delivered
+///   once more (at-least-once) and then committed;
+/// - the receiver seat is never touched, and nothing writes the position except
+///   the reader's own commit (this test only reads it).
+#[test]
+#[ignore = "requires the harness's real mTLS Nexus daemon"]
+fn live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset() {
+    use lease_fault::{Fault, FaultyBackend, Outcome, Probe};
+    use runtime::mailbox::{spawn_inbox_poller, InboxConvention};
+    type Seen = Arc<std::sync::Mutex<Vec<(String, Instant)>>>;
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("set daemon endpoint");
+    let auth = std::env::var("NEXUS_API_KEY").unwrap_or_default();
+    let agent = format!("scode-commit-fault-{}", fresh());
+    let peer = "commit-fault-peer";
+    let sender = dial(&endpoint);
+    let observer = Arc::new(mailbox(&dial(&endpoint), &agent, &auth));
+    let seen: Seen = Arc::default();
+    let probe = Probe::new();
+    let node = runtime::fs_backend::NexusVfsFsBackend::from_arc_mtls(
+        dial(&endpoint),
+        auth.clone(),
+        "root",
+    );
+    let receiver = Arc::new(Mailbox::new(
+        Arc::new(FaultyBackend::new(Arc::new(node), Arc::clone(&probe))),
+        agent.clone(),
+        InboxConvention::new(String::new()),
+    ));
+    let abort = runtime::HookAbortSignal::new();
+    let sink_seen = Arc::clone(&seen);
+    let handle = spawn_inbox_poller(receiver, 200, "commit-fault", abort.clone(), move |m| {
+        sink_seen
+            .lock()
+            .unwrap()
+            .push((m.body.clone(), Instant::now()));
+        true
+    });
+    let wait = |what: &str, within: Duration, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + within;
+        while !done() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {within:?} waiting for {what}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let deliveries = |body: &str| -> Vec<Instant> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(b, _)| b == body)
+            .map(|(_, at)| *at)
+            .collect()
+    };
+    let position = || observer.read_position(peer).expect("read position");
+
+    wait("the seat", Duration::from_secs(20), &|| probe.holds_seat());
+    send_to(&sender, peer, &agent, "m0 warm-up", &auth).expect("send");
+    wait(
+        "the warm-up to be delivered and committed",
+        Duration::from_secs(20),
+        &|| !deliveries("m0 warm-up").is_empty() && position().is_some_and(|p| p > 0),
+    );
+    let p0 = position().unwrap();
+
+    // Sample the durable position, read-only, from just before the fault.
+    let sampling = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let samples: Arc<std::sync::Mutex<Vec<(Instant, Instant, Option<u64>)>>> = Arc::default();
+    let sampler = {
+        let (sampling, samples, observer) = (
+            Arc::clone(&sampling),
+            Arc::clone(&samples),
+            Arc::clone(&observer),
+        );
+        thread::spawn(move || {
+            while sampling.load(std::sync::atomic::Ordering::Acquire) {
+                let start = Instant::now();
+                let p = observer.read_position(peer).expect("read position");
+                samples.lock().unwrap().push((start, Instant::now(), p));
+                thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+
+    let acquired_before = probe.reader_acquisitions().len();
+    let armed = Instant::now();
+    const CLAIM_DELAY: Duration = Duration::from_millis(800);
+    probe.delay_next_reader_claim(CLAIM_DELAY);
+    probe.set(Fault::ReaderRenewFails(1));
+    let body = "m1 committed under a failing renewal";
+    send_to(&sender, peer, &agent, body, &auth).expect("send");
+    wait(
+        "the position to advance past m1",
+        Duration::from_secs(30),
+        &|| position().is_some_and(|p| p > p0),
+    );
+    thread::sleep(Duration::from_secs(3));
+    sampling.store(false, std::sync::atomic::Ordering::Release);
+    sampler.join().expect("sampler");
+    let p1 = position().unwrap();
+
+    let delivered = deliveries(body);
+    assert_eq!(
+        delivered.len(),
+        2,
+        "m1 must be delivered once, refused at commit, and redelivered exactly once: {delivered:?}"
+    );
+    // With m1 delivered exactly twice, m0 delivered exactly once pins where the
+    // re-acquired reader resumed: at the durable offset, neither before it
+    // (m0 again) nor after it (no second m1).
+    assert_eq!(
+        deliveries("m0 warm-up").len(),
+        1,
+        "the re-acquired reader must resume at the durable offset, not before it"
+    );
+    let injected: Vec<_> = probe
+        .reader_renewals()
+        .into_iter()
+        .filter(|r| r.requested >= armed && r.outcome == Outcome::Injected)
+        .collect();
+    assert_eq!(
+        injected.len(),
+        1,
+        "exactly one INJECTED reader renewal: {injected:?}"
+    );
+    let failed = injected[0];
+    assert!(
+        failed.requested >= delivered[0] && failed.returned <= delivered[1],
+        "the failed renewal must be the commit's confirm(), between the two deliveries"
+    );
+    let (released, reached_node) = probe
+        .reader_releases()
+        .into_iter()
+        .find(|(at, _)| *at >= failed.returned)
+        .expect("the tail released the reader after the refused commit");
+    assert!(
+        reached_node,
+        "not partitioned, so the release reached the node"
+    );
+    let reacquired = probe
+        .reader_acquisitions()
+        .into_iter()
+        .skip(acquired_before)
+        .find(|at| *at >= released)
+        .expect("the tail re-acquired the reader");
+    assert!(
+        reacquired <= delivered[1],
+        "m1 must be redelivered by the re-acquired reader"
+    );
+    assert!(
+        reacquired.saturating_duration_since(released) >= CLAIM_DELAY,
+        "the INJECTED claim delay must have held the window open"
+    );
+    let samples = samples.lock().unwrap().clone();
+    let held: Vec<_> = samples
+        .iter()
+        .filter(|(start, end, _)| *start >= failed.returned && *end <= delivered[1])
+        .collect();
+    // Three is an empirical floor, not an invariant: the 800ms window yields
+    // dozens of samples, and three is enough to show the position held across
+    // it rather than in one lucky read.
+    assert!(
+        held.len() >= 3,
+        "too few position samples between the refused commit and the redelivery: {}",
+        held.len()
+    );
+    assert!(
+        held.iter().all(|(_, _, p)| *p == Some(p0)),
+        "the refused commit must leave the durable position at {p0}: {held:?}"
+    );
+    assert!(p1 > p0, "the redelivered batch was committed");
+    assert!(
+        probe.releases().is_empty(),
+        "the receiver seat must not be touched"
+    );
+
+    println!(
+        "BASELINE COMMIT OK: m1 delivered; ONE INJECTED reader renewal requested {:?} after that delivery and failed (the commit's confirm); commit refused, position held at {p0} in {} read-only samples; reader released {:?} and re-acquired {:?} after the failure (reached node: {reached_node}); m1 redelivered {:?} after the first delivery and committed, position {p0} -> {p1}; m1 delivered exactly twice and m0 once (resumed at the durable offset); seat untouched",
+        failed.requested.saturating_duration_since(delivered[0]),
+        held.len(),
+        released.saturating_duration_since(failed.returned),
+        reacquired.saturating_duration_since(failed.returned),
+        delivered[1].saturating_duration_since(delivered[0]),
+    );
+
+    abort.abort();
+    handle.join().expect("receiver");
 }

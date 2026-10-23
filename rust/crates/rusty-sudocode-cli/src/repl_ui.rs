@@ -2104,7 +2104,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // Format with the same iocraft width snapshot as the other chrome,
         // including the very first frame after a resize.
         StatusSlot::Active(spinner.render_frame(frame.get(), activity_state, tools, w))
-    } else if activity_state == EngineState::AwaitingInput {
+    } else if matches!(activity_state, EngineState::AwaitingInput(_)) {
         // The existing question/approval panel owns this interaction. No
         // animation or duplicate waiting instruction above InputSlot.
         StatusSlot::Empty

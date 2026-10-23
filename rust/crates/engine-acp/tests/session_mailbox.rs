@@ -83,6 +83,108 @@ fn until(
     panic!("timed out waiting for session message; seen: {seen:?}")
 }
 
+fn assert_runtime_state(kernel: &Kernel, pid: &Value, expected: &str, reason: Option<&str>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = call(kernel, "get_session_v1", json!({"session_id":pid}));
+        if state["state"] == expected && state["reason"].as_str() == reason {
+            eprintln!("RUNTIME_STATE_PROOF state={expected} reason={reason:?} pid={pid}");
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected runtime state {expected} ({reason:?}); actual: {state}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+struct HeldSend {
+    path: String,
+    entered: std::sync::mpsc::Sender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl kernel::core::dispatch::NativeInterceptHook for HeldSend {
+    fn name(&self) -> &'static str {
+        "runtime-state-held-send"
+    }
+
+    fn mutating_path_suffixes(&self) -> &'static [&'static str] {
+        &["/transcript"]
+    }
+
+    fn on_pre(
+        &self,
+        context: &kernel::core::dispatch::HookContext,
+    ) -> Result<kernel::core::dispatch::HookOutcome, String> {
+        if let kernel::core::dispatch::HookContext::Write(write) = context {
+            if write.path == self.path {
+                self.entered.send(()).map_err(|error| error.to_string())?;
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(30))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(kernel::core::dispatch::HookOutcome::Pass)
+    }
+}
+
+struct ReleaseSend(std::sync::mpsc::Sender<()>);
+impl Drop for ReleaseSend {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
+fn assert_direct_send_state(
+    kernel: &Arc<Kernel>,
+    mailbox: &SessionMailbox<Kernel>,
+    sid: &str,
+    pid: &Value,
+) {
+    let path = a2a::conversation_transcript_path(&a2a::conversation_id("worker", "held-peer"));
+    common::provision_stream_transcript(kernel, &path);
+    let (entered, waiting) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let hook = kernel
+        .enlist_hook_only_service("runtime-state-held-send")
+        .unwrap();
+    kernel.register_service_hook(
+        &hook,
+        Box::new(HeldSend {
+            path: path.clone(),
+            entered,
+            release: std::sync::Mutex::new(released),
+        }),
+    );
+    let release = ReleaseSend(release);
+    send(
+        mailbox,
+        json!({"jsonrpc":"2.0","id":"direct-state", "method":"_sudocode/a2a/send",
+        "params":{"sessionId":sid,"to":"held-peer","message":"DIRECT_STATE_DELIVERED","summary":"lifecycle proof"}}),
+    );
+    waiting
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the real send reached the held write");
+    assert_runtime_state(kernel, pid, "busy", None);
+    drop(release);
+    let (reply, _) = until(mailbox, |message| message["id"] == "direct-state");
+    assert!(reply.get("error").is_none(), "{reply}");
+    assert_runtime_state(kernel, pid, "ready", None);
+    let bytes = kernel::kernel::syscall::KernelSyscall::sys_read(
+        &**kernel,
+        &path,
+        &common::user_ctx(),
+        0,
+        0,
+    )
+    .unwrap();
+    assert!(String::from_utf8_lossy(&bytes.data.unwrap()).contains("DIRECT_STATE_DELIVERED"));
+}
+
 #[test]
 fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -132,6 +234,26 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     assert!(created.get("error").is_none(), "{created}");
     let sid = created["result"]["sessionId"].as_str().unwrap();
     assert_eq!(started["durable_session_id"], sid);
+    assert_runtime_state(&kernel, &started["session_id"], "ready", None);
+    send(
+        &mailbox,
+        json!({"jsonrpc":"2.0","id":"direct-mode", "method":"session/setPermissionMode",
+        "params":{"sessionId":sid,"permissionMode":"danger-full-access"}}),
+    );
+    until(&mailbox, |message| message["id"] == "direct-mode");
+    let before_direct = rt.block_on(service.captured_requests()).len();
+    assert_direct_send_state(&kernel, &mailbox, sid, &started["session_id"]);
+    assert_eq!(
+        rt.block_on(service.captured_requests()).len(),
+        before_direct,
+        "a direct send must not start a model turn"
+    );
+    send(
+        &mailbox,
+        json!({"jsonrpc":"2.0","id":"restore-mode", "method":"session/setPermissionMode",
+        "params":{"sessionId":sid,"permissionMode":"prompt"}}),
+    );
+    until(&mailbox, |message| message["id"] == "restore-mode");
     assert_eq!(
         created["result"]["_meta"]["sudocode"]["workspace"]["fileRoot"],
         format!(
@@ -178,6 +300,12 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             json!({"session_id":started["session_id"]}),
         );
         assert_eq!(state["state"], "awaiting_input");
+        assert_runtime_state(
+            &kernel,
+            &started["session_id"],
+            "awaiting_input",
+            Some("permission"),
+        );
         if cancelled {
             send(
                 &mailbox,
@@ -197,6 +325,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             );
         }
         let (terminal, events) = until(&mailbox, |message| message["id"] == turn);
+        assert_runtime_state(&kernel, &started["session_id"], "ready", None);
         assert_eq!(
             terminal["result"]["stopReason"],
             if cancelled { "cancelled" } else { "end_turn" },
@@ -316,6 +445,12 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         };
         assert_eq!(question["params"]["sessionId"], sid);
         assert_eq!(question["params"]["questions"][0]["id"], "q1");
+        assert_runtime_state(
+            &kernel,
+            &started["session_id"],
+            "awaiting_input",
+            Some("question"),
+        );
         if cancelled {
             send(
                 &mailbox,
@@ -377,6 +512,12 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     assert_eq!(
         state["state"], "awaiting_input",
         "question is still unanswered"
+    );
+    assert_runtime_state(
+        &kernel,
+        &started["session_id"],
+        "awaiting_input",
+        Some("question"),
     );
     send(
         &mailbox,

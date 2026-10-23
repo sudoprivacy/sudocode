@@ -47,7 +47,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::sync::oneshot;
 
 use engine_events::{
-    ContentBlock, EngineCommand, EngineEvent, EngineState, PermissionMode,
+    ContentBlock, EngineCommand, EngineEvent, EngineState, InputReason, PermissionMode,
     PermissionPromptDecision, PermissionRequest, QuestionPromptAnswer, QuestionPromptRequest,
     RequestId, TurnComplete,
 };
@@ -700,6 +700,7 @@ async fn run_direct_tool(
         tx: evt_tx.clone(),
         table: table.clone(),
     };
+    let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
     let mut handle =
         tokio::task::spawn_blocking(move || worker.run_direct_tool(&name, &input, &mut prompter));
     let mut shutdown = None;
@@ -1081,8 +1082,12 @@ impl RequestTable {
     ) -> PromptLease {
         let id = self.alloc();
         if !self.cancelled.load(Ordering::SeqCst) {
+            let reason = match &answer {
+                PendingAnswer::Permission(_) => InputReason::Permission,
+                PendingAnswer::Question(_) => InputReason::Question,
+            };
             self.insert(id, answer);
-            let _ = tx.send(EngineEvent::State(EngineState::AwaitingInput));
+            let _ = tx.send(EngineEvent::State(EngineState::AwaitingInput(reason)));
             let _ = tx.send(event(id));
         }
         PromptLease {

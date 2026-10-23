@@ -599,8 +599,6 @@ async fn drive_prompt(
             "Session control changed while the prompt was queued",
         ));
     }
-    registry.report_state(engine_core::EngineState::Running, None);
-    let _turn_state = HostedTurnState(Arc::clone(&registry));
     let session_cwd = registry.cwd(&sid);
     let cwd_lease = registry.cwd_lease();
     let subagents = registry.subagents(&sid);
@@ -685,7 +683,6 @@ async fn drive_prompt(
                 event = events.recv() => match event {
                     Some(EngineEvent::TextDelta { text }) => assistant_text.push_str(&text),
                     Some(EngineEvent::ContextCommitted(context)) => committed_context = Some(context),
-                    Some(EngineEvent::State(state)) => registry.report_state(state, None),
                     Some(EngineEvent::PermissionRequest { id, request }) => {
                         let abort = registry.abort_signal(&sid).expect("registered session abort signal");
                         replies.push(answer_permission(&sid, id, &request, &driver, abort, cx_perm.clone()));
@@ -1446,7 +1443,7 @@ pub trait HostedSessionFactory: Send + Sync {
         None
     }
     fn close(&self) {}
-    fn state_changed(&self, _state: engine_core::EngineState, _reason: Option<String>) {}
+    fn state_changed(&self, _state: engine_core::EngineState) {}
     fn open(
         &self,
         requested_id: Option<&str>,
@@ -1474,13 +1471,6 @@ struct SessionEntry {
     started_at: std::time::Instant,
     /// Present when the client opted into sub-agent events.
     subagents: Option<Arc<SessionSubagents>>,
-}
-
-struct HostedTurnState(SharedSessionRegistry);
-impl Drop for HostedTurnState {
-    fn drop(&mut self) {
-        self.0.report_state(engine_core::EngineState::Idle, None);
-    }
 }
 
 /// Async guard for a session lane; drop it to let the next request on the
@@ -1680,11 +1670,6 @@ impl SessionRegistry {
         }
     }
 
-    fn report_state(&self, state: engine_core::EngineState, reason: Option<String>) {
-        if let Some(factory) = &self.hosted_factory {
-            factory.state_changed(state, reason);
-        }
-    }
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionEntry>> {
         self.sessions
             .lock()
@@ -1780,6 +1765,7 @@ impl SessionRegistry {
             subagents.as_ref(),
             session_id.clone(),
             existing,
+            self.hosted_factory.clone(),
         )
         .map_err(AcpError::internal)?;
         self.lock_sessions().insert(

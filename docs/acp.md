@@ -57,6 +57,15 @@ session and independent across sessions:
   Setup and legacy slash operations that use the process working directory
   acquire a directory lease while they run.
 
+Managed cohost activity comes from the shared engine event stream, including
+direct A2A calls and management turns. Nexus reports `ready` when no foreground
+operation is in flight, `busy` while one is executing, and `awaiting_input` with
+reason `permission` or `question` while a prompt owns input. Waiting for input
+does not imply that independent tools have stopped. Likewise, `ready` does not
+imply that the session's background tasks have finished; their shared task
+registry owns that lifecycle. These states follow operation and prompt events,
+not output silence or spinner timing.
+
 ### Human takeover of tools
 
 Hosts check `initialize.result._meta.sudocode.toolPause.version == 1` before

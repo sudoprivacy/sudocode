@@ -172,23 +172,27 @@ pub enum CompletionReceipt {
     Retry,
 }
 
-/// The engine's lifecycle state, surfaced to renderers via
-/// [`EngineEvent::State`].
+/// The request which owns the foreground input surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputReason {
+    Permission,
+    Question,
+}
+
+/// Foreground operation state, independent of renderer and storage backend.
+/// Background tasks retain their own session-owned registry and lifecycle.
 ///
-/// [`EngineState::AwaitingInput`] is the trigger the kernel
-/// `AgentState::AwaitingInput` primitive was built to receive: the engine
-/// enters it the instant it emits a [`EngineEvent::PermissionRequest`] or
-/// [`EngineEvent::QuestionRequest`], and returns to [`EngineState::Running`]
-/// once the matching answer command arrives.
+/// The engine enters [`Self::AwaitingInput`] when it emits a permission or
+/// question request, and returns to [`Self::Running`] when that prompt releases
+/// input. Independent tools can continue while the prompt owns input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineState {
-    /// No turn in flight; waiting for the next [`EngineCommand::Prompt`].
+    /// No foreground operation in flight; background tasks may still run.
     Idle,
-    /// A turn is executing (model streaming, tools running).
+    /// A turn, management operation or direct tool call is executing.
     Running,
-    /// A turn is blocked on the renderer answering a permission or question
-    /// request.
-    AwaitingInput,
+    /// A prompt owns input. Other tools and provider streaming may continue.
+    AwaitingInput(InputReason),
 }
 
 /// End-of-turn aggregate — absorbs `runtime::TurnSummary` minus the message

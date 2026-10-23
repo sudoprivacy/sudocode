@@ -12,6 +12,8 @@
 
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
+#[path = "support/node_home.rs"]
+mod node_home;
 #[path = "common/openai_compat_mock.rs"]
 mod openai_compat_mock;
 #[path = "common/python.rs"]
@@ -8626,6 +8628,257 @@ async fn direct_a2a_pause_waits_for_an_in_flight_send() {
         )
         .await;
     assert!(resumed.get("error").is_none(), "resume_tools: {resumed}");
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// What `sender` has appended to its conversation with a credential's agent on
+/// a node, from `cursor`, read through that agent's own credential: `(from,
+/// body)` pairs and the next cursor. The node client is synchronous, so it
+/// runs on a blocking thread.
+async fn node_conversation(
+    endpoint: &str,
+    credential: &str,
+    sender: &str,
+    cursor: u64,
+    block_ms: u64,
+) -> (Vec<(String, String)>, u64) {
+    let (endpoint, credential, sender) = (
+        endpoint.to_string(),
+        credential.to_string(),
+        sender.to_string(),
+    );
+    tokio::task::spawn_blocking(move || {
+        let credential = runtime::nexus_mailbox::AgentCredential::load(&credential)
+            .expect("load the receiver credential bundle");
+        let agent = credential.agent.clone();
+        let client = runtime::nexus_mailbox::Config {
+            endpoint,
+            agent: credential.agent,
+            tls: credential.tls,
+        }
+        .connect()
+        .expect("dial the node as the receiver");
+        let inbox =
+            runtime::mailbox::Mailbox::over_nexus_mtls(client, agent, String::new(), "root");
+        inbox
+            .ensure_conversation(&sender)
+            .expect("provision the conversation");
+        let (envelopes, next) = inbox
+            .poll_conversation(&sender, cursor, block_ms)
+            .expect("read the conversation on the node");
+        (
+            envelopes
+                .into_iter()
+                .map(|envelope| (envelope.from, envelope.body))
+                .collect(),
+            next,
+        )
+    })
+    .await
+    .expect("node read task")
+}
+
+/// Read the conversation on the node from `cursor` until a body containing
+/// `marker` has arrived, returning everything read and the next cursor.
+async fn node_conversation_until(
+    endpoint: &str,
+    credential: &str,
+    sender: &str,
+    mut cursor: u64,
+    marker: &str,
+) -> (Vec<(String, String)>, u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut stored = Vec::new();
+    while !stored
+        .iter()
+        .any(|(_, body): &(String, String)| body.contains(marker))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{marker} never reached the node; read {stored:?}"
+        );
+        let (more, next) = node_conversation(endpoint, credential, sender, cursor, 2_000).await;
+        stored.extend(more);
+        cursor = next;
+    }
+    (stored, cursor)
+}
+
+/// An ACP client's direct send through a real nexus node: the node stamps the
+/// session's own authenticated identity on exactly one append, nothing falls
+/// back to a local mailbox, and the model is never asked. A call cancelled
+/// after its append answers that its outcome is unknown, and nothing resends
+/// it. `e2e/nexus-a2a/run.sh` supplies the daemon and both credentials;
+/// without them this test reports that it was skipped.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn direct_a2a_through_a_node_appends_once_as_the_session() {
+    let vars = [
+        "NEXUS_A2A_TEST_ENDPOINT",
+        "NEXUS_A2A_TEST_DIRECT_SENDER_CREDENTIAL",
+        "NEXUS_A2A_TEST_DIRECT_RECEIVER_CREDENTIAL",
+    ]
+    .map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
+    let [Some(endpoint), Some(sender_credential), Some(receiver_credential)] = vars else {
+        eprintln!(
+            "SKIP(nexus): set NEXUS_A2A_TEST_ENDPOINT and the direct-send credentials - \
+             e2e/nexus-a2a/run.sh does"
+        );
+        return;
+    };
+    let sender = runtime::nexus_mailbox::AgentCredential::load(&sender_credential)
+        .expect("load the sender credential bundle")
+        .agent;
+    let receiver = runtime::nexus_mailbox::AgentCredential::load(&receiver_credential)
+        .expect("load the receiver credential bundle")
+        .agent;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_millis();
+    let sent_marker = format!("DIRECT_NODE_SENT_{nonce}");
+    let held_marker = format!("DIRECT_NODE_HELD_{nonce}");
+    let (_, tail) = node_conversation(&endpoint, &receiver_credential, &sender, 0, 0).await;
+
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("direct-a2a-node");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    // Once armed, the post-tool hook holds a call after its append, so a
+    // cancel lands after the message has gone out.
+    let hook = if cfg!(windows) {
+        r"if exist direct-node.arm (echo started>direct-node.started& for /L %i in (1,1,60) do @if not exist direct-node.release (ping -n 2 127.0.0.1 >nul))"
+    } else {
+        r"if [ -f direct-node.arm ]; then touch direct-node.started; i=0; while [ ! -f direct-node.release ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done; fi"
+    };
+    let settings = workspace.root.join(".nexus").join("sudocode");
+    fs::create_dir_all(&settings).expect("create project settings");
+    fs::write(
+        settings.join("settings.json"),
+        json!({ "agentName": sender, "hooks": { "PostToolUse": [hook] } }).to_string(),
+    )
+    .expect("write project settings");
+    // The session attaches the way a machine does: a node record in its home
+    // and the credential minted for its own name.
+    let home = node_home::NodeHome::new(
+        "direct-a2a-node",
+        &endpoint,
+        &sender,
+        Path::new(&sender_credential),
+    );
+    let [(home_key, home_value), (profile_key, profile_value)] = home.env();
+    let mut client = spawn_stdio_client_with_args_and_env(
+        &workspace,
+        &[],
+        &[
+            (home_key, home_value.as_str()),
+            (profile_key, profile_value.as_str()),
+        ],
+    );
+    scenario_initialize(&mut client).await;
+    let sid = open_direct_session(&mut client, &workspace.root).await;
+    set_session_mode(&mut client, &sid, "workspace-write").await;
+    let before = server.captured_requests().await.len();
+
+    let (_, sent) = client
+        .send_request(
+            "_sudocode/a2a/send",
+            json!({ "sessionId": sid, "to": receiver, "message": sent_marker, "summary": "node probe" }),
+        )
+        .await;
+    assert_eq!(
+        sent["result"]["isError"], false,
+        "the send ran through the node: {sent}"
+    );
+    let (stored, tail) =
+        node_conversation_until(&endpoint, &receiver_credential, &sender, tail, &sent_marker).await;
+    let delivered: Vec<_> = stored
+        .iter()
+        .filter(|(_, body)| body.contains(&sent_marker))
+        .collect();
+    assert_eq!(delivered.len(), 1, "one append on the node: {stored:?}");
+    assert_eq!(
+        delivered[0].0, sender,
+        "the node stamps the session's authenticated identity: {stored:?}"
+    );
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+    for local in [
+        runtime::agent_mailbox::inbox_path_under(&workspace.root, &receiver),
+        PathBuf::from(
+            runtime::mailbox::Mailbox::workspace_local(&pair_root, receiver.clone())
+                .transcript_path(&sender),
+        ),
+    ] {
+        assert!(
+            !local.exists(),
+            "a session on a node must not fall back to {}",
+            local.display()
+        );
+    }
+
+    let (_, listed) = client
+        .send_request("_sudocode/a2a/agent_list", json!({ "sessionId": sid }))
+        .await;
+    assert_eq!(
+        listed["result"]["isError"], false,
+        "agent_list ran through the node: {listed}"
+    );
+
+    fs::write(workspace.root.join("direct-node.arm"), "").expect("arm the hook");
+    let held_id = client
+        .send_request_no_wait(
+            "_sudocode/a2a/send",
+            json!({ "sessionId": sid, "to": receiver, "message": held_marker, "summary": "node probe" }),
+        )
+        .await;
+    let started = workspace.root.join("direct-node.started");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !started.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the post-tool hook never held the call"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (stored, tail) =
+        node_conversation_until(&endpoint, &receiver_credential, &sender, tail, &held_marker).await;
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": sid }
+        }))
+        .await;
+    let answered = client
+        .recv_until(Duration::from_secs(30), |m| is_response_to(m, held_id))
+        .await;
+    let _ = fs::write(workspace.root.join("direct-node.release"), "");
+    let (_, resp) =
+        answered.unwrap_or_else(|seen| panic!("the cancelled send never answered; saw {seen:#?}"));
+    assert_eq!(
+        resp["error"]["data"]["outcome"], "unknown",
+        "a call cancelled after its append has an unknown outcome: {resp}"
+    );
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (later, _) = node_conversation(&endpoint, &receiver_credential, &sender, tail, 0).await;
+    let held = stored
+        .iter()
+        .chain(later.iter())
+        .filter(|(_, body)| body.contains(&held_marker))
+        .count();
+    assert_eq!(
+        held, 1,
+        "the held message was appended once and never resent"
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        before,
+        "a direct call never asks the model"
+    );
     client.shutdown().await;
     workspace.cleanup();
 }

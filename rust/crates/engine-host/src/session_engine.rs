@@ -1171,7 +1171,12 @@ impl engine_core::EngineDelegate for SessionEngine {
             engine_core::DirectToolError::Refused("the session runtime is not available".into())
         })?;
         self.rt()
-            .block_on(runtime.run_tool_call(name, input, Some(prompter)))
+            .block_on(runtime.run_tool_call(
+                name,
+                input,
+                Some(prompter),
+                Some(self.background_tasks.clone()),
+            ))
             .map_err(|error| engine_core::DirectToolError::Unknown(error.to_string()))
     }
 

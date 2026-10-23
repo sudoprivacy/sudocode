@@ -176,7 +176,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                             let (mut parent, ..) = build_assistant_message(prefix).expect("complete tool block supplies content");
                             parent.model = Some(self.running_model().to_string());
                             if let Err(failure) = self.checkpoint_assistant(&mut assistant_index, parent.clone()) { error = Some(failure); break; }
-                            if let Err(failure) = scheduler.enqueue(id.clone(), name.clone(), input.clone(), parent) {
+                            if let Err(failure) = scheduler.enqueue(id.clone(), name.clone(), input.clone(), Some(parent)) {
                                 error = Some(failure); break;
                             }
                         }
@@ -235,10 +235,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// model's call passes: pre-hook, the permission policy (prompting through
     /// `prompter`), this session's own executor, post-hook.
     ///
-    /// Nothing is written to the session — no assistant message and no tool
-    /// result — because no model asked for the call. The scheduler still needs
-    /// a parent message for the call's dispatch context; it is built here and
-    /// dropped with the scheduler. Returns the tool's output and whether it
+    /// The call is admitted through the session's `background_tasks`, the
+    /// fence a turn's tools take: a paused session refuses it, and a pause
+    /// waits for its worker to finish. It runs under a fresh `direct-` id and
+    /// with no assistant message, because no model asked for it; nothing is
+    /// written to the session. Returns the tool's output and whether it
     /// failed. A call cancelled after it was admitted is an error even when a
     /// partial result exists: the tool may have run, so no result is reported
     /// as if it were final.
@@ -248,13 +249,14 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         name: &str,
         input: &str,
         mut prompter: Option<&mut dyn PermissionPrompter>,
+        background_tasks: Option<crate::background_tasks::BackgroundTasks>,
     ) -> Result<(String, bool), RuntimeError> {
-        const CALL_ID: &str = "direct";
         const CANCELLED: &str = "the call was cancelled after it was admitted and may have run";
         let abort = self.hook_abort_signal.for_current_turn();
         self.tool_executor_mut().set_abort_signal(abort.clone());
         let no_observer: Option<&mut dyn RuntimeObserver> = None;
-        let context = self.dispatch_context(&no_observer, &prompter);
+        let mut context = self.dispatch_context(&no_observer, &prompter);
+        context.background_tasks = background_tasks;
         let executor = Arc::clone(&self.tool_executor);
         let executor = executor
             .lock()
@@ -267,13 +269,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             self.hook_progress_reporter.clone(),
         );
         scheduler.initialize_context(context);
-        let parent = ConversationMessage::assistant(vec![ContentBlock::ToolUse {
-            id: CALL_ID.into(),
-            name: name.into(),
-            input: input.into(),
-            thought_signature: None,
-        }]);
-        scheduler.enqueue(CALL_ID.into(), name.into(), input.into(), parent)?;
+        let call_id = format!("direct-{}", uuid::Uuid::new_v4());
+        scheduler.enqueue(call_id, name.into(), input.into(), None)?;
         let completed = loop {
             tokio::select! {
                 biased;

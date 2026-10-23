@@ -116,7 +116,7 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
         id: String,
         name: String,
         input: String,
-        parent: ConversationMessage,
+        parent: Option<ConversationMessage>,
     ) -> Result<(), RuntimeError> {
         if self.calls.iter().any(|call| call.id == id) {
             return Err(RuntimeError::new(format!(
@@ -128,7 +128,7 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
             id,
             name,
             input,
-            parent: Some(parent),
+            parent,
             phase: Phase::Queued,
             pre_hook: HookRunResult::allow(Vec::new()),
             output: None,
@@ -230,9 +230,12 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
                         .expect("context before first call")
                         .clone();
                     context.tool_use_id = Some(call.id.clone());
-                    let parent = call.parent.take().expect("undispatched parent");
-                    context.parent_session_messages.push(parent.clone());
-                    context.parent_assistant_message = Some(parent);
+                    // A call the host made directly has no assistant message:
+                    // its tool sees the session as it is, not a model turn.
+                    if let Some(parent) = call.parent.take() {
+                        context.parent_session_messages.push(parent.clone());
+                        context.parent_assistant_message = Some(parent);
+                    }
                     self.updates.push_back(ToolUpdate::Started {
                         id: call.id.clone(),
                         name: name.clone(),

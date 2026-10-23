@@ -8462,3 +8462,170 @@ async fn direct_a2a_cancel_after_delivery_reports_unknown() {
     client.shutdown().await;
     workspace.cleanup();
 }
+
+/// A pause issued while a direct send's worker is still writing waits for that
+/// worker: direct calls take the session's operation fence as a turn's tools
+/// do. The worker is held mid-write on a full FIFO standing in for the peer's
+/// transcript, so it is genuinely in flight when the pause arrives, and control
+/// is reported only after the test lets the write finish.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn direct_a2a_pause_waits_for_an_in_flight_send() {
+    use nix::{libc, sys::stat::Mode, unistd::mkfifo};
+    use std::io::{ErrorKind, Read, Write};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    const AGENT: &str = "direct-a2a-fenced";
+    const PEER: &str = "direct-a2a-held";
+    const MARKER: &str = "DIRECT_A2A_FENCED_91c4";
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("direct-a2a-fence");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let started = workspace.root.join("direct-pre.started");
+    let settings = workspace.root.join(".nexus").join("sudocode");
+    fs::create_dir_all(&settings).expect("create project settings");
+    fs::write(
+        settings.join("settings.json"),
+        json!({ "agentName": AGENT, "hooks": { "PreToolUse": ["touch direct-pre.started"] } })
+            .to_string(),
+    )
+    .expect("write project settings");
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+
+    // The send appends to this path; as a full pipe it blocks the append.
+    let transcript = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string())
+        .transcript_path(AGENT);
+    let transcript = Path::new(&transcript);
+    fs::create_dir_all(transcript.parent().expect("transcript dir"))
+        .expect("create transcript dir");
+    mkfifo(transcript, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+    let mut pipe = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(transcript)
+        .expect("open the fifo");
+    for chunk in [65_536, 4096, 512, 64, 8, 1] {
+        let block = vec![b'#'; chunk];
+        loop {
+            match pipe.write(&block) {
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill the pipe: {error}"),
+            }
+        }
+    }
+
+    let mut client = spawn_stdio_client(&workspace);
+    scenario_initialize(&mut client).await;
+    let sid = open_direct_session(&mut client, &workspace.root).await;
+    set_session_mode(&mut client, &sid, "workspace-write").await;
+    let before = server.captured_requests().await.len();
+
+    let send_id = client
+        .send_request_no_wait(
+            "_sudocode/a2a/send",
+            json!({ "sessionId": sid, "to": PEER, "message": MARKER, "summary": "probe" }),
+        )
+        .await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !started.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pre-tool hook never ran"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // The hook runs just before dispatch; give the worker time to reach the
+    // blocked write. Too little time can only fail this test, never pass it.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let pause_id = client
+        .send_request_no_wait("_sudocode/session/pause_tools", json!({ "sessionId": sid }))
+        .await;
+    let mut seen = match client
+        .recv_until(Duration::from_secs(3), |m| is_response_to(m, pause_id))
+        .await
+    {
+        Ok((_, early)) => {
+            panic!("pause reported control while the send's worker was still writing: {early}")
+        }
+        Err(seen) => seen,
+    };
+
+    // Release the worker by draining the pipe until its line arrives.
+    let mut drained = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let line_end = |bytes: &[u8]| {
+        let text = String::from_utf8_lossy(bytes);
+        text.find(MARKER)
+            .is_some_and(|at| text[at..].contains('\n'))
+    };
+    while !line_end(&drained) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the send never finished its write"
+        );
+        let mut buf = [0u8; 65_536];
+        match pipe.read(&mut buf) {
+            Ok(n) => drained.extend_from_slice(&buf[..n]),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("drain the pipe: {error}"),
+        }
+    }
+
+    let (more, paused) = client
+        .recv_until(Duration::from_secs(30), |m| is_response_to(m, pause_id))
+        .await
+        .unwrap_or_else(|seen| panic!("pause never reported control; saw {seen:#?}"));
+    seen.extend(more);
+    assert_eq!(
+        paused["result"]["isQuiescent"], true,
+        "pause reports control once the worker has finished: {paused}"
+    );
+    let sent = match seen.into_iter().find(|m| is_response_to(m, send_id)) {
+        Some(sent) => sent,
+        None => {
+            client
+                .recv_until(Duration::from_secs(30), |m| is_response_to(m, send_id))
+                .await
+                .unwrap_or_else(|seen| panic!("the send never answered; saw {seen:#?}"))
+                .1
+        }
+    };
+    assert_eq!(
+        sent["error"]["data"]["outcome"], "unknown",
+        "a send the pause stopped after admission has an unknown outcome: {sent}"
+    );
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut buf = [0u8; 65_536];
+    if let Ok(n) = pipe.read(&mut buf) {
+        drained.extend_from_slice(&buf[..n]);
+    }
+    assert_eq!(
+        String::from_utf8_lossy(&drained).matches(MARKER).count(),
+        1,
+        "the message was written once and never resent"
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        before,
+        "a direct call never asks the model"
+    );
+    let (_, resumed) = client
+        .send_request(
+            "_sudocode/session/resume_tools",
+            json!({ "sessionId": sid, "pauseEpoch": paused["result"]["pauseEpoch"] }),
+        )
+        .await;
+    assert!(resumed.get("error").is_none(), "resume_tools: {resumed}");
+    client.shutdown().await;
+    workspace.cleanup();
+}

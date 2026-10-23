@@ -1682,7 +1682,10 @@ fn ttl_advisor_is_opt_in_and_marks_retried_or_restarted_streams() {
 
 fn exit(cli: &mut PtySession) {
     cli.send("/exit\r").unwrap();
-    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let status = cli.expect_eof().unwrap_or_else(|error| {
+        panic!("{error}\nexit screen:\n{}", common::screen_tail(cli, 6000))
+    });
+    assert_eq!(status, 0);
 }
 
 fn fixed_prefix(before: &Value, after: &Value) {

@@ -105,6 +105,48 @@ fn transcripts(root: &Path, paths: &mut Vec<PathBuf>) {
 }
 
 #[test]
+fn two_submits_in_one_write_preserve_turn_boundaries() {
+    let env = TestEnv::new_mock("input-batch-submit");
+    let mut session = start(&env);
+    let first = env.prompt("First request: calculate 2 + 2.", "single_turn_text");
+    let second = env.prompt("Second request: calculate 2 + 2.", "single_turn_text");
+    session.send(&format!("{first}\r{second}\r")).unwrap();
+    common::expect_screen(
+        &session,
+        |screen| common::turn_status_line(screen).contains("turn 2"),
+        env.timeout(),
+        "both submitted turns completed",
+    );
+    common::expect_input_line_cleared(&session, env.timeout(), "both turns completed");
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+
+    let mut paths = Vec::new();
+    transcripts(&env.workspace_root().join(".scode"), &mut paths);
+    assert_eq!(paths.len(), 1);
+    let saved = Session::load_from_path(&paths[0]).unwrap();
+    let users: Vec<_> = saved
+        .messages
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .map(|message| {
+            message
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .next_back()
+                .expect("user-authored text follows the host context blocks")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(users, vec![first, second]);
+    assert_eq!(env.captured_message_count(), 2);
+}
+
+#[test]
 fn middle_paste_then_typing_preserves_submitted_content() {
     let env = TestEnv::new("input-batch-paste");
     let mut session = start(&env);

@@ -1,5 +1,5 @@
 //! Child Bash approval on the parent terminal -> fresh invoice -> follow-up.
-//! Run with SCODE_TEST_BACKEND=live and the normal live provider configuration.
+//! Run with `SCODE_TEST_BACKEND=live` and the normal live provider configuration.
 mod common;
 #[path = "support/wire_requests.rs"]
 mod wire_requests;
@@ -9,11 +9,14 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::TestEnv;
+use pty_expect::PtySession;
 use serde_json::Value;
 
 const BUDGET: Duration = common::LIVE_TURN_BUDGET;
 const INVOICE_AGENT: &str = "invoice-bash-fixture";
 const INVOICE_SYSTEM_MARKER: &str = "InvoiceBashFixture";
+const REPORT_AGENT: &str = "invoice-report-fixture";
+const REPORT_SYSTEM_MARKER: &str = "InvoiceReportFixture";
 
 /// Keep execution and report agents on the parent route. Authentication is a
 /// fixture input, not a model-selected part of this permission/report journey.
@@ -33,6 +36,63 @@ fn requests(directory: &Path) -> Vec<Value> {
         .map(|entry| entry.unwrap().path())
         .filter(|path| wire_requests::is_inference_request_dump(path))
         .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+        .collect()
+}
+
+fn submit_agent_request(cli: &mut PtySession, prompt: &str) {
+    cli.send(prompt).unwrap();
+    common::expect_screen(
+        cli,
+        |screen| common::screen_contains(screen, prompt),
+        BUDGET,
+        "complete agent task input",
+    );
+    cli.send("\r").unwrap();
+}
+
+fn completed_child_report(directory: &Path, workspace: &Path) -> String {
+    let mut reports = BTreeSet::new();
+    for request in requests(directory) {
+        for block in wire_requests::request_tool_blocks(&request) {
+            if block["type"] != "tool_result" {
+                continue;
+            }
+            let Some(result) = block["content"]
+                .as_str()
+                .and_then(|content| serde_json::from_str::<Value>(content).ok())
+            else {
+                continue;
+            };
+            if result["status"] == "completed" {
+                assert_ne!(block["is_error"], true);
+                reports.insert(
+                    result["outputFile"]
+                        .as_str()
+                        .expect("completed Agent result must name its report")
+                        .to_string(),
+                );
+            }
+        }
+    }
+    assert_eq!(reports.len(), 1, "exactly one invoice child must complete");
+    let report = reports.pop_first().unwrap();
+    let actual = Path::new(&report).canonicalize().unwrap();
+    let root = workspace.canonicalize().unwrap();
+    let relative = actual
+        .strip_prefix(&root)
+        .expect("completed report must belong to the fixture workspace");
+    assert_eq!(relative.parent(), Some(Path::new(".sudocode-agents")));
+    // The returned absolute path is the producer's tool contract. Preserve it.
+    report
+}
+
+fn offered_tools(request: &Value) -> BTreeSet<String> {
+    request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str().or(tool["function"]["name"].as_str()))
+        .map(tools::canonicalize_tool_name)
         .collect()
 }
 
@@ -69,7 +129,7 @@ fn child_approval_workflow(verify_report: bool) {
     .unwrap();
     std::fs::write(
         env.workspace_root().join("invoice.py"),
-        r#"import csv
+        r"import csv
 from pathlib import Path
 root = Path(__file__).resolve().parent
 with (root / 'order.csv').open() as f:
@@ -78,7 +138,7 @@ subtotal = int(order['units']) * int(order['unit_price']) + int(order['delivery'
 result = order['batch'] + ' ' + str(subtotal)
 (root / 'result.txt').write_text(result)
 print(result)
-"#,
+",
     )
     .unwrap();
     // Constrain the execution fixture through the same custom-agent tool pool
@@ -93,9 +153,20 @@ print(result)
         ),
     )
     .unwrap();
+    if verify_report {
+        std::fs::write(
+            agents_dir.join(format!("{REPORT_AGENT}.md")),
+            format!(
+                "---\nname: {REPORT_AGENT}\ndescription: Read a completed invoice report.\ntools: [read_file]\n---\n{REPORT_SYSTEM_MARKER}: read exactly the supplied report file and return its contents.\n"
+            ),
+        )
+        .unwrap();
+    }
     let captured = std::env::var_os("SCODE_LIVE_ARTIFACTS")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| env.workspace_root().join("requests"))
+        .map_or_else(
+            || env.workspace_root().join("requests"),
+            std::path::PathBuf::from,
+        )
         .join(format!("bubble-{stamp}"));
     std::fs::create_dir_all(&captured).unwrap();
     let model = common::live_model();
@@ -113,42 +184,15 @@ print(result)
     );
     cli.resize(48, 260).unwrap();
     common::expect_screen(&cli, |s| s.contains("❯"), BUDGET, "interactive prompt");
-    let script = env
-        .workspace_root()
-        .join("invoice.py")
-        .to_string_lossy()
-        .replace('\\', "/");
-    let command = format!("'{python}' '{script}'");
+    // Parent and child share the workspace; fixture commands use that namespace.
+    let command = format!("'{python}' 'invoice.py'");
     let command_words = shell_words::split(&command).unwrap();
-    let child_prompt = format!("Use the bash tool to run exactly this command once, with no other commands or retries: {command}. Report its actual output.");
+    let bash_input = serde_json::json!({ "command": command });
+    let child_prompt = format!("Call the bash tool exactly once with this input object: {bash_input}. Run no other commands or retries. Report its actual output.");
     let execution = agent_input(&model, INVOICE_AGENT, &child_prompt);
-    let mut prompt = format!("Call the Agent tool with exactly this input object, without adding or overriding fields: {execution}. Wait for the child and report its actual output.");
-    if verify_report {
-        let verification = agent_input(
-            &model,
-            "Explore",
-            "Read exactly OUTPUT_FILE and return the actual invoice output. Only read this report: do not run commands or create another report.",
-        );
-        prompt.push_str(&format!(" The first Agent already saves its report at the outputFile path in its returned result. Then call Agent with this exact input object, replacing only OUTPUT_FILE with that actual outputFile path: {verification}. Report that verified output."));
-    }
+    let prompt = format!("Call the Agent tool with exactly this input object, without adding or overriding fields: {execution}. Wait for the child and report its actual output.");
     let marker = common::turn_status_marker(&cli);
-    cli.send(&prompt).unwrap();
-    common::expect_screen(
-        &cli,
-        |s| {
-            s.split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .contains(if verify_report {
-                    "Report that verified output."
-                } else {
-                    "report its actual output."
-                })
-        },
-        BUDGET,
-        "agent task input",
-    );
-    cli.send("\r").unwrap();
+    submit_agent_request(&mut cli, &prompt);
     common::expect_screen(
         &cli,
         |s| {
@@ -165,17 +209,39 @@ print(result)
     );
     cli.send("1\r").unwrap();
     common::expect_turn_complete_after(&cli, &marker, BUDGET, "approved child completed");
+    let saved =
+        std::fs::read_to_string(env.workspace_root().join("result.txt")).unwrap_or_else(|error| {
+            panic!(
+                "approved child did not persist its result: {error}\n{}",
+                common::screen_tail(&cli, 6000)
+            )
+        });
+    assert!(
+        saved.contains(&nonce) && saved.contains(&subtotal.to_string()),
+        "approved child did not persist the actual result: {saved}"
+    );
     common::expect_screen(
         &cli,
         |s| s.contains(&nonce) && s.contains(&subtotal.to_string()),
         BUDGET,
         "actual child data in the parent reply",
     );
-    let saved = std::fs::read_to_string(env.workspace_root().join("result.txt")).unwrap();
-    assert!(
-        saved.contains(&nonce) && saved.contains(&subtotal.to_string()),
-        "approved child did not persist the actual result: {saved}"
-    );
+    if verify_report {
+        // Make report verification its own user turn. The actual completed
+        // child result owns the report path; no model has to infer a second
+        // task or locate a report from a placeholder inside a long request.
+        let report = completed_child_report(&captured, env.workspace_root());
+        let read_input = serde_json::json!({ "path": report });
+        let verification = agent_input(
+            &model,
+            REPORT_AGENT,
+            &format!("Call read_file exactly once with this input object: {read_input}. Return the actual invoice output. Only read this report: do not run commands or create another report."),
+        );
+        let prompt = format!("Call the Agent tool with exactly this input object, without adding or overriding fields: {verification}. Wait for this report verification child and report its actual output.");
+        let marker = common::turn_status_marker(&cli);
+        submit_agent_request(&mut cli, &prompt);
+        common::expect_turn_complete_after(&cli, &marker, BUDGET, "report verification completed");
+    }
     let marker = common::turn_status_marker(&cli);
     cli.send("Add 13 to that subtotal and reply with the batch code and final total. Use this conversation without tools.\r").unwrap();
     common::expect_turn_complete_after(&cli, &marker, BUDGET, "follow-up completed");
@@ -191,6 +257,7 @@ print(result)
     let mut fixture_reads = BTreeMap::new();
     let mut results = BTreeMap::new();
     let mut restricted_child_requests = 0;
+    let mut report_child_requests = 0;
     for request in requests(&captured) {
         assert_eq!(
             request["model"], model,
@@ -203,15 +270,18 @@ print(result)
             }
         }
         if system.contains(INVOICE_SYSTEM_MARKER) {
-            let offered: BTreeSet<_> = request["tools"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|tool| tool["name"].as_str().or(tool["function"]["name"].as_str()))
-                .map(tools::canonicalize_tool_name)
-                .collect();
-            assert_eq!(offered, BTreeSet::from(["bash".to_string()]));
+            assert_eq!(
+                offered_tools(&request),
+                BTreeSet::from(["bash".to_string()])
+            );
             restricted_child_requests += 1;
+        }
+        if system.contains(REPORT_SYSTEM_MARKER) {
+            assert_eq!(
+                offered_tools(&request),
+                BTreeSet::from(["read_file".to_string()]),
+            );
+            report_child_requests += 1;
         }
         for block in wire_requests::request_tool_blocks(&request) {
             if block["type"] == "tool_use" {
@@ -252,7 +322,9 @@ print(result)
                         } else {
                             env.workspace_root().join(path)
                         };
-                        let actual = path.canonicalize().expect("report file must exist");
+                        let actual = path.canonicalize().unwrap_or_else(|error| {
+                            panic!("observed read path {path:?} must exist in the fixture: {error}")
+                        });
                         let reports = env
                             .workspace_root()
                             .join(".sudocode-agents")
@@ -304,6 +376,10 @@ print(result)
         "the child retried or omitted the invoice command"
     );
     if verify_report {
+        assert!(
+            report_child_requests > 0,
+            "report child did not use its fixture tool pool"
+        );
         assert!(
             agents.len() >= 2,
             "the report verification child was omitted"

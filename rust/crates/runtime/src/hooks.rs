@@ -992,7 +992,15 @@ impl CommandWithStdin {
     ) -> std::io::Result<CommandExecution> {
         let mut child = self.command.spawn()?;
         if let Some(mut child_stdin) = child.stdin.take() {
-            child_stdin.write_all(stdin)?;
+            if let Err(error) = child_stdin.write_all(stdin) {
+                // Hooks may finish without consuming their JSON input. Their
+                // exit status and output still decide allow, deny or failure.
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
         }
 
         loop {

@@ -113,7 +113,89 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
-    assert_eq!(exit, 0, "a hooked turn should exit 0; got {exit}");
+    let screen = sess.render(|s| s.contents());
+    assert_eq!(
+        exit, 0,
+        "a hooked turn should exit 0; got {exit}\nPTY screen:\n{screen}"
+    );
+}
+
+#[test]
+fn early_hook_exit_preserves_its_decision_with_unread_tool_input() {
+    let content = "fixture line\n".repeat(20_000);
+    for (code, progress) in [(0, "done"), (1, "FAILED"), (2, "DENIED")] {
+        let env = TestEnv::new_mock("hook-unread-input");
+        #[cfg(windows)]
+        let command = format!("echo hook-observed & exit /b {code}");
+        #[cfg(not(windows))]
+        let command = format!("printf hook-observed; exit {code}");
+        write_pre_tool_use_hook(&env, &command);
+        let destination = env.workspace_root().join("hook-output.txt");
+        let calls = serde_json::json!([{
+            "id": "write-fixture", "name": "write_file",
+            "input": {"path": destination, "content": content}
+        }]);
+        // Keep the large tool input in the provider response. Passing it through
+        // terminal input or argv would test unrelated platform size limits.
+        let batch = env.workspace_root().join("calls.json");
+        fs::write(&batch, calls.to_string()).unwrap();
+        let prompt = format!(
+            "PARITY_SCENARIO:tool_concurrency TOOL_BATCH_FILE:{}",
+            serde_json::to_string(&batch).unwrap()
+        );
+        let mut session = env.spawn(&[
+            "--permission-mode",
+            "danger-full-access",
+            "--allowedTools",
+            "write_file",
+        ]);
+        session.resize(50, 160).unwrap();
+        session.expect("❯").unwrap();
+        let marker = common::turn_status_marker(&session);
+        session
+            .send(&format!("\x1b[200~{prompt}\x1b[201~"))
+            .unwrap();
+        common::expect_screen_settled(
+            &session,
+            |screen| common::input_line_of(screen).contains("TOOL_BATCH_FILE:"),
+            env.timeout(),
+            "hook fixture prompt pasted",
+        );
+        session.send("\r").unwrap();
+        session
+            .expect(&format!(r"\[hook {progress} PreToolUse\]"))
+            .unwrap_or_else(|error| {
+                let markers: Vec<_> = env
+                    .captured_message_bodies()
+                    .iter()
+                    .filter_map(|body| {
+                        body.find("TOOL_BATCH_FILE:")
+                            .map(|offset| body[offset..].chars().take(500).collect::<String>())
+                    })
+                    .collect();
+                panic!("{error}; captured batch markers: {markers:?}");
+            });
+        common::expect_turn_complete_after(
+            &session,
+            &marker,
+            env.timeout(),
+            "hook fixture completed",
+        );
+        common::expect_input_line_cleared(&session, env.timeout(), "ready to exit");
+        session.send("/exit\r").unwrap();
+        let exit = session.expect_eof().unwrap();
+        let screen = session.render(|screen| screen.contents());
+        assert!(!screen.contains("failed to start"), "{screen}");
+        assert_eq!(exit, 0, "{screen}");
+        if code == 0 {
+            assert_eq!(fs::read_to_string(destination).unwrap(), content);
+        } else {
+            assert!(
+                !destination.exists(),
+                "a refused hook allowed the write: {screen}"
+            );
+        }
+    }
 }
 
 /// With no hook configured, none of that output appears.
@@ -142,9 +224,11 @@ fn no_hook_configured_prints_no_hook_progress() {
         let screen = sess.render(|s| s.contents());
         panic!("exit: {e}\nPTY screen:\n{screen}");
     });
-    assert_eq!(exit, 0, "an unhooked turn should exit 0; got {exit}");
-
     let screen = sess.render(|s| s.contents());
+    assert_eq!(
+        exit, 0,
+        "an unhooked turn should exit 0; got {exit}\nPTY screen:\n{screen}"
+    );
     assert!(
         !screen.contains("[hook "),
         "no hook is configured, so no hook progress should be printed; PTY screen:\n{screen}"

@@ -306,6 +306,15 @@ impl SessionDriver {
             .map_err(|e| e.to_string())?
     }
 
+    pub(crate) async fn runtime_status(self: &Arc<Self>) -> Result<Value, String> {
+        let driver = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            driver.request(|request_id| EngineCommand::RuntimeStatus { request_id })
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
     pub(crate) async fn cancel_subagent(
         self: &Arc<Self>,
         agent_id: String,

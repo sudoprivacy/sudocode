@@ -173,7 +173,8 @@ pub enum CompletionReceipt {
 }
 
 /// The request which owns the foreground input surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InputReason {
     Permission,
     Question,
@@ -185,7 +186,8 @@ pub enum InputReason {
 /// The engine enters [`Self::AwaitingInput`] when it emits a permission or
 /// question request, and returns to [`Self::Running`] when that prompt releases
 /// input. Independent tools can continue while the prompt owns input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "waiting_for", rename_all = "snake_case")]
 pub enum EngineState {
     /// No foreground operation in flight; background tasks may still run.
     Idle,
@@ -193,6 +195,14 @@ pub enum EngineState {
     Running,
     /// A prompt owns input. Other tools and provider streaming may continue.
     AwaitingInput(InputReason),
+}
+
+/// A selected engine instance's current facts, independent of its host or PID.
+/// This observation neither proves global presence nor grants tool control.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeStatus {
+    pub foreground: EngineState,
+    pub background: runtime::background_tasks::BackgroundTaskSummary,
 }
 
 /// End-of-turn aggregate — absorbs `runtime::TurnSummary` minus the message
@@ -388,6 +398,11 @@ pub enum EngineEvent {
 /// each renderer's ad-hoc prompt path. They all collapse into these variants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineCommand {
+    /// Read current runtime metadata without starting or interrupting a turn.
+    /// The reply is a [`EngineEvent::CommandResult`] with this request ID.
+    RuntimeStatus {
+        request_id: u64,
+    },
     CancelSubagent {
         request_id: u64,
         agent_id: String,

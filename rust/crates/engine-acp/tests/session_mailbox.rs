@@ -102,6 +102,28 @@ fn assert_runtime_state(kernel: &Kernel, pid: &Value, expected: &str, reason: Op
     }
 }
 
+fn assert_status(
+    mailbox: &SessionMailbox<Kernel>,
+    sid: &str,
+    state: &str,
+    reason: Option<&str>,
+) -> Value {
+    send(
+        mailbox,
+        json!({"jsonrpc":"2.0","id":"runtime-status","method":"_sudocode/session/status",
+        "params":{"sessionId":sid}}),
+    );
+    let (reply, _) = until(mailbox, |message| message["id"] == "runtime-status");
+    assert!(reply.get("error").is_none(), "{reply}");
+    assert_eq!(reply["result"]["foreground"]["state"], state, "{reply}");
+    assert_eq!(
+        reply["result"]["foreground"]["waiting_for"],
+        reason.map_or(Value::Null, |reason| json!(reason)),
+        "{reply}"
+    );
+    reply["result"].clone()
+}
+
 struct HeldSend {
     path: String,
     entered: std::sync::mpsc::Sender<()>,
@@ -173,10 +195,14 @@ fn assert_direct_send_state(
         .recv_timeout(Duration::from_secs(10))
         .expect("the real send reached the held write");
     assert_runtime_state(kernel, pid, "busy", None);
+    let status = assert_status(mailbox, sid, "running", None);
+    assert!(status["background"]["tool_operations"].as_u64().unwrap() > 0);
     drop(release);
     let (reply, _) = until(mailbox, |message| message["id"] == "direct-state");
     assert!(reply.get("error").is_none(), "{reply}");
     assert_runtime_state(kernel, pid, "ready", None);
+    let status = assert_status(mailbox, sid, "idle", None);
+    assert_eq!(status["background"]["tool_operations"], 0);
     let bytes = kernel::kernel::syscall::KernelSyscall::sys_read(
         &**kernel,
         &path,
@@ -233,7 +259,11 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         &mailbox,
         json!({"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}),
     );
-    until(&mailbox, |message| message["id"] == "init");
+    let (initialized, _) = until(&mailbox, |message| message["id"] == "init");
+    assert_eq!(
+        initialized["result"]["_meta"]["sudocode"]["runtimeStatus"]["version"], 1,
+        "{initialized}"
+    );
     send(
         &mailbox,
         json!({"jsonrpc":"2.0","id":"new","method":"session/new","params":{"cwd":"/","mcpServers":[]}}),
@@ -243,6 +273,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     let sid = created["result"]["sessionId"].as_str().unwrap();
     assert_eq!(started["durable_session_id"], sid);
     assert_runtime_state(&kernel, &started["session_id"], "ready", None);
+    assert_status(&mailbox, sid, "idle", None);
     send(
         &mailbox,
         json!({"jsonrpc":"2.0","id":"direct-mode", "method":"session/setPermissionMode",
@@ -314,6 +345,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
             "awaiting_input",
             Some("permission"),
         );
+        assert_status(&mailbox, sid, "awaiting_input", Some("permission"));
         if cancelled {
             send(
                 &mailbox,
@@ -527,6 +559,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
         "awaiting_input",
         Some("question"),
     );
+    assert_status(&mailbox, sid, "awaiting_input", Some("question"));
     send(
         &mailbox,
         json!({"jsonrpc":"2.0","id":question["id"],

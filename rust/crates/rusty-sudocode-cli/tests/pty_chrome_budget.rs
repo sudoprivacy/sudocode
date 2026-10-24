@@ -60,7 +60,12 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
 
     // Below the literal-paste threshold, but longer than the small viewport.
     let payload = format!("DraftHead{}DraftTail", "_keep_".repeat(90));
-    let command = format!("! echo {payload} > draft.txt");
+    // Hold the shell after redirection creates the file. Existence alone
+    // cannot establish that the restored command has finished writing it.
+    let command = format!(
+        "! : > draft.txt; while [ ! -f draft-go ]; do sleep 0.01; done; \
+         echo {payload} > draft.txt; printf 'DraftDone%s' '-marker'"
+    );
     sess.send(&format!("\x1b[200~{command}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
@@ -108,6 +113,20 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
     while !result.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    assert_eq!(
+        std::fs::read_to_string(&result).unwrap(),
+        "",
+        "the file must exist before the shell is allowed to write"
+    );
+    std::fs::write(env.workspace_root().join("draft-go"), "").unwrap();
+    // This marker is assembled by the shell, so an echoed command cannot
+    // satisfy the wait. Check the draft only after its command has completed.
+    common::expect_screen(
+        &sess,
+        |s| s.contains("DraftDone-marker") && common::input_line_of(s).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "restored draft command completed",
+    );
     assert_eq!(
         std::fs::read_to_string(result).unwrap().trim(),
         payload,

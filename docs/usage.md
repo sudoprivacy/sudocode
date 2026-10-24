@@ -86,10 +86,13 @@ retries its existing node connection, and A2A tools report node IO errors;
 they do not redirect messages to a disk inbox. An uncertain send result must
 not be retried automatically.
 
-While claiming the receiver seat, an unchanged connection error is printed
-once; a different error or a new outage after a successful receiver-seat check
-is reported again. Connection retries continue without repeatedly scrolling the
-input area.
+Background receiver errors are available as `Last RX error` in `/status` and
+`last_receiver_error` in the structured peer status. This is the most recent
+failure in the current process, not a claim that the node remains offline.
+It is retained with the receiver's transient state and removed when its last
+receiver stops. Hosts can also subscribe to structured tracing. An unchanged
+receiver-seat error is recorded once; retries continue without writing into
+the terminal's input area.
 
 This does not start Nexus or mint an agent credential. A missing record still
 selects the same-machine disk namespace. Record parsing, missing credential

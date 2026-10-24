@@ -125,24 +125,43 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
     // Reuse the shared turn/ready gate before asking for a fresh receiver report.
     let ready_deadline = Instant::now() + BUDGET;
     common::expect_turn_complete_after(&second, &turn_marker, BUDGET, "redelivered peer turn");
-    common::expect_input_line_cleared(
-        &second,
-        ready_deadline.saturating_duration_since(Instant::now()),
-        "status at the rearmed prompt",
-    );
-    second.send("/status\r").expect("query the new receiver");
+    submit_line(&mut second, "/status", ready_deadline);
     common::expect_screen_settled(
         &second,
         |screen| {
-            screen.contains("receiving; waiting messages run at the next prompt")
+            common::screen_contains(screen, "receiving; waiting messages run at the next prompt")
                 && common::input_line_of(screen).is_empty()
         },
         ready_deadline.saturating_duration_since(Instant::now()),
         "the new receiver reports ownership and restores its input row",
     );
 
-    second.send("/exit\r").expect("exit the REPL");
-    assert_eq!(second.expect_eof().expect("the REPL exits"), 0);
+    submit_line(&mut second, "/exit", ready_deadline);
+    let exit = second.expect_eof().unwrap_or_else(|error| {
+        panic!(
+            "the REPL did not exit: {error:?}\nPTY:\n{}",
+            second.render(|screen| screen.contents())
+        );
+    });
+    assert_eq!(exit, 0);
+}
+
+/// Observe the command in the live editor before Enter: a status block can
+/// appear before raw input is rearmed, discarding a batched submit key.
+fn submit_line(sess: &mut pty_expect::PtySession, line: &str, deadline: Instant) {
+    common::expect_input_line_cleared(
+        sess,
+        deadline.saturating_duration_since(Instant::now()),
+        "ready for the next command",
+    );
+    sess.send(line).expect("type command");
+    common::expect_screen_settled(
+        sess,
+        |screen| common::input_line_of(screen) == line,
+        deadline.saturating_duration_since(Instant::now()),
+        "command reached the live editor",
+    );
+    sess.send("\r").expect("submit the rendered command");
 }
 
 fn spawn_instance(env: &TestEnv) -> pty_expect::PtySession {

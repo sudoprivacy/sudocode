@@ -40,6 +40,16 @@ fn closed_engine_releases_native_writer_and_fences_retained_snapshots() {
     .unwrap();
     let handle = engine.session_handle();
     let mut retained = engine.session_snapshot();
+    // Background observers can outlive close. Their shared binding must not
+    // retain the session's writer after its final save and owned work stop.
+    let _retained_tasks = engine.background_tasks().unwrap().with_completion(Some(
+        runtime::subagent_completion::CompletionJournal::open(
+            &retained,
+            retained.workspace_root().unwrap(),
+            true,
+        )
+        .unwrap(),
+    ));
     let before = std::fs::read(&handle.path).unwrap();
     assert!(engine_host::session::delete_managed_session(&handle.path)
         .unwrap_err()

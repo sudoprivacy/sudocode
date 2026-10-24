@@ -298,6 +298,11 @@ jobs:
         working-directory: .
         shell: pwsh
         run: python e2e/terminal-resize/setup_windows.py "$env:RUNNER_TEMP/scode-terminal-host"
+      - name: Verify bounded downloads and checksum rejection with the real archive
+        if: runner.os == 'Windows'
+        working-directory: .
+        shell: pwsh
+        run: python e2e/terminal-resize/check_windows_setup.py "$env:RUNNER_TEMP/scode-terminal-host/host.zip"
       - name: Select the Windows terminal runtime
         if: runner.os == 'Windows'
         shell: pwsh

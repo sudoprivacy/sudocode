@@ -177,5 +177,6 @@ pub fn status(agent: &str) -> runtime::mailbox::PeerStatus {
         cursor: runtime::mailbox::cursor_guarantee(agent)
             .map_or("none", runtime::cursor_fence::CursorGuarantee::as_str),
         error,
+        last_receiver_error: runtime::mailbox::last_receiver_error(agent),
     }
 }

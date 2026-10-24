@@ -11,9 +11,13 @@
 //! real failed send. No case may silently select a disk mailbox.
 
 mod common;
+#[cfg(unix)]
+#[path = "support/freeze.rs"]
+mod freeze;
 #[path = "support/node_home.rs"]
 mod node_home;
 
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -139,6 +143,7 @@ fn an_offline_node_does_not_block_startup_or_resume() {
             ("HOME", home.as_ref()),
             ("USERPROFILE", home.as_ref()),
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", mode),
+            ("PAGER", ""),
         ];
         let prompt = env.prompt("Reply with exactly OFFLINE_NODE_REPLY.", "single_turn_text");
         let reply = if env.is_mock() {
@@ -149,6 +154,8 @@ fn an_offline_node_does_not_block_startup_or_resume() {
         let mut fresh = env.spawn_with_env(&["--permission-mode", "read-only"], &vars);
         fresh.set_default_timeout(common::at_least(Duration::from_secs(30)));
         common::expect_input_line_cleared(&fresh, Duration::from_secs(30), "offline fresh");
+        expect_receiver_diagnostic(&mut fresh, "connect");
+        check_draft(&mut fresh);
         fresh
             .send(&format!("{prompt}\r"))
             .expect("send ordinary prompt");
@@ -176,10 +183,73 @@ fn an_offline_node_does_not_block_startup_or_resume() {
             .expect(reply)
             .expect("restored reply from original transcript");
         common::expect_input_line_cleared(&resumed, Duration::from_secs(30), "offline resume");
+        expect_receiver_diagnostic(&mut resumed, "connect");
+        check_draft(&mut resumed);
         resumed.send("/exit\r").expect("exit resumed session");
         assert_eq!(resumed.expect_eof().expect("resumed session exits"), 0);
         assert_no_disk_namespace(&env);
     }
+}
+
+/// Read-only status commands observe the real failed connection. A bounded
+/// wait permits the background RPC to complete without a scheduling sleep.
+fn expect_receiver_diagnostic(session: &mut pty_expect::PtySession, cause: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let screen = read_receiver_status(session);
+        if screen.contains("Last RX error")
+            && common::screen_contains(&screen.to_ascii_lowercase(), cause)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "receiver failure {cause:?} was not available in status: {screen}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn read_receiver_status(session: &mut pty_expect::PtySession) -> String {
+    session
+        .send("/status")
+        .expect("type receiver status command");
+    common::expect_screen_settled(
+        session,
+        |screen| common::input_line_of(screen) == "/status",
+        Duration::from_secs(30),
+        "receiver status command reached the input",
+    );
+    session.send("\r").expect("inspect receiver status");
+    let screen = common::expect_screen_settled(
+        session,
+        |screen| {
+            screen.contains("Peers")
+                && screen.contains('❯')
+                && common::input_line_of(screen).is_empty()
+        },
+        Duration::from_secs(30),
+        "receiver status returns to an empty prompt",
+    );
+    assert!(
+        !screen.contains("[nexus-a2a]"),
+        "background receiver wrote directly into the terminal: {screen}"
+    );
+    screen
+}
+
+/// Background retries must leave the editable line usable in both renderers.
+fn check_draft(session: &mut pty_expect::PtySession) {
+    let draft = "OFFLINE_DRAFT_中文";
+    session.send(draft).expect("type while node is offline");
+    common::expect_screen_settled(
+        session,
+        |screen| common::input_line_of(screen) == draft,
+        Duration::from_secs(30),
+        "offline receiver does not corrupt the draft",
+    );
+    session.send("\x15").expect("clear offline draft");
+    common::expect_input_line_cleared(session, Duration::from_secs(30), "offline draft cleared");
 }
 
 /// Reaching the prompt must not disguise a node failure as a local delivery.
@@ -290,3 +360,172 @@ fn assert_no_disk_namespace(env: &TestEnv) {
 
 /// The agent name every case's session answers to.
 const SESSION_AGENT: &str = "node-record-probe";
+
+/// Hold the real transport open until a draft is visible, then fail it.
+/// A subsequent connection exercises retries while input is active. Editing
+/// and the status report must remain usable as the transport failure arrives.
+#[test]
+fn receiver_failure_during_typing_keeps_the_draft_intact() {
+    for mode in ["off", "queue"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let env = TestEnv::new_mock("offline-node-draft");
+        node_home::pin_agent_name(env.workspace_root(), SESSION_AGENT);
+        let agents = empty_agents_dir(&env);
+        node_home::write_untrusted_credential(&agents, SESSION_AGENT);
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let home = home_with_record(&env, &record(&endpoint, &agents));
+        let home = home.to_string_lossy();
+        let mut session = env.spawn_with_env(
+            &["--permission-mode", "read-only"],
+            &[
+                ("HOME", home.as_ref()),
+                ("USERPROFILE", home.as_ref()),
+                ("SUDOCODE_INTERRUPT_QUEUE_MODE", mode),
+                ("PAGER", ""),
+            ],
+        );
+        let first = accept_connection(&listener);
+        common::expect_input_line_cleared(
+            &session,
+            Duration::from_secs(30),
+            "prompt while the node transport is pending",
+        );
+        let draft = "DRAFT_BEFORE_NODE_FAILURE_中文";
+        session.send(draft).unwrap();
+        common::expect_screen_settled(
+            &session,
+            |screen| common::input_line_of(screen) == draft,
+            Duration::from_secs(30),
+            "draft before the transport failure",
+        );
+        drop(first);
+        let next = accept_connection(&listener);
+        common::expect_screen_settled(
+            &session,
+            |screen| common::input_line_of(screen) == draft,
+            Duration::from_secs(30),
+            "draft after the receiver handled the transport failure",
+        );
+        drop(next);
+        drop(listener);
+        session.send("\x15").unwrap();
+        common::expect_input_line_cleared(
+            &session,
+            Duration::from_secs(30),
+            "draft clears after node failure",
+        );
+        expect_receiver_diagnostic(&mut session, "connect");
+        session.send("/exit\r").unwrap();
+        assert_eq!(session.expect_eof().unwrap(), 0);
+        assert_no_disk_namespace(&env);
+        assert_eq!(env.captured_message_count(), 0);
+    }
+}
+
+fn accept_connection(listener: &TcpListener) -> TcpStream {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "receiver never connected");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("accept node transport: {error}"),
+        }
+    }
+}
+
+/// Pausing a real node receiver lets its remote lease expire without killing
+/// its terminal. A peer takes over before the original process resumes.
+#[cfg(unix)]
+#[test]
+#[ignore = "requires a real Nexus daemon and a dedicated receiver credential"]
+fn live_node_lease_loss_preserves_editable_draft() {
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("test daemon endpoint");
+    let bundle =
+        std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL").expect("dedicated receiver credential");
+    let credential = runtime::nexus_mailbox::AgentCredential::load(&bundle)
+        .expect("load the receiver's own mTLS credential");
+    for mode in ["off", "queue"] {
+        let env = TestEnv::new_mock("node-lease-draft");
+        node_home::pin_agent_name(env.workspace_root(), &credential.agent);
+        let home = node_home::NodeHome::new(
+            "lease-draft",
+            &endpoint,
+            &credential.agent,
+            Path::new(&bundle),
+        );
+        let home_env = home.env();
+        let vars: Vec<_> = home_env
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .chain([("SUDOCODE_INTERRUPT_QUEUE_MODE", mode), ("PAGER", "")])
+            .collect();
+        let mut first = env.spawn_with_env(&["--permission-mode", "read-only"], &vars);
+        common::expect_input_line_cleared(
+            &first,
+            Duration::from_secs(30),
+            "original node receiver REPL starts",
+        );
+        expect_receiver_state(&mut first, "receiving", Duration::from_secs(30));
+        let draft = "DRAFT_BEFORE_LEASE_LOSS_中文";
+        first.send(draft).unwrap();
+        common::expect_screen_settled(
+            &first,
+            |screen| common::input_line_of(screen) == draft,
+            Duration::from_secs(30),
+            "draft is visible before the receiver stops renewing",
+        );
+        let frozen = freeze::freeze(first.process_id().expect("live scode process"))
+            .expect("freeze the original lease holder");
+        let mut second = env.spawn_with_env(&["--permission-mode", "read-only"], &vars);
+        common::expect_input_line_cleared(
+            &second,
+            Duration::from_secs(30),
+            "replacement node receiver REPL starts",
+        );
+        expect_receiver_state(&mut second, "receiving", Duration::from_secs(90));
+        frozen.resume().expect("resume the former lease holder");
+        common::expect_screen_settled(
+            &first,
+            |screen| common::input_line_of(screen) == draft,
+            Duration::from_secs(30),
+            "original draft survives the receiver handoff",
+        );
+        first.send("\x15").unwrap();
+        common::expect_input_line_cleared(
+            &first,
+            Duration::from_secs(30),
+            "draft clears after the lease handoff",
+        );
+        expect_receiver_diagnostic(&mut first, "receiver seat lost");
+        expect_receiver_state(&mut first, "standing by", Duration::from_secs(30));
+        check_draft(&mut first);
+        first.send("/exit\r").unwrap();
+        assert_eq!(first.expect_eof().unwrap(), 0);
+        expect_receiver_state(&mut second, "receiving", Duration::from_secs(30));
+        second.send("/exit\r").unwrap();
+        assert_eq!(second.expect_eof().unwrap(), 0);
+        assert_no_disk_namespace(&env);
+        assert_eq!(env.captured_message_count(), 0);
+    }
+}
+
+#[cfg(unix)]
+fn expect_receiver_state(session: &mut pty_expect::PtySession, state: &str, budget: Duration) {
+    let needle = format!("Receiver         {state}");
+    let deadline = Instant::now() + budget;
+    loop {
+        let screen = read_receiver_status(session);
+        if screen.contains(&needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "receiver never became {state}: {screen}"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}

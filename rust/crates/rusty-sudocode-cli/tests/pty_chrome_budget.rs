@@ -6,6 +6,15 @@ mod common;
 use common::TestEnv;
 use runtime::{ContentBlock, ConversationMessage, Session};
 
+struct DraftWriterGate(std::path::PathBuf);
+
+impl Drop for DraftWriterGate {
+    fn drop(&mut self) {
+        // A failed assertion must also let the waiting shell finish.
+        let _ = std::fs::write(&self.0, "");
+    }
+}
+
 fn exit(sess: &mut pty_expect::PtySession) {
     // Both workflows finish on an empty input. Do not send a redundant
     // parent-owned Ctrl-U in the same key burst as TextInput-owned typing.
@@ -51,6 +60,8 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
             ("SUDOCODE_TODO_STORE", store.to_str().unwrap()),
         ],
     );
+    // Drop before the PTY, including while an assertion is unwinding.
+    let writer_gate = DraftWriterGate(env.workspace_root().join("draft-go"));
     common::expect_screen_settled(
         &sess,
         |s| s.contains("BudgetTask2") && s.contains('❯'),
@@ -60,7 +71,12 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
 
     // Below the literal-paste threshold, but longer than the small viewport.
     let payload = format!("DraftHead{}DraftTail", "_keep_".repeat(90));
-    let command = format!("! echo {payload} > draft.txt");
+    // Hold the shell after redirection creates the file. Existence alone
+    // cannot establish that the restored command has finished writing it.
+    let command = format!(
+        "! : > draft.txt; while [ ! -f draft-go ]; do sleep 0.01; done; \
+         echo {payload} > draft.txt; printf 'DraftDone%s' '-marker'"
+    );
     sess.send(&format!("\x1b[200~{command}\x1b[201~")).unwrap();
     common::expect_screen(
         &sess,
@@ -108,6 +124,20 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
     while !result.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    assert_eq!(
+        std::fs::read_to_string(&result).unwrap(),
+        "",
+        "the file must exist before the shell is allowed to write"
+    );
+    drop(writer_gate);
+    // This marker is assembled by the shell, so an echoed command cannot
+    // satisfy the wait. Check the draft only after its command has completed.
+    common::expect_screen(
+        &sess,
+        |s| s.contains("DraftDone-marker") && common::input_line_of(s).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "restored draft command completed",
+    );
     assert_eq!(
         std::fs::read_to_string(result).unwrap().trim(),
         payload,

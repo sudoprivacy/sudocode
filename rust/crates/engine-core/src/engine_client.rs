@@ -283,13 +283,13 @@ impl EngineApiClient {
     /// [`AssistantEvent`]s; dropping it cancels the underlying HTTP request.
     async fn try_start_stream(
         &self,
-        message_request: &MessageRequest,
+        message_request: Arc<MessageRequest>,
         apply_stall_timeout: bool,
         is_post_tool: bool,
     ) -> Result<AssistantEventStream, RuntimeError> {
         let mut provider_stream = self
             .client
-            .stream_message(message_request, None)
+            .stream_message(&message_request, None)
             .await
             .map_err(|error| self.runtime_error(&error))?;
 
@@ -327,10 +327,8 @@ impl EngineApiClient {
             session_id: self.session_id.clone(),
             account: self.account.clone(),
             model: self.model.clone(),
-            retry_request: Some(build_empty_response_retry_request(
-                message_request,
-                is_post_tool,
-            )),
+            retry_request: Some(message_request),
+            is_post_tool,
         };
 
         Ok(Box::pin(futures::stream::try_unfold(
@@ -377,6 +375,10 @@ impl EngineApiClient {
                         // how the gateway framed the end of the stream.
                         if !state.has_content {
                             if let Some(retry_request) = state.retry_request.take() {
+                                let retry_request = build_empty_response_retry_request(
+                                    Arc::unwrap_or_clone(retry_request),
+                                    state.is_post_tool,
+                                );
                                 let response = state
                                     .client
                                     .send_message_streamed(&retry_request, None)
@@ -409,6 +411,11 @@ impl EngineApiClient {
                         &mut state.has_content,
                         &mut state.usage,
                     );
+                    if state.has_content {
+                        // Partial progress cannot be replayed. Release the
+                        // original history/schema snapshot as soon as it is usable.
+                        state.retry_request = None;
+                    }
 
                     if let Some(event) = state.buffer.pop_front() {
                         return Ok(Some((event, state)));
@@ -631,13 +638,18 @@ impl EngineApiClient {
             );
             message_request.tool_choice =
                 (self.enable_tools && allow_tools).then_some(ToolChoice::Auto);
+            let message_request = Arc::new(message_request);
 
             // Post-tool continuations get one stall-timeout retry (a nudge); other
             // turns run a single attempt.
             let max_attempts = if is_post_tool { 2 } else { 1 };
             for attempt in 1..=max_attempts {
                 match self
-                    .try_start_stream(&message_request, is_post_tool && attempt == 1, is_post_tool)
+                    .try_start_stream(
+                        Arc::clone(&message_request),
+                        is_post_tool && attempt == 1,
+                        is_post_tool,
+                    )
                     .await
                 {
                     Ok(stream) => return Ok(stream),
@@ -721,9 +733,11 @@ struct StreamState {
     /// way as failures raised before it — one wording, not two.
     account: Option<String>,
     model: String,
-    /// Sent once if the stream ends having produced nothing usable. `None` once
-    /// spent, so an empty answer costs at most one extra turn.
-    retry_request: Option<MessageRequest>,
+    /// Share the original request with startup retries rather than eagerly
+    /// cloning the entire history and tool schemas for a rare empty response.
+    /// Released on usable content; consumed at most once on an empty EOF.
+    retry_request: Option<Arc<MessageRequest>>,
+    is_post_tool: bool,
 }
 
 /// Translate one provider event into zero or more [`AssistantEvent`]s. Pure — no
@@ -925,11 +939,11 @@ fn request_ends_with_tool_result(request: &ApiRequest) -> bool {
 /// So the shape is unchanged and the remedy is about content: after a tool
 /// result, drop the tools and ask for a plain final message, which is what
 /// turns a stalled tool loop into an answer.
+#[cold]
 fn build_empty_response_retry_request(
-    request: &MessageRequest,
+    mut retry: MessageRequest,
     is_post_tool: bool,
 ) -> MessageRequest {
-    let mut retry = request.clone();
     if is_post_tool {
         retry.tools = None;
         retry.tool_choice = None;

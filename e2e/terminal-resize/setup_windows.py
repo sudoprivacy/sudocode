@@ -1,9 +1,11 @@
 """Install the checksum-pinned Electron/ConPTY/xterm runtime used by the PTY test."""
 
 import hashlib
+from http.client import IncompleteRead
 from pathlib import Path
 import shutil
 import sys
+import time
 import urllib.request
 import zipfile
 
@@ -11,20 +13,43 @@ COMMIT = "07f806f999227108933c2e30515b26eecc1fda74"
 SHA256 = "52f47072473375767d63ea5be9ffb96a3092124223fe5ce036834a299715014e"
 
 
+def verify_archive(archive):
+    with archive.open("rb") as data:
+        actual = hashlib.file_digest(data, "sha256").hexdigest()
+    if actual != SHA256:
+        raise ValueError(
+            f"terminal archive checksum mismatch: {actual} ({archive.stat().st_size} bytes)"
+        )
+
+
+def download_archive(archive):
+    url = f"https://update.code.visualstudio.com/commit:{COMMIT}/win32-x64-archive/stable"
+    temporary = archive.with_suffix(".partial")
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response, temporary.open("wb") as out:
+                shutil.copyfileobj(response, out)
+            # A CDN may return a truncated or incorrect body without an HTTP
+            # error. Never promote it to the cache before checking the pin.
+            verify_archive(temporary)
+            temporary.replace(archive)
+            return
+        except (OSError, ValueError, IncompleteRead) as error:
+            temporary.unlink(missing_ok=True)
+            if attempt == 3:
+                raise
+            print(f"Terminal download attempt {attempt}/3 failed: {error}; retrying", flush=True)
+            time.sleep(attempt)
+
+
 def main():
     root = Path(sys.argv[1]).resolve()
     root.mkdir(parents=True, exist_ok=True)
     archive = root / "host.zip"
     if not archive.exists():
-        url = f"https://update.code.visualstudio.com/commit:{COMMIT}/win32-x64-archive/stable"
-        temporary = archive.with_suffix(".partial")
-        with urllib.request.urlopen(url, timeout=120) as response, temporary.open("wb") as out:
-            shutil.copyfileobj(response, out)
-        temporary.replace(archive)
-    with archive.open("rb") as data:
-        actual = hashlib.file_digest(data, "sha256").hexdigest()
-    if actual != SHA256:
-        raise RuntimeError(f"terminal archive checksum mismatch: {actual}")
+        download_archive(archive)
+    else:
+        verify_archive(archive)
     version = COMMIT[:10]
     with zipfile.ZipFile(archive) as package:
         # The Node mode needs no editor extensions, language servers or updater.

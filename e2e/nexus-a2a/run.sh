@@ -194,6 +194,13 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
   --test acp_a2a_receive live_session_close_releases_an_acquired_receiver_seat_before_reply \
   -- --ignored --nocapture
 
+echo "== [deterministic] a real receiver lease handoff preserves terminal drafts =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
+  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$(authon_mint "receiver-draft-probe")" \
+  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
+  --test pty_node_record live_node_lease_loss_preserves_editable_draft \
+  -- --ignored --exact --test-threads=1 --nocapture
+
 echo "== [deterministic] direct ACP uses no model; pause and lost reply use real mTLS =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_A2A_TEST_DIRECT_CREDENTIAL="$(authon_mint "direct-acp-probe")" \

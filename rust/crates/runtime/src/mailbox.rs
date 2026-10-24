@@ -11,6 +11,10 @@
 //! that maps agent names to inbox paths. Everything above this layer is
 //! backend-agnostic.
 
+// Receivers run behind terminal editors. Diagnostics belong in the shared
+// receiver observation and tracing path, never directly on terminal streams.
+#![deny(clippy::print_stderr, clippy::print_stdout)]
+
 use std::sync::Arc;
 
 use crate::agent_mailbox::MailboxEnvelope;
@@ -1423,8 +1427,8 @@ impl Mailbox {
 /// What a receiver in this process is doing for its agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiverState {
-    /// Another instance of the agent holds its receiver seat; this one waits to
-    /// take over.
+    /// This instance does not hold the receiver seat. Another instance can
+    /// hold it, or the backend can be unavailable while this instance retries.
     Standby,
     /// This instance holds the agent's receiver seat and tails its
     /// conversations.
@@ -1465,6 +1469,9 @@ pub struct PeerStatus {
     pub cursor: &'static str,
     /// Why attaching failed, when it did.
     pub error: Option<String>,
+    /// Most recent background receiver failure in this process. Historical:
+    /// receiving can recover while this diagnostic remains inspectable.
+    pub last_receiver_error: Option<String>,
 }
 
 /// The cursor guarantee each agent's readers got in this process, as decided
@@ -1495,12 +1502,19 @@ pub fn cursor_guarantee(agent: &str) -> Option<crate::cursor_fence::CursorGuaran
 
 /// Receivers running in this process: per agent name, how many are standing
 /// by and how many are receiving.
+#[derive(Default)]
+struct ReceiverObservation {
+    standby: usize,
+    receiving: usize,
+    last_error: Option<String>,
+}
+
 static RECEIVER_STATES: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, (usize, usize)>>,
+    std::sync::Mutex<std::collections::HashMap<String, ReceiverObservation>>,
 > = std::sync::OnceLock::new();
 
 fn receiver_states(
-) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, (usize, usize)>> {
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<String, ReceiverObservation>> {
     RECEIVER_STATES
         .get_or_init(std::sync::Mutex::default)
         .lock()
@@ -1512,10 +1526,28 @@ fn receiver_states(
 #[must_use]
 pub fn receiver_state(agent: &str) -> Option<ReceiverState> {
     match receiver_states().get(agent) {
-        Some((_, receiving)) if *receiving > 0 => Some(ReceiverState::Receiving),
-        Some((standby, _)) if *standby > 0 => Some(ReceiverState::Standby),
+        Some(state) if state.receiving > 0 => Some(ReceiverState::Receiving),
+        Some(state) if state.standby > 0 => Some(ReceiverState::Standby),
         _ => None,
     }
+}
+
+/// Last background failure, retained with the receiver's transient state.
+#[must_use]
+pub fn last_receiver_error(agent: &str) -> Option<String> {
+    receiver_states()
+        .get(agent)
+        .and_then(|state| state.last_error.clone())
+}
+
+/// Background services never own the terminal. Hosts can inspect the same
+/// latest diagnostic through peer status or subscribe to structured tracing.
+fn report_receiver_error(mailbox: &Mailbox, label: &str, error: String) {
+    tracing::warn!(receiver = label, agent = mailbox.self_id(), %error, "mailbox receiver failed");
+    receiver_states()
+        .entry(mailbox.self_id().to_string())
+        .or_default()
+        .last_error = Some(error);
 }
 
 /// One receiver's entry in [`receiver_state`], withdrawn when it stops.
@@ -1532,13 +1564,13 @@ impl ReceiverStateEntry {
         let mut states = receiver_states();
         let counts = states.entry(self.agent.clone()).or_default();
         match self.state.replace(state) {
-            Some(ReceiverState::Standby) => counts.0 -= 1,
-            Some(ReceiverState::Receiving) => counts.1 -= 1,
+            Some(ReceiverState::Standby) => counts.standby -= 1,
+            Some(ReceiverState::Receiving) => counts.receiving -= 1,
             None => {}
         }
         match state {
-            ReceiverState::Standby => counts.0 += 1,
-            ReceiverState::Receiving => counts.1 += 1,
+            ReceiverState::Standby => counts.standby += 1,
+            ReceiverState::Receiving => counts.receiving += 1,
         }
     }
 }
@@ -1548,11 +1580,11 @@ impl Drop for ReceiverStateEntry {
         let mut states = receiver_states();
         if let Some(counts) = states.get_mut(&self.agent) {
             match self.state {
-                Some(ReceiverState::Standby) => counts.0 -= 1,
-                Some(ReceiverState::Receiving) => counts.1 -= 1,
+                Some(ReceiverState::Standby) => counts.standby -= 1,
+                Some(ReceiverState::Receiving) => counts.receiving -= 1,
                 None => {}
             }
-            if *counts == (0, 0) {
+            if counts.standby == 0 && counts.receiving == 0 {
                 states.remove(&self.agent);
             }
         }
@@ -1614,16 +1646,21 @@ pub fn spawn_inbox_poller(
     std::thread::Builder::new()
         .name(format!("{label}-inbox"))
         .spawn(move || {
-            // Announce before listening. A receiver that only becomes visible
-            // once someone has written to it cannot be found by whoever wants
-            // to write, and cannot be observed to be running at all.
-            if let Err(e) = mailbox.ensure_presence() {
-                eprintln!("[{label}] announcing this agent failed: {e}");
-            }
             let mut state = ReceiverStateEntry {
                 agent: mailbox.self_id().to_string(),
                 state: None,
             };
+            state.set(ReceiverState::Standby);
+            // Announce before listening. A receiver that only becomes visible
+            // once someone has written to it cannot be found by whoever wants
+            // to write, and cannot be observed to be running at all.
+            if let Err(e) = mailbox.ensure_presence() {
+                report_receiver_error(
+                    &mailbox,
+                    label,
+                    format!("announcing this agent failed: {e}"),
+                );
+            }
             // Keep retrying an offline node without repainting the terminal
             // with the same error on every discovery tick. A changed error or
             // a new outage after a successful receiver-seat check is reported again.
@@ -1639,7 +1676,7 @@ pub fn spawn_inbox_poller(
                     }
                     Err(e) => {
                         if last_claim_error.as_ref() != Some(&e) {
-                            eprintln!("[{label}] {e}");
+                            report_receiver_error(&mailbox, label, e.clone());
                             last_claim_error = Some(e);
                         }
                         sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
@@ -1688,12 +1725,14 @@ fn receive_while_seated(
                     tailing.insert(peer, tail);
                 }
             }
-            Err(e) => eprintln!("[{label}] listing conversations failed: {e}"),
+            Err(e) => {
+                report_receiver_error(mailbox, label, format!("listing conversations failed: {e}"));
+            }
         }
         sleep_unless_aborted(abort, CONVERSATION_DISCOVERY_MS);
     }
     if let Some(loss) = seat.loss() {
-        eprintln!("[{label}] receiver seat lost: {loss}");
+        report_receiver_error(mailbox, label, format!("receiver seat lost: {loss}"));
     }
     // Joining is what makes the receiver's handle mean "the receiver has
     // stopped". Without it the caller's join returns while N tails are still
@@ -1724,7 +1763,11 @@ fn spawn_conversation_tail(
                         continue;
                     }
                     Err(e) => {
-                        eprintln!("[{label}] claiming reader for {peer}: {e}");
+                        report_receiver_error(
+                            &mailbox,
+                            label,
+                            format!("claiming reader for {peer}: {e}"),
+                        );
                         sleep_unless_aborted(&abort, block_ms.max(1));
                         continue;
                     }
@@ -1735,7 +1778,11 @@ fn spawn_conversation_tail(
                         match mailbox.poll_conversation(&peer, reader.offset, block_ms) {
                             Ok(batch) => batch,
                             Err(e) => {
-                                eprintln!("[{label}] polling conversation with {peer}: {e}");
+                                report_receiver_error(
+                                    &mailbox,
+                                    label,
+                                    format!("polling conversation with {peer}: {e}"),
+                                );
                                 sleep_unless_aborted(&abort, block_ms.max(1));
                                 continue;
                             }
@@ -1744,7 +1791,11 @@ fn spawn_conversation_tail(
                         retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
                         if next > reader.offset {
                             if let Err(e) = reader.commit(next) {
-                                eprintln!("[{label}] committing reader for {peer}: {e}");
+                                report_receiver_error(
+                                    &mailbox,
+                                    label,
+                                    format!("committing reader for {peer}: {e}"),
+                                );
                                 break;
                             }
                         }
@@ -1754,7 +1805,11 @@ fn spawn_conversation_tail(
                     }
                 }
                 if let Some(loss) = reader.lease.loss() {
-                    eprintln!("[{label}] reader for {peer} lost: {loss}");
+                    report_receiver_error(
+                        &mailbox,
+                        label,
+                        format!("reader for {peer} lost: {loss}"),
+                    );
                 }
             }
         })

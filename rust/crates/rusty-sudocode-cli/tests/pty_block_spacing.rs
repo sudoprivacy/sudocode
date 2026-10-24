@@ -102,7 +102,10 @@ fn expected_file_frames(env: &TestEnv) -> BTreeMap<&'static str, usize> {
                     output,
                     ..
                 } => {
-                    assert!(!is_error, "spacing workflow contains a failed tool result");
+                    assert!(
+                        !is_error,
+                        "spacing workflow contains a failed tool result {tool_use_id}: {output}"
+                    );
                     if let Some(marker) = calls.get(tool_use_id.as_str()) {
                         let result: serde_json::Value = serde_json::from_str(output).unwrap();
                         let stdout = result["stdout"]
@@ -286,15 +289,15 @@ fn roundtrip(queue: bool, width: u16) {
             "complete multiline prompt pasted",
         );
     } else {
-        let instructions = env.workspace_root().join("spacing-instructions.md");
+        let instructions_file = "spacing-instructions.md";
+        let instructions = env.workspace_root().join(instructions_file);
         std::fs::write(&instructions, &prompt).unwrap();
         let input = if env.is_mock() {
             "PARITY_SCENARIO:transcript_spacing".to_string()
         } else {
-            let path = instructions.to_string_lossy().replace('\\', "/");
-            format!("Read the local file at {path:?} with read_file and follow its instructions.")
+            format!("Use read_file with the exact relative path `{instructions_file}` in the current working directory, then follow the file's instructions.")
         };
-        // Anchor the file instead of letting the provider guess a workspace.
+        // A workspace-relative name avoids copying a randomized temporary path.
         // Keep the input assertion on one row, then restore the tested width
         // before checking the live transcript and its replay.
         let input_width = u16::try_from(input.chars().count() + 8).unwrap().max(width);

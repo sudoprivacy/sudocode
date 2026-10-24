@@ -6,6 +6,15 @@ mod common;
 use common::TestEnv;
 use runtime::{ContentBlock, ConversationMessage, Session};
 
+struct DraftWriterGate(std::path::PathBuf);
+
+impl Drop for DraftWriterGate {
+    fn drop(&mut self) {
+        // A failed assertion must also let the waiting shell finish.
+        let _ = std::fs::write(&self.0, "");
+    }
+}
+
 fn exit(sess: &mut pty_expect::PtySession) {
     // Both workflows finish on an empty input. Do not send a redundant
     // parent-owned Ctrl-U in the same key burst as TextInput-owned typing.
@@ -51,6 +60,8 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
             ("SUDOCODE_TODO_STORE", store.to_str().unwrap()),
         ],
     );
+    // Drop before the PTY, including while an assertion is unwinding.
+    let writer_gate = DraftWriterGate(env.workspace_root().join("draft-go"));
     common::expect_screen_settled(
         &sess,
         |s| s.contains("BudgetTask2") && s.contains('❯'),
@@ -118,7 +129,7 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
         "",
         "the file must exist before the shell is allowed to write"
     );
-    std::fs::write(env.workspace_root().join("draft-go"), "").unwrap();
+    drop(writer_gate);
     // This marker is assembled by the shell, so an echoed command cannot
     // satisfy the wait. Check the draft only after its command has completed.
     common::expect_screen(

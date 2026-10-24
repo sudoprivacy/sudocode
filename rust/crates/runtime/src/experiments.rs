@@ -41,6 +41,8 @@ pub enum Experiment {
     /// `mcp__*` tools to the model. (ACP session-injected MCP servers
     /// are an explicit per-session request and are NOT gated by this.)
     McpConfigServers,
+    /// Independent runtime continuations over a durable session record log.
+    SharedSessionHistory,
     /// Local TTL recommendations; never changes a request's cache policy.
     CacheTtlAdvisor,
 }
@@ -49,6 +51,7 @@ impl Experiment {
     pub const ALL: &'static [Experiment] = &[
         Experiment::CoordinatorMode,
         Experiment::McpConfigServers,
+        Experiment::SharedSessionHistory,
         Experiment::CacheTtlAdvisor,
     ];
 
@@ -59,6 +62,7 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => "coordinatorMode",
             Experiment::McpConfigServers => "mcpConfigServers",
+            Experiment::SharedSessionHistory => "sharedSessionHistory",
             Experiment::CacheTtlAdvisor => "cacheTtlAdvisor",
         }
     }
@@ -69,6 +73,7 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => "COORDINATOR_MODE",
             Experiment::McpConfigServers => "MCP_CONFIG_SERVERS",
+            Experiment::SharedSessionHistory => "SHARED_SESSION_HISTORY",
             Experiment::CacheTtlAdvisor => "CACHE_TTL_ADVISOR",
         }
     }
@@ -81,6 +86,7 @@ impl Experiment {
         match self {
             Experiment::CoordinatorMode => Some("SUDOCODE_COORDINATOR_MODE"),
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
+            Experiment::SharedSessionHistory => None,
             Experiment::CacheTtlAdvisor => None,
         }
     }

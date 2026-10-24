@@ -181,6 +181,30 @@ FRONTDOOR_BUNDLE="$(authon_mint "$FRONTDOOR_ID")"
 authon_boot
 authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
 
+wait_writable() {
+  local i
+  for i in $(seq 1 30); do
+    if NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+         "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored 2>/dev/null | grep -q "1 passed"; then
+      echo "   writable after ~$((i * 4))s"
+      return 0
+    fi
+    sleep 4
+  done
+  echo "!! the co-host daemon never became writable" >&2
+  tail -40 "$WORK_DIR/daemon.log" >&2
+  return 1
+}
+
+provision_model() {
+  NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
+    NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+    NEXUS_A2A_MODEL_URL="$NEXUS_A2A_MODEL_URL" \
+    NEXUS_A2A_MODEL_ZONE="model" \
+    NEXUS_A2A_MODEL_STORAGE="$(native_path "$WORK_DIR/model-cache")" \
+    "${CARGO_TEST[@]}" live_mount_cohost_model -- --ignored --nocapture
+}
+
 # v0.8.5's control plane takes `start_session_v1` from a session credential
 # only, and the front-door shape is how one is legitimately obtained: the node
 # cert that administers the allow-list is the daemon's own, sitting in the
@@ -207,26 +231,10 @@ SESSION_RESUME_BUNDLE="$(mint_session_bundle "$ENDPOINT" "$(shell_path "$FRONTDO
   "$OPERATOR" "$WORK_DIR/session-resume-bundle")" \
   || { tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
 
-ready=
-for i in $(seq 1 30); do
-  if NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
-       "${CARGO_TEST[@]}" live_inbox_roundtrip -- --ignored 2>/dev/null | grep -q "1 passed"; then
-    echo "   writable after ~$((i * 4))s"
-    ready=1
-    break
-  fi
-  sleep 4
-done
-[ -n "$ready" ] || { echo "!! the co-host daemon never became writable" >&2; \
-  tail -40 "$WORK_DIR/daemon.log" >&2; exit 1; }
+wait_writable
 
 echo "== 3c. provision the model mount =="
-NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
-  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
-  NEXUS_A2A_MODEL_URL="$NEXUS_A2A_MODEL_URL" \
-  NEXUS_A2A_MODEL_ZONE="model" \
-  NEXUS_A2A_MODEL_STORAGE="$(native_path "$WORK_DIR/model-cache")" \
-  "${CARGO_TEST[@]}" live_mount_cohost_model -- --ignored --nocapture
+provision_model
 
 echo "== durable reader receipts through native Raft =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
@@ -295,5 +303,19 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
 echo "== 10. a silent client connection times out and recovers =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
+
+echo "== 11. independent concurrent contexts in one durable SID =="
+authon_stop
+# Enable the experiment only for its stage; earlier recovery stays on defaults.
+SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY=1 authon_boot
+authon_wait_log "Zone '$AUTHON_ZONE' registered" 45
+wait_writable
+provision_model
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_RESUME_BUNDLE" \
+  NEXUS_A2A_MODEL_TLS_DIR="$(native_path "$WORK_DIR/data/tls")" \
+  NEXUS_A2A_TEST_MODEL="$MODEL" \
+  "${CARGO_TEST[@]}" live_cohost_shared_sid_concurrent_contexts -- --ignored --exact --nocapture \
+  | tee "$WORK_DIR/shared-sid-test.log"
+grep -F "test result: ok. 1 passed; 0 failed;" "$WORK_DIR/shared-sid-test.log" >/dev/null
 
 echo "COHOST E2E OK"

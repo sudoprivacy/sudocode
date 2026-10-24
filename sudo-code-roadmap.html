@@ -643,6 +643,17 @@ coverage starts fresh and is tracked here as the single source.</p>
   </tbody>
 </table>
 
+<p><strong>Direct ACP A2A hardening (source in progress).</strong>
+<code>_sudocode/a2a/send</code> and <code>agent_list</code> keep the existing
+engine command lane and scheduler, with no model inference or invented model
+history. The follow-up adds typed pre-submission refusals, unique native command
+IDs bound to the actual executor mailbox, and the session operation registry
+covering hooks, approval and blocking Node work. Native result metadata remains
+separate from the transcript; timeout/disconnect remains Unknown. Real stdio
+hook/allowlist cases and isolated TLS-daemon pause/withheld-reply cases are wired
+to CI; source preparation is not deployment or cross-host callback acceptance.
+See <a href="docs/acp.md#direct-a2a-requests">the wire contract and test limits</a>.</p>
+
 <h4>2. Tool usage — file operations</h4>
 <table>
   <thead><tr><th>Feature</th><th>Hacker Priority</th><th>Status</th><th>Test</th><th>Notes</th></tr></thead>
@@ -2347,8 +2358,11 @@ allows two terminals to resume and append one transcript. The behavioral referen
 The consequence is precise: both continuations survive in durable history; each
 running instance continues its own context. Interleaving file writes does not
 mean inserting another instance's half-finished tool batch into a model request.
-This is source and documentation evidence; a dual-terminal run of installed CC
-remains a separate acceptance check.</p>
+An isolated run of Claude Code 2.1.301 confirmed that two independent resumes
+preserve both branches and that a fresh continuation selects the latest durable
+branch. A second run resumed while the original instance executed a real tool:
+the new context received an interrupted-call result with an unknown outcome,
+and the original tool subsequently completed in its own context.</p>
 
 <p><b>Default restore boundary · confirmed by the user.</b> A new runtime forks
 from the most recently completed turn. If A is still executing tools when B
@@ -2429,25 +2443,52 @@ through standalone, cohost and Moss.</td></tr>
 </table>
 
 <h4>Source audit and delivery tasks · 2026-10-18</h4>
-<p>Audited main <code>bea57f49</code>. Shared SID is the agreed target and requires
-the changes above. <code>engine-host/managed_session.rs</code> still holds a
-session-lifetime lease. <code>runtime/session_writer.rs</code> adds another lifetime
-lock on native storage. <code>session.rs</code> updates assistants by array index,
-replays <code>session_meta</code> as complete replacement, and persists maintenance
-as snapshots. <code>subagent_completion.rs</code> has a session-wide
-<code>active_trace</code> and treats a newly opened journal as recovery from its
-previous writer. <code>SessionStore::validate_loaded_session</code> compares the
-entire hosted identity, including the original Agent name.</p>
+<p>The shared record/replay layer, native commit locks, atomic stream appends,
+context-owned completion journals and Agent-link checks are implemented in the
+shared-session branch. Native CLI PTYs, ACP cold recovery, the real cohost daemon
+and funded Anthropic and OpenAI-compatible turns have exercised concurrent
+contexts and tool identity. Final default-path checks, CI and production host
+acceptance track delivery below.</p>
+
+<p><b>Backend implementation in progress.</b> <code>FsBackend::record_log</code>
+provides a separate complete-record contract: native files lock the actual log
+for each record, sync successful appends and discard an interrupted suffix;
+Nexus adapters create a fresh <code>wal</code> stream with keep-forever retention,
+propagate committed cursors and reject regular-file fallback. Existing streams
+require a trusted initialization binding; a stream type alone cannot verify its
+profile or retention. Real native subprocesses and four independent mTLS clients
+have exercised large records, process death and official-daemon restart. The
+native suite and the real-daemon restart journey are included in CI.</p>
+
+<p><b>Record/replay implementation in progress.</b> The history interpreter assigns
+stable message identities and parents, retains tool-result origins, and commits
+context revisions independently. Opening a context selects the latest completed
+turn at that open record's committed position. Streaming updates can change only
+that context's uncommitted assistant; compaction retains unchanged message IDs.
+Real native writer processes and independent mTLS clients against official Nexus
+0.8.22 have exercised a live child tool while a sibling opens and compacts its
+own context. Both branches and the real tool result survive daemon restart.
+An ambiguous durable append retry retains its record identity, and an invalid
+tool association is rejected without blocking later valid records. These storage
+journeys are included in CI. Product Session persistence now uses this layer
+for fresh sessions when <code>sharedSessionHistory</code> is enabled, and for
+recognized v3 logs. The experiment remains off by default. Ten deterministic
+PTY cases and a funded two-terminal journey have passed with real subprocess
+tools and isolated full outputs. The funded case also runs in the existing
+live CI workflow. Legacy transcripts retain their lifetime admission guards.
+Native completion journals remain scoped to their originating context; remote
+completion ownership and coordinated deletion still require a durable fencing
+contract. Passing transcript append tests does not enable those operations on
+a backend that lacks that contract. Final CI, release and consumer adoption
+remain open; concurrent CLI/cohost use has not yet shipped.</p>
 
 <ol>
-<li>Implement and accept the shared record/replay layer and backend append
-transactions, including the legacy-reader and older-live-writer boundary.</li>
-<li>Move snapshot, maintenance, streaming update and repair consumers onto that
-layer; accept cross-context compaction and restore.</li>
-<li>Align completion ownership, Agent-link authorization and the two host adapters;
-remove the session-lifetime exclusions together after their replacement passes.</li>
-<li>Accept real concurrent CLI processes, independent cohost runtimes, and
-browser/desktop → Moss → pod execution before publishing concurrency support.</li>
+<li>Complete default-path regression checks and CI for the shared history and
+completion storage change, including retained-host shutdown and legacy recovery.</li>
+<li>Publish the validated runtime and accept browser/desktop → Moss → pod
+execution against that artifact.</li>
+<li>Expose unambiguous Agent and runtime destinations through the existing
+<code>agent_list</code> and <code>send</code> tools.</li>
 </ol>
 <h3 id="contract-zone-p1a">Contract-zone P1a — runtime zone context</h3>
 

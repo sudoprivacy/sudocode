@@ -1,15 +1,16 @@
 //! Bounded, lossless response evidence on the session's own filesystem.
 use std::fmt;
 use std::io::{self, Write};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::{Duration, Instant};
 
 use flate2::{write::GzEncoder, Compression};
 use serde_json::json;
 use telemetry::{ResponseArchive, ResponseCaptureEnd, ResponseCaptureMetadata, ResponseRecorder};
 
+use crate::fs_backend::FsLock;
 use crate::json::JsonValue;
-use crate::session_writer::SessionWriter;
 use crate::{ConfigError, FsBackend, Session};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,9 +62,58 @@ impl ResponseRecordingConfig {
     }
 }
 
+/// Exclude response attachment deletion until every recorder has finalized.
+/// This lock never takes the transcript commit barrier.
+pub(crate) struct ResponseArchiveWriter {
+    lock: Arc<dyn FsLock>,
+    writes: Mutex<()>,
+}
+
+impl ResponseArchiveWriter {
+    pub(crate) fn acquire(fs: &dyn FsBackend, transcript: &Path) -> Result<Arc<Self>, String> {
+        if !fs.fenced_locks() {
+            return Err("completion_storage_exclusion_unavailable".into());
+        }
+        crate::subagent_completion::check_response_storage(fs, transcript)?;
+        let path = transcript.with_extension("responses.lock");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let lock = loop {
+            if let Some(lock) = fs
+                .try_lock(&path.to_string_lossy(), 30_000)
+                .map_err(|error| error.to_string())?
+            {
+                break lock;
+            }
+            if Instant::now() >= deadline {
+                return Err("session_writer_busy".into());
+            }
+            // A completed response can still be finalizing its gzip tail.
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        crate::subagent_completion::check_response_storage(fs, transcript)?;
+        Ok(Arc::new(Self {
+            lock,
+            writes: Mutex::new(()),
+        }))
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if !self.lock.renew().map_err(|error| error.to_string())? {
+            return Err("session_writer_lost".into());
+        }
+        Ok(())
+    }
+
+    fn write(&self) -> Result<MutexGuard<'_, ()>, String> {
+        let guard = self.writes.lock().map_err(|_| "response writer poisoned")?;
+        self.check()?;
+        Ok(guard)
+    }
+}
+
 pub struct SessionResponseArchive {
     fs: Arc<dyn FsBackend>,
-    writer: Mutex<Weak<SessionWriter>>,
+    writer: Mutex<Weak<ResponseArchiveWriter>>,
     transcript: PathBuf,
     directory: PathBuf,
     session_id: String,
@@ -96,7 +146,7 @@ impl SessionResponseArchive {
     }
 
     #[inline]
-    fn capture_writer(&self) -> io::Result<Arc<SessionWriter>> {
+    fn capture_writer(&self) -> io::Result<Arc<ResponseArchiveWriter>> {
         let mut current = self
             .writer
             .lock()
@@ -108,7 +158,7 @@ impl SessionResponseArchive {
         if !self.fs.exists(&self.transcript.to_string_lossy())? {
             return Err(io::Error::other("session_deleted"));
         }
-        let writer = SessionWriter::acquire_response_archive(self.fs.as_ref(), &self.transcript)
+        let writer = ResponseArchiveWriter::acquire(self.fs.as_ref(), &self.transcript)
             .map_err(io::Error::other)?;
         *current = Arc::downgrade(&writer);
         Ok(writer)
@@ -202,7 +252,7 @@ impl ResponseArchive for SessionResponseArchive {
 
 struct ArchiveWriter {
     fs: Arc<dyn FsBackend>,
-    writer: Arc<SessionWriter>,
+    writer: Arc<ResponseArchiveWriter>,
     path: PathBuf,
     used: Arc<Mutex<Option<u64>>>,
     limit: u64,
@@ -233,7 +283,7 @@ impl Write for ArchiveWriter {
 struct SessionResponseRecorder {
     encoder: Option<GzEncoder<ArchiveWriter>>,
     fs: Arc<dyn FsBackend>,
-    writer: Arc<SessionWriter>,
+    writer: Arc<ResponseArchiveWriter>,
     metadata_path: PathBuf,
     session_id: String,
     metadata: ResponseCaptureMetadata,

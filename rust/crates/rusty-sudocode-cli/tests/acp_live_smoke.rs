@@ -792,7 +792,11 @@ async fn run_subagent_scenarios(client: &mut AcpTestClient, workspace: &TestWork
         .expect("subagent test must persist its transcript")
         .session;
     let mut spawns = 0;
-    for block in session.messages.iter().flat_map(|message| &message.blocks) {
+    for block in session
+        .messages()
+        .iter()
+        .flat_map(|message| &message.blocks)
+    {
         if let runtime::ContentBlock::ToolUse { name, input, .. } = block {
             if matches!(name.as_str(), "Agent" | "agent_spawn") {
                 let args: Value = serde_json::from_str(input).expect("agent tool arguments");

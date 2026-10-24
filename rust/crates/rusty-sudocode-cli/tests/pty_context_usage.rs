@@ -318,7 +318,7 @@ fn compaction_clears_the_context_anchor_and_resumes_critical_facts() {
     assert_eq!(sess.expect_eof().unwrap(), 0);
     let continued = runtime::Session::load_from_path(&path).unwrap();
     let assistant = continued
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|message| message.role == runtime::MessageRole::Assistant)

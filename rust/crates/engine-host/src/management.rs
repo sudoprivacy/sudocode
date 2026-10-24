@@ -189,7 +189,7 @@ fn status_report(engine: &SessionEngine, cwd: &Path) -> Result<String, String> {
     Ok(format_status_report(
         &engine.current_model(),
         StatusUsage {
-            message_count: snapshot.messages.len(),
+            message_count: snapshot.messages().len(),
             turns: tracker.turns(),
             latest: tracker.current_turn_usage(),
             cumulative: tracker.cumulative_usage(),
@@ -216,7 +216,7 @@ fn model_report(engine: &SessionEngine, cwd: &Path, model: Option<&str>) -> Resu
             let snapshot = engine.session_snapshot();
             format_model_report(
                 &engine.current_model(),
-                snapshot.messages.len(),
+                snapshot.messages().len(),
                 engine.usage_snapshot().turns(),
                 &load_sudocode_config_for_current_dir(),
             )

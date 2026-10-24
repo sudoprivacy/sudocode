@@ -23,16 +23,6 @@ pub trait RetryNotifier: Send + Sync {
     fn on_retry_end(&self);
 }
 
-/// Default notifier that writes to stderr (matches legacy behavior).
-pub struct StderrRetryNotifier;
-
-impl RetryNotifier for StderrRetryNotifier {
-    fn on_retry(&self, attempt: u32, max_retries: u32, reason: &str) {
-        eprintln!("  \u{27f3} retry {attempt}/{max_retries} — {reason}");
-    }
-    fn on_retry_end(&self) {}
-}
-
 const REQUEST_ID_HEADER: &str = "request-id";
 const ALT_REQUEST_ID_HEADER: &str = "x-request-id";
 const ONEAPI_REQUEST_ID_HEADER: &str = "x-oneapi-request-id";

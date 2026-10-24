@@ -39,7 +39,7 @@ fn compacted_summary_survives_save_and_reload() {
             }]))
             .expect("push assistant message");
     }
-    let original_len = session.messages.len();
+    let original_len = session.messages().len();
 
     // when — force compaction, keeping only the last 2 messages.
     let result = compact_session_sync(
@@ -55,13 +55,13 @@ fn compacted_summary_survives_save_and_reload() {
     );
     let compacted = &result.compacted_session;
     assert!(
-        compacted.messages.len() < original_len,
+        compacted.messages().len() < original_len,
         "compacted session ({}) should be smaller than original ({original_len})",
-        compacted.messages.len()
+        compacted.messages().len()
     );
     // The summary is injected as the first message with System role.
     assert!(
-        matches!(compacted.messages[0].role, MessageRole::System),
+        matches!(compacted.messages()[0].role, MessageRole::System),
         "summary must be the first (System) message"
     );
 
@@ -78,12 +78,12 @@ fn compacted_summary_survives_save_and_reload() {
         "compaction record must persist across reload"
     );
     assert!(
-        matches!(restored.messages[0].role, MessageRole::System),
+        matches!(restored.messages()[0].role, MessageRole::System),
         "summary System message must survive reload"
     );
     assert_eq!(
-        restored.messages.len(),
-        compacted.messages.len(),
+        restored.messages().len(),
+        compacted.messages().len(),
         "reloaded message count must match the compacted session"
     );
 }

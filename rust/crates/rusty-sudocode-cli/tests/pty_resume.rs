@@ -9,17 +9,18 @@
 mod common;
 
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
 fn transcript_meta(path: &Path) -> serde_json::Value {
-    fs::read_to_string(path)
-        .expect("read transcript")
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid transcript JSON"))
-        .find(|row| row["type"] == "session_meta")
-        .expect("session metadata")
+    serde_json::from_str(
+        &runtime::Session::load_from_path(path)
+            .expect("read transcript")
+            .to_json()
+            .unwrap()
+            .render(),
+    )
+    .unwrap()
 }
 
 /// Opening and closing an empty REPL must not hide the only saved conversation.
@@ -60,25 +61,22 @@ fn print_preserves_interactive_latest_and_remains_resumable_by_id() {
     // An older transcript with no mode field must remain interactive. Seed
     // distinct history so export proves which conversation `latest` selected.
     assert!(transcript_meta(&interactive_path)["mode"].is_null());
-    let mut transcript = fs::OpenOptions::new()
-        .append(true)
-        .open(&interactive_path)
-        .unwrap();
+    let mut meta = transcript_meta(&interactive_path);
+    meta["type"] = serde_json::json!("session_meta");
+    let mut lines = vec![meta.to_string()];
     for (role, text) in [
         ("user", "INTERACTIVE_SESSION_SENTINEL"),
         ("assistant", "Saved interactive history."),
     ] {
-        writeln!(
-            transcript,
-            "{}",
+        lines.push(
             serde_json::json!({
                 "type": "message",
                 "message": {"role": role, "blocks": [{"type": "text", "text": text}]}
             })
-        )
-        .unwrap();
+            .to_string(),
+        );
     }
-    drop(transcript);
+    fs::write(&interactive_path, lines.join("\n") + "\n").unwrap();
 
     let prompt = env.prompt(
         "Reply with exactly PRINT_SESSION_SENTINEL.",

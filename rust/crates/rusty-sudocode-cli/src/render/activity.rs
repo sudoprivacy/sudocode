@@ -7,6 +7,7 @@ use std::{
     time::Instant,
 };
 
+use crossterm::style::SetForegroundColor;
 use engine_events::EngineState;
 
 use super::{spinner_progress::SpinnerProgress, text_layout, theme, RESET};
@@ -208,25 +209,22 @@ pub(super) struct ProgressValues<'a> {
 
 /// One formatter for inline and one-shot model/time/token/budget/ETA display.
 #[inline]
-pub(super) fn progress_line(
-    frame_index: usize,
-    label: &str,
-    values: ProgressValues<'_>,
-    width: usize,
-    metric: text_layout::ColumnMetric,
-    warning: bool,
-) -> String {
+fn progress_details(values: ProgressValues<'_>) -> String {
     let ProgressValues {
         model,
         elapsed,
         bytes,
         token_budget,
     } = values;
+    // Keep time-derived metadata stable between seconds while the logo keeps
+    // animating. Token changes still refresh immediately; turn statistics use
+    // the original precise duration outside this presentation formatter.
+    let elapsed = elapsed.floor();
     let mut details = String::new();
     if let Some(model) = model {
         let _ = write!(details, " [{model}]");
     }
-    let _ = write!(details, " ({elapsed:.1}s)");
+    let _ = write!(details, " ({elapsed:.0}s)");
     if bytes > 0 && elapsed >= 1.0 {
         let tokens = bytes / 4;
         if let Some(budget) = token_budget {
@@ -252,15 +250,30 @@ pub(super) fn progress_line(
             let _ = write!(details, " ↓ {tokens} tokens");
         }
     }
+    details
+}
+
+/// Lay out the activity row using the shared metadata and semantic colors.
+#[inline]
+pub(super) fn progress_line(
+    frame_index: usize,
+    label: &str,
+    values: ProgressValues<'_>,
+    width: usize,
+    metric: text_layout::ColumnMetric,
+    warning: bool,
+) -> String {
+    let details = progress_details(values);
     let logo = brand_spinner::frame(frame_index);
     let reserved = metric.width(logo) + 1 + metric.width(&details);
     let label = text_layout::single_line(label);
     let label = metric.truncate(&label, width.saturating_sub(reserved));
-    let theme = theme();
+    let colors = theme().activity_colors(warning);
     let line = format!(
-        "{}{logo}{} {label}{details}{RESET}",
-        theme.logo_fg(),
-        theme.spinner_fg(warning),
+        "{}{logo}{} {label}{}{details}{RESET}",
+        SetForegroundColor(colors.logo),
+        SetForegroundColor(colors.label),
+        SetForegroundColor(colors.metadata),
     );
     // On extremely narrow terminals even metadata cannot fit. Keep one row.
     if reserved > width {

@@ -13,16 +13,15 @@ use crate::json::{JsonError, JsonValue};
 use crate::prompt::SessionPromptSnapshot;
 use crate::usage::{parse_usage_cost_currency, TokenUsage};
 
+pub mod history;
+
 const SESSION_VERSION: u32 = 1;
 const UNANSWERED_TURN_TEXT: &str = "No response requested.";
-const ROTATE_AFTER_BYTES: u64 = 256 * 1024;
-const MAX_ROTATED_FILES: usize = 3;
 /// Cold-storage retention budget (bytes) for a transcript backed by a native
 /// append-log (nexus DT_STREAM). `0` = keep-forever: cold segments spill out
 /// of the hot tier but are never dropped, so the whole transcript stays
 /// readable. Ignored by regular-file backends.
 const TRANSCRIPT_RETENTION_BYTES: u64 = 0;
-static SESSION_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 static LAST_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Speaker role associated with a persisted conversation message.
@@ -84,6 +83,8 @@ pub enum ContentBlock {
 /// One conversation message with optional token-usage metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationMessage {
+    /// Stable transcript identity; provider payloads use role and blocks.
+    pub history: Option<Arc<crate::session_history::MessageIdentity>>,
     pub role: MessageRole,
     pub blocks: Vec<ContentBlock>,
     pub usage: Option<TokenUsage>,
@@ -161,7 +162,24 @@ impl SessionMode {
 struct SessionPersistence {
     path: PathBuf,
     fs: Arc<dyn FsBackend>,
-    writer: Arc<std::sync::Mutex<Option<Arc<crate::session_writer::SessionWriter>>>>,
+    writer: Arc<std::sync::Mutex<SessionWriterState>>,
+    committed_messages: Arc<std::sync::Mutex<BTreeSet<String>>>,
+    checkpoint: Arc<std::sync::Mutex<Option<CheckpointReceipt>>>,
+}
+
+#[derive(Default)]
+enum SessionWriterState {
+    #[default]
+    Unopened,
+    Active(Arc<crate::session_writer::SessionWriter>),
+    Closed,
+}
+
+#[derive(Clone)]
+struct CheckpointReceipt {
+    head: String,
+    view_revision: u64,
+    metadata_hash: [u8; 32],
 }
 
 impl fmt::Debug for SessionPersistence {
@@ -177,6 +195,7 @@ impl fmt::Debug for SessionPersistence {
 /// may relocate a session to its new process workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedSessionIdentity {
+    /// The Agent that created this transcript. Other Agents associate it by link.
     pub agent_name: String,
     pub owner_id: String,
     pub zone_id: String,
@@ -184,6 +203,12 @@ pub struct HostedSessionIdentity {
 }
 
 impl HostedSessionIdentity {
+    pub(crate) fn matches_storage_binding(&self, other: &Self) -> bool {
+        self.owner_id == other.owner_id
+            && self.zone_id == other.zone_id
+            && self.repos == other.repos
+    }
+
     fn to_json(&self) -> JsonValue {
         JsonValue::Object(BTreeMap::from([
             (
@@ -342,7 +367,7 @@ fn compaction_report_from_json(
         .transpose()
 }
 
-fn maintenance_usage_from_json(
+pub(crate) fn maintenance_usage_from_json(
     object: &BTreeMap<String, JsonValue>,
 ) -> Result<Vec<MaintenanceUsageReceipt>, SessionError> {
     object
@@ -359,6 +384,27 @@ fn maintenance_usage_from_json(
         .map(Option::unwrap_or_default)
 }
 
+pub(crate) fn merge_maintenance_receipts(
+    current: &mut Vec<MaintenanceUsageReceipt>,
+    receipts: &[MaintenanceUsageReceipt],
+) -> Vec<TokenUsage> {
+    let mut newly_known = Vec::new();
+    for receipt in receipts {
+        if let Some(existing) = current.iter_mut().find(|existing| {
+            existing.run_id == receipt.run_id && existing.attempt_id == receipt.attempt_id
+        }) {
+            if existing.usage.is_none() && receipt.usage.is_some() {
+                existing.usage = receipt.usage;
+                newly_known.extend(receipt.usage);
+            }
+        } else {
+            newly_known.extend(receipt.usage);
+            current.push(receipt.clone());
+        }
+    }
+    newly_known
+}
+
 /// Persisted conversational state for the runtime and CLI session manager.
 ///
 /// `workspace_root` binds the session to the worktree it was created in. The
@@ -373,7 +419,7 @@ pub struct Session {
     pub session_id: String,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
-    pub messages: Vec<ConversationMessage>,
+    pub(crate) messages: Vec<ConversationMessage>,
     pub compaction: Option<SessionCompaction>,
     pub maintenance_usage: Vec<MaintenanceUsageReceipt>,
     pub compaction_achievement: Option<CompactionAchievement>,
@@ -397,6 +443,8 @@ pub struct Session {
     /// This bookkeeping is never serialized into the durable transcript.
     pending_tool_repairs: usize,
     persistence: Option<SessionPersistence>,
+    restored_history_head: Option<String>,
+    view_revision: u64,
 }
 
 impl PartialEq for Session {
@@ -457,6 +505,18 @@ impl From<JsonError> for SessionError {
 }
 
 impl Session {
+    /// The selected model context. Mutations use the session's append/update or
+    /// context-building methods so its durable graph stays in sync.
+    #[must_use]
+    pub fn messages(&self) -> &[ConversationMessage] {
+        &self.messages
+    }
+
+    /// Consume a context snapshot without copying its conversation payloads.
+    #[must_use]
+    pub fn into_messages(self) -> Vec<ConversationMessage> {
+        self.messages
+    }
     #[must_use]
     pub fn new() -> Self {
         // P1a (§8.11 R6.2/R6.4)：subprocess 侧唯一可信 zone 来源是 host 注入
@@ -485,6 +545,8 @@ impl Session {
             prompt_snapshot_dirty: false,
             pending_tool_repairs: 0,
             persistence: None,
+            restored_history_head: None,
+            view_revision: 0,
         }
     }
 
@@ -511,10 +573,20 @@ impl Session {
 
     #[must_use]
     pub fn with_persistence_path(mut self, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        if self
+            .persistence
+            .as_ref()
+            .is_some_and(|current| current.path == path)
+        {
+            return self;
+        }
         self.persistence = Some(SessionPersistence {
-            path: path.into(),
+            path,
             fs: Arc::new(StdFsBackend),
             writer: Arc::default(),
+            committed_messages: Arc::default(),
+            checkpoint: Arc::default(),
         });
         self
     }
@@ -559,6 +631,9 @@ impl Session {
     #[must_use]
     pub fn with_messages(mut self, messages: Vec<ConversationMessage>) -> Self {
         self.messages = messages;
+        crate::session_history::rebase(&mut self.messages);
+        self.view_revision = self.view_revision.wrapping_add(1);
+
         self.touch();
         self
     }
@@ -573,13 +648,73 @@ impl Session {
         self.persistence.as_ref().map(|value| value.path.as_path())
     }
 
-    /// Shared by cloned session snapshots and their journal. A separately
-    /// loaded session cannot silently become a second writer in this process.
+    /// Adopt this runtime's transcript writer before accepting input. Native
+    /// ownership prevents deletion while the runtime is idle; activation also
+    /// migrates legacy storage without publishing a stale in-memory snapshot.
+    pub fn activate_persistence(&mut self) -> Result<(), SessionError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        let unopened = matches!(
+            *persistence
+                .writer
+                .lock()
+                .map_err(|_| SessionError::Format("session writer poisoned".into()))?,
+            SessionWriterState::Unopened
+        );
+        let writer = self.writer_for(&persistence.path)?;
+        if unopened {
+            if let Some(mut restored) = writer.history_session().map_err(SessionError::Format)? {
+                restored.persistence = self.persistence.clone();
+                restored.view_revision = self.view_revision;
+                if self.prompt_snapshot_dirty {
+                    restored.prompt_snapshot.clone_from(&self.prompt_snapshot);
+                    restored.prompt_snapshot_dirty = true;
+                }
+                *self = restored;
+            }
+        }
+        Ok(())
+    }
+
+    /// Release this context's writer after its owned work and final save finish.
+    /// Cloned snapshots share this state, so they cannot reopen a closed writer.
+    pub fn close_persistence(&self) {
+        if let Some(persistence) = &self.persistence {
+            *persistence
+                .writer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = SessionWriterState::Closed;
+        }
+    }
+
+    /// Whether this activated context has committed isolation for sibling restores.
+    pub fn supports_concurrent_resume(&self) -> Result<bool, SessionError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(false);
+        };
+        let guard = persistence
+            .writer
+            .lock()
+            .map_err(|_| SessionError::Format("session writer poisoned".into()))?;
+        match &*guard {
+            SessionWriterState::Active(writer) => {
+                writer.has_history().map_err(SessionError::Format)
+            }
+            SessionWriterState::Unopened | SessionWriterState::Closed => Ok(false),
+        }
+    }
+
+    /// Cloned snapshots and their journal share one writer. Independently
+    /// loaded sessions acquire their own runtime contexts.
     pub fn completion_writer(&self) -> Result<Arc<crate::session_writer::SessionWriter>, String> {
+        if !self.backend().fenced_locks() {
+            return Err("completion_storage_exclusion_unavailable".into());
+        }
+        self.ensure_context_persisted()
+            .map_err(|error| error.to_string())?;
         let path = self.persistence_path().ok_or("session has no transcript")?;
-        self.writer_for(path)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "completion_storage_exclusion_unavailable".into())
+        self.writer_for(path).map_err(|error| error.to_string())
     }
 
     pub(crate) fn adopt_completion_writer(
@@ -595,12 +730,14 @@ impl Session {
             .writer
             .lock()
             .map_err(|_| "session writer poisoned")?;
-        if let Some(existing) = current.as_ref() {
-            if !Arc::ptr_eq(existing, &writer) {
-                return Err("session_writer_busy".into());
+        match &*current {
+            SessionWriterState::Closed => return Err("session_closed".into()),
+            SessionWriterState::Active(existing) => {
+                if !Arc::ptr_eq(existing, &writer) {
+                    return Err("session_writer_busy".into());
+                }
             }
-        } else {
-            *current = Some(writer);
+            SessionWriterState::Unopened => *current = SessionWriterState::Active(writer),
         }
         Ok(())
     }
@@ -608,31 +745,110 @@ impl Session {
     fn writer_for(
         &self,
         path: &Path,
-    ) -> Result<Option<Arc<crate::session_writer::SessionWriter>>, SessionError> {
-        let backend = self.backend();
-        if !backend.fenced_locks() {
-            return Ok(None);
-        }
+    ) -> Result<Arc<crate::session_writer::SessionWriter>, SessionError> {
         if let Some(persistence) = &self.persistence {
             if persistence.path == path {
                 let mut guard = persistence
                     .writer
                     .lock()
                     .map_err(|_| SessionError::Format("session writer poisoned".into()))?;
-                if guard.is_none() {
-                    *guard = Some(
-                        crate::session_writer::SessionWriter::acquire(backend, path)
-                            .map_err(SessionError::Format)?,
-                    );
+                if matches!(*guard, SessionWriterState::Closed) {
+                    return Err(SessionError::Format("session_closed".into()));
                 }
-                let writer = guard.as_ref().expect("writer acquired");
+                if matches!(*guard, SessionWriterState::Unopened) {
+                    let writer = self.acquire_writer(path)?;
+                    writer
+                        .observe_head(self.restored_history_head.clone().or_else(|| {
+                            self.messages
+                                .last()
+                                .and_then(|message| message.history.as_ref())
+                                .map(|identity| identity.id.clone())
+                        }))
+                        .map_err(SessionError::Format)?;
+                    *guard = SessionWriterState::Active(writer);
+                }
+                let SessionWriterState::Active(writer) = &*guard else {
+                    unreachable!("writer acquired")
+                };
                 writer.check().map_err(SessionError::Format)?;
-                return Ok(Some(Arc::clone(writer)));
+                return Ok(Arc::clone(writer));
             }
         }
-        crate::session_writer::SessionWriter::acquire(backend, path)
-            .map(Some)
-            .map_err(SessionError::Format)
+        self.acquire_writer(path)
+    }
+
+    fn acquire_writer(
+        &self,
+        path: &Path,
+    ) -> Result<Arc<crate::session_writer::SessionWriter>, SessionError> {
+        let path_str = path.to_string_lossy();
+        let existing = self.backend().exists(&path_str)?;
+        let record_history =
+            existing && history::is_record_history(&self.backend().read(&path_str)?);
+        if record_history
+            || (!existing
+                && crate::experiments::is_enabled(
+                    crate::experiments::Experiment::SharedSessionHistory,
+                ))
+        {
+            return crate::session_writer::SessionWriter::acquire_history(
+                self.fs_handle(),
+                path,
+                self,
+                None,
+                self.view_revision,
+            )
+            .map_err(SessionError::Format);
+        }
+        let writer = if self.backend().fenced_locks() {
+            crate::session_writer::SessionWriter::acquire(self.fs_handle(), path)
+        } else {
+            crate::session_writer::SessionWriter::acquire_stream(
+                self.fs_handle(),
+                path,
+                TRANSCRIPT_RETENTION_BYTES,
+            )
+        };
+        writer.map_err(SessionError::Format)
+    }
+
+    fn maintenance_writer_for(
+        &self,
+        path: &Path,
+    ) -> Result<(Arc<crate::session_writer::SessionWriter>, bool), SessionError> {
+        if let Some(persistence) = &self.persistence {
+            let state = persistence
+                .writer
+                .lock()
+                .map_err(|_| SessionError::Format("session writer poisoned".into()))?;
+            match &*state {
+                SessionWriterState::Closed => {
+                    return Err(SessionError::Format("session_closed".into()));
+                }
+                SessionWriterState::Active(writer) => return Ok((Arc::clone(writer), false)),
+                SessionWriterState::Unopened => {}
+            }
+            let legacy = if self.backend().fenced_locks() {
+                match self.backend().read(&path.to_string_lossy()) {
+                    Ok(bytes) => !bytes.is_empty() && !history::is_record_history(&bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => return Err(error.into()),
+                }
+            } else {
+                false
+            };
+            if legacy {
+                // Do not cache this as a runtime writer: a later message append
+                // must still obtain exclusive legacy admission.
+                return crate::session_writer::SessionWriter::acquire_maintenance(
+                    self.fs_handle(),
+                    path,
+                )
+                .map(|writer| (writer, true))
+                .map_err(SessionError::Format);
+            }
+        }
+        self.writer_for(path).map(|writer| (writer, false))
     }
 
     /// Revision of the current durable transcript through its own backend.
@@ -647,7 +863,7 @@ impl Session {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
-        Ok(Some(durable_bytes_revision(bytes.as_deref())))
+        Ok(Some(self.revision_of_contents(bytes.as_deref())?))
     }
 
     /// Bind a source history to the revision of the same durable bytes.
@@ -666,6 +882,7 @@ impl Session {
     pub fn capture_durable_revision_for_history(
         &mut self,
     ) -> Result<(Option<String>, Vec<TokenUsage>), SessionError> {
+        self.activate_persistence()?;
         let (revision, receipts) = self.durable_history_revision()?;
         let newly_known = self.merge_maintenance_usage(&receipts);
         Ok((revision, newly_known))
@@ -684,16 +901,11 @@ impl Session {
             }
             Err(error) => return Err(error.into()),
         };
-        let contents = std::str::from_utf8(&bytes).map_err(|_| {
-            SessionError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "session transcript is not valid UTF-8",
-            ))
-        })?;
-        let durable = Self::from_persisted_contents(contents)?;
+        let contents = crate::session_history::decode(&bytes)?;
+        let durable = self.replay_durable(contents)?;
         // Tool input objects are stored canonically, while streamed input can
         // contain different whitespace. Compare the persisted message values;
-        // the byte revision below still guards concurrent durable changes.
+        // the source revision below binds this context to its durable ancestry.
         if !durable
             .messages
             .iter()
@@ -702,10 +914,74 @@ impl Session {
         {
             return Err(SessionError::SourceChanged);
         }
-        Ok((
-            Some(durable_bytes_revision(Some(&bytes))),
-            durable.maintenance_usage,
-        ))
+        let revision = durable.context_digest()?;
+        Ok((Some(revision), durable.maintenance_usage))
+    }
+
+    pub(crate) fn current_history_head(&self) -> Result<Option<String>, SessionError> {
+        if let Some(persistence) = &self.persistence {
+            if let SessionWriterState::Active(writer) = &*persistence
+                .writer
+                .lock()
+                .map_err(|_| SessionError::Format("session writer poisoned".into()))?
+            {
+                return writer.history_head().map_err(SessionError::Format);
+            }
+        }
+        Ok(self.restored_history_head.clone().or_else(|| {
+            self.messages
+                .last()
+                .and_then(|message| message.history.as_ref())
+                .map(|identity| identity.id.clone())
+        }))
+    }
+
+    fn replay_durable(&self, contents: &str) -> Result<Self, SessionError> {
+        let head = self.current_history_head()?;
+        if history::is_record_history(contents.as_bytes()) {
+            let graph = history::HistoryGraph::decode(contents.as_bytes())?;
+            return match head {
+                Some(head) => graph.revision_session(&head),
+                None => graph.completed_session(None),
+            }
+            .map_err(SessionError::Io);
+        }
+        let shared = Self::shared_history_suffix(contents)
+            .map_err(SessionError::Format)?
+            .ok_or_else(|| SessionError::Format("shared history missing".into()))?;
+        crate::session_history::replay(
+            shared,
+            // Legacy writers retain exclusive admission, so maintenance must
+            // also notice an uncoordinated older client's latest append.
+            // Only v3 above has independent committed runtime contexts.
+            crate::session_history::Selection::Latest,
+        )
+    }
+
+    fn revision_of_contents(&self, bytes: Option<&[u8]>) -> Result<String, SessionError> {
+        if let Some(bytes) = bytes {
+            let contents = crate::session_history::decode(bytes)?;
+            return self.replay_durable(contents)?.context_digest();
+        }
+
+        Ok(durable_bytes_revision(bytes))
+    }
+
+    pub(crate) fn context_digest(&self) -> Result<String, SessionError> {
+        let JsonValue::Object(mut context) = self.to_json()? else {
+            unreachable!("session is an object")
+        };
+        // Billing and bookkeeping can change independently of this context.
+        for key in [
+            "maintenance_usage",
+            "updated_at_ms",
+            "last_compaction_report",
+        ] {
+            context.remove(key);
+        }
+        Ok(durable_bytes_revision(Some(
+            JsonValue::Object(context).render().as_bytes(),
+        )))
     }
 
     /// The filesystem this session persists through, as a shareable handle.
@@ -752,6 +1028,34 @@ impl Session {
     #[must_use]
     pub fn tool_results_dir(&self) -> Option<PathBuf> {
         Self::tool_results_dir_for(self.persistence_path()?, &self.session_id)
+    }
+
+    /// Publish a fork after its inherited full tool outputs are available.
+    /// Both sides use their own backend, including forks between stores.
+    pub fn save_fork_to_path(&self, parent: &Self, path: &Path) -> Result<(), SessionError> {
+        if let Some(source) = parent.tool_results_dir() {
+            let source = source.to_string_lossy();
+            if parent.backend().exists(&source)? {
+                let target =
+                    Self::tool_results_dir_for(path, &self.session_id).ok_or_else(|| {
+                        SessionError::Format("fork has no attachment directory".into())
+                    })?;
+                self.backend().create_dir_all(&target.to_string_lossy())?;
+                for entry in parent.backend().readdir(&source)? {
+                    if entry.is_dir
+                        || entry.name.is_empty()
+                        || Self::sanitize_offload_id(&entry.name) != entry.name
+                    {
+                        return Err(SessionError::Format("invalid tool output entry".into()));
+                    }
+                    let bytes = parent.backend().read(&format!("{source}/{}", entry.name))?;
+                    let destination = target.join(&entry.name);
+                    self.backend()
+                        .write_atomic(&destination.to_string_lossy(), &bytes)?;
+                }
+            }
+        }
+        self.save_to_path(path)
     }
 
     /// Raw response attachments use the same session namespace as tool blobs.
@@ -814,45 +1118,69 @@ impl Session {
                     .ok_or_else(|| std::io::Error::other("session has no persistence"))?,
             )
             .map_err(std::io::Error::other)?;
-        let _write = writer
-            .as_ref()
-            .map(|w| w.write())
-            .transpose()
-            .map_err(std::io::Error::other)?;
+        let _write = writer.write().map_err(std::io::Error::other)?;
         backend.create_dir_all(&dir_str)?;
         let path_str = dir
-            .join(Self::sanitize_offload_id(id))
+            .join(self.tool_output_id(id))
             .to_string_lossy()
             .into_owned();
         backend.write_atomic(&path_str, full)?;
         Ok((path_str, full.len() as u64))
     }
 
+    /// Opaque attachment key scoped to the originating assistant message.
+    /// Legacy transcripts retain their existing attachment names.
+    #[must_use]
+    pub fn tool_output_id(&self, call_id: &str) -> String {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|message| {
+                let identity = message.history.as_ref()?;
+                message
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolUse { id, .. } if id == call_id))
+                    .then(|| {
+                        let mut hash = Sha256::new();
+                        hash.update(identity.id.as_bytes());
+                        hash.update([0]);
+                        hash.update(call_id.as_bytes());
+                        format!("output-{:x}", hash.finalize())
+                    })
+            })
+            .unwrap_or_else(|| Self::sanitize_offload_id(call_id))
+    }
+
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), SessionError> {
         let path = path.as_ref();
         let writer = self.writer_for(path)?;
-        let _write = writer
-            .as_ref()
-            .map(|w| w.write())
-            .transpose()
-            .map_err(SessionError::Format)?;
-        self.save_snapshot(path)
+        let _write = writer.write().map_err(SessionError::Format)?;
+        self.save_snapshot(path, &writer)
     }
 
     // Caller holds the writer operation guard, including bootstrap/compaction.
-    fn save_snapshot(&self, path: &Path) -> Result<(), SessionError> {
-        let snapshot = self.render_jsonl_snapshot()?;
-        let path_str = path.to_string_lossy();
-        let backend = self.backend();
-        if backend.is_append_stream(&path_str)? {
-            // One frame commits the complete replacement. Its session_meta
-            // starts a new snapshot when loading, rather than replaying history.
-            backend.append(&path_str, snapshot.as_bytes())?;
+    fn save_snapshot(
+        &self,
+        path: &Path,
+        writer: &crate::session_writer::SessionWriter,
+    ) -> Result<(), SessionError> {
+        if writer
+            .save_history(self, self.view_revision)
+            .map_err(SessionError::Format)?
+        {
             return Ok(());
         }
-        rotate_session_file_if_needed_with(backend, path)?;
-        write_atomic_with(backend, &path_str, &snapshot)?;
-        cleanup_rotated_logs_with(backend, path)?;
+        let frame = self.history_checkpoint(path)?;
+        if self.checkpoint_unchanged(path, &frame)? {
+            return Ok(());
+        }
+        let backend = self.backend();
+        let path_str = path.to_string_lossy();
+        backend.create_append_log(&path_str, TRANSCRIPT_RETENTION_BYTES)?;
+        backend.append(&path_str, format!("{}\n", frame.render()).as_bytes())?;
+        self.remember_committed_messages(path)?;
+        self.publish_checkpoint_cursor(path, &frame)?;
         Ok(())
     }
 
@@ -902,25 +1230,22 @@ impl Session {
     ) -> Result<(), SessionError> {
         let path = path.as_ref();
         let writer = self.writer_for(path)?;
-        let _write = writer
-            .as_ref()
-            .map(|w| w.write())
-            .transpose()
-            .map_err(SessionError::Format)?;
+        let _write = writer.write().map_err(SessionError::Format)?;
         let durable = match self.backend().read(&path.to_string_lossy()) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
-        if expected_revision
-            .is_some_and(|expected| expected != durable_bytes_revision(durable.as_deref()))
-        {
-            return Err(SessionError::SourceChanged);
+        if let Some(expected) = expected_revision {
+            if expected != original.revision_of_contents(durable.as_deref())? {
+                return Err(SessionError::SourceChanged);
+            }
         }
         let archive = format!(
-            "{}.before-{purpose}-{}",
+            "{}.before-{purpose}-{}-{}",
             path.display(),
-            current_time_millis()
+            current_time_millis(),
+            uuid::Uuid::new_v4()
         );
         // Preserve the durable source byte-for-byte. In-memory metadata can
         // already contain a staged prompt snapshot for a legacy transcript.
@@ -934,16 +1259,7 @@ impl Session {
             None => original.render_jsonl_snapshot()?,
         };
         write_atomic_with(self.backend(), &archive, &snapshot)?;
-        if self.backend().is_append_stream(&path.to_string_lossy())? {
-            return self.save_snapshot(path);
-        }
-        // Avoid rotation before the atomic replacement: failure must leave the
-        // live transcript at its original path, rather than only in a backup.
-        write_atomic_with(
-            self.backend(),
-            &path.to_string_lossy(),
-            &self.render_jsonl_snapshot()?,
-        )
+        self.save_snapshot(path, &writer)
     }
 
     /// Rewrite the persisted transcript from the in-memory state.
@@ -969,26 +1285,85 @@ impl Session {
         path: impl AsRef<Path>,
     ) -> Result<Self, SessionError> {
         let path = path.as_ref();
-        let contents = fs.read_to_string(&path.to_string_lossy())?;
-        Ok(Self::from_persisted_contents(&contents)?.with_persistence_path(path.to_path_buf()))
+        let bytes = fs.read(&path.to_string_lossy())?;
+        let contents = crate::session_history::decode(&bytes)?;
+        let session =
+            Self::from_persisted_contents(contents)?.with_persistence_path(path.to_path_buf());
+        Ok(session)
     }
 
     /// Replay either persisted format with the repairs used by every load.
     fn from_persisted_contents(contents: &str) -> Result<Self, SessionError> {
+        if history::is_record_history(contents.as_bytes()) {
+            return history::HistoryGraph::decode(contents.as_bytes())?
+                .completed_session(None)
+                .map_err(SessionError::Io);
+        }
         let mut session = match JsonValue::parse(contents) {
-            Ok(value)
-                if value
-                    .as_object()
-                    .is_some_and(|object| object.contains_key("messages")) =>
-            {
-                Self::from_json(&value)?
-            }
+            Ok(value) if Self::is_snapshot(&value) => Self::from_json(&value)?,
             Err(_) | Ok(_) => Self::from_jsonl(contents)?,
         };
         // Recover interrupted calls without changing existing result records:
         // local consumers such as /undo still need their structured payloads.
         session.pending_tool_repairs = session.sanitize_orphan_tool_uses();
+        if session.pending_tool_repairs > 0 {
+            crate::session_history::rebase(&mut session.messages);
+            session.view_revision = session.view_revision.wrapping_add(1);
+        } else {
+            crate::session_history::identify_legacy(&session.session_id, &mut session.messages);
+        }
+
         Ok(session)
+    }
+
+    fn is_snapshot(value: &JsonValue) -> bool {
+        value
+            .as_object()
+            .is_some_and(|object| object.contains_key("messages") && !object.contains_key("type"))
+    }
+
+    /// Preserve the legacy projection as an initial, neutral checkpoint.
+    /// Concurrent stream migrations retain any newer continuation already
+    /// appended while another runtime was reading these source bytes.
+    pub(crate) fn upgrade_legacy_transcript(contents: &str) -> Result<String, SessionError> {
+        let mut session = match JsonValue::parse(contents) {
+            Ok(value) if Self::is_snapshot(&value) => Self::from_json(&value)?,
+            _ => Self::from_legacy_jsonl(contents)?,
+        };
+        crate::session_history::identify_legacy(&session.session_id, &mut session.messages);
+        let JsonValue::Object(mut checkpoint) = session.history_checkpoint(Path::new(""))? else {
+            unreachable!("history checkpoint is an object")
+        };
+        checkpoint.insert("replaces_context".into(), JsonValue::Bool(false));
+        Ok(format!("{}\n", JsonValue::Object(checkpoint).render()))
+    }
+
+    fn ensure_context_persisted(&self) -> Result<(), SessionError> {
+        let Some(persistence) = &self.persistence else {
+            return Ok(());
+        };
+        let initialized = persistence
+            .checkpoint
+            .lock()
+            .map_err(|_| SessionError::Format("checkpoint receipt poisoned".into()))?
+            .is_some();
+        if initialized {
+            return Ok(());
+        }
+        let writer = self.writer_for(&persistence.path)?;
+        if writer.has_history().map_err(SessionError::Format)? {
+            return Ok(());
+        }
+        let _write = writer.write().map_err(SessionError::Format)?;
+        let initialized = persistence
+            .checkpoint
+            .lock()
+            .map_err(|_| SessionError::Format("checkpoint receipt poisoned".into()))?
+            .is_some();
+        if !initialized {
+            self.save_snapshot(&persistence.path, &writer)?;
+        }
+        Ok(())
     }
 
     /// Repair unfinished tool batches before a new turn uses this history.
@@ -996,10 +1371,16 @@ impl Session {
     pub fn repair_orphan_tool_uses(&mut self) -> Result<usize, SessionError> {
         let repairs = ToolHistoryRepairs::plan(&self.messages);
         if repairs.missing.is_empty() && self.pending_tool_repairs == 0 {
+            self.ensure_context_persisted()?;
             return Ok(0);
         }
-        let original = (!repairs.missing.is_empty()).then(|| self.messages.clone());
+        let has_missing = !repairs.missing.is_empty();
+        let original = has_missing.then(|| self.messages.clone());
         let repaired = self.pending_tool_repairs + repairs.apply_missing(&mut self.messages);
+        if has_missing {
+            crate::session_history::rebase(&mut self.messages);
+            self.view_revision = self.view_revision.wrapping_add(1);
+        }
         if let Err(error) = self.rewrite_persisted() {
             if let Some(original) = original {
                 self.messages = original;
@@ -1014,7 +1395,26 @@ impl Session {
         ToolHistoryRepairs::plan(&self.messages).apply_missing(&mut self.messages)
     }
 
-    pub fn push_message(&mut self, message: ConversationMessage) -> Result<(), SessionError> {
+    pub fn push_message(&mut self, mut message: ConversationMessage) -> Result<(), SessionError> {
+        self.activate_persistence()?;
+        if self
+            .messages
+            .last()
+            .is_some_and(|message| message.history.is_none())
+        {
+            crate::session_history::identify_legacy(&self.session_id, &mut self.messages);
+        }
+        self.ensure_context_persisted()?;
+        crate::session_history::identify_append(&mut message, &self.messages)
+            .map_err(SessionError::Format)?;
+        if let Some(path) = self.persistence_path() {
+            let writer = self.writer_for(path)?;
+            if let Some(identity) = &mut message.history {
+                Arc::make_mut(identity).parent_id =
+                    writer.message_head().map_err(SessionError::Format)?;
+            }
+        }
+
         self.touch();
         self.messages.push(message);
         let persist_result = {
@@ -1037,7 +1437,7 @@ impl Session {
     pub(crate) fn update_assistant_message(
         &mut self,
         index: usize,
-        message: ConversationMessage,
+        mut message: ConversationMessage,
     ) -> Result<(), SessionError> {
         let previous = self
             .messages
@@ -1048,15 +1448,35 @@ impl Session {
                 "stream update requires an assistant message".into(),
             ));
         }
+        message.history.clone_from(&previous.history);
         if previous == &message {
             return Ok(());
         }
         let record_index = i64::try_from(index)
             .map_err(|_| SessionError::Format("assistant index overflow".into()))?;
         let previous = std::mem::replace(&mut self.messages[index], message);
+        if let Some(path) = self.persistence_path() {
+            let writer = self.writer_for(path)?;
+            let _write = writer.write().map_err(SessionError::Format)?;
+            match writer.update_history(&self.messages[index]) {
+                Ok(true) => {
+                    self.touch();
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    self.messages[index] = previous;
+                    return Err(SessionError::Format(error));
+                }
+            }
+        }
         let mut record = BTreeMap::new();
         record.insert("type".into(), JsonValue::String("assistant_update".into()));
-        record.insert("index".into(), JsonValue::Number(record_index));
+        if let Some(identity) = &self.messages[index].history {
+            record.insert("message_id".into(), JsonValue::String(identity.id.clone()));
+        } else {
+            record.insert("index".into(), JsonValue::Number(record_index));
+        }
         record.insert("message".into(), self.messages[index].to_json());
         if let Err(error) = self.append_persisted_record(&JsonValue::Object(record)) {
             self.messages[index] = previous;
@@ -1070,9 +1490,23 @@ impl Session {
         self.push_message(ConversationMessage::user_text(text))
     }
 
+    pub(crate) fn record_turn_duration(&mut self, duration_ms: u64) -> Result<(), SessionError> {
+        let Some(index) = self
+            .messages
+            .iter()
+            .rposition(|message| message.role == MessageRole::Assistant)
+        else {
+            return Ok(());
+        };
+        let mut message = self.messages[index].clone();
+        message.duration_ms = Some(duration_ms);
+        self.update_assistant_message(index, message)
+    }
+
     /// Push a user message containing multiple content blocks (e.g. text + images).
     pub fn push_user_blocks(&mut self, blocks: Vec<ContentBlock>) -> Result<(), SessionError> {
         self.push_message(ConversationMessage {
+            history: None,
             role: MessageRole::User,
             blocks,
             usage: None,
@@ -1101,12 +1535,27 @@ impl Session {
             usage,
             pre_compact_discovered_tools,
         });
+        self.record_context_replacement();
+    }
+
+    /// Select a replacement context while preserving retained message identities.
+    /// Its next checkpoint records the complete selection as message references.
+    pub(crate) fn record_context_replacement(&mut self) {
+        let mut parent = None;
+        for message in &mut self.messages {
+            let identity = message.history.get_or_insert_with(|| {
+                Arc::new(crate::session_history::MessageIdentity::new(parent.clone()))
+            });
+            parent = Some(identity.id.clone());
+        }
+        crate::session_history::identify_legacy(&self.session_id, &mut self.messages);
+        self.view_revision = self.view_revision.wrapping_add(1);
     }
 
     #[must_use]
     pub fn fork(&self, branch_name: Option<String>) -> Self {
         let now = current_time_millis();
-        Self {
+        let mut fork = Self {
             version: self.version,
             session_id: generate_session_id(),
             created_at_ms: now,
@@ -1130,63 +1579,25 @@ impl Session {
             prompt_snapshot_dirty: false,
             pending_tool_repairs: 0,
             persistence: None,
-        }
+            restored_history_head: None,
+            view_revision: 0,
+        };
+        crate::session_history::rebase(&mut fork.messages);
+
+        fork
     }
 
-    pub fn to_json(&self) -> Result<JsonValue, SessionError> {
-        let mut object = BTreeMap::new();
-        object.insert(
-            "version".to_string(),
-            JsonValue::Number(i64::from(self.version)),
-        );
-        object.insert(
-            "session_id".to_string(),
-            JsonValue::String(self.session_id.clone()),
-        );
-        object.insert(
-            "created_at_ms".to_string(),
-            JsonValue::Number(i64_from_u64(self.created_at_ms, "created_at_ms")?),
-        );
-        object.insert(
-            "updated_at_ms".to_string(),
-            JsonValue::Number(i64_from_u64(self.updated_at_ms, "updated_at_ms")?),
-        );
-        object.insert(
-            "messages".to_string(),
-            JsonValue::Array(
-                self.messages
-                    .iter()
-                    .map(ConversationMessage::to_json)
-                    .collect(),
-            ),
-        );
+    fn context_metadata(&self) -> Result<JsonValue, SessionError> {
+        let JsonValue::Object(mut object) = self.meta_record()? else {
+            unreachable!("metadata is an object")
+        };
+        object.remove("type");
         if let Some(compaction) = &self.compaction {
-            object.insert("compaction".to_string(), compaction.to_json()?);
-        }
-        if self.mode != SessionMode::Interactive {
-            object.insert(
-                "mode".to_string(),
-                JsonValue::String(self.mode.as_str().to_string()),
-            );
-        }
-        if let Some(fork) = &self.fork {
-            object.insert("fork".to_string(), fork.to_json());
-        }
-        if let Some(snapshot) = &self.prompt_snapshot {
-            object.insert("prompt_snapshot".into(), snapshot.to_json());
-        }
-        if let Some(identity) = &self.identity {
-            object.insert("identity".to_string(), identity.to_json());
-        }
-        if let Some(workspace_root) = &self.workspace_root {
-            object.insert(
-                "workspace_root".to_string(),
-                JsonValue::String(workspace_root_to_string(workspace_root)?),
-            );
+            object.insert("compaction".into(), compaction.to_json()?);
         }
         if !self.prompt_history.is_empty() {
             object.insert(
-                "prompt_history".to_string(),
+                "prompt_history".into(),
                 JsonValue::Array(
                     self.prompt_history
                         .iter()
@@ -1195,8 +1606,28 @@ impl Session {
                 ),
             );
         }
-        self.insert_maintenance_metadata(&mut object)?;
         Ok(JsonValue::Object(object))
+    }
+
+    pub fn to_json(&self) -> Result<JsonValue, SessionError> {
+        let JsonValue::Object(mut object) = self.context_metadata()? else {
+            unreachable!("metadata is an object")
+        };
+        object.insert(
+            "messages".into(),
+            JsonValue::Array(
+                self.messages
+                    .iter()
+                    .map(ConversationMessage::to_json)
+                    .collect(),
+            ),
+        );
+        Ok(JsonValue::Object(object))
+    }
+
+    pub(super) fn with_history_head(mut self, head: Option<String>) -> Self {
+        self.restored_history_head = head;
+        self
     }
 
     pub fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
@@ -1294,6 +1725,8 @@ impl Session {
             prompt_snapshot_dirty: false,
             pending_tool_repairs: 0,
             persistence: None,
+            restored_history_head: None,
+            view_revision: 0,
         })
     }
 
@@ -1302,6 +1735,59 @@ impl Session {
         reason = "keep ordered JSONL replay and its accumulated state together"
     )]
     fn from_jsonl(contents: &str) -> Result<Self, SessionError> {
+        if let Some(shared) = Self::shared_history_suffix(contents).map_err(SessionError::Format)? {
+            crate::session_history::replay(shared, crate::session_history::Selection::Latest)
+        } else {
+            Self::from_legacy_jsonl(contents)
+        }
+    }
+
+    pub(crate) fn shared_history_suffix(contents: &str) -> Result<Option<&str>, String> {
+        let mut offset = 0;
+        for line in contents.split_inclusive('\n') {
+            if line.contains("history_checkpoint") {
+                let value = match JsonValue::parse(line) {
+                    Ok(value) => value,
+                    Err(_) if !line.ends_with('\n') => return Ok(None),
+                    Err(error) => return Err(error.to_string()),
+                };
+                if value
+                    .as_object()
+                    .and_then(|object| object.get("type"))
+                    .and_then(JsonValue::as_str)
+                    == Some("history_checkpoint")
+                {
+                    return Ok(Some(&contents[offset..]));
+                }
+            }
+            offset += line.len();
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn load_history_at(
+        fs: &dyn FsBackend,
+        path: &Path,
+        head: Option<&str>,
+    ) -> Result<Self, SessionError> {
+        let bytes = fs.read(&path.to_string_lossy())?;
+        if history::is_record_history(&bytes) {
+            let revision = head.ok_or_else(|| {
+                SessionError::Format("shared history context revision missing".into())
+            })?;
+            return history::HistoryGraph::decode(&bytes)?
+                .revision_session(revision)
+                .map_err(SessionError::Io);
+        }
+        let contents = crate::session_history::decode(&bytes)?;
+        let shared = Self::shared_history_suffix(contents)
+            .map_err(SessionError::Format)?
+            .ok_or_else(|| SessionError::Format("shared history missing".into()))?;
+        crate::session_history::replay(shared, crate::session_history::Selection::Head(head))
+    }
+
+    #[allow(clippy::too_many_lines, reason = "legacy JSONL compatibility replay")]
+    fn from_legacy_jsonl(contents: &str) -> Result<Self, SessionError> {
         let mut version = SESSION_VERSION;
         let mut session_id = None;
         let mut created_at_ms = None;
@@ -1319,22 +1805,12 @@ impl Session {
         let mut prompt_snapshot = None;
         let mut prompt_history = Vec::new();
 
-        for (line_number, raw_line) in contents.lines().enumerate() {
-            let line = raw_line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let value = JsonValue::parse(line).map_err(|error| {
-                SessionError::Format(format!(
-                    "invalid JSONL record at line {}: {}",
-                    line_number + 1,
-                    error
-                ))
-            })?;
+        for record in crate::session_history::records(contents) {
+            let (line_number, value) = record?;
             let object = value.as_object().ok_or_else(|| {
                 SessionError::Format(format!(
                     "JSONL record at line {} must be an object",
-                    line_number + 1
+                    line_number
                 ))
             })?;
             match object
@@ -1343,7 +1819,7 @@ impl Session {
                 .ok_or_else(|| {
                     SessionError::Format(format!(
                         "JSONL record at line {} missing type",
-                        line_number + 1
+                        line_number
                     ))
                 })? {
                 "session_meta" => {
@@ -1393,7 +1869,7 @@ impl Session {
                     let message_value = object.get("message").ok_or_else(|| {
                         SessionError::Format(format!(
                             "JSONL record at line {} missing message",
-                            line_number + 1
+                            line_number
                         ))
                     })?;
                     messages.push(ConversationMessage::from_json(message_value)?);
@@ -1432,12 +1908,15 @@ impl Session {
                 other => {
                     return Err(SessionError::Format(format!(
                         "unsupported JSONL record type at line {}: {other}",
-                        line_number + 1
+                        line_number
                     )))
                 }
             }
         }
 
+        if session_id.is_none() && !contents.trim().is_empty() {
+            return Err(SessionError::Format("session metadata missing".into()));
+        }
         let now = current_time_millis();
         Ok(Self {
             version,
@@ -1460,6 +1939,8 @@ impl Session {
             prompt_snapshot_dirty: false,
             pending_tool_repairs: 0,
             persistence: None,
+            restored_history_head: None,
+            view_revision: 0,
         })
     }
 
@@ -1474,31 +1955,210 @@ impl Session {
             text: text.into(),
         };
         self.prompt_history.push(entry);
-        let entry_ref = self.prompt_history.last().expect("entry was just pushed");
-        self.append_persisted_prompt_entry(entry_ref)
+        self.rewrite_persisted()
     }
 
-    /// The full session rendered as an ordered list of JSONL record lines
-    /// (no trailing newlines): meta → compaction → prompts → messages. The
-    /// single source for both the snapshot writer ([`Self::render_jsonl_snapshot`])
-    /// and the append-log bootstrap ([`Self::bootstrap_append_log`]) so the
-    /// two never drift in record order or content.
+    /// Build a self-contained history checkpoint for snapshots and exports.
     fn snapshot_lines(&self) -> Result<Vec<String>, SessionError> {
-        let mut lines = vec![self.meta_record()?.render()];
-        if let Some(compaction) = &self.compaction {
-            lines.push(compaction.to_jsonl_record()?.render());
+        Ok(vec![self.history_checkpoint(Path::new(""))?.render()])
+    }
+
+    fn history_checkpoint(&self, path: &Path) -> Result<JsonValue, SessionError> {
+        let owned = self
+            .messages
+            .iter()
+            .any(|message| message.history.is_none())
+            .then(|| {
+                let mut messages = self.messages.clone();
+                crate::session_history::identify_legacy(&self.session_id, &mut messages);
+                messages
+            });
+        let messages = owned.as_deref().unwrap_or(&self.messages);
+        let persistence = self
+            .persistence
+            .as_ref()
+            .filter(|persistence| persistence.path == path);
+        let committed = persistence
+            .map(|persistence| {
+                persistence
+                    .committed_messages
+                    .lock()
+                    .map_err(|_| SessionError::Format("history commit cache poisoned".into()))
+            })
+            .transpose()?;
+        let pending = messages
+            .iter()
+            .filter(|message| {
+                !committed.as_ref().is_some_and(|ids| {
+                    message
+                        .history
+                        .as_ref()
+                        .is_some_and(|identity| ids.contains(&identity.id))
+                })
+            })
+            .map(ConversationMessage::to_json)
+            .collect();
+        drop(committed);
+        let mut parent = persistence.and_then(|_| self.restored_history_head.clone());
+        let mut needs_view = true;
+        if let Some(persistence) = persistence {
+            if let SessionWriterState::Active(writer) = &*persistence
+                .writer
+                .lock()
+                .map_err(|_| SessionError::Format("session writer poisoned".into()))?
+            {
+                parent = writer.history_head().map_err(SessionError::Format)?;
+            }
+            needs_view = persistence
+                .checkpoint
+                .lock()
+                .map_err(|_| SessionError::Format("checkpoint receipt poisoned".into()))?
+                .as_ref()
+                .is_none_or(|receipt| receipt.view_revision != self.view_revision);
         }
-        lines.extend(
-            self.prompt_history
-                .iter()
-                .map(|entry| entry.to_jsonl_record().render()),
-        );
-        lines.extend(
-            self.messages
-                .iter()
-                .map(|message| message_record(message).render()),
-        );
-        Ok(lines)
+        let mut record = BTreeMap::from([
+            (
+                "replaces_context".into(),
+                JsonValue::Bool(needs_view && (self.view_revision > 0 || persistence.is_none())),
+            ),
+            (
+                "history_version".into(),
+                JsonValue::Number(crate::session_history::HISTORY_VERSION),
+            ),
+            (
+                "type".into(),
+                JsonValue::String("history_checkpoint".into()),
+            ),
+            (
+                "id".into(),
+                JsonValue::String(uuid::Uuid::new_v4().to_string()),
+            ),
+            (
+                "parent_id".into(),
+                parent.map_or(JsonValue::Null, JsonValue::String),
+            ),
+            ("meta".into(), self.context_metadata()?),
+            ("messages".into(), JsonValue::Array(pending)),
+        ]);
+        if needs_view {
+            record.insert(
+                "view".into(),
+                JsonValue::Array(
+                    messages
+                        .iter()
+                        .filter_map(|message| {
+                            message
+                                .history
+                                .as_ref()
+                                .map(|identity| JsonValue::String(identity.id.clone()))
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        Ok(JsonValue::Object(record))
+    }
+
+    fn checkpoint_unchanged(&self, path: &Path, frame: &JsonValue) -> Result<bool, SessionError> {
+        let Some(persistence) = self
+            .persistence
+            .as_ref()
+            .filter(|persistence| persistence.path == path)
+        else {
+            return Ok(false);
+        };
+        let Some(frame) = frame.as_object() else {
+            return Ok(false);
+        };
+        let Some(receipt) = persistence
+            .checkpoint
+            .lock()
+            .map_err(|_| SessionError::Format("checkpoint receipt poisoned".into()))?
+            .clone()
+        else {
+            return Ok(false);
+        };
+        let metadata_hash: [u8; 32] = Sha256::digest(
+            frame
+                .get("meta")
+                .ok_or_else(|| SessionError::Format("checkpoint metadata missing".into()))?
+                .render()
+                .as_bytes(),
+        )
+        .into();
+        Ok(frame.get("view").is_none()
+            && frame
+                .get("messages")
+                .and_then(JsonValue::as_array)
+                .is_some_and(|messages| messages.is_empty())
+            && frame.get("parent_id").and_then(JsonValue::as_str) == Some(receipt.head.as_str())
+            && metadata_hash == receipt.metadata_hash)
+    }
+
+    fn remember_committed_messages(&self, path: &Path) -> Result<(), SessionError> {
+        if let Some(persistence) = self
+            .persistence
+            .as_ref()
+            .filter(|persistence| persistence.path == path)
+        {
+            let mut committed = persistence
+                .committed_messages
+                .lock()
+                .map_err(|_| SessionError::Format("history commit cache poisoned".into()))?;
+            committed.extend(self.messages.iter().filter_map(|message| {
+                message.history.as_ref().map(|identity| identity.id.clone())
+            }));
+            drop(committed);
+        }
+        Ok(())
+    }
+
+    fn publish_checkpoint_cursor(
+        &self,
+        path: &Path,
+        frame: &JsonValue,
+    ) -> Result<(), SessionError> {
+        let Some(persistence) = self
+            .persistence
+            .as_ref()
+            .filter(|persistence| persistence.path == path)
+        else {
+            return Ok(());
+        };
+        let frame = frame
+            .as_object()
+            .ok_or_else(|| SessionError::Format("checkpoint must be an object".into()))?;
+        let head = frame
+            .get("id")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| SessionError::Format("checkpoint identity missing".into()))?;
+        if let SessionWriterState::Active(writer) = &*persistence
+            .writer
+            .lock()
+            .map_err(|_| SessionError::Format("session writer poisoned".into()))?
+        {
+            writer
+                .observe_head(Some(head.to_owned()))
+                .map_err(SessionError::Format)?;
+        }
+        let metadata_hash: [u8; 32] = Sha256::digest(
+            frame
+                .get("meta")
+                .ok_or_else(|| SessionError::Format("checkpoint metadata missing".into()))?
+                .render()
+                .as_bytes(),
+        )
+        .into();
+        *persistence
+            .checkpoint
+            .lock()
+            .map_err(|_| SessionError::Format("checkpoint receipt poisoned".into()))? =
+            Some(CheckpointReceipt {
+                head: head.to_owned(),
+                view_revision: self.view_revision,
+                metadata_hash,
+            });
+        Ok(())
     }
 
     fn render_jsonl_snapshot(&self) -> Result<String, SessionError> {
@@ -1513,44 +2173,39 @@ impl Session {
         let Some(path) = self.persistence_path() else {
             return Ok(());
         };
-        let writer = self.writer_for(path)?;
-        let _write = writer
-            .as_ref()
-            .map(|w| w.write())
-            .transpose()
-            .map_err(SessionError::Format)?;
         let path_str = path.to_string_lossy();
         if self.backend().exists(&path_str)? && self.backend().stat(&path_str)?.len > 0 {
             return Err(SessionError::Format(
                 "session transcript already exists".into(),
             ));
         }
-        self.bootstrap_append_log(path)
+        let writer = self.writer_for(path)?;
+        let _write = writer.write().map_err(SessionError::Format)?;
+        self.save_snapshot(path, &writer)
     }
 
-    /// Bootstrap an empty/missing transcript to the full in-memory snapshot.
-    ///
-    /// On a backend with a native append-log ([`FsBackend::is_append_stream`]
-    /// — the nexus DT_STREAM), each record is written as one framed
-    /// [`FsBackend::append`]; snapshot rewrite and size rotation do not apply
-    /// (the stream's internal cold-spill subsumes rotation). On a regular-file
-    /// backend it stays the atomic snapshot rewrite + rotation via
-    /// [`Self::save_to_path`].
-    // Caller holds the writer operation guard.
-    fn bootstrap_append_log(&self, path: &Path) -> Result<(), SessionError> {
-        let backend = self.backend();
-        let path_str = path.to_string_lossy();
-        backend.create_append_log(&path_str, TRANSCRIPT_RETENTION_BYTES)?;
-        if backend.is_append_stream(&path_str)? {
-            for line in self.snapshot_lines()? {
-                backend.append(&path_str, format!("{line}\n").as_bytes())?;
-            }
+    /// Seal a terminal turn only after its actual tool outcomes are durable.
+    pub(crate) fn finish_turn(&self, turn_id: &str) -> Result<(), SessionError> {
+        let Some(path) = self.persistence_path() else {
             return Ok(());
-        }
-        self.save_snapshot(path)
+        };
+        let writer = self.writer_for(path)?;
+        let _write = writer.write().map_err(SessionError::Format)?;
+        self.save_snapshot(path, &writer)?;
+        writer.finish_history(turn_id).map_err(SessionError::Format)
     }
 
     fn append_persisted_message(&self, message: &ConversationMessage) -> Result<(), SessionError> {
+        if let Some(path) = self.persistence_path() {
+            let writer = self.writer_for(path)?;
+            let _write = writer.write().map_err(SessionError::Format)?;
+            if writer
+                .append_history(message, self)
+                .map_err(SessionError::Format)?
+            {
+                return Ok(());
+            }
+        }
         let mut record = message_record(message);
         if self.prompt_snapshot_dirty {
             if let (JsonValue::Object(object), Some(snapshot)) =
@@ -1559,14 +2214,15 @@ impl Session {
                 object.insert("prompt_snapshot".into(), snapshot.to_json());
             }
         }
-        self.append_persisted_record(&record)
-    }
-
-    fn append_persisted_prompt_entry(
-        &self,
-        entry: &SessionPromptEntry,
-    ) -> Result<(), SessionError> {
-        self.append_persisted_record(&entry.to_jsonl_record())
+        self.append_persisted_record(&record)?;
+        if let (Some(persistence), Some(identity)) = (&self.persistence, &message.history) {
+            persistence
+                .committed_messages
+                .lock()
+                .map_err(|_| SessionError::Format("history commit cache poisoned".into()))?
+                .insert(identity.id.clone());
+        }
+        Ok(())
     }
 
     fn append_persisted_record(&self, record: &JsonValue) -> Result<(), SessionError> {
@@ -1574,19 +2230,36 @@ impl Session {
             return Ok(());
         };
         let writer = self.writer_for(path)?;
-        let _write = writer
-            .as_ref()
-            .map(|w| w.write())
-            .transpose()
-            .map_err(SessionError::Format)?;
+        let _write = writer.write().map_err(SessionError::Format)?;
         let path_str = path.to_string_lossy();
         let backend = self.backend();
         let needs_bootstrap = !backend.exists(&path_str)?
             || backend.stat(&path_str).map(|m| m.len == 0).unwrap_or(true);
         if needs_bootstrap {
-            return self.bootstrap_append_log(path);
+            return self.save_snapshot(path, &writer);
         }
         backend.append(&path_str, format!("{}\n", record.render()).as_bytes())?;
+        if let Some(id) = record
+            .as_object()
+            .and_then(|record| record.get("message"))
+            .and_then(JsonValue::as_object)
+            .and_then(|message| message.get("history"))
+            .and_then(JsonValue::as_object)
+            .and_then(|history| history.get("id"))
+            .and_then(JsonValue::as_str)
+        {
+            if record
+                .as_object()
+                .and_then(|record| record.get("type"))
+                .and_then(JsonValue::as_str)
+                == Some("message")
+            {
+                writer
+                    .observe_head(Some(id.to_owned()))
+                    .map_err(SessionError::Format)?;
+            }
+        }
+
         Ok(())
     }
 
@@ -1675,29 +2348,16 @@ impl Session {
         &mut self,
         receipts: &[MaintenanceUsageReceipt],
     ) -> Vec<TokenUsage> {
-        let mut newly_known = Vec::new();
-        for receipt in receipts {
-            if let Some(existing) = self.maintenance_usage.iter_mut().find(|existing| {
-                existing.run_id == receipt.run_id && existing.attempt_id == receipt.attempt_id
-            }) {
-                if existing.usage.is_none() && receipt.usage.is_some() {
-                    existing.usage = receipt.usage;
-                    newly_known.extend(receipt.usage);
-                }
-            } else {
-                newly_known.extend(receipt.usage);
-                self.maintenance_usage.push(receipt.clone());
-            }
-        }
+        let newly_known = merge_maintenance_receipts(&mut self.maintenance_usage, receipts);
         if !receipts.is_empty() {
             self.touch();
         }
         newly_known
     }
 
-    /// Persist billing and achievement metadata in a full snapshot. Appending
-    /// a lone `session_meta` would erase history on JSONL replay. A failed write
-    /// keeps all known receipts in memory for the caller to report or retry.
+    /// Persist billing and achievement metadata without claiming another
+    /// runtime's legacy message writer. A failed write keeps all known receipts
+    /// in memory for the caller to report or retry.
     pub fn persist_maintenance_metadata(&self) -> Result<(), SessionError> {
         self.persist_maintenance_metadata_checked(None)
     }
@@ -1710,12 +2370,11 @@ impl Session {
     ) -> Result<(), SessionError> {
         let writer = self
             .persistence_path()
-            .map(|path| self.writer_for(path))
-            .transpose()?
-            .flatten();
+            .map(|path| self.maintenance_writer_for(path))
+            .transpose()?;
         let _write = writer
             .as_ref()
-            .map(|w| w.write())
+            .map(|(writer, _)| writer.write())
             .transpose()
             .map_err(SessionError::Format)?;
         if let Some(expected) = expected_revision {
@@ -1723,19 +2382,16 @@ impl Session {
                 return Err(SessionError::SourceChanged);
             }
         }
-        let Some(path) = self.persistence_path() else {
+        if let Some((_, true)) = &writer {
+            let (durable, _) = self.durable_history_revision()?;
+            if durable.as_deref() != Some(self.context_digest()?.as_str()) {
+                return Err(SessionError::SourceChanged);
+            }
+        }
+        let (Some(path), Some((writer, _))) = (self.persistence_path(), writer.as_ref()) else {
             return Ok(());
         };
-        let path_str = path.to_string_lossy();
-        let snapshot = self.render_jsonl_snapshot()?;
-        let backend = self.backend();
-        if backend.is_append_stream(&path_str)? {
-            backend.append(&path_str, snapshot.as_bytes())?;
-            return Ok(());
-        }
-        // Metadata failures must preserve the original transcript path, even
-        // for large sessions which ordinary saves would rotate first.
-        write_atomic_with(backend, &path_str, &snapshot)
+        self.save_snapshot(path, writer)
     }
 
     fn touch(&mut self) {
@@ -1760,6 +2416,7 @@ impl ConversationMessage {
     #[must_use]
     pub fn user_text(text: impl Into<String>) -> Self {
         Self {
+            history: None,
             role: MessageRole::User,
             blocks: vec![ContentBlock::Text { text: text.into() }],
             usage: None,
@@ -1771,6 +2428,7 @@ impl ConversationMessage {
     #[must_use]
     pub fn assistant(blocks: Vec<ContentBlock>) -> Self {
         Self {
+            history: None,
             role: MessageRole::Assistant,
             blocks,
             usage: None,
@@ -1799,6 +2457,7 @@ impl ConversationMessage {
     #[must_use]
     pub fn assistant_with_usage(blocks: Vec<ContentBlock>, usage: Option<TokenUsage>) -> Self {
         Self {
+            history: None,
             role: MessageRole::Assistant,
             blocks,
             usage,
@@ -1815,6 +2474,7 @@ impl ConversationMessage {
         is_error: bool,
     ) -> Self {
         Self {
+            history: None,
             role: MessageRole::Tool,
             blocks: vec![ContentBlock::ToolResult {
                 tool_use_id: tool_use_id.into(),
@@ -1831,6 +2491,9 @@ impl ConversationMessage {
     #[must_use]
     pub fn to_json(&self) -> JsonValue {
         let mut object = BTreeMap::new();
+        if let Some(history) = &self.history {
+            object.insert("history".into(), history.to_json());
+        }
         object.insert(
             "role".to_string(),
             JsonValue::String(
@@ -1862,7 +2525,7 @@ impl ConversationMessage {
         JsonValue::Object(object)
     }
 
-    fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
+    pub(super) fn from_json(value: &JsonValue) -> Result<Self, SessionError> {
         let object = value
             .as_object()
             .ok_or_else(|| SessionError::Format("message must be an object".to_string()))?;
@@ -1898,6 +2561,11 @@ impl ConversationMessage {
             .and_then(JsonValue::as_i64)
             .and_then(|value| u64::try_from(value).ok());
         Ok(Self {
+            history: object
+                .get("history")
+                .map(crate::session_history::MessageIdentity::from_json)
+                .transpose()?
+                .map(Arc::new),
             role,
             blocks,
             usage,
@@ -2385,7 +3053,7 @@ impl ToolHistoryRepairs {
 
     fn plan(messages: &[ConversationMessage]) -> Self {
         let mut repairs = Self::default();
-        let mut pending: Vec<(&str, &str)> = Vec::new();
+        let mut pending: Vec<(&str, &str, Option<&str>)> = Vec::new();
         for (index, message) in messages.iter().enumerate() {
             // Anthropic-format history and fork prefixes put results in User
             // messages, while our executor writes Tool messages. Both are the
@@ -2400,7 +3068,11 @@ impl ToolHistoryRepairs {
             }
             if message.role == MessageRole::Assistant {
                 pending.extend(message.blocks.iter().filter_map(|block| match block {
-                    ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+                    ContentBlock::ToolUse { id, name, .. } => Some((
+                        id.as_str(),
+                        name.as_str(),
+                        crate::session_history::tool_origin(message, id),
+                    )),
                     _ => None,
                 }));
             }
@@ -2408,7 +3080,11 @@ impl ToolHistoryRepairs {
                 if let ContentBlock::ToolResult { tool_use_id, .. } = block {
                     if let Some(position) = pending
                         .iter()
-                        .position(|(id, _)| *id == tool_use_id)
+                        .position(|(id, _, origin)| {
+                            *id == tool_use_id
+                                && crate::session_history::tool_origin(message, tool_use_id)
+                                    .is_none_or(|expected| *origin == Some(expected))
+                        })
                         .filter(|_| is_result_message)
                     {
                         pending.remove(position);
@@ -2422,11 +3098,11 @@ impl ToolHistoryRepairs {
         repairs
     }
 
-    fn finish_batch(&mut self, before: usize, pending: &mut Vec<(&str, &str)>) {
+    fn finish_batch(&mut self, before: usize, pending: &mut Vec<(&str, &str, Option<&str>)>) {
         if pending.is_empty() {
             return;
         }
-        self.missing.push((before, pending.drain(..).map(|(id, name)| {
+        self.missing.push((before, pending.drain(..).map(|(id, name, _)| {
             ConversationMessage::tool_result(id, name,
                 "[Tool execution was interrupted before a final result was received. Side effects may already have occurred. Inspect the current state before retrying.]", true)
         }).collect()));
@@ -2515,11 +3191,6 @@ fn generate_session_id() -> String {
     format!("session-{}", uuid::Uuid::new_v4())
 }
 
-#[cfg(test)]
-fn write_atomic(path: &Path, contents: &str) -> Result<(), SessionError> {
-    write_atomic_with(&StdFsBackend, &path.to_string_lossy(), contents)
-}
-
 fn write_atomic_with(
     backend: &dyn FsBackend,
     path: &str,
@@ -2532,100 +3203,10 @@ fn write_atomic_with(
     Ok(())
 }
 
-#[allow(dead_code)]
-fn temporary_path_for(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("session");
-    path.with_file_name(format!(
-        "{file_name}.tmp-{}-{}",
-        current_time_millis(),
-        SESSION_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ))
-}
-
-#[cfg(test)]
-fn rotate_session_file_if_needed(path: &Path) -> Result<(), SessionError> {
-    rotate_session_file_if_needed_with(&StdFsBackend, path)
-}
-
-fn rotate_session_file_if_needed_with(
-    backend: &dyn FsBackend,
-    path: &Path,
-) -> Result<(), SessionError> {
-    let path_str = path.to_string_lossy();
-    let Ok(meta) = backend.stat(&path_str) else {
-        return Ok(());
-    };
-    if meta.len < ROTATE_AFTER_BYTES {
-        return Ok(());
-    }
-    let rotated = rotated_log_path(path);
-    backend.rename(&path_str, &rotated.to_string_lossy())?;
-    Ok(())
-}
-
-fn rotated_log_path(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("session");
-    path.with_file_name(format!("{stem}.rot-{}.jsonl", current_time_millis()))
-}
-
-#[cfg(test)]
-fn cleanup_rotated_logs(path: &Path) -> Result<(), SessionError> {
-    cleanup_rotated_logs_with(&StdFsBackend, path)
-}
-
-fn cleanup_rotated_logs_with(backend: &dyn FsBackend, path: &Path) -> Result<(), SessionError> {
-    let Some(parent) = path.parent() else {
-        return Ok(());
-    };
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("session");
-    let prefix = format!("{stem}.rot-");
-    let parent_str = parent.to_string_lossy();
-
-    let entries = match backend.readdir(&parent_str) {
-        Ok(entries) => entries,
-        Err(_) => return Ok(()),
-    };
-
-    let mut rotated_paths: Vec<PathBuf> = entries
-        .into_iter()
-        .filter(|entry| {
-            entry.name.starts_with(&prefix)
-                && Path::new(&entry.name)
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
-        })
-        .map(|entry| parent.join(&entry.name))
-        .collect();
-
-    rotated_paths.sort_by_key(|entry_path| {
-        backend
-            .stat(&entry_path.to_string_lossy())
-            .ok()
-            .and_then(|m| m.modified)
-            .unwrap_or(UNIX_EPOCH)
-    });
-
-    let remove_count = rotated_paths.len().saturating_sub(MAX_ROTATED_FILES);
-    for stale_path in rotated_paths.into_iter().take(remove_count) {
-        backend.delete(&stale_path.to_string_lossy())?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_rotated_logs, current_time_millis, rotate_session_file_if_needed, ContentBlock,
-        ConversationMessage, MessageRole, Session, SessionFork,
+        current_time_millis, ContentBlock, ConversationMessage, MessageRole, Session, SessionFork,
     };
     use crate::json::JsonValue;
     use crate::usage::{TokenUsage, UsageCostCurrency, UsageTracker};
@@ -2949,8 +3530,8 @@ mod tests {
 
         assert_eq!(restored.messages.len(), 1);
         assert_eq!(
-            restored.messages[0],
-            ConversationMessage::user_text("legacy")
+            restored.messages[0].blocks,
+            ConversationMessage::user_text("legacy").blocks
         );
         assert!(!restored.session_id.is_empty());
     }
@@ -2975,7 +3556,7 @@ mod tests {
         fs::remove_file(&path).expect("temp file should be removable");
 
         assert_eq!(restored.messages.len(), 2);
-        assert_eq!(restored.messages[0], ConversationMessage::user_text("hi"));
+        assert_eq!(restored.messages[0], session.messages[0]);
     }
 
     #[test]
@@ -3062,54 +3643,6 @@ mod tests {
             })
         );
         assert_eq!(restored.messages, forked.messages);
-    }
-
-    #[test]
-    fn rotates_and_cleans_up_large_session_logs() {
-        // given — its own directory, not the shared system temp dir.
-        // Rotation cleanup lists the parent directory, so anything else
-        // writing there is part of this test's input. Sharing the system
-        // temp dir with the rest of a `--workspace` run made this test fail
-        // intermittently on CI: an unrelated file vanishing mid-listing
-        // aborted the listing, cleanup silently did nothing, and the
-        // rotated-file count stayed above the cap.
-        let dir = temp_session_path("rotation").with_extension("d");
-        fs::create_dir_all(&dir).expect("rotation dir should create");
-        let path = dir.join("session.json");
-        let oversized_length =
-            usize::try_from(super::ROTATE_AFTER_BYTES + 10).expect("rotate threshold should fit");
-        fs::write(&path, "x".repeat(oversized_length)).expect("oversized file should write");
-
-        // when
-        rotate_session_file_if_needed(&path).expect("rotation should succeed");
-
-        // then
-        assert!(
-            !path.exists(),
-            "original path should be rotated away before rewrite"
-        );
-
-        for _ in 0..5 {
-            // Sleep 10ms between iterations so each rotated_log_path()
-            // gets a distinct timestamp and modification time. CI VMs
-            // may have coarse timers where 2ms is not enough to produce
-            // distinct filesystem timestamps, causing cleanup to
-            // non-deterministically skip files during dedup/sort.
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            let rotated = super::rotated_log_path(&path);
-            fs::write(&rotated, "old").expect("rotated file should write");
-        }
-        cleanup_rotated_logs(&path).expect("cleanup should succeed");
-
-        let rotated_count = rotation_files(&path).len();
-        assert!(rotated_count <= super::MAX_ROTATED_FILES);
-        assert_eq!(
-            rotated_count,
-            super::MAX_ROTATED_FILES,
-            "cleanup should leave exactly the cap, not fewer and not more",
-        );
-
-        fs::remove_dir_all(&dir).expect("rotation dir should be removable");
     }
 
     #[test]
@@ -3271,30 +3804,6 @@ mod tests {
         let path = temp_session_path(label);
         fs::write(&path, format!("{contents}\n")).expect("temp session file should write");
         path
-    }
-
-    fn rotation_files(path: &Path) -> Vec<PathBuf> {
-        let stem = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .expect("temp path should have file stem")
-            .to_string();
-        fs::read_dir(path.parent().expect("temp path should have parent"))
-            .expect("temp dir should read")
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|entry_path| {
-                entry_path
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with(&format!("{stem}.rot-"))
-                            && Path::new(name)
-                                .extension()
-                                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"))
-                    })
-            })
-            .collect()
     }
 }
 

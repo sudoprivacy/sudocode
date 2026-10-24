@@ -43,7 +43,9 @@ fn seed(env: &TestEnv, text: String) -> std::path::PathBuf {
         }]))
         .unwrap();
     let path = env.workspace_root().join("links.jsonl");
-    session.save_to_path(&path).unwrap();
+    // The release comparison also opens this fixture with main's older CLI.
+    // Export the common snapshot format through the public session serializer.
+    std::fs::write(&path, format!("{}\n", session.to_json().unwrap().render())).unwrap();
     path
 }
 

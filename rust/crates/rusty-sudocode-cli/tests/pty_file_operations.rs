@@ -94,7 +94,7 @@ fn windows_verbatim_paths_read_the_same_file() {
         .load_session("latest")
         .unwrap()
         .session;
-    let blocks: Vec<_> = saved.messages.iter().flat_map(|m| &m.blocks).collect();
+    let blocks: Vec<_> = saved.messages().iter().flat_map(|m| &m.blocks).collect();
     for path in &paths {
         let id = blocks
             .iter()

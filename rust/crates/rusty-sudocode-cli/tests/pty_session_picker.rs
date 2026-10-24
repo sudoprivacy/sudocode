@@ -55,7 +55,7 @@ fn record_response(
 ) -> PathBuf {
     let session = runtime::Session::load_from_path(path).unwrap();
     let count = session
-        .messages
+        .messages()
         .iter()
         .filter(|message| message.role == runtime::MessageRole::Assistant)
         .count();
@@ -66,7 +66,7 @@ fn record_response(
         |_| {
             let persisted = runtime::Session::load_from_path(path).is_ok_and(|session| {
                 session
-                    .messages
+                    .messages()
                     .iter()
                     .filter(|message| message.role == runtime::MessageRole::Assistant)
                     .count()

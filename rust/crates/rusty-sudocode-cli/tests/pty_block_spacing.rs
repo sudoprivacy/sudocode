@@ -79,7 +79,7 @@ fn expected_file_frames(env: &TestEnv) -> BTreeMap<&'static str, usize> {
     let saved = store.load_session("latest").unwrap().session;
     let mut calls = BTreeMap::new();
     let mut successful = BTreeSet::new();
-    for message in &saved.messages {
+    for message in saved.messages() {
         for block in &message.blocks {
             match block {
                 ContentBlock::ToolUse {
@@ -350,7 +350,7 @@ fn roundtrip(queue: bool, width: u16) {
     let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
     let saved = store.load_session("latest").unwrap().session;
     let results: Vec<_> = saved
-        .messages
+        .messages()
         .iter()
         .flat_map(|message| &message.blocks)
         .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))

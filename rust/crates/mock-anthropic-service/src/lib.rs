@@ -859,7 +859,7 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
 }
 
 fn concurrency_batch_complete(request: &MessageRequest) -> bool {
-    concurrency_calls(request).iter().all(|call| request.messages.iter().flat_map(|m| &m.content).any(|block| {
+    concurrency_calls(request).iter().all(|call| current_turn_blocks(request).any(|block| {
         matches!(block, InputContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == &call.id)
     }))
 }
@@ -994,10 +994,21 @@ fn compact_bash_step(request: &MessageRequest) -> Option<(String, &'static str, 
         json!({"command":"printf 'diagnostic only' >&2"}),
     ];
     if completed == steps.len() {
+        let output = request.messages.iter().rev().find_map(|message| {
+            message.content.iter().find_map(|block| match block {
+                InputContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } if tool_use_id == "compact_bash_5" => Some(flatten_tool_result_content(content)),
+                _ => None,
+            })
+        })?;
+        let output_id = output.split_once("id=\"")?.1.split_once('"')?.0;
         return Some((
             format!("compact_bash_{completed}"),
             "read_tool_output",
-            json!({"id":"compact_bash_5", "offset":60000, "limit":1000}),
+            json!({"id":output_id, "offset":60000, "limit":1000}),
         ));
     }
     steps
@@ -1007,25 +1018,33 @@ fn compact_bash_step(request: &MessageRequest) -> Option<(String, &'static str, 
 }
 
 // A resumed session must run the new task rather than reuse an earlier result.
+fn current_turn_blocks(request: &MessageRequest) -> impl Iterator<Item = &InputContentBlock> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|message| {
+            message
+                .content
+                .iter()
+                .rev()
+                .map(move |block| (message.role.as_str(), block))
+        })
+        .take_while(|(role, block)| {
+            !(*role == "user"
+                && matches!(block,
+            InputContentBlock::Text { text, .. } if text.contains(SCENARIO_PREFIX)))
+        })
+        .map(|(_, block)| block)
+}
+
 fn current_turn_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
-    for message in request.messages.iter().rev() {
-        for block in message.content.iter().rev() {
-            match block {
-                InputContentBlock::ToolResult {
-                    content, is_error, ..
-                } => {
-                    return Some((flatten_tool_result_content(content), *is_error));
-                }
-                InputContentBlock::Text { text, .. }
-                    if message.role == "user" && text.contains("PARITY_SCENARIO:") =>
-                {
-                    return None
-                }
-                _ => {}
-            }
-        }
-    }
-    None
+    current_turn_blocks(request).find_map(|block| match block {
+        InputContentBlock::ToolResult {
+            content, is_error, ..
+        } => Some((flatten_tool_result_content(content), *is_error)),
+        _ => None,
+    })
 }
 
 fn latest_tool_result(request: &MessageRequest) -> Option<(String, bool)> {
@@ -2115,7 +2134,7 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
         // A co-host agent answers a peer message by calling `send` back. The
         // reply's recipient is fixed here because nothing outside the daemon
         // chooses it: the agent runs in-process and this scenario is its mind.
-        Scenario::CohostReply => match latest_tool_result(request) {
+        Scenario::CohostReply => match current_turn_tool_result(request) {
             Some((tool_output, _)) => final_text_sse(&format!("cohost replied: {tool_output}")),
             None => tool_use_sse(
                 "toolu_cohost_reply",
@@ -2914,7 +2933,7 @@ fn build_message_response(request: &MessageRequest, scenario: Scenario) -> Messa
                 ),
             }
         }
-        Scenario::CohostReply => match latest_tool_result(request) {
+        Scenario::CohostReply => match current_turn_tool_result(request) {
             Some((tool_output, _)) => text_message_response(
                 "msg_cohost_reply_final",
                 &format!("cohost replied: {tool_output}"),

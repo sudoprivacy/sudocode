@@ -21,9 +21,11 @@ data=run/'data';identity=run/'id';data.mkdir();identity.mkdir()
 env={k:v for k,v in os.environ.items() if k.upper() in ['PATH','SYSTEMROOT','WINDIR','COMSPEC','PATHEXT','TEMP','TMP','SYSTEMDRIVE','NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE']}
 env.update(NEXUS_DATA_DIR=str(data),NEXUS_IDENTITY_DIR=str(identity),NEXUS_API_KEY_SECRET='isolated-acp-sdk-fixture-only',NEXUS_ADVERTISE_ADDR=f'127.0.0.1:{port}',NEXUS_CLUSTER_INIT='sharedzone',NEXUS_CLUSTER_INIT_MOUNTS='/agents=sharedzone',RUST_LOG='info')
 process=None
+start_offset=0
 log=(run/'daemon.log').open('ab')
 def start():
- global process
+ global process,start_offset
+ start_offset=(run/'daemon.log').stat().st_size
  process=subprocess.Popen([str(daemon),'--bind-addr',f'127.0.0.1:{port}'],env=env,stdout=log,stderr=subprocess.STDOUT)
  (run/'owned-daemon.json').write_text(json.dumps({'pid':process.pid,'binary':str(daemon),'data':str(data),'port':port}))
 def stop():
@@ -36,7 +38,7 @@ def stop():
 
 def waitlog(needle):
  startAt=time.monotonic()
- while needle not in (run/'daemon.log').read_text(encoding='utf-8',errors='replace'):
+ while needle not in (run/'daemon.log').read_bytes()[start_offset:].decode('utf-8',errors='replace'):
   if process.poll() is not None:raise RuntimeError('Owned daemon exited')
   if time.monotonic()-startAt>45:raise TimeoutError(needle)
   time.sleep(.1)
@@ -62,7 +64,7 @@ try:
  p=subprocess.run([str(node),str(npm),'install','--offline','--ignore-scripts','--no-audit','--no-fund','--prefix',str(install),str(sdk/'artifacts/sudocode-acp-0.1.0.tgz')],env=env,capture_output=True)
  (run/'offline-install.log').write_bytes(p.stdout+p.stderr);assert p.returncode==0
  p=subprocess.run([str(node),str(install/'node_modules/@sudocode/acp/dist/server.cjs'),'--verify'],env=env,capture_output=True);assert p.returncode==0,p.stderr
- start();waitlog("Zone 'sharedzone' registered")
+ start();waitlog('VFS data plane ready')
  config={'root':str(run),'install':str(install),'sdkSource':str(sdk),'scode':str(scode),'scodeSha256':scodeReceipt['binarySha256'],'source':scodeReceipt['sourceCommit'],'packageSource':json.loads((sdk/'manifest.json').read_text())['sourceCommit'],'sampleConfig':str(sdk/'../../rust/crates/runtime/src/sudocode.sample.json'),'actors':actors,'marker':uuid.uuid4().hex,'daemonReceipt':daemonReceipt}
  cfg=run/'driver.json';cfg.write_text(json.dumps(config))
  p=subprocess.run([str(node),str(sdk/'test/nativeIntegration.cjs'),str(cfg)],env=env,capture_output=True,timeout=180)

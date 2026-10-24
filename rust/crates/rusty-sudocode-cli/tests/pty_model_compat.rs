@@ -312,7 +312,7 @@ fn assistant_answer(root: &Path) -> Result<String, String> {
     }
     let session = Session::load_from_path(&paths[0]).map_err(|e| e.to_string())?;
     let message = session
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|message| message.role == MessageRole::Assistant)

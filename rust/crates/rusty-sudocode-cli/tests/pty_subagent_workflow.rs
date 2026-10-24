@@ -219,21 +219,25 @@ fn run_background_verification(workflow: Workflow) {
             .expect("saved parent transcript");
         let saved = runtime::Session::load_from_path(&path).unwrap();
         assert!(
-            saved.messages.iter().flat_map(|m| &m.blocks).any(|block| {
-                let runtime::ContentBlock::ToolResult {
-                    tool_name, output, ..
-                } = block
-                else {
-                    return false;
-                };
-                tool_name.eq_ignore_ascii_case("bash")
-                    && serde_json::from_str::<Value>(output).is_ok_and(|result| {
-                        result["exit_code"] == 0
-                            && result["stdout"]
-                                .as_str()
-                                .is_some_and(|text| text.trim() == "PARENT_WORK_FINISHED")
-                    })
-            }),
+            saved
+                .messages()
+                .iter()
+                .flat_map(|m| &m.blocks)
+                .any(|block| {
+                    let runtime::ContentBlock::ToolResult {
+                        tool_name, output, ..
+                    } = block
+                    else {
+                        return false;
+                    };
+                    tool_name.eq_ignore_ascii_case("bash")
+                        && serde_json::from_str::<Value>(output).is_ok_and(|result| {
+                            result["exit_code"] == 0
+                                && result["stdout"]
+                                    .as_str()
+                                    .is_some_and(|text| text.trim() == "PARENT_WORK_FINISHED")
+                        })
+                }),
             "foreground tool must finish normally after task view dismissal"
         );
     }
@@ -312,6 +316,7 @@ fn manifests(env: &TestEnv) -> Vec<Value> {
         .flatten()
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
         .filter_map(|entry| serde_json::from_slice(&fs::read(entry.path()).ok()?).ok())
+        .filter(|manifest: &Value| manifest.get("agentId").is_some())
         .collect()
 }
 

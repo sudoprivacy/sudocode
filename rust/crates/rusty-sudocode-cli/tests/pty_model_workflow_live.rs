@@ -167,7 +167,7 @@ fn delegate_compact_and_resume_a_fresh_quote() {
          do not search directories or read files because the source was removed.", output.display()));
     let bytes = fs::read(&output).unwrap_or_else(|error| {
         let session = Session::load_from_path(path).unwrap();
-        let last_messages: Vec<_> = session.messages.iter().rev().take(6).collect();
+        let last_messages: Vec<_> = session.messages().iter().rev().take(6).collect();
         panic!(
             "read {}: {error}\nPTY:\n{screen}\nFinal messages:\n{last_messages:#?}",
             output.display()
@@ -195,7 +195,7 @@ fn parent_transcript(env: &TestEnv) -> PathBuf {
     assert_eq!(parents.len(), 1, "must find the actual parent transcript");
     let before = Session::load_from_path(&parents[0]).unwrap();
     let spawns: Vec<_> = before
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .filter_map(|b| {

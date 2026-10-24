@@ -130,7 +130,7 @@ fn turn(cli: &mut pty_expect::PtySession, prompt: &str) {
 
 fn assert_no_standalone_labels(session: &runtime::Session) {
     for block in session
-        .messages
+        .messages()
         .iter()
         .filter(|message| message.role == runtime::MessageRole::Assistant)
         .flat_map(|message| &message.blocks)
@@ -213,7 +213,7 @@ fn thinking_replay_live_repairs_edited_prefix_once_and_resumes_new_signatures() 
     let assert_answer = |marker: &str| {
         let session = runtime::Session::load_from_path(&path).unwrap();
         let text = session
-            .messages
+            .messages()
             .last()
             .unwrap()
             .blocks
@@ -229,7 +229,7 @@ fn thinking_replay_live_repairs_edited_prefix_once_and_resumes_new_signatures() 
             .join("");
         assert_eq!(text.trim(), marker);
         for block in session
-            .messages
+            .messages()
             .iter()
             .filter(|m| m.role == runtime::MessageRole::Assistant)
             .flat_map(|m| &m.blocks)
@@ -246,7 +246,7 @@ fn thinking_replay_live_repairs_edited_prefix_once_and_resumes_new_signatures() 
     assert_answer(&format!("REPLAY_START:{nonce}:{expected}"));
     let before = runtime::Session::load_from_path(&path).unwrap();
     assert!(before
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .any(|block| matches!(block,
@@ -287,11 +287,11 @@ fn thinking_replay_live_repairs_edited_prefix_once_and_resumes_new_signatures() 
     );
     let archived = runtime::Session::load_from_path(archives[0].path()).unwrap();
     assert_eq!(
-        &archived.messages[..before.messages.len()],
-        before.messages.as_slice()
+        &archived.messages()[..before.messages().len()],
+        before.messages()
     );
     let repaired = runtime::Session::load_from_path(&path).unwrap();
-    for (original, actual) in before.messages.iter().zip(&repaired.messages) {
+    for (original, actual) in before.messages().iter().zip(repaired.messages()) {
         let mut expected = original.clone();
         if expected.role == runtime::MessageRole::Assistant {
             expected.blocks.retain(|b| {
@@ -302,6 +302,14 @@ fn thinking_replay_live_repairs_edited_prefix_once_and_resumes_new_signatures() 
                 )
             });
         }
+        if expected.blocks != original.blocks {
+            assert_ne!(
+                original.history.as_ref().map(|identity| &identity.id),
+                actual.history.as_ref().map(|identity| &identity.id),
+                "changed signed content must have a new immutable identity"
+            );
+        }
+        expected.history.clone_from(&actual.history);
         assert_eq!(
             &expected, actual,
             "repair must retain ordinary history and usage"
@@ -423,7 +431,7 @@ fn effort_live_read_adjust_and_resume_use_persisted_preference() {
     let assert_answer =
         |marker: &str| {
             let session = runtime::Session::load_from_path(&path).unwrap();
-            assert!(session.messages.last().unwrap().blocks.iter().any(
+            assert!(session.messages().last().unwrap().blocks.iter().any(
                 |b| matches!(b, runtime::ContentBlock::Text { text } if text.trim() == marker)
             ));
         };
@@ -565,14 +573,14 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
     let session = runtime::Session::load_from_path(&path).unwrap();
     assert_no_standalone_labels(&session);
     assert!(session
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .any(|b| matches!(b,
         runtime::ContentBlock::Text { text } if text.contains("ADAPTIVE_CHAIN_OK:324"))));
     assert!(
         session
-            .messages
+            .messages()
             .iter()
             .flat_map(|m| &m.blocks)
             .any(|b| matches!(b,
@@ -581,7 +589,7 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
         "live route must preserve signed thinking, including hidden summaries"
     );
     if display == "omitted" {
-        assert!(session.messages.iter().flat_map(|m| &m.blocks).all(|b| {
+        assert!(session.messages().iter().flat_map(|m| &m.blocks).all(|b| {
             !matches!(b, runtime::ContentBlock::Thinking { thinking, .. } if !thinking.is_empty())
         }), "hidden mode must omit readable summaries, not the signed blocks");
     }
@@ -623,7 +631,7 @@ fn adaptive_live_tool_chain_compaction_and_resume_read_cache() {
     let resumed = runtime::Session::load_from_path(&path).unwrap();
     assert_no_standalone_labels(&resumed);
     assert!(resumed
-        .messages
+        .messages()
         .last()
         .unwrap()
         .blocks

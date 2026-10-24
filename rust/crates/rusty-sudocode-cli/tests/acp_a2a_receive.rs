@@ -189,10 +189,143 @@ impl Drop for AcpStdio {
     }
 }
 
+/// A successful close must retire the real receiver worker before the client
+/// can terminate its CLI. Merely observing an empty agent's startup response
+/// misses this branch: the receiver may not have claimed its seat yet.
+#[test]
+#[ignore = "requires a running nexusd-cluster and a dedicated receiver credential"]
+fn live_session_close_releases_an_acquired_receiver_seat_before_reply() {
+    use runtime::fs_backend::{FsBackend, NexusVfsFsBackend};
+
+    let endpoint = std::env::var("NEXUS_A2A_TEST_ENDPOINT").expect("test daemon endpoint");
+    let bundle = std::env::var("NEXUS_A2A_TEST_RECEIVER_CREDENTIAL")
+        .expect("dedicated lifecycle receiver credential");
+    let credential = runtime::nexus_mailbox::AgentCredential::load(&bundle)
+        .expect("load lifecycle receiver credential");
+    let agent = credential.agent.clone();
+    let client = runtime::nexus_mailbox::Config {
+        endpoint: endpoint.clone(),
+        agent: agent.clone(),
+        tls: credential.tls,
+    }
+    .connect()
+    .expect("connect using the receiver's own mTLS identity");
+    let backend = NexusVfsFsBackend::from_arc_mtls(client, String::new(), "root");
+    let path = format!("/agents/{agent}/receiver.lock");
+    let workspace = tempfile::tempdir().expect("lifecycle workspace");
+    let config_home = tempfile::tempdir().expect("lifecycle config home");
+    let binary = std::env::var_os("SCODE_RECEIVER_TEST_BIN")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_scode").into());
+    let mut acp = spawn_acp_from_binary(
+        &binary,
+        &endpoint,
+        &agent,
+        "unused-peer",
+        &workspace,
+        &config_home,
+    );
+    let initialized = acp.request(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    );
+    assert!(initialized.get("result").is_some(), "{initialized}");
+    let opened_at = Instant::now();
+    let opened = acp.request(
+        "session/new",
+        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+    );
+    let sid = opened["result"]["sessionId"]
+        .as_str()
+        .expect("new SID")
+        .to_string();
+    let second = acp.request(
+        "session/new",
+        json!({"cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+    );
+    let second_sid = second["result"]["sessionId"]
+        .as_str()
+        .expect("second SID")
+        .to_string();
+    let await_seat = || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match backend
+                .try_lock(&path, 30_000)
+                .expect("probe the real seat")
+            {
+                None => break,
+                Some(probe) => drop(probe),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "receiver never acquired its real seat"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    await_seat();
+    let first_close = acp.request("session/close", json!({"sessionId": sid}));
+    assert!(first_close.get("result").is_some(), "{first_close}");
+    assert!(
+        backend
+            .try_lock(&path, 30_000)
+            .expect("seat after first close")
+            .is_none(),
+        "closing one session must preserve its agent's other live session"
+    );
+    let last_close = acp.request("session/close", json!({"sessionId": second_sid}));
+    assert!(last_close.get("result").is_some(), "{last_close}");
+    assert!(
+        opened_at.elapsed() < Duration::from_secs(15),
+        "the close proof must precede the receiver's original 30-second TTL"
+    );
+    let probe = backend
+        .try_lock(&path, 30_000)
+        .expect("seat after last close");
+    assert!(
+        probe.is_some(),
+        "close replied before its acquired receiver seat was released"
+    );
+    drop(probe);
+
+    // Re-entry on this connection exercises the retained retirement handle.
+    let loaded = acp.request(
+        "session/load",
+        json!({"sessionId": second_sid, "cwd": workspace.path().to_string_lossy(), "mcpServers": []}),
+    );
+    assert!(loaded.get("result").is_some(), "{loaded}");
+    await_seat();
+    let closed = acp.request("session/close", json!({"sessionId": second_sid}));
+    assert!(closed.get("result").is_some(), "{closed}");
+    let probe = backend
+        .try_lock(&path, 30_000)
+        .expect("seat after re-entry close");
+    assert!(probe.is_some(), "re-entered receiver was not joined");
+    drop(probe);
+}
+
 /// Start `scode acp` wired to `endpoint` as `agent`, with an isolated config
 /// home so the durable read cursor a test writes cannot leak into another test
 /// or into the developer's own.
 fn spawn_acp(
+    endpoint: &str,
+    agent: &str,
+    peer: &str,
+    workspace: &tempfile::TempDir,
+    config_home: &tempfile::TempDir,
+) -> AcpStdio {
+    spawn_acp_from_binary(
+        std::ffi::OsStr::new(env!("CARGO_BIN_EXE_scode")),
+        endpoint,
+        agent,
+        peer,
+        workspace,
+        config_home,
+    )
+}
+
+fn spawn_acp_from_binary(
+    binary: &std::ffi::OsStr,
     endpoint: &str,
     agent: &str,
     peer: &str,
@@ -218,7 +351,7 @@ fn spawn_acp(
         std::path::Path::new(&receiver_credential),
     );
     node_home::pin_agent_name(workspace.path(), agent);
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    let mut cmd = Command::new(binary);
     cmd.arg("acp")
         .current_dir(workspace.path())
         .env("SUDO_CODE_CONFIG_HOME", config_home.path())

@@ -113,7 +113,7 @@ fn real_terminal_long_reviews_preserve_scrollback_and_reading_position() {
             let content = transcripts
                 .iter()
                 .filter_map(|path| runtime::Session::load_from_path(path).ok())
-                .flat_map(|session| session.messages)
+                .flat_map(runtime::Session::into_messages)
                 .flat_map(|message| message.blocks)
                 .find_map(|block| match block {
                     runtime::ContentBlock::ToolUse { name, input, .. } if name == "write_plan" => {

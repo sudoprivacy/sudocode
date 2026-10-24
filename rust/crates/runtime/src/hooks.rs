@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fmt::Write as FmtWrite;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -992,7 +992,12 @@ impl CommandWithStdin {
     ) -> std::io::Result<CommandExecution> {
         let mut child = self.command.spawn()?;
         if let Some(mut child_stdin) = child.stdin.take() {
-            child_stdin.write_all(stdin)?;
+            // Hooks can ignore their input and finish before it is written.
+            // Still collect their output and exit status to preserve decisions.
+            match child_stdin.write_all(stdin) {
+                Err(error) if error.kind() != ErrorKind::BrokenPipe => return Err(error),
+                _ => {}
+            }
         }
 
         loop {

@@ -213,7 +213,7 @@ fn an_offline_node_send_fails_on_the_node_without_creating_a_disk_inbox() {
         "the actual child session must use the private test workspace"
     );
     let results: Vec<_> = saved
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .filter_map(|block| {
@@ -254,7 +254,7 @@ fn wait_for_saved_reply(env: &TestEnv, expected: &str) -> PathBuf {
             common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
         {
             if let Ok(saved) = runtime::Session::load_from_path(&path) {
-                let replied = saved.messages.iter().any(|message| {
+                let replied = saved.messages().iter().any(|message| {
                     message.role == runtime::MessageRole::Assistant
                         && message.blocks.iter().any(|block| {
                             matches!(block, runtime::ContentBlock::Text { text } if text.contains(expected))

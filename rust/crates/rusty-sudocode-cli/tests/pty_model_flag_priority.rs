@@ -140,7 +140,7 @@ fn assistant_answer(env: &TestEnv) -> Option<String> {
     // The live child can still be appending a record while this is polled.
     let session = Session::load_from_path(transcript).ok()?;
     let answer = session
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|message| message.role == MessageRole::Assistant)?;

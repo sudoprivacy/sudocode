@@ -26,7 +26,7 @@ fn assert_file_roundtrip(env: &common::TestEnv, nonce: &str, format: &str) {
     let fixture = env.workspace_root().join("fixture.txt");
     let mut reads = std::collections::BTreeSet::new();
     let mut successful_reads = std::collections::BTreeSet::new();
-    for message in &session.messages {
+    for message in session.messages() {
         for block in &message.blocks {
             match block {
                 ContentBlock::ToolUse {
@@ -68,7 +68,7 @@ fn assert_file_roundtrip(env: &common::TestEnv, nonce: &str, format: &str) {
         "{format}: no actual file read returned this run's contents"
     );
     let answer = session
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|message| message.role == MessageRole::Assistant)
@@ -133,7 +133,7 @@ fn interactive_file_reads_updated_contents_after_resume() {
             |_| {
                 file_session(&env).is_some_and(|session| {
                     session
-                        .messages
+                        .messages()
                         .iter()
                         .rev()
                         .find(|m| m.role == MessageRole::Assistant)

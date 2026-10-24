@@ -468,7 +468,7 @@ fn signed_capture_body() -> String {
 fn assert_capture_session(path: &std::path::Path, expected: usize) {
     let session = runtime::Session::load_from_path(path).unwrap();
     let assistants: Vec<_> = session
-        .messages
+        .messages()
         .iter()
         .filter(|message| message.role == runtime::MessageRole::Assistant)
         .collect();
@@ -560,7 +560,7 @@ fn raw_stream_capture_preserves_signed_content_through_resume() {
         |_| {
             runtime::Session::load_from_path(&path).is_ok_and(|session| {
                 session
-                    .messages
+                    .messages()
                     .iter()
                     .filter(|m| m.role == runtime::MessageRole::Assistant)
                     .count()
@@ -735,7 +735,7 @@ fn raw_stream_capture_keeps_streaming_and_resume_responsive() {
             |_| {
                 runtime::Session::load_from_path(&path).is_ok_and(|session| {
                     session
-                        .messages
+                        .messages()
                         .iter()
                         .any(|message| message.role == runtime::MessageRole::Assistant)
                 })
@@ -801,7 +801,7 @@ fn raw_stream_capture_burst_preserves_output_and_reports_any_missing_evidence() 
     );
     let (path, directory) = capture_session_paths(&env);
     let session = runtime::Session::load_from_path(&path).unwrap();
-    assert!(session.messages.iter().flat_map(|m| &m.blocks).any(|block|
+    assert!(session.messages().iter().flat_map(|m| &m.blocks).any(|block|
         matches!(block, runtime::ContentBlock::Text { text } if text == "STREAM_BODY_VERIFIED")));
     let body = std::fs::read_dir(directory)
         .unwrap()
@@ -1059,7 +1059,7 @@ fn check_response(kind: ResponseKind) {
             .path;
         let session = runtime::Session::load_from_path(&path).unwrap();
         let assistant = session
-            .messages
+            .messages()
             .iter()
             .rev()
             .find(|message| message.role == runtime::MessageRole::Assistant)
@@ -1140,7 +1140,7 @@ fn check_response(kind: ResponseKind) {
             .path;
         let session = runtime::Session::load_from_path(&path).unwrap();
         let usage = session
-            .messages
+            .messages()
             .iter()
             .rev()
             .find(|message| message.role == runtime::MessageRole::Assistant)
@@ -1206,7 +1206,7 @@ fn check_response(kind: ResponseKind) {
                 |_| {
                     runtime::Session::load_from_path(&path).is_ok_and(|session| {
                         session
-                            .messages
+                            .messages()
                             .iter()
                             .filter(|message| message.role == runtime::MessageRole::Assistant)
                             .count()
@@ -1224,7 +1224,7 @@ fn check_response(kind: ResponseKind) {
             let restored = runtime::Session::load_from_path(&path).unwrap();
             assert_eq!(
                 restored
-                    .messages
+                    .messages()
                     .iter()
                     .filter(|message| message.role == runtime::MessageRole::Assistant)
                     .count(),

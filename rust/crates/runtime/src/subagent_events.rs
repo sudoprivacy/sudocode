@@ -67,6 +67,8 @@ pub enum SubagentUpdate {
 pub struct SubagentLifecycle {
     /// Client-visible id of the spawning call.
     pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_message_id: Option<String>,
     pub phase: SubagentPhase,
     /// Position in the spawned agent's own sequence (0 for `Started`).
     pub seq: u64,
@@ -81,6 +83,16 @@ pub struct SubagentLifecycle {
     /// task-notification format. Renderers enqueue it without interpreting
     /// the tool's private manifest schema.
     pub completion_notification: Option<String>,
+}
+
+impl SubagentLifecycle {
+    #[must_use]
+    pub fn source_key(&self) -> String {
+        crate::session_history::tool_source_key(
+            self.assistant_message_id.as_deref(),
+            &self.tool_call_id,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -118,15 +130,21 @@ pub struct SubagentIdentity {
 pub struct SubagentScope {
     agent_id: String,
     parent_tool_call_id: String,
+    assistant_message_id: Option<String>,
     next_seq: Mutex<u64>,
 }
 
 impl SubagentScope {
     #[must_use]
-    pub fn new(agent_id: impl Into<String>, parent_tool_call_id: impl Into<String>) -> Self {
+    pub fn new(
+        agent_id: impl Into<String>,
+        parent_tool_call_id: impl Into<String>,
+        assistant_message_id: Option<String>,
+    ) -> Self {
         Self {
             agent_id: agent_id.into(),
             parent_tool_call_id: parent_tool_call_id.into(),
+            assistant_message_id,
             next_seq: Mutex::new(0),
         }
     }
@@ -134,6 +152,11 @@ impl SubagentScope {
     #[must_use]
     pub fn parent_tool_call_id(&self) -> &str {
         &self.parent_tool_call_id
+    }
+
+    #[must_use]
+    pub fn assistant_message_id(&self) -> Option<&str> {
+        self.assistant_message_id.as_deref()
     }
 
     fn lock_seq(&self) -> std::sync::MutexGuard<'_, u64> {

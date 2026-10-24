@@ -270,6 +270,7 @@ pub fn unchanged_compaction(session: &Session) -> CompactionResult {
 pub fn prune_tool_results(session: &mut Session) -> usize {
     let mut pruned = 0;
     for message in &mut session.messages {
+        let before = pruned;
         for block in &mut message.blocks {
             if let ContentBlock::ToolResult {
                 tool_name, output, ..
@@ -288,6 +289,14 @@ pub fn prune_tool_results(session: &mut Session) -> usize {
                 }
             }
         }
+        if pruned > before {
+            if let Some(identity) = &mut message.history {
+                std::sync::Arc::make_mut(identity).id = uuid::Uuid::new_v4().to_string();
+            }
+        }
+    }
+    if pruned > 0 {
+        session.record_context_replacement();
     }
     pruned
 }
@@ -607,6 +616,7 @@ impl PreparedCompaction {
         );
         let mut session = self.source.clone();
         session.messages = vec![ConversationMessage {
+            history: None,
             role: MessageRole::System,
             blocks: vec![ContentBlock::Text { text: continuation }],
             usage: None,
@@ -931,6 +941,7 @@ fn build_compaction_messages(
             };
 
             Some(ConversationMessage {
+                history: None,
                 role,
                 blocks,
                 usage: None,
@@ -1083,6 +1094,7 @@ async fn compact_session_inner<C: ApiClient>(
     );
 
     let mut compacted_messages = vec![ConversationMessage {
+        history: None,
         role: MessageRole::System,
         blocks: vec![ContentBlock::Text { text: continuation }],
         usage: None,
@@ -1249,6 +1261,7 @@ async fn compact_session_cache_safe_inner<C: ApiClient>(
     );
 
     let mut compacted_messages = vec![ConversationMessage {
+        history: None,
         role: MessageRole::System,
         blocks: vec![ContentBlock::Text { text: continuation }],
         usage: None,
@@ -1342,6 +1355,7 @@ pub fn compact_session_sync(session: &Session, config: CompactionConfig) -> Comp
     );
 
     let mut compacted_messages = vec![ConversationMessage {
+        history: None,
         role: MessageRole::System,
         blocks: vec![ContentBlock::Text { text: continuation }],
         usage: None,
@@ -1390,10 +1404,16 @@ fn find_safe_compaction_boundary(
             for block in &message.blocks {
                 match block {
                     ContentBlock::ToolUse { id, .. } => {
-                        pending.insert(id, index);
+                        pending.insert(
+                            (crate::session_history::tool_origin(message, id), id),
+                            index,
+                        );
                     }
                     ContentBlock::ToolResult { tool_use_id, .. } => {
-                        pending.remove(tool_use_id);
+                        pending.remove(&(
+                            crate::session_history::tool_origin(message, tool_use_id),
+                            tool_use_id,
+                        ));
                     }
                     _ => {}
                 }
@@ -1798,6 +1818,7 @@ mod tests {
             }]),
             ConversationMessage::tool_result("1", "bash", "ok ".repeat(200), false),
             ConversationMessage {
+                history: None,
                 role: MessageRole::Assistant,
                 blocks: vec![ContentBlock::Text {
                     text: "recent".to_string(),
@@ -2179,6 +2200,7 @@ mod tests {
         let mut session = Session::new();
         session.messages = vec![
             ConversationMessage {
+                history: None,
                 role: MessageRole::System,
                 blocks: vec![ContentBlock::Text {
                     text: get_compact_continuation_message(summary, true, true, None),
@@ -2293,6 +2315,7 @@ mod tests {
                 },
             ]),
             ConversationMessage {
+                history: None,
                 role: MessageRole::User,
                 blocks: vec![ContentBlock::Image {
                     data: "base64data".to_string(),

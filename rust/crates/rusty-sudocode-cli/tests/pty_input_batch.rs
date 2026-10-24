@@ -146,7 +146,7 @@ fn middle_paste_then_typing_preserves_submitted_content() {
     let saved = Session::load_from_path(&paths[0]).unwrap();
     let text = |role| {
         saved
-            .messages
+            .messages()
             .iter()
             .rev()
             .find(|message| message.role == role)

@@ -135,7 +135,7 @@ fn spinner_warning_tracks_idle_time_and_recovers_on_progress() {
                 .last()
         });
         if let Some((line, color)) = snapshot {
-            if line.contains("(3.") && !line.contains('↓') {
+            if line.contains("(3s)") && !line.contains('↓') {
                 assert_eq!(color, "Rgb(166, 227, 161)", "initial wait remains green");
                 saw_initial_wait = true;
             }

@@ -106,7 +106,7 @@ fn shell_roundtrip(env: &TestEnv, prompt: &str, answer_marker: &str) -> BTreeMap
         .expect("saved transcript");
     let saved = runtime::Session::load_from_path(&path).unwrap();
     let saved_results: BTreeMap<_, _> = saved
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .filter_map(|b| match b {
@@ -250,7 +250,7 @@ fn cancelled_bash_persists_a_compact_interruption() {
         .expect("saved transcript");
     let saved = runtime::Session::load_from_path(&path).unwrap();
     let output = saved
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .find_map(|b| match b {

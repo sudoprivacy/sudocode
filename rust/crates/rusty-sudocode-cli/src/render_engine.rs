@@ -446,6 +446,7 @@ impl EngineEventRenderer {
                 name,
                 output,
                 is_error,
+            ..
             } => {
                 let input = self.tool_inputs.take(&id);
                 // Footer advice is rendered once in its slot; traces and

@@ -96,6 +96,7 @@ pub struct ModelCapability {
 impl ModelCapability {
     /// A model the gateway listed but documented nothing about. Every field is
     /// unknown, so every caller takes its own fallback.
+    #[cfg(test)]
     fn undocumented() -> Self {
         Self {
             context_window: None,
@@ -701,13 +702,6 @@ fn write_file(
 
 fn parse_capabilities_json(json: &str) -> Option<ModelCapabilitiesFile> {
     serde_json::from_str(json).ok()
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]

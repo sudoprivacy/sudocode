@@ -168,7 +168,8 @@ main pushes and manual workflow runs, using `SUDOROUTER_CI_API_KEY`.
 
 Hosts check `initialize.result._meta.sudocode.directA2a.version == 1`. Two
 session requests run the session's own A2A tools for the client, without a
-model turn:
+model turn. `directA2a.errorOutcomes == 1` means every failure carries a typed
+outcome, described below.
 
 - `_sudocode/a2a/send` with `{ "sessionId", "to", "message", "summary" }`
   runs the `send` tool. `message` and `summary` are plain text. The session's agent is the
@@ -183,23 +184,97 @@ permission mode (a prompt arrives as `session/request_permission`, and a denial
 comes back as `isError: true`) and `--allowedTools`. Nothing is written to the
 conversation, so the model never sees the call.
 
-A direct request never waits. It fails in one of two ways:
+A direct request never waits: if the session is in a turn or another request,
+or its tools are paused, it is refused before anything runs. `isError: true`
+reports a failed call; it does not prove that nothing was delivered, so do not
+retry it blindly.
 
-- **Refused (`-32602` invalid params):** nothing ran, so the client may
-  correct the request and send it again. This covers an unknown session,
-  invalid params, paused tools, and a session busy with a turn or another
-  request.
-- **Outcome unknown (`-32603`, `error.data.outcome == "unknown"`):** the call
-  was admitted and then failed, was cancelled (`session/cancel`,
-  `pause_tools`) or lost its reply. The message may have been sent, so do not
-  resend it blindly.
+`directA2a.errorOutcomes == 1` adds a typed refusal contract. Only an error with
+code `-32602` and `error.data.sudocode.directA2a` containing
+`{ "version": 1, "outcome": "not_submitted" }` attests that the host rejected
+the request before tool execution. This includes an unknown session, invalid
+params, paused tools, a busy session and a session control change. The reason
+is carried in `error.data.detail`. After
+admission, driver or response failures use `-32603` with top-level
+`error.data.outcome: "unknown"` and matching versioned phase metadata. A
+cancelled call never returns a partial tool result as if final. Generic
+JSON-RPC errors without the advertised contract, opaque
+`isError` results, timeout and disconnect do not prove that no append occurred.
+Keep the original request for reconciliation; do not retry or fall back to a
+prompt automatically.
 
-`isError: true` is the tool's own failure; it does not prove that nothing was
-delivered either.
+`directA2a.hostAudit == 1` adds
+`result._meta.sudocode.directA2a.audit`: version, unique `commandId`, native
+`sessionId`, actual executor mailbox `actor` and `namespaceRoot`, tool,
+`requestedInputSha256`, optional `effectiveInputSha256` and `resultSha256`.
+The first hash binds the requested fields before hooks; the effective hash is
+present only after the real executor has validated the rewritten invocation.
+The result hash binds content and `isError` before adding metadata. The host checks the
+effective call after hooks against its actual mailbox and unique command ID;
+hooks cannot insert a sender override or structured control message, change
+tools or dispatch a shadowing MCP tool. A plain text rewrite still uses the
+ordinary scheduler, hooks, policy and real executor.
 
-A direct call takes the same operation fence as a turn's tools: paused tools
-refuse it, and `pause_tools` reports control only after its worker has
-finished.
+Audit metadata is returned on this connection, separate from model history; it
+is not a durable journal or a delivery receipt. An empty namespace root denotes
+the daemon's logical namespace, not proof of a healthy connection or verified
+remote identity. The receiving node's authenticated envelope is the independent
+identity evidence. Hosts retaining an audit must save the native result and
+its call ID themselves, without putting a fabricated model tool call into the
+transcript. `hostAudit:1` is specifically metadata on a returned tool result,
+including an opaque `isError` result. A driver exception, cancellation without
+a result, or transport loss may have no audit receipt; `-32603` still means
+Unknown and does not promise command/actor correlation. There is no all-command
+provenance claim. Inspect the real node envelope to reconcile an uncertain
+append.
+
+Hash encoding is independent of JSON property order and has no Unicode
+normalization. `frame(x)` means an unsigned 64-bit big-endian byte length,
+followed by UTF-8 bytes. Digests are SHA-256, lowercase hexadecimal:
+
+```text
+input:  ASCII("sudocode.direct-a2a.input.v1") || NUL || frame(tool)
+        || u64be(number of fields)
+        || for each ASCII field name in sorted order:
+             frame(name) || type || value
+        string: type=1, value=frame(text)
+        false:  type=2, no value bytes
+        true:   type=3, no value bytes
+result: ASCII("sudocode.direct-a2a.result.v1") || NUL
+        || one byte (isError ? 1 : 0) || frame(content)
+```
+
+Input fields use native tool names: `to`, `message`, `summary`, or
+optional `active_only`. Omitted and false are distinct. No audit field or RPC
+`sessionId` participates in those hashes; native session/actor remain separate
+audit fields. The public schemas bound the field count and types. A hook's
+effective hash does not disclose its body; the real envelope is needed to
+verify the final recipient and text.
+
+Direct calls share the session's operation registry, including the lease held
+by an actual blocking Node worker. Cancelling the scheduler does not stop that
+worker immediately. `pause_tools` acknowledges quiescence only after the worker
+has drained; a timeout keeps the fence. An accepted append can still become
+visible at the node after the caller loses its ACP reply.
+
+The normal stdio tests check typed refusals, hook rewriting, mailbox binding
+and absence from model history. `e2e/nexus-a2a/run.sh` also runs
+`acp_direct_fences::live_direct_a2a_*` against its isolated real TLS daemon:
+opaque TCP traffic is held while pause cancels a request, and a post-execution
+hook withholds a reply while the node already holds the message. Their model
+endpoint refuses every inference request and must record zero calls. This is
+not a cross-host idle callback or production deployment acceptance.
+
+### Closing a peer session
+
+When the last session for an agent closes, the server stops and joins that
+agent's real receiver worker before replying to `session/close`. Closing one
+of several sessions keeps the shared receiver running. A replacement receiver
+waits for a retiring worker rather than treating its stop signal as completed
+cleanup. The join includes the worker's lock-release attempts; a failed remote
+unlock can still require backend TTL recovery. This changes no lease, cursor,
+delivery acknowledgement or retry policy.
+
 ### Per-session system prompt (`_meta.sudocode.*`)
 
 `session/new` and `session/load` accept two optional, orthogonal keys under
@@ -642,19 +717,35 @@ keys under the update's own `_meta.sudocode` tell them apart:
 
 ## Durable direct sub-agent completions (extension v1)
 
-The on-disk journal uses version 2 from its first supported release. Transcript
-mutations and journal registration, replay and ACKs share one native storage
-writer. A competing ACP process receives `session_writer_busy` without changing
-either file. Replay may retire an interrupted turn only after the previous
-process has released ownership. A cold replay reused by `session/load` shares
-that writer rather than acquiring a competing one. Backends with only expiring,
-unfenced leases cannot advertise this extension.
+One SID can have several concurrent runtime contexts. Transcript appends retain
+stable message identities and parent references; each runtime continues its own
+context. See the [shared-session storage contract](design/agent-context-storage-matrix.html#shared-session-context).
 
-Version 1 journals came only from unreleased development builds. They remain
-unchanged and return `legacy_writer_unconfirmed`: acquiring a new lock cannot
-prove that a non-locking old executable has stopped. Automatic conversion or
-deletion is not supported. Protocol negotiation remains extension version 1;
-it is independent of the journal format.
+The v3 completion layout stores the SID binding and deletion tombstone in
+`transcript.completions.json`, and each context's journal in
+`transcript.completions/<context-id>.json`. A short native OS lock serializes
+commits. A separate OS owner lock holds each live context; a new runtime opens
+another context while that owner is alive. Cold recovery resumes a journal at
+the nearest matching ancestor after its owner exits. Neutral checkpoints retain
+that ancestry, so cold recovery preserves completion receipts and context
+revisions. Tool sources are keyed by
+the originating assistant message identity and provider call ID.
+
+```mermaid
+flowchart LR
+    SID[SID transcript] --> Binding[SID binding and tombstone]
+    SID --> A[Context A journal]
+    SID --> B[Context B journal]
+    A --> OA[Runtime A owner lock]
+    B --> OB[Runtime B owner lock]
+```
+
+Opening v2 storage preserves its durable facts before publishing the v3 binding
+under the commit lock. An older writer encountering this binding reports a
+protocol mismatch. Unversioned v1 journals return `legacy_writer_unconfirmed`
+with their original bytes preserved. Protocol negotiation remains extension v1,
+independent of the storage version. Backends advertise the extension when they
+provide this ownership and commit contract.
 
 A controller opts in on each connection with
 `initialize._meta.sudocode.subagentCompletions: {"version":1}`. The server
@@ -716,7 +807,8 @@ that parent's unproven completions.
 
 An opted-in prompt's committed response and `session/load` expose
 `_meta.sudocode.contextRef = {sessionId,revision,digest,lastTraceId}`. The digest
-covers recoverable transcript bytes. Live load validates exact cwd and rebinds
+covers the recoverable context projection. Appends by another context preserve
+that projection. Live load validates exact cwd and rebinds
 without replacing the engine; cold load opens the exact stored session. A
 controller sending an automatic input supplies `_meta.sudocode.expectedContext`.
 The agent checks it inside that session's prompt lane before any model work;
@@ -731,7 +823,7 @@ Controllers negotiate `initialize._meta.sudocode.taskCompletions: {"version":1}`
 When both completion extensions are offered, the server selects task completions
 only. This uses the same journal, sender and receipt reduction as sub-agent v1;
 sub-agent IDs, frozen messages, order and receipt hashes remain unchanged.
-Only native storage with session writer exclusion advertises the extension.
+Storage ownership follows the [completion storage contract above](#durable-direct-sub-agent-completions-extension-v1).
 
 `_sudocode/task/completed` is a JSON-RPC request. Sub-agent payloads replace
 `agentId` with `kind: "subagent"` and `taskId`. Terminal payloads are:
@@ -779,28 +871,22 @@ creates a journal. Use that exact reference with subsequent operations:
   Native session deletion additionally removes its transcript and offloaded
   tool results after committing the same tombstone.
 
-Transcript saves, compaction, journal writes, ACKs and deletion share one native
-writer lifetime and serialized write operations. A second process gets
-`session_writer_busy`; a cold delivery reused by `session/load` shares its writer.
-Deleting a result never removes the independent lock file. Deleted sessions
-cannot reopen. A temporary storage error retains the bounded exit snapshot for
+Transcript saves, compaction, journal writes, ACKs and deletion use the
+[same commit and context ownership contract](#durable-direct-sub-agent-completions-extension-v1).
+Purge checks other native transcript writers and completion context owners. It
+reports `session_writer_busy` while another writer is alive, including CLI
+instances that have no completion extension. Native writer presence is an OS
+lock; a crashed writer's free locator does not assert liveness. The committed
+SID tombstone fences subsequent transcript and journal writes. Context lock
+files retain stable paths for exclusion.
+A temporary storage error retains the bounded exit snapshot for
 retry; a process loss before that snapshot was saved becomes
 `execution_unconfirmed`, even if its child later exits. Uncertain process creation
 or cancellation also cannot be presented as terminal evidence. Never rerun such
 a command automatically. Recovery covers reconnects and process restart, not
 power-loss durability.
 
-The first supported on-disk journal format is v2, introduced together with
-shared writer ownership in the sub-agent completion change. Both stages use
-that same format and writer. The earlier, non-locking v1 format existed only in
-development/test builds; it is rejected with `legacy_writer_unconfirmed` and
-its original bytes are preserved. Automatic conversion/deletion is not an
-upgrade path, and no production v1 migration workflow is required.
-
-Stage-one v2 sub-agent records can be replayed and acknowledged by the task
-extension without changing their source, frozen payload, publication ordinal,
-ACK or context. Rolling back remains supported for sub-agent-only records.
-Once terminal sources exist, the stage-one binary rejects completion replay
-and transcript mutations with `completion_journal_unsupported`; read-only
-transcript loading without completion negotiation does not grant write access.
-Both journal and transcript bytes remain intact.
+The task extension retains each migrated sub-agent source, frozen payload,
+publication ordinal, ACK and context. Protocol capability negotiation controls
+which completion payloads the controller can handle; the storage binding
+controls writer compatibility.

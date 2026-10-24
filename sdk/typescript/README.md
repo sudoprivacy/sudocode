@@ -44,6 +44,21 @@ previous version directory for rollback. Use a versioned, verified scode path,
 not a shared launcher that another process can repoint. This archive is not a
 scode binary, node record, certificate or model credential bundle.
 
+### Pair the native CLI with its Node protocol
+
+The bridge's ACP capability handshake does not certify the Nexus backend
+protocol. Record the full CLI source/hash and the daemon release separately.
+Starting with scode 0.2.36 (Nexus pin v0.8.23), remote filesystem operations
+require `InspectTarget` to resolve the operation-authorized target before
+classifying linked streams. Pair that CLI with a daemon implementing the
+v0.8.23 contract. An older node returning `UNIMPLEMENTED` fails the operation;
+there is no legacy fallback that guesses link targets or bypasses authority.
+
+For a frozen older node, retain its independently tested compatible CLI.
+Changing the bridge package or successfully initializing ACP does not upgrade
+that node. Qualify a daemon upgrade and rollback separately before switching
+the CLI; do not upgrade a shared running node as a package-install side effect.
+
 Generate a private machine configuration with an explicitly existing session:
 
 ```sh

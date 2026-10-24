@@ -59,7 +59,7 @@ impl RequestScope {
         let attempt = self
             .0
             .attempts
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 (used < limit).then(|| used + 1)
             })
             .map(|used| used + 1)

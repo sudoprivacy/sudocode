@@ -5,8 +5,18 @@
 
 use runtime::{ContentBlock, ConversationMessage, MessageRole, Session};
 
+/// Forking changes durable identities while preserving every model-facing field.
+fn assert_seeded_messages(actual: &[ConversationMessage], expected: &[ConversationMessage]) {
+    let mut actual = actual.to_vec();
+    for message in &mut actual {
+        message.history = None;
+    }
+    assert_eq!(actual, expected);
+}
+
 fn user_text(text: &str) -> ConversationMessage {
     ConversationMessage {
+        history: None,
         role: MessageRole::User,
         blocks: vec![ContentBlock::Text {
             text: text.to_string(),
@@ -19,6 +29,7 @@ fn user_text(text: &str) -> ConversationMessage {
 
 fn assistant_text(text: &str) -> ConversationMessage {
     ConversationMessage {
+        history: None,
         role: MessageRole::Assistant,
         blocks: vec![ContentBlock::Text {
             text: text.to_string(),
@@ -31,6 +42,7 @@ fn assistant_text(text: &str) -> ConversationMessage {
 
 fn tool_use(id: &str, name: &str, input: &str) -> ConversationMessage {
     ConversationMessage {
+        history: None,
         role: MessageRole::Assistant,
         blocks: vec![ContentBlock::ToolUse {
             id: id.to_string(),
@@ -46,6 +58,7 @@ fn tool_use(id: &str, name: &str, input: &str) -> ConversationMessage {
 
 fn placeholder_tool_result(tool_use_id: &str) -> ConversationMessage {
     ConversationMessage {
+        history: None,
         role: MessageRole::User,
         blocks: vec![ContentBlock::ToolResult {
             tool_use_id: tool_use_id.to_string(),
@@ -73,8 +86,8 @@ fn with_messages_pre_seeds_message_vec() {
     let session = Session::new().with_messages(prefix.clone());
 
     // then — messages match verbatim
-    assert_eq!(session.messages, prefix);
-    assert_eq!(session.messages.len(), 2);
+    assert_seeded_messages(session.messages(), &prefix);
+    assert_eq!(session.messages().len(), 2);
 }
 
 #[test]
@@ -103,14 +116,14 @@ fn with_messages_replaces_existing_messages() {
     session
         .push_user_text("first turn")
         .expect("push should succeed without persistence");
-    assert_eq!(session.messages.len(), 1);
+    assert_eq!(session.messages().len(), 1);
 
     // when — replace via with_messages
     let session = session.with_messages(vec![user_text("replacement")]);
 
     // then — the replacement wins, not merged
-    assert_eq!(session.messages.len(), 1);
-    match &session.messages[0].blocks[0] {
+    assert_eq!(session.messages().len(), 1);
+    match &session.messages()[0].blocks[0] {
         ContentBlock::Text { text } => assert_eq!(text, "replacement"),
         other => panic!("expected Text block, got {other:?}"),
     }
@@ -122,7 +135,7 @@ fn with_messages_supports_empty_vec() {
     let session = Session::new().with_messages(Vec::new());
 
     // then — no messages, session usable
-    assert!(session.messages.is_empty());
+    assert!(session.messages().is_empty());
 }
 
 // ── Fork subagent shape ─────────────────────────────────────────────
@@ -150,13 +163,13 @@ fn with_messages_carries_fork_style_prefix() {
     let session = Session::new().with_messages(prefix.clone());
 
     // then — prefix is intact in insertion order
-    assert_eq!(session.messages, prefix);
-    assert_eq!(session.messages.len(), 3);
-    match &session.messages[0].blocks[0] {
+    assert_seeded_messages(session.messages(), &prefix);
+    assert_eq!(session.messages().len(), 3);
+    match &session.messages()[0].blocks[0] {
         ContentBlock::ToolUse { name, .. } => assert_eq!(name, "Agent"),
         other => panic!("expected ToolUse block, got {other:?}"),
     }
-    match &session.messages[1].blocks[0] {
+    match &session.messages()[1].blocks[0] {
         ContentBlock::ToolResult {
             tool_use_id,
             output,

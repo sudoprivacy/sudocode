@@ -1,3 +1,6 @@
+mod common;
+
+use common::managed_session::seed_managed_session;
 use std::sync::Arc;
 
 use backends::storage::local_connector::LocalConnectorBackend;
@@ -53,7 +56,8 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
         desc
     };
     let first = descriptor("first", "/projects/first");
-    let prepared = prepare_managed_agent(&kernel, &first, &Default::default()).unwrap();
+    let prepared =
+        prepare_managed_agent(&kernel, &first, &seed_managed_session(&kernel, &first)).unwrap();
     let original_id = prepared.durable_session_id().to_string();
     let cwd = prepared.cwd();
     assert_eq!(cwd, project.canonicalize().unwrap());
@@ -147,10 +151,11 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
     assert_eq!(effect.exit_code, Some(0));
     engine.persist().unwrap();
     drop(engine);
+    let second_descriptor = descriptor("second", "/projects/second");
     let second = prepare_managed_agent(
         &kernel,
-        &descriptor("second", "/projects/second"),
-        &Default::default(),
+        &second_descriptor,
+        &seed_managed_session(&kernel, &second_descriptor),
     )
     .unwrap();
     assert_ne!(second.cwd(), cwd);
@@ -186,7 +191,7 @@ fn hosted_sessions_share_native_files_and_skills_while_retaining_durable_agent_s
         recovered.fs_handle().read("side-effect.txt").unwrap(),
         b"effect"
     );
-    assert!(recovered.messages.iter().flat_map(|message| &message.blocks).any(|block| matches!(block,
+    assert!(recovered.messages().iter().flat_map(|message| &message.blocks).any(|block| matches!(block,
         runtime::ContentBlock::ToolResult { tool_use_id, is_error: true, output, .. }
             if tool_use_id == "in-flight-effect" && output.contains("Side effects may already have occurred")
     )));

@@ -116,6 +116,37 @@ fn pre_tool_use_hook_progress_reaches_the_terminal() {
     assert_eq!(exit, 0, "a hooked turn should exit 0; got {exit}");
 }
 
+/// A command that ignores stdin must retain its denial or failure decision.
+#[test]
+fn quick_hooks_preserve_nonzero_exit_decisions() {
+    for (code, outcome) in [(2, "DENIED"), (7, "FAILED")] {
+        let env = TestEnv::new_mock("hook-quick-exit");
+        let command = if cfg!(windows) {
+            format!("echo hook-observed & exit /b {code}")
+        } else {
+            format!("echo hook-observed; exit {code}")
+        };
+        write_pre_tool_use_hook(&env, &command);
+        let prompt = env.prompt("Run the bash fixture", "bash_stdout_roundtrip");
+        let mut sess = env.spawn(&[
+            "--permission-mode",
+            "danger-full-access",
+            "--allowedTools",
+            "bash",
+            &prompt,
+        ]);
+        sess.set_default_timeout(common::LIVE_TURN_BUDGET);
+        sess.resize(50, 120).expect("resize pty");
+        sess.expect(&format!(r"\[hook {outcome} PreToolUse\] [Bb]ash:"))
+            .expect("the terminal must retain the hook's exit decision");
+        assert_eq!(sess.expect_eof().expect("hooked turn exits"), 0);
+        let screen = sess.render(|s| s.contents());
+        assert!(screen.contains("hook-observed"), "{screen}");
+        assert!(!screen.contains("Broken pipe"), "{screen}");
+        assert!(!screen.contains("failed to start"), "{screen}");
+    }
+}
+
 /// With no hook configured, none of that output appears.
 ///
 /// The guard for the other direction: an assertion on `[hook` alone would pass

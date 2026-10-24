@@ -493,7 +493,7 @@ fn unanswered_turn_fixture(
             .unwrap();
     }
     original.save_to_path(&path).unwrap();
-    (path, original.messages)
+    (path, original.messages().to_vec())
 }
 
 #[test]
@@ -568,13 +568,13 @@ fn resumed_unanswered_turns_end_before_new_requests_without_rewriting_history() 
         }
         let persisted = Session::load_from_path(&path).unwrap();
         assert_eq!(
-            &persisted.messages[..original_messages.len()],
+            &persisted.messages()[..original_messages.len()],
             &original_messages,
             "old signed history or tool results changed"
         );
         assert_eq!(
             persisted
-                .messages
+                .messages()
                 .iter()
                 .filter(|message| {
                     message.role == runtime::MessageRole::Assistant
@@ -620,11 +620,27 @@ fn without_thinking(mut messages: Value) -> Value {
 
 #[test]
 fn rejected_thinking_is_archived_once_and_new_signatures_survive_resume() {
-    for mode in ["off", "queue"] {
+    for (mode, shared) in [("off", false), ("queue", false), ("off", true)] {
         let env = TestEnv::new_mock("thinking-repair-resume");
         let capture = Capture::new();
         capture.thinking_blocks.store(true, Ordering::Relaxed);
         let path = fixture(&env, &capture);
+        if shared {
+            use runtime::fs_backend::{FsBackend, RecordLogMode, StdFsBackend};
+            use runtime::history::{HistoryLog, HistoryRecord, RecordOutcome};
+
+            let seed = Session::load_from_path(&path).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            let log = StdFsBackend
+                .record_log(&path.to_string_lossy(), RecordLogMode::CreateNew)
+                .unwrap();
+            let mut history = HistoryLog::new(log);
+            let record = HistoryRecord::initialize(&seed).unwrap();
+            assert_eq!(
+                history.commit(&record, Duration::from_secs(5)).unwrap(),
+                RecordOutcome::Applied
+            );
+        }
         let config_path = env.config_home().join("sudocode.json");
         let mut config: Value =
             serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
@@ -671,11 +687,11 @@ fn rejected_thinking_is_archived_once_and_new_signatures_survive_resume() {
         );
         let archived = Session::load_from_path(&archives[0]).unwrap();
         assert_eq!(
-            &archived.messages[..before.messages.len()],
-            before.messages.as_slice()
+            &archived.messages()[..before.messages().len()],
+            before.messages()
         );
         let repaired = Session::load_from_path(&path).unwrap();
-        for (old, new) in before.messages.iter().zip(&repaired.messages) {
+        for (old, new) in before.messages().iter().zip(repaired.messages()) {
             let mut expected = old.clone();
             if expected.role == runtime::MessageRole::Assistant {
                 expected.blocks.retain(|block| {
@@ -685,6 +701,14 @@ fn rejected_thinking_is_archived_once_and_new_signatures_survive_resume() {
                     )
                 });
             }
+            if expected.blocks != old.blocks {
+                assert_ne!(
+                    old.history.as_ref().map(|identity| &identity.id),
+                    new.history.as_ref().map(|identity| &identity.id),
+                    "changed signed content must have a new immutable identity"
+                );
+            }
+            expected.history.clone_from(&new.history);
             assert_eq!(
                 &expected, new,
                 "text, tool records and usage stay unchanged"
@@ -801,8 +825,12 @@ fn thinking_repair_preserves_a_concurrent_transcript_append() {
         .unwrap()
         .contains("EXTERNAL_APPEND_MUST_SURVIVE"));
     let session = Session::load_from_path(&path).unwrap();
-    assert!(session.messages.iter().flat_map(|message| &message.blocks).any(|block|
+    assert!(session.messages().iter().flat_map(|message| &message.blocks).any(|block|
         matches!(block,ContentBlock::Thinking {signature:Some(signature),..} if signature == "signed-prefix-0")));
+    assert!(session.messages().iter().flat_map(|message| &message.blocks).any(|block|
+        matches!(block,ContentBlock::Text {text} if text == "EXTERNAL_APPEND_MUST_SURVIVE")));
+    let restored = Session::load_from_path(&path).unwrap();
+    assert_eq!(session.messages(), restored.messages());
     drop(cli);
 }
 
@@ -1089,7 +1117,7 @@ fn effort_changes_preserve_signed_history_and_max_is_session_scoped() {
 
 #[test]
 fn tool_input_objects_and_legacy_strings_survive_cli_resume_without_number_loss() {
-    for legacy in [false, true] {
+    for (legacy, changed_input) in [(false, false), (true, false), (false, true)] {
         let env = TestEnv::new_mock("tool-input-history");
         let capture = Capture::new();
         let path = fixture(&env, &capture);
@@ -1119,23 +1147,60 @@ fn tool_input_objects_and_legacy_strings_survive_cli_resume_without_number_loss(
             .unwrap();
         session.save_to_path(&path).unwrap();
         drop(session);
-        if legacy {
+        if legacy || changed_input {
             let raw = std::fs::read_to_string(&path).unwrap();
-            let rewritten: Vec<String> = raw
+            let mut changed_message = None;
+            let mut rewritten: Vec<String> = raw
                 .lines()
                 .map(|line| {
                     let mut row: Value = serde_json::from_str(line).unwrap();
+                    let mut is_changed = false;
                     if let Some(blocks) = row["message"]["blocks"].as_array_mut() {
                         for block in blocks {
                             if block["id"] == "history-input" {
-                                block["input"] = json!(raw_input);
+                                block["input"] = if changed_input {
+                                    is_changed = true;
+                                    let mut changed = input.clone();
+                                    changed["fraction"] = json!(0.75);
+                                    changed
+                                } else {
+                                    json!(raw_input)
+                                };
                             }
                         }
                     }
-                    row.to_string()
+                    if is_changed {
+                        changed_message = Some(row["message"].clone());
+                        line.to_owned()
+                    } else {
+                        row.to_string()
+                    }
                 })
                 .collect();
+            if changed_input {
+                let mut checkpoint = rewritten
+                    .iter()
+                    .rev()
+                    .find_map(|line| {
+                        let row: Value = serde_json::from_str(line).unwrap();
+                        (row["type"] == "history_checkpoint").then_some(row)
+                    })
+                    .unwrap();
+                checkpoint["parent_id"] = checkpoint["id"].clone();
+                checkpoint["id"] = json!("changed-input-checkpoint");
+                checkpoint["messages"] = json!([changed_message.expect("stored tool message")]);
+                rewritten.push(checkpoint.to_string());
+            }
             std::fs::write(&path, rewritten.join("\n") + "\n").unwrap();
+        }
+        if changed_input {
+            let mut cli = env.spawn(&["--resume", path.to_str().unwrap()]);
+            cli.set_default_timeout(WAIT);
+            cli.expect("checkpoint changes an existing message")
+                .unwrap();
+            cli.expect_eof().unwrap();
+            assert!(capture.bodies().is_empty());
+            continue;
         }
         let mut cli = spawn(&env, &path);
         turn(&mut cli, "Continue from the stored sample.");

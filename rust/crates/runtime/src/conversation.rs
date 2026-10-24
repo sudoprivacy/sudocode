@@ -451,6 +451,7 @@ pub trait RuntimeObserver {
 
     fn on_tool_result(
         &mut self,
+        _assistant_message_id: Option<&str>,
         _tool_use_id: &str,
         _tool_name: &str,
         _output: &str,
@@ -732,6 +733,10 @@ pub struct ToolDispatchContext {
     pub background_tasks: Option<crate::background_tasks::BackgroundTasks>,
     /// The `tool_use` id of this invocation, including concurrent calls.
     pub tool_use_id: Option<String>,
+    /// Host provenance for a direct A2A invocation, kept out of model history.
+    /// Keep this cold state shared: ordinary model calls must not carry its
+    /// strings inline through every scheduler context and async frame.
+    pub external_a2a: Option<Arc<crate::external_a2a::ExternalA2aCall>>,
     /// The parent session's active permission mode. A spawned sub-agent runs
     /// under this mode rather than an unconditional full-access policy, so a
     /// read-only session spawns read-only workers and a workspace-write
@@ -745,6 +750,16 @@ pub struct ToolDispatchContext {
 }
 
 impl ToolDispatchContext {
+    /// Stable identity assigned before dispatch, shared by all call producers.
+    #[must_use]
+    pub fn assistant_message_id(&self) -> Option<&str> {
+        self.parent_assistant_message
+            .as_ref()?
+            .history
+            .as_ref()
+            .map(|history| history.id.as_str())
+    }
+
     /// Returns `true` when the parent session's history contains a user
     /// message tagged with [`FORK_BOILERPLATE_TAG`] — meaning this
     /// dispatch is happening inside a fork child. Mirrors CC-fork's
@@ -773,7 +788,17 @@ impl ToolDispatchContext {
 /// crosses a thread boundary and needs no `Sync`). Any per-invocation mutable
 /// state (spinner, prompter) lives behind single-threaded interior mutability
 /// in the impl.
+#[allow(
+    async_fn_in_trait,
+    reason = "Tool futures are polled on the owning thread and deliberately do not require Send."
+)]
 pub trait ToolExecutor: Send {
+    /// The mailbox actually installed in this executor. A direct A2A call
+    /// requires this binding instead of resolving an unscoped disk default.
+    fn external_a2a_binding(&self) -> Option<crate::external_a2a::MailboxBinding> {
+        None
+    }
+
     /// Scheduling capability of the effective (post-hook) invocation.
     /// Dynamic executors may add metadata-backed tools without changing the
     /// conversation scheduler. Permission checks remain independent.
@@ -1720,6 +1745,7 @@ where
             .offload_tool_result(tool_use_id, output.as_bytes())
         {
             Ok((_path, total)) => {
+                let output_id = self.session.tool_output_id(tool_use_id);
                 // The physical path never leaves the engine; the model only
                 // ever sees the opaque tool_use id. The full result is paged
                 // back in as byte windows via `read_tool_output`, continuing
@@ -1727,7 +1753,7 @@ where
                 // first with its `pattern` seek.
                 let end = offload_preview_end(&output);
                 format!(
-                    "<persisted-output bytes={total} id=\"{tool_use_id}\">\nOutput too large ({total} bytes). Preview (first {end} bytes):\n{}\n…\n[Read the rest with read_tool_output(id=\"{tool_use_id}\", offset={end}) — continue from each response's nextOffset until it is null — or pass pattern=<regex> to find the offsets of specific lines first.]\n</persisted-output>",
+                    "<persisted-output bytes={total} id=\"{output_id}\">\nOutput too large ({total} bytes). Preview (first {end} bytes):\n{}\n…\n[Read the rest with read_tool_output(id=\"{output_id}\", offset={end}) — continue from each response's nextOffset until it is null — or pass pattern=<regex> to find the offsets of specific lines first.]\n</persisted-output>",
                     &output[..end]
                 )
             }
@@ -1818,7 +1844,8 @@ where
             .is_some();
         let catalog = self.api_client.model_catalog();
         let (blocks, pending_notifications) = Self::prepend_pending_task_notifications(blocks)?;
-        let turn = self.run_turn_with_blocks_inner(blocks, prompter, observer);
+        let turn_id = format!("turn-{}", uuid::Uuid::new_v4());
+        let turn = self.run_turn_with_blocks_inner(blocks, prompter, observer, turn_id.clone());
         let summary = if let Some(catalog) = catalog {
             catalog.refresh_in_background();
             catalog.scope(turn).await
@@ -1848,11 +1875,9 @@ where
                     "refusing to persist a stale session; durable history preserved: {error}"
                 ))
             })?;
-            if let Some(path) = self.session.persistence_path() {
-                self.session.save_to_path(path).map_err(|error| {
-                    RuntimeError::new(format!("failed to persist session: {error}"))
-                })?;
-            }
+            self.session.finish_turn(&turn_id).map_err(|error| {
+                RuntimeError::new(format!("failed to complete durable session turn: {error}"))
+            })?;
             pending_notifications
                 .acknowledge()
                 .map_err(RuntimeError::new)?;
@@ -1865,6 +1890,7 @@ where
         blocks: Vec<ContentBlock>,
         mut prompter: Option<&mut dyn PermissionPrompter>,
         mut observer: Option<&mut dyn RuntimeObserver>,
+        turn_id: String,
     ) -> Result<TurnSummary, RuntimeError> {
         let blocks = self.inject_date_context(blocks);
         let blocks = self.inject_model_context(blocks);
@@ -1900,14 +1926,6 @@ where
         }
 
         // Start file tracking for this turn
-        let turn_id = format!(
-            "turn-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0)
-        );
         self.current_turn_id = Some(turn_id.clone());
         self.file_tracker.start_turn(turn_id.clone());
 
@@ -2352,15 +2370,11 @@ where
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
         self.usage_tracker.record_turn_duration(turn_duration_ms);
-        if let Some(message) = self
-            .session
-            .messages
-            .iter_mut()
-            .rev()
-            .find(|m| m.role == MessageRole::Assistant)
-        {
-            message.duration_ms = Some(turn_duration_ms);
-        }
+        self.session
+            .record_turn_duration(turn_duration_ms)
+            .map_err(|error| {
+                RuntimeError::new(format!("failed to persist turn duration: {error}"))
+            })?;
 
         let turn_usage = sum_assistant_message_usage(&assistant_messages);
         let session_usage = self.usage_tracker.cumulative_usage();
@@ -3431,6 +3445,11 @@ where
         if removed == 0 {
             return Ok(0);
         }
+        // Repaired payloads form a new context projection. Reuse the existing
+        // replacement path so prior immutable nodes and sibling tool origins
+        // survive; a metadata-only save would silently retain the old thinking.
+        let messages = std::mem::take(&mut candidate.messages);
+        candidate = candidate.with_messages(messages);
         if let Some(path) = self.session.persistence_path() {
             candidate
                 .save_thinking_repaired_to_path_checked(&self.session, path, revision.as_deref())
@@ -3914,7 +3933,13 @@ fn notify_tool_result(
         return;
     };
 
-    observer.on_tool_result(tool_use_id, tool_name, output, *is_error);
+    observer.on_tool_result(
+        crate::session_history::tool_origin(result_message, tool_use_id),
+        tool_use_id,
+        tool_name,
+        output,
+        *is_error,
+    );
 }
 
 fn runtime_observer_mut<'a>(
@@ -4278,6 +4303,7 @@ mod tests {
 
         fn on_tool_result(
             &mut self,
+            _assistant_message_id: Option<&str>,
             tool_use_id: &str,
             tool_name: &str,
             output: &str,
@@ -4878,11 +4904,12 @@ mod tests {
             .expect("conversation loop should succeed");
 
         // 1. Full blob spilled to the session's tool-results/<id>, byte-exact.
+        let output_id = runtime.session().tool_output_id("big-1");
         let offloaded = runtime
             .session()
             .tool_results_dir()
             .expect("tool-results dir")
-            .join("big-1");
+            .join(&output_id);
         let spilled = fs::read_to_string(&offloaded).expect("offloaded blob should exist");
         assert_eq!(spilled, big);
 
@@ -4899,7 +4926,7 @@ mod tests {
             panic!("expected a tool_result block");
         };
         assert!(output.contains("<persisted-output"));
-        assert!(output.contains("id=\"big-1\""));
+        assert!(output.contains(&format!("id=\"{output_id}\"")));
         assert!(!output.contains(SENTINEL), "tail must not be inlined");
         assert!(output.len() < big.len());
         let inline_output = output.clone();
@@ -6188,7 +6215,15 @@ mod tests {
 
         let forked = runtime.fork_session(Some("alt-path".to_string()));
 
-        assert_eq!(forked.messages, session.messages);
+        let mut inherited = forked.messages.clone();
+        for message in &mut inherited {
+            message.history = None;
+        }
+        let mut original = session.messages.clone();
+        for message in &mut original {
+            message.history = None;
+        }
+        assert_eq!(inherited, original);
         assert_ne!(forked.session_id, session.session_id);
         assert_eq!(
             forked

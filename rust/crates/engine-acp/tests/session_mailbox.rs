@@ -58,6 +58,7 @@ fn send(mailbox: &SessionMailbox<Kernel>, message: Value) {
     mailbox.send(SessionPayload::Rpc { message }).unwrap();
 }
 
+#[track_caller]
 fn until(
     mailbox: &SessionMailbox<Kernel>,
     predicate: impl Fn(&Value) -> bool,
@@ -76,7 +77,9 @@ fn until(
                 );
                 seen.push(message);
             }
-            Some(SessionPayload::Closed { reason }) => panic!("session closed: {reason}"),
+            Some(SessionPayload::Closed { reason }) => {
+                panic!("session closed: {reason}; seen: {seen:?}")
+            }
             None => {}
         }
     }
@@ -211,10 +214,15 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     a2a::install_a2a_stamp_hook(&kernel, true).unwrap();
     let path = a2a::conversation_transcript_path(&a2a::conversation_id("worker", "operator"));
     common::provision_stream_transcript(&kernel, &path);
+    let seeded = common::managed_session::seed_managed_session(
+        &kernel,
+        &common::make_desc("seed", "worker", "scripted"),
+    );
     let started = call(
         &kernel,
         "start_session_v1",
-        json!({"agent_id":"worker","model":"scripted"}),
+        json!({"agent_id":"worker","model":"scripted",
+            "resume_session_id":seeded.resume_session_id}),
     );
     let endpoint: SessionEndpoint =
         serde_json::from_value(started["session_endpoint"].clone()).unwrap();
@@ -644,10 +652,15 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     // A fresh session has no earlier parity marker to replay. The provider's
     // existing missing-scenario HTTP 400 is a permanent rejection, isolated
     // from the successful session and the shared benchmark fixture.
+    let failed_seed = common::managed_session::seed_managed_session(
+        &kernel,
+        &common::make_desc("seed", "failed-worker", "scripted"),
+    );
     let failed_start = call(
         &kernel,
         "start_session_v1",
-        json!({"agent_id":"failed-worker","model":"scripted"}),
+        json!({"agent_id":"failed-worker","model":"scripted",
+            "resume_session_id":failed_seed.resume_session_id}),
     );
     let failed_endpoint: SessionEndpoint =
         serde_json::from_value(failed_start["session_endpoint"].clone()).unwrap();

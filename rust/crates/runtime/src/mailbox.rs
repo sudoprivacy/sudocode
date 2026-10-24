@@ -428,6 +428,15 @@ impl Mailbox {
         &self.self_id
     }
 
+    /// Read-only binding of this exact mailbox, before any A2A IO.
+    #[must_use]
+    pub fn binding(&self) -> crate::external_a2a::MailboxBinding {
+        crate::external_a2a::MailboxBinding {
+            actor: self.self_id.clone(),
+            namespace_root: self.convention.root.clone(),
+        }
+    }
+
     /// The transcript this mailbox and `peer` share.
     ///
     /// There is no "my inbox" any more, which is the point: a conversation is
@@ -906,6 +915,19 @@ const READER_LEASE_MS: u64 = 30_000;
 /// `block_ms` per conversation, most of them carrying no new information.
 const READER_RENEW_MS: u64 = READER_LEASE_MS / 2;
 
+/// How far ahead of the lease TTL a holder stops acting on a lease it last
+/// proved a while ago.
+///
+/// The backend expires the lock `READER_LEASE_MS` after it *received* the last
+/// renewal, so every age here is measured from when a renewal was *requested*.
+/// The margin bounds how old a successful renewal may be and still count, and
+/// how long belief in the last one lasts while the next is still out. It is a
+/// scheduling heuristic, not a guarantee: a process that is suspended can still
+/// deliver or commit after the backend handed the seat to a standby. Only a
+/// fenced register write closes the commit side, and delivery cannot be fenced
+/// at all.
+const LEASE_SAFETY_MARGIN_MS: u64 = 10_000;
+
 /// How often a receiver re-lists its chat list looking for conversations it is
 /// not yet tailing.
 ///
@@ -1001,17 +1023,149 @@ impl ConversationReader {
     }
 }
 
+/// Whether a lease last proven `elapsed_ms` ago may still be acted on: it has to
+/// leave [`LEASE_SAFETY_MARGIN_MS`] before the TTL the lock was taken with.
+fn within_grace(elapsed_ms: u64) -> bool {
+    elapsed_ms.saturating_add(LEASE_SAFETY_MARGIN_MS) < READER_LEASE_MS
+}
+
+/// Milliseconds elapsed since `at`.
+fn elapsed_ms(at: std::time::Instant) -> u64 {
+    u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// How old a renewal requested at `requested` is, as far as the lease goes: a
+/// lock that cannot expire under its holder never ages.
+fn request_age_ms(expiring: bool, requested: std::time::Instant) -> u64 {
+    if expiring {
+        elapsed_ms(requested)
+    } else {
+        0
+    }
+}
+
+/// Record a renewal that succeeded, as of when it was requested. Never moves the
+/// record back: the worker and a commit can renew concurrently and return out of
+/// order.
+fn mark_renewed(
+    last_renewed: &std::sync::Mutex<std::time::Instant>,
+    requested: std::time::Instant,
+) {
+    let mut at = last_renewed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if requested > *at {
+        *at = requested;
+    }
+}
+
+/// Where a lease was found not to be fresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseSite {
+    /// The background renewal worker.
+    Worker,
+    /// The renewal ahead of a write that relies on still holding the lock.
+    Confirm,
+}
+
+/// Why a lease stopped being trusted: the first renewal that did not prove it
+/// fresh, or belief lapsing while none answered.
+///
+/// Recorded so that a delivery that did not advance can say which, and so that
+/// a transient renewal error, if one ever happens in production, is counted
+/// rather than inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseLoss {
+    /// The renewal returned an error `elapsed_ms` after it was requested.
+    RenewFailed {
+        site: LeaseSite,
+        kind: std::io::ErrorKind,
+        elapsed_ms: u64,
+    },
+    /// The backend answered that the lock is no longer held.
+    NotHeld { site: LeaseSite, elapsed_ms: u64 },
+    /// The backend answered that the lock is held, but too long after the
+    /// request for that to count.
+    LateSuccess { site: LeaseSite, elapsed_ms: u64 },
+    /// No renewal answered in time: the last successful one was requested
+    /// `since_ms` ago.
+    Lapsed { since_ms: u64 },
+}
+
+impl std::fmt::Display for LeaseLoss {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RenewFailed {
+                site,
+                kind,
+                elapsed_ms,
+            } => write!(
+                f,
+                "{site:?} renewal failed ({kind:?}) {elapsed_ms}ms after it was requested"
+            ),
+            Self::NotHeld { site, elapsed_ms } => write!(
+                f,
+                "{site:?} renewal found the lock no longer held {elapsed_ms}ms after it was requested"
+            ),
+            Self::LateSuccess { site, elapsed_ms } => write!(
+                f,
+                "{site:?} renewal succeeded {elapsed_ms}ms after it was requested, too late to count"
+            ),
+            Self::Lapsed { since_ms } => write!(
+                f,
+                "no renewal answered in time; the last successful one was requested {since_ms}ms ago"
+            ),
+        }
+    }
+}
+
+/// What one renewal requested at `requested` says about the lease: `None` if
+/// it proved the lease fresh.
+fn renewal_loss(
+    site: LeaseSite,
+    result: &std::io::Result<bool>,
+    expiring: bool,
+    requested: std::time::Instant,
+) -> Option<LeaseLoss> {
+    let elapsed_ms = elapsed_ms(requested);
+    match result {
+        Err(e) => Some(LeaseLoss::RenewFailed {
+            site,
+            kind: e.kind(),
+            elapsed_ms,
+        }),
+        Ok(false) => Some(LeaseLoss::NotHeld { site, elapsed_ms }),
+        Ok(true) if !within_grace(request_age_ms(expiring, requested)) => {
+            Some(LeaseLoss::LateSuccess { site, elapsed_ms })
+        }
+        Ok(true) => None,
+    }
+}
+
 /// An exclusive backend lock, renewed on its own thread for as long as this
 /// value lives.
 ///
 /// Renewal is independent of what the holder is doing, because a model turn can
-/// block for longer than the lease. Once a renewal fails the lease stays
-/// invalid and the holder must stop acting on it. Dropping stops the renewal
-/// thread first and only then releases the lock.
+/// block for longer than the lease. A renewal proves ownership only as of when
+/// it was requested: a success that comes back too late counts as lost, the
+/// next renewal is timed from the last successful request, and belief in the
+/// lease lapses on its own once that request is older than the grace allows.
+/// Once a renewal fails the lease stays invalid and the holder must stop acting
+/// on it. Dropping stops the renewal thread first and only then releases the
+/// lock.
 struct HeldLease {
     lock: Arc<dyn crate::fs_backend::FsLock>,
     stop: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     valid: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the backend can expire this lock under its holder (a TTL lease)
+    /// rather than holding it until the holder exits. Only then does the age of
+    /// a renewal matter.
+    expiring: bool,
+    /// When the last renewal that actually succeeded was *requested*, on the
+    /// monotonic clock, shared by the worker and [`HeldLease::confirm`].
+    last_renewed: Arc<std::sync::Mutex<std::time::Instant>>,
+    /// The first reason this lease stopped being trusted, once it has.
+    loss: Arc<std::sync::OnceLock<LeaseLoss>>,
     renewer: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -1022,21 +1176,39 @@ impl HeldLease {
                 .create_dir_all(dir)
                 .map_err(|e| format!("create directory {dir}: {e}"))?;
         }
+        let requested = std::time::Instant::now();
         let Some(lock) = backend
             .try_lock(lock_path, READER_LEASE_MS)
             .map_err(|e| e.to_string())?
         else {
             return Ok(None);
         };
+        // `fenced_locks` means the lock holds until its holder exits; anything
+        // else is a lease the backend can expire under us.
+        let expiring = !backend.fenced_locks();
+        if !within_grace(request_age_ms(expiring, requested)) {
+            // The grant came back too late to act on. Release it (dropping the
+            // lock does) rather than start delivering on a lease that may
+            // already be near expiry; the caller retries as for a held seat.
+            return Ok(None);
+        }
         let stop = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let valid = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let last_renewed = Arc::new(std::sync::Mutex::new(requested));
+        let loss = Arc::new(std::sync::OnceLock::new());
         let worker_stop = Arc::clone(&stop);
         let worker_valid = Arc::clone(&valid);
         let worker_lock = Arc::clone(&lock);
+        let worker_last_renewed = Arc::clone(&last_renewed);
+        let worker_loss = Arc::clone(&loss);
         let renewer = std::thread::Builder::new()
             .name("mailbox-lease".into())
             .spawn(move || {
                 let (mutex, wake) = &*worker_stop;
+                // Every renewal is timed from when the last successful one was
+                // requested, never from when its reply came back: a slow reply
+                // must not push the next renewal past the TTL.
+                let mut wait_ms = READER_RENEW_MS.saturating_sub(elapsed_ms(requested));
                 loop {
                     let stopped = mutex
                         .lock()
@@ -1044,7 +1216,7 @@ impl HeldLease {
                     let (stopped, _) = wake
                         .wait_timeout_while(
                             stopped,
-                            std::time::Duration::from_millis(READER_RENEW_MS),
+                            std::time::Duration::from_millis(wait_ms),
                             |stopped| !*stopped,
                         )
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1052,10 +1224,17 @@ impl HeldLease {
                         break;
                     }
                     drop(stopped);
-                    if !matches!(worker_lock.renew(), Ok(true)) {
+                    let requested = std::time::Instant::now();
+                    let result = worker_lock.renew();
+                    if let Some(lost) =
+                        renewal_loss(LeaseSite::Worker, &result, expiring, requested)
+                    {
+                        let _ = worker_loss.set(lost);
                         worker_valid.store(false, std::sync::atomic::Ordering::Release);
                         break;
                     }
+                    mark_renewed(&worker_last_renewed, requested);
+                    wait_ms = READER_RENEW_MS.saturating_sub(elapsed_ms(requested));
                 }
             })
             .map_err(|e| format!("start lease renewal: {e}"))?;
@@ -1063,24 +1242,71 @@ impl HeldLease {
             lock,
             stop,
             valid,
+            expiring,
+            last_renewed,
+            loss,
             renewer: Some(renewer),
         }))
     }
 
+    /// Whether the holder may still act on this lease.
+    ///
+    /// The flag records a renewal that failed; the age check covers one that has
+    /// not answered at all. While a renewal is in flight the worker cannot clear
+    /// the flag, so belief must also lapse on its own once the last successful
+    /// renewal was requested longer ago than the grace allows, and then it
+    /// stays lapsed.
     fn is_valid(&self) -> bool {
-        self.valid.load(std::sync::atomic::Ordering::Acquire)
+        if !self.valid.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
+        }
+        let since_ms = request_age_ms(
+            self.expiring,
+            *self
+                .last_renewed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if within_grace(since_ms) {
+            return true;
+        }
+        // Lapsing is final, like a failed renewal: a success that lands later
+        // must not restore belief the holder has already acted on losing.
+        let _ = self.loss.set(LeaseLoss::Lapsed { since_ms });
+        self.valid
+            .store(false, std::sync::atomic::Ordering::Release);
+        false
+    }
+
+    /// The first reason this lease stopped being trusted, if it has. Set
+    /// exactly when [`HeldLease::is_valid`] turns false, and before it does.
+    fn loss(&self) -> Option<LeaseLoss> {
+        self.loss.get().copied()
     }
 
     /// Renew now, ahead of a write that relies on still holding the lock.
-    /// `Ok(false)` means it was lost and marks the lease invalid for good.
+    /// `Ok(false)` means it was lost and marks the lease invalid for good; a
+    /// success that took too long to come back counts as lost too. An `Err`
+    /// refuses the write and ends the lease the same way, as a failed renewal
+    /// in the worker does: every caller lets go of a lease whose write was
+    /// refused, and a lease left valid after a failed renewal would carry a
+    /// reason for a loss that had not happened.
     fn confirm(&self) -> std::io::Result<bool> {
         if !self.is_valid() {
             return Ok(false);
         }
-        let held = self.lock.renew()?;
-        if !held {
+        let requested = std::time::Instant::now();
+        let result = self.lock.renew();
+        let lost = renewal_loss(LeaseSite::Confirm, &result, self.expiring, requested);
+        if let Some(lost) = lost {
+            let _ = self.loss.set(lost);
             self.valid
                 .store(false, std::sync::atomic::Ordering::Release);
+        }
+        result?;
+        let held = lost.is_none();
+        if held {
+            mark_renewed(&self.last_renewed, requested);
         }
         Ok(held)
     }
@@ -1466,6 +1692,9 @@ fn receive_while_seated(
         }
         sleep_unless_aborted(abort, CONVERSATION_DISCOVERY_MS);
     }
+    if let Some(loss) = seat.loss() {
+        eprintln!("[{label}] receiver seat lost: {loss}");
+    }
     // Joining is what makes the receiver's handle mean "the receiver has
     // stopped". Without it the caller's join returns while N tails are still
     // delivering into a sink it believes is finished with.
@@ -1523,6 +1752,9 @@ fn spawn_conversation_tail(
                         sleep_unless_aborted(&abort, retry_delay_ms);
                         retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
                     }
+                }
+                if let Some(loss) = reader.lease.loss() {
+                    eprintln!("[{label}] reader for {peer} lost: {loss}");
                 }
             }
         })

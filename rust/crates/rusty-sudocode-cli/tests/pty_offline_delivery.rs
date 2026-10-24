@@ -81,7 +81,7 @@ fn persisted_message_is_consumed_when_the_receiver_first_starts() {
     let store = SessionStore::from_cwd_with(env.workspace_root(), Arc::new(StdFsBackend)).unwrap();
     let saved = store.latest_session().unwrap();
     let session = store.load_session(&saved.id).unwrap().session;
-    assert!(session.messages.iter().any(|message| {
+    assert!(session.messages().iter().any(|message| {
         message.role == MessageRole::User
             && message.blocks.iter().any(|block| {
                 matches!(block, ContentBlock::Text { text } if text.contains("OFFLINE_RECEIPT_7319"))
@@ -93,7 +93,7 @@ fn persisted_message_is_consumed_when_the_receiver_first_starts() {
         .0
         .iter()
         .any(|message| message.from == "offline-recipient" && message.body.trim() == receipt);
-    let persisted_assistant_text = session.messages.iter().any(|message| {
+    let persisted_assistant_text = session.messages().iter().any(|message| {
         message.role == MessageRole::Assistant
             && message
                 .blocks
@@ -103,7 +103,7 @@ fn persisted_message_is_consumed_when_the_receiver_first_starts() {
     assert!(
         persisted_reply || persisted_assistant_text,
         "the delivery cursor requires the actual model receipt in durable history; saved messages: {:?}",
-        session.messages
+        session.messages()
     );
     eprintln!("PASS: durable delivery existed before the receiver PID; successful {} PTY turn committed its cursor", if env.is_mock() { "mock" } else { "live" });
 }

@@ -102,7 +102,7 @@ fn ambiguous_edits_preserve_bytes_and_can_be_repaired() {
         .unwrap()
         .session;
     let results: Vec<_> = saved
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .filter_map(|block| match block {

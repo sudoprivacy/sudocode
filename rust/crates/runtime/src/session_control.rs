@@ -313,7 +313,7 @@ impl SessionStore {
         let forked = forked
             .with_persistence_path(handle.path.clone())
             .with_fs_backend(Arc::clone(&self.fs));
-        forked.save_to_path(&handle.path)?;
+        forked.save_fork_to_path(session, &handle.path)?;
         Ok(ForkedManagedSession {
             parent_session_id,
             handle,
@@ -328,11 +328,17 @@ impl SessionStore {
         session: &Session,
     ) -> Result<(), SessionControlError> {
         if let Some(expected) = &self.identity {
-            return if session.identity.as_ref() == Some(expected) {
+            let is_bound = session.identity.as_ref().is_some_and(|actual| {
+                actual.matches_storage_binding(expected)
+                    && (actual.agent_name == expected.agent_name
+                        || self.has_session_link(&expected.agent_name, session_path, session))
+            });
+            return if is_bound {
                 Ok(())
             } else {
                 Err(SessionControlError::Format(
-                    "session ownership or repository bindings do not match (legacy sessions without identity cannot be restored by this host)".into(),
+                    "session ownership, repository bindings or Agent association do not match"
+                        .into(),
                 ))
             };
         }
@@ -350,6 +356,19 @@ impl SessionStore {
         Err(SessionControlError::WorkspaceMismatch {
             expected: self.workspace_root.clone(),
             actual: actual.to_path_buf(),
+        })
+    }
+
+    fn has_session_link(&self, agent_name: &str, transcript: &Path, session: &Session) -> bool {
+        let alias = format!("/agents/{agent_name}/sessions/{}", session.session_id);
+        let target = if transcript.file_name() == Some(std::ffi::OsStr::new(TRANSCRIPT_FILE)) {
+            transcript.parent().unwrap_or(transcript)
+        } else {
+            transcript
+        };
+        self.fs.read_link(&alias).is_ok_and(|linked| {
+            canonicalize_for_compare(Path::new(&linked), self.fs.as_ref())
+                == canonicalize_for_compare(target, self.fs.as_ref())
         })
     }
 

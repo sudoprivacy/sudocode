@@ -144,6 +144,7 @@ pub struct BackgroundTasks {
     parent_id: Option<String>,
     completion: Arc<Mutex<Option<Arc<crate::subagent_completion::CompletionJournal>>>>,
     tool_id: Option<String>,
+    assistant_message_id: Option<String>,
 }
 
 impl std::fmt::Debug for BackgroundTasks {
@@ -301,9 +302,10 @@ impl BackgroundTasks {
 
     /// Per-invocation identity, never a mutable session-global current tool ID.
     #[must_use]
-    pub fn for_tool(&self, tool: Option<&str>) -> Self {
+    pub fn for_tool(&self, assistant_message_id: Option<&str>, tool: Option<&str>) -> Self {
         let mut tasks = self.clone();
         tasks.tool_id = tool.map(str::to_owned);
+        tasks.assistant_message_id = assistant_message_id.map(str::to_owned);
         tasks
     }
 
@@ -324,6 +326,7 @@ impl BackgroundTasks {
             return Ok(None);
         };
         journal.register_terminal(
+            self.assistant_message_id.as_deref(),
             self.tool_id
                 .as_deref()
                 .ok_or("terminal tool identity missing")?,
@@ -498,6 +501,7 @@ impl BackgroundTasks {
             parent_id: Some(id.to_string()),
             completion: Arc::clone(&self.completion),
             tool_id: None,
+            assistant_message_id: None,
         }
     }
 

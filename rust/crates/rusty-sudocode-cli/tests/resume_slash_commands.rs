@@ -54,7 +54,7 @@ fn resumed_binary_accepts_slash_commands_with_arguments() {
     assert!(stdout.contains("wrote transcript"));
     assert!(stdout.contains(export_path.to_str().expect("utf8 path")));
     assert!(stdout.contains("Session cleared"));
-    assert!(stdout.contains("Mode             resumed session reset"));
+    assert!(stdout.contains("Mode             fresh session"));
     assert!(stdout.contains("Previous session"));
     assert!(stdout.contains("Resume previous  scode --resume"));
     assert!(stdout.contains("Backup           "));
@@ -64,8 +64,22 @@ fn resumed_binary_accepts_slash_commands_with_arguments() {
     assert!(export.contains("# Conversation Export"));
     assert!(export.contains("ship the slash command harness"));
 
-    let restored = Session::load_from_path(&session_path).expect("cleared session should load");
-    assert!(restored.messages.is_empty());
+    let fresh_path = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("  Session file     "))
+        .map(PathBuf::from)
+        .expect("clear output includes the fresh session path");
+    assert_ne!(fresh_path, session_path);
+    let restored = Session::load_from_path(&fresh_path).expect("cleared session should load");
+    assert!(restored.messages().is_empty());
+    assert_ne!(restored.session_id, session.session_id);
+    assert_eq!(
+        Session::load_from_path(&session_path)
+            .unwrap()
+            .messages()
+            .len(),
+        1
+    );
 
     let backup_path = stdout
         .lines()
@@ -73,9 +87,9 @@ fn resumed_binary_accepts_slash_commands_with_arguments() {
         .map(PathBuf::from)
         .expect("clear output should include backup path");
     let backup = Session::load_from_path(&backup_path).expect("backup session should load");
-    assert_eq!(backup.messages.len(), 1);
+    assert_eq!(backup.messages().len(), 1);
     assert!(matches!(
-        backup.messages[0].blocks.first(),
+        backup.messages()[0].blocks.first(),
         Some(ContentBlock::Text { text }) if text == "ship the slash command harness"
     ));
 }

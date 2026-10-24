@@ -728,26 +728,13 @@ fn wait_idle(kernel: &Kernel, pid: &serde_json::Value) {
     }
 }
 
-fn stop_session(kernel: &Kernel, pid: &serde_json::Value, sid: &str) {
+fn stop_session(kernel: &Kernel, pid: &serde_json::Value) {
     managed_call(
         kernel,
         "cancel_v1",
         serde_json::json!({"session_id":pid,"mode":"session"}),
     )
     .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let path = format!("/sessions/{sid}");
-    loop {
-        if let Some(lock) = kernel.sys_lock(&path, "", 1, 5, "test").unwrap() {
-            kernel.sys_unlock(&path, &lock, false).unwrap();
-            return;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "old worker still owns the session"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 fn await_new_reply(
@@ -814,8 +801,12 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     let transcript = InboxConvention::new(String::new()).transcript_path(USER, agent);
     provision_stream_transcript(&kernel, &transcript);
     mb.ensure_conversation(agent).unwrap();
-    let mut request =
-        json!({"agent_id":agent,"owner_id":"test-owner","zone_id":"root","model":MODEL});
+    let seeded =
+        common::managed_session::seed_managed_session(&kernel, &make_desc("seed", agent, MODEL));
+    let request = json!({
+        "agent_id":agent,"owner_id":"test-owner","zone_id":"root","model":MODEL,
+        "resume_session_id":seeded.resume_session_id,
+    });
     provision_stream_transcript(
         &kernel,
         &a2a::conversation_transcript_path(&a2a::conversation_id(agent, "test-owner")),
@@ -830,9 +821,6 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         fs.exists(&path).unwrap(),
         "even an empty session is durable before start returns"
     );
-    request["resume_session_id"] = json!(sid);
-    let busy = managed_call(&kernel, "start_session_v1", request.clone()).unwrap_err();
-    assert!(busy.contains("still running"), "{busy}");
     let mut cursor = 0;
     (mb.sender())(
         agent,
@@ -848,20 +836,12 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         "first turn",
     );
     wait_idle(&kernel, &first["session_id"]);
-    stop_session(&kernel, &first["session_id"], sid);
-    drop(first_controller);
+    stop_session(&kernel, &first["session_id"]);
+    first_controller.wait_closed();
     let before = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
-    assert!(!before.messages.is_empty());
+    assert!(!before.messages().is_empty());
     let before_bytes = fs.read_to_string(&path).unwrap();
-    // The bare kernel has no raft WAL and initially degrades to a regular
-    // file. Put the saved records in a native stream to exercise production's
-    // framing on restore: a snapshot rewrite here would duplicate every turn.
-    fs.delete(&path).unwrap();
-    provision_stream_transcript(&kernel, &path);
     assert!(fs.is_append_stream(&path).unwrap());
-    for line in before_bytes.lines() {
-        fs.append(&path, format!("{line}\n").as_bytes()).unwrap();
-    }
 
     for (key, value) in [
         ("agent_id", json!("another-agent")),
@@ -915,14 +895,14 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         "resumed turn",
     );
     wait_idle(&kernel, &second["session_id"]);
-    stop_session(&kernel, &second["session_id"], sid);
-    drop(second_controller);
+    stop_session(&kernel, &second["session_id"]);
+    second_controller.wait_closed();
     let after = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
     assert_eq!(after.session_id, before.session_id);
-    assert!(after.messages.len() > before.messages.len());
+    assert!(after.messages().len() > before.messages().len());
     assert_eq!(
-        &after.messages[..before.messages.len()],
-        before.messages.as_slice()
+        &after.messages()[..before.messages().len()],
+        before.messages()
     );
     let requests = harness
         .runtime
@@ -934,8 +914,7 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         "the resumed model must receive the old conversation"
     );
     assert_eq!(fs.readdir("/sessions").unwrap().len(), 1);
-    // Store listing and forks must also use this backend, rather than reading
-    // or writing the daemon's host disk.
+    // Store listing and loading use the same backend as the hosted transcript.
     let store = runtime::session_control::SessionStore::from_cwd_with(
         after.workspace_root().unwrap(),
         Arc::clone(&fs),
@@ -944,11 +923,11 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
     .with_identity(after.identity.clone().unwrap());
     assert_eq!(store.list_sessions().unwrap().len(), 1);
     let loaded = store.load_session(sid).unwrap().session;
-    let fork = store.fork_session(&loaded, None).unwrap();
-    assert!(fs.exists(&fork.handle.path.to_string_lossy()).unwrap());
+    assert_eq!(loaded.messages(), after.messages());
     // Legacy data remains readable locally but lacks the ownership proof a
     // hosted restore requires. Do not silently adopt or replace it.
     fs.delete(&path).unwrap();
+    provision_stream_transcript(&kernel, &path);
     let mut legacy = after;
     legacy.identity = None;
     legacy
@@ -956,7 +935,13 @@ fn managed_rpc_restores_history_on_a_new_pid_and_keeps_writing_the_same_vfs_sess
         .with_fs_backend(Arc::clone(&fs))
         .save_to_path(&path)
         .unwrap();
-    assert!(managed_call(&kernel, "start_session_v1", request)
-        .unwrap_err()
-        .contains("without identity"));
+    let unbound = runtime::Session::load_from_path_with(&*fs, &path).unwrap();
+    assert!(unbound.identity.is_none());
+    assert_eq!(unbound.session_id, sid);
+    let unbound_bytes = fs.read_to_string(&path).unwrap();
+    let requests_before_rejection = harness.requests_seen();
+    let error = managed_call(&kernel, "start_session_v1", request).unwrap_err();
+    assert!(error.contains("co-host: restore session:"), "{error}");
+    assert_eq!(fs.read_to_string(&path).unwrap(), unbound_bytes);
+    assert_eq!(harness.requests_seen(), requests_before_rejection);
 }

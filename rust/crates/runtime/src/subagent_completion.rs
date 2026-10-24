@@ -11,7 +11,9 @@ use crate::fs_backend::FsBackend;
 use crate::{ContentBlock, Session, SubagentLifecycle, SubagentPhase};
 
 mod control;
+mod storage;
 mod terminal;
+pub(crate) use storage::{check_response_storage, check_shared_storage, prepare_shared_storage};
 use terminal::TerminalSource;
 pub use terminal::{ShellKind, TaskCompletion, TerminalCompletion, TerminalSnapshot};
 
@@ -40,14 +42,14 @@ impl Completions {
         match event.phase {
             SubagentPhase::Started => {
                 self.workers
-                    .entry(event.tool_call_id.clone())
+                    .entry(event.source_key())
                     .or_insert_with(|| Worker {
                         agent_id: event.agent.agent_id.clone(),
                         ..Worker::default()
                     });
             }
             SubagentPhase::Finished => {
-                if let Some(worker) = self.workers.get_mut(&event.tool_call_id) {
+                if let Some(worker) = self.workers.get_mut(&event.source_key()) {
                     worker.finished = Some(event.clone());
                 }
                 self.suppress_collected();
@@ -55,16 +57,17 @@ impl Completions {
         }
     }
 
-    pub fn tool_result(&mut self, id: &str, name: &str, output: &str) {
+    pub fn tool_result(&mut self, assistant: Option<&str>, id: &str, name: &str, output: &str) {
+        let key = crate::session_history::tool_source_key(assistant, id);
         let value = serde_json::from_str::<serde_json::Value>(output).ok();
-        if let Some(worker) = self.workers.get_mut(id) {
+        if let Some(worker) = self.workers.get_mut(&key) {
             if value
                 .as_ref()
                 .is_some_and(|v| matches!(v["status"].as_str(), Some("running" | "backgrounded")))
             {
                 worker.background = true;
             } else {
-                self.workers.remove(id);
+                self.workers.remove(&key);
             }
         }
         // Only an explicit read consumes a result. An unrelated tool returning
@@ -177,16 +180,10 @@ struct Journal {
     cwd: PathBuf,
     context: Option<ContextRef>,
     active_trace: Option<String>,
+    #[serde(default)]
+    head_id: Option<String>,
     reducer: Completions,
     sources: BTreeMap<String, Source>,
-}
-
-// Session writes must reject a journal this executable cannot preserve, even
-// when ACP completion delivery was not negotiated (for example after rollback).
-pub(crate) fn validate_journal(value: serde_json::Value) -> Result<(), String> {
-    serde_json::from_value::<Journal>(value)
-        .map(|_| ())
-        .map_err(|error| format!("completion_journal_unsupported: {error}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -219,6 +216,7 @@ pub struct CompletionJournal {
     instance: String,
     task_protocol: std::sync::atomic::AtomicBool,
     writer: Arc<crate::session_writer::SessionWriter>,
+    _context_owner: Arc<dyn crate::fs_backend::FsLock>,
 }
 
 impl CompletionJournal {
@@ -261,27 +259,19 @@ impl CompletionJournal {
             .to_path_buf();
         let fs = session.fs_handle();
         let writer = session.completion_writer()?;
-        let path = transcript
-            .with_extension("completions.json")
-            .to_string_lossy()
-            .into_owned();
-        let state = if fs.exists(&path).map_err(|e| e.to_string())? {
-            let state: Journal =
-                serde_json::from_str(&fs.read_to_string(&path).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?;
-            if state.version != crate::session_writer::JOURNAL_VERSION
-                || state.session_id != session.session_id
-                || state.cwd != cwd
-            {
-                return Err("completion journal identity mismatch".into());
-            }
-            state
-        } else if create {
+        let (path, previous, context_owner) = {
+            let _write = writer.write()?;
+            let storage = storage::open_context(fs.as_ref(), &transcript, session, cwd, create)?;
+            (storage.path, storage.previous, storage.owner)
+        };
+        let state = if let Some(previous) = previous {
+            previous
+        } else {
             Journal {
-                version: crate::session_writer::JOURNAL_VERSION,
+                version: storage::SHARED_VERSION,
                 storage_ref: checksum(
                     &serde_json::to_vec(&(1, &session.session_id, &transcript))
-                        .map_err(|e| e.to_string())?,
+                        .map_err(|error| error.to_string())?,
                 ),
                 deleted: None,
                 closed_traces: BTreeSet::new(),
@@ -290,11 +280,10 @@ impl CompletionJournal {
                 cwd: cwd.to_path_buf(),
                 context: None,
                 active_trace: None,
+                head_id: writer.history_head()?,
                 reducer: Completions::default(),
                 sources: BTreeMap::new(),
             }
-        } else {
-            return Err("completion journal missing".into());
         };
         let interrupted = state.active_trace.clone();
         let journal = Arc::new(Self {
@@ -307,6 +296,7 @@ impl CompletionJournal {
             instance: uuid::Uuid::new_v4().to_string(),
             task_protocol: std::sync::atomic::AtomicBool::new(false),
             writer,
+            _context_owner: context_owner,
         });
         // Opening a new writer means the previous process no longer owns this
         // journal. Its interrupted turn cannot publish, but must not prevent a
@@ -455,12 +445,13 @@ impl CompletionJournal {
                     "completion_journal_capacity: session has 10000 registered children".into(),
                 );
             }
-            if state.sources.contains_key(&lifecycle.tool_call_id) {
+            let key = lifecycle.source_key();
+            if state.sources.contains_key(&key) {
                 return Err("duplicate spawn tool id".into());
             }
             state.reducer.lifecycle(&lifecycle);
             state.sources.insert(
-                lifecycle.tool_call_id.clone(),
+                key,
                 Source {
                     ordinal: 0,
                     lifecycle: Some(lifecycle),
@@ -490,10 +481,11 @@ impl CompletionJournal {
             return Ok(());
         } // registration is already durable
         self.change(|state| {
-            if !state.sources.contains_key(&event.tool_call_id) {
+            let key = event.source_key();
+            if !state.sources.contains_key(&key) {
                 return Ok(());
             }
-            if let Some(source) = state.sources.get_mut(&event.tool_call_id) {
+            if let Some(source) = state.sources.get_mut(&key) {
                 if source.payload.is_some() || source.settled {
                     return Ok(());
                 }
@@ -508,13 +500,24 @@ impl CompletionJournal {
         })
     }
 
-    pub fn tool_result(&self, id: &str, name: &str, output: &str) -> Result<(), String> {
+    pub fn tool_result(
+        &self,
+        assistant: Option<&str>,
+        id: &str,
+        name: &str,
+        output: &str,
+    ) -> Result<(), String> {
         if self.deleted() {
             return Ok(());
         }
         self.change(|state| {
-            state.reducer.tool_result(id, name, output);
-            Self::terminal_tool_result(state, id, name, output);
+            state.reducer.tool_result(assistant, id, name, output);
+            Self::terminal_tool_result(
+                state,
+                &crate::session_history::tool_source_key(assistant, id),
+                name,
+                output,
+            );
             Self::publish(state)
         })
     }
@@ -523,6 +526,7 @@ impl CompletionJournal {
     /// committed. The context digest covers the persisted, recoverable bytes.
     pub fn commit(&self, trace: &str) -> Result<ContextRef, String> {
         let digest = self.digest()?;
+        let head = self.writer.history_head()?;
         self.change(|state| {
             if state.active_trace.as_deref() != Some(trace) {
                 return Err("completion turn identity mismatch".into());
@@ -534,6 +538,7 @@ impl CompletionJournal {
                 last_trace_id: trace.to_owned(),
             };
             state.context = Some(context.clone());
+            state.head_id = head;
             state.active_trace = None;
             state.closed_traces.insert(trace.to_owned());
             for source in state.sources.values_mut().filter(|s| s.trace_id == trace) {
@@ -594,9 +599,10 @@ impl CompletionJournal {
             return Ok(());
         }
         for event in state.reducer.drain() {
+            let source_key = event.source_key();
             let source = state
                 .sources
-                .get_mut(&event.tool_call_id)
+                .get_mut(&source_key)
                 .ok_or("completion source missing")?;
             if !source.closed || source.payload.is_some() || source.settled {
                 continue;
@@ -608,13 +614,8 @@ impl CompletionJournal {
                 return Err("completion message exceeds 64 KiB".into());
             }
             let id = checksum(
-                &serde_json::to_vec(&(
-                    1,
-                    &state.session_id,
-                    &event.tool_call_id,
-                    &event.agent.agent_id,
-                ))
-                .map_err(|e| e.to_string())?,
+                &serde_json::to_vec(&(1, &state.session_id, source_key, &event.agent.agent_id))
+                    .map_err(|e| e.to_string())?,
             );
             // Order published results, not spawns: an earlier child finishing
             // late must not overtake a frozen delivery awaiting its durable ACK,
@@ -649,10 +650,10 @@ impl CompletionJournal {
     }
 
     fn digest(&self) -> Result<String, String> {
-        self.fs
-            .read(&self.transcript.to_string_lossy())
-            .map(|bytes| checksum(&bytes))
-            .map_err(|e| e.to_string())
+        let head = self.writer.history_head()?;
+        let session = Session::load_history_at(self.fs.as_ref(), &self.transcript, head.as_deref())
+            .map_err(|error| error.to_string())?;
+        session.context_digest().map_err(|error| error.to_string())
     }
 
     pub fn context(&self) -> Result<Option<ContextRef>, String> {
@@ -745,8 +746,11 @@ impl CompletionJournal {
         &self,
         terminal: impl Fn(&str, &SubagentLifecycle) -> Result<Option<SubagentLifecycle>, String>,
     ) -> Result<ReplayStatus, String> {
-        let session = Session::load_from_path_with(self.fs.as_ref(), &self.transcript)
-            .map_err(|e| e.to_string())?;
+        let session = {
+            let head = self.writer.history_head()?;
+            Session::load_history_at(self.fs.as_ref(), &self.transcript, head.as_deref())
+        }
+        .map_err(|e| e.to_string())?;
         let digest = self.digest()?;
         self.change(|state| {
             if state.active_trace.is_some()
@@ -772,7 +776,13 @@ impl CompletionJournal {
                             ..
                         } = block
                         {
-                            state.reducer.tool_result(tool_use_id, tool_name, output);
+                            let origin = crate::session_history::tool_origin(message, tool_use_id);
+                            // Migrated sources retain the identity used by their
+                            // original registration; new calls always carry a UUID.
+                            let origin = origin.filter(|id| !id.starts_with("legacy-"));
+                            state
+                                .reducer
+                                .tool_result(origin, tool_use_id, tool_name, output);
                         }
                     }
                 }

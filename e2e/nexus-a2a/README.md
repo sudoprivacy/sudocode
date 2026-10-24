@@ -22,6 +22,25 @@ test) is the piece unit tests can't cover: it drives `Mailbox::ensure_inbox` +
 DT_STREAM. `run.sh` brings the daemon up, waits for a writable single-voter
 leader, and runs it; it is deterministic and always safe to run.
 
+The same harness runs `fs_record_log` against four independent mTLS clients,
+appends 32 large JSON records to a new WAL with unlimited retention, restarts
+its owned daemon, and checks every record and the next committed cursor. It
+rejects a regular-file path instead of falling back to read/concatenate/write.
+Native record locking and interrupted-write recovery use real subprocesses in
+the regular `cargo test --workspace` suite on all three operating systems.
+
+`shared_history_records` uses the same restart to verify two contexts of one
+durable SID. A runs a real child tool while B restores the completed prefix and
+compacts its own continuation. Restart preserves both completed branches and A's
+real tool-result association. The same restart also exercises product Session
+and ConversationRuntime persistence, including a real subprocess tool and cold
+restore after sibling compaction. CLI/cohost admission, completion ownership
+and release adoption retain their separate acceptance checks.
+
+On Linux the harness also uses `strace` to fail the actual native append's
+`fdatasync`. Replay must successfully sync that same file before allowing a
+real file effect. CI installs the injector; local Linux runs need `strace`.
+
 The cross-node harness boots two authenticated daemons. It checks an idle tail,
 a peer write that wakes it, four concurrent tails receiving all 128 ordered
 messages, and a reverse acknowledgement. It then runs two real scode processes

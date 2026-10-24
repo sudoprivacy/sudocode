@@ -556,13 +556,15 @@ pub fn build_engine_runtime(
 
 pub fn build_runtime_for_host(
     host: &HostContext,
-    session: Session,
+    mut session: Session,
     session_id: &str,
     config: RuntimeConfig,
     session_mcp: &std::collections::BTreeMap<String, runtime::ScopedMcpServerConfig>,
 ) -> Result<BuiltRuntime, Box<dyn std::error::Error>> {
     let loader = ConfigLoader::default_for(&host.config_root);
     let file_config = loader.load()?;
+    runtime::experiments::init_config_flags(file_config.experiments().clone());
+    session.activate_persistence()?;
     let runtime_plugin_state = build_runtime_plugin_state_with_loader(
         &host.config_root,
         &loader,

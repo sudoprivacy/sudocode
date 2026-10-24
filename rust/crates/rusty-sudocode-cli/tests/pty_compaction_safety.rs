@@ -594,9 +594,9 @@ fn framed_fixture_summary(tokens: usize) -> String {
     let summary = "<summary>PROJECT_ALPHA CHECKPOINT_COMPLETE</summary>";
     let estimate = |summary: &str| {
         let mut session = Session::new();
-        session.messages = vec![ConversationMessage::user_text(
+        session = session.with_messages(vec![ConversationMessage::user_text(
             get_compact_continuation_message(summary, true, true, None),
-        )];
+        )]);
         estimate_session_tokens(&session)
     };
     let base = estimate(summary);
@@ -766,7 +766,15 @@ fn manual_compact_retries_a_one_token_reduction_before_committing_the_target() {
         })
         .collect();
     assert_eq!(archives.len(), 1, "only the accepted replacement commits");
-    assert_eq!(std::fs::read(archives[0].path()).unwrap(), original);
+    assert!(std::fs::read(archives[0].path())
+        .unwrap()
+        .starts_with(&original));
+    assert_eq!(
+        Session::load_from_path(archives[0].path())
+            .unwrap()
+            .session_id,
+        Session::load_from_path(&path).unwrap().session_id,
+    );
 }
 
 #[test]
@@ -781,7 +789,7 @@ fn safe_but_over_target_checkpoints_fail_and_preserve_history() {
         "12K is under the hard window but over the 7.5K target: {screen}"
     );
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, original.messages);
+    assert_eq!(restored.messages(), original.messages());
     assert_eq!(restored.compaction, original.compaction);
     let report = restored.last_compaction_report.as_ref().unwrap();
     assert_eq!(report.outcome, runtime::CompactionOutcome::Failed);
@@ -816,7 +824,7 @@ fn immediately_repeating_a_met_compaction_skips_until_its_budget_changes() {
     assert_eq!(code, 0, "{screen}");
     assert_eq!(compaction_request_count(&provider), requests);
     let second = Session::load_from_path(&path).unwrap();
-    assert_eq!(second.messages, first.messages);
+    assert_eq!(second.messages(), first.messages());
     assert_eq!(second.compaction, first.compaction);
     assert_eq!(second.maintenance_usage, first.maintenance_usage);
 
@@ -836,7 +844,7 @@ fn immediately_repeating_a_met_compaction_skips_until_its_budget_changes() {
     assert_eq!(report.outcome, runtime::CompactionOutcome::Failed);
     assert_eq!(report.before_history, estimate_session_tokens(&first));
     assert_eq!(report.target_history, Some(report.before_history / 2));
-    assert_eq!(changed.messages, first.messages);
+    assert_eq!(changed.messages(), first.messages());
     // The already compacted four-message tail cannot meet a second halving,
     // so invalidating the fingerprint fails locally before billing a request.
     assert_eq!(compaction_request_count(&provider), requests);
@@ -848,14 +856,12 @@ fn compaction_can_release_an_older_image_exchange_when_recent_tail_exceeds_targe
     let env = budget_env("large-image-tail", &provider);
     let mut session = Session::new().with_workspace_root(env.workspace_root());
     session.model = Some("claude-sonnet-4-6".into());
-    session
-        .messages
-        .push(ConversationMessage::user_text(format!(
-            "Previous summary: PROJECT_ALPHA {}",
-            "s".repeat(8_000)
-        )));
+    let mut messages = vec![ConversationMessage::user_text(format!(
+        "Previous summary: PROJECT_ALPHA {}",
+        "s".repeat(8_000)
+    ))];
     for (id, path) in [("older-image", "older.png"), ("latest-image", "latest.png")] {
-        session.messages.push(ConversationMessage::assistant(vec![
+        messages.push(ConversationMessage::assistant(vec![
             ContentBlock::ToolUse {
                 id: id.into(),
                 name: "read_file".into(),
@@ -873,8 +879,9 @@ fn compaction_can_release_an_older_image_exchange_when_recent_tail_exceeds_targe
             data: "AAAA".repeat(375_000),
             mime_type: "image/png".into(),
         });
-        session.messages.push(result);
+        messages.push(result);
     }
+    let session = session.with_messages(messages);
     let before = estimate_session_tokens(&session);
     let path = env.workspace_root().join("history.jsonl");
     session.save_to_path(&path).unwrap();
@@ -885,11 +892,11 @@ fn compaction_can_release_an_older_image_exchange_when_recent_tail_exceeds_targe
     let report = restored.last_compaction_report.as_ref().unwrap();
     assert_eq!(report.outcome, runtime::CompactionOutcome::TargetMet);
     assert!(estimate_session_tokens(&restored) <= before / 2);
-    assert_eq!(restored.messages.len(), 3);
-    assert!(restored.messages[1].blocks.iter().any(|block| {
+    assert_eq!(restored.messages().len(), 3);
+    assert!(restored.messages()[1].blocks.iter().any(|block| {
         matches!(block, ContentBlock::ToolUse { id, .. } if id == "latest-image")
     }));
-    assert!(restored.messages[2]
+    assert!(restored.messages()[2]
         .blocks
         .iter()
         .any(|block| matches!(block, ContentBlock::Image { .. })));
@@ -919,10 +926,10 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
         let env = budget_env(mode, &provider);
         let mut session = Session::new().with_workspace_root(env.workspace_root());
         session.model = Some("claude-sonnet-4-6".into());
-        session.messages.push(ConversationMessage::user_text(
+        let mut messages = vec![ConversationMessage::user_text(
             "Certificate task: ".to_owned() + &"u".repeat(8_800),
-        ));
-        session.messages.push(ConversationMessage::assistant(vec![
+        )];
+        messages.push(ConversationMessage::assistant(vec![
             ContentBlock::ToolUse {
                 id: "earlier-command".into(),
                 name: "bash".into(),
@@ -930,13 +937,13 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
                 thought_signature: None,
             },
         ]));
-        session.messages.push(ConversationMessage::tool_result(
+        messages.push(ConversationMessage::tool_result(
             "earlier-command",
             "bash",
             "p".repeat(15_800),
             false,
         ));
-        session.messages.push(ConversationMessage::assistant(vec![
+        messages.push(ConversationMessage::assistant(vec![
             ContentBlock::ToolUse {
                 id: "unread-image".into(),
                 name: "read_file".into(),
@@ -954,7 +961,8 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
             data: "AAAA".repeat(1_382_360),
             mime_type: "image/png".into(),
         });
-        session.messages.push(image);
+        messages.push(image);
+        let session = session.with_messages(messages);
         let before = estimate_session_tokens(&session);
         let path = env.workspace_root().join("history.jsonl");
         session.save_to_path(&path).unwrap();
@@ -968,7 +976,7 @@ fn latest_large_image_keeps_enough_summary_budget_on_truncated_retry() {
         );
         assert!(estimate_session_tokens(&restored) <= before / 2);
         assert!(restored
-            .messages
+            .messages()
             .iter()
             .any(|message| message.blocks.iter().any(|block| {
                 matches!(block, ContentBlock::Image { data, .. } if data.len() == 5_529_440)
@@ -1090,7 +1098,9 @@ fn exhausted_network_retries_do_not_restart_the_budget_in_the_fallback() {
         ..runtime::TokenUsage::default()
     };
     let mut original = Session::load_from_path(&path).unwrap();
-    original.messages.last_mut().unwrap().usage = Some(old_usage);
+    let mut messages = original.messages().to_vec();
+    messages.last_mut().unwrap().usage = Some(old_usage);
+    original = original.with_messages(messages);
     original.save_to_path(&path).unwrap();
     // Retain a read-only snapshot after handing the writer to the CLI.
     drop(original);
@@ -1104,7 +1114,7 @@ fn exhausted_network_retries_do_not_restart_the_budget_in_the_fallback() {
     let (code, screen) = compact_env(&env, &path);
     assert_ne!(code, 0, "{screen}");
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, original.messages);
+    assert_eq!(restored.messages(), original.messages());
     assert_eq!(restored.compaction, original.compaction);
     assert_eq!(
         compaction_request_count(&provider),
@@ -1144,7 +1154,7 @@ fn usage_preceding_a_malformed_stream_frame_is_billable_without_installing_text(
     let (code, screen) = compact_env(&env, &path);
     assert_ne!(code, 0, "{screen}");
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, original.messages);
+    assert_eq!(restored.messages(), original.messages());
     assert_eq!(restored.compaction, original.compaction);
     assert!(!restored.maintenance_usage.is_empty());
     assert!(
@@ -1194,12 +1204,14 @@ fn an_unreachable_protected_tail_or_todo_budget_does_not_call_the_provider() {
             ).unwrap();
         } else {
             let mut session = Session::load_from_path(&path).unwrap();
-            for (index, message) in session.messages.iter_mut().enumerate() {
+            let mut messages = session.messages().to_vec();
+            for (index, message) in messages.iter_mut().enumerate() {
                 let tokens = if index < 6 { 100 } else { 3_600 };
                 message.blocks = vec![ContentBlock::Text {
                     text: "x".repeat((tokens - 1) * 4 + 1),
                 }];
             }
+            session = session.with_messages(messages);
             assert_eq!(estimate_session_tokens(&session), 15_000);
             session.save_to_path(&path).unwrap();
         }
@@ -1210,7 +1222,7 @@ fn an_unreachable_protected_tail_or_todo_budget_does_not_call_the_provider() {
             "protected context exceeds the 7.5K target: {screen}"
         );
         let restored = Session::load_from_path(&path).unwrap();
-        assert_eq!(restored.messages, original.messages);
+        assert_eq!(restored.messages(), original.messages());
         assert_eq!(restored.compaction, original.compaction);
         assert_eq!(compaction_request_count(&provider), 0);
     }
@@ -1234,7 +1246,7 @@ fn empty_history_cannot_skip_when_fixed_request_overhead_exceeds_the_window() {
         "fixed overhead cannot fit an empty history: {screen}"
     );
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, source.messages);
+    assert_eq!(restored.messages(), source.messages());
     assert_eq!(restored.compaction, source.compaction);
     let report = restored.last_compaction_report.as_ref().unwrap();
     assert_eq!(report.outcome, runtime::CompactionOutcome::Failed);
@@ -1401,7 +1413,7 @@ fn cancelling_a_delayed_checkpoint_preserves_the_resumable_source() {
     cli.set_default_timeout(Duration::from_secs(15));
     let _ = cli.expect_eof().unwrap();
     let restored = Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, original.messages);
+    assert_eq!(restored.messages(), original.messages());
     assert_eq!(restored.compaction, original.compaction);
     assert_eq!(compaction_request_count(&provider), 1);
     let report = restored.last_compaction_report.as_ref().unwrap();
@@ -1413,7 +1425,7 @@ fn cancelling_a_delayed_checkpoint_preserves_the_resumable_source() {
 }
 
 #[test]
-fn a_concurrent_durable_history_change_prevents_checkpoint_installation() {
+fn a_concurrent_edit_to_existing_history_prevents_checkpoint_installation() {
     for before_run in [false, true] {
         let provider = Provider::new("budget-revision-conflict");
         let env = budget_env("durable-source-revision-conflict", &provider);
@@ -1434,11 +1446,25 @@ fn a_concurrent_durable_history_change_prevents_checkpoint_installation() {
                 "summary request must start before the external append",
             );
         }
-        let mut external = Session::load_from_path(&path).unwrap();
-        external
-            .push_user_text("EXTERNAL_WRITER_SENTINEL preserve this concurrent decision.")
+        let external = Session::load_from_path(&path).unwrap();
+        let original_text = external
+            .messages()
+            .iter()
+            .filter(|message| message.role == runtime::MessageRole::Assistant)
+            .flat_map(|message| &message.blocks)
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            })
             .unwrap();
-        external.save_to_path(&path).unwrap();
+        let original = std::fs::read_to_string(&path).unwrap();
+        let changed = original.replace(
+            &serde_json::to_string(original_text).unwrap(),
+            &serde_json::to_string("EXTERNAL_WRITER_SENTINEL preserve this concurrent decision.")
+                .unwrap(),
+        );
+        assert_ne!(changed, original, "fixture must edit an existing message");
+        std::fs::write(&path, changed).unwrap();
         // The external write is complete; the CLI must now be able to persist
         // its source_changed report without a second active fixture writer.
         drop(external);
@@ -1471,7 +1497,7 @@ fn a_concurrent_durable_history_change_prevents_checkpoint_installation() {
             screen
         };
         let restored = Session::load_from_path(&path).unwrap();
-        assert_eq!(restored.messages, external.messages);
+        assert_eq!(restored.messages(), external.messages());
         assert_eq!(restored.compaction, external.compaction);
         assert_eq!(
             compaction_request_count(&provider),
@@ -1512,6 +1538,21 @@ fn compaction_preserves_external_billing_for_unchanged_history() {
     let mut external = Session::load_from_path(&path).unwrap();
     external.merge_maintenance_usage(std::slice::from_ref(&receipt));
     external.persist_maintenance_metadata().unwrap();
+    let persisted = std::fs::read(&path).unwrap();
+    assert!(external
+        .push_user_text("METADATA_WRITER_MUST_NOT_APPEND_MESSAGES")
+        .unwrap_err()
+        .to_string()
+        .contains("session_writer_busy"));
+    let changed = external
+        .clone()
+        .with_messages(vec![ConversationMessage::user_text("REPLACED_CONTEXT")]);
+    assert!(changed
+        .persist_maintenance_metadata()
+        .unwrap_err()
+        .to_string()
+        .contains("source changed"));
+    assert_eq!(std::fs::read(&path).unwrap(), persisted);
     drop(external);
     cli.send("/compact\r").unwrap();
     common::expect_screen(
@@ -1663,7 +1704,7 @@ fn live_compaction_resumes_a_file_task_using_constraints_from_removed_history() 
         "the real model must recover facts available only in the compacted prefix"
     );
     let resumed = Session::load_from_path(&path).unwrap();
-    assert!(resumed.messages.iter().flat_map(|message| &message.blocks).any(|block| {
+    assert!(resumed.messages().iter().flat_map(|message| &message.blocks).any(|block| {
         matches!(block, ContentBlock::ToolUse { name, .. } if name == "write_file" || name == "Write")
     }));
     let report = compacted.last_compaction_report.as_ref().unwrap();
@@ -1717,7 +1758,7 @@ fn codex_and_gemini_require_a_complete_terminal_before_installing_a_checkpoint()
             assert!(estimate_session_tokens(&restored) <= 7_500);
             assert_eq!(compaction_request_count(&provider), 1);
         } else {
-            assert_eq!(restored.messages, original.messages, "{mode}");
+            assert_eq!(restored.messages(), original.messages(), "{mode}");
             assert_eq!(restored.compaction, original.compaction, "{mode}");
             let report = restored.last_compaction_report.as_ref().unwrap();
             assert_eq!(report.outcome, runtime::CompactionOutcome::Failed);
@@ -1829,7 +1870,8 @@ fn failed_empty_truncated_and_growing_summaries_preserve_durable_history() {
         assert_ne!(compact(&workspace, &path, "history preserved"), 0, "{mode}");
         let restored = Session::load_from_path(&path).unwrap();
         assert_eq!(
-            restored.messages, original.messages,
+            restored.messages(),
+            original.messages(),
             "{mode} must preserve every source message"
         );
         assert_eq!(
@@ -1895,13 +1937,15 @@ fn adaptive_compaction_keeps_its_output_ceiling_and_continues_the_task() {
         // Leave ample room below the strict history target so the request uses
         // the full 12K visible ceiling. The former production path added a
         // fictitious 16K manual thinking reservation to this adaptive model.
-        for message in &mut source.messages {
+        let mut messages = source.messages().to_vec();
+        for message in &mut messages {
             for block in &mut message.blocks {
                 if let ContentBlock::Text { text } = block {
                     *text = text.repeat(10);
                 }
             }
         }
+        source = source.with_messages(messages);
         source.save_to_path(&path).unwrap();
         let before = estimate_session_tokens(&source);
         drop(source);
@@ -1988,7 +2032,7 @@ fn adaptive_compaction_keeps_its_output_ceiling_and_continues_the_task() {
         assert!(continued.contains("Consolidated checkpoint"));
         assert_eq!(continued.matches("PROJECT_ADAPTIVE_CONTINUE").count(), 1);
         let restored = Session::load_from_path(&path).unwrap();
-        assert!(restored.messages.iter().any(|message| {
+        assert!(restored.messages().iter().any(|message| {
             message.blocks.iter().any(
                 |block| matches!(block, ContentBlock::Text { text } if text == "ALPHA_CONTEXT_OK"),
             )
@@ -2029,13 +2073,15 @@ fn compaction_uses_fixed_output_ceiling_and_summary_length_guidance() {
         // target. The smaller fixture belongs to the dynamic-cap regression;
         // it can no longer count a 10K checkpoint as ordinary success.
         let mut source = Session::load_from_path(&path).unwrap();
-        for message in &mut source.messages {
+        let mut messages = source.messages().to_vec();
+        for message in &mut messages {
             for block in &mut message.blocks {
                 if let ContentBlock::Text { text } = block {
                     *text = text.repeat(4);
                 }
             }
         }
+        source = source.with_messages(messages);
         source.save_to_path(&path).unwrap();
         let before = estimate_session_tokens(&source);
         drop(source);
@@ -2077,9 +2123,9 @@ fn recompaction_rewrites_checkpoint_and_archives_original_history() {
     let original = std::fs::read(&path).unwrap();
     assert_eq!(compact(&workspace, &path, "Messages removed"), 0);
     let first = Session::load_from_path(&path).unwrap();
-    assert!(first.messages.len() < 32);
+    assert!(first.messages().len() < 32);
     assert!(
-        first.messages.len() > 5,
+        first.messages().len() > 5,
         "retain a token-priced recent tail, not only four messages"
     );
     assert!(
@@ -2114,7 +2160,15 @@ fn recompaction_rewrites_checkpoint_and_archives_original_history() {
         })
         .collect();
     assert_eq!(archives.len(), 1);
-    assert_eq!(std::fs::read(archives[0].path()).unwrap(), original);
+    assert!(std::fs::read(archives[0].path())
+        .unwrap()
+        .starts_with(&original));
+    assert_eq!(
+        Session::load_from_path(archives[0].path())
+            .unwrap()
+            .session_id,
+        Session::load_from_path(&path).unwrap().session_id,
+    );
 
     let mut next = first;
     for _ in 0..12 {
@@ -2174,7 +2228,7 @@ fn compaction_carries_the_todo_list_forward() {
 
     let restored = Session::load_from_path(&path).unwrap();
     let transcript = restored
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| m.blocks.iter())
         .filter_map(|b| match b {
@@ -2236,13 +2290,15 @@ fn automatic_compaction_continues_after_a_long_summary() {
     std::fs::write(config_path, config.to_string()).unwrap();
     let path = fixture(&workspace);
     let mut session = Session::load_from_path(&path).unwrap();
-    for message in &mut session.messages {
+    let mut messages = session.messages().to_vec();
+    for message in &mut messages {
         for block in &mut message.blocks {
             if let ContentBlock::Text { text } = block {
                 *text = text.repeat(4);
             }
         }
     }
+    session = session.with_messages(messages);
     session.save_to_path(&path).unwrap();
 
     drop(session);
@@ -2332,13 +2388,15 @@ fn automatic_compaction_failure_never_sends_a_historyless_task_request() {
     std::fs::write(config_path, config.to_string()).unwrap();
     let path = fixture(&workspace);
     let mut original = Session::load_from_path(&path).unwrap();
-    for message in &mut original.messages {
+    let mut messages = original.messages().to_vec();
+    for message in &mut messages {
         for block in &mut message.blocks {
             if let ContentBlock::Text { text } = block {
                 *text = text.repeat(3);
             }
         }
     }
+    original = original.with_messages(messages);
     // Pruning happens on a staged clone before preflight or a model failure.
     // A failure must restore this output as well as the textual history.
     original
@@ -2378,8 +2436,8 @@ fn automatic_compaction_failure_never_sends_a_historyless_task_request() {
     cli.expect_eof().unwrap();
     let restored = Session::load_from_path(&path).unwrap();
     assert_eq!(
-        &restored.messages[..original.messages.len()],
-        &original.messages
+        &restored.messages()[..original.messages().len()],
+        original.messages()
     );
     assert_eq!(
         restored.last_compaction_report.as_ref().unwrap().outcome,
@@ -2471,9 +2529,20 @@ fn persistence_failure_preserves_original_transcript() {
     workspace.write_mock_config(&provider.url);
     let path = fixture(&workspace);
     let original = std::fs::read(&path).unwrap();
+    let source = Session::load_from_path(&path).unwrap();
     let _restore = RestorePermissions(workspace.root.clone());
     assert_ne!(compact(&workspace, &path, "history preserved"), 0);
-    assert_eq!(std::fs::read(&path).unwrap(), original);
+    // Failure/billing metadata may append to the existing log even when the
+    // directory refuses the archive needed for a context replacement.
+    assert!(std::fs::read(&path).unwrap().starts_with(&original));
+    let restored = Session::load_from_path(&path).unwrap();
+    assert_eq!(restored.messages(), source.messages());
+    assert_eq!(restored.compaction, source.compaction);
+    assert_eq!(
+        restored.last_compaction_report.as_ref().unwrap().outcome,
+        runtime::CompactionOutcome::Failed
+    );
+    assert_eq!(restored.maintenance_usage.len(), 1);
     assert_eq!(
         provider.requests.lock().unwrap().len(),
         1,
@@ -2488,7 +2557,7 @@ fn empty_compacted_history_cannot_continue_a_task() {
     workspace.write_mock_config(&provider.url);
     let path = fixture(&workspace);
     let mut damaged = Session::load_from_path(&path).unwrap();
-    damaged.messages.clear();
+    damaged = damaged.with_messages(Vec::new());
     damaged.record_compaction("legacy checkpoint", 32);
     damaged.save_to_path(&path).unwrap();
     drop(damaged);
@@ -2522,7 +2591,10 @@ fn empty_compacted_history_cannot_continue_a_task() {
         provider.requests.lock().unwrap().is_empty(),
         "damaged history must never reach the model"
     );
-    assert!(Session::load_from_path(&path).unwrap().messages.is_empty());
+    assert!(Session::load_from_path(&path)
+        .unwrap()
+        .messages()
+        .is_empty());
 }
 
 // Drive both runtime clients through the real Agent tool. Two closed read
@@ -2670,6 +2742,7 @@ fn subagent_compaction_uses_shared_text_transport() {
         .map(|entry| {
             serde_json::from_slice::<Value>(&std::fs::read(entry.path()).unwrap()).unwrap()
         })
+        .filter(|manifest| manifest.get("agentId").is_some())
         .collect::<Vec<_>>();
     assert_eq!(manifests.len(), 1);
     assert_eq!(manifests[0]["model"], "claude-sonnet");
@@ -2798,13 +2871,14 @@ fn openai_compaction_validates_responses_and_preserves_history_on_failure() {
             let restored = Session::load_from_path(&path).unwrap();
             assert!(restored
                 .compaction
+                .as_ref()
                 .unwrap()
                 .summary
                 .contains("PROJECT_ALPHA"));
-            assert!(restored.messages.len() < 32);
+            assert!(restored.messages().len() < 32);
         } else {
             let restored = Session::load_from_path(&path).unwrap();
-            assert_eq!(restored.messages, original.messages, "{mode}");
+            assert_eq!(restored.messages(), original.messages(), "{mode}");
             assert_eq!(restored.compaction, original.compaction, "{mode}");
         }
         assert!(!workspace.root.join("SHOULD_NOT_EXIST").exists());
@@ -2885,7 +2959,10 @@ fn post_turn_compaction_failure_stops_the_cli_turn() {
     cli.send("/exit\r").unwrap();
     cli.expect_eof().unwrap();
     let after = Session::load_from_path(&path).unwrap();
-    assert_eq!(&after.messages[..before.messages.len()], &before.messages);
+    assert_eq!(
+        &after.messages()[..before.messages().len()],
+        before.messages()
+    );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(
         requests

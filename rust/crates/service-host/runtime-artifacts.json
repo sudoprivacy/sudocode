@@ -1,17 +1,16 @@
 {
   "versions": {
-    "nexusd-cluster": "0.8.21",
     "nexus-vault": "0.5.68",
     "nexus-local-connector": "0.4.64",
     "nexus-fuse-plugin": "0.6.64"
   },
   "sha256": {
-    "v0.8.22/nexusd-cluster-linux-aarch64.tar.gz": "0c6f37389ef289718e4f4a675c263784ec8db94c6b7742d61c7521458767ab30",
-    "v0.8.22/nexusd-cluster-linux-x86_64.tar.gz": "b94bc46abf206ea1862100ad2f15950b3b3614c113a7419396f63cfba849ac50",
-    "v0.8.22/nexusd-cluster-macos-aarch64.tar.gz": "b93fb4857311bf35ab98f53d24af53b931033f603edcb095d9c35d323279dbbf",
-    "v0.8.22/nexusd-cluster-macos-x86_64.tar.gz": "7d00421beb0f45c255eb0073d43a12709fe23efe64c72036102049f3271b1cd5",
-    "v0.8.22/nexusd-cluster-windows-aarch64.zip": "682244352821449f1f45c6744748de5eee8ecfdce3add32069e38d9a28036de0",
-    "v0.8.22/nexusd-cluster-windows-x86_64.zip": "e7ece855dbaf09d04a081a8a8f6aa99dd553b637ce5a6e962584be959f070e46",
+    "v0.8.23/nexusd-cluster-linux-aarch64.tar.gz": "92fbaa748b51339eabfb25345649e318def050f6ca48f5e60884d4a06cb411b4",
+    "v0.8.23/nexusd-cluster-linux-x86_64.tar.gz": "2d2102e50a15c8a2e79c5c8df1281fbbb4451fe81db79211bd80471e631f73d2",
+    "v0.8.23/nexusd-cluster-macos-aarch64.tar.gz": "4fc5049abad64b2f14a733d0cd90061fd259c8a02b4f1593a2f4aac17560d980",
+    "v0.8.23/nexusd-cluster-macos-x86_64.tar.gz": "b68d8331de4d3b57b26ede723a29d732ca520befd7c417a2963707eda3e78250",
+    "v0.8.23/nexusd-cluster-windows-aarch64.zip": "ae99baf9377f3562c111cb69d73b813acd8ce9a97c9d065c6198e885b9cba077",
+    "v0.8.23/nexusd-cluster-windows-x86_64.zip": "85450489ea29b69cfcb6b9a8e27886e030dedede4e1d575e6e24df69bd712ea9",
     "vault-v0.5.68/nexus-vault-linux-x86_64.tar.gz": "60e752e48ddcd34887fd181e302164ba69d1f5f284a700f3486689344815f914",
     "vault-v0.5.68/nexus-vault-macos-arm64.tar.gz": "4d0a0814c94bc9dff4934331885d2d811ee51a13c9c661377fef0f9ca6f4c018",
     "vault-v0.5.68/nexus-vault-macos-x86_64.tar.gz": "6380f3435ea549db9f0c7399ea402600a07efce0f73df94a1bce54b966385525",

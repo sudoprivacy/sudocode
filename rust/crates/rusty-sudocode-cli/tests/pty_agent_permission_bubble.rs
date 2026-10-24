@@ -122,15 +122,7 @@ print(result)
     let command_words = shell_words::split(&command).unwrap();
     let child_prompt = format!("Use the bash tool to run exactly this command once, with no other commands or retries: {command}. Report its actual output.");
     let execution = agent_input(&model, INVOICE_AGENT, &child_prompt);
-    let mut prompt = format!("Call the Agent tool with exactly this input object, without adding or overriding fields: {execution}. Wait for the child and report its actual output.");
-    if verify_report {
-        let verification = agent_input(
-            &model,
-            "Explore",
-            "Read exactly OUTPUT_FILE and return the actual invoice output. Only read this report: do not run commands or create another report.",
-        );
-        prompt.push_str(&format!(" The first Agent already saves its report at the outputFile path in its returned result. Then call Agent with this exact input object, replacing only OUTPUT_FILE with that actual outputFile path: {verification}. Report that verified output."));
-    }
+    let prompt = format!("Call the Agent tool with exactly this input object, without adding or overriding fields: {execution}. Wait for the child and report its actual output.");
     let marker = common::turn_status_marker(&cli);
     cli.send(&prompt).unwrap();
     common::expect_screen(
@@ -139,11 +131,7 @@ print(result)
             s.split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
-                .contains(if verify_report {
-                    "Report that verified output."
-                } else {
-                    "report its actual output."
-                })
+                .contains("report its actual output.")
         },
         BUDGET,
         "agent task input",
@@ -176,6 +164,33 @@ print(result)
         saved.contains(&nonce) && saved.contains(&subtotal.to_string()),
         "approved child did not persist the actual result: {saved}"
     );
+    if verify_report {
+        // Its own turn: asked to chain both Agent calls in one turn, a live
+        // model sometimes answered from the first child's result and never
+        // made the second call. Whether it chains steps unprompted is not
+        // what this workflow is about; reading the saved report without
+        // re-running the invoice is.
+        let verification = agent_input(
+            &model,
+            "Explore",
+            "Read exactly OUTPUT_FILE and return the actual invoice output. Only read this report: do not run commands or create another report.",
+        );
+        let marker = common::turn_status_marker(&cli);
+        cli.send(&format!("The Agent call above saved its report at the outputFile path in its returned result. Call the Agent tool with this exact input object, replacing only OUTPUT_FILE with that actual outputFile path: {verification}. Report that verified output.")).unwrap();
+        common::expect_screen(
+            &cli,
+            |s| {
+                s.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("Report that verified output.")
+            },
+            BUDGET,
+            "report verification input",
+        );
+        cli.send("\r").unwrap();
+        common::expect_turn_complete_after(&cli, &marker, BUDGET, "report verification completed");
+    }
     let marker = common::turn_status_marker(&cli);
     cli.send("Add 13 to that subtotal and reply with the batch code and final total. Use this conversation without tools.\r").unwrap();
     common::expect_turn_complete_after(&cli, &marker, BUDGET, "follow-up completed");

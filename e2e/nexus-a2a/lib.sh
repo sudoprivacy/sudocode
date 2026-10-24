@@ -39,6 +39,12 @@ shell_path() {
   fi
 }
 
+# Cargo discovers configuration from its working directory. Run at the Rust
+# workspace so native harness builds use the same target policy as releases.
+cargo_in_workspace() {
+  (cd "$RUST_DIR" && cargo "$@")
+}
+
 # ── Auth-on bring-up, shared by every A2A harness ──────────────────────────────
 #
 # scode is cert-only: it dials mTLS with a minted credential and never plaintext,
@@ -92,6 +98,11 @@ cargo_in_workspace() {
 # binary from AUTHON_NEXUSD_BIN.
 authon_boot() {
   local env_lines
+  export NEXUS_A2A_ZONE="$AUTHON_ZONE"
+  AUTHON_LOG_OFFSET=0
+  if [ -f "$AUTHON_DATA_DIR/daemon.log" ]; then
+    AUTHON_LOG_OFFSET="$(wc -c <"$AUTHON_DATA_DIR/daemon.log")"
+  fi
   mapfile -t env_lines < <(authon_daemon_env)
   env $AUTHON_NO_CONV "${env_lines[@]}" \
     "$AUTHON_NEXUSD_BIN" --bind-addr "0.0.0.0:${AUTHON_PORT}" \
@@ -124,7 +135,8 @@ authon_stop() {
 authon_wait_log() {
   local needle="$1" budget="${2:-45}" i
   for i in $(seq 1 "$budget"); do
-    if grep -q "$needle" "$AUTHON_DATA_DIR/daemon.log" 2>/dev/null; then
+    if tail -c "+$((AUTHON_LOG_OFFSET + 1))" "$AUTHON_DATA_DIR/daemon.log" 2>/dev/null \
+      | grep -F -- "$needle" >/dev/null; then
       echo "   $needle (after ~${i}s)"
       return 0
     fi

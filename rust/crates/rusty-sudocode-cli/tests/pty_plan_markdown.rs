@@ -386,7 +386,7 @@ fn approve(queue: bool, clear: bool, no_color: bool) {
     finish(&mut sess);
     let transcript = find_transcript(&env.workspace_root().join(".scode"));
     let persisted = runtime::Session::load_from_path(&transcript).unwrap();
-    let text = format!("{:?}", persisted.messages);
+    let text = format!("{:?}", persisted.messages());
     assert_eq!(
         text.contains("Earlier I considered editing the sample application."),
         !clear
@@ -564,6 +564,6 @@ fn one_shot_saves_a_draft_without_inventing_user_approval() {
     let persisted =
         runtime::Session::load_from_path(find_transcript(&env.workspace_root().join(".scode")))
             .unwrap();
-    assert!(!format!("{:?}", persisted.messages).contains("The user APPROVED the plan"));
+    assert!(!format!("{:?}", persisted.messages()).contains("The user APPROVED the plan"));
     assert!(persisted.compaction.is_none());
 }

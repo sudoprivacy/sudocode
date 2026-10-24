@@ -378,7 +378,7 @@ fn assert_persisted_text(env: &TestEnv, document: &str) {
     let sessions = env.workspace_root().join(".scode/sessions");
     let is_complete = walk_session_files(&sessions).into_iter().any(|entry| {
         runtime::Session::load_from_path(&entry).is_ok_and(|saved| {
-            saved.messages.iter().any(|message| {
+            saved.messages().iter().any(|message| {
                 message.blocks.iter().any(|block|
                     matches!(block, runtime::ContentBlock::Text { text } if text == document))
             })

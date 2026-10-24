@@ -239,12 +239,8 @@ fn concurrent_processes_save_uuid_sessions_without_replacing_each_other() {
                 continue;
             }
             let content = fs::read_to_string(&transcript).unwrap();
-            let metadata: serde_json::Value = content
-                .lines()
-                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .find(|value| value["type"] == "session_meta")
-                .expect("saved transcript metadata");
-            let id = metadata["session_id"].as_str().unwrap();
+            let persisted = runtime::Session::load_from_path(&transcript).unwrap();
+            let id = persisted.session_id.as_str();
             let uuid = id.strip_prefix("session-").expect("session prefix");
             assert_eq!(uuid.len(), 36, "cross-process ID must use a UUID: {id}");
             assert_eq!(
@@ -257,7 +253,7 @@ fn concurrent_processes_save_uuid_sessions_without_replacing_each_other() {
             assert!(content.contains("Reply with exactly 4."));
             let session = store.load_session(id).unwrap().session;
             assert!(
-                session.messages.iter().any(|message| {
+                session.messages().iter().any(|message| {
                     message.role == runtime::MessageRole::Assistant
                         && message.blocks.iter().any(|block| {
                             matches!(block, runtime::ContentBlock::Text { text } if text.trim() == expected_answer)
@@ -451,7 +447,12 @@ fn compact_reduces_messages() {
     // and that Messages removed is > 0.
     let output = sess
         .expect("(?i)Result\\s+(compacted|skipped)")
-        .expect("should see compact result status");
+        .unwrap_or_else(|error| {
+            panic!(
+                "compact result: {error}\nPTY screen:\n{}",
+                sess.render(|s| s.contents())
+            )
+        });
 
     assert!(
         output.to_ascii_lowercase().contains("compacted"),

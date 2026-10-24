@@ -30,6 +30,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 .as_deref()
                 .and_then(RuntimeObserver::background_tasks),
             tool_use_id: None,
+            external_a2a: None,
             parent_permission_mode: Some(self.permission_policy.active_mode()),
             permission_sink: prompter
                 .as_deref()
@@ -176,6 +177,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                             let (mut parent, ..) = build_assistant_message(prefix).expect("complete tool block supplies content");
                             parent.model = Some(self.running_model().to_string());
                             if let Err(failure) = self.checkpoint_assistant(&mut assistant_index, parent.clone()) { error = Some(failure); break; }
+                            parent.history.clone_from(&self.session.messages[assistant_index.expect("checkpointed assistant")].history);
                             if let Err(failure) = scheduler.enqueue(id.clone(), name.clone(), input.clone(), Some(parent)) {
                                 error = Some(failure); break;
                             }
@@ -237,7 +239,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     ///
     /// The call is admitted through the session's `background_tasks`, the
     /// fence a turn's tools take: a paused session refuses it, and a pause
-    /// waits for its worker to finish. It runs under a fresh `direct-` id and
+    /// waits for its worker to finish. It runs under a fresh `external-a2a-` command id and
     /// with no assistant message, because no model asked for it; nothing is
     /// written to the session. Returns the tool's output and whether it
     /// failed. A call cancelled after it was admitted is an error even when a
@@ -249,18 +251,33 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         name: &str,
         input: &str,
         mut prompter: Option<&mut dyn PermissionPrompter>,
-        background_tasks: Option<crate::background_tasks::BackgroundTasks>,
-    ) -> Result<(String, bool), RuntimeError> {
+        tasks: crate::background_tasks::BackgroundTasks,
+    ) -> Result<crate::external_a2a::ExternalToolResult, RuntimeError> {
         const CANCELLED: &str = "the call was cancelled after it was admitted and may have run";
+        // This outer operation covers hooks and approval waits. The executor
+        // also clones a lease into its actual blocking worker, so cancellation
+        // cannot make pause acknowledge while that worker is still running.
+        let _operation = tasks.begin_operation().map_err(RuntimeError::new)?;
         let abort = self.hook_abort_signal.for_current_turn();
         self.tool_executor_mut().set_abort_signal(abort.clone());
         let no_observer: Option<&mut dyn RuntimeObserver> = None;
         let mut context = self.dispatch_context(&no_observer, &prompter);
-        context.background_tasks = background_tasks;
         let executor = Arc::clone(&self.tool_executor);
         let executor = executor
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let binding = executor
+            .external_a2a_binding()
+            .ok_or_else(|| RuntimeError::new("the actual executor has no bound A2A mailbox"))?;
+        let call = crate::external_a2a::ExternalA2aCall::new(
+            &self.session.session_id,
+            binding,
+            name,
+            input,
+        )
+        .map_err(RuntimeError::new)?;
+        context.background_tasks = Some(tasks);
+        context.external_a2a = Some(Arc::new(call.clone()));
         let mut scheduler = tool_execution::ToolScheduler::new(
             &*executor,
             self.hook_runner.clone(),
@@ -269,8 +286,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             self.hook_progress_reporter.clone(),
         );
         scheduler.initialize_context(context);
-        let call_id = format!("direct-{}", uuid::Uuid::new_v4());
-        scheduler.enqueue(call_id, name.into(), input.into(), None)?;
+        scheduler.enqueue(call.command_id.clone(), name.into(), input.into(), None)?;
         let completed = loop {
             tokio::select! {
                 biased;
@@ -297,6 +313,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 } => Some((output, is_error)),
                 _ => None,
             })
+            .map(|(output, is_error)| call.report(output, is_error))
             .ok_or_else(|| RuntimeError::new("the tool call produced no result"))
     }
 }

@@ -323,6 +323,7 @@ mod tests {
 
     fn assistant(blocks: Vec<ContentBlock>) -> ConversationMessage {
         ConversationMessage {
+            history: None,
             role: MessageRole::Assistant,
             blocks,
             usage: None,

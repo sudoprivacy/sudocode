@@ -813,6 +813,7 @@ mod tests {
     fn reconstructs_usage_from_session_messages() {
         let mut session = Session::new();
         session.messages = vec![ConversationMessage {
+            history: None,
             role: MessageRole::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".to_string(),
@@ -854,6 +855,7 @@ mod tests {
             pre_compact_discovered_tools: Default::default(),
         });
         session.messages = vec![ConversationMessage {
+            history: None,
             role: MessageRole::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "done".to_string(),
@@ -891,6 +893,7 @@ mod tests {
         // the sum as cumulative (the status line's `+Ns Σs`).
         let mut session = Session::new();
         let mut turn = |ms: u64| ConversationMessage {
+            history: None,
             role: MessageRole::Assistant,
             blocks: vec![ContentBlock::Text {
                 text: "ok".to_string(),

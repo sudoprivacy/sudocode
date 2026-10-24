@@ -365,6 +365,7 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                         name,
                         output,
                         is_error,
+                        ..
                     } => {
                         if options.format == OutputFormat::StreamJson {
                             write_json(

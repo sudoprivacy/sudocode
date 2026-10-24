@@ -122,7 +122,7 @@ pub trait EngineDelegate: Send + Sync + 'static {
         _name: &str,
         _input: &str,
         _prompter: &mut dyn PermissionPrompter,
-    ) -> Result<(String, bool), DirectToolError> {
+    ) -> Result<runtime::external_a2a::ExternalToolResult, DirectToolError> {
         Err(DirectToolError::Refused(
             "this engine does not run direct tool calls".into(),
         ))
@@ -249,7 +249,9 @@ impl EngineSession {
                         .build()
                         .expect("engine-session tokio runtime")
                 });
-                runtime.block_on(drive(delegate, cmd_rx, EventSink::new(evt_tx, completions)));
+                let route = Arc::new(evt_tx);
+                runtime.block_on(drive(delegate, cmd_rx, EventSink::new(&route, completions)));
+                drop(route);
                 let _ = stopped_tx.send(());
             })
             .expect("spawn engine-session thread");
@@ -738,9 +740,10 @@ async fn run_direct_tool(
             result = &mut handle => {
                 table.cancel_all();
                 let result = match result {
-                    Ok(Ok((content, is_error))) => Ok(serde_json::json!({
-                        "content": content,
-                        "isError": is_error,
+                    Ok(Ok(result)) => Ok(serde_json::json!({
+                        "content": result.content,
+                        "isError": result.is_error,
+                        "_meta": { "sudocode": { "directA2a": { "audit": result.audit } } },
                     })),
                     Ok(Err(DirectToolError::Refused(reason))) => {
                         Ok(serde_json::json!({ "refused": reason }))
@@ -880,8 +883,16 @@ impl RuntimeObserver for ObserverAdapter {
         });
     }
 
-    fn on_tool_result(&mut self, tool_use_id: &str, tool_name: &str, output: &str, is_error: bool) {
+    fn on_tool_result(
+        &mut self,
+        assistant_message_id: Option<&str>,
+        tool_use_id: &str,
+        tool_name: &str,
+        output: &str,
+        is_error: bool,
+    ) {
         let _ = self.tx.send(EngineEvent::ToolResult {
+            assistant_message_id: assistant_message_id.map(str::to_owned),
             id: tool_use_id.into(),
             name: tool_name.into(),
             output: output.into(),

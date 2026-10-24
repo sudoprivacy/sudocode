@@ -10,8 +10,12 @@
 //! spawned `scode acp` cannot initialise winsock — so `acp serve` fails to bind
 //! and dies before printing its ready line. See `common/isolated_env.rs`.
 
+#[path = "support/acp_direct_fences.rs"]
+mod acp_direct_fences;
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
+#[path = "support/node_home.rs"]
+mod node_home;
 #[path = "common/openai_compat_mock.rs"]
 mod openai_compat_mock;
 #[path = "common/python.rs"]
@@ -1267,13 +1271,12 @@ async fn scenario_slash_compact(
     );
 
     // Persisted right away, not at the end of the next turn.
-    let after = read_session_transcript(&workspace.root, &session_id);
-    assert!(
-        after.contains("\"type\":\"compaction\""),
-        "compaction metadata should be on disk right after /compact"
-    );
     let compacted = runtime::Session::load_from_path(&transcript_path)
         .expect("compacted transcript should load immediately after /compact");
+    assert!(
+        compacted.compaction.is_some(),
+        "compaction metadata should be on disk right after /compact"
+    );
     let report = compacted
         .last_compaction_report
         .as_ref()
@@ -1415,7 +1418,7 @@ async fn scenario_slash_compact_cancel(
 fn assert_cancelled_compaction_persisted(transcript_path: &Path, source: &runtime::Session) {
     let restored = runtime::Session::load_from_path(transcript_path)
         .expect("cancelled compaction transcript should load");
-    assert_eq!(restored.messages, source.messages);
+    assert_eq!(restored.messages(), source.messages());
     assert_eq!(restored.compaction, source.compaction);
     assert_eq!(
         restored.compaction_achievement,
@@ -1869,7 +1872,7 @@ async fn acp_stdio_long_history_is_compacted_instead_of_rejected() {
     let transcript_path = find_session_transcript(&workspace.root, &session_id);
     let mut session =
         runtime::Session::load_from_path(&transcript_path).expect("seed transcript should load");
-    session.messages.clear();
+    session = session.with_messages(Vec::new());
     let filler_line = "The conversation went on about the migration plan for a long while. ";
     let filler = filler_line.repeat(30_000 / filler_line.len()); // ~30 KB per message
     for turn in 0..10 {
@@ -1969,13 +1972,13 @@ async fn acp_stdio_long_history_is_compacted_instead_of_rejected() {
     let reloaded =
         runtime::Session::load_from_path(&transcript_path).expect("compacted transcript loads");
     assert!(
-        reloaded.compaction.is_some() && reloaded.messages.len() < 20,
+        reloaded.compaction.is_some() && reloaded.messages().len() < 20,
         "transcript on disk should be compacted: compaction={:?} messages={}",
         reloaded
             .compaction
             .as_ref()
             .map(|c| c.removed_message_count),
-        reloaded.messages.len()
+        reloaded.messages().len()
     );
 
     client.shutdown().await;
@@ -2020,7 +2023,7 @@ async fn seed_filler_history(
     let transcript_path = find_session_transcript(&workspace.root, &session_id);
     let mut session =
         runtime::Session::load_from_path(&transcript_path).expect("seed transcript should load");
-    session.messages.clear();
+    session = session.with_messages(Vec::new());
     for turn in 0..pairs {
         session
             .push_user_text(format!(
@@ -2144,12 +2147,12 @@ async fn acp_stdio_context_limit_rejection_is_compacted_and_retried() {
     assert!(report.after_history <= report.safe_history_budget);
     assert!(
         reloaded
-            .messages
+            .messages()
             .last()
             .is_some_and(|message| message.role == runtime::MessageRole::Assistant),
         "the answered turn should be persisted after the compacted history: {:?}",
         reloaded
-            .messages
+            .messages()
             .iter()
             .map(|message| message.role)
             .collect::<Vec<_>>()
@@ -4982,6 +4985,31 @@ async fn acp_session_new_system_prompt_override_and_append_reach_model() {
         "session/load override + append must reach the model; body: {body}"
     );
 
+    // A failed rebuild retains the live writer and its previous prompt options.
+    let config_path = workspace.config_home.join("sudocode.json");
+    let valid_config = fs::read(&config_path).unwrap();
+    let before_failed_reload = server.captured_requests().await.len();
+    fs::write(&config_path, "{invalid reload configuration").unwrap();
+    let (_, failed_reload) = client
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId": plain, "cwd": root.to_string_lossy(), "mcpServers": [],
+                "_meta": {"sudocode": {"systemPrompt": "FAILED_RELOAD_MUST_STAY_PRIVATE"}},
+            }),
+        )
+        .await;
+    fs::write(&config_path, valid_config).unwrap();
+    assert!(failed_reload.get("error").is_some(), "{failed_reload}");
+    assert_eq!(server.captured_requests().await.len(), before_failed_reload);
+    let body = last_model_request_after_prompt(&mut client, &server, &plain, "p4").await;
+    assert!(
+        body.contains(LOAD_OVERRIDE)
+            && body.contains(APPEND)
+            && !body.contains("FAILED_RELOAD_MUST_STAY_PRIVATE"),
+        "failed reload changed the live context: {body}"
+    );
+
     // Validation: empty / non-string values are invalid_params for either key.
     assert_bad_prompt_meta_rejected(&mut client, &root, OVERRIDE).await;
 
@@ -5928,7 +5956,7 @@ async fn acp_compaction_failure_is_terminal_and_preserves_history() {
         .contains("上下文压缩失败，本次对话已停止"));
     assert!(text.contains("上下文压缩失败，本次对话已停止"), "{text}");
     let restored = runtime::Session::load_from_path(&path).unwrap();
-    assert_eq!(restored.messages, before.messages);
+    assert_eq!(restored.messages(), before.messages());
     assert_eq!(restored.compaction, before.compaction);
     assert_eq!(
         restored.compaction_achievement,
@@ -6238,8 +6266,141 @@ impl Drop for CompletionFixtureRelease {
     }
 }
 
+/// Locate the sole context in fixtures that open one completion writer.
+fn completion_context_path(workspace: &TestWorkspace, sid: &str) -> PathBuf {
+    let transcript = find_session_transcript(&workspace.root, sid);
+    let binding = transcript.with_extension("completions.json");
+    let saved: Value = serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
+    if saved["sources"].is_object() {
+        return binding;
+    }
+    let contexts: Vec<_> = fs::read_dir(transcript.with_extension("completions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    assert_eq!(
+        contexts.len(),
+        1,
+        "expected one completion context: {contexts:?}"
+    );
+    contexts.into_iter().next().unwrap()
+}
+
+/// Bind the v2 journal capture to a real ACP context, including its prompt snapshot.
+fn seed_legacy_completion(workspace: &TestWorkspace, sid: &str, context: &Value) -> Value {
+    use sha2::{Digest, Sha256};
+
+    let cwd = fs::canonicalize(&workspace.root).unwrap();
+    let path = find_session_transcript(&workspace.root, sid);
+    let session = runtime::Session::load_from_path(&path).unwrap();
+    let mut meta: Value = serde_json::from_str(&session.to_json().unwrap().render()).unwrap();
+    let messages = meta.as_object_mut().unwrap().remove("messages").unwrap();
+    meta["type"] = json!("session_meta");
+    let mut records = vec![meta.to_string()];
+    for mut message in messages.as_array().unwrap().iter().cloned() {
+        message.as_object_mut().unwrap().remove("history");
+        records.push(json!({"type":"message","message":message}).to_string());
+    }
+    let transcript = records.join("\n") + "\n";
+    let mut journal: Value =
+        serde_json::from_str(include_str!("fixtures/completion_v2/journal.json")).unwrap();
+    let binding: Value =
+        serde_json::from_slice(&fs::read(path.with_extension("completions.json")).unwrap())
+            .unwrap();
+    journal["session_id"] = json!(sid);
+    journal["cwd"] = json!(cwd);
+    journal["storage_ref"] = binding["storage_ref"].clone();
+    journal["context"] = context.clone();
+    journal["context"]["digest"] = json!(format!("{:x}", Sha256::digest(transcript.as_bytes())));
+    let directory = path.with_extension("completions");
+    assert!(fs::canonicalize(&directory).unwrap().starts_with(&cwd));
+    fs::remove_dir_all(directory).unwrap();
+    fs::write(&path, transcript).unwrap();
+    fs::write(path.with_extension("completions.json"), journal.to_string()).unwrap();
+    journal["context"].clone()
+}
+
+#[tokio::test]
+async fn acp_legacy_completion_upgrade_preserves_context_and_model_history() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    let workspace = TestWorkspace::new("legacy-completion-upgrade");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    let spawn = || {
+        spawn_stdio_client_with_args_and_env(
+            &workspace,
+            &["--permission-mode", "danger-full-access"],
+            &[("SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY", "0")],
+        )
+    };
+    let mut producer = spawn();
+    initialize_task_completions(&mut producer).await;
+    let sid = scenario_session_new(&mut producer, &workspace.root).await;
+    let (_, previous) = producer
+        .send_request(
+            "session/prompt",
+            json!({"sessionId":sid,"_meta":{"traceId":"legacy-prefix"},
+                "prompt":[{"type":"text","text":format!(
+                    "LEGACY_COMPLETION_PREFIX {SCENARIO_PREFIX}streaming_text")}]}),
+        )
+        .await;
+    assert_eq!(previous["result"]["stopReason"], "end_turn", "{previous}");
+    let context = previous["result"]["_meta"]["sudocode"]["contextRef"].clone();
+    producer.shutdown().await;
+    let previous_context = seed_legacy_completion(&workspace, &sid, &context);
+    let binding: Value = serde_json::from_slice(
+        &fs::read(
+            find_session_transcript(&workspace.root, &sid).with_extension("completions.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let before_load = server.captured_requests().await.len();
+    let mut resumed = spawn();
+    initialize_task_completions(&mut resumed).await;
+    let (_, loaded) = resumed
+        .send_request(
+            "session/load",
+            json!({"sessionId":sid,"cwd":workspace.root,"mcpServers":[]}),
+        )
+        .await;
+    assert!(loaded.get("result").is_some(), "{loaded}");
+    let metadata = &loaded["result"]["_meta"]["sudocode"];
+    assert_eq!(metadata["storageRef"], binding["storage_ref"]);
+    assert_eq!(
+        metadata["contextRef"]["revision"],
+        previous_context["revision"]
+    );
+    assert_eq!(
+        metadata["contextRef"]["lastTraceId"],
+        previous_context["lastTraceId"]
+    );
+    assert_eq!(server.captured_requests().await.len(), before_load);
+    let (_, continued) = resumed
+        .send_request(
+            "session/prompt",
+            json!({"sessionId":sid,"_meta":{"traceId":"after-upgrade"},
+                "prompt":[{"type":"text","text":format!("{SCENARIO_PREFIX}streaming_text")}]}),
+        )
+        .await;
+    assert_eq!(continued["result"]["stopReason"], "end_turn", "{continued}");
+    assert!(server
+        .captured_requests()
+        .await
+        .last()
+        .unwrap()
+        .raw_body
+        .contains("LEGACY_COMPLETION_PREFIX"));
+    resumed.shutdown().await;
+    workspace.cleanup();
+}
+
 async fn frozen_completion_sources(workspace: &TestWorkspace, sid: &str, count: usize) -> Value {
-    let path = find_session_transcript(&workspace.root, sid).with_extension("completions.json");
+    let path = completion_context_path(workspace, sid);
     timeout(Duration::from_secs(15), async {
         loop {
             let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -6401,8 +6562,28 @@ async fn acp_completions_retry_ack_and_exact_context() {
     );
     let transcript = find_session_transcript(&workspace.root, &sid);
     let saved = fs::read(&transcript).unwrap();
-    let mut changed = saved.clone();
-    changed.push(b'\n');
+    let saved_text = String::from_utf8(saved.clone()).unwrap();
+    let records: Vec<Value> = saved_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let text = records
+        .iter()
+        .filter_map(|record| record["message"]["blocks"].as_array())
+        .flatten()
+        .find(|block| block["type"] == "text")
+        .expect("saved history contains text");
+    let changed = saved_text
+        .replace(
+            &text["text"].to_string(),
+            &json!(format!(
+                "{} externally edited",
+                text["text"].as_str().unwrap()
+            ))
+            .to_string(),
+        )
+        .into_bytes();
     fs::write(&transcript, &changed).unwrap();
     let (_, unconfirmed) = client
         .send_request(
@@ -6573,7 +6754,7 @@ async fn acp_completion_rebind_ignores_late_receipts_and_quarantines_bad_ack() {
     );
     client.send_raw(&json!({"jsonrpc":"2.0","id":second["id"],"result":{"completionId":"wrong-current-identity","disposition":"stored"}})).await;
     // Wait for the durable receipt boundary before replay rebinds the sender.
-    let journal = find_session_transcript(&workspace.root, &sid).with_extension("completions.json");
+    let journal = completion_context_path(&workspace, &sid);
     timeout(Duration::from_secs(10), async {
         loop {
             let state: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
@@ -7016,6 +7197,221 @@ async fn initialize_task_completions(client: &mut AcpTestClient) {
         .is_none());
 }
 
+/// Independent ACP processes retain completion ownership while they append to
+/// one SID, including a provider call ID reused within the first process.
+#[tokio::test]
+async fn acp_shared_sid_scopes_background_results_and_protects_live_contexts() {
+    let server = MockAnthropicService::spawn().await.unwrap();
+    // Resolve before isolate_env replaces Unix PATH with /usr/bin:/bin.
+    let node = std::process::Command::new("node")
+        .args(["-p", "process.execPath"])
+        .output()
+        .expect("Node.js is required for the terminal completion fixture");
+    assert!(node.status.success(), "{node:?}");
+    let node = String::from_utf8(node.stdout).expect("Node executable path is UTF-8");
+    let node = node.trim();
+    assert!(Path::new(node).is_absolute(), "{node}");
+    let node = if cfg!(windows) {
+        format!("& '{}'", node.replace('\'', "''"))
+    } else {
+        format!("'{}'", node.replace('\'', "'\"'\"'"))
+    };
+    let workspace = TestWorkspace::new("shared-sid-completion-owners");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    fs::write(
+        workspace.root.join("completion-gate.cjs"),
+        r#"
+const fs = require('node:fs');
+const label = process.argv[2];
+fs.writeFileSync(label + '.ready', label);
+const timer = setInterval(() => {
+  if (!fs.existsSync(label + '.release')) return;
+  clearInterval(timer);
+  fs.writeFileSync(label + '.effect', label + ' durable effect');
+  process.stdout.write(label + ' completed');
+}, 10);
+"#,
+    )
+    .unwrap();
+    let spawn = || {
+        spawn_stdio_client_with_args_and_env(
+            &workspace,
+            &["--permission-mode", "danger-full-access"],
+            &[("SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY", "1")],
+        )
+    };
+    let mut producer = spawn();
+    initialize_task_completions(&mut producer).await;
+    let sid = scenario_session_new(&mut producer, &workspace.root).await;
+    let (_, previous) = producer
+        .send_request(
+            "session/prompt",
+            json!({
+                "sessionId":sid,"_meta":{"traceId":"legacy-prefix"},"prompt":[{"type":"text",
+                "text":format!("LEGACY_SHARED_PREFIX {SCENARIO_PREFIX}streaming_text")}]
+            }),
+        )
+        .await;
+    assert_eq!(previous["result"]["stopReason"], "end_turn", "{previous}");
+    let context = previous["result"]["_meta"]["sudocode"]["contextRef"].clone();
+    producer.shutdown().await;
+    let previous_context = context;
+    let mut first = spawn();
+    initialize_task_completions(&mut first).await;
+    let (_, migrated) = first
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"mcpServers":[]
+            }),
+        )
+        .await;
+    assert!(migrated.get("error").is_none(), "{migrated}");
+    let migrated_context = &migrated["result"]["_meta"]["sudocode"]["contextRef"];
+    assert_eq!(
+        migrated_context["revision"], previous_context["revision"],
+        "{migrated}"
+    );
+    assert_eq!(
+        migrated_context["lastTraceId"], previous_context["lastTraceId"],
+        "{migrated}"
+    );
+    let mut second = spawn();
+    initialize_task_completions(&mut second).await;
+    let (_, loaded) = second
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"mcpServers":[]
+            }),
+        )
+        .await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let storage = loaded["result"]["_meta"]["sudocode"]["storageRef"].clone();
+    assert!(storage.is_string(), "{loaded}");
+    for label in ["A1", "B1", "A2"] {
+        let client = if label == "B1" {
+            &mut second
+        } else {
+            &mut first
+        };
+        let shell = if cfg!(windows) { "PowerShell" } else { "Bash" };
+        let calls = json!([{"id":"call_1","name":shell,"input":{
+            "command":format!("{node} completion-gate.cjs {label}"),"run_in_background":true
+        }}]);
+        let (events, response) = client
+            .send_request(
+                "session/prompt",
+                json!({
+                    "sessionId":sid,"_meta":{"traceId":label},"prompt":[{"type":"text",
+                    "text":format!("{SCENARIO_PREFIX}tool_concurrency TOOL_BATCH:{calls}")}]
+                }),
+            )
+            .await;
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        assert!(
+            events
+                .iter()
+                .all(|event| event["method"] != "_sudocode/task/completed"),
+            "{label} completed before its release gate: {events:?}"
+        );
+        timeout(Duration::from_secs(10), async {
+            while !workspace.root.join(format!("{label}.ready")).exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background process reached its gate");
+    }
+    let (_, rejected) = first
+        .send_request(
+            "_sudocode/task/purge",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"storageRef":storage,"cleanupId":"live-peer"
+            }),
+        )
+        .await;
+    assert!(
+        rejected["error"]
+            .to_string()
+            .contains("session_writer_busy"),
+        "{rejected}"
+    );
+    for label in ["B1", "A2", "A1"] {
+        let client = if label == "B1" {
+            &mut second
+        } else {
+            &mut first
+        };
+        fs::write(workspace.root.join(format!("{label}.release")), "release").unwrap();
+        let (_, event) = client
+            .recv_until(SUBAGENT_EVENTS_WAIT, |event| {
+                event["method"] == "_sudocode/task/completed"
+            })
+            .await
+            .expect("durable terminal notification");
+        assert_eq!(event["params"]["originTraceId"], label, "{event}");
+        assert_eq!(event["params"]["parentToolCallId"], "call_1", "{event}");
+        assert!(
+            event["params"]["message"].as_str().unwrap().contains(label),
+            "{event}"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.root.join(format!("{label}.effect"))).unwrap(),
+            format!("{label} durable effect")
+        );
+        client
+            .send_raw(&json!({"jsonrpc":"2.0","id":event["id"],"result":{
+                "completionId":event["params"]["completionId"],"disposition":"stored"
+            }}))
+            .await;
+    }
+    for (client, expected) in [(&mut first, 2), (&mut second, 1)] {
+        let (_, status) = client
+            .send_request(
+                "_sudocode/task/replay",
+                json!({
+                    "sessionId":sid,"cwd":workspace.root,"storageRef":storage
+                }),
+            )
+            .await;
+        assert_eq!(status["result"]["settled"], expected, "{status}");
+        assert_eq!(status["result"]["pending"], 0, "{status}");
+    }
+    first.shutdown().await;
+    second.shutdown().await;
+    let mut restored = spawn();
+    initialize_task_completions(&mut restored).await;
+    let (_, loaded) = restored
+        .send_request(
+            "session/load",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"mcpServers":[]
+            }),
+        )
+        .await;
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let (_, status) = restored
+        .send_request(
+            "_sudocode/task/replay",
+            json!({
+                "sessionId":sid,"cwd":workspace.root,"storageRef":storage
+            }),
+        )
+        .await;
+    assert_eq!(
+        status["result"]["settled"], 2,
+        "latest context restores A's journal: {status}"
+    );
+    let (_,purged) = restored.send_request("_sudocode/task/purge",json!({
+        "sessionId":sid,"cwd":workspace.root,"storageRef":storage,"cleanupId":"finished-contexts"
+    })).await;
+    assert_eq!(purged["result"]["disposition"], "purged", "{purged}");
+    restored.shutdown().await;
+    workspace.cleanup();
+}
+
 #[tokio::test]
 async fn acp_task_storage_and_workspace_metadata_coexist() {
     let server = MockAnthropicService::spawn().await.unwrap();
@@ -7360,15 +7756,22 @@ async fn acp_task_completions_interrupted_shell_and_encoded_budget() {
     workspace.cleanup();
 }
 
-/// Competing ACP processes must not retire the live owner or overwrite its
-/// transcript/ACKs. Process death releases native ownership before takeover.
+/// Concurrent ACP contexts append to the same SID while retaining separate
+/// completion ownership. A sibling never repairs another context's live tool.
 #[tokio::test]
-async fn acp_completions_exclude_live_writer_before_replay_or_load() {
+async fn acp_completions_keep_live_contexts_independent_during_replay_and_load() {
     let server = MockAnthropicService::spawn().await.unwrap();
     let workspace = TestWorkspace::new("completion-writer");
     workspace.create();
     workspace.write_sudocode_json(&server.base_url());
-    let mut owner = spawn_stdio_client_danger(&workspace);
+    let spawn = || {
+        spawn_stdio_client_with_args_and_env(
+            &workspace,
+            &["--permission-mode", "danger-full-access"],
+            &[("SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY", "1")],
+        )
+    };
+    let mut owner = spawn();
     initialize_with_completions(&mut owner).await;
     let sid = scenario_session_new(&mut owner, &workspace.root).await;
     owner.send_request_no_wait("session/prompt", json!({
@@ -7382,21 +7785,28 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
         .await
         .unwrap();
     let transcript = find_session_transcript(&workspace.root, &sid);
-    let journal = transcript.with_extension("completions.json");
+    let journal = completion_context_path(&workspace, &sid);
     // The question can reach ACP before the provider's final usage update is
     // persisted. Wait for that durable boundary while the question keeps the
     // turn open; otherwise the owner itself can change our byte snapshot.
     timeout(Duration::from_secs(10), async {
         loop {
             let saved = fs::read_to_string(&transcript).unwrap();
-            if saved.lines().any(|line| {
-                serde_json::from_str::<Value>(line).is_ok_and(|record| {
-                    record["type"] == "assistant_update"
-                        && record["message"]["usage"]["output_tokens"]
-                            .as_u64()
-                            .is_some_and(|tokens| tokens > 0)
+            let graph = runtime::history::HistoryGraph::decode(saved.as_bytes()).unwrap();
+            let record: runtime::history::HistoryRecord =
+                serde_json::from_str(saved.lines().last().unwrap()).unwrap();
+            if graph
+                .context_session(record.context_id())
+                .unwrap()
+                .messages()
+                .iter()
+                .any(|message| {
+                    message
+                        .usage
+                        .as_ref()
+                        .is_some_and(|usage| usage.output_tokens > 0)
                 })
-            }) {
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -7408,9 +7818,9 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
     let before_journal = fs::read(&journal).unwrap();
     let state: Value = serde_json::from_slice(&before_journal).unwrap();
     assert_eq!(state["active_trace"], "live-owner");
-    assert_eq!(state["version"], 2);
+    assert_eq!(state["version"], 3);
 
-    let mut competitor = spawn_stdio_client_danger(&workspace);
+    let mut competitor = spawn();
     initialize_with_completions(&mut competitor).await;
     for method in ["_sudocode/subagent/replay", "session/load"] {
         let mut params = json!({"sessionId":sid, "cwd":workspace.root});
@@ -7418,22 +7828,31 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
             params["mcpServers"] = json!([]);
         }
         let (_, response) = competitor.send_request(method, params).await;
-        assert!(
-            response["error"]
-                .to_string()
-                .contains("session_writer_busy"),
-            "{response}"
-        );
+        assert!(response.get("result").is_some(), "{response}");
         assert!(
             fs::read(&journal).unwrap() == before_journal,
             "competing {method} changed journal"
         );
         assert!(
-            fs::read(&transcript).unwrap() == before_transcript,
-            "competing {method} changed transcript"
+            fs::read(&transcript)
+                .unwrap()
+                .starts_with(&before_transcript),
+            "competing {method} replaced durable history"
         );
     }
-    // SIGKILL + wait is actual owner exit, not a timeout-based assumption.
+    let contexts = fs::read_dir(transcript.with_extension("completions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .count();
+    assert!(
+        contexts >= 2,
+        "each live writer must own a separate context"
+    );
+    // Kill + wait proves exit; no timeout substitutes for process ownership.
     owner.shutdown().await;
     let (_, replay) = competitor
         .send_request(
@@ -7445,11 +7864,12 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
         .await;
     assert!(replay.get("result").is_some(), "{replay}");
     assert!(
-        fs::read(&transcript).unwrap() == before_transcript,
-        "takeover changed transcript"
+        fs::read(&transcript)
+            .unwrap()
+            .starts_with(&before_transcript),
+        "replay replaced durable history"
     );
-    let state: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
-    assert!(state["active_trace"].is_null());
+    assert_eq!(fs::read(&journal).unwrap(), before_journal);
     let (_, loaded) = competitor
         .send_request(
             "session/load",
@@ -7459,10 +7879,11 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
         )
         .await;
     assert!(loaded.get("result").is_some(), "{loaded}");
-    assert_eq!(
-        fs::read(&transcript).unwrap(),
-        before_transcript,
-        "loading must project the interrupted result without rewriting history"
+    assert!(
+        fs::read(&transcript)
+            .unwrap()
+            .starts_with(&before_transcript),
+        "loading must preserve the original interrupted history"
     );
     let (_, continued) = competitor
         .send_request(
@@ -7474,24 +7895,22 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
         )
         .await;
     assert_eq!(continued["result"]["stopReason"], "end_turn", "{continued}");
-    let repaired_transcript = fs::read(&transcript).unwrap();
+    let continued_transcript = fs::read(&transcript).unwrap();
     assert!(
-        String::from_utf8_lossy(&repaired_transcript)
+        !String::from_utf8_lossy(&continued_transcript)
             .contains("Side effects may already have occurred"),
-        "the new owner must persist the interrupted tool's uncertain outcome"
+        "a sibling must not repair another runtime's interrupted tool"
     );
+    let requests = server.captured_requests().await;
+    let request = &requests.last().unwrap().raw_body;
     assert!(
-        server
-            .captured_requests()
-            .await
-            .last()
-            .unwrap()
-            .raw_body
-            .contains("Side effects may already have occurred"),
-        "the resumed model must receive the persisted uncertainty about prior effects"
+        !request.contains("Side effects may already have occurred")
+            && !request.contains(&format!("{SCENARIO_PREFIX}ask_user_question_roundtrip")),
+        "the resumed model must exclude the sibling's unfinished turn: {request}"
     );
     competitor.shutdown().await;
-    let mut competitor = spawn_stdio_client_danger(&workspace);
+    assert_eq!(fs::read(&journal).unwrap(), before_journal);
+    let mut competitor = spawn();
     initialize_with_completions(&mut competitor).await;
     let (_, loaded_again) = competitor
         .send_request(
@@ -7500,19 +7919,21 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
         )
         .await;
     assert!(loaded_again.get("result").is_some(), "{loaded_again}");
-    assert_eq!(
-        fs::read(&transcript).unwrap(),
-        repaired_transcript,
-        "a further process restart must retain the repair without rewriting history"
+    assert!(
+        fs::read(&transcript)
+            .unwrap()
+            .starts_with(&continued_transcript),
+        "a further restart must retain both contexts and append history"
     );
     competitor.shutdown().await;
 
     // Unreleased, non-locking v1 records require explicit offline handling.
-    let mut legacy: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+    let binding = transcript.with_extension("completions.json");
+    let mut legacy: Value = serde_json::from_slice(&fs::read(&binding).unwrap()).unwrap();
     legacy["version"] = json!(1);
     let bytes = serde_json::to_vec(&legacy).unwrap();
-    fs::write(&journal, &bytes).unwrap();
-    let mut reader = spawn_stdio_client_danger(&workspace);
+    fs::write(&binding, &bytes).unwrap();
+    let mut reader = spawn();
     initialize_with_completions(&mut reader).await;
     let (_, response) = reader
         .send_request(
@@ -7528,7 +7949,7 @@ async fn acp_completions_exclude_live_writer_before_replay_or_load() {
             .contains("legacy_writer_unconfirmed"),
         "{response}"
     );
-    assert_eq!(fs::read(&journal).unwrap(), bytes);
+    assert_eq!(fs::read(&binding).unwrap(), bytes);
     reader.shutdown().await;
     workspace.cleanup();
 }
@@ -8118,11 +8539,35 @@ async fn set_session_mode(client: &mut AcpTestClient, session_id: &str, mode: &s
     );
 }
 
-/// A definite refusal is invalid params: nothing ran, so it may be resent.
+/// A definite refusal is invalid params typed `not_submitted`: nothing ran, so
+/// it may be resent.
 fn assert_refused(resp: &Value, case: &str) {
     assert_eq!(
         resp["error"]["code"], -32602,
         "{case} must be refused before anything runs: {resp}"
+    );
+    assert_eq!(
+        resp["error"]["data"]["sudocode"]["directA2a"],
+        json!({ "version": 1, "outcome": "not_submitted" }),
+        "{case} is typed as not submitted: {resp}"
+    );
+}
+
+/// A failure after admission is an internal error typed `unknown`: the call
+/// may have run, so it must not be resent blindly.
+fn assert_unknown(resp: &Value, case: &str) {
+    assert_eq!(
+        resp["error"]["code"], -32603,
+        "{case} is not a refusal: {resp}"
+    );
+    assert_eq!(
+        resp["error"]["data"]["outcome"], "unknown",
+        "{case} says its outcome is unknown: {resp}"
+    );
+    assert_eq!(
+        resp["error"]["data"]["sudocode"]["directA2a"],
+        json!({ "version": 1, "outcome": "unknown" }),
+        "{case} is typed as unknown: {resp}"
     );
 }
 
@@ -8137,6 +8582,50 @@ fn conversation_log(pair_root: &Path, peer: &str, sender: &str) -> String {
 /// `_sudocode/a2a/send` runs the session's own `send` tool for the client: the
 /// message reaches the peer on the pair root from the session's agent, the
 /// model is never asked, and the model's history never sees it.
+fn assert_direct_host_audit<'a>(
+    reply: &'a Value,
+    sid: &str,
+    actor: &str,
+    root: &Path,
+    tool: &str,
+) -> &'a Value {
+    use sha2::{Digest, Sha256};
+    let audit = &reply["result"]["_meta"]["sudocode"]["directA2a"]["audit"];
+    assert_eq!(audit["version"], 1, "{reply}");
+    assert_eq!(
+        audit["sessionId"], sid,
+        "the loaded native session: {reply}"
+    );
+    assert_eq!(
+        audit["actor"], actor,
+        "the executor's actual sender: {reply}"
+    );
+    assert_eq!(audit["namespaceRoot"], root.to_string_lossy().as_ref());
+    assert_eq!(audit["tool"], tool);
+    assert!(audit["commandId"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("external-a2a-")));
+    let mut hash = Sha256::new();
+    let content = reply["result"]["content"].as_str().unwrap().as_bytes();
+    hash.update(b"sudocode.direct-a2a.result.v1\0");
+    hash.update([u8::from(reply["result"]["isError"].as_bool().unwrap())]);
+    hash.update((content.len() as u64).to_be_bytes());
+    hash.update(content);
+    assert_eq!(
+        audit["resultSha256"],
+        format!("{:x}", hash.finalize()),
+        "audit binds actual unchanged tool output and isError, before metadata"
+    );
+    audit
+}
+
+fn assert_direct_not_submitted(reply: &Value, case: &str) {
+    assert_refused(reply, case);
+    let phase = &reply["error"]["data"]["sudocode"]["directA2a"];
+    assert_eq!(phase["version"], 1);
+    assert_eq!(phase["outcome"], "not_submitted");
+}
+
 #[tokio::test]
 async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
     const AGENT: &str = "direct-a2a-sender";
@@ -8156,8 +8645,17 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
         .send_request("initialize", json!({ "protocolVersion": 1 }))
         .await;
     assert_eq!(
-        init["result"]["_meta"]["sudocode"]["directA2a"]["version"], 1,
-        "initialize advertises the direct A2A requests: {init}"
+        init["result"]["_meta"]["sudocode"]["directA2a"],
+        json!({ "version": 1, "errorOutcomes": 1, "hostAudit": 1 }),
+        "initialize advertises the direct A2A requests and their typed outcomes: {init}"
+    );
+    assert_eq!(
+        init["result"]["_meta"]["sudocode"]["directA2a"]["errorOutcomes"],
+        1
+    );
+    assert_eq!(
+        init["result"]["_meta"]["sudocode"]["directA2a"]["hostAudit"],
+        1
     );
     let sid = open_direct_session(&mut client, &workspace.root).await;
     set_session_mode(&mut client, &sid, "workspace-write").await;
@@ -8189,6 +8687,7 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
         log.contains(MARKER) && log.contains(AGENT),
         "the peer's conversation holds the message from {AGENT}: {log}"
     );
+    let sent_audit = assert_direct_host_audit(&sent, &sid, AGENT, &pair_root, "send");
 
     let (_, listed) = client
         .send_request("_sudocode/a2a/agent_list", json!({ "sessionId": sid }))
@@ -8204,6 +8703,8 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
         rows.get("agents").is_some() && rows.get("count").is_some(),
         "agent_list returns the tool's own rows: {rows}"
     );
+    let list_audit = assert_direct_host_audit(&listed, &sid, AGENT, &pair_root, "agent_list");
+    assert_ne!(sent_audit["commandId"], list_audit["commandId"]);
     assert_eq!(
         server.captured_requests().await.len(),
         before,
@@ -8265,23 +8766,34 @@ async fn direct_a2a_refusals_send_nothing() {
         params
     };
 
-    for (case, params) in [
-        ("an unknown session", send("no-such-session", json!({}))),
+    for (case, params, reason) in [
+        (
+            "an unknown session",
+            send("no-such-session", json!({})),
+            "unknown_session",
+        ),
         (
             "a sender override",
             send(&sid, json!({ "sender": "someone-else" })),
+            "invalid_params",
         ),
         (
             "a structured message",
             send(&sid, json!({ "message": { "type": "shutdown_request" } })),
+            "invalid_params",
         ),
         (
             "a message without a summary",
             json!({ "sessionId": sid, "to": PEER, "message": MARKER }),
+            "invalid_params",
         ),
     ] {
         let (_, resp) = client.send_request("_sudocode/a2a/send", params).await;
-        assert_refused(&resp, case);
+        assert!(
+            resp.get("error").is_some(),
+            "{case} must be refused: {resp}"
+        );
+        assert_direct_not_submitted(&resp, reason);
     }
 
     // The session starts read-only: the tool runs and the policy refuses it.
@@ -8306,7 +8818,8 @@ async fn direct_a2a_refusals_send_nothing() {
     let (_, resp) = client
         .send_request("_sudocode/a2a/send", send(&sid, json!({})))
         .await;
-    assert_refused(&resp, "paused tools");
+    assert!(resp.get("error").is_some(), "paused tools refuse: {resp}");
+    assert_direct_not_submitted(&resp, "paused");
     let (_, resumed) = client
         .send_request(
             "_sudocode/session/resume_tools",
@@ -8319,7 +8832,11 @@ async fn direct_a2a_refusals_send_nothing() {
     let (_, resp) = client
         .send_request("_sudocode/a2a/send", send(&sid, json!({})))
         .await;
-    assert_refused(&resp, "a session busy with a turn");
+    assert!(
+        resp.get("error").is_some(),
+        "a session busy with a turn refuses at once: {resp}"
+    );
+    assert_direct_not_submitted(&resp, "busy");
     allow_permission(&mut client, &permission_id).await;
     client
         .recv_until(Duration::from_secs(60), |m| is_response_to(m, prompt_id))
@@ -8437,14 +8954,7 @@ async fn direct_a2a_cancel_after_delivery_reports_unknown() {
     let _ = fs::write(&release, "");
     let (_, resp) =
         answered.unwrap_or_else(|seen| panic!("the cancelled send never answered; saw {seen:#?}"));
-    assert_eq!(
-        resp["error"]["code"], -32603,
-        "a call cancelled after it ran is not a refusal: {resp}"
-    );
-    assert_eq!(
-        resp["error"]["data"]["outcome"], "unknown",
-        "the response says the outcome is unknown: {resp}"
-    );
+    assert_unknown(&resp, "a call cancelled after it ran");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(
@@ -8599,10 +9109,7 @@ async fn direct_a2a_pause_waits_for_an_in_flight_send() {
                 .1
         }
     };
-    assert_eq!(
-        sent["error"]["data"]["outcome"], "unknown",
-        "a send the pause stopped after admission has an unknown outcome: {sent}"
-    );
+    assert_unknown(&sent, "a send the pause stopped after admission");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     let mut buf = [0u8; 65_536];
@@ -8626,6 +9133,254 @@ async fn direct_a2a_pause_waits_for_an_in_flight_send() {
         )
         .await;
     assert!(resumed.get("error").is_none(), "resume_tools: {resumed}");
+    client.shutdown().await;
+    workspace.cleanup();
+}
+
+/// What `sender` has appended to its conversation with a credential's agent on
+/// a node, from `cursor`, read through that agent's own credential: `(from,
+/// body)` pairs and the next cursor. The node client is synchronous, so it
+/// runs on a blocking thread.
+async fn node_conversation(
+    endpoint: &str,
+    credential: &str,
+    sender: &str,
+    cursor: u64,
+    block_ms: u64,
+) -> (Vec<(String, String)>, u64) {
+    let (endpoint, credential, sender) = (
+        endpoint.to_string(),
+        credential.to_string(),
+        sender.to_string(),
+    );
+    tokio::task::spawn_blocking(move || {
+        let credential = runtime::nexus_mailbox::AgentCredential::load(&credential)
+            .expect("load the receiver credential bundle");
+        let agent = credential.agent.clone();
+        let client = runtime::nexus_mailbox::Config {
+            endpoint,
+            agent: credential.agent,
+            tls: credential.tls,
+        }
+        .connect()
+        .expect("dial the node as the receiver");
+        let inbox =
+            runtime::mailbox::Mailbox::over_nexus_mtls(client, agent, String::new(), "root");
+        inbox
+            .ensure_conversation(&sender)
+            .expect("provision the conversation");
+        let (envelopes, next) = inbox
+            .poll_conversation(&sender, cursor, block_ms)
+            .expect("read the conversation on the node");
+        (
+            envelopes
+                .into_iter()
+                .map(|envelope| (envelope.from, envelope.body))
+                .collect(),
+            next,
+        )
+    })
+    .await
+    .expect("node read task")
+}
+
+/// Read the conversation on the node from `cursor` until a body containing
+/// `marker` has arrived, returning everything read and the next cursor.
+async fn node_conversation_until(
+    endpoint: &str,
+    credential: &str,
+    sender: &str,
+    mut cursor: u64,
+    marker: &str,
+) -> (Vec<(String, String)>, u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut stored = Vec::new();
+    while !stored
+        .iter()
+        .any(|(_, body): &(String, String)| body.contains(marker))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{marker} never reached the node; read {stored:?}"
+        );
+        let (more, next) = node_conversation(endpoint, credential, sender, cursor, 2_000).await;
+        stored.extend(more);
+        cursor = next;
+    }
+    (stored, cursor)
+}
+
+/// An ACP client's direct send through a real nexus node: the node stamps the
+/// session's own authenticated identity on exactly one append, nothing falls
+/// back to a local mailbox, and the model is never asked. A call cancelled
+/// after its append answers that its outcome is unknown, and nothing resends
+/// it. `e2e/nexus-a2a/run.sh` supplies the daemon and both credentials;
+/// without them this test reports that it was skipped.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn direct_a2a_through_a_node_appends_once_as_the_session() {
+    let vars = [
+        "NEXUS_A2A_TEST_ENDPOINT",
+        "NEXUS_A2A_TEST_DIRECT_SENDER_CREDENTIAL",
+        "NEXUS_A2A_TEST_DIRECT_RECEIVER_CREDENTIAL",
+    ]
+    .map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()));
+    let [Some(endpoint), Some(sender_credential), Some(receiver_credential)] = vars else {
+        eprintln!(
+            "SKIP(nexus): set NEXUS_A2A_TEST_ENDPOINT and the direct-send credentials - \
+             e2e/nexus-a2a/run.sh does"
+        );
+        return;
+    };
+    let sender = runtime::nexus_mailbox::AgentCredential::load(&sender_credential)
+        .expect("load the sender credential bundle")
+        .agent;
+    let receiver = runtime::nexus_mailbox::AgentCredential::load(&receiver_credential)
+        .expect("load the receiver credential bundle")
+        .agent;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after epoch")
+        .as_millis();
+    let sent_marker = format!("DIRECT_NODE_SENT_{nonce}");
+    let held_marker = format!("DIRECT_NODE_HELD_{nonce}");
+    let (_, tail) = node_conversation(&endpoint, &receiver_credential, &sender, 0, 0).await;
+
+    let server = MockAnthropicService::spawn()
+        .await
+        .expect("mock service should start");
+    let workspace = TestWorkspace::new("direct-a2a-node");
+    workspace.create();
+    workspace.write_sudocode_json(&server.base_url());
+    // Once armed, the post-tool hook holds a call after its append, so a
+    // cancel lands after the message has gone out.
+    let hook = if cfg!(windows) {
+        r"if exist direct-node.arm (echo started>direct-node.started& for /L %i in (1,1,60) do @if not exist direct-node.release (ping -n 2 127.0.0.1 >nul))"
+    } else {
+        r"if [ -f direct-node.arm ]; then touch direct-node.started; i=0; while [ ! -f direct-node.release ] && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done; fi"
+    };
+    let settings = workspace.root.join(".nexus").join("sudocode");
+    fs::create_dir_all(&settings).expect("create project settings");
+    fs::write(
+        settings.join("settings.json"),
+        json!({ "agentName": sender, "hooks": { "PostToolUse": [hook] } }).to_string(),
+    )
+    .expect("write project settings");
+    // The session attaches the way a machine does: a node record in its home
+    // and the credential minted for its own name.
+    let home = node_home::NodeHome::new(
+        "direct-a2a-node",
+        &endpoint,
+        &sender,
+        Path::new(&sender_credential),
+    );
+    let [(home_key, home_value), (profile_key, profile_value)] = home.env();
+    let mut client = spawn_stdio_client_with_args_and_env(
+        &workspace,
+        &[],
+        &[
+            (home_key, home_value.as_str()),
+            (profile_key, profile_value.as_str()),
+        ],
+    );
+    scenario_initialize(&mut client).await;
+    let sid = open_direct_session(&mut client, &workspace.root).await;
+    set_session_mode(&mut client, &sid, "workspace-write").await;
+    let before = server.captured_requests().await.len();
+
+    let (_, sent) = client
+        .send_request(
+            "_sudocode/a2a/send",
+            json!({ "sessionId": sid, "to": receiver, "message": sent_marker, "summary": "node probe" }),
+        )
+        .await;
+    assert_eq!(
+        sent["result"]["isError"], false,
+        "the send ran through the node: {sent}"
+    );
+    let (stored, tail) =
+        node_conversation_until(&endpoint, &receiver_credential, &sender, tail, &sent_marker).await;
+    let delivered: Vec<_> = stored
+        .iter()
+        .filter(|(_, body)| body.contains(&sent_marker))
+        .collect();
+    assert_eq!(delivered.len(), 1, "one append on the node: {stored:?}");
+    assert_eq!(
+        delivered[0].0, sender,
+        "the node stamps the session's authenticated identity: {stored:?}"
+    );
+    let pair_root = runtime::mailbox::local_pair_root_in(&workspace.config_home);
+    for local in [
+        runtime::agent_mailbox::inbox_path_under(&workspace.root, &receiver),
+        PathBuf::from(
+            runtime::mailbox::Mailbox::workspace_local(&pair_root, receiver.clone())
+                .transcript_path(&sender),
+        ),
+    ] {
+        assert!(
+            !local.exists(),
+            "a session on a node must not fall back to {}",
+            local.display()
+        );
+    }
+
+    let (_, listed) = client
+        .send_request("_sudocode/a2a/agent_list", json!({ "sessionId": sid }))
+        .await;
+    assert_eq!(
+        listed["result"]["isError"], false,
+        "agent_list ran through the node: {listed}"
+    );
+
+    fs::write(workspace.root.join("direct-node.arm"), "").expect("arm the hook");
+    let held_id = client
+        .send_request_no_wait(
+            "_sudocode/a2a/send",
+            json!({ "sessionId": sid, "to": receiver, "message": held_marker, "summary": "node probe" }),
+        )
+        .await;
+    let started = workspace.root.join("direct-node.started");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !started.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the post-tool hook never held the call"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (stored, tail) =
+        node_conversation_until(&endpoint, &receiver_credential, &sender, tail, &held_marker).await;
+    client
+        .send_raw(&json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": sid }
+        }))
+        .await;
+    let answered = client
+        .recv_until(Duration::from_secs(30), |m| is_response_to(m, held_id))
+        .await;
+    let _ = fs::write(workspace.root.join("direct-node.release"), "");
+    let (_, resp) =
+        answered.unwrap_or_else(|seen| panic!("the cancelled send never answered; saw {seen:#?}"));
+    assert_unknown(&resp, "a call cancelled after its append on the node");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (later, _) = node_conversation(&endpoint, &receiver_credential, &sender, tail, 0).await;
+    let held = stored
+        .iter()
+        .chain(later.iter())
+        .filter(|(_, body)| body.contains(&held_marker))
+        .count();
+    assert_eq!(
+        held, 1,
+        "the held message was appended once and never resent"
+    );
+    assert_eq!(
+        server.captured_requests().await.len(),
+        before,
+        "a direct call never asks the model"
+    );
     client.shutdown().await;
     workspace.cleanup();
 }

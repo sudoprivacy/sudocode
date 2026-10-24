@@ -4,7 +4,7 @@
 use a2a::session::{SessionEndpoint, SessionPayload, SessionSide};
 use a2a::session_io::SessionMailbox;
 use kernel::kernel::{Kernel, OperationContext};
-use managed_agent::{SpawnHandle, SpawnOptions, SpawnTask};
+use managed_agent::{SpawnHandle, SpawnTask};
 use runtime::spawn_task::{AgentDescriptor, AgentState};
 use runtime::HookAbortSignal;
 use serde_json::{json, Value};
@@ -62,7 +62,7 @@ fn connect(
     response(&mailbox, "open")?;
     Ok(mailbox)
 }
-fn pump(mailbox: SessionMailbox<Kernel>, stop: HookAbortSignal) {
+fn pump(mailbox: SessionMailbox<Kernel>, stop: HookAbortSignal) -> Result<(), String> {
     while !stop.is_aborted() {
         match mailbox.receive(200) {
             Ok(Some(SessionPayload::Rpc { message }))
@@ -75,12 +75,17 @@ fn pump(mailbox: SessionMailbox<Kernel>, stop: HookAbortSignal) {
                     .find(|option| option["kind"] == "allow_once")
                     .unwrap()["optionId"]
                     .clone();
-                if send(&mailbox, json!({"jsonrpc":"2.0","id":message["id"],"result":{"outcome":{"outcome":"selected","optionId":option}}})).is_err() { break; }
+                send(
+                    &mailbox,
+                    json!({"jsonrpc":"2.0","id":message["id"],"result":{"outcome":{"outcome":"selected","optionId":option}}}),
+                )?;
             }
-            Ok(Some(SessionPayload::Closed { .. })) | Err(_) => break,
+            Ok(Some(SessionPayload::Closed { .. })) => return Ok(()),
+            Err(error) => return Err(error),
             _ => {}
         }
     }
+    Err("controller stopped before the runtime closed".into())
 }
 pub struct TestAbort {
     stop: HookAbortSignal,
@@ -108,14 +113,13 @@ pub fn spawn_managed_agent(
         format!("{}-{:?}", desc.pid, std::time::SystemTime::now()),
     );
     crate::common::provision_stream_transcript(&kernel, &endpoint.transcript);
+    let mut options = crate::common::managed_session::seed_managed_session(&kernel, &desc);
+    options.session_endpoint = Some(endpoint.clone());
     let host: Arc<dyn SpawnHandle> = Arc::from(
         engine_acp::managed_agent::SudoCodeSpawnAdapter.spawn_with_options(
             Arc::clone(&kernel),
             desc,
-            SpawnOptions {
-                session_endpoint: Some(endpoint.clone()),
-                ..SpawnOptions::default()
-            },
+            options,
             Arc::new(observer),
         )?,
     );
@@ -128,7 +132,9 @@ pub fn spawn_managed_agent(
     };
     let stop = HookAbortSignal::new();
     let thread_stop = stop.clone();
-    let join = std::thread::spawn(move || pump(mailbox, thread_stop));
+    let join = std::thread::spawn(move || {
+        let _ = pump(mailbox, thread_stop);
+    });
     Ok(TestHost {
         abort_signal: TestAbort { stop, host },
         join,
@@ -136,7 +142,20 @@ pub fn spawn_managed_agent(
 }
 pub struct Controller {
     stop: HookAbortSignal,
-    join: Option<std::thread::JoinHandle<()>>,
+    join: Option<std::thread::JoinHandle<Result<(), String>>>,
+}
+impl Controller {
+    pub fn wait_closed(mut self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !self.join.as_ref().unwrap().is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "runtime did not close its transport"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        self.join.take().unwrap().join().unwrap().unwrap();
+    }
 }
 impl Drop for Controller {
     fn drop(&mut self) {

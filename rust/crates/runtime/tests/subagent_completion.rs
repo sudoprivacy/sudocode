@@ -8,6 +8,7 @@ use std::sync::Arc;
 fn lifecycle(phase: SubagentPhase) -> SubagentLifecycle {
     SubagentLifecycle {
         tool_call_id: "spawn-1".into(),
+        assistant_message_id: None,
         phase,
         seq: 0,
         agent: SubagentIdentity {
@@ -52,6 +53,7 @@ fn handoff_terminal_and_closed_are_all_required_in_every_order() {
                         .unwrap(),
                     1 => journal
                         .tool_result(
+                            None,
                             "spawn-1",
                             "agent_spawn",
                             &format!("{{\"status\":\"{status}\"}}"),
@@ -88,7 +90,9 @@ fn explicit_collection_before_publication_suppresses_even_before_finished_event(
                     .lifecycle(&lifecycle(SubagentPhase::Finished))
                     .unwrap();
             }
-            journal.tool_result("read-1", "pid_output", output).unwrap();
+            journal
+                .tool_result(None, "read-1", "pid_output", output)
+                .unwrap();
             if !terminal_first {
                 journal
                     .lifecycle(&lifecycle(SubagentPhase::Finished))
@@ -109,6 +113,7 @@ fn unrelated_tool_output_cannot_consume_completion() {
     store.source(&journal);
     journal
         .tool_result(
+            None,
             "read-1",
             "read_file",
             r#"{"status":"completed","agentId":"agent-1"}"#,
@@ -152,7 +157,7 @@ impl Store {
             .register(lifecycle(SubagentPhase::Started), "child.json".into())
             .unwrap();
         journal
-            .tool_result("spawn-1", "agent_spawn", r#"{"status":"running"}"#)
+            .tool_result(None, "spawn-1", "agent_spawn", r#"{"status":"running"}"#)
             .unwrap();
     }
 }
@@ -179,6 +184,7 @@ fn frozen_delivery_replays_identically_until_ack_is_committed() {
     assert_eq!(journal.pending(), payload);
     journal
         .tool_result(
+            None,
             "read-1",
             "pid_output",
             r#"{"status":"completed","agentId":"agent-1"}"#,
@@ -206,7 +212,7 @@ fn late_earlier_spawn_cannot_overtake_unacknowledged_completion() {
         .register(second.clone(), "child-2.json".into())
         .unwrap();
     journal
-        .tool_result("spawn-2", "agent_spawn", r#"{"status":"running"}"#)
+        .tool_result(None, "spawn-2", "agent_spawn", r#"{"status":"running"}"#)
         .unwrap();
     journal.commit("run:1").unwrap();
     second.phase = SubagentPhase::Finished;
@@ -309,9 +315,26 @@ fn transcript_change_and_wrong_journal_identity_are_rejected() {
     let context = journal.commit("run:1").unwrap();
     assert!(CompletionJournal::open(&store.session, &store.dir.join("different"), false).is_err());
     let path = store.session.persistence_path().unwrap();
-    let mut bytes = std::fs::read(path).unwrap();
-    bytes.push(b'\n');
-    std::fs::write(path, bytes).unwrap();
+    let bytes = std::fs::read_to_string(path).unwrap();
+    let mut records: Vec<serde_json::Value> = bytes
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    for record in &mut records {
+        if record["type"] == "history_checkpoint" {
+            record["meta"]["model"] = "externally-changed".into();
+        } else if record["type"] == "session_meta" {
+            record["model"] = "externally-changed".into();
+        }
+    }
+    let changed = records
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_ne!(changed.trim(), bytes.trim());
+    std::fs::write(path, changed + "\n").unwrap();
     assert!(journal.context().is_err());
     assert!(journal.begin("run:2", Some(&context)).is_err());
 }

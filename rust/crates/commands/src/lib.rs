@@ -5757,7 +5757,7 @@ mod tests {
     #[test]
     fn unbound_compact_preserves_history() {
         let mut session = Session::new();
-        session.messages = vec![
+        session = session.with_messages(vec![
             ConversationMessage::user_text("a ".repeat(200)),
             ConversationMessage::assistant(vec![ContentBlock::Text {
                 text: "b ".repeat(200),
@@ -5766,7 +5766,7 @@ mod tests {
             ConversationMessage::assistant(vec![ContentBlock::Text {
                 text: "recent".to_string(),
             }]),
-        ];
+        ]);
 
         let result = handle_slash_command(
             "/compact",
@@ -5779,7 +5779,7 @@ mod tests {
         .expect("slash command should be handled");
 
         assert!(result.message.contains("history preserved"));
-        assert_eq!(result.session.messages, session.messages);
+        assert_eq!(result.session.messages(), session.messages());
     }
 
     #[test]

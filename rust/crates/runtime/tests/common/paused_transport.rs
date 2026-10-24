@@ -14,6 +14,7 @@ pub struct PausedTransport {
     stopped: Arc<AtomicBool>,
     sockets: Arc<Mutex<Vec<TcpStream>>>,
     worker: Option<JoinHandle<()>>,
+    blocked: Arc<(Mutex<u64>, Condvar)>,
 }
 
 impl PausedTransport {
@@ -32,10 +33,12 @@ impl PausedTransport {
         let gate = Arc::new((Mutex::new(false), Condvar::new()));
         let stopped = Arc::new(AtomicBool::new(false));
         let sockets = Arc::new(Mutex::new(Vec::new()));
+        let blocked = Arc::new((Mutex::new(0), Condvar::new()));
         let worker = {
             let gate = Arc::clone(&gate);
             let stopped = Arc::clone(&stopped);
             let sockets = Arc::clone(&sockets);
+            let blocked = Arc::clone(&blocked);
             thread::spawn(move || {
                 let mut pipes = Vec::new();
                 while !stopped.load(Ordering::Acquire) {
@@ -56,8 +59,9 @@ impl PausedTransport {
                             ] {
                                 let gate = Arc::clone(&gate);
                                 let stopped = Arc::clone(&stopped);
+                                let blocked = Arc::clone(&blocked);
                                 pipes.push(thread::spawn(move || {
-                                    forward(source, destination, &gate, &stopped);
+                                    forward(source, destination, &gate, &stopped, &blocked);
                                 }));
                             }
                         }
@@ -78,6 +82,7 @@ impl PausedTransport {
             stopped,
             sockets,
             worker: Some(worker),
+            blocked,
         })
     }
 
@@ -88,6 +93,18 @@ impl PausedTransport {
     pub fn set_paused(&self, paused: bool) {
         *self.gate.0.lock().unwrap() = paused;
         self.gate.1.notify_all();
+    }
+
+    /// Wait for bytes actually read from a socket and held at the closed gate.
+    /// This is an IO barrier, not a statement about which encrypted RPC it is.
+    #[allow(dead_code)]
+    pub fn wait_for_blocked(&self, budget: Duration) -> bool {
+        let (count, _) = self
+            .blocked
+            .1
+            .wait_timeout_while(self.blocked.0.lock().unwrap(), budget, |count| *count == 0)
+            .unwrap();
+        *count > 0
     }
 }
 
@@ -104,7 +121,13 @@ impl Drop for PausedTransport {
     }
 }
 
-fn forward(mut source: TcpStream, mut destination: TcpStream, gate: &Gate, stopped: &AtomicBool) {
+fn forward(
+    mut source: TcpStream,
+    mut destination: TcpStream,
+    gate: &Gate,
+    stopped: &AtomicBool,
+    blocked: &(Mutex<u64>, Condvar),
+) {
     let mut buffer = [0; 16 * 1024];
     while !stopped.load(Ordering::Acquire) {
         let size = match source.read(&mut buffer) {
@@ -123,6 +146,10 @@ fn forward(mut source: TcpStream, mut destination: TcpStream, gate: &Gate, stopp
             Err(_) => break,
         };
         let mut paused = gate.0.lock().unwrap();
+        if *paused {
+            *blocked.0.lock().unwrap() += 1;
+            blocked.1.notify_all();
+        }
         while *paused && !stopped.load(Ordering::Acquire) {
             paused = gate.1.wait(paused).unwrap();
         }

@@ -38,7 +38,7 @@ pub struct PreparedManagedAgent {
     session: runtime::Session,
     config: RuntimeConfig,
     abort: runtime::HookAbortSignal,
-    lease: crate::managed_session::SessionLease,
+    lease: Option<crate::managed_session::SessionLease>,
 }
 
 impl PreparedManagedAgent {
@@ -48,6 +48,8 @@ impl PreparedManagedAgent {
     pub fn model(&self) -> &str {
         &self.config.model
     }
+    /// Stop the host when its lifetime or durable-session admission ends.
+    /// Turn cancellation uses the separate signal installed by `open`.
     pub fn abort_signal(&self) -> runtime::HookAbortSignal {
         self.abort.clone()
     }
@@ -65,15 +67,18 @@ impl PreparedManagedAgent {
         memory: runtime::memory::MemoryMode,
     ) -> Result<crate::SessionEngine, String> {
         self.config.memory = memory;
-        crate::SessionEngine::for_host(
+        let engine = crate::SessionEngine::for_host(
             self.host,
             self.session,
             self.config,
             mcp_servers,
             prompt_overrides,
             runtime::HookAbortSignal::new(),
-            Box::new(self.lease),
-        )
+        )?;
+        Ok(match self.lease {
+            Some(lease) => engine.with_lifetime_guard(lease),
+            None => engine,
+        })
     }
 }
 
@@ -190,6 +195,10 @@ where
     };
 
     let abort = runtime::HookAbortSignal::default();
+    let settings = runtime::ConfigLoader::default_for(&host.config_root)
+        .load()
+        .map_err(|error| format!("co-host: load runtime settings: {error}"))?;
+    runtime::experiments::init_config_flags(settings.experiments().clone());
     let (session, lease) = crate::managed_session::prepare_session(
         kernel,
         desc,

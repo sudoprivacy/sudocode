@@ -96,6 +96,7 @@ pub(crate) fn engine_event_to_session_update(
             name,
             output,
             is_error,
+            ..
         } => tool_result_update(id, &name, output, is_error, subagent_events, None),
         EngineEvent::Subagent(event) if subagent_events => subagent_update(event),
         // Usage/ModelResolved/PromptCache/AutoCompaction/ToolProgress/HookProgress/
@@ -382,6 +383,15 @@ pub(crate) fn open_loaded_session(
     memory: runtime::memory::MemoryMode,
 ) -> Result<(Arc<SessionEngine>, PathBuf), crate::AcpError> {
     let cwd = canonical_session_cwd(&cwd).map_err(crate::AcpError::invalid_params)?;
+    if let Some(engine) = registry.engine(session_id) {
+        if registry.cwd(session_id).as_ref() != Some(&cwd) {
+            return Err(crate::AcpError::invalid_params("session cwd mismatch"));
+        }
+        engine
+            .reconfigure(mcp_servers, prompt_overrides, memory)
+            .map_err(crate::AcpError::internal)?;
+        return Ok((engine, cwd));
+    }
     let (handle, session) = load_session_reference(session_id)
         .map_err(|e| crate::AcpError::internal(format!("failed to load session: {e}")))?;
     registry.attach_completion_writer(&session, &cwd)?;
@@ -419,7 +429,6 @@ pub(crate) fn open_forked_session(
 ) -> Result<(Arc<SessionEngine>, PathBuf), crate::AcpError> {
     let cwd = canonical_session_cwd(&cwd).map_err(crate::AcpError::invalid_params)?;
     let parent = resolve_fork_source(source, registry)?;
-    let parent_tool_results = parent.tool_results_dir();
 
     let _scope = WorkspaceRootScope::enter(&cwd);
     // `Session::fork` keeps the transcript, compaction state, model and prompt
@@ -431,20 +440,8 @@ pub(crate) fn open_forked_session(
     })?;
     let forked = forked.with_persistence_path(handle.path.clone());
     forked
-        .save_to_path(&handle.path)
+        .save_fork_to_path(&parent, &handle.path)
         .map_err(|error| crate::AcpError::internal(format!("failed to persist fork: {error}")))?;
-    // Offloaded tool results live beside the transcript and are referenced from
-    // it by id; carry them over so the fork's "read more" paths keep resolving.
-    if let (Some(from), Some(to)) = (parent_tool_results, forked.tool_results_dir()) {
-        if from.is_dir() {
-            if let Err(error) = copy_dir_recursive(&from, &to) {
-                eprintln!(
-                    "warning: fork of {} could not copy offloaded tool results: {error}",
-                    parent.session_id
-                );
-            }
-        }
-    }
     let system_prompt = build_acp_system_prompt(&cwd, &prompt_overrides, memory)
         .map_err(crate::AcpError::internal)?;
     let engine = SessionEngine::open_persisted(
@@ -531,21 +528,6 @@ fn load_persisted_session(cwd: &Path, session_id: &str) -> Result<runtime::Sessi
                 cwd.display()
             )
         })
-}
-
-/// Copy a directory tree (files + sub-directories; symlinks followed).
-fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(to)?;
-    for entry in std::fs::read_dir(from)? {
-        let entry = entry?;
-        let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
 }
 
 // ===========================================================================

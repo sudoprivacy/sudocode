@@ -32,6 +32,7 @@ enum Phase {
 
 struct Invocation {
     id: String,
+    origin: Option<String>,
     name: String,
     input: String,
     parent: Option<ConversationMessage>,
@@ -125,6 +126,10 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
         }
         self.calls.push(Invocation {
             parallel: self.executor.is_concurrency_safe(&name, &input),
+            origin: parent
+                .as_ref()
+                .and_then(|message| message.history.as_ref())
+                .map(|identity| identity.id.clone()),
             id,
             name,
             input,
@@ -355,7 +360,14 @@ impl<'a, T: ToolExecutor> ToolScheduler<'a, T> {
         if context_action.is_some() {
             self.context_action = context_action;
         }
-        let message = output.into_message(call.id.clone(), call.name.clone(), is_error);
+        let mut message = output.into_message(call.id.clone(), call.name.clone(), is_error);
+        if let Some(origin) = &call.origin {
+            let mut identity = crate::session_history::MessageIdentity::new(None);
+            identity
+                .tool_origins
+                .insert(call.id.clone(), origin.clone());
+            message.history = Some(std::sync::Arc::new(identity));
+        }
         call.phase = Phase::Complete;
         call.parent = None;
         self.updates.push_back(ToolUpdate::Completed {

@@ -85,25 +85,9 @@ pub fn load_session_reference(
 }
 
 pub fn delete_managed_session(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let journal = path.with_extension("completions.json");
-    let (session_id, cwd) = if journal.exists() {
-        let binding: serde_json::Value = serde_json::from_slice(&fs::read(&journal)?)?;
-        (
-            binding["session_id"]
-                .as_str()
-                .ok_or("missing completion session identity")?
-                .to_owned(),
-            PathBuf::from(binding["cwd"].as_str().ok_or("missing completion cwd")?),
-        )
-    } else {
-        let session = Session::load_from_path(path)?;
-        let cwd = session
-            .workspace_root()
-            .ok_or("missing session workspace identity")?
-            .to_path_buf();
-        (session.session_id, cwd)
-    };
     let backend = runtime::fs_backend::StdFsBackend;
+    let (session_id, cwd) =
+        runtime::subagent_completion::CompletionJournal::storage_identity(&backend, path)?;
     let binding =
         runtime::subagent_completion::CompletionJournal::probe(&backend, path, &session_id, &cwd)?;
     runtime::subagent_completion::CompletionJournal::purge_stored(
@@ -175,7 +159,7 @@ pub fn context_overflow_user_message(
     context_limit: usize,
 ) -> String {
     let summary_prefix = usize::from(session.compaction.is_some());
-    let compactable = session.messages.len().saturating_sub(summary_prefix)
+    let compactable = session.messages().len().saturating_sub(summary_prefix)
         > CompactionConfig::default().preserve_recent_messages;
     if compactable {
         format!(

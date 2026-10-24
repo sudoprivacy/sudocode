@@ -291,12 +291,12 @@ fn openai_reasoning_fields_reach_the_terminal_and_session() {
         let sessions = store.list_sessions().unwrap();
         let session = Session::load_from_path(&sessions[0].path).unwrap();
         assert!(session
-            .messages
+            .messages()
             .iter()
             .flat_map(|m| &m.blocks)
             .any(|b| matches!(b,
             ContentBlock::ToolResult {output,is_error:false,..} if output.contains(&nonce))));
-        let blocks = &session.messages.last().unwrap().blocks;
+        let blocks = &session.messages().last().unwrap().blocks;
         let thinking: Vec<_> = blocks
             .iter()
             .filter_map(|block| match block {
@@ -394,9 +394,9 @@ fn azure_envelopes_preserve_file_answers_and_literal_text() {
         let store = SessionStore::from_cwd(env.workspace_root()).unwrap();
         let sessions = store.list_sessions().unwrap();
         let session = Session::load_from_path(&sessions[0].path).unwrap();
-        assert!(session.messages.iter().flat_map(|m| &m.blocks).any(|b| matches!(b,ContentBlock::ToolResult {output,is_error:false,..} if output.contains(&nonce))));
+        assert!(session.messages().iter().flat_map(|m| &m.blocks).any(|b| matches!(b,ContentBlock::ToolResult {output,is_error:false,..} if output.contains(&nonce))));
         let final_message = session
-            .messages
+            .messages()
             .iter()
             .rev()
             .find(|m| m.role == MessageRole::Assistant)
@@ -491,7 +491,7 @@ fn azure_live_file_roundtrip_has_a_final_answer() {
     assert_eq!(sessions.len(), 1);
     let session = Session::load_from_path(&sessions[0].path).unwrap();
     let results: Vec<_> = session
-        .messages
+        .messages()
         .iter()
         .flat_map(|m| &m.blocks)
         .filter_map(|b| match b {
@@ -512,7 +512,7 @@ fn azure_live_file_roundtrip_has_a_final_answer() {
         "provider recovered from a failed tool"
     );
     let final_message = session
-        .messages
+        .messages()
         .iter()
         .rev()
         .find(|m| m.role == MessageRole::Assistant)

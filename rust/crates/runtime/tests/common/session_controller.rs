@@ -4,6 +4,7 @@
 use a2a::session::{SessionCodec, SessionEndpoint, SessionPayload, SessionSide};
 use nexus_vfs_client::NexusVfsClient;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
@@ -17,6 +18,13 @@ pub struct Controller {
     client: Arc<NexusVfsClient>,
     pid: Value,
     auth: String,
+    requests: mpsc::Sender<ControlRequest>,
+}
+
+struct ControlRequest {
+    method: String,
+    params: Value,
+    reply: mpsc::SyncSender<Value>,
 }
 
 impl Controller {
@@ -29,6 +37,7 @@ impl Controller {
         let connection = Arc::clone(client);
         let token = auth.to_string();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (requests, incoming) = mpsc::channel::<ControlRequest>();
         let worker = thread::spawn(move || -> Result<(), String> {
             let send = |codec: &mut SessionCodec, message| -> Result<(), String> {
                 let bytes = codec.encode(SessionPayload::Rpc { message })?;
@@ -43,7 +52,18 @@ impl Controller {
             )?;
             let mut offset = 0;
             let mut ready_tx = Some(ready_tx);
+            let mut pending = BTreeMap::new();
+            let mut next_request = 0u64;
             while !stop.load(Ordering::Acquire) {
+                while let Ok(request) = incoming.try_recv() {
+                    let id = format!("fixture-request-{next_request}");
+                    next_request += 1;
+                    send(
+                        &mut codec,
+                        json!({"jsonrpc":"2.0","id":id,"method":request.method,"params":request.params}),
+                    )?;
+                    pending.insert(id, request.reply);
+                }
                 let result = connection
                     .stream_read_at(&endpoint.transcript, offset, true, 200, &token)
                     .map_err(|e| e.to_string())?;
@@ -54,6 +74,12 @@ impl Controller {
                 }
                 match codec.decode(&bytes)? {
                     Some(SessionPayload::Rpc { message }) => {
+                        if let Some(reply) =
+                            message["id"].as_str().and_then(|id| pending.remove(id))
+                        {
+                            let _ = reply.send(message);
+                            continue;
+                        }
                         if message.get("error").is_some() {
                             return Err(message.to_string());
                         }
@@ -93,11 +119,43 @@ impl Controller {
             client: Arc::clone(client),
             pid: started["session_id"].clone(),
             auth: auth.to_string(),
+            requests,
         };
         ready_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("controller initialize/session-new handshake");
         controller
+    }
+
+    pub fn request(&self, method: &str, params: Value) -> Value {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.requests
+            .send(ControlRequest {
+                method: method.into(),
+                params,
+                reply,
+            })
+            .expect("controller request channel");
+        response
+            .recv_timeout(Duration::from_secs(30))
+            .expect("controller RPC response")
+    }
+
+    pub fn wait_closed(mut self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !self.worker.as_ref().unwrap().is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "managed runtime did not close its transport"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        self.worker
+            .take()
+            .unwrap()
+            .join()
+            .expect("controller thread")
+            .expect("controller channel");
     }
 }
 

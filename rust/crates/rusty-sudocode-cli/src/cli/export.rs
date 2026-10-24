@@ -30,7 +30,7 @@ pub(crate) fn render_session_markdown(
         String::new(),
         format!("- **Session**: `{session_id}`"),
         format!("- **File**: `{}`", session_path.display()),
-        format!("- **Messages**: {}", session.messages.len()),
+        format!("- **Messages**: {}", session.messages().len()),
     ];
     if let Some(workspace_root) = session.workspace_root() {
         lines.push(format!("- **Workspace**: `{}`", workspace_root.display()));
@@ -52,7 +52,7 @@ pub(crate) fn render_session_markdown(
     lines.push("---".to_string());
     lines.push(String::new());
 
-    for (index, message) in session.messages.iter().enumerate() {
+    for (index, message) in session.messages().iter().enumerate() {
         let role = match message.role {
             MessageRole::System => "System",
             MessageRole::User => "User",
@@ -156,7 +156,7 @@ pub(crate) fn run_export(
             "Export\n  Result           wrote markdown transcript\n  File             {}\n  Session          {}\n  Messages         {}",
             path.display(),
             handle.id,
-            session.messages.len(),
+            session.messages().len(),
         );
         match output_format {
             CliOutputFormat::Text => println!("{report}"),
@@ -167,7 +167,7 @@ pub(crate) fn run_export(
                     "message": report,
                     "session_id": handle.id,
                     "file": path.display().to_string(),
-                    "messages": session.messages.len(),
+                    "messages": session.messages().len(),
                 }))?
             ),
         }
@@ -187,7 +187,7 @@ pub(crate) fn run_export(
                 "kind": "export",
                 "session_id": handle.id,
                 "file": handle.path.display().to_string(),
-                "messages": session.messages.len(),
+                "messages": session.messages().len(),
                 "markdown": markdown,
             }))?
         ),
@@ -197,7 +197,7 @@ pub(crate) fn run_export(
 
 pub(crate) fn default_export_filename(session: &Session) -> String {
     let stem = session
-        .messages
+        .messages()
         .iter()
         .find_map(|message| match message.role {
             MessageRole::User => message.blocks.iter().find_map(|block| match block {
@@ -271,7 +271,7 @@ pub(crate) fn short_tool_id(id: &str) -> String {
 
 pub(crate) fn render_export_text(session: &Session) -> String {
     let mut lines = vec!["# Conversation Export".to_string(), String::new()];
-    for (index, message) in session.messages.iter().enumerate() {
+    for (index, message) in session.messages().iter().enumerate() {
         let role = match message.role {
             MessageRole::System => "system",
             MessageRole::User => "user",
@@ -429,7 +429,7 @@ pub(crate) fn collect_session_prompt_history(session: &Session) -> Vec<PromptHis
     }
     let timestamp_ms = session.updated_at_ms;
     session
-        .messages
+        .messages()
         .iter()
         .filter(|message| message.role == MessageRole::User)
         .filter_map(|message| {
@@ -446,7 +446,7 @@ pub(crate) fn collect_session_prompt_history(session: &Session) -> Vec<PromptHis
 
 pub(crate) fn recent_user_context(session: &Session, limit: usize) -> String {
     let requests = session
-        .messages
+        .messages()
         .iter()
         .filter(|message| message.role == MessageRole::User)
         .filter_map(|message| {

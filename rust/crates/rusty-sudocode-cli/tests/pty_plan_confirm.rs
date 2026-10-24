@@ -122,7 +122,7 @@ fn saved_plan_decision(dir: &std::path::Path, expected: &str, expected_error: bo
         {
             let session = Session::load_from_path(&path).unwrap();
             session
-                .messages
+                .messages()
                 .iter()
                 .flat_map(|message| &message.blocks)
                 .any(|block| {

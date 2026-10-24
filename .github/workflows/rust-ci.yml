@@ -364,8 +364,23 @@ jobs:
       # which does not vary by host — platform-specific daemon behaviour is
       # nexus-vfs's own CI. Adding runners would multiply the daemon-boot flake
       # surface for signal already covered.
+      - name: Install native durability fault injector
+        run: |
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends strace
+          fi
       - name: A2A round-trip against the pinned daemon
         run: e2e/nexus-a2a/run.sh
+      - name: Retain native syscall fault evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-session-durability
+          path: |
+            /tmp/scode-shared-records-*
+            /tmp/scode-shared-runtime-*
+          if-no-files-found: ignore
 
       # One daemon can only show that a client and a server agree. What A2A
       # actually rests on is a mechanism that does not exist until there are
@@ -726,6 +741,7 @@ jobs:
           cargo test -p rusty-sudocode-cli --test pty_model_flag_priority configured_model_reads_updated_file_after_resume -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_a2a_overlay queued_and_offline_messages_survive_receiver_restart -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_a2a_overlay pending_batch_and_two_runtimes_share_one_durable_reader -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_shared_session live_independent_runtimes_preserve_tools_and_outputs_in_one_session -- --ignored --exact --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_agent_permission_bubble -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_bash_process_tree --test pty_input_batch --test pty_hook_progress --test pty_arrow_keys -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_background_tasks inspecting_running_task_does_not_acknowledge_its_future_result -- --nocapture

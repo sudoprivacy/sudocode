@@ -287,6 +287,7 @@ pub enum EngineEvent {
     /// A tool finished (was `RuntimeObserver::on_tool_result`). `output` is the
     /// tool's textual result; `is_error` distinguishes failures.
     ToolResult {
+        assistant_message_id: Option<String>,
         id: String,
         name: String,
         output: String,

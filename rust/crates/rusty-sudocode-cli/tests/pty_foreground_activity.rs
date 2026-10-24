@@ -344,6 +344,22 @@ fn brand_animation_and_parallel_summary_share_one_status_row() {
                 "logo uses brand amber"
             );
         }
+        for (text, color) in [
+            ("Running", "Rgb(166, 227, 161)"),
+            ("[claude", "Idx(247)"),
+            ("s)", "Idx(247)"),
+        ] {
+            let column = unicode_width::UnicodeWidthStr::width(&line[..line.find(text).unwrap()]);
+            let cell = raw
+                .cell(u16::try_from(*row).unwrap(), u16::try_from(column).unwrap())
+                .unwrap();
+            assert_eq!(
+                format!("{:?}", cell.fgcolor()),
+                color,
+                "activity stays distinct from secondary metadata: {text}"
+            );
+            assert!(!cell.dim(), "muted metadata uses a readable theme color");
+        }
         logo
     });
     common::expect_screen(

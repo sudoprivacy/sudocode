@@ -1,12 +1,17 @@
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    reason = "The protobuf generator owns the wire representation."
+)]
 pub mod proto {
     tonic::include_proto!("nexus.grpc.vfs");
 }
 
 use proto::nexus_vfs_service_client::NexusVfsServiceClient;
 use proto::{
-    CallRequest, DeleteRequest, LockRequest, ReadRequest, ReaddirRequest, RenameRequest,
-    SetattrRequest, StatRequest, StreamReadAtRequest, StreamWriteRequest, UnlockRequest,
-    WriteRequest,
+    CallRequest, DeleteRequest, InspectTargetRequest, LockRequest, ReadRequest, ReaddirRequest,
+    RenameRequest, SetattrRequest, StatRequest, StreamReadAtRequest, StreamWriteRequest,
+    UnlockRequest, WriteRequest,
 };
 use std::io;
 use std::sync::mpsc;
@@ -26,23 +31,35 @@ pub struct VfsReadResult {
     pub next_offset: Option<u64>,
 }
 
-/// DT_STREAM entry-type code (mirrors the kernel `entry_type`), passed to
-/// `Setattr` when provisioning a mailbox DT_STREAM.
+/// A resolved path and optional entry classification, without content metadata.
+pub struct VfsIoTarget {
+    pub path: String,
+    pub entry_type: Option<i32>,
+}
+
+pub use proto::inspect_target_request::Access as TargetAccess;
+
+/// `DT_STREAM` entry-type code (mirrors the kernel `entry_type`), passed to
+/// `Setattr` when provisioning a mailbox `DT_STREAM`.
 const DT_STREAM: i32 = 4;
 
-/// DT_DIR entry-type code, for reading `Readdir` results back.
+/// `DT_DIR` entry-type code, for reading `Readdir` results back.
 const DT_DIR: u32 = 1;
 
-/// The same DT_DIR code as `Setattr` takes it. `Readdir` reports entry types as
+/// The same `DT_DIR` code as `Setattr` takes it. `Readdir` reports entry types as
 /// `u32` and `Setattr` accepts them as `i32`, so the one value needs both spellings;
 /// naming the second rather than casting at the call site keeps the cast off the
 /// path where a wrong entry type is a silent mis-provision (`DT_LINK = 3` and
 /// `DT_PIPE = 3` once cost this project a chat-list index that was a pipe).
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "DT_DIR is the fixed protocol constant 1."
+)]
 const DT_DIR_SETATTR: i32 = DT_DIR as i32;
 
-/// DT_LINK entry-type code for `Setattr`.
+/// `DT_LINK` entry-type code for `Setattr`.
 ///
-/// **6, not 3.** 3 is DT_PIPE's discriminant, and the A2A chat-list index was once
+/// **6, not 3.** 3 is `DT_PIPE`'s discriminant, and the A2A chat-list index was once
 /// written with it: the syscall dispatches on the integer, so there was no compile
 /// error and no runtime error — the index was simply a pipe, while every
 /// path-composition test stayed green.
@@ -90,14 +107,14 @@ enum VfsOp {
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<Vec<u8>>>,
     },
-    /// Append one frame to a DT_STREAM; returns the offset it landed at.
+    /// Append one frame to a `DT_STREAM`; returns the offset it landed at.
     StreamWrite {
         path: String,
         data: Vec<u8>,
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<u64>>,
     },
-    /// Read a DT_STREAM at `offset`; returns `(data, next_offset, eof)`.
+    /// Read a `DT_STREAM` at `offset`; returns `(data, next_offset, eof)`.
     /// When `blocking`, the server parks up to `timeout_ms` waiting for the
     /// next frame (returning `eof` on timeout) — the event-driven mailbox tail.
     StreamReadAt {
@@ -115,7 +132,7 @@ enum VfsOp {
     /// directory differ only by the `entry_type` the kernel dispatches on, and a
     /// second arm would be the same request assembled a second way.
     EnsureEntry {
-        request: SetattrRequest,
+        request: Box<SetattrRequest>,
         resp: mpsc::SyncSender<io::Result<bool>>,
     },
     /// `Stat` — the TYPED RPC, not the generic Call surface.
@@ -123,6 +140,10 @@ enum VfsOp {
         path: String,
         auth_token: String,
         resp: mpsc::SyncSender<io::Result<VfsStat>>,
+    },
+    InspectTarget {
+        request: InspectTargetRequest,
+        resp: mpsc::SyncSender<io::Result<VfsIoTarget>>,
     },
     /// `Readdir` — the TYPED RPC, not the generic Call surface.
     Readdir {
@@ -189,6 +210,10 @@ impl NexusVfsClient {
         )
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One service thread owns the exhaustive RPC dispatch."
+    )]
     fn connect_inner(endpoint: &str, tls: Option<TlsMaterial>) -> io::Result<Self> {
         // tonic's `Channel::from_shared` requires a URI scheme; accept a bare
         // `host:port` for ergonomics and supply the scheme the transport
@@ -482,7 +507,7 @@ impl NexusVfsClient {
                                     }));
                                 }
                                 VfsOp::EnsureEntry { request, resp } => {
-                                    let r = client.setattr(deadlined(request, OP_DEADLINE)).await;
+                                    let r = client.setattr(deadlined(*request, OP_DEADLINE)).await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
@@ -496,16 +521,15 @@ impl NexusVfsClient {
                                     auth_token,
                                     resp,
                                 } => {
-                                    let r = client
-                                        .stat(deadlined(
-                                            StatRequest {
-                                                path,
-                                                auth_token,
-                                                ..Default::default()
-                                            },
-                                            OP_DEADLINE,
-                                        ))
-                                        .await;
+                                    let request = deadlined(
+                                        StatRequest {
+                                            path,
+                                            auth_token,
+                                            ..Default::default()
+                                        },
+                                        OP_DEADLINE,
+                                    );
+                                    let r = client.stat(request).await;
                                     let _ = resp.send(grpc_result(r, |r| {
                                         if r.is_error {
                                             Err(vfs_err(&r.error_payload))
@@ -524,6 +548,26 @@ impl NexusVfsClient {
                                                 io::ErrorKind::NotFound,
                                                 format!("{}: not found", r.path),
                                             ))
+                                        }
+                                    }));
+                                }
+                                VfsOp::InspectTarget { request, resp } => {
+                                    let result = client
+                                        .inspect_target(deadlined(request, OP_DEADLINE))
+                                        .await;
+                                    let _ = resp.send(grpc_result(result, |target| {
+                                        if target.is_error {
+                                            Err(vfs_err(&target.error_payload))
+                                        } else if target.path.is_empty() {
+                                            Err(io::Error::new(
+                                                io::ErrorKind::InvalidData,
+                                                "target inspection returned no path",
+                                            ))
+                                        } else {
+                                            Ok(VfsIoTarget {
+                                                path: target.path,
+                                                entry_type: target.entry_type,
+                                            })
                                         }
                                     }));
                                 }
@@ -687,7 +731,7 @@ impl NexusVfsClient {
         await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
-    /// Append one frame to a DT_STREAM at `path`; returns the byte offset
+    /// Append one frame to a `DT_STREAM` at `path`; returns the byte offset
     /// the frame landed at. This is the A2A mailbox SEND path — one message
     /// is one framed append to `/agents/<recipient>/chat-with-me` (the node
     /// stamps an unforgeable `from` under auth-on).
@@ -704,11 +748,11 @@ impl NexusVfsClient {
         await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
-    /// Non-blocking read of a DT_STREAM at `offset`. Returns
+    /// Non-blocking read of a `DT_STREAM` at `offset`. Returns
     /// `(data, next_offset, eof)` — `eof == true` means no frame was
     /// available at `offset` yet. This is the A2A inbox POLL path (advance
     /// the caller's cursor to `next_offset` after each delivered frame).
-    /// Read one DT_STREAM frame at `offset`, returning `(data, next_offset,
+    /// Read one `DT_STREAM` frame at `offset`, returning `(data, next_offset,
     /// eof)`. When `blocking`, the server parks up to `timeout_ms` for the next
     /// frame and returns `eof=true` (empty) on timeout — the event-driven
     /// mailbox tail (`read_at_blocking`), woken sub-millisecond by any write to
@@ -743,7 +787,7 @@ impl NexusVfsClient {
         )
     }
 
-    /// `sys_setattr(DT_STREAM)` on `path` — create the DT_STREAM container
+    /// `sys_setattr(DT_STREAM)` on `path` — create the `DT_STREAM` container
     /// with the given `io_profile` (backend waterfall) and `capacity`
     /// (cold-storage retention budget). Idempotent: an existing stream is a
     /// no-op. Returns whether the stream was freshly created. This is how a
@@ -772,7 +816,7 @@ impl NexusVfsClient {
     /// The destination lives in the entry's METADATA, which is the point: a mount with
     /// no content store keeps metadata and drops bytes, so a pointer written as content
     /// is unreadable exactly where the pointer itself is readable. That is why the A2A
-    /// chat-list index is specified as a DT_LINK and not a file holding a path.
+    /// chat-list index is specified as a `DT_LINK` and not a file holding a path.
     ///
     /// This could not exist until `SetattrRequest` carried a link target. Without it
     /// the backend's `link()` fell through to the trait's no-op, so a standalone agent
@@ -813,7 +857,10 @@ impl NexusVfsClient {
     pub fn setattr(&self, request: SetattrRequest) -> io::Result<bool> {
         let (resp, rx) = mpsc::sync_channel(1);
         self.tx
-            .send(VfsOp::EnsureEntry { request, resp })
+            .send(VfsOp::EnsureEntry {
+                request: Box::new(request),
+                resp,
+            })
             .map_err(|_| broken_pipe())?;
         await_reply(&rx, OP_DEADLINE + HANDOFF_GRACE)
     }
@@ -833,9 +880,7 @@ impl NexusVfsClient {
         await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
-    /// Stat a path via the generic Call RPC.
-    ///
-    /// Returns `(size, is_directory)` on success.
+    /// Inspect a directory entry through the typed Stat RPC.
     pub fn stat(&self, path: &str, auth_token: &str) -> io::Result<VfsStat> {
         let (resp_tx, resp_rx) = mpsc::sync_channel(1);
         self.tx
@@ -846,6 +891,29 @@ impl NexusVfsClient {
             })
             .map_err(|_| broken_pipe())?;
         await_reply(&resp_rx, OP_DEADLINE + HANDOFF_GRACE)
+    }
+
+    /// Inspect the authorized I/O target for an operation, including creation.
+    /// A node without this RPC reports Unsupported.
+    pub fn inspect_target(
+        &self,
+        path: &str,
+        access: TargetAccess,
+        auth_token: &str,
+    ) -> io::Result<VfsIoTarget> {
+        let (resp, rx) = mpsc::sync_channel(1);
+        self.tx
+            .send(VfsOp::InspectTarget {
+                request: InspectTargetRequest {
+                    path: path.to_owned(),
+                    access: access as i32,
+                    auth_token: auth_token.to_owned(),
+                    ..Default::default()
+                },
+                resp,
+            })
+            .map_err(|_| broken_pipe())?;
+        await_reply(&rx, OP_DEADLINE + HANDOFF_GRACE)
     }
 
     /// List directory entries.
@@ -879,7 +947,7 @@ pub struct VfsStat {
     pub entry_type: i32,
     pub zone_id: String,
     pub modified_at_ms: Option<i64>,
-    /// Where a DT_LINK points; `None` for every other entry type.
+    /// Where a `DT_LINK` points; `None` for every other entry type.
     ///
     /// Carried because following a link is half of having one: a backend that plants
     /// links and cannot read them back leaves the caller to guess. The wire has always
@@ -908,6 +976,7 @@ where
                     io::ErrorKind::PermissionDenied
                 }
                 tonic::Code::DeadlineExceeded => io::ErrorKind::TimedOut,
+                tonic::Code::Unimplemented => io::ErrorKind::Unsupported,
                 _ => io::ErrorKind::Other,
             };
             Err(io::Error::new(kind, status.to_string()))

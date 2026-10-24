@@ -39,6 +39,7 @@ use tools::testing::build_forked_messages_for_test;
 
 fn parent_assistant_with_two_tool_uses() -> ConversationMessage {
     ConversationMessage {
+        history: None,
         role: MessageRole::Assistant,
         blocks: vec![
             ContentBlock::Text {
@@ -180,6 +181,7 @@ fn fork_with_zero_parent_tool_uses_still_produces_shared_prefix_shape() {
     // build_forked_messages handles by returning just a
     // user_text message.
     let parent_no_tools = ConversationMessage {
+        history: None,
         role: MessageRole::Assistant,
         blocks: vec![ContentBlock::Text {
             text: "Preparing to delegate…".to_string(),

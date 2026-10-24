@@ -9,6 +9,8 @@
 // so a helper only one of them needs reads as dead code in the other.
 #![allow(dead_code)]
 
+pub mod managed_session;
+
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,19 +21,10 @@ use runtime::mailbox::Mailbox;
 
 /// Mount everything a co-hosted agent's session needs.
 ///
-/// All three get a CONTENT backend, `/agents` included. It used to be mounted
-/// metadata-only on the reasoning that a chat list holds only DT_LINKs — but a
-/// chat-list entry is a plain WRITE now (a link is unmakeable over gRPC, where
-/// `Setattr` carries no target), and bytes written to a backend-less mount
-/// leave no child for `readdir`. The receiver finds its conversations by
-/// listing that directory, so an empty listing is an agent that hears nothing:
-/// it reaches READY, polls a chat list with no entries, and waits forever.
-///
-/// In production this cannot arise — a founder mounts every prefix its
-/// subsystems declare (`default_replicated_prefixes` = A2A's prefixes plus
-/// `SESSIONS_BASE`) onto its zone — which is exactly why the harness has to
-/// model the same set. `/sessions` is in it because a co-hosted agent records
-/// its turns there.
+/// Each durable namespace has a content backend. Agent indexes link to the
+/// canonical conversation and session directories, whose transcripts retain
+/// the bytes the receiver and recovery loader read. The harness mounts the
+/// same durable prefixes the daemon provisions, alongside node-local procfs.
 pub fn mount_agent_world(kernel: &Kernel) {
     for point in ["/", "/proc", "/conversations", "/agents", "/sessions"] {
         kernel.vfs_router_arc().add_mount(

@@ -72,69 +72,72 @@ fn resume_preserves_results_without_duplicate_or_unmatched_tool_ids() {
             text: "Read complete.".into(),
         }]))
         .unwrap();
-    let healthy_prefix = session.messages.clone();
-    session
-        .push_message(ConversationMessage::tool_result(
-            "missing-call",
-            "read_file",
-            "ORPHAN-RESULT-KEPT",
-            false,
-        ))
-        .unwrap();
-    session.push_message(call("late-result")).unwrap();
-    session
-        .push_user_text("The previous turn was interrupted.")
-        .unwrap();
-    session
-        .push_message(ConversationMessage::tool_result(
-            "late-result",
-            "read_file",
-            "LATE-RESULT-KEPT",
-            false,
-        ))
-        .unwrap();
-    session.push_message(call("duplicate-result")).unwrap();
-    session
-        .push_message(ConversationMessage::tool_result(
-            "duplicate-result",
-            "read_file",
-            "FIRST-RESULT-KEPT",
-            false,
-        ))
-        .unwrap();
-    session
-        .push_message(ConversationMessage::tool_result(
-            "duplicate-result",
-            "read_file",
-            "DUPLICATE-RESULT-KEPT",
-            true,
-        ))
-        .unwrap();
+    let healthy_prefix = session.messages().to_vec();
+    let mut messages = session.messages().to_vec();
+    messages.push(ConversationMessage::tool_result(
+        "missing-call",
+        "read_file",
+        "ORPHAN-RESULT-KEPT",
+        false,
+    ));
+    messages.push(call("late-result"));
+    messages.push(ConversationMessage::user_text(
+        "The previous turn was interrupted.",
+    ));
+    messages.push(ConversationMessage::tool_result(
+        "late-result",
+        "read_file",
+        "LATE-RESULT-KEPT",
+        false,
+    ));
+    messages.push(call("duplicate-result"));
+    messages.push(ConversationMessage::tool_result(
+        "duplicate-result",
+        "read_file",
+        "FIRST-RESULT-KEPT",
+        false,
+    ));
+    messages.push(ConversationMessage::tool_result(
+        "duplicate-result",
+        "read_file",
+        "DUPLICATE-RESULT-KEPT",
+        true,
+    ));
     let created_file = root.join("undo.txt");
     fs::write(&created_file, "created before resume\n").unwrap();
-    session
-        .push_message(ConversationMessage::tool_result(
-            "historical-write",
-            "write_file",
-            serde_json::json!({
-                "type": "create",
-                "filePath": created_file,
-                "content": "created before resume\n",
-                "originalFile": null,
-                "structuredPatch": [],
-            })
-            .to_string(),
-            false,
-        ))
-        .unwrap();
-    let source_results: Vec<_> = session
-        .messages
+    messages.push(ConversationMessage::tool_result(
+        "historical-write",
+        "write_file",
+        serde_json::json!({
+            "type": "create",
+            "filePath": created_file,
+            "content": "created before resume\n",
+            "originalFile": null,
+            "structuredPatch": [],
+        })
+        .to_string(),
+        false,
+    ));
+    let source_results: Vec<_> = messages
         .iter()
         .flat_map(|message| &message.blocks)
         .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
         .cloned()
         .collect();
-    session.save_to_path(&path).unwrap();
+    // Deliberately malformed legacy history comes from stored bytes, rather
+    // than asking the new writer to publish an unmatched tool result.
+    let mut legacy: Value = serde_json::from_str(&session.to_json().unwrap().render()).unwrap();
+    legacy["messages"] = Value::Array(
+        messages
+            .iter()
+            .map(|message| {
+                let mut value: Value = serde_json::from_str(&message.to_json().render()).unwrap();
+                value.as_object_mut().unwrap().remove("history");
+                value
+            })
+            .collect(),
+    );
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
     let target = "claude-opus-4-6";
 
     // A second process must preserve the repair and all result content.
@@ -183,22 +186,32 @@ fn resume_preserves_results_without_duplicate_or_unmatched_tool_ids() {
         cli.send("\r").expect("submit exit");
         assert_eq!(cli.expect_eof().expect("process exits"), 0);
         let restored = Session::load_from_path(&path).unwrap();
+        let content = |messages: &[ConversationMessage]| {
+            messages
+                .iter()
+                .cloned()
+                .map(|mut message| {
+                    message.history = None;
+                    message
+                })
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            &restored.messages[..healthy_prefix.len()],
-            healthy_prefix.as_slice(),
+            content(&restored.messages()[..healthy_prefix.len()]),
+            content(&healthy_prefix),
             "repair must not rewrite healthy history, even across a model switch"
         );
         for source in &source_results {
             assert!(
                 restored
-                    .messages
+                    .messages()
                     .iter()
                     .any(|message| message.blocks.contains(source)),
                 "model projection must preserve structured source records: {source:?}"
             );
         }
         assert!(restored
-            .messages
+            .messages()
             .iter()
             .any(|message| message.role == MessageRole::Assistant
                 && message.blocks.iter().any(

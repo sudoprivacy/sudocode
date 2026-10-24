@@ -20,6 +20,7 @@ pub fn messages_from_blocks(blocks: Vec<ContentBlock>) -> Vec<ConversationMessag
     blocks
         .into_iter()
         .map(|block| ConversationMessage {
+            history: None,
             role: MessageRole::User,
             blocks: vec![block],
             usage: None,

@@ -16,8 +16,14 @@ impl Completions {
                 }
             }
             EngineEvent::ToolResult {
-                id, name, output, ..
-            } => self.0.tool_result(id, name, output),
+                assistant_message_id,
+                id,
+                name,
+                output,
+                ..
+            } => self
+                .0
+                .tool_result(assistant_message_id.as_deref(), id, name, output),
             _ => return Vec::new(),
         }
         self.0.drain()
@@ -27,7 +33,7 @@ impl Completions {
 mod control;
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use engine_events::PromptContext;
 use runtime::subagent_completion::CompletionJournal;
@@ -149,15 +155,19 @@ impl CompletionState {
                             let mut terminal = lifecycle.as_ref().clone();
                             terminal.raw_output = None;
                             turn.terminal_retries
-                                .insert(lifecycle.tool_call_id.clone(), terminal);
+                                .insert(lifecycle.source_key(), terminal);
                             eprintln!("[engine-completion] terminal persistence pending: {error}");
                         }
                     }
                     Ok(())
                 }
                 EngineEvent::ToolResult {
-                    id, name, output, ..
-                } => journal.tool_result(id, name, output),
+                    assistant_message_id,
+                    id,
+                    name,
+                    output,
+                    ..
+                } => journal.tool_result(assistant_message_id.as_deref(), id, name, output),
                 _ => Ok(()),
             };
             if let Err(error) = observed {
@@ -211,20 +221,21 @@ impl CompletionState {
 
 /// Serializes completion-affecting events before crossing the renderer seam.
 /// Streaming deltas retain the direct channel path and take no state lock.
+/// The pump owns the route; retained host callbacks cannot keep it alive.
 #[derive(Clone)]
 pub(crate) struct EventSink {
-    tx: std::sync::mpsc::Sender<EngineEvent>,
+    tx: Weak<std::sync::mpsc::Sender<EngineEvent>>,
     order: Arc<Mutex<()>>,
     pub(crate) completions: Arc<CompletionState>,
 }
 
 impl EventSink {
     pub(crate) fn new(
-        tx: std::sync::mpsc::Sender<EngineEvent>,
+        tx: &Arc<std::sync::mpsc::Sender<EngineEvent>>,
         completions: Arc<CompletionState>,
     ) -> Self {
         Self {
-            tx,
+            tx: Arc::downgrade(tx),
             completions,
             order: Arc::default(),
         }
@@ -234,15 +245,15 @@ impl EventSink {
         &self,
         message: String,
     ) -> Result<(), std::sync::mpsc::SendError<()>> {
-        self.tx
-            .send(EngineEvent::PromptRejected { message })
+        let tx = self.route()?;
+        tx.send(EngineEvent::PromptRejected { message })
             .map_err(|_| std::sync::mpsc::SendError(()))?;
-        self.tx
-            .send(EngineEvent::State(engine_events::EngineState::Idle))
+        tx.send(EngineEvent::State(engine_events::EngineState::Idle))
             .map_err(|_| std::sync::mpsc::SendError(()))
     }
 
     pub(crate) fn send(&self, event: EngineEvent) -> Result<(), std::sync::mpsc::SendError<()>> {
+        let tx = self.route()?;
         if matches!(
             event,
             EngineEvent::TurnStarted { .. }
@@ -256,15 +267,17 @@ impl EventSink {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for event in self.completions.observe(event) {
-                self.tx
-                    .send(event)
-                    .map_err(|_| std::sync::mpsc::SendError(()))?;
+                tx.send(event).map_err(|_| std::sync::mpsc::SendError(()))?;
             }
             Ok(())
         } else {
-            self.tx
-                .send(event)
-                .map_err(|_| std::sync::mpsc::SendError(()))
+            tx.send(event).map_err(|_| std::sync::mpsc::SendError(()))
         }
+    }
+
+    fn route(
+        &self,
+    ) -> Result<Arc<std::sync::mpsc::Sender<EngineEvent>>, std::sync::mpsc::SendError<()>> {
+        self.tx.upgrade().ok_or(std::sync::mpsc::SendError(()))
     }
 }

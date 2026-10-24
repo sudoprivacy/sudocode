@@ -229,7 +229,8 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
         .unwrap_or_default();
     let mut system_tools = Vec::new();
     let mut mcp_tools = Vec::new();
-    for definition in client.request_tool_definitions(&session.messages, &pre_compact_discovered) {
+    for definition in client.request_tool_definitions(&session.messages(), &pre_compact_discovered)
+    {
         let loaded = !definition.defer_loading;
         let tokens = if loaded {
             estimate_serialized_tokens(&definition)
@@ -320,6 +321,6 @@ pub fn collect_context_usage(cwd: &Path, built: &BuiltRuntime) -> ContextUsage {
         skills_tokens,
         skills,
         message_tokens: estimate_session_tokens(session),
-        message_count: session.messages.len(),
+        message_count: session.messages().len(),
     }
 }

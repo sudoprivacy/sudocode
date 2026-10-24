@@ -329,10 +329,15 @@ fn controller_workflow(compact: bool) {
     let conversation =
         a2a::conversation_transcript_path(&a2a::conversation_id("stock-worker", "operator"));
     common::provision_stream_transcript(&kernel, &conversation);
+    let seeded = common::managed_session::seed_managed_session(
+        &kernel,
+        &common::make_desc("seed", "stock-worker", &model),
+    );
     let started = call(
         &kernel,
         "start_session_v1",
-        json!({"agent_id":"stock-worker","model":model}),
+        json!({"agent_id":"stock-worker","model":model,
+            "resume_session_id":seeded.resume_session_id}),
     );
     let endpoint: SessionEndpoint =
         serde_json::from_value(started["session_endpoint"].clone()).unwrap();

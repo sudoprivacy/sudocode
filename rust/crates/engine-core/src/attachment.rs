@@ -191,7 +191,7 @@ impl EngineDelegate for DeferredDelegate {
         name: &str,
         input: &str,
         prompter: &mut dyn PermissionPrompter,
-    ) -> Result<(String, bool), DirectToolError> {
+    ) -> Result<runtime::external_a2a::ExternalToolResult, DirectToolError> {
         self.get()
             .map_err(DirectToolError::Refused)?
             .run_direct_tool(name, input, prompter)

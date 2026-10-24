@@ -2913,6 +2913,7 @@ mod tests {
 
     fn user_message_with_results(results: Vec<(&str, bool)>) -> runtime::ConversationMessage {
         runtime::ConversationMessage {
+            history: None,
             role: runtime::MessageRole::User,
             blocks: results
                 .into_iter()
@@ -3127,6 +3128,7 @@ mod tests {
         let renderer = crate::render::TerminalRenderer::new();
         let messages = vec![
             runtime::ConversationMessage {
+                history: None,
                 role: runtime::MessageRole::Assistant,
                 blocks: vec![runtime::ContentBlock::ToolUse {
                     id: "call_1".to_string(),
@@ -3139,6 +3141,7 @@ mod tests {
                 duration_ms: None,
             },
             runtime::ConversationMessage {
+                history: None,
                 role: runtime::MessageRole::Tool,
                 blocks: vec![runtime::ContentBlock::ToolResult {
                     tool_use_id: "call_1".to_string(),
@@ -3173,6 +3176,7 @@ mod tests {
         // card. A resumed session is not "in flight"; only completed calls show.
         let renderer = crate::render::TerminalRenderer::new();
         let messages = vec![runtime::ConversationMessage {
+            history: None,
             role: runtime::MessageRole::Assistant,
             blocks: vec![runtime::ContentBlock::ToolUse {
                 id: "call_1".to_string(),
@@ -3211,6 +3215,7 @@ mod tests {
         // must render as the plain `❯ text` echo — no rules.
         let renderer = crate::render::TerminalRenderer::new();
         let messages = vec![runtime::ConversationMessage {
+            history: None,
             role: runtime::MessageRole::User,
             blocks: vec![runtime::ContentBlock::Text {
                 text: "hello there".to_string(),

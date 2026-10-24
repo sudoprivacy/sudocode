@@ -18,6 +18,9 @@ use rustyline::{
 
 use crate::render::{BOLD, DIM, RESET};
 
+mod stderr;
+pub(crate) use stderr::BackgroundPrinter;
+
 /// Rustyline handler for `↑`: moves cursor to the line above (or to the
 /// beginning of the current line on single-line input), and only navigates
 /// history when the cursor is already at the top-left. This matches Claude
@@ -292,6 +295,10 @@ pub struct LineEditor {
     images: ImageMap,
     /// How many turns are waiting to run at the next prompt.
     waiting_turns: Arc<AtomicUsize>,
+    background_printer: Option<BackgroundPrinter>,
+    // Keep this after `editor`: dropping the editor first disconnects its
+    // external-printer queue, so shutdown can join even an in-flight print.
+    stderr: Option<stderr::StderrOutput>,
 }
 
 impl LineEditor {
@@ -353,13 +360,26 @@ impl LineEditor {
             Cmd::Noop,
         );
 
+        let stderr = editor
+            .create_external_printer()
+            .ok()
+            .and_then(stderr::StderrOutput::activate);
+        let background_printer = stderr.as_ref().map(stderr::StderrOutput::printer);
+
         Self {
             prompt: prompt.into(),
             editor,
             pending_exit_at: None,
             images,
             waiting_turns,
+            background_printer,
+            stderr,
         }
+    }
+
+    #[inline]
+    pub(crate) fn background_printer(&self) -> Option<BackgroundPrinter> {
+        self.background_printer.clone()
     }
 
     pub fn push_history(&mut self, entry: impl Into<String>) {
@@ -406,7 +426,7 @@ impl LineEditor {
         if let Some(helper) = self.editor.helper_mut() {
             helper.set_completions(Vec::new());
         }
-        match self.editor.readline(prompt) {
+        match self.read_prompt(prompt) {
             Ok(line) => Ok(line.trim().to_string()),
             Err(ReadlineError::Interrupted | ReadlineError::Eof) => Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -425,8 +445,9 @@ impl LineEditor {
             helper.reset_current_line();
         }
 
+        let prompt = self.prompt.clone();
         loop {
-            match self.editor.readline(&self.prompt) {
+            match self.read_prompt(&prompt) {
                 Ok(line) => {
                     self.pending_exit_at = None;
                     self.push_history(&line);
@@ -481,6 +502,19 @@ impl LineEditor {
         self.editor
             .helper()
             .map_or_else(String::new, SlashCommandHelper::current_line)
+    }
+
+    /// The sole raw-mode boundary for both ordinary input and choice dialogs.
+    #[inline]
+    fn read_prompt(&mut self, prompt: &str) -> rustyline::Result<String> {
+        if let Some(stderr) = &self.stderr {
+            stderr.set_active(true)?;
+        }
+        let read = self.editor.readline(prompt);
+        if let Some(stderr) = &self.stderr {
+            stderr.set_active(false)?;
+        }
+        read
     }
 
     fn finish_interrupted_read(&mut self) {

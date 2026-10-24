@@ -50,106 +50,7 @@ pub(crate) mod prose_preview;
 use prose_preview::{PreviewUpdate, ProsePreview};
 use tasks::{TaskBrowser, TaskFocus};
 
-// ── stderr redirect ───────────────────────────────────────────────────
-
-/// Windows stub — stderr redirect is a no-op on non-Unix platforms.
-#[cfg(not(unix))]
-mod stderr_redirect {
-    pub struct StderrRedirect;
-    impl StderrRedirect {
-        pub fn activate() -> Option<Self> {
-            None
-        }
-        pub fn drain(&self) -> Option<Vec<u8>> {
-            None
-        }
-        pub fn suspend(&self) -> std::io::Result<()> {
-            Ok(())
-        }
-        pub fn resume(&self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-}
-
-/// Unix pipe-based stderr redirect: replaces fd 2 with a pipe so that
-/// any library writing to stderr (e.g. tracing, nix, openssl) does not
-/// corrupt the iocraft canvas.  Captured bytes are drained each tick and
-/// routed through the iocraft stdout handle.
-///
-/// All syscalls go through `nix`'s safe wrappers — no `unsafe` blocks.
-#[cfg(unix)]
-mod stderr_redirect {
-    use std::io::Read;
-    use std::os::fd::{AsFd, AsRawFd, OwnedFd};
-
-    pub struct StderrRedirect {
-        read_file: std::fs::File,
-        write_fd: OwnedFd,
-        original_stderr: OwnedFd,
-    }
-
-    impl StderrRedirect {
-        /// Replace fd 2 with the write end of a pipe.  Returns `Some` on
-        /// success.  The read end is kept for `drain()`.
-        pub fn activate() -> Option<Self> {
-            let (read_fd, write_fd): (OwnedFd, OwnedFd) = nix::unistd::pipe().ok()?;
-            let original_stderr = std::io::stderr().as_fd().try_clone_to_owned().ok()?;
-
-            // Make the read end non-blocking so drain() never stalls.
-            let flags =
-                nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL).ok()?;
-            let mut oflags = nix::fcntl::OFlag::from_bits_truncate(flags);
-            oflags.insert(nix::fcntl::OFlag::O_NONBLOCK);
-            nix::fcntl::fcntl(read_fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(oflags)).ok()?;
-
-            let read_file = std::fs::File::from(read_fd);
-            nix::unistd::dup2(write_fd.as_raw_fd(), 2).ok()?;
-            Some(Self {
-                read_file,
-                write_fd,
-                original_stderr,
-            })
-        }
-
-        /// External programs inherit the real terminal, not the capture pipe.
-        pub fn suspend(&self) -> std::io::Result<()> {
-            nix::unistd::dup2(self.original_stderr.as_raw_fd(), 2)?;
-            Ok(())
-        }
-
-        pub fn resume(&self) -> std::io::Result<()> {
-            nix::unistd::dup2(self.write_fd.as_raw_fd(), 2)?;
-            Ok(())
-        }
-
-        /// Non-blocking drain: returns captured text or `None`.
-        pub fn drain(&self) -> Option<Vec<u8>> {
-            let mut buf = [0u8; 4096];
-            let mut collected = Vec::new();
-            let mut file = &self.read_file;
-            loop {
-                match file.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => collected.extend_from_slice(&buf[..n]),
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(_) => break,
-                }
-            }
-            if collected.is_empty() {
-                None
-            } else {
-                Some(collected)
-            }
-        }
-    }
-
-    impl Drop for StderrRedirect {
-        fn drop(&mut self) {
-            let _ = self.suspend();
-        }
-    }
-}
+use crate::stderr_capture as stderr_redirect;
 
 // ── ChromeSlot enums ──────────────────────────────────────────────────
 
@@ -2056,9 +1957,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .take()
     {
         system.suspend(move || {
-            let redir = stderr_redir.lock().expect("stderr redirect mutex poisoned");
+            let mut redir = stderr_redir.lock().expect("stderr redirect mutex poisoned");
             let released = redir
-                .as_ref()
+                .as_mut()
                 .map_or(Ok(()), stderr_redirect::StderrRedirect::suspend);
             let is_released = released.is_ok();
             if request.ready.send(released).is_ok() && is_released {
@@ -2066,7 +1967,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 let _ = request.resume.recv();
             }
             let restored = redir
-                .as_ref()
+                .as_mut()
                 .map_or(Ok(()), stderr_redirect::StderrRedirect::resume);
             let _ = request.done.send(restored);
         });

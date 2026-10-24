@@ -604,19 +604,13 @@ pub(crate) fn build_runtime_with_plugin_state(
     // above this line is identical for both hosts; this is the line that
     // decides whether a write lands on local disk or in the kernel.
     let tool_registry = tool_registry.with_fs(Arc::clone(&host.fs));
-    // Resolve this session's one peer namespace (fail loud on a partial node
-    // config or a dial failure). A co-hosted agent has none to resolve: its
-    // daemon injected the mailbox it lives in.
+    // Select one peer namespace. A configured but unavailable node keeps a
+    // mailbox that reports its errors on A2A IO; it is never an empty scope
+    // that could make tools deliver to disk. Cohost injects its own mailbox.
     let peer = if host.mailbox.is_some() {
         None
     } else {
-        match crate::peer::attach(&host.resolved_agent_name()) {
-            Ok(peer) => Some(peer),
-            Err(error) => {
-                shutdown_mcp_state_best_effort(&mcp_state);
-                return Err(Box::new(std::io::Error::other(error)));
-            }
-        }
+        Some(crate::peer::attach(&host.resolved_agent_name()))
     };
     // per-session injected MCP tools bypass the global --allowed-tools gate:
     // they are explicitly requested for this session and their names are only

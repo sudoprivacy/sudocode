@@ -598,8 +598,17 @@ pub fn format_status_report(
 
 fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
     let namespace = match (peer.namespace, &peer.endpoint, &peer.error) {
-        (Some("node"), Some(endpoint), _) => format!("node {endpoint}"),
-        (Some(_), _, _) => "same-machine pair root".to_string(),
+        (Some("node"), endpoint, error) => {
+            let selected = endpoint
+                .as_ref()
+                .map_or_else(|| "node".to_string(), |endpoint| format!("node {endpoint}"));
+            match error {
+                Some(error) => format!("{selected} (unavailable: {error})"),
+                None => selected,
+            }
+        }
+        (Some("disk"), _, _) => "same-machine pair root".to_string(),
+        (Some(namespace), _, _) => namespace.to_string(),
         (None, _, Some(error)) => format!("unavailable: {error}"),
         (None, _, None) => "unavailable".to_string(),
     };
@@ -609,6 +618,7 @@ fn format_peer_report(peer: &runtime::mailbox::PeerStatus) -> String {
         }
         ("receiving", _) => "receiving",
         ("standby", _) => "standing by: another instance of this agent is receiving",
+        ("unavailable", _) => "unavailable; ordinary session remains usable",
         _ => "not running in this process",
     };
     let cursor = match peer.cursor {

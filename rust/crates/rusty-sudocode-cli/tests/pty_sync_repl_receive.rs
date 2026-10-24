@@ -11,6 +11,7 @@ mod common;
 #[path = "support/node_home.rs"]
 mod node_home;
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::TestEnv;
@@ -20,6 +21,22 @@ use runtime::mailbox::{local_pair_root_in, Mailbox};
 const AGENT: &str = "sync-receiver";
 const PEER: &str = "sync-peer";
 const BUDGET: Duration = Duration::from_secs(30);
+
+#[inline]
+fn send_from(pair_root: &Path, peer: &str, body: &str) {
+    Mailbox::workspace_local(pair_root, peer.to_string())
+        .send(MailboxEnvelope {
+            from: peer.to_string(),
+            to: AGENT.to_string(),
+            body: body.to_string(),
+            summary: None,
+            timestamp: 0,
+            color: None,
+            kind: runtime::agent_mailbox::kinds::MESSAGE.to_string(),
+            request_id: None,
+        })
+        .expect("the peer writes on the pair root");
+}
 
 fn expect_on_screen(sess: &mut pty_expect::PtySession, needle: &str) {
     let deadline = Instant::now() + BUDGET;
@@ -47,20 +64,20 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
     session.set_default_timeout(BUDGET);
     session.expect("❯").expect("the REPL should start");
     common::expect_input_line_cleared(&session, BUDGET, "sync receiver ready");
+    session
+        .send("draft-界-keep")
+        .expect("type a fast Unicode draft");
+    common::expect_input_line(&session, "draft-界-keep", BUDGET, "draft before notice");
+    session
+        .send("\x1b[D\x1b[D\x1b[D\x1b[D")
+        .expect("move before keep");
 
     let pair_root = local_pair_root_in(env.config_home());
-    Mailbox::workspace_local(&pair_root, PEER.to_string())
-        .send(MailboxEnvelope {
-            from: PEER.to_string(),
-            to: AGENT.to_string(),
-            body: "for the sync REPL PARITY_SCENARIO:single_turn_text".to_string(),
-            summary: None,
-            timestamp: 0,
-            color: None,
-            kind: runtime::agent_mailbox::kinds::MESSAGE.to_string(),
-            request_id: None,
-        })
-        .expect("the peer writes on the pair root");
+    send_from(
+        &pair_root,
+        PEER,
+        "for the sync REPL PARITY_SCENARIO:single_turn_text",
+    );
     let inbox = Mailbox::workspace_local(&pair_root, AGENT.to_string());
     let position = || {
         inbox
@@ -71,6 +88,13 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
 
     // Announced while the prompt waits, and not yet taken.
     expect_on_screen(&mut session, &format!("Message from {PEER} is waiting"));
+    common::expect_input_line(&session, "draft-界-keep", BUDGET, "draft after notice");
+    session.send("X").expect("type at the preserved cursor");
+    common::expect_input_line(&session, "draft-界-Xkeep", BUDGET, "cursor after notice");
+    // A single control-key burst also exercises the upstream buffered-input
+    // fix. The draft is not submitted as a user or peer turn.
+    session.send("\x05\x15").expect("end then clear the draft");
+    common::expect_input_line_cleared(&session, BUDGET, "draft cleared before peer turn");
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(
         position(),
@@ -106,6 +130,19 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
     );
     common::expect_input_line_cleared(&session, BUDGET, "status completed");
 
-    session.send("/exit\r").expect("exit the REPL");
+    // Closing with an announced, unconsumed delivery must release the receiver
+    // and the printer worker. The notice is fresh (a distinct peer), and its
+    // actual message must remain unread for the next owner.
+    session
+        .send("/exit")
+        .expect("type exit before the next notice");
+    send_from(&pair_root, "sync-exit-peer", "LEAVE_UNREAD_ON_EXIT");
+    expect_on_screen(&mut session, "Message from sync-exit-peer is waiting");
+    common::expect_input_line(&session, "/exit", BUDGET, "exit draft after notice");
+    session.send("\r").expect("exit the REPL");
     assert_eq!(session.expect_eof().expect("the REPL exits"), 0);
+    assert_eq!(
+        inbox.read_position("sync-exit-peer").unwrap().unwrap_or(0),
+        0
+    );
 }

@@ -28,7 +28,8 @@ indicatif = "0.17"
 iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "a43bc2a9dfc30e636bdadc9582da9e39f91f5018" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
-rustyline = "15"
+# v19 fixes buffered-input stalls when the external printer is enabled (#977).
+rustyline = "=19.0.0"
 runtime = { path = "../runtime" }
 # ACP renderer (server + stdio/ws transports) moved out of `runtime`.
 engine-acp = { path = "../engine-acp" }
@@ -68,6 +69,8 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-tungstenite = "0.29"
 
 [target.'cfg(windows)'.dependencies]
+# Safe process stderr capture for the inline renderer (already in Cargo.lock).
+filedescriptor = "=0.8.3"
 # The one crate allowed to contain `unsafe` — see its docs for why the
 # workspace's `unsafe_code = "forbid"` is kept absolute everywhere else.
 stdin-peek = { path = "../stdin-peek" }

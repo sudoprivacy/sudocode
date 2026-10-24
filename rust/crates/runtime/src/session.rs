@@ -1292,6 +1292,59 @@ impl Session {
         Ok(session)
     }
 
+    /// Refresh this runtime's durable view without opening another writer.
+    /// New history/checkpoint caches belong to the fresh view; ownership stays
+    /// shared with this context's snapshots and completion journal. A record
+    /// writer restores its own continuation, not the latest sibling's branch.
+    #[inline]
+    pub(crate) fn reload_persisted_source(&self) -> Result<Self, SessionError> {
+        let persistence = self
+            .persistence
+            .as_ref()
+            .ok_or_else(|| SessionError::Format("session has no transcript".into()))?;
+        let writer = match &*persistence
+            .writer
+            .lock()
+            .map_err(|_| SessionError::Format("session writer poisoned".into()))?
+        {
+            SessionWriterState::Closed => {
+                return Err(SessionError::Format("session_closed".into()));
+            }
+            SessionWriterState::Active(writer) => Some(Arc::clone(writer)),
+            SessionWriterState::Unopened => None,
+        };
+        let _write = writer
+            .as_ref()
+            .map(|writer| writer.write().map_err(SessionError::Format))
+            .transpose()?;
+        let history = writer
+            .as_ref()
+            .map(|writer| {
+                writer
+                    .refresh_history_session()
+                    .map_err(SessionError::Format)
+            })
+            .transpose()?
+            .flatten();
+        let mut restored = match history {
+            Some(session) => session.with_persistence_path(&persistence.path),
+            None => Self::load_from_path_with(persistence.fs.as_ref(), &persistence.path)?,
+        }
+        .with_fs_backend(Arc::clone(&persistence.fs));
+        if restored.session_id != self.session_id
+            || restored.workspace_root != self.workspace_root
+            || restored.identity != self.identity
+        {
+            return Err(SessionError::SourceChanged);
+        }
+        let restored_persistence = restored
+            .persistence
+            .as_mut()
+            .expect("restored path attached");
+        restored_persistence.writer = Arc::clone(&persistence.writer);
+        Ok(restored)
+    }
+
     /// Replay either persisted format with the repairs used by every load.
     pub(crate) fn from_persisted_contents(contents: &str) -> Result<Self, SessionError> {
         let is_record_history = history::is_record_history(contents.as_bytes());

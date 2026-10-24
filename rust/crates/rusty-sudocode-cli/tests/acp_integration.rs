@@ -14,6 +14,8 @@
 mod acp_direct_fences;
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
+#[path = "support/acp_node_binding.rs"]
+mod node_binding;
 #[path = "support/node_home.rs"]
 mod node_home;
 #[path = "common/openai_compat_mock.rs"]

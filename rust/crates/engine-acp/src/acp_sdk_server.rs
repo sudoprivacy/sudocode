@@ -840,9 +840,7 @@ async fn ensure_a2a_receiver(
     // the peer namespace the session build attached this agent to.
     let mailbox = match &registry.hosted_factory {
         Some(factory) => factory.mailbox(),
-        None => engine_host::peer::attach(&agent)
-            .ok()
-            .map(|peer| peer.mailbox()),
+        None => Some(engine_host::peer::attach(&agent).mailbox()),
     };
     let Some(mailbox) = mailbox else {
         return;

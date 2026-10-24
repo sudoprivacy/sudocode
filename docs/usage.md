@@ -79,24 +79,37 @@ remains owned by global `settings.json` and project `settings.local.json`.
 ### Standalone sessions and the local Nexus node
 
 Standalone `scode` reads `~/.nexus/run/node.json` when selecting its peer
-namespace. With a readable record and credential files for this agent,
-starting or resuming a session does not wait for the node to answer. Ordinary
-model and workspace work can continue while the node is offline. The receiver
-retries its existing node connection, and A2A tools report node IO errors;
-they do not redirect messages to a disk inbox. An uncertain send result must
-not be retried automatically.
+namespace. Starting or resuming an ordinary session does not require that node
+to answer or this agent's bundle to be ready. A present but unusable record,
+missing credential files or an identity mismatch leave A2A unavailable with
+the actual cause in `/status` and tool results. They do not redirect messages
+to a disk inbox or prevent ordinary model and workspace work.
 
-While claiming the receiver seat, an unchanged connection error is printed
-once; a different error or a new outage after a successful receiver-seat check
-is reported again. Connection retries continue without repeatedly scrolling the
-input area.
+Background receive failures share a short notice across the receiver's
+conversations, with at most one reminder per minute during an interruption.
+Detailed errors and repeat counts are retained in the local diagnostic log
+named by the notice. Once all observed failures clear and checks stay healthy,
+one recovery notice is shown. A healthy peer does not hide another peer's
+failure. Retrying task-completion persistence uses the same reporting policy.
+See [background retry diagnostics](design/background-retry-diagnostics.md)
+for the shared implementation and repository audit.
 
 This does not start Nexus or mint an agent credential. A missing record still
-selects the same-machine disk namespace. Record parsing, missing credential
-files and credential identity mismatches still stop startup; a lazy client is
-not proof that TLS authentication will succeed. Changing an already running session
-from disk to node remains an explicit handoff. Receiver ownership and a selected
-node endpoint in `/status` are not proof that a remote peer is online.
+selects the same-machine disk namespace for that process. When a node was
+selected, its tools and original receiver share one binding: the receiver
+retries local configuration and credential resolution, then retries node IO
+through the same client. Preparing the missing bundle can therefore make
+that binding usable without starting another receiver. A failed or uncertain
+send is never automatically resent. Receiver `unavailable` means the receiver
+could not initialize; `standby` means another instance holds its seat.
+
+A constructed client is not proof that TLS authentication succeeds. The
+client's credentials remain fixed after construction; rotation or replacing
+an unusable constructed client is not covered by local binding retries.
+Changing a running session from disk to node remains an explicit handoff.
+Receiver ownership and a selected node endpoint in `/status` are not proof
+that a remote peer is online. Cohost continues using its injected mailbox and
+requires its host services.
 
 ### CLI packages
 

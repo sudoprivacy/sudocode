@@ -230,6 +230,15 @@ echo "== [deterministic] a failed reader renewal refuses the commit; the reader 
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset -- --ignored --nocapture
 
+# A stalled batch is recorded by the step that stopped it: a lease lost
+# mid-batch (INJECTED worker renewal failure) is LeaseLost, a consumer that
+# refused under a held lease is ConsumerRefused.
+echo "== [deterministic] a stalled batch records the step that stopped it =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_stall_from_lease_lost_mid_batch_is_recorded_as_lease_lost -- --ignored --nocapture
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_refusal_under_a_held_lease_is_recorded_as_consumer_refused -- --ignored --nocapture
+
 # The receiver seat trusts only fresh renewals: a late reply, a partition and a
 # slow-but-successful renewal are injected by the test-only wrapper; the node's
 # TTL is what any takeover waits on.

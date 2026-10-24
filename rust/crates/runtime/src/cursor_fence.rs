@@ -64,6 +64,15 @@ pub(crate) struct RegisterCursor {
 }
 
 impl RegisterCursor {
+    /// Which claim this cursor writes as.
+    ///
+    /// Exposed for diagnostics only — a delivery stall is attributable to the
+    /// claim that failed to advance, and the tail loop cannot name it otherwise
+    /// once the register is reached through this type.
+    pub(crate) fn holder(&self) -> &str {
+        &self.holder
+    }
+
     /// Take the register at `path` for `holder`, returning the cursor and the
     /// offset to resume from. `Ok(None)` means another claimer won this round;
     /// the caller retries the way it would after losing the lock.

@@ -280,6 +280,61 @@ fn legacy_runtime_resume_inherits_written_prefix_while_native_tool_runs() {
 }
 
 #[test]
+fn refreshing_a_live_context_preserves_its_writer_and_excludes_sibling_history() {
+    std::env::set_var("SUDOCODE_EXPERIMENT_SHARED_SESSION_HISTORY", "1");
+    let root = std::env::temp_dir().join(format!("scode-refresh-context-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let fixture = Fixture(root.clone());
+    let path = root.join("history.jsonl");
+    let seed = Session::new()
+        .with_workspace_root(&root)
+        .with_persistence_path(&path);
+    seed.initialize_persistence().unwrap();
+    let executor = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (mut a, requests) = runtime(
+        load(&path, false),
+        vec![answer("A_BEFORE_REFRESH"), answer("A_AFTER_REFRESH")],
+        StaticToolExecutor::new(),
+    );
+    executor
+        .block_on(a.run_turn("A_INITIAL_PROMPT", None, None))
+        .unwrap();
+    // Keep the actual journal/snapshot writer alive across the source refresh.
+    let snapshot = a.session().clone();
+    let writer = snapshot.completion_writer().unwrap();
+    let (mut b, _) = runtime(
+        load(&path, false),
+        vec![answer("B_PRIVATE_AFTER_A")],
+        StaticToolExecutor::new(),
+    );
+    executor
+        .block_on(b.run_turn("B_PRIVATE_PROMPT", None, None))
+        .unwrap();
+    assert!(transcript(load(&path, false).messages()).contains("B_PRIVATE_AFTER_A"));
+    a.refresh_compaction_source().unwrap();
+    assert!(Arc::ptr_eq(
+        &writer,
+        &a.session().completion_writer().unwrap()
+    ));
+    let refreshed = transcript(a.session().messages());
+    assert!(refreshed.contains("A_BEFORE_REFRESH"));
+    assert!(!refreshed.contains("B_PRIVATE_AFTER_A"));
+    executor
+        .block_on(a.run_turn("A_CONTINUES_AFTER_REFRESH", None, None))
+        .unwrap();
+    assert!(!transcript(requests.lock().unwrap().last().unwrap()).contains("B_PRIVATE_AFTER_A"));
+    let restored = load(&path, false);
+    assert!(transcript(restored.messages()).contains("A_AFTER_REFRESH"));
+    assert!(!transcript(restored.messages()).contains("B_PRIVATE_AFTER_A"));
+    drop((snapshot, writer, a, b, seed, restored));
+    drop(executor);
+    drop(fixture);
+}
+
+#[test]
 #[ignore = "requires the real pinned Nexus daemon and mTLS credentials"]
 fn live_runtime_resume_inherits_written_prefix_and_keeps_native_tool_result() {
     exercise_runtime_history(true, false);

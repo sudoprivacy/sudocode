@@ -1624,31 +1624,30 @@ pub fn spawn_inbox_poller(
                 agent: mailbox.self_id().to_string(),
                 state: None,
             };
-            // Keep retrying an offline node without repainting the terminal
-            // with the same error on every discovery tick. A changed error or
-            // a new outage after a successful receiver-seat check is reported again.
-            let mut last_claim_error = None;
+            let diagnostics = Arc::new(telemetry::RetryDiagnostics::new(
+                label,
+                mailbox.self_id(),
+                "Message receiving is interrupted; retrying in the background.",
+                "Message receive checks recovered.",
+            ));
             while !abort.is_aborted() {
                 state.set(ReceiverState::Standby);
                 let seat = match mailbox.claim_receiver() {
                     Ok(Some(seat)) => seat,
                     Ok(None) => {
-                        last_claim_error = None;
+                        diagnostics.succeeded("receiver seat");
                         sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
                         continue;
                     }
                     Err(e) => {
-                        if last_claim_error.as_ref() != Some(&e) {
-                            eprintln!("[{label}] {e}");
-                            last_claim_error = Some(e);
-                        }
+                        diagnostics.failed("receiver seat", &e);
                         sleep_unless_aborted(&abort, CONVERSATION_DISCOVERY_MS);
                         continue;
                     }
                 };
-                last_claim_error = None;
+                diagnostics.succeeded("receiver seat");
                 state.set(ReceiverState::Receiving);
-                receive_while_seated(&mailbox, &seat, block_ms, label, &abort, &sink);
+                receive_while_seated(&mailbox, &seat, block_ms, &diagnostics, &abort, &sink);
             }
         })
         .expect("spawn inbox receiver thread")
@@ -1663,7 +1662,7 @@ fn receive_while_seated(
     mailbox: &Arc<Mailbox>,
     seat: &HeldLease,
     block_ms: u64,
-    label: &'static str,
+    diagnostics: &Arc<telemetry::RetryDiagnostics>,
     abort: &crate::HookAbortSignal,
     sink: &Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
 ) {
@@ -1673,6 +1672,7 @@ fn receive_while_seated(
     while !abort.is_aborted() && seat.is_valid() {
         match mailbox.list_conversations() {
             Ok(peers) => {
+                diagnostics.succeeded("conversation discovery");
                 for peer in peers {
                     if tailing.contains_key(&peer) {
                         continue;
@@ -1681,19 +1681,19 @@ fn receive_while_seated(
                         Arc::clone(mailbox),
                         peer.clone(),
                         block_ms,
-                        label,
+                        Arc::clone(diagnostics),
                         tails_stop.clone(),
                         Arc::clone(sink),
                     );
                     tailing.insert(peer, tail);
                 }
             }
-            Err(e) => eprintln!("[{label}] listing conversations failed: {e}"),
+            Err(e) => diagnostics.failed("conversation discovery", &e),
         }
         sleep_unless_aborted(abort, CONVERSATION_DISCOVERY_MS);
     }
     if let Some(loss) = seat.loss() {
-        eprintln!("[{label}] receiver seat lost: {loss}");
+        eprintln!("[{}] receiver seat lost: {loss}", diagnostics.component());
     }
     // Joining is what makes the receiver's handle mean "the receiver has
     // stopped". Without it the caller's join returns while N tails are still
@@ -1703,19 +1703,36 @@ fn receive_while_seated(
         let _ = tail.join();
     }
 }
+/// Operational facts for one receive error; unknown positions stay null.
+#[inline]
+fn receiver_error_context(
+    peer: &str,
+    operation: &str,
+    offset: Option<u64>,
+    tail: Option<u64>,
+) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::Map::from_iter([
+        ("peer".into(), peer.into()),
+        ("operation".into(), operation.into()),
+        ("offset".into(), offset.into()),
+        ("tail".into(), tail.into()),
+    ])
+}
+
 /// One conversation's tail: hold the reader seat, park on the transcript,
 /// deliver, commit.
 fn spawn_conversation_tail(
     mailbox: Arc<Mailbox>,
     peer: String,
     block_ms: u64,
-    label: &'static str,
+    diagnostics: Arc<telemetry::RetryDiagnostics>,
     abort: crate::HookAbortSignal,
     sink: Arc<dyn Fn(&MailboxEnvelope) -> bool + Send + Sync>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
-        .name(format!("{label}-tail"))
+        .name(format!("{}-tail", diagnostics.component()))
         .spawn(move || {
+            let scope = format!("conversation with {peer}");
             while !abort.is_aborted() {
                 let mut reader = match mailbox.conversation_reader(&peer).acquire() {
                     Ok(Some(reader)) => reader,
@@ -1724,7 +1741,11 @@ fn spawn_conversation_tail(
                         continue;
                     }
                     Err(e) => {
-                        eprintln!("[{label}] claiming reader for {peer}: {e}");
+                        diagnostics.failed_with(
+                            &scope,
+                            &e,
+                            receiver_error_context(&peer, "claim", None, None),
+                        );
                         sleep_unless_aborted(&abort, block_ms.max(1));
                         continue;
                     }
@@ -1735,7 +1756,16 @@ fn spawn_conversation_tail(
                         match mailbox.poll_conversation(&peer, reader.offset, block_ms) {
                             Ok(batch) => batch,
                             Err(e) => {
-                                eprintln!("[{label}] polling conversation with {peer}: {e}");
+                                diagnostics.failed_with(
+                                    &scope,
+                                    &e,
+                                    receiver_error_context(
+                                        &peer,
+                                        "poll",
+                                        Some(reader.offset),
+                                        None,
+                                    ),
+                                );
                                 sleep_unless_aborted(&abort, block_ms.max(1));
                                 continue;
                             }
@@ -1744,7 +1774,16 @@ fn spawn_conversation_tail(
                         retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
                         if next > reader.offset {
                             if let Err(e) = reader.commit(next) {
-                                eprintln!("[{label}] committing reader for {peer}: {e}");
+                                diagnostics.failed_with(
+                                    &scope,
+                                    &e,
+                                    receiver_error_context(
+                                        &peer,
+                                        "commit",
+                                        Some(reader.offset),
+                                        Some(next),
+                                    ),
+                                );
                                 break;
                             }
                         }
@@ -1752,9 +1791,13 @@ fn spawn_conversation_tail(
                         sleep_unless_aborted(&abort, retry_delay_ms);
                         retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
                     }
+                    diagnostics.succeeded(&scope);
                 }
                 if let Some(loss) = reader.lease.loss() {
-                    eprintln!("[{label}] reader for {peer} lost: {loss}");
+                    eprintln!(
+                        "[{}] reader for {peer} lost: {loss}",
+                        diagnostics.component()
+                    );
                 }
             }
         })

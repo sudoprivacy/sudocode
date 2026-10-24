@@ -299,6 +299,21 @@ impl SessionWriter {
             .transpose()
     }
 
+    #[inline]
+    pub(crate) fn refresh_history_session(&self) -> Result<Option<crate::Session>, String> {
+        self.history
+            .lock()
+            .map_err(|_| "session history poisoned")?
+            .as_mut()
+            .map(|active| {
+                active
+                    .context
+                    .refresh_session()
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()
+    }
+
     pub(crate) fn has_history(&self) -> Result<bool, String> {
         self.history
             .lock()

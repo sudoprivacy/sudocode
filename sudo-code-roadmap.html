@@ -1942,7 +1942,7 @@ shortcut. This changes presentation, not slot allocation or input ownership.</p>
 <p>Dependencies: <strong>crossterm 0.28</strong>,
 <strong>pulldown-cmark 0.13</strong>, <strong>syntect 5</strong>,
 <strong>iocraft 0.8</strong>, <strong>smol 2</strong>,
-<strong>rustyline 15</strong> (sync path), <strong>serde_json</strong>.</p>
+<strong>rustyline 19</strong> (sync path, upstream buffered-input fix for external diagnostics), <strong>serde_json</strong>.</p>
 
 <h4>Phase 0 · Structural cleanup</h4>
 
@@ -2531,9 +2531,15 @@ until its v0.8.16 tag.</p>
 With an existing readable node record and credential, constructing the session's
 peer client does not perform a network probe. Ordinary startup and resume keep
 the node namespace while the receiver retries and A2A operations report their
-actual errors. Receiver-seat retries print an unchanged error once, reset that
-diagnostic after a successful receiver-seat check, and retain the existing retry
-interval. PTY acceptance requires usable input after a completed offline turn
+actual errors. Background receive and terminal-persistence retries share
+<code>telemetry::RetryDiagnostics</code>: one service-level notice, bounded
+reminders, detailed local errors/repeat counts, and recovery only after all
+observed failing scopes clear. Existing retry intervals and outcomes remain
+unchanged. Unix and Windows stderr diagnostics enter the inline renderer rather
+than overwrite live input; terminal handoff suspends and restores capture.
+The <a href="docs/design/background-retry-diagnostics.md">repository
+audit and acceptance scope</a> distinguish background diagnostics from command
+failures and existing HTTP/MCP state. PTY acceptance requires usable input after a completed offline turn
 and covers both renderers, restored history and a
 failed real send without a disk inbox. Record parsing, missing credential files
 and identity mismatches still fail startup; representing those conditions as

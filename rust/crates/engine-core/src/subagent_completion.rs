@@ -48,6 +48,9 @@ pub struct CompletionState {
     wake: Arc<tokio::sync::Notify>,
     delivery: Mutex<control::DeliveryState>,
     inner: Mutex<CompletionTurn>,
+    // Error-only state must not reserve the reporter's map/strings in every
+    // healthy session. Keep allocation lazy as well as initialization.
+    persistence_diagnostics: std::sync::OnceLock<Box<telemetry::RetryDiagnostics>>,
     // Fields drop in declaration order. Keep this last so retirement follows
     // the journal/storage fields, including a worker's final state owner.
     pub(crate) lifetime: crate::attachment::CompletionLifetime,
@@ -126,7 +129,11 @@ impl CompletionState {
     fn retry_locked(&self, turn: &mut CompletionTurn) -> Result<(), String> {
         if let Some(journal) = self.journal() {
             while let Some((id, event)) = turn.terminal_retries.first_key_value() {
-                journal.lifecycle(event)?;
+                if let Err(error) = journal.lifecycle(event) {
+                    self.persistence_diagnostics().failed(id, &error);
+                    return Err(error);
+                }
+                self.persistence_diagnostics().succeeded(id);
                 let id = id.clone();
                 turn.terminal_retries.remove(&id);
             }
@@ -154,9 +161,9 @@ impl CompletionState {
                         if let Err(error) = journal.lifecycle(lifecycle) {
                             let mut terminal = lifecycle.as_ref().clone();
                             terminal.raw_output = None;
-                            turn.terminal_retries
-                                .insert(lifecycle.source_key(), terminal);
-                            eprintln!("[engine-completion] terminal persistence pending: {error}");
+                            let source = lifecycle.source_key();
+                            turn.terminal_retries.insert(source.clone(), terminal);
+                            self.persistence_diagnostics().failed(&source, &error);
                         }
                     }
                     Ok(())

@@ -86,10 +86,14 @@ retries its existing node connection, and A2A tools report node IO errors;
 they do not redirect messages to a disk inbox. An uncertain send result must
 not be retried automatically.
 
-While claiming the receiver seat, an unchanged connection error is printed
-once; a different error or a new outage after a successful receiver-seat check
-is reported again. Connection retries continue without repeatedly scrolling the
-input area.
+Background receive failures share a short notice across the receiver's
+conversations, with at most one reminder per minute during an interruption.
+Detailed errors and repeat counts are retained in the local diagnostic log
+named by the notice. Once all observed failures clear and checks stay healthy,
+one recovery notice is shown. A healthy peer does not hide another peer's
+failure. Retrying task-completion persistence uses the same reporting policy.
+See [background retry diagnostics](design/background-retry-diagnostics.md)
+for the shared implementation and repository audit.
 
 This does not start Nexus or mint an agent credential. A missing record still
 selects the same-machine disk namespace. Record parsing, missing credential

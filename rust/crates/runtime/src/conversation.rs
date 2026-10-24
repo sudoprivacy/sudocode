@@ -2480,16 +2480,11 @@ where
         // Failed reloads must also disable any later stale metadata write.
         self.compaction_source_revision = None;
         self.session_source_stale = true;
-        let Some(path) = self
-            .session
-            .persistence_path()
-            .map(std::path::Path::to_path_buf)
-        else {
+        if self.session.persistence_path().is_none() {
             self.session_source_stale = false;
             return Ok(());
-        };
-        let fs = self.session.fs_handle();
-        let mut refreshed = Session::load_from_path_with(fs.as_ref(), &path)?.with_fs_backend(fs);
+        }
+        let mut refreshed = self.session.reload_persisted_source()?;
         refreshed.merge_maintenance_usage(&self.session.maintenance_usage);
         self.usage_tracker.refresh_session_totals(&refreshed);
         self.session = refreshed;

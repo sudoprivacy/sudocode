@@ -76,6 +76,7 @@ pub struct Probe {
     /// Locks dropped while partitioned. Held, not released, so the node keeps
     /// them until their TTL runs out.
     leaked: Mutex<Vec<Arc<dyn FsLock>>>,
+    register_writes: Mutex<std::collections::HashMap<String, (bool, u64)>>,
 }
 
 impl Probe {
@@ -86,11 +87,38 @@ impl Probe {
             reader: Mutex::new(Vec::new()),
             reader_claim_delay: Mutex::new(None),
             leaked: Mutex::new(Vec::new()),
+            register_writes: Mutex::default(),
         })
     }
 
     pub fn set(&self, fault: Fault) {
         *self.fault.lock().unwrap() = fault;
+    }
+
+    /// Fail only this exact register's writes, leaving all locks and reads real.
+    pub fn fail_register_writes(&self, path: &str, fail: bool) -> u64 {
+        let mut writes = self.register_writes.lock().unwrap();
+        let (active, attempts) = writes.entry(path.into()).or_default();
+        *active = fail;
+        *attempts
+    }
+
+    pub fn register_write_attempts(&self, path: &str) -> u64 {
+        self.register_writes
+            .lock()
+            .unwrap()
+            .get(path)
+            .map_or(0, |(_, attempts)| *attempts)
+    }
+
+    fn check_register_write(&self, path: &str) -> io::Result<()> {
+        if let Some((fail, attempts)) = self.register_writes.lock().unwrap().get_mut(path) {
+            *attempts += 1;
+            if *fail {
+                return Err(injected("reader register write transport error"));
+            }
+        }
+        Ok(())
     }
 
     fn fault(&self) -> Fault {
@@ -354,6 +382,7 @@ impl FsBackend for FaultyBackend {
         data: &[u8],
     ) -> io::Result<WriteOutcome> {
         self.reachable()?;
+        self.probe.check_register_write(path)?;
         self.inner.write_if_version(path, expected, data)
     }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
@@ -406,6 +435,7 @@ impl FsBackend for FaultyBackend {
     }
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
         self.reachable()?;
+        self.probe.check_register_write(path)?;
         self.inner.write_atomic(path, data)
     }
     fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {

@@ -19,10 +19,13 @@ The peer store depends on one durable fact: whether the machine publishes a node
 | No node record | Same-machine pair root on disk (`local_pair_root()`) | n/a |
 | Node record present | The machine's node | Error. Never falls back to disk. |
 
-`engine_host::peer::attach` is the only place this decision is made. The session build uses it for three things:
+`engine_host::peer::attach` is the only place this decision is made. The session build uses it for:
 - the system-prompt identity section;
 - the tool scope, so that `send` and `agent_list` see one mailbox;
 - the host shell's single receiver.
+- the authenticated filesystem for Nexus model mounts. A `nexus:///mount`
+  provider route sends model writes through the node's existing
+  hooks. Local workspace files and history keep their local filesystem.
 
 A co-hosted agent never calls it, because its daemon injects the mailbox it lives in.
 

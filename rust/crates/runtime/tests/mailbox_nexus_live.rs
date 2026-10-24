@@ -2409,15 +2409,16 @@ fn live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset
         failed.requested >= delivered[0] && failed.returned <= delivered[1],
         "the failed renewal must be the commit's confirm(), between the two deliveries"
     );
-    let (released, reached_node) = probe
+    let release = probe
         .reader_releases()
         .into_iter()
-        .find(|(at, _)| *at >= failed.returned)
+        .find(|release| release.requested >= failed.returned)
         .expect("the tail released the reader after the refused commit");
     assert!(
-        reached_node,
+        release.reached_node,
         "not partitioned, so the release reached the node"
     );
+    let released = release.returned;
     let reacquired = probe
         .reader_acquisitions()
         .into_iter()
@@ -2462,6 +2463,7 @@ fn live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset
         released.saturating_duration_since(failed.returned),
         reacquired.saturating_duration_since(failed.returned),
         delivered[1].saturating_duration_since(delivered[0]),
+        reached_node = release.reached_node,
     );
 
     abort.abort();
@@ -2615,9 +2617,10 @@ fn live_receiver_seat_trusts_only_fresh_renewals() {
         "after a prompt renewal the next one must follow a normal interval later, \
          timed from the request: it came {interval:?} later"
     );
-    let (a_released, a_reached_node) = a.releases()[a_released_before];
+    let release = a.releases()[a_released_before];
+    let a_released = release.requested;
     assert!(
-        a_reached_node,
+        release.reached_node,
         "A was not partitioned, so its release reached the node"
     );
     assert!(
@@ -2698,14 +2701,15 @@ fn live_receiver_seat_trusts_only_fresh_renewals() {
         last_try <= BOUND + Duration::from_secs(1),
         "{holder_label} kept renewing {last_try:?} after its last real renewal, past its bound"
     );
-    let (gave_up, reached_node) = *holder
+    let release = *holder
         .releases()
         .last()
         .expect("the holder gave the seat up");
     assert!(
-        !reached_node,
+        !release.reached_node,
         "partitioned, so the release never reached the node"
     );
+    let gave_up = release.returned;
     assert!(
         gave_up < took,
         "the cut-off holder must stop receiving before the node hands the seat on"
@@ -2803,6 +2807,9 @@ fn live_receiver_seat_trusts_only_fresh_renewals() {
     //       taken after the reply landed.
     let last_proof = next_real_renewal(owner, owner_label);
     let seat_releases_before = owner.releases().len();
+    // The node may grant the seat before its old client observes release
+    // completion. Force that ordering without delaying the real release.
+    let release_gate = owner.hold_next_seat_release();
     owner.set(Fault::SeatRenewReturnsLate(Duration::from_secs(19)));
     let stale_from = last_proof.requested + BOUND;
     thread::sleep((stale_from + Duration::from_secs(3)).saturating_duration_since(Instant::now()));
@@ -2827,9 +2834,13 @@ fn live_receiver_seat_trusts_only_fresh_renewals() {
                 && r.returned.saturating_duration_since(r.requested) >= Duration::from_secs(19)
         })
         .unwrap();
-    wait("m5 to be delivered", Duration::from_secs(30), &|| {
-        delivered("seat-a", stale_body) || delivered("seat-b", stale_body)
-    });
+    let delivery_deadline = Instant::now() + Duration::from_secs(30);
+    release_gate.wait_until_released(delivery_deadline.saturating_duration_since(Instant::now()));
+    wait(
+        "m5 to be delivered before old release completion is observed",
+        delivery_deadline.saturating_duration_since(Instant::now()),
+        &|| delivered("seat-a", stale_body) || delivered("seat-b", stale_body),
+    );
     let (m5_receiver, m5_at) = seen
         .lock()
         .unwrap()
@@ -2842,15 +2853,22 @@ fn live_receiver_seat_trusts_only_fresh_renewals() {
         "m5 was delivered by {m5_receiver} {:?} before the late reply landed, on a proof past the bound",
         very_late.returned.saturating_duration_since(m5_at)
     );
-    let (owner_released, owner_reached) = owner
+    drop(release_gate);
+    wait(
+        "the old release completion to be observed",
+        delivery_deadline.saturating_duration_since(Instant::now()),
+        &|| owner.releases().len() > seat_releases_before,
+    );
+    let release = owner
         .releases()
         .get(seat_releases_before)
         .copied()
         .expect("the holder must give up a seat whose last proof passed the bound");
     assert!(
-        owner_reached,
+        release.reached_node,
         "not partitioned, so the release reached the node"
     );
+    let owner_released = release.requested;
     assert!(
         owner_released >= very_late.returned,
         "the old seat is released once its renewal returns"
@@ -2862,6 +2880,10 @@ fn live_receiver_seat_trusts_only_fresh_renewals() {
         .filter(|at| *at >= owner_released)
         .min()
         .expect("a grant after the old seat was released");
+    assert!(
+        regrant < release.returned && m5_at < release.returned,
+        "the test must exercise regrant and delivery before release completion is observed"
+    );
     let deliverer = if m5_receiver == "seat-a" { &a } else { &b };
     assert!(
         deliverer

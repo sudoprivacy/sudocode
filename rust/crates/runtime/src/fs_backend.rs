@@ -2199,6 +2199,27 @@ impl NexusVfsFsBackend {
         self.client.inspect_target(path, access, &self.auth_token)
     }
 
+    /// The entry type at `path`, for choosing how to read or append it.
+    ///
+    /// The node's target query answers it. A node older than that query
+    /// answers `Unimplemented`, which arrives here as `Unsupported`; the
+    /// entry's own stat gives the type then, as it did before the query
+    /// existed, without following a link. Classification only: authorization
+    /// keeps the target query and fails closed without it.
+    fn entry_type(&self, path: &str, access: ResourceAccessKind) -> io::Result<Option<i32>> {
+        match self.inspect_target(path, access) {
+            Ok(target) => Ok(target.entry_type),
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                match self.client.stat(path, &self.auth_token) {
+                    Ok(stat) => Ok(Some(stat.entry_type)),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn remote_stat(&self, path: &str) -> io::Result<nexus_vfs_client::VfsStat> {
         self.client.stat(path, &self.auth_token)
     }
@@ -2253,11 +2274,7 @@ impl FsBackend for NexusVfsFsBackend {
         self.authorize_target(path, ResourceAccessKind::Write)?;
         // Stream identity comes from the server's entry type and uses its
         // atomic frame append. Ordinary files retain their byte append path.
-        if self
-            .inspect_target(path, ResourceAccessKind::Write)?
-            .entry_type
-            == Some(i32::from(DT_STREAM))
-        {
+        if self.entry_type(path, ResourceAccessKind::Write)? == Some(i32::from(DT_STREAM)) {
             self.client
                 .stream_write(path, data.to_vec(), &self.auth_token)
                 .map(|_offset| ())
@@ -2281,8 +2298,8 @@ impl FsBackend for NexusVfsFsBackend {
 
     fn is_append_stream(&self, path: &str) -> io::Result<bool> {
         self.authorize_target(path, ResourceAccessKind::Read)?;
-        self.inspect_target(path, ResourceAccessKind::Read)
-            .map(|target| target.entry_type == Some(i32::from(DT_STREAM)))
+        self.entry_type(path, ResourceAccessKind::Read)
+            .map(|entry_type| entry_type == Some(i32::from(DT_STREAM)))
     }
 
     fn delete(&self, path: &str) -> io::Result<()> {

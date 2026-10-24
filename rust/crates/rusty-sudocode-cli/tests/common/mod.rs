@@ -708,6 +708,26 @@ impl TestEnv {
         }
     }
 
+    /// Launch an installed executable with the fixture's normal environment
+    /// and workspace, preserving exactly the arguments supplied by the caller.
+    pub fn spawn_executable_with_env(
+        &self,
+        executable: &std::path::Path,
+        args: &[&str],
+        env_vars: &[(&str, &str)],
+    ) -> PtySession {
+        let (Backend::Mock { workspace, .. } | Backend::Live { workspace }) = &self.backend;
+        spawn_executable_with_workspace(
+            executable,
+            workspace,
+            None,
+            &[],
+            args,
+            DEFAULT_TIMEOUT,
+            env_vars,
+        )
+    }
+
     /// The workspace root (temp dir).  Useful for writing fixture
     /// files that tool calls will read.
     #[must_use]
@@ -885,7 +905,26 @@ fn spawn_with_workspace(
     timeout: Duration,
     env_vars: &[(&str, &str)],
 ) -> PtySession {
-    let bin = scode_bin();
+    spawn_executable_with_workspace(
+        &scode_bin(),
+        workspace,
+        config_home_override,
+        base_args,
+        extra_args,
+        timeout,
+        env_vars,
+    )
+}
+
+fn spawn_executable_with_workspace(
+    bin: &std::path::Path,
+    workspace: &HarnessWorkspace,
+    config_home_override: Option<&std::path::Path>,
+    base_args: &[&str],
+    extra_args: &[&str],
+    timeout: Duration,
+    env_vars: &[(&str, &str)],
+) -> PtySession {
     let bin_str = bin.to_string_lossy().to_string();
     #[cfg(not(windows))]
     let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());

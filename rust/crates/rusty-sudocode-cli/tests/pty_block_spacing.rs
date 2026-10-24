@@ -393,8 +393,9 @@ fn repeated_file_read_has_one_frame_per_saved_command() {
     let config = env.workspace_root().join(".nexus/sudocode");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("settings.json"), r#"{"thinking":false}"#).unwrap();
+    let release = env.workspace_root().join("spacing-batch.release");
     let batch = serde_json::json!([
-        {"id":"spacing_one", "name":"bash", "input":{"command":"cat spacing-one.txt"}, "stream_text_chunks":["Spacing intro.\n\n"]},
+        {"id":"spacing_one", "name":"bash", "input":{"command":"cat spacing-one.txt"}, "stream_prelude":"Spacing intro.\n\n", "stream_wait_for":release},
         {"id":"spacing_two", "name":"bash", "input":{"command":"cat spacing-two.txt"}},
         {"id":"spacing_one_again", "name":"bash", "input":{"command":"cat spacing-one.txt"}},
     ]);
@@ -412,6 +413,13 @@ fn repeated_file_read_has_one_frame_per_saved_command() {
     );
     let marker = common::turn_status_marker(&sess);
     sess.send("\r").unwrap();
+    common::expect_screen(
+        &sess,
+        |screen| screen.contains("ONE_END"),
+        common::DEFAULT_TIMEOUT,
+        "the first real command completes while the stream holds the next tool",
+    );
+    std::fs::write(&release, "continue the batch").unwrap();
     common::expect_turn_complete_after(
         &sess,
         &marker,

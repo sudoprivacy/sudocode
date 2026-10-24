@@ -578,15 +578,32 @@ async fn handle_connection(
         if calls.iter().any(|call| call.stream_wait_for.is_some()) {
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
             let body = build_stream_body(&request, scenario);
-            let mut call_index = 0;
+            let mut tool_starts = 0;
+            let mut current_tool = None;
             let mut text_waited = false;
             for chunk in body.split_inclusive("\n\n") {
                 socket.write_all(chunk.as_bytes()).await?;
-                let is_postlude_delta = chunk
+                let event = chunk
                     .lines()
                     .find_map(|line| line.strip_prefix("data: "))
-                    .and_then(|data| serde_json::from_str::<Value>(data).ok())
-                    .is_some_and(|event| {
+                    .and_then(|data| serde_json::from_str::<Value>(data).ok());
+                // Text blocks own no tool gate. Match the actual emitted tool
+                // identity instead of counting every content_block_stop.
+                if let Some(event) = event
+                    .as_ref()
+                    .filter(|event| event["type"] == "content_block_start")
+                {
+                    current_tool = (event["content_block"]["type"] == "tool_use")
+                        .then(|| {
+                            calls.iter().position(|call| {
+                                event["content_block"]["id"].as_str() == Some(call.id.as_str())
+                            })
+                        })
+                        .flatten();
+                    tool_starts += usize::from(current_tool.is_some());
+                }
+                let is_postlude_delta = tool_starts == calls.len()
+                    && event.as_ref().is_some_and(|event| {
                         event["type"] == "content_block_delta"
                             && event["delta"]["type"] == "text_delta"
                     });
@@ -596,9 +613,9 @@ async fn handle_connection(
                         .iter()
                         .find(|call| !call.stream_text_chunks.is_empty())
                 } else if chunk.starts_with("event: content_block_stop\n") {
-                    let call = calls.get(call_index);
-                    call_index += 1;
-                    call.filter(|call| call.stream_text_chunks.is_empty())
+                    current_tool
+                        .and_then(|index| calls.get(index))
+                        .filter(|call| call.stream_text_chunks.is_empty())
                 } else {
                     None
                 };
@@ -803,6 +820,7 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
 }
 
 struct ConcurrencyCall {
+    stream_prelude: Option<String>,
     stream_wait_for: Option<String>,
     stream_fail_after: bool,
     stream_text_chunks: Vec<String>,
@@ -832,6 +850,7 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
         .expect("tool_concurrency requires TOOL_BATCH JSON")
         .into_iter()
         .map(|call| ConcurrencyCall {
+            stream_prelude: call["stream_prelude"].as_str().map(str::to_string),
             stream_wait_for: call["stream_wait_for"].as_str().map(str::to_string),
             stream_fail_after: call["stream_fail_after"].as_bool().unwrap_or(false),
             // File-backed chunks keep response markers out of the echoed prompt.
@@ -1679,12 +1698,21 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                         partial_json_chunks: chunks,
                     })
                     .collect();
+                let prelude: String = calls
+                    .iter()
+                    .filter_map(|call| call.stream_prelude.as_deref())
+                    .collect();
                 let text_chunks: Vec<_> = calls
                     .iter()
                     .flat_map(|call| &call.stream_text_chunks)
                     .map(String::as_str)
                     .collect();
-                tool_uses_sse_with_text(&uses, 12, None, &text_chunks)
+                tool_uses_sse_with_text(
+                    &uses,
+                    12,
+                    (!prelude.is_empty()).then_some(prelude.as_str()),
+                    &text_chunks,
+                )
             }
             true => final_text_sse("Concurrency batch done."),
         },

@@ -41,6 +41,7 @@ const GENERIC_FATAL_WRAPPER_MARKERS: &[&str] = &[
 
 const CONTEXT_WINDOW_ERROR_MARKERS: &[&str] = &[
     "maximum context length",
+    "maximum prompt length",
     "context window",
     "context length",
     "too many tokens",

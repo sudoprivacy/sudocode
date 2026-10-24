@@ -222,6 +222,18 @@ fn serve(
         ("200 OK", json!({"input_tokens": 1000}))
     } else if !is_post {
         ("200 OK", json!({"data": []}))
+    } else if mode == "openai-prompt-limit" && !compaction {
+        if number == 1 {
+            (
+                "400 Bad Request",
+                json!({"code":"invalid-argument","error":"This model's maximum prompt length is 200000 but the request contains 205005 tokens."}),
+            )
+        } else {
+            (
+                "200 OK",
+                json!({"id":"recovered-turn","object":"chat.completion","created":0,"model":"grok-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"GROK_PROMPT_RECOVERED"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":10,"total_tokens":1010}}),
+            )
+        }
     } else if mode == "budget-transport-exhausted"
         || (mode == "budget-transport-fallback" && number <= 2)
     {
@@ -2830,6 +2842,86 @@ fn internal_model_alias_and_resumed_model_use_active_wire_identity() {
         assert_eq!(requests[0]["max_tokens"], 1024);
         assert!(Session::load_from_path(&path).unwrap().compaction.is_some());
     }
+}
+
+#[test]
+fn provider_prompt_length_rejection_compacts_before_resending_the_pending_turn() {
+    let provider = Provider::new("openai-prompt-limit");
+    let workspace = HarnessWorkspace::new("grok-prompt-limit");
+    workspace.write_mock_config(&provider.url);
+    let config_path = workspace.config_home.join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    let model = &mut config["models"]["claude-sonnet"];
+    model["contextWindow"] = json!(1_000_000);
+    model["maxOutputTokens"] = json!(1024);
+    model["providers"]["api-key"]["model"] = json!("grok-4.6");
+    model["providers"]["api-key"]["api"] = json!("openai-completions");
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let path = fixture(&workspace);
+    let original = Session::load_from_path(&path).unwrap();
+    let mut cli = spawn_scode_in_dir_with_env(
+        &workspace.root,
+        &[
+            "--auth",
+            "api-key",
+            "--model",
+            "claude-sonnet",
+            "--resume",
+            path.to_str().unwrap(),
+        ],
+        Duration::from_secs(30),
+        &[
+            ("SUDO_CODE_CONFIG_HOME", &workspace.config_home),
+            ("HOME", &workspace.home),
+        ],
+    )
+    .unwrap();
+    common::expect_input_line_cleared(&cli, Duration::from_secs(30), "resume ready");
+    cli.send("Continue PROJECT_ALPHA. Pending instruction: GROK_PENDING_ONCE.")
+        .unwrap();
+    common::expect_input_line(
+        &cli,
+        "GROK_PENDING_ONCE",
+        Duration::from_secs(30),
+        "pending prompt entered",
+    );
+    let marker = common::turn_status_marker(&cli);
+    cli.send("\r").unwrap();
+    cli.expect("GROK_PROMPT_RECOVERED").unwrap_or_else(|error| {
+        panic!(
+            "pending turn did not complete after compaction: {error}\n{}\nrequest count: {}",
+            cli.render(|screen| screen.contents()),
+            provider.requests.lock().unwrap().len()
+        );
+    });
+    common::expect_turn_complete_after(
+        &cli,
+        &marker,
+        Duration::from_secs(30),
+        "provider-rejected turn completed after compaction",
+    );
+    cli.send("/exit\r").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3, "one refusal, one checkpoint, one task");
+    assert!(!is_compaction_request(&requests[0]));
+    assert!(is_compaction_request(&requests[1]));
+    assert!(!is_compaction_request(&requests[2]));
+    for index in [0, 2] {
+        let messages = requests[index]["messages"].to_string();
+        assert_eq!(messages.matches("GROK_PENDING_ONCE").count(), 1);
+        assert!(messages.contains("PROJECT_ALPHA"));
+        assert_eq!(requests[index]["model"], "grok-4.6");
+    }
+    assert!(
+        requests[2]["messages"].to_string().len() < requests[0]["messages"].to_string().len(),
+        "the retry must contain the compacted history"
+    );
+    let restored = Session::load_from_path(&path).unwrap();
+    assert!(restored.compaction.is_some());
+    assert!(restored.messages().len() < original.messages().len());
+    assert!(!workspace.root.join("SHOULD_NOT_EXIST").exists());
 }
 
 #[test]

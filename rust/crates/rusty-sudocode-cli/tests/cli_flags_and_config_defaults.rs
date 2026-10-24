@@ -2,9 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use runtime::Session;
+use runtime::{Session, SessionStore};
 use serde_json;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -70,6 +70,103 @@ fn resume_flag_loads_a_saved_session_and_dispatches_status() {
     assert!(stdout.contains(session_path.to_str().expect("utf8 path")));
 
     fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+}
+
+#[test]
+fn resume_latest_refuses_to_skip_a_newer_unreadable_session() {
+    // given: the session the user last worked in was written in a format this
+    // build cannot read, and an older readable session sits beside it
+    let temp_dir = unique_temp_dir("resume-latest-unreadable");
+    fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+    let store = SessionStore::from_cwd(&temp_dir).expect("session store");
+    let older = store.create_handle("older-readable");
+    fs::create_dir_all(older.path.parent().expect("session dir")).expect("session dir");
+    let mut session = Session::new().with_workspace_root(store.workspace_root().to_path_buf());
+    session
+        .push_user_text("older work")
+        .expect("session write should succeed");
+    session
+        .save_to_path(&older.path)
+        .expect("session should persist");
+    let older_id = session.session_id.clone();
+    let newer = store.create_handle("newer-unreadable");
+    fs::create_dir_all(newer.path.parent().expect("session dir")).expect("session dir");
+    fs::write(&newer.path, "{\"type\":\"record_from_a_newer_scode\"}\n")
+        .expect("unreadable session should persist");
+    let base = SystemTime::now() - Duration::from_secs(3600);
+    set_modified(&older.path, base);
+    set_modified(&newer.path, base + Duration::from_secs(60));
+    let older_bytes = fs::read(&older.path).expect("older session bytes");
+
+    // when
+    let refused = resume_latest_json(&temp_dir);
+
+    // then: it names the unreadable session instead of resuming the older one
+    assert!(
+        !refused.status.success(),
+        "stdout:\n{}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    assert!(refused.stdout.is_empty(), "nothing may be restored");
+    let error: serde_json::Value =
+        serde_json::from_slice(&refused.stderr).expect("stderr should be one JSON error");
+    let reason = error["error"].as_str().expect("error reason");
+    assert!(reason.contains("newer-unreadable"), "{error}");
+    assert!(reason.contains("record_from_a_newer_scode"), "{error}");
+    assert!(
+        error["hint"]
+            .as_str()
+            .expect("hint")
+            .contains("newer scode"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::read(&older.path).expect("older session bytes"),
+        older_bytes
+    );
+
+    // an explicit reference still resumes the readable session
+    let explicit = Command::new(env!("CARGO_BIN_EXE_scode"))
+        .current_dir(&temp_dir)
+        .args(["--output-format", "json", "--resume", "older-readable"])
+        .output()
+        .expect("scode should launch");
+    assert_success(&explicit);
+    assert_eq!(restored_session_id(&explicit), older_id);
+
+    // and once the readable session is the newer one, `latest` resumes it
+    set_modified(&older.path, base + Duration::from_secs(120));
+    let resumed = resume_latest_json(&temp_dir);
+    assert_success(&resumed);
+    assert_eq!(restored_session_id(&resumed), older_id);
+
+    fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+}
+
+fn resume_latest_json(cwd: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_scode"))
+        .current_dir(cwd)
+        .args(["--output-format", "json", "--resume"])
+        .output()
+        .expect("scode should launch")
+}
+
+fn restored_session_id(output: &Output) -> String {
+    let restored: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be one JSON object");
+    assert_eq!(restored["kind"], "restored", "{restored}");
+    restored["session_id"]
+        .as_str()
+        .expect("session id")
+        .to_string()
+}
+
+fn set_modified(path: &Path, time: SystemTime) {
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(time))
+        .expect("set session mtime");
 }
 
 #[test]

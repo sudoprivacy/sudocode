@@ -106,7 +106,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
 
     // The redelivered message is live, not a stale notice: Enter runs it and the
     // position finally advances.
-    let marker = common::turn_status_marker(&second);
+    let turn_marker = common::turn_status_marker(&second);
     second
         .send("\r")
         .expect("press Enter on the second instance");
@@ -122,17 +122,25 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // Cursor progress and command output can both precede the next input row.
-    // Use the same completed-turn and prompt barriers as the sync receive
-    // journey, rather than retrying commands against a winding-down turn.
-    common::expect_turn_complete_after(&second, &marker, BUDGET, "redelivered turn completed");
-    common::expect_input_line_cleared(&second, BUDGET, "status at ready prompt");
-    second.send("/status\r").expect("send /status");
-    expect_on_screen(
-        &mut second,
-        "receiving; waiting messages run at the next prompt",
+    // A durable read position can advance before the input row is rearmed.
+    // Reuse the shared turn/ready gate before asking for a fresh receiver report.
+    let ready_deadline = Instant::now() + BUDGET;
+    common::expect_turn_complete_after(&second, &turn_marker, BUDGET, "redelivered peer turn");
+    common::expect_input_line_cleared(
+        &second,
+        ready_deadline.saturating_duration_since(Instant::now()),
+        "status at the rearmed prompt",
     );
-    common::expect_input_line_cleared(&second, BUDGET, "status completed");
+    second.send("/status\r").expect("query the new receiver");
+    common::expect_screen_settled(
+        &second,
+        |screen| {
+            screen.contains("receiving; waiting messages run at the next prompt")
+                && common::input_line_of(screen).is_empty()
+        },
+        ready_deadline.saturating_duration_since(Instant::now()),
+        "the new receiver reports ownership and restores its input row",
+    );
 
     second.send("/exit\r").expect("exit the REPL");
     assert_eq!(

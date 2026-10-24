@@ -356,6 +356,9 @@ async fn drive(
         };
         let tasks = delegate.background_tasks().unwrap_or_default();
         match cmd {
+            EngineCommand::RuntimeStatus { request_id } => {
+                handle_runtime_status(request_id, &tasks, &evt_tx);
+            }
             EngineCommand::Completion { id, action } => handle_completion(id, action, &evt_tx),
             EngineCommand::CancelSubagent {
                 request_id,
@@ -469,6 +472,16 @@ fn handle_completion(id: Option<u64>, action: engine_events::CompletionAction, s
     if let Some(id) = id {
         let _ = sink.send(EngineEvent::CommandResult { id, result });
     }
+}
+
+fn handle_runtime_status(
+    id: u64,
+    tasks: &runtime::background_tasks::BackgroundTasks,
+    sink: &EventSink,
+) {
+    let result =
+        serde_json::to_value(sink.runtime_status(tasks)).map_err(|error| error.to_string());
+    let _ = sink.send(EngineEvent::CommandResult { id, result });
 }
 
 fn handle_subagent_cancel(id: u64, agent_id: &str, sink: &EventSink) {
@@ -596,6 +609,7 @@ async fn run_one_turn(
                     }
                 }
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
+                Some(EngineCommand::RuntimeStatus { request_id }) => handle_runtime_status(request_id, tasks, evt_tx),
                 Some(EngineCommand::Completion { id, action }) => handle_completion(id, action, evt_tx),
                 Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
                 // Both paths abort and reap; only explicit Close persists.
@@ -717,6 +731,7 @@ async fn run_direct_tool(
                 }
                 Some(EngineCommand::DirectTool { request_id, .. }) => refuse_busy(request_id, evt_tx),
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
+                Some(EngineCommand::RuntimeStatus { request_id }) => handle_runtime_status(request_id, tasks, evt_tx),
                 Some(EngineCommand::Completion { id, action }) => handle_completion(id, action, evt_tx),
                 Some(EngineCommand::CancelSubagent { request_id, agent_id }) => handle_subagent_cancel(request_id, &agent_id, evt_tx),
                 command @ (Some(EngineCommand::Close) | None) => {

@@ -4141,7 +4141,14 @@ async fn acp_subagent_events_background_parallel() {
         "two active child streams before release",
     )
     .await;
-    let seen: Vec<Value> = during.iter().chain(&before_release).cloned().collect();
+    let mut seen: Vec<Value> = during.iter().chain(&before_release).cloned().collect();
+    let (status_updates, status) = client
+        .send_request("_sudocode/session/status", json!({"sessionId":session_id}))
+        .await;
+    assert_eq!(status["result"]["foreground"]["state"], "idle", "{status}");
+    assert_eq!(status["result"]["background"]["agents"], 2, "{status}");
+    assert_eq!(status["result"]["background"]["terminals"], 0, "{status}");
+    seen.extend(status_updates);
     fs::write(release, "both child streams observed").expect("release real children");
     let after = collect_until_finished(&mut client, &seen, 2).await;
     for n in &after {
@@ -7514,6 +7521,15 @@ async fn acp_task_completions_terminal_replay_and_purge() {
     assert!(during
         .iter()
         .all(|v| v["method"] != "_sudocode/task/completed"));
+    let (_, running) = client
+        .send_request("_sudocode/session/status", json!({"sessionId":sid}))
+        .await;
+    assert_eq!(
+        running["result"]["foreground"]["state"], "idle",
+        "{running}"
+    );
+    assert_eq!(running["result"]["background"]["terminals"], 1, "{running}");
+    assert_eq!(running["result"]["background"]["agents"], 0, "{running}");
     fs::write(workspace.root.join("release-task"), "go").unwrap();
     let (_, first) = client
         .recv_until(SUBAGENT_EVENTS_WAIT, |v| {
@@ -7527,6 +7543,13 @@ async fn acp_task_completions_terminal_replay_and_purge() {
     assert_eq!(first["params"]["status"], "failed");
     assert_eq!(first["params"]["originTraceId"], "root:1");
     assert_eq!(first["params"]["parentToolCallId"], "background-1");
+    let (_, completed) = client
+        .send_request("_sudocode/session/status", json!({"sessionId":sid}))
+        .await;
+    assert_eq!(
+        completed["result"]["background"]["terminals"], 0,
+        "{completed}"
+    );
     assert!(first["params"]["message"]
         .as_str()
         .unwrap()

@@ -226,6 +226,7 @@ impl CompletionState {
 pub(crate) struct EventSink {
     tx: Weak<std::sync::mpsc::Sender<EngineEvent>>,
     order: Arc<Mutex<()>>,
+    state: Arc<Mutex<engine_events::EngineState>>,
     pub(crate) completions: Arc<CompletionState>,
 }
 
@@ -238,6 +239,7 @@ impl EventSink {
             tx: Arc::downgrade(tx),
             completions,
             order: Arc::default(),
+            state: Arc::new(Mutex::new(engine_events::EngineState::Idle)),
         }
     }
 
@@ -248,12 +250,37 @@ impl EventSink {
         let tx = self.route()?;
         tx.send(EngineEvent::PromptRejected { message })
             .map_err(|_| std::sync::mpsc::SendError(()))?;
-        tx.send(EngineEvent::State(engine_events::EngineState::Idle))
-            .map_err(|_| std::sync::mpsc::SendError(()))
+        self.send(EngineEvent::State(engine_events::EngineState::Idle))
+    }
+
+    pub(crate) fn runtime_status(
+        &self,
+        tasks: &runtime::background_tasks::BackgroundTasks,
+    ) -> engine_events::RuntimeStatus {
+        let foreground = *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        engine_events::RuntimeStatus {
+            foreground,
+            background: tasks.summary(),
+        }
     }
 
     pub(crate) fn send(&self, event: EngineEvent) -> Result<(), std::sync::mpsc::SendError<()>> {
         let tx = self.route()?;
+        if let EngineEvent::State(state) = event {
+            // Keep query observations in the same order as lifecycle events.
+            // Provider output and elapsed time never mutate this projection.
+            let mut current = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *current = state;
+            return tx
+                .send(EngineEvent::State(state))
+                .map_err(|_| std::sync::mpsc::SendError(()));
+        }
         if matches!(
             event,
             EngineEvent::TurnStarted { .. }

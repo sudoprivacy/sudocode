@@ -265,6 +265,41 @@ hook withholds a reply while the node already holds the message. Their model
 endpoint refuses every inference request and must record zero calls. This is
 not a cross-host idle callback or production deployment acceptance.
 
+### Runtime status (extension v1)
+
+`initialize.result._meta.sudocode.runtimeStatus.version = 1`
+advertises `_sudocode/session/status`. Send `{ "sessionId": "..." }` for a
+session on this ACP connection. The response contains:
+
+```json
+{
+  "foreground": { "state": "awaiting_input", "waiting_for": "question" },
+  "background": {
+    "terminals": 0,
+    "agents": 0,
+    "execution_unconfirmed": 0,
+    "tool_operations": 1
+  }
+}
+```
+
+Foreground states are `idle`, `running`, and `awaiting_input`. `waiting_for` is
+present only for `awaiting_input`, with `permission` or `question`. The snapshot
+comes from the engine's lifecycle events. It remains queryable during a model
+request, direct tool call, or unanswered input request and starts no model turn.
+Background counts come from the session task registry without copying outputs
+or changing task subscriptions. Terminal and Agent counts include only
+background-marked running/stopping tasks. `execution_unconfirmed` counts those
+background records separately; `tool_operations` counts actual worker leases,
+including workers whose caller has already been cancelled.
+
+This describes the selected engine, not a global online/offline decision.
+Several engines may share a SID. The runtime host must retain its instance
+identity and authorization when routing this request. A missing session is an
+error. Disconnects or unsupported hosts do not establish that an Agent is
+offline. Counts and foreground state are observations of independently moving
+work, not a grant of human control; use the pause/fence protocol for takeover.
+
 ### Closing a peer session
 
 When the last session for an agent closes, the server stops and joins that

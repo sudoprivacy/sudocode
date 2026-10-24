@@ -14,28 +14,25 @@ pub(crate) use commands::reports::{
     run_git_capture_in, GitWorkspaceSummary,
 };
 
-pub(crate) fn git_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+/// Run git in `cwd` and return its stdout. A non-zero exit is an error that
+/// carries git's own stderr.
+pub(crate) fn run_git_checked_in(
+    cwd: &Path,
+    args: &[&str],
+) -> Result<String, Box<dyn std::error::Error>> {
     let output = std::process::Command::new("git")
         .args(args)
-        .current_dir(runtime::current_workspace_root()?)
+        .current_dir(cwd)
         .output()?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("git {} failed: {stderr}", args.join(" ")).into());
+        let stderr = process_text::decode_process_output(&output.stderr).text;
+        return Err(format!("git {} failed: {}", args.join(" "), stderr.trim()).into());
     }
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(process_text::decode_process_output(&output.stdout).text)
 }
 
-pub(crate) fn git_status_ok(args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(runtime::current_workspace_root()?)
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("git {} failed: {stderr}", args.join(" ")).into());
-    }
-    Ok(())
+pub(crate) fn git_output(args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    run_git_checked_in(&runtime::current_workspace_root()?, args)
 }
 
 /// Detect if the current working directory is "broad" (home directory or

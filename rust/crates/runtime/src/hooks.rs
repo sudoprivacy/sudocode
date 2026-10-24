@@ -547,8 +547,14 @@ impl HookRunner {
 
         match child.output_with_stdin(payload.as_bytes(), abort_signal) {
             Ok(CommandExecution::Finished(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = process_text::decode_process_output(&output.stdout)
+                    .text
+                    .trim()
+                    .to_string();
+                let stderr = process_text::decode_process_output(&output.stderr)
+                    .text
+                    .trim()
+                    .to_string();
                 let parsed = parse_hook_output(event, tool_name, command, &stdout, &stderr);
                 let primary_message = parsed.primary_message().map(ToOwned::to_owned);
                 match output.status.code() {

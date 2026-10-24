@@ -61,7 +61,7 @@ fn interrupted_tool_output(tool_name: &str) -> String {
     if tool_name.eq_ignore_ascii_case("bash") {
         crate::bash::interrupted_bash_output(
             "Command interrupted by user",
-            "interrupted",
+            crate::bash::ShellStatus::Interrupted,
             None,
             None,
         )

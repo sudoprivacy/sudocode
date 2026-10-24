@@ -104,7 +104,10 @@ fn find_git_root(cwd: &Path) -> Option<PathBuf> {
     if !output.status.success() {
         return None;
     }
-    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let root = process_text::decode_process_output(&output.stdout)
+        .text
+        .trim()
+        .to_string();
     if root.is_empty() {
         return None;
     }

@@ -11,6 +11,7 @@ publish.workspace = true
 # `engine-acp` depend on it to build a session; neither the wire types nor the
 # renderer live here. Dependencies are added as the engine code moves in.
 [dependencies]
+process-text = { path = "../process-text" }
 # `SudoCodeConfig` (the config SSOT, re-exported by engine-core) for model/alias
 # resolution.
 engine-core = { path = "../engine-core" }

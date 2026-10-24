@@ -48,7 +48,11 @@ pub fn render_input_line(command: &str) -> String {
 /// connector, the rest are indented to align; stderr lines are tinted with the
 /// error colour; an empty result says so instead of printing nothing.
 #[must_use]
-pub fn render_output_block(stdout: &str, stderr: &str, exit_status: Option<&str>) -> String {
+pub fn render_output_block(
+    stdout: &str,
+    stderr: &str,
+    exit_status: Option<&runtime::ShellStatus>,
+) -> String {
     use crate::render::{ansi_fg, theme, DIM, RESET};
     let t = theme();
     let err = ansi_fg(t.error);
@@ -66,7 +70,7 @@ pub fn render_output_block(stdout: &str, stderr: &str, exit_status: Option<&str>
         ));
     }
     if let Some(status) = exit_status {
-        lines.push(format!("{err}{status}{RESET}"));
+        lines.push(format!("{err}{}{RESET}", status.label()));
     }
     if lines.is_empty() {
         lines.push(format!("{DIM}(no output){RESET}"));

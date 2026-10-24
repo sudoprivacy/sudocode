@@ -5606,7 +5606,7 @@ impl LiveCli {
                 self.out_println(bash_mode::render_output_block(
                     &output.stdout,
                     &output.stderr,
-                    output.return_code_interpretation.as_deref(),
+                    output.return_code_interpretation.as_ref(),
                 ));
                 bash_mode::history_blocks(command, &output.stdout, &output.stderr)
             }

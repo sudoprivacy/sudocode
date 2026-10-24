@@ -71,7 +71,7 @@ pub(crate) async fn run_headers_helper(
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = process_text::decode_process_output(&output.stdout).text;
     let headers: BTreeMap<String, String> =
         serde_json::from_str(stdout.trim()).map_err(|error| {
             io::Error::new(

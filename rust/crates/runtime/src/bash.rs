@@ -91,6 +91,87 @@ pub struct BashCommandInput {
     pub allowed_mounts: Option<Vec<String>>,
 }
 
+/// What happened to a shell command that did not simply succeed.
+///
+/// The one vocabulary behind the model-facing `returnCodeInterpretation` and
+/// every place that shows it: producers build a variant, consumers read one,
+/// and only [`ShellStatus::wire`] spells the strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellStatus {
+    /// Ran and exited with this non-zero code.
+    Exit(i32),
+    /// Ended by a signal (Unix), in the OS's own words.
+    Signal(String),
+    /// The script could not be parsed, so nothing in it ran.
+    ParseError,
+    /// Killed after exceeding its timeout.
+    Timeout,
+    /// Cancelled by the user.
+    Interrupted,
+    /// Refused before it ran, for this reason.
+    Blocked(String),
+}
+
+impl ShellStatus {
+    /// The value models, transcripts and task readers see.
+    #[must_use]
+    pub fn wire(&self) -> String {
+        match self {
+            Self::Exit(code) => format!("exit_code:{code}"),
+            Self::Signal(description) => description.clone(),
+            Self::ParseError => "parse_error".to_owned(),
+            Self::Timeout => "timeout".to_owned(),
+            Self::Interrupted => "interrupted".to_owned(),
+            Self::Blocked(reason) => format!("preflight_blocked:{reason}"),
+        }
+    }
+
+    /// Read a value written by [`ShellStatus::wire`].
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        if let Some(code) = value
+            .strip_prefix("exit_code:")
+            .and_then(|code| code.parse().ok())
+        {
+            return Self::Exit(code);
+        }
+        if let Some(reason) = value.strip_prefix("preflight_blocked:") {
+            return Self::Blocked(reason.to_owned());
+        }
+        match value {
+            "parse_error" => Self::ParseError,
+            "timeout" => Self::Timeout,
+            "interrupted" => Self::Interrupted,
+            other => Self::Signal(other.to_owned()),
+        }
+    }
+
+    /// The same, for people.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Exit(code) => format!("exit {code}"),
+            Self::Signal(description) => description.clone(),
+            Self::ParseError => "parse error".to_owned(),
+            Self::Timeout => "timeout".to_owned(),
+            Self::Interrupted => "interrupted".to_owned(),
+            Self::Blocked(reason) => format!("blocked: {}", reason.replace('_', " ")),
+        }
+    }
+}
+
+impl Serialize for ShellStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for ShellStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(|value| Self::from_wire(&value))
+    }
+}
+
 /// Output returned from a bash tool invocation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BashCommandOutput {
@@ -117,13 +198,17 @@ pub struct BashCommandOutput {
     #[serde(rename = "dangerouslyDisableSandbox")]
     pub dangerously_disable_sandbox: Option<bool>,
     #[serde(rename = "returnCodeInterpretation")]
-    pub return_code_interpretation: Option<String>,
+    pub return_code_interpretation: Option<ShellStatus>,
     #[serde(rename = "noOutputExpected")]
     pub no_output_expected: Option<bool>,
     #[serde(rename = "structuredContent")]
     pub structured_content: Option<Vec<serde_json::Value>>,
     #[serde(rename = "sandboxStatus")]
     pub sandbox_status: Option<SandboxStatus>,
+    /// Some output bytes were valid neither as UTF-8 nor in the console's code
+    /// page, and were replaced.
+    #[serde(rename = "lossyOutput", default)]
+    pub lossy_output: bool,
 }
 
 impl BashCommandOutput {
@@ -137,7 +222,7 @@ impl BashCommandOutput {
                 stderr.push('\n');
             }
             stderr.push_str("Command interrupted by user");
-            Some("interrupted".to_owned())
+            Some(ShellStatus::Interrupted)
         } else {
             describe_exit_status(status)
         };
@@ -158,6 +243,7 @@ impl BashCommandOutput {
             no_output_expected,
             structured_content: None,
             sandbox_status: None,
+            lossy_output: false,
         }
     }
 
@@ -179,7 +265,94 @@ impl BashCommandOutput {
             no_output_expected: Some(false),
             structured_content: None,
             sandbox_status: None,
+            lossy_output: false,
         }
+    }
+
+    /// A finished child, from the bytes it wrote: decoded, capped, and flagged
+    /// when some of them could not be decoded.
+    #[must_use]
+    pub fn from_process(status: std::process::ExitStatus, stdout: &[u8], stderr: &[u8]) -> Self {
+        let (stdout, stdout_lossy) = decoded_capped(stdout);
+        let (stderr, stderr_lossy) = decoded_capped(stderr);
+        let mut output = Self::completed(status, stdout, stderr);
+        output.lossy_output = stdout_lossy || stderr_lossy;
+        output
+    }
+
+    /// A command stopped before it finished ([`ShellStatus::Timeout`] or
+    /// [`ShellStatus::Interrupted`]): what it wrote so far, with `message`
+    /// saying why as the last line of stderr.
+    #[must_use]
+    pub fn stopped(status: ShellStatus, stdout: &[u8], stderr: &[u8], message: &str) -> Self {
+        let (stdout, stdout_lossy) = decoded_capped(stdout);
+        let (stderr, stderr_lossy) = decoded_capped(stderr);
+        let mut stderr = stderr.trim_end().to_owned();
+        if !stderr.is_empty() {
+            stderr.push('\n');
+        }
+        stderr.push_str(message);
+        Self {
+            stdout,
+            exit_code: None,
+            stderr,
+            raw_output_path: None,
+            interrupted: true,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: Some(status),
+            no_output_expected: Some(false),
+            structured_content: None,
+            sandbox_status: None,
+            lossy_output: stdout_lossy || stderr_lossy,
+        }
+    }
+
+    /// A command refused before it ran.
+    #[must_use]
+    pub fn blocked(
+        reason: &str,
+        stderr: String,
+        structured_content: Option<Vec<serde_json::Value>>,
+    ) -> Self {
+        Self {
+            stdout: String::new(),
+            exit_code: None,
+            stderr,
+            raw_output_path: None,
+            interrupted: false,
+            is_image: None,
+            background_task_id: None,
+            backgrounded_by_user: None,
+            assistant_auto_backgrounded: None,
+            dangerously_disable_sandbox: None,
+            return_code_interpretation: Some(ShellStatus::Blocked(reason.to_owned())),
+            no_output_expected: Some(false),
+            structured_content,
+            sandbox_status: None,
+            lossy_output: false,
+        }
+    }
+
+    /// PowerShell reports a script it could not parse as an ordinary failure,
+    /// although nothing in it ran. The error names its category in a token no
+    /// locale translates: `CategoryInfo : ParserError` in Windows PowerShell,
+    /// a leading `ParserError:` in PowerShell 7's error view and in the
+    /// parser's own report.
+    #[must_use]
+    pub fn with_powershell_parse_error(mut self) -> Self {
+        let parse_error = matches!(self.return_code_interpretation, Some(ShellStatus::Exit(_)))
+            && self.stderr.lines().any(|line| {
+                line.trim_start().starts_with("ParserError:")
+                    || (line.contains("CategoryInfo") && line.contains(": ParserError"))
+            });
+        if parse_error {
+            self.return_code_interpretation = Some(ShellStatus::ParseError);
+        }
+        self
     }
 
     /// Model-facing projection, applied before transcript persistence and output offload.
@@ -198,8 +371,13 @@ impl BashCommandOutput {
             object.insert("interrupted".into(), true.into());
         }
         // Preserve names consumed by renderers and task/output readers.
+        if let Some(status) = &self.return_code_interpretation {
+            object.insert("returnCodeInterpretation".into(), status.wire().into());
+        }
+        if self.lossy_output {
+            object.insert("lossyOutput".into(), true.into());
+        }
         for (key, text) in [
-            ("returnCodeInterpretation", &self.return_code_interpretation),
             ("backgroundTaskId", &self.background_task_id),
             ("rawOutputPath", &self.raw_output_path),
         ] {
@@ -244,14 +422,24 @@ fn native_control_exit(_status: std::process::ExitStatus) -> bool {
     false
 }
 
-fn describe_exit_status(status: std::process::ExitStatus) -> Option<String> {
+/// A child's output as text, capped at [`MAX_OUTPUT_BYTES_SAFETY`], and whether
+/// decoding it lost anything.
+fn decoded_capped(bytes: &[u8]) -> (String, bool) {
+    let decoded = process_text::decode_process_output(bytes);
+    (
+        truncate_output(&decoded.text, MAX_OUTPUT_BYTES_SAFETY),
+        decoded.lossy,
+    )
+}
+
+fn describe_exit_status(status: std::process::ExitStatus) -> Option<ShellStatus> {
     if status.success() {
         None
     } else if let Some(code) = status.code() {
-        Some(format!("exit_code:{code}"))
+        Some(ShellStatus::Exit(code))
     } else {
         // `code() == None` means signal termination on Unix, not success.
-        Some(status.to_string())
+        Some(ShellStatus::Signal(status.to_string()))
     }
 }
 
@@ -376,7 +564,12 @@ fn get_current_branch(cwd: &std::path::Path) -> Option<String> {
         .output()
         .ok()?;
     if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Some(
+            process_text::decode_process_output(&output.stdout)
+                .text
+                .trim()
+                .to_string(),
+        )
     } else {
         None
     }
@@ -389,7 +582,12 @@ fn get_head_commit(cwd: &std::path::Path) -> Option<String> {
         .output()
         .ok()?;
     if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Some(
+            process_text::decode_process_output(&output.stdout)
+                .text
+                .trim()
+                .to_string(),
+        )
     } else {
         None
     }
@@ -402,7 +600,12 @@ fn get_git_actor(cwd: &std::path::Path) -> Option<String> {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
+        .map(|o| {
+            process_text::decode_process_output(&o.stdout)
+                .text
+                .trim()
+                .to_string()
+        })?;
     Some(name)
 }
 
@@ -473,22 +676,18 @@ async fn execute_bash_async(
             };
             return Ok(interrupted_bash_output(
                 &message,
-                if is_timeout { "timeout" } else { "interrupted" },
+                if is_timeout {
+                    ShellStatus::Timeout
+                } else {
+                    ShellStatus::Interrupted
+                },
                 input.dangerously_disable_sandbox,
                 Some(sandbox_status),
             ));
         }
     };
 
-    let stdout = truncate_output(
-        &String::from_utf8_lossy(&output.stdout),
-        MAX_OUTPUT_BYTES_SAFETY,
-    );
-    let stderr = truncate_output(
-        &String::from_utf8_lossy(&output.stderr),
-        MAX_OUTPUT_BYTES_SAFETY,
-    );
-    let mut result = BashCommandOutput::completed(output.status, stdout, stderr);
+    let mut result = BashCommandOutput::from_process(output.status, &output.stdout, &output.stderr);
     result.dangerously_disable_sandbox = input.dangerously_disable_sandbox;
     result.sandbox_status = Some(sandbox_status);
     Ok(result)
@@ -496,8 +695,8 @@ async fn execute_bash_async(
 
 /// One line read off a child's stdout or stderr by [`pump_lines`].
 enum StreamChunk {
-    Stdout(String),
-    Stderr(String),
+    Stdout(process_text::DecodedText),
+    Stderr(process_text::DecodedText),
 }
 
 /// Read `reader` line by line to EOF, forwarding each line as a [`StreamChunk`].
@@ -506,16 +705,21 @@ enum StreamChunk {
 /// — see the comment at the call site in [`execute_bash_streaming`].
 async fn pump_lines<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
-    wrap: fn(String) -> StreamChunk,
+    wrap: fn(process_text::DecodedText) -> StreamChunk,
     tx: &tokio::sync::mpsc::UnboundedSender<StreamChunk>,
 ) {
-    let mut line = String::new();
+    // Raw bytes, decoded per line: `read_line` stopped at the first line that
+    // was not UTF-8 and dropped everything after it.
+    let mut line = Vec::new();
     loop {
         line.clear();
-        match reader.read_line(&mut line).await {
+        match reader.read_until(b'\n', &mut line).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {
-                if tx.send(wrap(std::mem::take(&mut line))).is_err() {
+                if tx
+                    .send(wrap(process_text::decode_process_output(&line)))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -531,15 +735,20 @@ fn accumulate_chunk(
     progress_chunk: &mut String,
     total_lines: &mut usize,
     total_bytes: &mut usize,
+    lossy: &mut bool,
 ) {
     match chunk {
-        StreamChunk::Stdout(text) => {
+        StreamChunk::Stdout(decoded) => {
+            *lossy |= decoded.lossy;
+            let text = decoded.text;
             *total_bytes += text.len();
             *total_lines += 1;
             stdout_buf.push_str(&text);
             progress_chunk.push_str(&text);
         }
-        StreamChunk::Stderr(text) => {
+        StreamChunk::Stderr(decoded) => {
+            *lossy |= decoded.lossy;
+            let text = decoded.text;
             *total_bytes += text.len();
             stderr_buf.push_str(&text);
         }
@@ -579,6 +788,7 @@ async fn execute_bash_streaming(
     let mut stderr_buf = String::new();
     let mut total_lines: usize = 0;
     let mut total_bytes: usize = 0;
+    let mut lossy = false;
     let mut progress_chunk = String::new();
     let mut last_progress = tokio::time::Instant::now();
 
@@ -630,6 +840,7 @@ async fn execute_bash_streaming(
                     &mut progress_chunk,
                     &mut total_lines,
                     &mut total_bytes,
+                    &mut lossy,
                 );
             }
             break;
@@ -641,7 +852,7 @@ async fn execute_bash_streaming(
                 child.kill().await?;
                 return Ok(interrupted_bash_output(
                     "Command interrupted by user",
-                    "interrupted",
+                    ShellStatus::Interrupted,
                     input.dangerously_disable_sandbox,
                     Some(sandbox_status),
                 ));
@@ -650,7 +861,7 @@ async fn execute_bash_streaming(
                 child.kill().await?;
                 return Ok(interrupted_bash_output(
                     &format!("Command exceeded timeout of {timeout_ms} ms"),
-                    "timeout",
+                    ShellStatus::Timeout,
                     input.dangerously_disable_sandbox,
                     Some(sandbox_status),
                 ));
@@ -666,6 +877,7 @@ async fn execute_bash_streaming(
                     &mut progress_chunk,
                     &mut total_lines,
                     &mut total_bytes,
+                    &mut lossy,
                 );
 
                 if let Some(ref cb) = on_progress {
@@ -700,33 +912,22 @@ async fn execute_bash_streaming(
     let stdout = truncate_output(&stdout_buf, MAX_OUTPUT_BYTES_SAFETY);
     let stderr = truncate_output(&stderr_buf, MAX_OUTPUT_BYTES_SAFETY);
     let mut result = BashCommandOutput::completed(status, stdout, stderr);
+    result.lossy_output = lossy;
     result.dangerously_disable_sandbox = input.dangerously_disable_sandbox;
     result.sandbox_status = Some(sandbox_status);
     Ok(result)
 }
 
 pub(crate) fn interrupted_bash_output(
-    stderr: &str,
-    return_code_interpretation: &str,
+    message: &str,
+    status: ShellStatus,
     dangerously_disable_sandbox: Option<bool>,
     sandbox_status: Option<SandboxStatus>,
 ) -> BashCommandOutput {
-    BashCommandOutput {
-        exit_code: None,
-        stdout: String::new(),
-        stderr: stderr.to_string(),
-        raw_output_path: None,
-        interrupted: true,
-        is_image: None,
-        background_task_id: None,
-        backgrounded_by_user: None,
-        assistant_auto_backgrounded: None,
-        dangerously_disable_sandbox,
-        return_code_interpretation: Some(return_code_interpretation.to_string()),
-        no_output_expected: Some(true),
-        structured_content: None,
-        sandbox_status,
-    }
+    let mut output = BashCommandOutput::stopped(status, b"", b"", message);
+    output.dangerously_disable_sandbox = dangerously_disable_sandbox;
+    output.sandbox_status = sandbox_status;
+    output
 }
 
 fn sandbox_status_for_input(input: &BashCommandInput, cwd: &std::path::Path) -> SandboxStatus {
@@ -911,7 +1112,12 @@ impl BackgroundShell {
                         .read_to_end(&mut bytes)
                 });
                 if read.is_ok() {
-                    final_output = String::from_utf8_lossy(&bytes).into_owned();
+                    final_output = if start > 0 {
+                        process_text::decode_process_output_tail(&bytes)
+                    } else {
+                        process_text::decode_process_output(&bytes)
+                    }
+                    .text;
                     output_truncated = start > 0;
                     self.tasks.update(&self.id, |task| {
                         task.output.clone_from(&final_output);
@@ -959,7 +1165,10 @@ impl BackgroundShell {
                             BackgroundTaskStatus::Failed
                         };
                         task.exit_code = status.code();
-                        task.activity = describe_exit_status(status).unwrap_or_default();
+                        task.activity = describe_exit_status(status)
+                            .as_ref()
+                            .map(ShellStatus::wire)
+                            .unwrap_or_default();
                     });
                     self.child = None;
                     return;
@@ -1148,7 +1357,7 @@ fn prepare_sandbox_dirs(cwd: &std::path::Path) {
 mod tests {
     use super::{
         execute_bash, execute_bash_with_abort, execute_bash_with_progress, BashCommandInput,
-        BashProgressCallback,
+        BashProgressCallback, ShellStatus,
     };
     use crate::hooks::HookAbortSignal;
     use crate::sandbox::FilesystemIsolationMode;
@@ -1214,8 +1423,8 @@ mod tests {
 
         assert!(output.interrupted);
         assert_eq!(
-            output.return_code_interpretation.as_deref(),
-            Some("interrupted")
+            output.return_code_interpretation,
+            Some(ShellStatus::Interrupted)
         );
     }
 

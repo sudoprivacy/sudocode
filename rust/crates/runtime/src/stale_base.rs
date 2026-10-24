@@ -122,7 +122,7 @@ fn resolve_rev(cwd: &Path, rev: &str) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let sha = String::from_utf8(output.stdout).ok()?;
+    let sha = process_text::decode_process_output(&output.stdout).text;
     let trimmed = sha.trim();
     if trimmed.is_empty() {
         None

@@ -79,7 +79,7 @@ fn read_branch(cwd: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let branch = String::from_utf8(output.stdout).ok()?;
+    let branch = process_text::decode_process_output(&output.stdout).text;
     let trimmed = branch.trim();
     if trimmed.is_empty() || trimmed == "HEAD" {
         None
@@ -107,7 +107,7 @@ fn read_recent_commits(cwd: &Path) -> Vec<GitCommitEntry> {
     if !output.status.success() {
         return Vec::new();
     }
-    let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+    let stdout = process_text::decode_process_output(&output.stdout).text;
     stdout
         .lines()
         .filter_map(|line| {
@@ -136,7 +136,7 @@ fn read_staged_files(cwd: &Path) -> Vec<String> {
     if !output.status.success() {
         return Vec::new();
     }
-    let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+    let stdout = process_text::decode_process_output(&output.stdout).text;
     stdout
         .lines()
         .filter(|line| !line.trim().is_empty())

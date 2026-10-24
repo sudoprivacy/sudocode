@@ -33,7 +33,7 @@ fn run_bang_command(engine: &SessionEngine, command: &str) -> Result<String, Str
                 command,
                 &output.stdout,
                 &output.stderr,
-                output.return_code_interpretation.as_deref(),
+                output.return_code_interpretation.as_ref(),
             ),
             commands::bash_mode::history_blocks(command, &output.stdout, &output.stderr),
         ),
@@ -158,7 +158,7 @@ fn git_diff_report(cwd: &Path) -> Result<String, String> {
             .current_dir(cwd)
             .output()
             .map_err(|e| e.to_string())?;
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        Ok(process_text::decode_process_output(&output.stdout).text)
     };
     let cached = run(&["diff", "--cached", "--no-color"])?;
     let unstaged = run(&["diff", "--no-color"])?;

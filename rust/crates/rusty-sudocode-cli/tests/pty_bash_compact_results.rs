@@ -267,3 +267,83 @@ fn cancelled_bash_persists_a_compact_interruption() {
     assert!(result.get("sandboxStatus").is_none());
     assert!(result.as_object().unwrap().values().all(|v| !v.is_null()));
 }
+
+/// What a failing PowerShell call shows the model and the user. A script that
+/// cannot be parsed reads as a parse error — nothing in it ran — rather than an
+/// exit code, with the parser's own message on screen. Text a console program
+/// wrote in the console's code page is decoded, not replaced. The model gets
+/// the same compact result the card is drawn from.
+#[cfg(windows)]
+#[test]
+fn powershell_failures_read_as_written() {
+    const DECODED: &str = "编码错误：配置无效";
+    let env = TestEnv::new("powershell-failures");
+    if !env.is_mock() {
+        return;
+    }
+    // Console programs write in the console's code page. Switching the shared
+    // console to CP936 from inside the run makes this call write GBK bytes on
+    // any Windows locale, and tells the reader in this process the same. The
+    // text is joined at run time, so only the decoded output can show it whole:
+    // the command itself is on screen too.
+    let calls = serde_json::json!([
+        {"id": "ps_parse", "name": "PowerShell", "input": {"command": "Write-Output 'unclosed' ("}},
+        {"id": "ps_cp936", "name": "PowerShell", "input": {"command":
+            "[Console]::OutputEncoding = [Text.Encoding]::GetEncoding(936); [Console]::Error.WriteLine('编码错误' + '：配置无效'); exit 1"
+        }},
+    ]);
+    let prompt = env.prompt(
+        "Run the supplied PowerShell commands.",
+        &format!("tool_concurrency TOOL_BATCH:{calls}"),
+    );
+    let mut cli = env.spawn(&["--permission-mode", "danger-full-access", &prompt]);
+    cli.resize(60, 200).unwrap();
+    let screen = common::expect_screen(
+        &cli,
+        |s| s.contains("Concurrency batch done."),
+        std::time::Duration::from_secs(90),
+        "both PowerShell calls complete",
+    );
+    assert!(
+        screen.contains("parse error"),
+        "the unparsable script is named a parse error:\n{screen}"
+    );
+    assert!(
+        screen.contains("ParserError"),
+        "the parser's own message is on screen, not behind a line count:\n{screen}"
+    );
+    assert!(
+        screen.contains(DECODED),
+        "code-page output is decoded on screen:\n{screen}"
+    );
+    assert!(!screen.contains('\u{FFFD}'), "nothing replaced:\n{screen}");
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+
+    let request: Value =
+        serde_json::from_str(env.captured_message_bodies().last().unwrap()).unwrap();
+    let sent = results(&request);
+    let parse: Value = serde_json::from_str(&sent["ps_parse"]).unwrap();
+    assert_eq!(parse["returnCodeInterpretation"], "parse_error", "{parse}");
+    assert!(
+        parse["stderr"].as_str().unwrap().contains("ParserError"),
+        "{parse}"
+    );
+    let decoded: Value = serde_json::from_str(&sent["ps_cp936"]).unwrap();
+    assert_eq!(
+        decoded["stderr"].as_str().unwrap().trim_end(),
+        DECODED,
+        "{decoded}"
+    );
+    assert_eq!(decoded["returnCodeInterpretation"], "exit_code:1");
+    for result in [&parse, &decoded] {
+        assert!(result.get("lossyOutput").is_none(), "{result}");
+        assert!(
+            result
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|v| !v.is_null() && *v != Value::Bool(false)),
+            "only fields that say something reach the model: {result}"
+        );
+    }
+}

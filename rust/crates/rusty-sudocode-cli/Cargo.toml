@@ -10,6 +10,7 @@ name = "scode"
 path = "src/main.rs"
 
 [dependencies]
+process-text = { path = "../process-text" }
 arboard = { version = "3", features = ["image-data"] }
 async-trait = "0.1"
 base64 = "0.22"

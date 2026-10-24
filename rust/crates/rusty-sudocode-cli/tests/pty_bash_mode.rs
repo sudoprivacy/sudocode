@@ -101,7 +101,7 @@ fn bang_reports_stderr_and_exit_code() {
     sess.send("! sh -c 'echo boom-on-stderr >&2; exit 3'\r")
         .expect("send failing ! command");
     sess.expect("boom-on-stderr").expect("stderr should render");
-    sess.expect("exit_code:3")
+    sess.expect("exit 3")
         .expect("non-zero exit status should render");
     sess.expect("❯").expect("prompt should return");
 

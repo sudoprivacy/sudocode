@@ -563,9 +563,15 @@ impl PluginTool {
 
         let output = child.wait_with_output()?;
         if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            Ok(process_text::decode_process_output(&output.stdout)
+                .text
+                .trim()
+                .to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr = process_text::decode_process_output(&output.stderr)
+                .text
+                .trim()
+                .to_string();
             Err(PluginError::CommandFailed(format!(
                 "plugin tool `{}` from `{}` failed for `{}`: {}",
                 self.definition.name,
@@ -2711,7 +2717,10 @@ fn run_lifecycle_commands(
         let output = process.output()?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr = process_text::decode_process_output(&output.stderr)
+                .text
+                .trim()
+                .to_string();
             return Err(PluginError::CommandFailed(format!(
                 "plugin `{}` {} failed for `{}`: {}",
                 metadata.id,
@@ -2783,7 +2792,9 @@ fn materialize_source(
             if !output.status.success() {
                 return Err(PluginError::CommandFailed(format!(
                     "git clone failed for `{url}`: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
+                    process_text::decode_process_output(&output.stderr)
+                        .text
+                        .trim()
                 )));
             }
             Ok(destination)

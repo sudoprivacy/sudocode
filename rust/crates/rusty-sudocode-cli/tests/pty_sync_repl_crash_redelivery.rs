@@ -97,6 +97,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
         .expect("\u{276f}")
         .expect("the second REPL should start");
     expect_on_screen(&mut second, &format!("Message from {PEER} is waiting"));
+    common::expect_input_line_cleared(&second, BUDGET, "redelivery prompt ready");
     assert_eq!(
         position(),
         0,
@@ -142,7 +143,15 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
     );
 
     second.send("/exit\r").expect("exit the REPL");
-    assert_eq!(second.expect_eof().expect("the REPL exits"), 0);
+    assert_eq!(
+        second.expect_eof().unwrap_or_else(|error| {
+            panic!(
+                "the REPL exits: {error}\n{}",
+                second.render(|s| s.contents())
+            )
+        }),
+        0
+    );
 }
 
 fn spawn_instance(env: &TestEnv) -> pty_expect::PtySession {

@@ -1582,6 +1582,7 @@ name = "engine-events"
 version = "0.2.36"
 dependencies = [
  "runtime",
+ "serde",
  "serde_json",
 ]
 

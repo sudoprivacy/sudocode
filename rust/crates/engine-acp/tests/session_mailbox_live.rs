@@ -411,11 +411,30 @@ fn controller_workflow(compact: bool) {
     let mut completed_tools = 0;
     let mut text = String::new();
     let mut finished = false;
+    let mut pending_permission = None;
+    let mut status_queries = 0;
     while Instant::now() < deadline {
         match mailbox.receive(100).unwrap() {
             Some(SessionPayload::Rpc { message }) => {
                 eprintln!("[mailbox] {message}");
-                if message["method"] == "session/request_permission" {
+                if message["id"] == "live-runtime-status" {
+                    assert!(message.get("error").is_none(), "{message}");
+                    let status = &message["result"];
+                    assert_eq!(status["foreground"]["state"], "awaiting_input", "{status}");
+                    assert_eq!(
+                        status["foreground"]["waiting_for"], "permission",
+                        "{status}"
+                    );
+                    status_queries += 1;
+                    let (id, option) = pending_permission
+                        .take()
+                        .expect("approval is still pending");
+                    send(
+                        &mailbox,
+                        json!({"jsonrpc":"2.0","id":id,
+                        "result":{"outcome":{"outcome":"selected","optionId":option}}}),
+                    );
+                } else if message["method"] == "session/request_permission" {
                     if permissions == 0 {
                         assert_request_context(
                             &capture_dir,
@@ -464,10 +483,13 @@ fn controller_workflow(compact: bool) {
                         .find(|o| o["kind"] == "allow_once")
                         .unwrap()["optionId"]
                         .clone();
+                    assert!(pending_permission
+                        .replace((message["id"].clone(), option))
+                        .is_none());
                     send(
                         &mailbox,
-                        json!({"jsonrpc":"2.0","id":message["id"],
-                        "result":{"outcome":{"outcome":"selected","optionId":option}}}),
+                        json!({"jsonrpc":"2.0","id":"live-runtime-status",
+                        "method":"_sudocode/session/status","params":{"sessionId":sid}}),
                     );
                 } else if message["id"] == "inventory" {
                     assert!(message.get("error").is_none(), "{message}");
@@ -509,6 +531,7 @@ fn controller_workflow(compact: bool) {
         })
         .unwrap();
     assert!(finished, "live turn timed out: {text}");
+    assert_eq!(status_queries, permissions);
     assert!(
         permissions > 0,
         "controller never received a tool permission request"

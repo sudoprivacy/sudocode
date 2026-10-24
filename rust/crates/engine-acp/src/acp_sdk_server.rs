@@ -280,6 +280,12 @@ pub(crate) struct ResumeToolsRequest {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonRpcResponse)]
 pub(crate) struct ResumeToolsResponse {}
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RuntimeStatusRequest {
+    pub session_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Custom extension: _sudocode/a2a/* (direct A2A requests)
 // ---------------------------------------------------------------------------
@@ -287,6 +293,7 @@ pub(crate) struct ResumeToolsResponse {}
 // Served from the catch-all dispatch rather than as typed handlers: every typed
 // handler nests the server's type one level deeper, and the chain is already at
 // the depth the compiler lays out by default in every crate that runs it.
+const RUNTIME_STATUS_METHOD: &str = "_sudocode/session/status";
 const DIRECT_SEND_METHOD: &str = "_sudocode/a2a/send";
 const DIRECT_AGENT_LIST_METHOD: &str = "_sudocode/a2a/agent_list";
 
@@ -601,8 +608,6 @@ async fn drive_prompt(
             "Session control changed while the prompt was queued",
         ));
     }
-    registry.report_state(engine_core::EngineState::Running, None);
-    let _turn_state = HostedTurnState(Arc::clone(&registry));
     let session_cwd = registry.cwd(&sid);
     let cwd_lease = registry.cwd_lease();
     let subagents = registry.subagents(&sid);
@@ -687,7 +692,6 @@ async fn drive_prompt(
                 event = events.recv() => match event {
                     Some(EngineEvent::TextDelta { text }) => assistant_text.push_str(&text),
                     Some(EngineEvent::ContextCommitted(context)) => committed_context = Some(context),
-                    Some(EngineEvent::State(state)) => registry.report_state(state, None),
                     Some(EngineEvent::PermissionRequest { id, request }) => {
                         let abort = registry.abort_signal(&sid).expect("registered session abort signal");
                         replies.push(answer_permission(&sid, id, &request, &driver, abort, cx_perm.clone()));
@@ -1063,6 +1067,7 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("systemPromptOverride".to_string(), json!(true));
     sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
     sudocode_ns.insert("toolPause".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert("runtimeStatus".to_string(), json!({ "version": 1 }));
     // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
     sudocode_ns.insert(
         "directA2a".to_string(),
@@ -1532,7 +1537,7 @@ pub trait HostedSessionFactory: Send + Sync {
         None
     }
     fn close(&self) {}
-    fn state_changed(&self, _state: engine_core::EngineState, _reason: Option<String>) {}
+    fn state_changed(&self, _state: engine_core::EngineState) {}
     fn open(
         &self,
         requested_id: Option<&str>,
@@ -1560,13 +1565,6 @@ struct SessionEntry {
     started_at: std::time::Instant,
     /// Present when the client opted into sub-agent events.
     subagents: Option<Arc<SessionSubagents>>,
-}
-
-struct HostedTurnState(SharedSessionRegistry);
-impl Drop for HostedTurnState {
-    fn drop(&mut self) {
-        self.0.report_state(engine_core::EngineState::Idle, None);
-    }
 }
 
 /// Async guard for a session lane; drop it to let the next request on the
@@ -1776,11 +1774,6 @@ impl SessionRegistry {
         }
     }
 
-    fn report_state(&self, state: engine_core::EngineState, reason: Option<String>) {
-        if let Some(factory) = &self.hosted_factory {
-            factory.state_changed(state, reason);
-        }
-    }
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionEntry>> {
         self.sessions
             .lock()
@@ -1876,6 +1869,7 @@ impl SessionRegistry {
             subagents.as_ref(),
             session_id.clone(),
             existing,
+            self.hosted_factory.clone(),
         )
         .map_err(AcpError::internal)?;
         self.lock_sessions().insert(
@@ -2175,6 +2169,23 @@ fn answer_permission(
 }
 
 /// The session, tool and tool input a direct A2A request asks for.
+/// Observe one engine through its command lane without acquiring a turn
+/// listener or the session lock, including while input or tools are pending.
+async fn read_runtime_status(
+    registry: Arc<SessionRegistry>,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, Error> {
+    let request: RuntimeStatusRequest = serde_json::from_value(params)
+        .map_err(|error| Error::invalid_params().data(error.to_string()))?;
+    let driver = registry
+        .driver(&request.session_id)
+        .ok_or_else(|| Error::invalid_params().data("Unknown session"))?;
+    driver
+        .runtime_status()
+        .await
+        .map_err(|error| Error::internal_error().data(error))
+}
+
 fn direct_a2a_call(
     message: agent_client_protocol::UntypedMessage,
 ) -> Result<(String, &'static str, serde_json::Value), DirectToolError> {
@@ -3306,11 +3317,23 @@ pub(crate) async fn run_acp_on_transport(
             },
             on_receive_request!(),
         )
-        // --- catch-all: direct A2A requests, then unhandled methods ---
+        // Extensions share the existing dispatch to keep the SDK handler type bounded.
         .on_receive_dispatch(
             {
                 let registry = Arc::clone(&registry);
                 async move |dispatch: Dispatch, cx: ConnectionTo<Client>| match dispatch {
+                    Dispatch::Request(message, responder)
+                        if message.method() == RUNTIME_STATUS_METHOD =>
+                    {
+                        let registry = Arc::clone(&registry);
+                        let (_, params) = message.into_parts();
+                        cx.spawn(async move {
+                            responder
+                                .respond_with_result(read_runtime_status(registry, params).await)?;
+                            Ok(())
+                        })?;
+                        Ok(Handled::Yes)
+                    }
                     Dispatch::Request(message, responder)
                         if matches!(
                             message.method(),

@@ -14,7 +14,7 @@ use engine_host::SessionEngine;
 use serde_json::Value;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use crate::acp_sdk_server::SessionSubagents;
+use crate::acp_sdk_server::{HostedSessionFactory, SessionSubagents};
 use crate::session_ops;
 
 type ControlWaiter = std::sync::mpsc::Sender<Result<Value, String>>;
@@ -50,6 +50,7 @@ pub(crate) struct SessionDriver {
     listener: Mutex<Option<UnboundedSender<EngineEvent>>>,
     connection: Mutex<ConnectionState>,
     subagents: Mutex<Option<Weak<SessionSubagents>>>,
+    hosted_factory: Mutex<Option<Arc<dyn HostedSessionFactory>>>,
     requests: Mutex<HashMap<u64, ControlWaiter>>,
     next_request: AtomicU64,
     bridge_stopped: Mutex<std::sync::mpsc::Receiver<()>>,
@@ -74,6 +75,7 @@ impl SessionDriver {
             listener: Mutex::new(None),
             connection: Mutex::new(ConnectionState::default()),
             subagents: Mutex::new(None),
+            hosted_factory: Mutex::new(None),
             requests: Mutex::new(HashMap::new()),
             next_request: AtomicU64::new(1),
             bridge_stopped: Mutex::new(stopped_rx),
@@ -111,6 +113,18 @@ impl SessionDriver {
     }
 
     fn on_event(self: &Arc<Self>, session_id: &str, event: EngineEvent) {
+        // Observe the engine's ordered lifecycle even without a prompt listener
+        // (direct calls and idle background delivery share this same route).
+        if let EngineEvent::State(state) = &event {
+            let factory = self
+                .hosted_factory
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(factory) = factory {
+                factory.state_changed(*state);
+            }
+        }
         match event {
             EngineEvent::CommandResult { id, result } => {
                 {
@@ -225,11 +239,16 @@ impl SessionDriver {
         subagents: Option<&Arc<SessionSubagents>>,
         session_id: String,
         existing: Option<Arc<Self>>,
+        hosted_factory: Option<Arc<dyn HostedSessionFactory>>,
     ) -> Result<Arc<Self>, String> {
         let driver = subagents
             .and_then(|route| route.completion_delivery())
             .or(existing)
             .unwrap_or_else(|| Self::new(EngineSession::deferred(Arc::default()), session_id));
+        *driver
+            .hosted_factory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = hosted_factory;
         driver.attachment.attach(engine)?;
         *driver
             .subagents
@@ -285,6 +304,15 @@ impl SessionDriver {
         tokio::task::spawn_blocking(move || driver.control(action))
             .await
             .map_err(|e| e.to_string())?
+    }
+
+    pub(crate) async fn runtime_status(self: &Arc<Self>) -> Result<Value, String> {
+        let driver = Arc::clone(self);
+        tokio::task::spawn_blocking(move || {
+            driver.request(|request_id| EngineCommand::RuntimeStatus { request_id })
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     pub(crate) async fn cancel_subagent(

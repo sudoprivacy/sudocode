@@ -39,7 +39,7 @@
 //! same bridge with `block_in_place`; the normal tool loop awaits replies.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -276,10 +276,16 @@ enum PendingAnswer {
 /// and the pump for a single turn.
 #[derive(Clone, Default)]
 struct RequestTable {
-    pending: Arc<Mutex<HashMap<RequestId, PendingAnswer>>>,
+    input: Arc<Mutex<InputRequests>>,
     next_id: Arc<AtomicU64>,
-    cancelled: Arc<AtomicBool>,
     interaction: runtime::PromptQueue,
+}
+
+#[derive(Default)]
+struct InputRequests {
+    // An answered request retains input ownership until its prompt lease ends.
+    pending: HashMap<RequestId, Option<PendingAnswer>>,
+    cancelled: bool,
 }
 
 impl RequestTable {
@@ -287,31 +293,28 @@ impl RequestTable {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn insert(&self, id: RequestId, answer: PendingAnswer) {
-        let mut pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !self.cancelled.load(Ordering::SeqCst) {
-            pending.insert(id, answer);
-        }
-    }
-
     fn take(&self, id: RequestId) -> Option<PendingAnswer> {
-        self.pending
+        self.input
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&id)
+            .pending
+            .get_mut(&id)?
+            .take()
     }
 
     /// Dropping the answer senders wakes a worker blocked in a permission or
-    /// question prompt when the enclosing turn is cancelled.
-    fn cancel_all(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        self.pending
+    /// question prompt. Input ownership ends now, while the turn may still drain.
+    fn cancel_all(&self, tx: &EventSink) {
+        let mut input = self
+            .input
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        input.cancelled = true;
+        let had_input = !input.pending.is_empty();
+        input.pending.clear();
+        if had_input {
+            let _ = tx.send(EngineEvent::State(EngineState::Running));
+        }
     }
 }
 
@@ -621,13 +624,13 @@ async fn run_one_turn(
                     });
                     tasks.begin_shutdown();
                     abort.abort();
-                    table.cancel_all();
+                    table.cancel_all(evt_tx);
                 }
                 // Cancel aborts the in-flight turn; it then
                 // finishes (cancelled) and we fall through to the `result` arm.
                 Some(EngineCommand::Cancel) => {
                     abort.abort();
-                    table.cancel_all();
+                    table.cancel_all(evt_tx);
                 }
                 Some(EngineCommand::DirectTool { request_id, .. }) => refuse_busy(request_id, evt_tx),
                 // A Prompt arriving mid-turn is a renderer bug (renderers serialize
@@ -636,7 +639,7 @@ async fn run_one_turn(
             },
             () = evt_tx.completions.delivery_changed() => evt_tx.completions.deliver(evt_tx),
             result = &mut handle => {
-                table.cancel_all();
+                table.cancel_all(evt_tx);
                 match result {
                     Ok(Ok(complete)) => {
                         let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
@@ -741,11 +744,11 @@ async fn run_direct_tool(
                         ShutdownReason::Disconnected
                     });
                     abort.abort();
-                    table.cancel_all();
+                    table.cancel_all(evt_tx);
                 }
                 Some(EngineCommand::Cancel) => {
                     abort.abort();
-                    table.cancel_all();
+                    table.cancel_all(evt_tx);
                 }
                 // The host serializes turns and direct calls on one lane, so a
                 // prompt arriving here is a renderer bug. Ignore it, as a turn
@@ -753,7 +756,7 @@ async fn run_direct_tool(
                 Some(_) => {}
             },
             result = &mut handle => {
-                table.cancel_all();
+                table.cancel_all(evt_tx);
                 let result = match result {
                     Ok(Ok(result)) => Ok(serde_json::json!({
                         "content": result.content,
@@ -1092,8 +1095,12 @@ struct PromptLease {
 
 impl Drop for PromptLease {
     fn drop(&mut self) {
-        self.table.take(self.id);
-        if !self.table.cancelled.load(Ordering::SeqCst) {
+        let mut input = self
+            .table
+            .input
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if input.pending.remove(&self.id).is_some() && !input.cancelled {
             let _ = self.tx.send(EngineEvent::State(EngineState::Running));
         }
     }
@@ -1107,12 +1114,18 @@ impl RequestTable {
         event: impl FnOnce(RequestId) -> EngineEvent,
     ) -> PromptLease {
         let id = self.alloc();
-        if !self.cancelled.load(Ordering::SeqCst) {
+        let mut input = self
+            .input
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Admission, cancellation and lifecycle publication share this lock.
+        // A queued prompt cannot publish AwaitingInput after cancellation.
+        if !input.cancelled {
             let reason = match &answer {
                 PendingAnswer::Permission(_) => InputReason::Permission,
                 PendingAnswer::Question(_) => InputReason::Question,
             };
-            self.insert(id, answer);
+            input.pending.insert(id, Some(answer));
             let _ = tx.send(EngineEvent::State(EngineState::AwaitingInput(reason)));
             let _ = tx.send(event(id));
         }

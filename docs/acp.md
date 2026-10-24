@@ -287,6 +287,8 @@ Foreground states are `idle`, `running`, and `awaiting_input`. `waiting_for` is
 present only for `awaiting_input`, with `permission` or `question`. The snapshot
 comes from the engine's lifecycle events. It remains queryable during a model
 request, direct tool call, or unanswered input request and starts no model turn.
+Cancellation releases input ownership immediately; foreground work may remain
+`running` while the cancelled turn or its tools finish stopping.
 Background counts come from the session task registry without copying outputs
 or changing task subscriptions. Terminal and Agent counts include only
 background-marked running/stopping tasks. `execution_unconfirmed` counts those

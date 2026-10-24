@@ -159,7 +159,8 @@ main pushes and manual workflow runs, using `SUDOROUTER_CI_API_KEY`.
 
 Hosts check `initialize.result._meta.sudocode.directA2a.version == 1`. Two
 session requests run the session's own A2A tools for the client, without a
-model turn:
+model turn. `directA2a.errorOutcomes == 1` means every failure carries a typed
+outcome, described below.
 
 - `_sudocode/a2a/send` with `{ "sessionId", "to", "message", "summary" }`
   runs the `send` tool. `message` and `summary` are plain text. The session's agent is the
@@ -176,14 +177,18 @@ conversation, so the model never sees the call.
 
 A direct request never waits. It fails in one of two ways:
 
-- **Refused (`-32602` invalid params):** nothing ran, so the client may
+- **Refused:** `-32602` invalid params, with
+  `error.data.sudocode.directA2a == { "version": 1, "outcome": "not_submitted" }`
+  and the reason in `error.data.detail`. Nothing ran, so the client may
   correct the request and send it again. This covers an unknown session,
   invalid params, paused tools, and a session busy with a turn or another
   request.
-- **Outcome unknown (`-32603`, `error.data.outcome == "unknown"`):** the call
-  was admitted and then failed, was cancelled (`session/cancel`,
+- **Outcome unknown:** `-32603`, with `error.data.outcome == "unknown"` and
+  `error.data.sudocode.directA2a == { "version": 1, "outcome": "unknown" }`.
+  The call was admitted and then failed, was cancelled (`session/cancel`,
   `pause_tools`) or lost its reply. The message may have been sent, so do not
-  resend it blindly.
+  resend it blindly. A client that loses the response itself is in the same
+  position.
 
 `isError: true` is the tool's own failure; it does not prove that nothing was
 delivered either.
@@ -191,6 +196,7 @@ delivered either.
 A direct call takes the same operation fence as a turn's tools: paused tools
 refuse it, and `pause_tools` reports control only after its worker has
 finished.
+
 ### Per-session system prompt (`_meta.sudocode.*`)
 
 `session/new` and `session/load` accept two optional, orthogonal keys under

@@ -1014,7 +1014,10 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     sudocode_ns.insert("systemPromptAppend".to_string(), json!(true));
     sudocode_ns.insert("toolPause".to_string(), json!({ "version": 1 }));
     // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
-    sudocode_ns.insert("directA2a".to_string(), json!({ "version": 1 }));
+    sudocode_ns.insert(
+        "directA2a".to_string(),
+        json!({ "version": 1, "errorOutcomes": 1 }),
+    );
     // `session/new` accepts `_meta.sudocode.forkFrom` (see
     // `fork_source_from_meta`): a client that forks a conversation into a
     // new directory gates on this instead of probing.
@@ -2101,18 +2104,25 @@ fn direct_a2a_call(
     }
 }
 
-/// A direct A2A failure on the wire. A refusal is invalid params: nothing ran,
-/// so the client may correct the request and send it again. Anything after
-/// admission is an internal error whose `data.outcome` is `"unknown"`: the
-/// message may have been sent, so the client must not resend it blindly.
+/// A direct A2A failure on the wire, typed as `initialize` advertises with
+/// `errorOutcomes: 1`. A refusal is invalid params whose outcome is
+/// `not_submitted`: nothing ran, so the client may correct the request and
+/// send it again. Anything after admission is an internal error whose outcome
+/// is `unknown`: the message may have been sent, so the client must not resend
+/// it blindly.
 fn direct_a2a_error(error: &DirectToolError) -> Error {
+    let typed = |outcome: &str| json!({ "directA2a": { "version": 1, "outcome": outcome } });
     match error {
-        DirectToolError::Refused(reason) => {
-            acp_error_to_sdk(&AcpError::invalid_params(reason.clone()))
-        }
+        DirectToolError::Refused(reason) => Error::invalid_params().data(json!({
+            "detail": reason,
+            "sudocode": typed("not_submitted"),
+        })),
         DirectToolError::Unknown(detail) => {
-            let mut error =
-                Error::internal_error().data(json!({ "outcome": "unknown", "detail": detail }));
+            let mut error = Error::internal_error().data(json!({
+                "outcome": "unknown",
+                "detail": detail,
+                "sudocode": typed("unknown"),
+            }));
             error.message = "The call may have run; its outcome is unknown".into();
             error
         }

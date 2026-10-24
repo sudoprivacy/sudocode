@@ -8537,11 +8537,35 @@ async fn set_session_mode(client: &mut AcpTestClient, session_id: &str, mode: &s
     );
 }
 
-/// A definite refusal is invalid params: nothing ran, so it may be resent.
+/// A definite refusal is invalid params typed `not_submitted`: nothing ran, so
+/// it may be resent.
 fn assert_refused(resp: &Value, case: &str) {
     assert_eq!(
         resp["error"]["code"], -32602,
         "{case} must be refused before anything runs: {resp}"
+    );
+    assert_eq!(
+        resp["error"]["data"]["sudocode"]["directA2a"],
+        json!({ "version": 1, "outcome": "not_submitted" }),
+        "{case} is typed as not submitted: {resp}"
+    );
+}
+
+/// A failure after admission is an internal error typed `unknown`: the call
+/// may have run, so it must not be resent blindly.
+fn assert_unknown(resp: &Value, case: &str) {
+    assert_eq!(
+        resp["error"]["code"], -32603,
+        "{case} is not a refusal: {resp}"
+    );
+    assert_eq!(
+        resp["error"]["data"]["outcome"], "unknown",
+        "{case} says its outcome is unknown: {resp}"
+    );
+    assert_eq!(
+        resp["error"]["data"]["sudocode"]["directA2a"],
+        json!({ "version": 1, "outcome": "unknown" }),
+        "{case} is typed as unknown: {resp}"
     );
 }
 
@@ -8575,8 +8599,9 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
         .send_request("initialize", json!({ "protocolVersion": 1 }))
         .await;
     assert_eq!(
-        init["result"]["_meta"]["sudocode"]["directA2a"]["version"], 1,
-        "initialize advertises the direct A2A requests: {init}"
+        init["result"]["_meta"]["sudocode"]["directA2a"],
+        json!({ "version": 1, "errorOutcomes": 1 }),
+        "initialize advertises the direct A2A requests and their typed outcomes: {init}"
     );
     let sid = open_direct_session(&mut client, &workspace.root).await;
     set_session_mode(&mut client, &sid, "workspace-write").await;
@@ -8856,14 +8881,7 @@ async fn direct_a2a_cancel_after_delivery_reports_unknown() {
     let _ = fs::write(&release, "");
     let (_, resp) =
         answered.unwrap_or_else(|seen| panic!("the cancelled send never answered; saw {seen:#?}"));
-    assert_eq!(
-        resp["error"]["code"], -32603,
-        "a call cancelled after it ran is not a refusal: {resp}"
-    );
-    assert_eq!(
-        resp["error"]["data"]["outcome"], "unknown",
-        "the response says the outcome is unknown: {resp}"
-    );
+    assert_unknown(&resp, "a call cancelled after it ran");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(
@@ -9018,10 +9036,7 @@ async fn direct_a2a_pause_waits_for_an_in_flight_send() {
                 .1
         }
     };
-    assert_eq!(
-        sent["error"]["data"]["outcome"], "unknown",
-        "a send the pause stopped after admission has an unknown outcome: {sent}"
-    );
+    assert_unknown(&sent, "a send the pause stopped after admission");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     let mut buf = [0u8; 65_536];
@@ -9275,10 +9290,7 @@ async fn direct_a2a_through_a_node_appends_once_as_the_session() {
     let _ = fs::write(workspace.root.join("direct-node.release"), "");
     let (_, resp) =
         answered.unwrap_or_else(|seen| panic!("the cancelled send never answered; saw {seen:#?}"));
-    assert_eq!(
-        resp["error"]["data"]["outcome"], "unknown",
-        "a call cancelled after its append has an unknown outcome: {resp}"
-    );
+    assert_unknown(&resp, "a call cancelled after its append on the node");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
     let (later, _) = node_conversation(&endpoint, &receiver_credential, &sender, tail, 0).await;

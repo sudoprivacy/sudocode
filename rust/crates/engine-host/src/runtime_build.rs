@@ -732,7 +732,10 @@ pub(crate) fn build_runtime_with_plugin_state(
         config.enable_tools,
         config.allowed_tools.clone(),
         &engine_core::ModelAccess {
-            fs: Arc::clone(&host.fs),
+            fs: match &peer {
+                Some(crate::peer::Peer::Node(node)) => node.fs(),
+                _ => Arc::clone(&host.fs),
+            },
             require_mount: host.require_model_mount,
         },
     ) {

@@ -1,5 +1,7 @@
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
+#[path = "support/node_home.rs"]
+mod node_home;
 
 use mock_anthropic_service::{MockAnthropicService, SCENARIO_PREFIX};
 use serde_json::Value;
@@ -64,6 +66,9 @@ impl Fixture {
     fn run(&self, args: &[&str], input: Option<&[u8]>) -> Output {
         let mut cmd = self.command();
         cmd.args(args);
+        self.run_command(cmd, input)
+    }
+    fn run_command(&self, mut cmd: Command, input: Option<&[u8]>) -> Output {
         if input.is_some() {
             cmd.stdin(Stdio::piped());
         }
@@ -85,6 +90,65 @@ impl Fixture {
         }
     }
 }
+#[test]
+fn node_model_route_fails_at_the_node_without_http_fallback() {
+    let f = Fixture::new();
+    let agent = "headless-model-route";
+    let bundles = f.dir.path().join("bundles");
+    node_home::write_untrusted_credential(&bundles, agent);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = listener.local_addr().unwrap().to_string();
+    drop(listener);
+    let home = node_home::NodeHome::new("model-route", &endpoint, agent, &bundles.join(agent));
+    node_home::pin_agent_name(f.dir.path(), agent);
+    let config = f.dir.path().join("config/sudocode.json");
+    let original = fs::read_to_string(&config).unwrap();
+    fs::write(
+        &config,
+        original.replace(&f.server.base_url(), "nexus:///cloud-model"),
+    )
+    .unwrap();
+    let mut cmd = f.command();
+    cmd.envs(home.env()).args([
+        "--print",
+        "hello",
+        "--model",
+        "sonnet",
+        "--output-format=json",
+    ]);
+    let out = f.run_command(cmd, None);
+    assert!(!out.status.success());
+    let result = json_output(&out);
+    let error = result["error"].as_str().unwrap();
+    assert!(error.contains("Nexus model write"), "{result}");
+    assert!(error.to_lowercase().contains("unavailable"), "{result}");
+    assert!(f.runtime.block_on(f.server.captured_requests()).is_empty());
+
+    // A node used only for peers does not change an explicitly direct model.
+    fs::write(config, original).unwrap();
+    let mut cmd = f.command();
+    cmd.envs(home.env()).args([
+        "--print",
+        &format!("{SCENARIO_PREFIX}read_file_roundtrip"),
+        "--model",
+        "sonnet",
+        "--permission-mode",
+        "read-only",
+        "--output-format=json",
+    ]);
+    let out = f.run_command(cmd, None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        json_output(&out)["result"],
+        "read_file roundtrip complete: alpha parity line"
+    );
+    assert!(!f.runtime.block_on(f.server.captured_requests()).is_empty());
+}
+
 fn json_output(out: &Output) -> Value {
     serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(

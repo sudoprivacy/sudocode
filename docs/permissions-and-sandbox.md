@@ -46,7 +46,7 @@ This is the same filesystem a co-hosted agent runs on inside
 `nexusd-cluster`, reached through the same tools. The two hosts differ in
 which kernel answers, not in what a tool call means.
 
-## Co-hosted model requests
+## Model requests through Nexus
 
 Co-hosted agents require a Nexus model mount. Build `nexusd-cohost` with
 `--features daemon,driver-ai` and provision an `anthropic` or `openai` mount
@@ -74,7 +74,16 @@ mount returns an error; an HTTP fallback is refused.
 
 The supported formats are Anthropic Messages, OpenAI Chat Completions and
 OpenAI Responses. Gemini and Codex subscription routes are refused in a
-co-host. Standalone CLI sessions retain their configured HTTP connections.
+co-host.
+
+A CLI attached through `~/.nexus/run/node.json` uses that same authenticated
+node connection for `nexus:///mount` model requests. Its workspace tools and
+history remain local. The node's existing
+model mount and native hooks enforce the policy; the CLI has no separate DLP
+service. A node record used only for A2A does not change a configured HTTP
+model route. Direct HTTP CLI routes have no mandatory DLP; deployment-managed
+CLI profiles must select a Nexus model mount to enable it. A CLI without a
+node record retains its configured HTTP connections.
 
 ## Co-hosted session recovery
 

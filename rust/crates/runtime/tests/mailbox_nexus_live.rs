@@ -2433,9 +2433,12 @@ fn live_reader_commit_refused_on_renew_error_then_reacquired_from_durable_offset
         "the INJECTED claim delay must have held the window open"
     );
     let samples = samples.lock().unwrap().clone();
+    // Up to the re-acquisition, which the probe records once the lock is held
+    // and before the claim rewrites the register. A read concurrent with that
+    // write is a different question from whether the refused commit moved it.
     let held: Vec<_> = samples
         .iter()
-        .filter(|(start, end, _)| *start >= failed.returned && *end <= delivered[1])
+        .filter(|(start, end, _)| *start >= failed.returned && *end <= reacquired)
         .collect();
     // Three is an empirical floor, not an invariant: the 800ms window yields
     // dozens of samples, and three is enough to show the position held across

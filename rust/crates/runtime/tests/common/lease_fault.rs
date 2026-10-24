@@ -61,7 +61,14 @@ pub struct Renewal {
 #[derive(Clone, Copy, Debug)]
 pub enum LockEvent {
     Acquired(Instant),
-    Released { at: Instant, reached_node: bool },
+    /// `at` is when the release was requested. The node frees the lock no
+    /// earlier, so any grant it makes afterwards is stamped no earlier than
+    /// this: stamping when the release returned could put a competitor's grant
+    /// before it.
+    Released {
+        at: Instant,
+        reached_node: bool,
+    },
     Renewed(Renewal),
 }
 
@@ -282,6 +289,7 @@ impl Drop for FaultyLock {
         let Some(inner) = self.inner.take() else {
             return;
         };
+        let requested = Instant::now();
         let reached_node = !self.probe.partitioned();
         if reached_node {
             drop(inner);
@@ -291,7 +299,7 @@ impl Drop for FaultyLock {
         self.probe.record(
             self.seat,
             LockEvent::Released {
-                at: Instant::now(),
+                at: requested,
                 reached_node,
             },
         );

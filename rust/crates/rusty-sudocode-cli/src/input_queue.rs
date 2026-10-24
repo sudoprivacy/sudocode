@@ -1,46 +1,12 @@
-//! REPL input queue for the interactive shell.
+//! Input ownership for every REPL source: humans, peers and task completions.
 //!
-//! When a turn is running, user (and A2A peer) inputs are queued rather than
-//! blocked, and flushed as one batched turn when the turn ends. This mirrors
-//! the queue half of sudowork's `turnInputCoordinator`; sudocode's REPL does
-//! not auto-interrupt a running turn — the human uses ESC / Ctrl-C to cancel
-//! explicitly (see `EscCancelHandler` and the `abort_hook` in `LineEditor`),
-//! and A2A peers never interrupt. The two products are runtime-exclusive: one
-//! sudocode process is either a REPL for a human at a terminal OR an ACP server
-//! for sudowork.
-//!
-//! ## Behavior
-//!
-//! |                | queue OFF                  | queue ON (default)                            |
-//! |----------------|----------------------------|-----------------------------------------------|
-//! | during a turn  | rejected (blocked)         | queued during turn; batched flush on turn end |
-//!
-//! ## Batched flush
-//!
-//! When N inputs are queued while a turn is running, on turn end the coordinator
-//! joins them with `\n\n` and issues ONE `run_turn` — not N. This matches
-//! "I'll queue up what I want to say, send it all together when you finish".
-//!
-//! ## Echo timing
-//!
-//! Only the coordinator knows whether a submit runs now (idle) or waits (queued
-//! during a turn), so it — not the UI thread — owns writing the `❯ text` echo to
-//! scrollback: immediately for an idle submit, and at the turn boundary for a
-//! queued one (via [`NextTurn::echoes`]). Until then a queued input lives only
-//! in the transient queue overlay, so pressing Enter mid-turn no longer looks
-//! like the input was sent.
-//!
-//! ## Environment override
-//!
-//! Reads `SUDOCODE_INTERRUPT_QUEUE_MODE`:
-//! - unset — defaults to `queue` (CC parity)
-//! - `off` — sync behavior, no queue
-//! - `queue` — queue ON (default)
-//!
-//! Wiring (input-thread + main coordinator + tokio worker) lives in `main.rs`'s
-//! interactive REPL.
+//! Explicitly queued inputs wait for a turn boundary. Steering transfers them
+//! to engine-core, retaining receipts until a durable consumption event arrives.
+//! Esc flushes the queue; cancellation is a separate engine command.
 
-use std::collections::VecDeque;
+pub use engine_events::InputSource as QueuedKind;
+use engine_events::{EngineCommand, InputView, TurnInput};
+use std::collections::{BTreeMap, VecDeque};
 
 /// Whether the REPL queues inputs that land while a turn is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,8 +18,10 @@ pub enum QueueMode {
 impl QueueMode {
     /// Resolve from `SUDOCODE_INTERRUPT_QUEUE_MODE`. Case-insensitive.
     /// Default is `Queue` — message queue ON, matching Claude Code parity.
-    /// ESC and Ctrl-C cancel are wired in the async REPL via
-    /// `EscCancelHandler` and the `abort_hook` in `LineEditor`.
+    /// In the async REPL, Enter steers independently of the queue setting.
+    /// Startup `off` instead selects the legacy synchronous REPL.
+    /// Esc flushes pending input;
+    /// Ctrl+C always cancels through the engine control channel.
     #[must_use]
     pub fn from_env() -> Self {
         std::env::var("SUDOCODE_INTERRUPT_QUEUE_MODE")
@@ -99,53 +67,43 @@ impl QueueMode {
 /// humans (paste collapsed to a placeholder chip), the complete envelope for
 /// peers so their body can be laid out at the width at flush time. The UI keeps
 /// a separate one-line peer preview outside this scheduling queue.
-/// `kind` selects the scrollback marker at flush — `❯` for human input, a message frame
+/// `source` selects the scrollback marker at flush — `❯` for human input, a message frame
 /// for an inbound A2A peer message. Both echo on flush (symmetric): the queued
 /// item lands in scrollback at the moment it actually runs, never earlier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedInput<R = ()> {
-    pub text: String,
-    pub display: String,
-    pub kind: QueuedKind,
-    /// Opaque completion receipt, owned by this input until its turn finishes.
+    pub input: TurnInput,
+    /// The transport receipt follows ownership until durable consumption.
     pub receipt: Option<R>,
 }
 
-/// Where a queued item came from — selects its scrollback marker on flush.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueuedKind {
-    Human,
-    Peer,
-    Subagent,
-}
-
 impl<R> QueuedInput<R> {
-    pub fn human(text: impl Into<String>, display: impl Into<String>) -> Self {
+    pub fn new(
+        text: impl Into<String>,
+        display: impl Into<String>,
+        source: QueuedKind,
+        receipt: Option<R>,
+    ) -> Self {
         Self {
-            text: text.into(),
-            display: display.into(),
-            kind: QueuedKind::Human,
-            receipt: None,
+            input: TurnInput {
+                id: 0,
+                text: text.into(),
+                display: display.into(),
+                source,
+            },
+            receipt,
         }
+    }
+    pub fn human(text: impl Into<String>, display: impl Into<String>) -> Self {
+        Self::new(text, display, QueuedKind::Human, None)
     }
     pub fn peer(text: impl Into<String>, display: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            display: display.into(),
-            kind: QueuedKind::Peer,
-            receipt: None,
-        }
+        Self::new(text, display, QueuedKind::Peer, None)
     }
 }
 
-/// One line to echo to scrollback when the queue flushes — its `display` text
-/// and the `kind` that selects the marker. The caller renders it (the queue
-/// stays rendering-agnostic).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EchoLine {
-    pub display: String,
-    pub kind: QueuedKind,
-}
+/// The same bounded metadata shape drives live rows, consumption and replay.
+pub type EchoLine = InputView;
 
 /// The decision returned by `submit_during_turn` — what the caller must do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,7 +124,7 @@ pub struct NextTurn<R = ()> {
     pub prompt: String,
     /// The scrollback lines to echo for this run, in submission order (every
     /// queued item echoes on flush now — human and peer alike). Each carries the
-    /// marker `kind` so the caller renders human echoes and peer frames correctly. Empty for an idle
+    /// marker `source` so the caller renders human echoes and peer frames correctly. Empty for an idle
     /// submit, whose echo the coordinator prints directly.
     pub echoes: Vec<EchoLine>,
     /// How many queued items this run consumed.
@@ -201,8 +159,23 @@ pub fn load_queue_mode(shared: &SharedQueueMode) -> QueueMode {
 /// The coordinator itself is pure sync — no threads, no channels. Wiring it to
 /// the async input-thread + tokio worker lives in `main.rs`.
 #[derive(Debug, Default)]
+enum Phase {
+    #[default]
+    Idle,
+    Preparing,
+    Running,
+    Cancelling {
+        resume_requested: bool,
+    },
+    Paused,
+}
+
+#[derive(Debug, Default)]
 pub struct TurnInputCoordinator<R = ()> {
     queue: VecDeque<QueuedInput<R>>,
+    steering: BTreeMap<u64, QueuedInput<R>>,
+    next_id: u64,
+    phase: Phase,
 }
 
 impl<R> TurnInputCoordinator<R> {
@@ -210,12 +183,136 @@ impl<R> TurnInputCoordinator<R> {
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
+            steering: BTreeMap::new(),
+            next_id: 0,
+            phase: Phase::Idle,
+        }
+    }
+
+    pub fn can_start(&self) -> bool {
+        matches!(self.phase, Phase::Idle)
+    }
+    pub fn can_steer(&self) -> bool {
+        matches!(self.phase, Phase::Preparing | Phase::Running)
+    }
+    pub fn can_deliver(&self) -> bool {
+        matches!(self.phase, Phase::Running)
+    }
+    pub fn has_idle_queue(&self) -> bool {
+        !self.is_running() && !self.queue.is_empty()
+    }
+    pub fn is_running(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Preparing | Phase::Running | Phase::Cancelling { .. }
+        )
+    }
+    pub fn is_paused(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Cancelling {
+                resume_requested: false
+            } | Phase::Paused
+        )
+    }
+    pub fn start_turn(&mut self) {
+        self.phase = Phase::Preparing;
+    }
+    /// Engine admission opens the inbox and resets abort before this receipt.
+    /// Controls accepted during preparation must follow that reset, never precede it.
+    pub fn turn_started(&mut self) -> Option<EngineCommand> {
+        match self.phase {
+            Phase::Preparing => {
+                self.phase = Phase::Running;
+                let inputs = self
+                    .steering
+                    .values()
+                    .map(|input| input.input.clone())
+                    .collect::<Vec<_>>();
+                (!inputs.is_empty()).then_some(EngineCommand::Steer { inputs })
+            }
+            Phase::Cancelling { .. } => Some(EngineCommand::Cancel),
+            _ => None,
+        }
+    }
+    pub fn cancel_turn(&mut self) {
+        self.phase = Phase::Cancelling {
+            resume_requested: false,
+        };
+    }
+    pub fn finish_turn(&mut self) {
+        let paused = self.is_paused();
+        self.recover_uncommitted();
+        self.phase = if paused && !self.queue.is_empty() {
+            Phase::Paused
+        } else {
+            Phase::Idle
+        };
+    }
+    pub fn resume(&mut self) {
+        match &mut self.phase {
+            Phase::Cancelling { resume_requested } => *resume_requested = true,
+            Phase::Paused => self.phase = Phase::Idle,
+            _ => {}
+        }
+    }
+
+    fn identify(&mut self, input: &mut TurnInput) {
+        if input.id == 0 {
+            self.next_id += 1;
+            input.id = self.next_id;
+        }
+    }
+
+    pub fn enqueue(&mut self, mut input: QueuedInput<R>) -> InputView {
+        self.identify(&mut input.input);
+        let view = input.input.view();
+        self.queue.push_back(input);
+        view
+    }
+
+    pub fn steer(&mut self, mut input: QueuedInput<R>) -> TurnInput {
+        self.identify(&mut input.input);
+        let message = input.input.clone();
+        self.steering.insert(message.id, input);
+        message
+    }
+
+    pub fn flush(&mut self) -> Vec<TurnInput> {
+        let queued = self.queue.drain(..).collect::<Vec<_>>();
+        queued.into_iter().map(|input| self.steer(input)).collect()
+    }
+
+    pub fn has_pending_input(&self) -> bool {
+        !self.queue.is_empty() || !self.steering.is_empty()
+    }
+
+    pub fn committed(&mut self, id: u64) -> Option<R> {
+        self.steering.remove(&id).and_then(|input| input.receipt)
+    }
+
+    pub fn defer(&mut self, id: u64) -> bool {
+        if let Some(input) = self.steering.remove(&id) {
+            self.queue.push_back(input);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Recover unacknowledged steering after turn failure/cancellation. A late
+    /// refusal can arrive after TurnComplete; ids make that reply idempotent.
+    pub fn recover_uncommitted(&mut self) {
+        let pending = std::mem::take(&mut self.steering);
+        for (_, input) in pending.into_iter().rev() {
+            self.queue.push_front(input);
         }
     }
 
     /// Number of pending inputs (not the currently-running turn — just what's
     /// queued behind it). For the queue-chip UI in the terminal chrome.
     #[must_use]
+    #[cfg(test)]
     pub fn pending(&self) -> usize {
         self.queue.len()
     }
@@ -223,8 +320,13 @@ impl<R> TurnInputCoordinator<R> {
     /// Snapshot of pending display texts, oldest first. Drives the queue
     /// overlay so it reflects the coordinator's queue exactly.
     #[must_use]
+    pub fn previews(&self) -> Vec<EchoLine> {
+        self.queue.iter().map(|input| input.input.view()).collect()
+    }
+
+    #[cfg(test)]
     pub fn peek_display(&self) -> Vec<String> {
-        self.queue.iter().map(|q| q.display.clone()).collect()
+        self.queue.iter().map(|q| q.input.display.clone()).collect()
     }
 
     /// Called on the FIRST submit when the REPL is idle. No decision — just run
@@ -235,7 +337,7 @@ impl<R> TurnInputCoordinator<R> {
     #[must_use]
     pub fn submit_when_idle(&mut self, input: QueuedInput<R>) -> NextTurn<R> {
         NextTurn {
-            prompt: input.text,
+            prompt: input.input.text,
             echoes: Vec::new(),
             consumed: 1,
             receipts: input.receipt.into_iter().collect(),
@@ -246,7 +348,7 @@ impl<R> TurnInputCoordinator<R> {
     /// caller must do next.
     pub fn submit_during_turn(&mut self, input: QueuedInput<R>, mode: QueueMode) -> SubmitOutcome {
         if mode.queue_enabled() {
-            self.queue.push_back(input);
+            let _ = self.enqueue(input);
             return SubmitOutcome::Queued;
         }
         // Queue off — sudocode's historical behavior: reject and let the caller
@@ -270,11 +372,8 @@ impl<R> TurnInputCoordinator<R> {
         let mut consumed = 0_usize;
         let mut receipts = Vec::new();
         while let Some(item) = self.queue.pop_front() {
-            echoes.push(EchoLine {
-                display: item.display,
-                kind: item.kind,
-            });
-            parts.push(item.text);
+            echoes.push(item.input.view());
+            parts.push(item.input.text);
             receipts.extend(item.receipt);
             consumed += 1;
         }
@@ -307,7 +406,11 @@ impl<R> TurnInputCoordinator<R> {
     /// the queue holds no human item (all-Peer or empty), so the caller falls
     /// through to its normal empty-buffer `↑` behavior (prompt history).
     pub fn dequeue_all_human(&mut self) -> Option<String> {
-        if !self.queue.iter().any(|q| q.kind == QueuedKind::Human) {
+        if !self
+            .queue
+            .iter()
+            .any(|q| q.input.source == QueuedKind::Human)
+        {
             return None;
         }
         // Partition in place: collect human texts in order, retain every
@@ -315,8 +418,8 @@ impl<R> TurnInputCoordinator<R> {
         let mut humans = Vec::new();
         let mut rest = VecDeque::with_capacity(self.queue.len());
         for item in std::mem::take(&mut self.queue) {
-            if item.kind == QueuedKind::Human {
-                humans.push(item.text);
+            if item.input.source == QueuedKind::Human {
+                humans.push(item.input.text);
             } else {
                 rest.push_back(item);
             }
@@ -327,6 +430,7 @@ impl<R> TurnInputCoordinator<R> {
 
     /// Drop everything without running any of it. Used by shutdown / /clear.
     pub fn clear(&mut self) {
+        self.steering.clear();
         self.queue.clear();
     }
 }
@@ -383,7 +487,7 @@ mod queue_docs {
         assert_eq!(next.prompt, "B\n\nC\n\nD");
         let echo_texts: Vec<&str> = next.echoes.iter().map(|e| e.display.as_str()).collect();
         assert_eq!(echo_texts, vec!["B", "C", "D"]);
-        assert!(next.echoes.iter().all(|e| e.kind == QueuedKind::Human));
+        assert!(next.echoes.iter().all(|e| e.source == QueuedKind::Human));
         assert_eq!(next.consumed, 3);
         assert!(c.drain_next().is_none(), "queue drained");
     }
@@ -400,9 +504,9 @@ mod queue_docs {
         assert_eq!(next.prompt, "human\n\npeer-text");
         assert_eq!(next.echoes.len(), 2, "both echo on flush");
         assert_eq!(next.echoes[0].display, "human");
-        assert_eq!(next.echoes[0].kind, QueuedKind::Human);
+        assert_eq!(next.echoes[0].source, QueuedKind::Human);
         assert_eq!(next.echoes[1].display, "peer-display");
-        assert_eq!(next.echoes[1].kind, QueuedKind::Peer);
+        assert_eq!(next.echoes[1].source, QueuedKind::Peer);
     }
 
     #[test]

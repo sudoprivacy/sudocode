@@ -47,6 +47,7 @@ fn status_reports_the_disk_namespace_and_that_this_session_receives() {
     // so give the receiver one to claim.
     Mailbox::workspace_local(&local_pair_root_in(env.config_home()), PEER.to_string())
         .send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
             body: "status check PARITY_SCENARIO:single_turn_text".to_string(),

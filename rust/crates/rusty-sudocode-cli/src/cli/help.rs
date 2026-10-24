@@ -21,8 +21,10 @@ pub(crate) fn render_repl_help() -> String {
             .to_string(),
         "  Up/Down              Navigate prompt history".to_string(),
         "  Ctrl-R               Reverse-search prompt history".to_string(),
-        "  Tab                  Complete commands, modes, and recent sessions".to_string(),
-        "  Ctrl-C               Clear input (double Ctrl-C to exit)".to_string(),
+        "  Enter / Tab          Steer current work / queue next turn; Tab completes /commands"
+            .to_string(),
+        "  Ctrl-C twice         Exit (second press within 800 ms)".to_string(),
+        "  Esc / Ctrl+C         Flush pending input (or cancel) / always cancel".to_string(),
         "  Shift+Enter/Ctrl+J   Insert a newline".to_string(),
         "  Auto-save            .scode/sessions/<session-id>.jsonl".to_string(),
         "  Resume latest        /resume latest".to_string(),

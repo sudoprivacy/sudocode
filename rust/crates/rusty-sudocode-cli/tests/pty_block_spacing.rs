@@ -394,7 +394,7 @@ fn repeated_file_read_has_one_frame_per_saved_command() {
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("settings.json"), r#"{"thinking":false}"#).unwrap();
     let batch = serde_json::json!([
-        {"id":"spacing_one", "name":"bash", "input":{"command":"cat spacing-one.txt"}, "stream_text_chunks":["Spacing intro.\n\n"]},
+        {"id":"spacing_one", "name":"bash", "input":{"command":"cat spacing-one.txt"}, "stream_text_prelude":"Spacing intro.\n\n"},
         {"id":"spacing_two", "name":"bash", "input":{"command":"cat spacing-two.txt"}},
         {"id":"spacing_one_again", "name":"bash", "input":{"command":"cat spacing-one.txt"}},
     ]);

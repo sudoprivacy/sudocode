@@ -856,6 +856,7 @@ impl Mailbox {
         let mb = Arc::clone(self);
         Arc::new(move |to: &str, body: &str| {
             let env = MailboxEnvelope {
+                delivery: crate::turn_input::InputDelivery::Steer,
                 from: mb.self_id.clone(),
                 to: to.to_string(),
                 body: body.to_string(),
@@ -1883,6 +1884,7 @@ mod tests {
 
     fn note(from: &str, to: &str, body: &str) -> MailboxEnvelope {
         MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: from.to_string(),
             to: to.to_string(),
             body: body.to_string(),
@@ -2030,6 +2032,7 @@ mod tests {
         let mb = local_mailbox(&ws, "team-lead");
 
         mb.send(MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: "team-lead".to_string(),
             to: "worker".to_string(),
             body: "hello worker".to_string(),
@@ -2058,6 +2061,7 @@ mod tests {
         // Both land in the SAME transcript — that is the point of a shared
         // conversation. Each side tells its own appends apart by `from`.
         mb.send(MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: "agent-a".to_string(),
             to: "agent-b".to_string(),
             body: "self-write".to_string(),
@@ -2069,6 +2073,7 @@ mod tests {
         })
         .unwrap();
         mb.send(MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: "agent-b".to_string(),
             to: "agent-b".to_string(),
             body: "from peer".to_string(),
@@ -2094,6 +2099,7 @@ mod tests {
 
         for i in 0..3 {
             mb.send(MailboxEnvelope {
+                delivery: crate::turn_input::InputDelivery::Steer,
                 from: format!("agent-{i}"),
                 to: "worker".to_string(),
                 body: format!("msg-{i}"),
@@ -2118,6 +2124,7 @@ mod tests {
         let mb = local_mailbox(&ws, "coordinator");
 
         mb.send(MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "alpha".to_string(),
             body: "hi".to_string(),
@@ -2129,6 +2136,7 @@ mod tests {
         })
         .unwrap();
         mb.send(MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "beta".to_string(),
             body: "hi".to_string(),
@@ -2159,6 +2167,7 @@ mod tests {
         let ws = temp_workspace("list-recip-shape");
         let mb = local_mailbox(&ws, "coordinator");
         mb.send(MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "alpha".to_string(),
             body: "hi".to_string(),
@@ -2342,6 +2351,7 @@ mod tests {
         // Write a message from a sub-agent to team-lead.
         let mb = local_mailbox(&ws, "sub-agent-1");
         mb.send(MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: "sub-agent-1".to_string(),
             to: "team-lead".to_string(),
             body: "task complete".to_string(),

@@ -44,7 +44,7 @@ use crate::render::output::{split_lines, OutputOp, Utf8Stream};
 use crate::render::styled_text::StyledText;
 use ansi_text::{row_text, AnsiText, RichText};
 use choice_text::ChoiceText;
-use footer::FooterTips;
+use footer::{FooterHints, FooterTips};
 use layout::{ansi, ansi_with_style, ChromeLayout, InputLayout, Measurements, Slot};
 pub(crate) mod prose_preview;
 use prose_preview::{PreviewUpdate, ProsePreview};
@@ -378,6 +378,7 @@ impl ToolCard {
 pub enum UiCommand {
     BackgroundTask(engine_events::BackgroundTaskEvent),
     BackgroundTaskError(String),
+    OpenTasks,
     ToolQueued {
         id: String,
         name: String,
@@ -405,17 +406,15 @@ pub enum UiCommand {
     ToolFinished {
         id: String,
     },
-    /// A message (human input or inbound A2A) was queued for the next turn —
-    /// append it to the pending overlay in arrival order. `display` is the
-    /// compact one-line form. The coordinator sends one per enqueue (not a
-    /// wholesale list) so tools and messages keep their true interleaving.
-    QueuedMessagePush {
+    /// Upsert by identity: queued → steering preserves its place among tools.
+    InputUpsert {
+        id: u64,
         display: String,
         is_human: bool,
+        delivery: engine_events::InputDelivery,
     },
-    /// Clear all queued-message items from the pending overlay (tool cards
-    /// stay). Sent by the coordinator when the queue drains at a turn boundary.
-    QueuedMessagesClear,
+    InputRemove(u64),
+    PendingInputsClear,
 }
 
 #[derive(Clone)]
@@ -424,6 +423,10 @@ pub struct UiCommandSender {
 }
 
 impl UiCommandSender {
+    pub fn open_tasks(&self) {
+        let _ = self.tx.send(UiCommand::OpenTasks);
+    }
+
     pub fn background_task(&self, event: engine_events::BackgroundTaskEvent) {
         let _ = self.tx.send(UiCommand::BackgroundTask(event));
     }
@@ -486,15 +489,30 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::ToolFinished { id: id.to_string() });
     }
 
-    pub fn queued_message_push(&self, display: &str, is_human: bool) {
-        let _ = self.tx.send(UiCommand::QueuedMessagePush {
-            display: display.to_string(),
-            is_human,
+    pub fn pending_input(
+        &self,
+        input: engine_events::InputView,
+        delivery: engine_events::InputDelivery,
+    ) {
+        let display = queued_message::preview(input.display, input.source);
+        let _ = self.tx.send(UiCommand::InputUpsert {
+            id: input.id,
+            display,
+            is_human: input.source == engine_events::InputSource::Human,
+            delivery,
         });
     }
 
-    pub fn queued_messages_clear(&self) {
-        let _ = self.tx.send(UiCommand::QueuedMessagesClear);
+    pub fn steering_push(&self, input: &engine_events::TurnInput) {
+        self.pending_input(input.view(), engine_events::InputDelivery::Steer);
+    }
+
+    pub fn pending_input_remove(&self, id: u64) {
+        let _ = self.tx.send(UiCommand::InputRemove(id));
+    }
+
+    pub fn pending_inputs_clear(&self) {
+        let _ = self.tx.send(UiCommand::PendingInputsClear);
     }
 }
 
@@ -936,12 +954,18 @@ pub enum InputEvent {
         text: String,
         display: String,
     },
+    Queue {
+        text: String,
+        display: String,
+    },
     QuestionAnswer(String),
     /// Inspect the frozen review without answering it.
     InspectDocument(String),
     StopBackgroundTask(String),
-    /// ESC pressed — cancel the running turn.
+    /// Esc flushes pending input, or cancels when none is pending.
     Abort,
+    /// Ctrl+C always cancels, even with pending input.
+    Cancel,
     Exit,
 }
 
@@ -1049,7 +1073,12 @@ pub enum PendingItem {
     /// `is_human` distinguishes a typed input from an inbound A2A/peer message
     /// so the empty-buffer `↑` removes all human chips (matching the
     /// coordinator's `dequeue_all_human`) while leaving peer chips in place.
-    QueuedMessage { display: String, is_human: bool },
+    Input {
+        id: u64,
+        display: String,
+        is_human: bool,
+        delivery: engine_events::InputDelivery,
+    },
 }
 
 /// Render the pending overlay: in-flight tool cards and queued messages in one
@@ -1077,7 +1106,7 @@ fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: u
     // tool cards (multi-line) can never crowd a queued message out.
     let message_count = items
         .iter()
-        .filter(|i| matches!(i, PendingItem::QueuedMessage { .. }))
+        .filter(|i| matches!(i, PendingItem::Input { .. }))
         .count();
     // Budget left for tool-card lines after messages take their rows. Keep at
     // least room for the overflow marker if there are any tools.
@@ -1096,7 +1125,7 @@ fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: u
                 .map(str::to_string)
                 .collect::<Vec<_>>(),
             ),
-            PendingItem::QueuedMessage { .. } => None,
+            PendingItem::Input { .. } => None,
         })
         .collect();
     let tool_lines: usize = cards.iter().flatten().map(Vec::len).sum();
@@ -1109,8 +1138,16 @@ fn render_pending_overlay(items: &[PendingItem], max_lines: usize, term_width: u
     let mut tools_shown = 0;
     for (item, card_lines) in items.iter().zip(cards) {
         match item {
-            PendingItem::QueuedMessage { display, .. } => {
-                lines.push(queued_message::render(display, term_width, support, theme));
+            PendingItem::Input {
+                display, delivery, ..
+            } => {
+                lines.push(queued_message::render(
+                    display,
+                    *delivery == engine_events::InputDelivery::Steer,
+                    term_width,
+                    support,
+                    theme,
+                ));
             }
             PendingItem::Tool(_) => {
                 let card_lines = card_lines.expect("tool card projection");
@@ -1273,8 +1310,8 @@ struct ReplContext {
     /// Running tool cards for the StagingSlot overlay, in insertion order.
     /// Pending items for the overlay above the StatusSlot: in-flight tool cards
     /// and queued messages (human + inbound A2A) in one ordered list, so the
-    /// overlay shows arrival order across both. `ToolStarted`/`QueuedMessagePush`
-    /// append; `ToolFinished` removes a tool by id; `QueuedMessagesClear` drops
+    /// overlay shows arrival order across both. `ToolStarted`/`InputUpsert`
+    /// append; `ToolFinished` removes a tool by id; `InputsClear` drops
     /// the queued messages. Same `Arc<Mutex>` rationale as `todo_items` —
     /// avoids shifting hook indices.
     pending: Arc<Mutex<Vec<PendingItem>>>,
@@ -1328,9 +1365,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut input_slot = hooks.use_state(|| InputSlot::TextInput);
     let mut should_exit = hooks.use_state(|| false);
     let mut last_ctrlc = hooks.use_state(|| None::<Instant>);
-    let mut history = hooks.use_state(Vec::<String>::new);
+    let history = hooks.use_state(Vec::<String>::new);
     let mut history_cursor = hooks.use_state(|| None::<usize>);
-    let mut saved_input = hooks.use_state(String::new);
+    let saved_input = hooks.use_state(String::new);
     let mut tab_candidates = hooks.use_state(Vec::<String>::new);
     let mut tab_index = hooks.use_state(|| 0usize);
     let mut footer_hint = hooks.use_state(|| None::<(String, Instant)>);
@@ -1418,6 +1455,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             if let Ok(rx) = ui_rx_for_future.lock() {
                 loop {
                     match rx.try_recv() {
+                        Ok(UiCommand::OpenTasks) => {
+                            tasks_for_future.lock().unwrap_or_else(std::sync::PoisonError::into_inner).open();
+                            frame.set(frame.get().wrapping_add(1));
+                        }
                         Ok(UiCommand::BackgroundTask(event)) => {
                             let changed = tasks_for_future
                                 .lock()
@@ -1467,8 +1508,8 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         }
                         Ok(UiCommand::ClearQuestion) => {
                             let is_plain_input = matches!(*input_slot.read(), InputSlot::TextInput);
-                            input_slot.set(InputSlot::TextInput);
                             if !is_plain_input {
+                                input_slot.set(InputSlot::TextInput);
                                 input_value.set(String::new());
                             }
                         }
@@ -1533,19 +1574,26 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     .retain(|p| !matches!(p, PendingItem::Tool(c) if c.id == id));
                             }
                         }
-                        Ok(UiCommand::QueuedMessagePush { display, is_human }) => {
-                            // Append in arrival order, interleaved with tool
-                            // cards, so the overlay mirrors what happened.
+                        // Waiting for an answer has no spinner-driven redraw.
+                        // Input ownership changes must wake their own frame.
+                        Ok(UiCommand::InputUpsert { id, display, is_human, delivery }) => {
                             if let Ok(mut pending) = pending_for_future.lock() {
-                                pending.push(PendingItem::QueuedMessage { display, is_human });
+                                let row = PendingItem::Input { id, display, is_human, delivery };
+                                if let Some(existing) = pending.iter_mut().find(|item| matches!(item, PendingItem::Input { id: value, .. } if *value == id)) {
+                                    *existing = row;
+                                } else { pending.push(row); }
                             }
+                            frame.set(frame.get().wrapping_add(1));
                         }
-                        Ok(UiCommand::QueuedMessagesClear) => {
-                            // Drop queued messages (tool cards stay); the
-                            // coordinator has flushed the queue into a turn.
+                        Ok(UiCommand::InputRemove(id)) => {
                             if let Ok(mut pending) = pending_for_future.lock() {
-                                pending.retain(|p| matches!(p, PendingItem::Tool(_)));
+                                pending.retain(|item| !matches!(item, PendingItem::Input { id: value, .. } if *value == id));
                             }
+                            frame.set(frame.get().wrapping_add(1));
+                        }
+                        Ok(UiCommand::PendingInputsClear) => {
+                            if let Ok(mut pending) = pending_for_future.lock() { pending.retain(|item| matches!(item, PendingItem::Tool(_))); }
+                            frame.set(frame.get().wrapping_add(1));
                         }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => break,
@@ -1609,6 +1657,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let stdout_for_events = stdout.clone();
 
     hooks.use_terminal_events({
+        let pending_for_keys = Arc::clone(&pending);
         let input_frame = input_frame.clone();
         move |event| match event {
             TerminalEvent::Key(KeyEvent {
@@ -1646,7 +1695,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 if matches!(current_slot, InputSlot::TextInput) {
                     let mut browser = tasks_for_events.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let focus = browser.focus;
-                    if focus != TaskFocus::Input {
+                    let is_cancel = code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL);
+                    if focus != TaskFocus::Input && is_cancel {
+                        browser.close();
+                        input_value.set(String::new());
+                    }
+                    // Navigation is local; cancellation always reaches the
+                    // same handler below, including double Ctrl+C to exit.
+                    if focus != TaskFocus::Input && !is_cancel {
                         match (focus, code) {
                             (TaskFocus::Footer, KeyCode::Enter | KeyCode::Down) => browser.open(),
                             (TaskFocus::Footer, KeyCode::Esc | KeyCode::Up) => browser.close(),
@@ -1664,7 +1720,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             (TaskFocus::Footer, KeyCode::Char(_)) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                                 browser.close();
                             }
-                            (_, KeyCode::Char('c')) if modifiers.contains(KeyModifiers::CONTROL) => browser.close(),
                             _ => {}
                         }
                         frame.set(frame.get().wrapping_add(1));
@@ -1673,12 +1728,6 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if code == KeyCode::Down && browser.has_tasks() && history_cursor.get().is_none()
                         && input_value.read().is_empty() {
                         browser.focus = TaskFocus::Footer;
-                        frame.set(frame.get().wrapping_add(1));
-                        return;
-                    }
-                    if code == KeyCode::Enter && matches!(commands::validate_slash_command_input(input_value.read().trim()), Ok(Some(commands::SlashCommand::Tasks { args: None }))) {
-                        browser.open();
-                        input_value.set(String::new());
                         frame.set(frame.get().wrapping_add(1));
                         return;
                     }
@@ -1749,43 +1798,9 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                     input_slot.set(InputSlot::TextInput);
                                 }
                             }
-                            InputSlot::TextInput => {
-                                let val = input_value.read().clone();
-                                if let Some(event) = enter_key_event_for_value(None, 0, &val) {
-                                    if !*has_submitted.read() { has_submitted.set(true); }
-                                    match event {
-                                        InputEvent::Exit => {
-                                            should_exit.set(true);
-                                            let _ = input_tx_for_events.send(InputEvent::Exit);
-                                        }
-                                        InputEvent::Submit { text, .. } => {
-                                            let store_snap = paste_store.read().clone();
-                                            let expanded = expand_paste_placeholders(&text, &store_snap);
-                                            let display = expand_paste_for_display(&text, &store_snap);
-                                            paste_store.write().clear();
-                                            next_paste_id.set(1);
-                                            let trimmed = expanded.trim();
-                                            if !trimmed.is_empty() {
-                                                let mut h = history.write();
-                                                if h.last().map_or(true, |last| last != trimmed) {
-                                                    h.push(trimmed.to_string());
-                                                }
-                                            }
-                                            // The coordinator owns the `❯` echo to scrollback: it
-                                            // alone knows whether this runs now (idle) or waits in
-                                            // the queue overlay behind a running turn. Echoing here
-                                            // would make a queued input look sent.
-                                            let _ = input_tx_for_events.send(InputEvent::Submit { text: expanded, display });
-                                        }
-                                        InputEvent::QuestionAnswer(_) | InputEvent::InspectDocument(_) | InputEvent::Abort | InputEvent::StopBackgroundTask(_) => {}
-                                    }
-                                    input_value.set(String::new());
-                                    if history_cursor.get().is_some() {
-                                        history_cursor.set(None);
-                                        saved_input.set(String::new());
-                                    }
-                                }
-                            }
+                            // TextInput owns submission and clearing at event
+                            // time, before the next key can edit its buffer.
+                            InputSlot::TextInput => {}
                         }
                     }
                     // ── Up/Down — DialPad option selection ─────────────
@@ -1959,24 +1974,22 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             should_exit.set(true);
                         } else {
                             last_ctrlc.set(Some(now));
-                            let _ = input_tx_for_events.send(InputEvent::Abort);
+                            let _ = input_tx_for_events.send(InputEvent::Cancel);
                             let hint_msg = format!("{}Press Ctrl-C again to exit{}", crate::render::DIM, crate::render::RESET);
                             footer_hint.set(Some((hint_msg, Instant::now() + ctrlc_hint_ttl())));
-                            input_value.set(String::new());
+                            // The mounted editor clears its own buffer in this
+                            // key event, before subsequent typing. Panel input
+                            // has a different owner and is cleared here.
+                            if !matches!(current_slot, InputSlot::TextInput) {
+                                input_value.set(String::new());
+                                dialpad_input.set(String::new());
+                            }
                         }
                     }
                     KeyCode::Esc => {
-                        // In FuzzySelect/DialPad, ESC cancels. Also drop any
-                        // in-progress DialPad custom-input buffer.
-                        dialpad_input.set(String::new());
-                        if !matches!(current_slot, InputSlot::TextInput) {
-                            input_slot.set(InputSlot::TextInput);
-                            input_value.set(String::new());
-                            let _ = input_tx_for_events.send(InputEvent::Abort);
-                        } else {
-                            let _ = input_tx_for_events.send(InputEvent::Abort);
-                            input_value.set(String::new());
-                        }
+                        // The coordinator alone decides flush versus cancel;
+                        // only cancellation sends ClearQuestion back to UI.
+                        let _ = input_tx_for_events.send(InputEvent::Abort);
                     }
                     KeyCode::Tab
                         if matches!(current_slot, InputSlot::TextInput)
@@ -2139,12 +2152,31 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut browser = tasks
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pending_input = pending
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|item| matches!(item, PendingItem::Input { .. }));
+    let controls = if pending_input && !turn_active {
+        Some("Enter send · Esc flush · ↑ edit queued")
+    } else if pending_input {
+        Some("Enter steer · Tab queue · Esc flush · Ctrl+C cancel")
+    } else if turn_active {
+        Some("Enter steer · Tab queue · Esc/Ctrl+C cancel")
+    } else {
+        None
+    };
+    let explicit_hint = footer_hint.read().clone();
+    let native_hint = explicit_hint.as_ref().map(|(text, _)| text.as_str());
     let footer_text = Arc::new(footer_tips.read().render(
         &perm,
         &browser,
         submitted,
         turn_active,
-        footer_hint.read().as_ref().map(|(text, _)| text.as_str()),
+        FooterHints {
+            transient: native_hint,
+            controls,
+        },
         w,
     ));
     let footer_summary = Arc::new(footer_tips.read().render(
@@ -2152,7 +2184,10 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         &browser,
         submitted,
         turn_active,
-        footer_hint.read().as_ref().map(|(text, _)| text.as_str()),
+        FooterHints {
+            transient: native_hint,
+            controls,
+        },
         w,
     ));
     let task_panel = browser.is_panel().then(|| browser.panel(w, usize::MAX));
@@ -2180,13 +2215,13 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
     let queued = pending_items
         .iter()
-        .filter(|item| matches!(item, PendingItem::QueuedMessage { .. }))
+        .filter(|item| matches!(item, PendingItem::Input { .. }))
         .count();
     let running = pending_items.len() - queued;
     let pending_summary = if pending_items.is_empty() {
         String::new()
     } else {
-        format!("{running} running · {queued} queued")
+        format!("{running} running · {queued} pending")
     };
     // Decode semantic initial styles before measurement. Painting consumes the
     // same spans, so explicit resets never acquire a parent fallback color.
@@ -2415,6 +2450,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     dequeue: dequeue_hook.clone(),
                     pending: Arc::clone(&pending),
                 };
+                let input_tx_for_edit = input_tx.clone();
                 let on_edit: TextInputEditHandler = Box::new(move |event, current, cursor| {
                     // Read focus at event time: several keys can arrive before
                     // the next render. TextInput remains the only draft editor.
@@ -2437,13 +2473,39 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         return Some(edit);
                     }
                     match event {
-                        // The parent owns submission. TextInput must not
-                        // insert a newline at a middle cursor before Enter is
-                        // handled there; Shift+Enter remains an editor event.
-                        TerminalEvent::Key(KeyEvent { code: KeyCode::Enter, modifiers, .. })
-                            if !modifiers.contains(KeyModifiers::SHIFT) => Some(TextInputEdit {
-                                value: current.to_owned(), cursor_offset: cursor,
-                            }),
+                        TerminalEvent::Key(KeyEvent { code, modifiers, .. })
+                            if (*code == KeyCode::Enter && !modifiers.contains(KeyModifiers::SHIFT))
+                                || (*code == KeyCode::Tab && !modifiers.contains(KeyModifiers::CONTROL)
+                                    && !current.starts_with('/')) => {
+                            if let Some(event) = enter_key_event_for_value(None, 0, current) {
+                                if !*has_submitted.read() { has_submitted.set(true); }
+                                let event = match event {
+                                    InputEvent::Exit => { should_exit.set(true); InputEvent::Exit }
+                                    InputEvent::Submit { text, .. } => {
+                                        let store = paste_store.read().clone();
+                                        let expanded = expand_paste_placeholders(&text, &store);
+                                        let display = expand_paste_for_display(&text, &store);
+                                        paste_store.write().clear();
+                                        next_paste_id.set(1);
+                                        let trimmed = expanded.trim();
+                                        let mut history = input_history.history.write();
+                                        if !trimmed.is_empty() && history.last().is_none_or(|last| last != trimmed) {
+                                            history.push(trimmed.to_string());
+                                        }
+                                        if *code == KeyCode::Tab { InputEvent::Queue { text: expanded, display } }
+                                        else { InputEvent::Submit { text: expanded, display } }
+                                    }
+                                    _ => unreachable!("plain input cannot answer a panel"),
+                                };
+                                let _ = input_tx_for_edit.send(event);
+                                input_history.selected.set(None);
+                                input_history.saved_input.set(String::new());
+                                Some(TextInputEdit { value: String::new(), cursor_offset: 0 })
+                            } else { Some(TextInputEdit { value: current.to_string(), cursor_offset: cursor }) }
+                        }
+                        TerminalEvent::Key(KeyEvent { code, modifiers, .. })
+                            if *code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) =>
+                            Some(TextInputEdit { value: String::new(), cursor_offset: 0 }),
                         TerminalEvent::Paste(pasted) => {
                             let mut id = next_paste_id.get();
                             let mut store = paste_store.write();
@@ -2635,9 +2697,11 @@ mod tests {
         // them in arrival order, not grouped into two panes.
         let items = vec![
             PendingItem::Tool(tool_card("1", "bash")),
-            PendingItem::QueuedMessage {
+            PendingItem::Input {
                 display: "Message from mac-ai: hi".to_string(),
                 is_human: false,
+                id: 0,
+                delivery: engine_events::InputDelivery::Queue,
             },
             PendingItem::Tool(tool_card("2", "read_file")),
         ];

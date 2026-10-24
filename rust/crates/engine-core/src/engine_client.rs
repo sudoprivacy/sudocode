@@ -820,6 +820,7 @@ fn push_output_block(
 ) {
     match block {
         OutputContentBlock::Text { text } => {
+            buffer.push_back(AssistantEvent::ResponseBlockStart);
             if !text.is_empty() {
                 *has_content = true;
                 buffer.push_back(AssistantEvent::TextDelta(text));
@@ -831,6 +832,7 @@ fn push_output_block(
             input,
             thought_signature,
         } => {
+            buffer.push_back(AssistantEvent::ResponseBlockStart);
             let initial_input = if streaming_tool_input
                 && input.is_object()
                 && input.as_object().is_some_and(serde_json::Map::is_empty)

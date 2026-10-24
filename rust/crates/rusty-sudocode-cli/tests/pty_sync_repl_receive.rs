@@ -51,6 +51,7 @@ fn a_peer_message_waits_at_the_sync_prompt_and_runs_on_enter() {
     let pair_root = local_pair_root_in(env.config_home());
     Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
             body: "for the sync REPL PARITY_SCENARIO:single_turn_text".to_string(),

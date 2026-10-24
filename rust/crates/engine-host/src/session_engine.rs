@@ -150,6 +150,7 @@ pub struct SessionEngine {
     /// A cancellation endpoint that stays accessible while compaction holds
     /// the session mutex for its model request and receipt finalization.
     compaction_abort_signal: runtime::HookAbortSignal,
+    turn_inputs: runtime::turn_input::TurnInputInbox,
     session: std::sync::Mutex<AcpCliSession>,
     /// The session's blocking runtime for turn work. `Option` so `Drop` can take
     /// it and `shutdown_background()` it: the seam pump owns this delegate and
@@ -237,6 +238,7 @@ impl SessionEngine {
         let cwd = host.shell_root.clone();
         Ok(Self {
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
+            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
             compaction_abort_signal: abort_signal.clone(),
             session: std::sync::Mutex::new(AcpCliSession {
                 cwd,
@@ -334,6 +336,7 @@ impl SessionEngine {
         };
         Ok(Self {
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
+            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
             compaction_abort_signal: session.abort_signal.clone(),
             session: std::sync::Mutex::new(session),
             tokio_runtime: Some(Self::build_async_runtime()?),
@@ -418,6 +421,7 @@ impl SessionEngine {
         };
         Ok(Self {
             background_tasks: runtime::background_tasks::BackgroundTasks::default(),
+            turn_inputs: runtime::turn_input::TurnInputInbox::default(),
             compaction_abort_signal: session.abort_signal.clone(),
             session: std::sync::Mutex::new(session),
             tokio_runtime: Some(Self::build_async_runtime()?),
@@ -1073,6 +1077,9 @@ impl engine_core::EngineDelegate for SessionEngine {
         prompter: &mut dyn runtime::PermissionPrompter,
     ) -> Result<engine_core::TurnComplete, runtime::RuntimeError> {
         let mut session = self.lock_session();
+        if let Some(runtime) = session.runtime.runtime_mut() {
+            runtime.set_turn_input_inbox(self.turn_inputs.clone());
+        }
         Self::ensure_fresh_session_source(&mut session)?;
         let previous_compaction_run_id = session
             .runtime
@@ -1219,6 +1226,10 @@ impl engine_core::EngineDelegate for SessionEngine {
                 self.background_tasks.clone(),
             ))
             .map_err(|error| engine_core::DirectToolError::Unknown(error.to_string()))
+    }
+
+    fn turn_input_inbox(&self) -> Option<runtime::turn_input::TurnInputInbox> {
+        Some(self.turn_inputs.clone())
     }
 
     fn abort_signal(&self) -> runtime::HookAbortSignal {

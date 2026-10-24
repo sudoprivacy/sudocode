@@ -57,6 +57,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
     let pair_root = local_pair_root_in(env.config_home());
     Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
             body: "for the sync REPL PARITY_SCENARIO:single_turn_text".to_string(),

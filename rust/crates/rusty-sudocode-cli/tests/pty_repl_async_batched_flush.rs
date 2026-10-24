@@ -97,7 +97,7 @@ fn three_queued_inputs_flush_as_one_combined_downstream_request() {
     // QueueMode::Queue takes the Queued arm — pushed to the queue tail,
     // NOT sent downstream as its own request.
     for marker in ["QUEUED_B", "QUEUED_C", "QUEUED_D"] {
-        sess.send(&format!("{marker}\r"))
+        sess.send(&format!("{marker}\t"))
             .expect("queue marker during A");
         // Small pause so the input thread ships each event as its own
         // Submit rather than concatenating on rustyline's edit buffer.

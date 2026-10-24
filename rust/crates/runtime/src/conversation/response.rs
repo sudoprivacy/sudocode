@@ -125,7 +125,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     #[allow(clippy::await_holding_lock)]
     pub(super) async fn execute_response(
         &mut self,
-        mut stream: AssistantEventStream,
+        stream: AssistantEventStream,
         iteration: usize,
         allow_tools: bool,
         observer: &mut Option<&mut dyn RuntimeObserver>,
@@ -145,7 +145,15 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             self.hook_progress_reporter.clone(),
         );
         let mut events = Vec::new();
+        let mut stream = Some(stream);
         let mut ended = false;
+        let mut yielded = false;
+        let mut at_boundary = true;
+        let inbox = self.turn_inputs.clone();
+        // Subscribe once for this response, rather than locking/re-registering
+        // on every token while an ordinary text block streams.
+        let input_ready = inbox.ready();
+        tokio::pin!(input_ready);
         let mut error = None;
         let mut cancelled = false;
         let mut assistant_index = None;
@@ -157,12 +165,31 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             tokio::select! {
                 biased;
                 () = abort.cancelled() => { cancelled = true; break; }
+                () = &mut input_ready, if !ended && at_boundary => {
+                    // Stop sampling only. Already-admitted tools still settle and
+                    // retain their real results; no interruption marker is added.
+                    drop(stream.take());
+                    ended = true;
+                    yielded = true;
+                    observe_assistant_event(observer, &AssistantEvent::MessageStop);
+                    events.push(AssistantEvent::MessageStop);
+                }
                 update = scheduler.next(prompter), if !scheduler.is_finished() => {
                     self.observe_tool_update(update, &mut scheduler, iteration, observer);
                     if let Err(failure) = self.persist_ready_results(&scheduler, &mut persisted_results) { error = Some(failure); break; }
                 }
-                next = stream.next(), if !ended => match next {
+                next = async { stream.as_mut().expect("active provider stream").next().await }, if !ended => match next {
                     Some(Ok(event)) => {
+                        // Preserve the entire consecutive thinking sequence. A
+                        // non-thinking start can yield before tool admission;
+                        // unfinished tool JSON has caused no external effects.
+                        match &event {
+                            AssistantEvent::ThinkingStart | AssistantEvent::Thinking { .. }
+                            | AssistantEvent::RedactedThinking { .. } => at_boundary = false,
+                            AssistantEvent::ResponseBlockStart | AssistantEvent::TextDelta(_)
+                            | AssistantEvent::ToolUse { .. } | AssistantEvent::MessageStop => at_boundary = true,
+                            _ => {}
+                        }
                         if let AssistantEvent::ToolUse { id, name, input, .. } = &event {
                             if !allow_tools {
                                 error = Some(RuntimeError::new("model requested tools after the computation step limit was reached"));
@@ -230,6 +257,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             persisted_results,
             error,
             cancelled,
+            yielded,
         }
     }
 
@@ -325,6 +353,7 @@ pub(super) struct ExecutedResponse {
     pub(super) results: Vec<ConversationMessage>,
     pub(super) error: Option<RuntimeError>,
     pub(super) cancelled: bool,
+    pub(super) yielded: bool,
     pub(super) context_action: Option<crate::image_input::ToolContextAction>,
 }
 
@@ -334,7 +363,7 @@ fn observe_assistant_event(
 ) {
     if let Some(obs) = observer.as_deref_mut() {
         match &event {
-            AssistantEvent::ThinkingStart => {}
+            AssistantEvent::ThinkingStart | AssistantEvent::ResponseBlockStart => {}
             AssistantEvent::Thinking { thinking, .. } => {
                 // A signature-only event carries
                 // no text; forwarding it would

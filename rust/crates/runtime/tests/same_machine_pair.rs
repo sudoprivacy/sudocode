@@ -39,6 +39,7 @@ fn mailbox(root: &Path, self_id: &str) -> Mailbox {
 
 fn note(from: &str, to: &str, body: &str) -> MailboxEnvelope {
     MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: to.to_string(),
         body: body.to_string(),

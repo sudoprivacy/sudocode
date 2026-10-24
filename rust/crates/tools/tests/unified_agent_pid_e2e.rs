@@ -35,6 +35,7 @@ fn unique_workspace(label: &str) -> std::path::PathBuf {
 
 fn envelope(kind: &str, from: &str, body: &str) -> MailboxEnvelope {
     MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: String::new(),
         body: body.to_string(),
@@ -53,6 +54,7 @@ fn envelope_with_request_id(
     request_id: &str,
 ) -> MailboxEnvelope {
     MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: String::new(),
         body: body.to_string(),
@@ -554,6 +556,7 @@ fn unified_mailbox_send_poll_roundtrip() {
 
     sender_mb
         .send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: "coordinator".to_string(),
             to: "researcher".to_string(),
             body: "investigate the auth module".to_string(),
@@ -600,6 +603,7 @@ fn unified_mailbox_read_all_from_multiple_senders() {
 
     for i in 0..5 {
         mb.send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: format!("agent-{i}"),
             to: "worker".to_string(),
             body: format!("report {i}"),
@@ -629,6 +633,7 @@ fn unified_mailbox_read_all_from_multiple_senders() {
 #[test]
 fn envelope_serializes_body_not_text() {
     let env = MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
         from: "agent".to_string(),
         to: "peer".to_string(),
         body: "content".to_string(),
@@ -837,6 +842,7 @@ fn poller_compose_multi_turn_integration() {
                         &ws_cb,
                         agent_id,
                         MailboxEnvelope {
+                            delivery: runtime::turn_input::InputDelivery::Steer,
                             from: "coordinator".to_string(),
                             to: agent_id.to_string(),
                             body: "proceed with phase 2".to_string(),
@@ -851,6 +857,7 @@ fn poller_compose_multi_turn_integration() {
                         &ws_cb,
                         agent_id,
                         MailboxEnvelope {
+                            delivery: runtime::turn_input::InputDelivery::Steer,
                             from: "coordinator".to_string(),
                             to: agent_id.to_string(),
                             body: "also update the README".to_string(),

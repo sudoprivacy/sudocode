@@ -8451,6 +8451,7 @@ async fn acp_stdio_receives_peer_messages_on_the_pair_root() {
     let peer = runtime::mailbox::Mailbox::workspace_local(&pair_root, PEER.to_string());
     for (agent, _) in &sessions {
         peer.send(runtime::agent_mailbox::MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: (*agent).to_string(),
             body: format!("for {agent} PARITY_SCENARIO:single_turn_text"),

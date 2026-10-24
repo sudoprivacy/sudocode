@@ -555,6 +555,7 @@ fn cohost_waits_for_permission_cancels_and_runs_the_next_turn() {
     );
     failed_peer
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: "failed-peer".into(),
             to: "failed-worker".into(),
             body: "FAILED-ACP-DELIVERY".into(),

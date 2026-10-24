@@ -993,6 +993,7 @@ async fn ensure_a2a_receiver(
                         mailbox.sends_so_far(),
                     ) {
                         let reply = runtime::agent_mailbox::MailboxEnvelope {
+                            delivery: runtime::turn_input::InputDelivery::Steer,
                             from: mailbox.self_id().to_string(),
                             to: message.from.clone(),
                             body,

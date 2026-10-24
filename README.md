@@ -151,6 +151,8 @@ scode doctor
 The [usage guide](docs/usage.md) covers prompt editing, background tasks,
 session recovery, configuration, and output formats. The
 [ACP guide](docs/acp.md) covers transports, permissions, and session controls.
+The [input controls](docs/usage.md#steering-queueing-and-cancellation) distinguish
+steering current work, queueing the next turn, flushing, and cancellation.
 
 ## Build and contribute
 

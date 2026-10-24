@@ -557,7 +557,7 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
     let queued = "StyleQueuedMarker 待办 日本語";
     sess.send(queued).expect("type queued message");
     common::expect_input_line(&sess, queued, common::DEFAULT_TIMEOUT, "queued draft");
-    sess.send("\r").expect("queue draft");
+    sess.send("\t").expect("queue draft");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     expect_style(&sess, "StyleQueuedMarker", ("Default", false, false));
     expect_style(&sess, "╭─", (border, !no_color, false));
@@ -578,7 +578,7 @@ fn running_card_and_queued_input_styles(light: bool, no_color: bool) {
         common::DEFAULT_TIMEOUT,
         "recall removes the queue preview",
     );
-    sess.send("\r").expect("requeue the recalled message");
+    sess.send("\t").expect("requeue the recalled message");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));
     sess.resize(30, 78).expect("resize during tool");
     expect_style(&sess, "↳ queued: StyleQueuedMarker", (label, false, false));

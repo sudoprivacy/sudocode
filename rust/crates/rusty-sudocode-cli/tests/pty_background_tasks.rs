@@ -590,6 +590,90 @@ fn exiting_during_a_foreground_tool_reaps_both_process_groups() {
     }
 }
 
+/// The tools promise "end your turn — you will be notified". A shell that
+/// finishes while the prompt is idle must reach the model by itself: nobody
+/// types after the launch turn ends.
+#[test]
+fn a_background_shell_finishing_at_an_idle_prompt_reports_to_the_model() {
+    let (env, _release) = task_env("background-idle-wake");
+    let mut session = start(
+        &env,
+        &[shell(
+            "wake",
+            "while [ ! -f release ]; do sleep 0.1; done; echo IDLE_WAKE_OUTPUT",
+            "Idle wake fixture",
+        )],
+    );
+    let before = common::turn_status_marker(&session);
+    let launched = env.is_mock().then(|| env.captured_message_count());
+    fs::write(env.workspace_root().join("release"), "go").unwrap();
+    common::expect_screen(
+        &session,
+        |s| s.contains("Background task \"Idle wake fixture\" completed (exit 0)"),
+        common::LIVE_TURN_BUDGET,
+        "completion shown in scrollback",
+    );
+    common::expect_turn_complete_after(
+        &session,
+        &before,
+        common::LIVE_TURN_BUDGET,
+        "the completion ran a turn with no human input",
+    );
+    if let Some(launched) = launched {
+        let bodies = env.captured_message_bodies();
+        let woke = &bodies[launched..];
+        assert!(
+            woke.iter()
+                .any(|body| body.contains("<task-notification>")
+                    && body.contains("IDLE_WAKE_OUTPUT")),
+            "the model never received the finished shell: {woke:?}"
+        );
+    }
+    expect_input_ready(&session, common::DEFAULT_TIMEOUT, "back at input");
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+}
+
+/// `/exit` while the provider is still answering ends that turn (`Close`
+/// aborts in-flight work). A finished task now starts turns at idle, so a
+/// turn under a racing `/exit` is ordinary and must not hold shutdown.
+#[test]
+fn exiting_while_the_provider_is_answering_cancels_the_turn() {
+    let (env, _release) = task_env("exit-cancels-streaming-turn");
+    if !env.is_mock() {
+        // The stall is a mock control; a live provider has no such switch.
+        return;
+    }
+    // Never released: the mock holds its stream until its own deadline.
+    let stall = env.workspace_root().join("stream-never-released");
+    let calls = [
+        json!({"id":"stalled","name":"Bash","input":{"command":"echo unreachable","description":"Stalled stream fixture"},"stream_wait_for":stall}),
+    ];
+    let mut session = spawn_for_calls(&env, &calls);
+    session.resize(40, 100).unwrap();
+    expect_input_ready(&session, Duration::from_secs(30), "ready");
+    send_calls(&env, &mut session, &calls);
+    let deadline = Instant::now() + common::DEFAULT_TIMEOUT;
+    while env.captured_message_count() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the turn never reached the provider"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Let the stream reach its stall point before leaving.
+    std::thread::sleep(Duration::from_millis(500));
+    let exit_started = Instant::now();
+    session.set_default_timeout(Duration::from_secs(45));
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+    let took = exit_started.elapsed();
+    assert!(
+        took < Duration::from_secs(10),
+        "exit waited for the stalled turn instead of cancelling it: {took:?}"
+    );
+}
+
 /// Run the same real-shell workload against baseline and candidate releases.
 #[test]
 #[ignore = "manual release A/B measurement"]

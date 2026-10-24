@@ -32,6 +32,7 @@ fn persisted_message_is_consumed_when_the_receiver_first_starts() {
     let outbox = Mailbox::workspace_local(&root, sender.into());
     outbox
         .send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: sender.into(),
             to: recipient,
             body: body.clone(),

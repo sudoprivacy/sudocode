@@ -9,6 +9,12 @@ use crossterm::style::ContentStyle;
 use engine_core::{Tip, TipPriority};
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy)]
+pub(super) struct FooterHints<'a> {
+    pub transient: Option<&'a str>,
+    pub controls: Option<&'a str>,
+}
+
 #[derive(Clone, Default)]
 pub(super) struct FooterTips {
     model: BTreeMap<TipPriority, Tip>,
@@ -39,14 +45,18 @@ impl FooterTips {
         tasks: &TaskBrowser,
         submitted: bool,
         active: bool,
-        native_hint: Option<&str>,
+        hints: FooterHints<'_>,
         width: usize,
     ) -> StyledText {
-        let native = native_hint.map(|message| Tip {
+        let native = hints.transient.map(|message| Tip {
             priority: TipPriority::Urgent,
             message: StyledText::from_ansi(message)
                 .text
                 .replace(['\n', '\r', '\t'], " "),
+        });
+        let control = hints.controls.map(|message| Tip {
+            priority: TipPriority::Normal,
+            message: message.to_string(),
         });
         let ordinary = Tip {
             priority: TipPriority::Normal,
@@ -68,6 +78,7 @@ impl FooterTips {
             })
             .or((!active).then_some(&ordinary))
             .filter(|tip| !active || tip.priority == TipPriority::Urgent)
+            .or(control.as_ref())
             .filter(|tip| tasks.focus == TaskFocus::Input || tip.priority == TipPriority::Urgent);
 
         let mut base = truncate_to_width(&format!("  ⏵⏵ {permission}"), width);

@@ -52,6 +52,43 @@ typing share the editor's current buffer and cursor, even in one key burst;
 no redraw is required between them. On an empty draft, `Up` recalls queued
 human messages before history, leaving inbound peer messages queued.
 
+## Steering, queueing and cancellation
+
+These controls apply to the default asynchronous REPL. Starting with
+`SUDOCODE_INTERRUPT_QUEUE_MODE=off` selects the legacy synchronous REPL,
+which retains turn-boundary delivery.
+
+While the model or tools are working:
+
+| Key | Behavior |
+| --- | --- |
+| Enter | Offer the message within the current task. |
+| Tab | Queue the message for the next turn; slash command completion keeps Tab. |
+| Esc with pending messages | Flush the entire queue into the current task. |
+| Esc without pending messages, or Ctrl+C | Cancel the current turn. Ctrl+C always cancels. |
+
+Steering adds ordinary input to the conversation, without an instruction to
+abandon the original task. The model can use a suggestion or treat it as FYI.
+Sampling yields at replayable text or before a tool is admitted. Consecutive
+thinking blocks remain complete and unchanged. Already admitted tools finish
+and their results reach the model before the new input.
+Flush preserves the unsent draft and does not add an interruption marker.
+Cancelling with Esc also keeps the unsent draft; Ctrl+C clears it.
+
+The pending area distinguishes `queued` from `steering`. A steering message
+stays visible until it enters the conversation. `Up` recalls explicitly queued
+human input, keeping peer messages and accepted steering out of the editor.
+Cancellation preserves unapplied messages without automatically restarting
+work; Enter or Esc resumes that retained queue. A second Ctrl+C within 800 ms
+exits. Session management commands require an idle turn and return immediately
+when work is active.
+
+For an interactive peer, `send` accepts `delivery: "steer"` (default) or
+`delivery: "queue"`. Peer provenance and message bodies remain intact. Other
+hosts deliver at their turn boundaries. Delivery intent never grants a peer
+permission to cancel the human's task; the existing structured subagent
+shutdown request remains a separate control operation.
+
 ## Global and project directories
 
 All native config paths resolve through `runtime::config`. The same roots own

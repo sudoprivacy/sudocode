@@ -104,7 +104,7 @@ fn queued_session(label: &str, messages: &[&str]) -> (TestEnv, PtySession) {
     sess.send(&format!("{prompt}\r")).expect("start long turn");
     sess.expect("interrupt-start").expect("tool started");
     for message in messages {
-        sess.send(&format!("{message}\r"))
+        sess.send(&format!("{message}\t"))
             .expect("queue human message");
         wait_for_screen(
             &sess,
@@ -162,6 +162,7 @@ fn inject_with_kind(env: &TestEnv, receiver: &str, from: &str, body: &str, kind:
         Mailbox::workspace_local(&local_pair_root_in(env.config_home()), from.to_string());
     mailbox
         .send(MailboxEnvelope {
+            delivery: engine_events::InputDelivery::Queue,
             from: from.to_string(),
             to: receiver.to_string(),
             body: body.to_string(),
@@ -623,7 +624,7 @@ fn up_arrow_pops_human_and_skips_queued_a2a() {
 
     // Queue a HUMAN message during the turn. Its overlay chip renders as
     // `↳ queued: HUMAN-EDIT-MARKER` (no `❯` in the chip display).
-    sess.send(&format!("{HUMAN_MARKER}\r"))
+    sess.send(&format!("{HUMAN_MARKER}\t"))
         .expect("queue human marker during turn");
     wait_for_screen(
         &sess,
@@ -682,7 +683,11 @@ fn a2a_received_during_a_turn_shows_in_pending_overlay() {
     wait_for_screen(&sess, "draft cleared", |screen| {
         screen.contains('❯') && input_text(screen).is_empty()
     });
-    sess.send("\x1b").unwrap(); // Cancel Bash; the queued peer now runs.
+    sess.send("\x03").unwrap(); // Hard-cancel while preserving the explicit queue.
+    wait_for_screen(&sess, "foreground task cancelled", |s| {
+        s.contains("Cancelled")
+    });
+    sess.send("\x1b").unwrap(); // Flush the retained queue while idle.
     wait_for_screen(&sess, "complete peer body flushed", |s| {
         s.contains("│ QUEUED-BODY-END") && !has_chip(s, "Message from mac-ai")
     });
@@ -811,7 +816,7 @@ fn up_arrow_recalls_all_queued_humans_in_submit_order() {
     });
     // Resubmit the edited multiline block and recall it again: proves the
     // composed text round-trips through the real queue without losing a line.
-    sess.send("\r").expect("resubmit stack");
+    sess.send("\t").expect("resubmit stack");
     wait_for_screen(&sess, "edited stack re-queued", |screen| {
         input_text(screen).is_empty() && has_chip(screen, FIRST)
     });

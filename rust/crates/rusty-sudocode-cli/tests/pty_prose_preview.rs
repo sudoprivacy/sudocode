@@ -258,13 +258,14 @@ fn cancel_commits_visible_partial_prose_once() {
         "cancel commits visible prose",
     );
     session.render(|screen| assert_eq!(screen.contents().matches("ProseStart").count(), 1));
-    // Escape intentionally clears the draft in the existing input policy.
-    common::expect_input_line_cleared(
+    // Esc keeps the unsent draft for both soft flush and hard cancellation.
+    common::expect_input_line(
         &session,
+        "keep-draft",
         common::DEFAULT_TIMEOUT,
-        "input ready after cancel",
+        "cancel preserves the unsent draft",
     );
-    session.send("after-cancel").unwrap();
+    session.send("\x15after-cancel").unwrap();
     common::expect_input_line(
         &session,
         "after-cancel",

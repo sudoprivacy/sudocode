@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use sha2::{Digest, Sha256};
+
 use crate::fs_backend::{FsBackend, FsLock, RecordLogMode};
 use crate::session::history::ContextHistory;
 
@@ -91,7 +93,7 @@ impl SessionWriter {
         if fs.exists(&path).map_err(|error| error.to_string())?
             && fs.stat(&path).map_err(|error| error.to_string())?.len > 0
         {
-            let bytes = fs.read(&path).map_err(|error| error.to_string())?;
+            let bytes = fs.read_snapshot(&path).map_err(|error| error.to_string())?;
             let contents =
                 crate::session_history::decode(&bytes).map_err(|error| error.to_string())?;
             let shared = crate::Session::shared_history_suffix(contents)?.is_some();
@@ -183,9 +185,13 @@ impl SessionWriter {
         }
         let path = transcript.to_string_lossy();
         let mode = if fs.exists(&path).map_err(|error| error.to_string())? {
-            let bytes = fs.read(&path).map_err(|error| error.to_string())?;
+            let bytes = fs.read_snapshot(&path).map_err(|error| error.to_string())?;
             if !crate::session::history::is_record_history(&bytes) {
-                return Err("session history initialization binding missing".into());
+                if !native {
+                    return Err("session history initialization binding missing".into());
+                }
+                let _owners = Self::exclude_writers(fs.as_ref(), transcript, None)?;
+                Self::migrate_native_history(fs.as_ref(), transcript, &bytes, seed)?;
             }
             RecordLogMode::Existing
         } else {
@@ -240,6 +246,48 @@ impl SessionWriter {
             })),
             _legacy_owner: None,
         }))
+    }
+
+    /// Preserve the source bytes before publishing the new record-log binding.
+    /// The caller holds the SID transaction and has excluded all old writers.
+    fn migrate_native_history(
+        fs: &dyn FsBackend,
+        transcript: &Path,
+        bytes: &[u8],
+        seed: &crate::Session,
+    ) -> Result<(), String> {
+        let contents = crate::session_history::decode(bytes).map_err(|error| error.to_string())?;
+        let source =
+            crate::Session::from_persisted_contents(contents).map_err(|error| error.to_string())?;
+        if source.session_id != seed.session_id {
+            return Err("session history identity mismatch".into());
+        }
+        let record = crate::session::history::HistoryRecord::initialize(&source)
+            .and_then(|record| record.encode())
+            .map_err(|error| error.to_string())?;
+        drop(source);
+        let valid = crate::session::history::HistoryGraph::decode(&record)
+            .map(|graph| graph.latest_commit().is_some())
+            .map_err(|error| error.to_string())?;
+        if !valid {
+            return Err("legacy session history initialization rejected".into());
+        }
+        let archive = format!(
+            "{}.before-history-upgrade-{:x}",
+            transcript.display(),
+            Sha256::digest(bytes)
+        );
+        let is_archived = fs.exists(&archive).map_err(|error| error.to_string())?;
+        if is_archived && fs.read(&archive).map_err(|error| error.to_string())? != bytes {
+            return Err("legacy session archive contents changed".into());
+        }
+        crate::subagent_completion::prepare_shared_storage(fs, transcript)?;
+        if !is_archived {
+            fs.write_atomic(&archive, bytes)
+                .map_err(|error| error.to_string())?;
+        }
+        fs.write_atomic(&transcript.to_string_lossy(), &record)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn history_session(&self) -> Result<Option<crate::Session>, String> {

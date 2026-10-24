@@ -40,17 +40,43 @@ impl ContextHistory {
             failed: None,
         };
         match current.history.commit(&record, COMMIT_TIMEOUT)? {
-            RecordOutcome::Applied => Ok(current),
+            RecordOutcome::Applied => {}
             RecordOutcome::Rejected(reason) if reason == "history_already_initialized" => {
                 let branch = source.map_or_else(HistoryRecord::branch_latest, |id| {
                     HistoryRecord::branch(id.into())
                 });
                 current.context = branch.context_id().into();
                 current.commit(&branch)?;
-                Ok(current)
             }
-            RecordOutcome::Rejected(reason) => Err(invalid(reason)),
+            RecordOutcome::Rejected(reason) => return Err(invalid(reason)),
         }
+        current.recover_inherited_calls()?;
+        Ok(current)
+    }
+
+    fn recover_inherited_calls(&mut self) -> io::Result<()> {
+        let mut session = self.session()?;
+        if session.sanitize_orphan_tool_uses() == 0 {
+            return Ok(());
+        }
+        let graph = self.history.graph();
+        let source: HashSet<_> = graph.message_ids(&self.context)?.into_iter().collect();
+        let retained: Vec<_> = session
+            .messages
+            .iter()
+            .map(|message| {
+                message
+                    .history
+                    .as_ref()
+                    .map(|identity| identity.id.as_str())
+                    .filter(|id| source.contains(*id))
+            })
+            .collect();
+        // The existing projection record carries the exact recovery payload.
+        // Replay never regenerates durable diagnostics from today's wording.
+        let record =
+            graph.prepare_projection(&self.context, self.revision()?, &session, &retained)?;
+        self.commit(&record)
     }
 
     fn check(&self) -> io::Result<()> {

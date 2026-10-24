@@ -318,4 +318,12 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$SESSION_RESUME_BUN
   | tee "$WORK_DIR/shared-sid-test.log"
 grep -F "test result: ok. 1 passed; 0 failed;" "$WORK_DIR/shared-sid-test.log" >/dev/null
 
+echo "== 10. filesystem stream reads preserve every committed frame =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_filesystem_stream_read_and_append_preserve_all_frames -- --ignored --nocapture
+
+echo "== 11. a silent client connection times out and recovers =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_a_silent_transport_errors_and_then_recovers -- --ignored --nocapture
+
 echo "COHOST E2E OK"

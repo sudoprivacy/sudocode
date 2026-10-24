@@ -1907,7 +1907,6 @@ fn live_cohost_session_resume() {
 #[test]
 #[ignore = "requires the shared-history stage of e2e/nexus-a2a/run-cohost.sh"]
 fn live_cohost_shared_sid_concurrent_contexts() {
-    use runtime::history::{HistoryGraph, HistoryRecord};
     use serde_json::{json, Value};
     let operator = Arc::new(model_operator());
     let agent = format!("shared-sid-probe-{}", fresh());
@@ -2039,16 +2038,7 @@ fn live_cohost_shared_sid_concurrent_contexts() {
         cursor = frame.next_offset;
     }
     let history = String::from_utf8(durable).unwrap();
-    let graph = HistoryGraph::decode(history.as_bytes()).expect("committed v3 history");
-    let mut tool_origins = std::collections::BTreeSet::new();
-    for line in history.lines() {
-        let record: HistoryRecord = serde_json::from_str(line).unwrap();
-        if let Some(id) = record.message_id() {
-            if let Some(origin) = graph.tool_origin(id, "call_1") {
-                tool_origins.insert(origin.to_owned());
-            }
-        }
-    }
+    let tool_origins = shared_history_tool_origins(&history);
     assert_eq!(
         tool_origins.len(),
         2,
@@ -2062,23 +2052,35 @@ fn live_cohost_shared_sid_concurrent_contexts() {
     for label in ["A", "B"] {
         let own = format!("{label}_CONTEXT_PROMPT");
         let other = format!("{}_CONTEXT_PROMPT", if label == "A" { "B" } else { "A" });
+        let is_later_resume = label == "B";
         let captured: Vec<_> = requests
             .iter()
             .filter(|entry| entry.name.ends_with(".prompt"))
             .filter_map(|entry| operator.read(&listed_path("/model", &entry.name), "").ok())
             .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .filter(|request| request["body"]["messages"].to_string().contains(&own))
+            .filter(|request| {
+                is_later_resume || !request["body"]["messages"].to_string().contains(&other)
+            })
             .collect();
         assert!(
             !captured.is_empty(),
             "actual model request for {label} missing"
         );
-        assert!(
-            captured
-                .iter()
-                .all(|request| !request["body"]["messages"].to_string().contains(&other)),
-            "contexts crossed"
-        );
+        for request in captured {
+            let messages = request["body"]["messages"].to_string();
+            assert_eq!(
+                messages.contains(&other),
+                is_later_resume,
+                "a later resume inherits the source's already written input"
+            );
+            if is_later_resume {
+                assert!(
+                    !messages.contains("A_MODEL_DONE"),
+                    "the source's later reply must stay outside the frozen continuation"
+                );
+            }
+        }
     }
     let linked_agent = format!("{agent}-linked");
     let mut linked_request = request.clone();
@@ -2141,7 +2143,7 @@ fn live_cohost_shared_sid_concurrent_contexts() {
         operator.read(&linked_file, "").unwrap(),
         b"linked Agent durable effect"
     );
-    let mut complete_history = history.into_bytes();
+    let mut linked_history = history.into_bytes();
     loop {
         let frame = operator
             .stream_read_at(&path, cursor, false, 0, "")
@@ -2151,18 +2153,61 @@ fn live_cohost_shared_sid_concurrent_contexts() {
         }
         assert!(frame.next_offset > cursor);
         cursor = frame.next_offset;
-        complete_history.extend(frame.data);
+        linked_history.extend(frame.data);
     }
-    let graph = HistoryGraph::decode(&complete_history).expect("linked Agent committed history");
-    let completed = graph.completed_session(None).unwrap();
-    assert_eq!(completed.session_id, sid);
-    assert_eq!(completed.identity.as_ref().unwrap().agent_name, agent);
-    assert!(completed.messages().iter().flat_map(|message| &message.blocks).any(|block|
+    let graph = runtime::history::HistoryGraph::decode(&linked_history).unwrap();
+    let restored = graph.resume_session().unwrap();
+    assert_eq!(restored.session_id, sid);
+    assert!(restored.messages().iter().flat_map(|message| &message.blocks).any(|block|
         matches!(block, runtime::ContentBlock::Text { text } if text.contains("linked Agent durable effect"))));
+    assert_eq!(
+        restored.identity.as_ref().unwrap().agent_name,
+        agent,
+        "linked context must preserve the durable session identity"
+    );
+    assert_eq!(
+        shared_history_tool_origins(std::str::from_utf8(&linked_history).unwrap()).len(),
+        3,
+        "the linked Agent's tool result requires its own assistant origin"
+    );
     println!(
         "COHOST SHARED SID OK: {sid}, linked Agent={linked_agent}, independent PIDs={},{}",
         first["session_id"], second["session_id"]
     );
+}
+
+fn shared_history_tool_origins(history: &str) -> std::collections::BTreeSet<String> {
+    use runtime::history::{HistoryGraph, HistoryRecord};
+    let graph = HistoryGraph::decode(history.as_bytes()).unwrap();
+    let contexts: std::collections::BTreeSet<_> = history
+        .lines()
+        .map(|line| serde_json::from_str::<HistoryRecord>(line).unwrap())
+        .map(|record| record.context_id().to_owned())
+        .collect();
+    let mut origins = std::collections::BTreeSet::new();
+    for context in contexts {
+        let session = graph.context_session(&context).unwrap();
+        for message in session.messages() {
+            if !message.blocks.iter().any(|block| {
+                matches!(block, runtime::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call_1")
+            }) {
+                continue;
+            }
+            let identity = message.history.as_ref().unwrap();
+            let origin = &identity.tool_origins["call_1"];
+            assert!(
+                session.messages().iter().any(|assistant| {
+                    assistant.history.as_ref().is_some_and(|identity| identity.id == *origin)
+                    && assistant.blocks.iter().any(|block| {
+                        matches!(block, runtime::ContentBlock::ToolUse { id, .. } if id == "call_1")
+                    })
+                }),
+                "a restored result must resolve to its originating assistant"
+            );
+            origins.insert(origin.clone());
+        }
+    }
+    origins
 }
 
 /// Atomic reader claims and receipt recovery through mTLS, gRPC and Raft.

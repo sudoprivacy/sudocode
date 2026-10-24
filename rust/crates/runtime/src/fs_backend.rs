@@ -202,6 +202,11 @@ pub trait FsBackend: Send + Sync + 'static {
         ))
     }
     fn read(&self, path: &str) -> io::Result<Vec<u8>>;
+    /// Read a complete view coordinated with backend record writers.
+    /// Atomic object and framed-stream backends use their ordinary read.
+    fn read_snapshot(&self, path: &str) -> io::Result<Vec<u8>> {
+        self.read(path)
+    }
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()>;
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()>;
     fn delete(&self, path: &str) -> io::Result<()>;
@@ -544,6 +549,9 @@ impl FsBackend for Arc<dyn FsBackend> {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         (**self).read(path)
     }
+    fn read_snapshot(&self, path: &str) -> io::Result<Vec<u8>> {
+        (**self).read_snapshot(path)
+    }
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
         (**self).write(path, data)
     }
@@ -758,6 +766,8 @@ impl FsBackend for StdFsBackend {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
+        // Recovery mutates the same inode that snapshot readers lock.
+        file.lock()?;
         let length = file.metadata()?.len();
         if length == 0 {
             return Ok(());
@@ -845,6 +855,9 @@ impl FsBackend for StdFsBackend {
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
         std::fs::read(path)
     }
+    fn read_snapshot(&self, path: &str) -> io::Result<Vec<u8>> {
+        record_log::read_native_snapshot(path)
+    }
 
     /// A real OS link where the platform gives one without privilege, else a small
     /// file holding the path it points at.
@@ -910,9 +923,13 @@ impl FsBackend for StdFsBackend {
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
+            // Windows requires read access to lock an append handle.
+            .read(cfg!(windows))
             .create(true)
             .append(true)
             .open(path)?;
+        // Coordinate legacy appends with native snapshots and record writers.
+        file.lock()?;
         file.write_all(data)
     }
 
@@ -1001,9 +1018,32 @@ impl FsBackend for StdFsBackend {
     }
 
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        let temp = format!("{path}.tmp.{}", std::process::id());
-        std::fs::write(&temp, data)?;
-        std::fs::rename(&temp, path)
+        use std::io::Write;
+
+        let temp = format!("{path}.tmp.{}", uuid::Uuid::new_v4());
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)?;
+            file.write_all(data)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temp, path)?;
+            #[cfg(unix)]
+            {
+                let parent = std::path::Path::new(path)
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                std::fs::File::open(parent)?.sync_all()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
     }
 
     /// The turn's workspace root (see [`crate::workspace_root`]), which is

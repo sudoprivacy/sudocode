@@ -13,7 +13,10 @@ use crate::{ContentBlock, Session, SubagentLifecycle, SubagentPhase};
 mod control;
 mod storage;
 mod terminal;
-pub(crate) use storage::{check_response_storage, check_shared_storage, prepare_shared_storage};
+pub(crate) use storage::{
+    check_response_storage, check_shared_storage, is_binding_file as is_completion_binding_file,
+    prepare_shared_storage,
+};
 use terminal::TerminalSource;
 pub use terminal::{ShellKind, TaskCompletion, TerminalCompletion, TerminalSnapshot};
 

@@ -670,6 +670,9 @@ pub fn resolve_managed_session_path_for(
 
 #[must_use]
 pub fn is_managed_session_file(path: &Path) -> bool {
+    if crate::subagent_completion::is_completion_binding_file(path) {
+        return false;
+    }
     // Rotation snapshots (`<id>.rot-<ts>.jsonl`) share the .jsonl extension but
     // are NOT resumable sessions: each carries the same internal session_id as
     // its parent, so listing them yields duplicate entries for one session.

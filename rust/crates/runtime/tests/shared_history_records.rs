@@ -254,7 +254,7 @@ fn completed_forks_survive_live_tools_compaction_and_restart() {
     assert!(!fixture.0.join("actual-tool-result").exists());
 
     let mut b = HistoryLog::new(fixture.log(RecordLogMode::Existing));
-    let branch = HistoryRecord::branch_latest();
+    let branch = HistoryRecord::branch(seed.id().into());
     commit(&mut b, &branch);
     let context = branch.context_id();
     assert_eq!(

@@ -74,6 +74,150 @@ fn encode(value: &Value) -> Vec<u8> {
     bytes
 }
 
+fn wait_for_marker(worker: &mut Worker, path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !path.exists() {
+        assert!(
+            worker.0.try_wait().unwrap().is_none(),
+            "record writer exited"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "record writer did not become ready"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn native_snapshot_waits_for_another_process_to_finish_its_commit() {
+    if let Ok(root) = std::env::var(WORKER_DIR) {
+        let root = Path::new(&root);
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(root.join("events.jsonl"))
+            .unwrap();
+        file.lock().unwrap();
+        file.write_all(b"{\"committed\":").unwrap();
+        std::fs::write(root.join("snapshot-ready"), b"ready").unwrap();
+        while !root.join("snapshot-release").exists() {
+            thread::sleep(Duration::from_millis(10));
+        }
+        file.write_all(b"\"after-lock\"}\n").unwrap();
+        file.sync_data().unwrap();
+        return;
+    }
+    let fixture = Fixture::new();
+    let path = fixture.0.join("events.jsonl");
+    let mut writer = Worker::spawn(
+        &fixture.0,
+        "snapshot",
+        "native_snapshot_waits_for_another_process_to_finish_its_commit",
+    );
+    wait_for_marker(&mut writer, &fixture.0.join("snapshot-ready"));
+    #[cfg(windows)]
+    assert_eq!(
+        StdFsBackend
+            .read(&path.to_string_lossy())
+            .unwrap_err()
+            .raw_os_error(),
+        Some(33)
+    );
+    let (started, running) = std::sync::mpsc::sync_channel(1);
+    let (ready, result) = std::sync::mpsc::sync_channel(1);
+    let reader = thread::spawn(move || {
+        let fs: std::sync::Arc<dyn FsBackend> = std::sync::Arc::new(StdFsBackend);
+        started.send(()).unwrap();
+        ready
+            .send(fs.read_snapshot(&path.to_string_lossy()))
+            .unwrap();
+    });
+    running.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        matches!(
+            result.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ),
+        "snapshot bypassed the writer's commit lock"
+    );
+    std::fs::write(fixture.0.join("snapshot-release"), b"commit").unwrap();
+    writer.finish();
+    assert_eq!(
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+        b"{\"committed\":\"after-lock\"}\n"
+    );
+    reader.join().unwrap();
+}
+
+#[test]
+fn native_legacy_writes_wait_for_shared_snapshot_readers() {
+    if let Ok(root) = std::env::var(WORKER_DIR) {
+        let root = Path::new(&root);
+        let path = root.join("events.jsonl");
+        std::fs::write(root.join("legacy-ready"), b"ready").unwrap();
+        match std::env::var(WORKER_ID).unwrap().as_str() {
+            "append" => StdFsBackend
+                .append(&path.to_string_lossy(), b"{\"after\":true}\n")
+                .unwrap(),
+            "recover" => StdFsBackend
+                .recover_append_log(&path.to_string_lossy())
+                .unwrap(),
+            operation => panic!("unknown legacy operation: {operation}"),
+        }
+        return;
+    }
+
+    for operation in ["append", "recover"] {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("events.jsonl");
+        let initial = if operation == "append" {
+            b"{\"before\":true}\n".as_slice()
+        } else {
+            b"{\"before\":true}\n{\"partial\":".as_slice()
+        };
+        std::fs::write(&path, initial).unwrap();
+        let mut snapshot = std::fs::File::open(&path).unwrap();
+        snapshot.lock_shared().unwrap();
+        let mut worker = Worker::spawn(
+            &fixture.0,
+            operation,
+            "native_legacy_writes_wait_for_shared_snapshot_readers",
+        );
+        wait_for_marker(&mut worker, &fixture.0.join("legacy-ready"));
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while Instant::now() < deadline {
+            assert!(
+                worker.0.try_wait().unwrap().is_none(),
+                "legacy {operation} bypassed or failed on the snapshot lock"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut observed = Vec::new();
+        std::io::Read::read_to_end(&mut snapshot, &mut observed).unwrap();
+        assert_eq!(
+            observed, initial,
+            "snapshot bytes changed during {operation}"
+        );
+        snapshot.unlock().unwrap();
+        worker.finish();
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            if operation == "append" {
+                b"{\"before\":true}\n{\"after\":true}\n".as_slice()
+            } else {
+                b"{\"before\":true}\n".as_slice()
+            },
+            "legacy {operation} must finish after the reader releases its lock"
+        );
+    }
+}
+
 #[test]
 fn native_records_preserve_large_concurrent_process_writes() {
     if let Ok(root) = std::env::var(WORKER_DIR) {
@@ -174,18 +318,7 @@ fn native_record_recovery_preserves_commits_after_process_death() {
         "partial",
         "native_record_recovery_preserves_commits_after_process_death",
     );
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !fixture.0.join("partial-ready").exists() {
-        assert!(
-            worker.0.try_wait().unwrap().is_none(),
-            "partial writer exited"
-        );
-        assert!(
-            Instant::now() < deadline,
-            "partial writer did not become ready"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_marker(&mut worker, &fixture.0.join("partial-ready"));
     worker.0.kill().unwrap();
     worker.0.wait().unwrap();
     assert_eq!(log.read(cursor).unwrap(), (Vec::new(), cursor));

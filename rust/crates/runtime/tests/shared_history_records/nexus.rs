@@ -30,6 +30,7 @@ fn live_shared_history_preserves_contexts_while_sibling_tool_runs() {
     let path = format!("{directory}/events");
     let mut a = HistoryLog::new(fs.record_log(&path, RecordLogMode::CreateNew).unwrap());
     let prefix = seed(&mut a);
+    let completed_prefix = a.graph().latest_commit().unwrap().to_string();
     let branch_a = HistoryRecord::branch_latest();
     commit(&mut a, &branch_a);
     let context_a = branch_a.context_id();
@@ -55,7 +56,7 @@ fn live_shared_history_preserves_contexts_while_sibling_tool_runs() {
             .record_log(&path, RecordLogMode::Existing)
             .unwrap(),
     );
-    let branch_b = HistoryRecord::branch_latest();
+    let branch_b = HistoryRecord::branch(completed_prefix);
     commit(&mut b, &branch_b);
     let context_b = branch_b.context_id();
     assert_eq!(

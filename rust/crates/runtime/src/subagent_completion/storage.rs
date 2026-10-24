@@ -14,6 +14,7 @@ fn is_context_entry(entry: &crate::fs_backend::FsDirEntry) -> bool {
 }
 
 pub(crate) const SHARED_VERSION: u32 = 3;
+const BINDING_EXTENSION: &str = "completions.json";
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Binding {
@@ -25,7 +26,14 @@ pub(super) struct Binding {
 }
 
 fn binding_path(transcript: &Path) -> PathBuf {
-    transcript.with_extension("completions.json")
+    transcript.with_extension(BINDING_EXTENSION)
+}
+
+pub(crate) fn is_binding_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(BINDING_EXTENSION))
+        .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 fn context_dir(transcript: &Path) -> PathBuf {

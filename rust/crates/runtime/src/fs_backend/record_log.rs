@@ -66,6 +66,18 @@ pub(super) struct NativeRecordLog {
     file: Mutex<File>,
 }
 
+/// Match the writer's inode lock while retaining raw legacy and record bytes.
+/// Closing this read-only handle releases its shared OS lock.
+pub(super) fn read_native_snapshot(path: &str) -> io::Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    file.lock_shared()?;
+    let length = usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(length).map_err(io::Error::other)?;
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Closing a process releases the OS lock, including after an incomplete write.
 struct LockedFile<'a>(MutexGuard<'a, File>);
 

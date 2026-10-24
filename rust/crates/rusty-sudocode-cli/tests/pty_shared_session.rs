@@ -239,23 +239,30 @@ fn run_print_turn(env: &TestEnv, transcript: &std::path::Path, marker: &str) {
 
 #[test]
 fn independent_cli_processes_append_to_the_same_sid_while_both_turns_are_open() {
-    run_two_cli_contexts(false);
+    run_two_cli_contexts(false, false);
 }
 
 #[test]
-fn resuming_during_another_turn_forks_the_last_completed_turn() {
-    run_two_cli_contexts(true);
+fn resuming_during_another_turn_inherits_its_written_prefix() {
+    run_two_cli_contexts(true, false);
 }
 
-fn run_two_cli_contexts(is_second_started_late: bool) {
-    let env = shared_mock(if is_second_started_late {
+#[test]
+fn legacy_session_migrates_before_independent_cli_processes_resume() {
+    run_two_cli_contexts(true, true);
+}
+
+fn run_two_cli_contexts(is_second_started_late: bool, is_legacy_seed: bool) {
+    let env = shared_mock(if is_legacy_seed {
+        "shared-sid-legacy-two-processes"
+    } else if is_second_started_late {
         "shared-sid-late-runtime"
     } else {
         "shared-sid-two-processes"
     });
     let root = env.workspace_root();
     let transcript = root.join("shared.jsonl");
-    save_seed(&Session::new().with_workspace_root(root), &transcript);
+    seed_cli_context(root, &transcript, is_legacy_seed);
     let dump = root.join("requests");
     fs::create_dir_all(&dump).unwrap();
     let variables = [("SUDOCODE_DUMP_REQUESTS", dump.to_str().unwrap())];
@@ -298,7 +305,7 @@ fn run_two_cli_contexts(is_second_started_late: bool) {
         common::expect_input_line_cleared(
             second,
             env.timeout(),
-            "late runtime restored completed context",
+            "late runtime restored the written prefix",
         );
     }
     // The first response remains blocked while a separate process submits the
@@ -340,7 +347,30 @@ fn run_two_cli_contexts(is_second_started_late: bool) {
     for cli in [&mut first, second] {
         exit_cli(&env, cli);
     }
-    let durable = fs::read_to_string(&transcript).unwrap();
+    assert_two_cli_contexts(&transcript, &dump, is_second_started_late, is_legacy_seed);
+}
+
+fn seed_cli_context(root: &std::path::Path, transcript: &std::path::Path, is_legacy_seed: bool) {
+    let mut seed = Session::new().with_workspace_root(root);
+    if is_legacy_seed {
+        seed.push_user_text("LEGACY_DURABLE_PREFIX").unwrap();
+        seed.push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "LEGACY_DURABLE_ANSWER".into(),
+        }]))
+        .unwrap();
+        fs::write(transcript, seed.to_json().unwrap().render()).unwrap();
+    } else {
+        save_seed(&seed, transcript);
+    }
+}
+
+fn assert_two_cli_contexts(
+    transcript: &std::path::Path,
+    dump: &std::path::Path,
+    is_second_started_late: bool,
+    is_legacy_seed: bool,
+) {
+    let durable = fs::read_to_string(transcript).unwrap();
     for expected in [
         "FIRST_CONTEXT_PROMPT",
         "SECOND_CONTEXT_PROMPT",
@@ -352,7 +382,16 @@ fn run_two_cli_contexts(is_second_started_late: bool) {
             "concurrent context lost: {expected}"
         );
     }
-    let selected = Session::load_from_path(&transcript).expect("concurrent log remains resumable");
+    let selected = Session::load_from_path(transcript).expect("concurrent log remains resumable");
+    if is_legacy_seed {
+        assert!(selected
+            .messages()
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .any(|block| {
+                matches!(block, ContentBlock::Text { text } if text == "LEGACY_DURABLE_PREFIX")
+            }));
+    }
     assert!(selected.messages().iter().flat_map(|message| &message.blocks).any(|block| {
         matches!(block, ContentBlock::Text { text } if text.contains("FRESH_CONTEXT_PROMPT"))
     }), "closing an idle older runtime changed the default resume branch");
@@ -376,8 +415,8 @@ fn run_two_cli_contexts(is_second_started_late: bool) {
         let messages = request["messages"].to_string();
         if is_second_started_late && messages.contains("SECOND_CONTEXT_PROMPT") {
             assert!(
-                !messages.contains("FIRST_CONTEXT_PROMPT"),
-                "a later resume must not inherit a sibling's unfinished turn"
+                messages.contains("FIRST_CONTEXT_PROMPT"),
+                "a later resume must inherit the already written user message"
             );
             assert!(
                 !messages.contains("FIRST_CONTEXT_DONE"),
@@ -408,7 +447,7 @@ fs.writeFileSync(label + '.ready', 'tool running');
 const timer = setInterval(() => {
   if (!fs.existsSync(label + '.release')) return;
   clearInterval(timer);
-  fs.writeFileSync(label + '.effect', label + ' durable effect');
+  fs.appendFileSync(label + '.effect', label + ' durable effect');
   process.stdout.write((label + '_OUTPUT_').repeat(6000));
 }, 10);
 "#,
@@ -632,7 +671,10 @@ fn assert_gate_outputs(transcript: &std::path::Path, sid: &str, expected_call_id
                 .next()
                 .unwrap();
             let full = fs::read_to_string(output_dir.join(output_id)).unwrap();
-            assert!(full.contains(&format!("{label}_OUTPUT_")));
+            assert!(
+                full.contains(&format!("{label}_OUTPUT_").repeat(6000)),
+                "full tool output must retain every emitted byte"
+            );
             let other = if label == "A" { "B" } else { "A" };
             assert!(
                 !full.contains(&format!("{other}_OUTPUT_")),

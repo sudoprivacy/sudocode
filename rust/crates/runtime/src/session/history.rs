@@ -1,5 +1,5 @@
-//! Append history with immutable completed continuations. Opening a context
-//! forks a completed turn; it cannot recover or mutate a sibling's live turn.
+//! Append history with independent continuations. Opening a context freezes
+//! its inherited prefix and applies interrupted-tool recovery to that branch.
 //!
 //! This layer does not admit writers. Hosts must retain their existing admission
 //! protocol until transcript, completion and deletion consumers adopt this log.
@@ -155,7 +155,7 @@ impl HistoryRecord {
         )
     }
 
-    /// Select the latest completed turn at this record's committed log position,
+    /// Select the latest written continuation at this record's committed log position,
     /// including when the preparing client has only read a follower's old prefix.
     #[must_use]
     pub fn branch_latest() -> Self {

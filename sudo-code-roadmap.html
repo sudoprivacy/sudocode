@@ -2364,13 +2364,12 @@ branch. A second run resumed while the original instance executed a real tool:
 the new context received an interrupted-call result with an unknown outcome,
 and the original tool subsequently completed in its own context.</p>
 
-<p><b>Default restore boundary · confirmed by the user.</b> A new runtime forks
-from the most recently completed turn. If A is still executing tools when B
-opens the SID, A keeps its in-flight turn and real results on A's branch; B
-continues the completed prefix. Opening B does not establish that A was
-interrupted and must not repair or consume A's unfinished calls. Selection
-follows committed history order. This is Sudo Code's selected restore boundary;
-the CCB evidence above establishes the record/ancestry pattern.</p>
+<p><b>Restore parity acceptance.</b> Verify the written-prefix and branch-local
+recovery contract in the
+<a href="docs/design/agent-context-storage-matrix.html#shared-session-context">storage matrix</a>
+against the isolated CC run above. Acceptance includes a pending model response,
+an executing native tool, a sibling's synthetic interrupted result, the source's
+actual result, and a fresh restore after both branches finish.</p>
 
 <p>The durable object and authorization contract lives in the
 <a href="docs/design/agent-context-storage-matrix.html#shared-session-context">storage matrix</a>.
@@ -2418,8 +2417,9 @@ Exercise cancellation, stale candidates, crash and restart.</td></tr>
 context, and a durable repair targets that specific call. Opening another context
 does not establish that a live call in its sibling has ended.</td><td>Resume while
 the sibling tool is still running; A receives its real result once, while B
-continues the completed prefix without synthesizing a failure for A. Recover
-an actually interrupted call without repeating its effects.</td></tr>
+inherits the already written prefix and persists an unknown-outcome interrupted
+result in B's branch. A's live call and actual result retain their original
+identity. A fresh restore reuses the persisted repair without repeating effects.</td></tr>
 <tr><td>Completion delivery</td><td>Separate transcript append from completion
 ownership. The completion protocol binds active traces, context revisions,
 terminal sources, reservations and acknowledgements to the originating context.
@@ -2462,9 +2462,9 @@ native suite and the real-daemon restart journey are included in CI.</p>
 
 <p><b>Record/replay implementation in progress.</b> The history interpreter assigns
 stable message identities and parents, retains tool-result origins, and commits
-context revisions independently. Opening a context selects the latest completed
-turn at that open record's committed position. Streaming updates can change only
-that context's uncommitted assistant; compaction retains unchanged message IDs.
+context revisions independently. Written-prefix restoration and frozen inherited
+messages are being checked against the CC reference. Streaming updates can change
+only that context's own uncommitted assistant; compaction retains unchanged message IDs.
 Real native writer processes and independent mTLS clients against official Nexus
 0.8.22 have exercised a live child tool while a sibling opens and compacts its
 own context. Both branches and the real tool result survive daemon restart.

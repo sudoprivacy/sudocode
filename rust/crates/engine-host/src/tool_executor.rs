@@ -243,6 +243,10 @@ fn parse_tool_call_input(input: &str) -> Result<serde_json::Value, ToolError> {
 }
 
 impl ToolExecutor for CliToolExecutor {
+    fn external_a2a_binding(&self) -> Option<runtime::external_a2a::MailboxBinding> {
+        self.mailbox.as_ref().map(|mailbox| mailbox.binding())
+    }
+
     fn is_concurrency_safe(&self, name: &str, input: &str) -> bool {
         let name = tools::canonicalize_tool_name(name);
         if self.tool_registry.has_runtime_tool(&name) {
@@ -323,6 +327,21 @@ impl ToolExecutor for CliToolExecutor {
         // spelling `send` as `SendMessage` lost the nexus-A2A route and had its
         // cross-machine message written to a local file instead.
         let tool_name = tools::canonicalize_tool_name(tool_name);
+
+        if let Some(call) = &ctx.external_a2a {
+            call.validate_dispatch(
+                &tool_name,
+                &value,
+                self.external_a2a_binding().as_ref(),
+                ctx.tool_use_id.as_deref(),
+            )
+            .map_err(ToolError::new)?;
+            if self.tool_registry.has_runtime_tool(&tool_name) {
+                return Err(ToolError::new(
+                    "external A2A cannot dispatch a shadowing MCP tool",
+                ));
+            }
+        }
 
         if tool_name == "AskUserQuestion"
             && self

@@ -78,6 +78,7 @@ CLIENT_BUNDLE="$(authon_mint "live-probe")" || { daemon_logs; exit 1; }
 echo "   $CLIENT_BUNDLE"
 DIRECT_SENDER_BUNDLE="$(authon_mint "direct-sender")" || { daemon_logs; exit 1; }
 DIRECT_RECEIVER_BUNDLE="$(authon_mint "direct-receiver")" || { daemon_logs; exit 1; }
+DIRECT_FENCE_BUNDLE="$(authon_mint "direct-acp-probe")" || { daemon_logs; exit 1; }
 
 echo "== 4. restart TLS-on =="
 authon_boot
@@ -203,6 +204,24 @@ direct_out="$(NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
 printf '%s\n' "$direct_out"
 if printf '%s' "$direct_out" | grep -q 'SKIP(nexus)'; then
   echo "!! the direct-send test skipped under the harness" >&2
+  exit 1
+fi
+
+# The same path under fault: the live probe's mTLS traffic is held at a TCP
+# gate while pause cancels a direct send, and pause must wait for the node
+# worker; a post-tool hook withholds a reply after the node already holds the
+# message, and losing that reply must neither undo nor repeat the append. The
+# model endpoint refuses every inference request and must record none. Both
+# tests are ignored outside this harness, so require that both actually ran.
+echo "== [deterministic] direct send: pause waits for the node worker; a lost reply is not repeated =="
+fence_out="$(NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  NEXUS_A2A_TEST_DIRECT_CREDENTIAL="$DIRECT_FENCE_BUNDLE" \
+  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
+  --test acp_integration live_direct_a2a_ -- --ignored --test-threads=1 --nocapture 2>&1)" \
+  || { printf '%s\n' "$fence_out"; daemon_logs; exit 1; }
+printf '%s\n' "$fence_out"
+if ! printf '%s' "$fence_out" | grep -q 'test result: ok. 2 passed'; then
+  echo "!! the direct-send fence tests did not both run" >&2
   exit 1
 fi
 

@@ -324,6 +324,9 @@ struct DirectAgentListRequest {
 struct DirectA2aResponse {
     content: String,
     is_error: bool,
+    /// `sudocode.directA2a.audit`, the host's record of this call.
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    meta: Option<serde_json::Value>,
 }
 
 /// `_meta.sudocode` key a client sets in `clientCapabilities` (and scode
@@ -1016,7 +1019,7 @@ fn initialize_meta(subagent_events: Option<u64>) -> Map<String, serde_json::Valu
     // `_sudocode/a2a/send` and `_sudocode/a2a/agent_list`.
     sudocode_ns.insert(
         "directA2a".to_string(),
-        json!({ "version": 1, "errorOutcomes": 1 }),
+        json!({ "version": 1, "errorOutcomes": 1, "hostAudit": 1 }),
     );
     // `session/new` accepts `_meta.sudocode.forkFrom` (see
     // `fork_source_from_meta`): a client that forks a conversation into a

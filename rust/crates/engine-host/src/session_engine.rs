@@ -1205,20 +1205,27 @@ impl engine_core::EngineDelegate for SessionEngine {
         name: &str,
         input: &str,
         prompter: &mut dyn runtime::PermissionPrompter,
-    ) -> Result<(String, bool), engine_core::DirectToolError> {
+    ) -> Result<runtime::external_a2a::ExternalToolResult, engine_core::DirectToolError> {
+        use engine_core::DirectToolError::{Refused, Unknown};
         let mut session = self.lock_session();
         let _scope = runtime::WorkspaceRootScope::enter(&session.cwd);
-        let runtime = session.runtime.runtime_mut().ok_or_else(|| {
-            engine_core::DirectToolError::Refused("the session runtime is not available".into())
-        })?;
+        let runtime = session
+            .runtime
+            .runtime_mut()
+            .ok_or_else(|| Refused("the session runtime is not available".into()))?;
+        // Both are checked before anything runs, so their failure is a refusal.
+        // The operation spans hooks and approval waits as well as the worker,
+        // which takes its own lease from the same registry.
+        let call = runtime.external_a2a_call(name, input).map_err(Refused)?;
+        let _operation = self.background_tasks.begin_operation().map_err(Refused)?;
         self.rt()
             .block_on(runtime.run_tool_call(
-                name,
+                call,
                 input,
                 Some(prompter),
                 Some(self.background_tasks.clone()),
             ))
-            .map_err(|error| engine_core::DirectToolError::Unknown(error.to_string()))
+            .map_err(|error| Unknown(error.to_string()))
     }
 
     fn abort_signal(&self) -> runtime::HookAbortSignal {

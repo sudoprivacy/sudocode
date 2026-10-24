@@ -30,6 +30,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 .as_deref()
                 .and_then(RuntimeObserver::background_tasks),
             tool_use_id: None,
+            external_a2a: None,
             parent_permission_mode: Some(self.permission_policy.active_mode()),
             permission_sink: prompter
                 .as_deref()
@@ -232,32 +233,52 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         }
     }
 
-    /// Run one tool by name outside any model turn, through the gates a
-    /// model's call passes: pre-hook, the permission policy (prompting through
-    /// `prompter`), this session's own executor, post-hook.
+    /// Admit a host's direct A2A call before anything runs: the tool and its
+    /// input must fit the narrow request, and the call is bound to the mailbox
+    /// actually installed in this session's executor. A failure here is a
+    /// refusal; nothing was dispatched.
+    pub fn external_a2a_call(
+        &self,
+        name: &str,
+        input: &str,
+    ) -> Result<crate::external_a2a::ExternalA2aCall, String> {
+        let binding = self
+            .tool_executor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .external_a2a_binding()
+            .ok_or("the session's executor has no bound A2A mailbox")?;
+        crate::external_a2a::ExternalA2aCall::new(&self.session.session_id, binding, name, input)
+    }
+
+    /// Run an admitted direct A2A call outside any model turn, through the
+    /// gates a model's call passes: pre-hook, the permission policy (prompting
+    /// through `prompter`), this session's own executor, post-hook.
     ///
     /// The call is admitted through the session's `background_tasks`, the
     /// fence a turn's tools take: a paused session refuses it, and a pause
-    /// waits for its worker to finish. It runs under a fresh `direct-` id and
-    /// with no assistant message, because no model asked for it; nothing is
-    /// written to the session. Returns the tool's output and whether it
-    /// failed. A call cancelled after it was admitted is an error even when a
-    /// partial result exists: the tool may have run, so no result is reported
-    /// as if it were final.
+    /// waits for its worker to finish. It runs under the call's own
+    /// `external-a2a-` id with no assistant message, because no model asked for
+    /// it; nothing is written to the session. The executor rechecks the call
+    /// after hooks against its binding. Returns the tool's output, whether it
+    /// failed, and the call's audit. A call cancelled after it was admitted is
+    /// an error even when a partial result exists: the tool may have run, so no
+    /// result is reported as if it were final.
     #[allow(clippy::await_holding_lock)]
     pub async fn run_tool_call(
         &mut self,
-        name: &str,
+        call: crate::external_a2a::ExternalA2aCall,
         input: &str,
         mut prompter: Option<&mut dyn PermissionPrompter>,
         background_tasks: Option<crate::background_tasks::BackgroundTasks>,
-    ) -> Result<(String, bool), RuntimeError> {
+    ) -> Result<crate::external_a2a::ExternalToolResult, RuntimeError> {
         const CANCELLED: &str = "the call was cancelled after it was admitted and may have run";
         let abort = self.hook_abort_signal.for_current_turn();
         self.tool_executor_mut().set_abort_signal(abort.clone());
         let no_observer: Option<&mut dyn RuntimeObserver> = None;
         let mut context = self.dispatch_context(&no_observer, &prompter);
         context.background_tasks = background_tasks;
+        context.external_a2a = Some(call.clone());
         let executor = Arc::clone(&self.tool_executor);
         let executor = executor
             .lock()
@@ -270,8 +291,12 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             self.hook_progress_reporter.clone(),
         );
         scheduler.initialize_context(context);
-        let call_id = format!("direct-{}", uuid::Uuid::new_v4());
-        scheduler.enqueue(call_id, name.into(), input.into(), None)?;
+        scheduler.enqueue(
+            call.command_id.clone(),
+            call.tool.clone(),
+            input.into(),
+            None,
+        )?;
         let completed = loop {
             tokio::select! {
                 biased;
@@ -298,6 +323,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 } => Some((output, is_error)),
                 _ => None,
             })
+            .map(|(output, is_error)| call.report(output, is_error))
             .ok_or_else(|| RuntimeError::new("the tool call produced no result"))
     }
 }

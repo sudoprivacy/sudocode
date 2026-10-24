@@ -24,6 +24,7 @@ pub mod cursor_fence;
 pub mod custom_agents;
 pub mod effort;
 pub mod experiments;
+pub mod external_a2a;
 mod file_intent;
 mod file_ops;
 mod file_redirect;

@@ -428,6 +428,15 @@ impl Mailbox {
         &self.self_id
     }
 
+    /// Read-only binding of this exact mailbox, before any A2A IO.
+    #[must_use]
+    pub fn binding(&self) -> crate::external_a2a::MailboxBinding {
+        crate::external_a2a::MailboxBinding {
+            actor: self.self_id.clone(),
+            namespace_root: self.convention.root.clone(),
+        }
+    }
+
     /// The transcript this mailbox and `peer` share.
     ///
     /// There is no "my inbox" any more, which is the point: a conversation is

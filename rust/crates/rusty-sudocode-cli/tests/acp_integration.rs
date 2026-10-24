@@ -10,6 +10,8 @@
 //! spawned `scode acp` cannot initialise winsock — so `acp serve` fails to bind
 //! and dies before printing its ready line. See `common/isolated_env.rs`.
 
+#[path = "support/acp_direct_fences.rs"]
+mod acp_direct_fences;
 #[path = "common/isolated_env.rs"]
 mod isolated_env;
 #[path = "support/node_home.rs"]
@@ -8551,6 +8553,53 @@ fn assert_refused(resp: &Value, case: &str) {
     );
 }
 
+/// The host's audit of a returned direct call: the loaded session, the actor
+/// and namespace of the mailbox its executor actually holds, the tool, a fresh
+/// command id, and a result hash binding the unchanged content and `isError`.
+fn assert_direct_host_audit<'a>(
+    reply: &'a Value,
+    sid: &str,
+    actor: &str,
+    root: &Path,
+    tool: &str,
+) -> &'a Value {
+    use sha2::{Digest, Sha256};
+    let audit = &reply["result"]["_meta"]["sudocode"]["directA2a"]["audit"];
+    assert_eq!(audit["version"], 1, "{reply}");
+    assert_eq!(
+        audit["sessionId"], sid,
+        "the loaded native session: {reply}"
+    );
+    assert_eq!(
+        audit["actor"], actor,
+        "the executor's actual sender: {reply}"
+    );
+    assert_eq!(
+        audit["namespaceRoot"],
+        root.to_string_lossy().as_ref(),
+        "{reply}"
+    );
+    assert_eq!(audit["tool"], tool, "{reply}");
+    assert!(
+        audit["commandId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("external-a2a-")),
+        "{reply}"
+    );
+    let mut hash = Sha256::new();
+    let content = reply["result"]["content"].as_str().unwrap().as_bytes();
+    hash.update(b"sudocode.direct-a2a.result.v1\0");
+    hash.update([u8::from(reply["result"]["isError"].as_bool().unwrap())]);
+    hash.update((content.len() as u64).to_be_bytes());
+    hash.update(content);
+    assert_eq!(
+        audit["resultSha256"],
+        format!("{:x}", hash.finalize()),
+        "audit binds the unchanged tool output and isError: {reply}"
+    );
+    audit
+}
+
 /// A failure after admission is an internal error typed `unknown`: the call
 /// may have run, so it must not be resent blindly.
 fn assert_unknown(resp: &Value, case: &str) {
@@ -8600,8 +8649,8 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
         .await;
     assert_eq!(
         init["result"]["_meta"]["sudocode"]["directA2a"],
-        json!({ "version": 1, "errorOutcomes": 1 }),
-        "initialize advertises the direct A2A requests and their typed outcomes: {init}"
+        json!({ "version": 1, "errorOutcomes": 1, "hostAudit": 1 }),
+        "initialize advertises the direct A2A requests, typed outcomes and host audit: {init}"
     );
     let sid = open_direct_session(&mut client, &workspace.root).await;
     set_session_mode(&mut client, &sid, "workspace-write").await;
@@ -8633,6 +8682,7 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
         log.contains(MARKER) && log.contains(AGENT),
         "the peer's conversation holds the message from {AGENT}: {log}"
     );
+    let sent_audit = assert_direct_host_audit(&sent, &sid, AGENT, &pair_root, "send");
 
     let (_, listed) = client
         .send_request("_sudocode/a2a/agent_list", json!({ "sessionId": sid }))
@@ -8648,6 +8698,8 @@ async fn direct_a2a_send_reaches_the_peer_without_a_model_turn() {
         rows.get("agents").is_some() && rows.get("count").is_some(),
         "agent_list returns the tool's own rows: {rows}"
     );
+    let list_audit = assert_direct_host_audit(&listed, &sid, AGENT, &pair_root, "agent_list");
+    assert_ne!(sent_audit["commandId"], list_audit["commandId"]);
     assert_eq!(
         server.captured_requests().await.len(),
         before,
@@ -9225,6 +9277,8 @@ async fn direct_a2a_through_a_node_appends_once_as_the_session() {
         sent["result"]["isError"], false,
         "the send ran through the node: {sent}"
     );
+    // On a node the namespace is the daemon's own, so the root is empty.
+    assert_direct_host_audit(&sent, &sid, &sender, Path::new(""), "send");
     let (stored, tail) =
         node_conversation_until(&endpoint, &receiver_credential, &sender, tail, &sent_marker).await;
     let delivered: Vec<_> = stored

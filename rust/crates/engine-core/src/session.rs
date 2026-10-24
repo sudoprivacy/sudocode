@@ -116,13 +116,13 @@ pub trait EngineDelegate: Send + Sync + 'static {
 
     /// Run one tool by name outside any turn, through the hooks and permission
     /// policy a model's call passes, without writing to the conversation.
-    /// Returns the tool's output and whether it failed.
+    /// Returns the tool's output, whether it failed, and the call's audit.
     fn run_direct_tool(
         &self,
         _name: &str,
         _input: &str,
         _prompter: &mut dyn PermissionPrompter,
-    ) -> Result<(String, bool), DirectToolError> {
+    ) -> Result<runtime::external_a2a::ExternalToolResult, DirectToolError> {
         Err(DirectToolError::Refused(
             "this engine does not run direct tool calls".into(),
         ))
@@ -739,9 +739,10 @@ async fn run_direct_tool(
             result = &mut handle => {
                 table.cancel_all();
                 let result = match result {
-                    Ok(Ok((content, is_error))) => Ok(serde_json::json!({
-                        "content": content,
-                        "isError": is_error,
+                    Ok(Ok(result)) => Ok(serde_json::json!({
+                        "content": result.content,
+                        "isError": result.is_error,
+                        "_meta": { "sudocode": { "directA2a": { "audit": result.audit } } },
                     })),
                     Ok(Err(DirectToolError::Refused(reason))) => {
                         Ok(serde_json::json!({ "refused": reason }))

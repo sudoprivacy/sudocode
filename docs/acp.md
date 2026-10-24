@@ -197,6 +197,50 @@ A direct call takes the same operation fence as a turn's tools: paused tools
 refuse it, and `pause_tools` reports control only after its worker has
 finished.
 
+`directA2a.hostAudit == 1` adds `result._meta.sudocode.directA2a.audit` to
+every returned result, including an `isError` one: `version`, a fresh
+`commandId` (`external-a2a-<uuid>`), the native `sessionId`, the `actor` and
+`namespaceRoot` of the mailbox the session's executor actually holds, `tool`,
+`requestedInputSha256`, an optional `effectiveInputSha256` and `resultSha256`.
+The requested hash binds the fields before hooks. The effective hash is present
+only once the real executor has validated the call after hooks. The result hash
+binds `content` and `isError` before the metadata is added. Hooks may rewrite
+plain text, but the executor refuses a rewrite that adds a sender, sends a
+structured control message, changes the tool or reaches a shadowing MCP tool.
+
+The audit is returned on this connection and kept out of model history. It is
+not a durable journal or a delivery receipt. An empty `namespaceRoot` means the
+daemon's logical namespace, not a verified connection; the receiving node's
+authenticated envelope is the independent evidence of identity. A host that
+keeps audits stores the result and its `commandId` itself, without putting a
+fabricated tool call into the transcript. A `-32603` failure may carry no
+audit.
+
+Hashes are lowercase hexadecimal SHA-256, independent of JSON key order and
+without Unicode normalization. `frame(x)` is an unsigned 64-bit big-endian byte
+length followed by the UTF-8 bytes:
+
+```text
+input:  ASCII("sudocode.direct-a2a.input.v1") || NUL || frame(tool)
+        || u64be(number of fields)
+        || for each field name in sorted order:
+             frame(name) || type || value
+        string: type=1, value=frame(text)
+        false:  type=2, no value bytes
+        true:   type=3, no value bytes
+result: ASCII("sudocode.direct-a2a.result.v1") || NUL
+        || one byte (isError ? 1 : 0) || frame(content)
+```
+
+Input fields use the tool's own names: `to`, `message`, `summary`, or optional
+`active_only`. Omitted and `false` are distinct. Neither the RPC `sessionId`
+nor any audit field is hashed.
+
+`e2e/nexus-a2a/run.sh` runs these requests against a real daemon: a direct
+send stamped by the node exactly once, pause waiting for a node worker held at
+a TCP gate, and a reply lost after the node already holds the message. Its
+model endpoint refuses every inference request and must record none.
+
 ### Per-session system prompt (`_meta.sudocode.*`)
 
 `session/new` and `session/load` accept two optional, orthogonal keys under

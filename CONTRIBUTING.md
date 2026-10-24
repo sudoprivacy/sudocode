@@ -322,7 +322,11 @@ Prompt cache observation defaults, field semantics and synthetic scenarios live
 in [`spec/prompt_cache_observations.json`](./spec/prompt_cache_observations.json).
 The native ledger reads that specification directly. Endpoint probes can pin
 the same public file by commit and SHA-256. Cache efficiency formulas remain
-in [`spec/cache_metrics.json`](./spec/cache_metrics.json).
+in [`spec/cache_metrics.json`](./spec/cache_metrics.json). Synthetic usage
+snapshots with expected totals live in
+[`spec/cache_usage_fixtures.json`](./spec/cache_usage_fixtures.json), with a
+proposed [schema](./spec/cache_usage_fixtures.schema.json) beside it. Report
+and scanner adapters should reproduce those totals.
 
 ### Startup latency
 

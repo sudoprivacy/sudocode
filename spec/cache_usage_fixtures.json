@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "scope": "Synthetic usage snapshots with expected totals for cache report regressions",
+  "schema": "spec/cache_usage_fixtures.schema.json",
+  "metrics_spec": "spec/cache_metrics.json",
+  "evidence_scope": "Synthetic numbers chosen for arithmetic; not measurements of any provider, route, gateway or account",
+  "counting_rules": {
+    "request_identity": ["request_id", "request_started_ms", "context_segment"],
+    "repeated_snapshots": "Usage is cumulative per request. The last snapshot for a request identity is its final usage and counts once. Earlier or repeated snapshots of it are ignored.",
+    "distinct_requests": "Requests with different identities stay separate even when their usage and timestamps match.",
+    "segments": "A committed compaction starts the next context_segment in the same session. Segment totals partition the session totals, and a boundary never resets cumulative session usage.",
+    "cache_efficiency": "Percentages follow spec/cache_metrics.json over session_usage, rounded to two decimals."
+  },
+  "fixtures": [
+    {
+      "id": "repeated_final_snapshots",
+      "description": "One request's final cumulative usage appears three times and another's twice, out of order. A third request has the same usage and completion second as the second but its own id. Count each request's final snapshot once and keep distinct requests separate.",
+      "session_id": "fixture-session-dedup",
+      "model": "claude-opus-5-5",
+      "snapshots": [
+        {"request_id": "dedup-request-1", "request_started_ms": 1000000, "response_started_ms": 1000900, "response_completed_ms": 1002000, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 120, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 8000, "output_tokens": 40}},
+        {"request_id": "dedup-request-1", "request_started_ms": 1000000, "response_started_ms": 1000900, "response_completed_ms": 1002000, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 120, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 8000, "output_tokens": 40}},
+        {"request_id": "dedup-request-1", "request_started_ms": 1000000, "response_started_ms": 1000900, "response_completed_ms": 1002000, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 120, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 8000, "output_tokens": 40}},
+        {"request_id": "dedup-request-2", "request_started_ms": 1060000, "response_started_ms": 1060700, "response_completed_ms": 1061400, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 80, "cache_read_input_tokens": 8000, "cache_creation_input_tokens": 400, "output_tokens": 60}},
+        {"request_id": "dedup-request-3", "request_started_ms": 1060200, "response_started_ms": 1060800, "response_completed_ms": 1061600, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 80, "cache_read_input_tokens": 8000, "cache_creation_input_tokens": 400, "output_tokens": 60}},
+        {"request_id": "dedup-request-2", "request_started_ms": 1060000, "response_started_ms": 1060700, "response_completed_ms": 1061400, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 80, "cache_read_input_tokens": 8000, "cache_creation_input_tokens": 400, "output_tokens": 60}}
+      ],
+      "expected": {
+        "sessions": 1,
+        "requests": 3,
+        "duplicate_snapshots_ignored": 3,
+        "session_usage": {"input_tokens": 280, "cache_read_input_tokens": 16000, "cache_creation_input_tokens": 8800, "output_tokens": 160},
+        "segments": [
+          {"context_segment": 0, "requests": 3, "usage": {"input_tokens": 280, "cache_read_input_tokens": 16000, "cache_creation_input_tokens": 8800, "output_tokens": 160}}
+        ],
+        "segment_boundaries": [],
+        "cache_efficiency": {"read_share_pct": 63.8, "write_share_pct": 35.09, "reuse_pct": 64.52}
+      }
+    },
+    {
+      "id": "ttl_switch_5m_to_1h",
+      "description": "The client changes its requested TTL from 5m to 1h after the second request. The supplied observations show a full-prefix write on the first 1h request, then warm reads after gaps longer than five minutes. They are inputs, not a rule about any route, and they establish no adaptive saving.",
+      "session_id": "fixture-session-ttl",
+      "model": "claude-opus-5-5",
+      "ttl_transition": {
+        "from_ttl_seconds": 300,
+        "to_ttl_seconds": 3600,
+        "first_request_id": "ttl-request-3",
+        "upstream_ttl": "unknown",
+        "observations": "supplied",
+        "savings_claimed": false
+      },
+      "snapshots": [
+        {"request_id": "ttl-request-1", "request_started_ms": 2000000, "response_started_ms": 2000800, "response_completed_ms": 2002000, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 20000, "output_tokens": 30}},
+        {"request_id": "ttl-request-2", "request_started_ms": 2120000, "response_started_ms": 2120600, "response_completed_ms": 2121500, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 40, "cache_read_input_tokens": 20000, "cache_creation_input_tokens": 500, "output_tokens": 30}},
+        {"request_id": "ttl-request-3", "request_started_ms": 2240000, "response_started_ms": 2240900, "response_completed_ms": 2242000, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [3600], "usage": {"input_tokens": 40, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 20500, "output_tokens": 30}},
+        {"request_id": "ttl-request-4", "request_started_ms": 3740000, "response_started_ms": 3740600, "response_completed_ms": 3741500, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [3600], "usage": {"input_tokens": 40, "cache_read_input_tokens": 20500, "cache_creation_input_tokens": 300, "output_tokens": 30}},
+        {"request_id": "ttl-request-5", "request_started_ms": 5540000, "response_started_ms": 5540600, "response_completed_ms": 5541500, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [3600], "usage": {"input_tokens": 40, "cache_read_input_tokens": 20800, "cache_creation_input_tokens": 200, "output_tokens": 30}}
+      ],
+      "expected": {
+        "sessions": 1,
+        "requests": 5,
+        "duplicate_snapshots_ignored": 0,
+        "session_usage": {"input_tokens": 210, "cache_read_input_tokens": 61300, "cache_creation_input_tokens": 41500, "output_tokens": 150},
+        "segments": [
+          {"context_segment": 0, "requests": 5, "usage": {"input_tokens": 210, "cache_read_input_tokens": 61300, "cache_creation_input_tokens": 41500, "output_tokens": 150}}
+        ],
+        "segment_boundaries": [],
+        "cache_efficiency": {"read_share_pct": 59.51, "write_share_pct": 40.29, "reuse_pct": 59.63},
+        "by_requested_ttl": [
+          {"requested_ttl_seconds": 300, "requests": 2, "usage": {"input_tokens": 90, "cache_read_input_tokens": 20000, "cache_creation_input_tokens": 20500, "output_tokens": 60}},
+          {"requested_ttl_seconds": 3600, "requests": 3, "usage": {"input_tokens": 120, "cache_read_input_tokens": 41300, "cache_creation_input_tokens": 21000, "output_tokens": 90}}
+        ]
+      }
+    },
+    {
+      "id": "compaction_same_session",
+      "description": "A committed compaction inside one session. The compaction request belongs to the segment it summarises, and later requests carry the next segment. The session identity stays the same and cumulative usage is not reset.",
+      "session_id": "fixture-session-compaction",
+      "model": "claude-opus-5-5",
+      "snapshots": [
+        {"request_id": "compact-request-1", "request_started_ms": 3000000, "response_started_ms": 3000900, "response_completed_ms": 3002000, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 60, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 30000, "output_tokens": 50}},
+        {"request_id": "compact-request-2", "request_started_ms": 3100000, "response_started_ms": 3100700, "response_completed_ms": 3101800, "context_segment": 0, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 50, "cache_read_input_tokens": 30000, "cache_creation_input_tokens": 1200, "output_tokens": 80}},
+        {"request_id": "compact-request-3", "request_started_ms": 3160000, "response_started_ms": 3160800, "response_completed_ms": 3175000, "context_segment": 0, "request_kind": "compaction", "requested_ttls_seconds": [300], "usage": {"input_tokens": 40, "cache_read_input_tokens": 31200, "cache_creation_input_tokens": 0, "output_tokens": 900}},
+        {"request_id": "compact-request-4", "request_started_ms": 3205000, "response_started_ms": 3205900, "response_completed_ms": 3207000, "context_segment": 1, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 70, "cache_read_input_tokens": 4000, "cache_creation_input_tokens": 6000, "output_tokens": 60}},
+        {"request_id": "compact-request-5", "request_started_ms": 3295000, "response_started_ms": 3295600, "response_completed_ms": 3296700, "context_segment": 1, "request_kind": "session_request", "requested_ttls_seconds": [300], "usage": {"input_tokens": 50, "cache_read_input_tokens": 10000, "cache_creation_input_tokens": 400, "output_tokens": 70}}
+      ],
+      "expected": {
+        "sessions": 1,
+        "requests": 5,
+        "duplicate_snapshots_ignored": 0,
+        "session_usage": {"input_tokens": 270, "cache_read_input_tokens": 75200, "cache_creation_input_tokens": 37600, "output_tokens": 1160},
+        "segments": [
+          {"context_segment": 0, "requests": 3, "usage": {"input_tokens": 150, "cache_read_input_tokens": 61200, "cache_creation_input_tokens": 31200, "output_tokens": 1030}},
+          {"context_segment": 1, "requests": 2, "usage": {"input_tokens": 120, "cache_read_input_tokens": 14000, "cache_creation_input_tokens": 6400, "output_tokens": 130}}
+        ],
+        "segment_boundaries": [
+          {"after_request_id": "compact-request-3", "from_segment": 0, "to_segment": 1, "cause": "compaction"}
+        ],
+        "cache_efficiency": {"read_share_pct": 66.51, "write_share_pct": 33.25, "reuse_pct": 66.67}
+      }
+    }
+  ]
+}

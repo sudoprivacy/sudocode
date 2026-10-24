@@ -221,3 +221,275 @@ fn ttl_advisor_report_separates_forward_scenarios_from_training_and_bad_samples(
     }
     assert_eq!(env.captured_message_count(), 0);
 }
+
+const USAGE_FIXTURES: &str = include_str!("../../../../spec/cache_usage_fixtures.json");
+const USAGE_FIELDS: [&str; 4] = [
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "output_tokens",
+];
+
+fn usage_fixture(id: &str) -> Value {
+    let fixtures: Value = serde_json::from_str(USAGE_FIXTURES).unwrap();
+    fixtures["fixtures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fixture| fixture["id"] == id)
+        .unwrap_or_else(|| panic!("missing usage fixture {id}"))
+        .clone()
+}
+
+/// The fixture's counting rule: the last snapshot of a request identity is final.
+fn final_snapshots(fixture: &Value) -> Vec<&Value> {
+    let identity = |s: &Value| {
+        (
+            s["request_id"].clone(),
+            s["request_started_ms"].clone(),
+            s["context_segment"].clone(),
+        )
+    };
+    let mut finals: Vec<&Value> = Vec::new();
+    for snapshot in fixture["snapshots"].as_array().unwrap() {
+        match finals.iter().position(|s| identity(s) == identity(snapshot)) {
+            Some(position) => finals[position] = snapshot,
+            None => finals.push(snapshot),
+        }
+    }
+    finals
+}
+
+fn usage_sum(snapshots: &[&Value]) -> Value {
+    let mut usage = serde_json::Map::new();
+    for field in USAGE_FIELDS {
+        let sum: u64 = snapshots
+            .iter()
+            .map(|s| s["usage"][field].as_u64().unwrap())
+            .sum();
+        usage.insert(field.to_owned(), json!(sum));
+    }
+    Value::Object(usage)
+}
+
+/// Keeps the expected totals tied to the snapshots, so a fixture edit cannot
+/// leave them stale.
+fn assert_fixture_totals(fixture: &Value) -> Vec<&Value> {
+    let expected = &fixture["expected"];
+    let finals = final_snapshots(fixture);
+    let snapshots = fixture["snapshots"].as_array().unwrap().len();
+    assert_eq!(expected["requests"], finals.len());
+    assert_eq!(
+        expected["duplicate_snapshots_ignored"],
+        snapshots - finals.len()
+    );
+    assert_eq!(expected["session_usage"], usage_sum(&finals));
+    let mut partitioned = 0;
+    for segment in expected["segments"].as_array().unwrap() {
+        let members: Vec<&Value> = finals
+            .iter()
+            .copied()
+            .filter(|s| s["context_segment"] == segment["context_segment"])
+            .collect();
+        assert_eq!(segment["requests"], members.len());
+        assert_eq!(segment["usage"], usage_sum(&members));
+        partitioned += members.len();
+    }
+    assert_eq!(partitioned, finals.len(), "segments partition the session");
+    finals
+}
+
+/// Writes a fixture as the ledger and rollup that `scode cache stats` reads.
+/// Every snapshot becomes a ledger row, repeats included. The rollup holds the
+/// fixture's expected totals, so only the ledger rows test the report's counting.
+fn write_usage_fixture(env: &TestEnv, fixture: &Value) {
+    std::fs::write(
+        env.config_home().join("settings.json"),
+        json!({"experimental":{"cacheTtlAdvisor":true}}).to_string(),
+    )
+    .unwrap();
+    let dir = env
+        .config_home()
+        .join("cache/prompt-cache")
+        .join(fixture["session_id"].as_str().unwrap());
+    std::fs::create_dir_all(&dir).unwrap();
+    let expected = &fixture["expected"];
+    let usage = &expected["session_usage"];
+    std::fs::write(
+        dir.join("stats.json"),
+        json!({"tracked_requests":expected["requests"],"completion_cache_hits":0,
+            "completion_cache_misses":0,"completion_cache_writes":0,
+            "expected_invalidations":0,"unexpected_cache_breaks":0,
+            "total_cache_read_input_tokens":usage["cache_read_input_tokens"],
+            "total_cache_creation_input_tokens":usage["cache_creation_input_tokens"],
+            "total_input_tokens":usage["input_tokens"],
+            "input_tokens_observed_requests":expected["requests"],
+            "last_cache_creation_input_tokens":null,"last_cache_read_input_tokens":null,
+            "last_request_hash":null,"last_completion_cache_key":null,
+            "last_break_reason":null,"last_cache_source":null})
+        .to_string(),
+    )
+    .unwrap();
+    let mut rows = String::new();
+    for s in fixture["snapshots"].as_array().unwrap() {
+        let row = json!({
+            "at_unix_secs": s["response_completed_ms"].as_u64().unwrap() / 1000,
+            "gateway_request_id": s["request_id"], "model": fixture["model"],
+            "input_tokens": s["usage"]["input_tokens"],
+            "cache_read_input_tokens": s["usage"]["cache_read_input_tokens"],
+            "cache_creation_input_tokens": s["usage"]["cache_creation_input_tokens"],
+            "observation": {"schema_version":1,
+                "request_started_ms": s["request_started_ms"],
+                "response_started_ms": s["response_started_ms"],
+                "response_completed_ms": s["response_completed_ms"],
+                "attempts":1, "message_starts":1, "completed":true,
+                "context_segment": s["context_segment"], "request_kind": s["request_kind"],
+                "route_key":"fixture-route", "settings_key":"fixture-settings",
+                "requested_ttls_seconds": s["requested_ttls_seconds"],
+                "upstream_ttl_seconds":null, "client_prefix_compatible":true}
+        });
+        rows.push_str(&row.to_string());
+        rows.push('\n');
+    }
+    std::fs::write(dir.join("requests.jsonl"), rows).unwrap();
+}
+
+fn usage_fixture_report(id: &str) -> (Value, Value) {
+    let fixture = usage_fixture(id);
+    let env = TestEnv::new_mock(&format!("cache-usage-{id}"));
+    write_usage_fixture(&env, &fixture);
+    let mut cli = env.spawn(&["cache", "stats", "--output-format", "json"]);
+    cli.resize(180, 400).unwrap();
+    cli.expect("forward_comparison").unwrap();
+    assert_eq!(cli.expect_eof().unwrap(), 0);
+    let screen = cli.render(screen_contents);
+    let first = screen.find('{').unwrap();
+    let last = screen.rfind('}').unwrap();
+    let report: Value = serde_json::from_str(&screen[first..=last]).unwrap();
+    assert_eq!(env.captured_message_count(), 0);
+    (fixture, report)
+}
+
+fn assert_report_counts_fixture(fixture: &Value, report: &Value) {
+    let expected = &fixture["expected"];
+    assert_eq!(report["sessions"], expected["sessions"]);
+    assert_eq!(
+        report["uncached_input_tokens"],
+        expected["session_usage"]["input_tokens"]
+    );
+    let session = &report["per_session"][0];
+    for metric in ["read_share_pct", "write_share_pct", "reuse_pct"] {
+        let actual = session["cache_efficiency"][metric].as_f64().unwrap();
+        let rounded = expected["cache_efficiency"][metric].as_f64().unwrap();
+        assert!(
+            (actual - rounded).abs() <= 0.005_000_1,
+            "{metric}: report {actual}, fixture {rounded}"
+        );
+    }
+    let intervals = &session["completion_intervals"];
+    assert_eq!(intervals["rows"], expected["requests"]);
+    assert_eq!(
+        intervals["duplicate_rows_ignored"],
+        expected["duplicate_snapshots_ignored"]
+    );
+    let gaps: u64 = ["under_5m", "from_5m_to_1h", "over_1h"]
+        .iter()
+        .map(|bucket| intervals[bucket].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        gaps + 1,
+        expected["requests"].as_u64().unwrap(),
+        "intervals continue across segments"
+    );
+    let coverage = &session["ttl_advisor"]["coverage"];
+    assert_eq!(coverage["rows"], expected["requests"]);
+    assert_eq!(
+        coverage["duplicate_snapshots_ignored"],
+        expected["duplicate_snapshots_ignored"]
+    );
+    assert_eq!(coverage["legacy_or_malformed_rows"], 0);
+}
+
+#[test]
+fn usage_fixture_counts_each_final_snapshot_once() {
+    let (fixture, report) = usage_fixture_report("repeated_final_snapshots");
+    let finals = assert_fixture_totals(&fixture);
+    assert_report_counts_fixture(&fixture, &report);
+    let twins: Vec<_> = finals
+        .iter()
+        .filter(|s| s["usage"] == finals[1]["usage"])
+        .collect();
+    assert_eq!(twins.len(), 2, "matching usage must not merge requests");
+    assert_ne!(twins[0]["request_id"], twins[1]["request_id"]);
+}
+
+#[test]
+fn usage_fixture_ttl_switch_keeps_observations_explicit_and_claims_no_savings() {
+    let (fixture, report) = usage_fixture_report("ttl_switch_5m_to_1h");
+    let finals = assert_fixture_totals(&fixture);
+    assert_report_counts_fixture(&fixture, &report);
+    for group in fixture["expected"]["by_requested_ttl"].as_array().unwrap() {
+        let members: Vec<&Value> = finals
+            .iter()
+            .copied()
+            .filter(|s| s["requested_ttls_seconds"] == json!([group["requested_ttl_seconds"]]))
+            .collect();
+        assert_eq!(group["requests"], members.len());
+        assert_eq!(group["usage"], usage_sum(&members));
+    }
+    let transition = &fixture["ttl_transition"];
+    let switch = finals
+        .iter()
+        .position(|s| s["request_id"] == transition["first_request_id"])
+        .unwrap();
+    let requested = |s: &&Value| s["requested_ttls_seconds"].clone();
+    assert!(finals[..switch]
+        .iter()
+        .all(|s| requested(s) == json!([transition["from_ttl_seconds"]])));
+    assert!(finals[switch..]
+        .iter()
+        .all(|s| requested(s) == json!([transition["to_ttl_seconds"]])));
+    let advisor = &report["per_session"][0]["ttl_advisor"];
+    assert_eq!(advisor["mode"], "advisory_only");
+    assert_eq!(advisor["applied"], false);
+    assert_eq!(advisor["upstream_ttl"], "unknown");
+    assert_eq!(
+        advisor["comparison_kind"],
+        "hypothetical_not_causal_or_billed_savings"
+    );
+    assert_eq!(advisor["coverage"]["ineligible_rows"], 0);
+    assert!(advisor["decisions"].as_array().unwrap().is_empty());
+    assert!(
+        advisor["forward_comparison"].as_array().unwrap().is_empty(),
+        "observations alone must not produce a savings figure"
+    );
+}
+
+#[test]
+fn usage_fixture_compaction_keeps_one_session_and_both_totals() {
+    let (fixture, report) = usage_fixture_report("compaction_same_session");
+    let finals = assert_fixture_totals(&fixture);
+    assert_report_counts_fixture(&fixture, &report);
+    for boundary in fixture["expected"]["segment_boundaries"]
+        .as_array()
+        .unwrap()
+    {
+        let at = finals
+            .iter()
+            .position(|s| s["request_id"] == boundary["after_request_id"])
+            .unwrap();
+        assert_eq!(finals[at]["request_kind"], "compaction");
+        assert_eq!(finals[at]["context_segment"], boundary["from_segment"]);
+        assert_eq!(finals[at + 1]["context_segment"], boundary["to_segment"]);
+    }
+    assert_eq!(report["per_session"].as_array().unwrap().len(), 1);
+    let compactions = finals
+        .iter()
+        .filter(|s| s["request_kind"] == "compaction")
+        .count();
+    assert_eq!(
+        report["per_session"][0]["ttl_advisor"]["coverage"]["ineligible_rows"],
+        compactions,
+        "a compaction request counts in the session but is not an advisor interval"
+    );
+}

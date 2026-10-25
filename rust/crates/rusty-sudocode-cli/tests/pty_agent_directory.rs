@@ -56,9 +56,10 @@ fn discovered_agent_list_address_delivers_to_the_peer() {
         // fixture supplying either the address or the tool calls.
         complete_turn(
             &mut cli,
-            &format!("Discover the reachable Agents. Copy the address returned for {UNIFIED_SEND_RECIPIENT} and send it this message: {BODY}"),
+            &format!("Discover the reachable Agents using agent_list. Copy the send_to address returned for {UNIFIED_SEND_RECIPIENT} and use send to send it exactly this message: {BODY}. Use summary: directory address roundtrip. Do not use a shell or create files."),
         );
     }
+    assert_cards(&cli, env.timeout());
     let conversations = peer.list_conversations().unwrap();
     if conversations.is_empty() && env.is_mock() {
         for body in env.captured_message_bodies() {
@@ -78,6 +79,83 @@ fn discovered_agent_list_address_delivers_to_the_peer() {
         .all(|message| message.to == UNIFIED_SEND_RECIPIENT));
     cli.send("/exit\r").unwrap();
     assert_eq!(cli.expect_eof().unwrap(), 0);
+    let path = assert_saved_send(&env);
+    let mut resumed = env.spawn(&[
+        "--resume",
+        path.to_str().unwrap(),
+        "--permission-mode",
+        "read-only",
+    ]);
+    resumed.resize(70, 120).unwrap();
+    common::expect_input_line_cleared(&resumed, env.timeout(), "restored directory ready");
+    assert_cards(&resumed, env.timeout());
+    resumed.send("/exit").unwrap();
+    common::expect_input_line(&resumed, "/exit", env.timeout(), "resumed exit typed");
+    resumed.send("\r").unwrap();
+    assert_eq!(resumed.expect_eof().unwrap(), 0);
+}
+
+fn assert_saved_send(env: &TestEnv) -> std::path::PathBuf {
+    let path = common::find_session_transcript(&env.workspace_root().join(".scode/sessions"))
+        .expect("the actual conversation was saved");
+    let saved = runtime::Session::load_from_path(&path).unwrap();
+    let raw_result = saved
+        .messages()
+        .iter()
+        .flat_map(|message| &message.blocks)
+        .find_map(|block| match block {
+            runtime::ContentBlock::ToolResult {
+                tool_name,
+                output,
+                is_error: false,
+                ..
+            } if tool_name == "send" => Some(output.as_str()),
+            _ => None,
+        })
+        .expect("the live model must choose send, with a successful real result");
+    let result: Value = serde_json::from_str(raw_result).unwrap();
+    assert_eq!(
+        result["routing"]["content"], BODY,
+        "presentation never clips model context"
+    );
+    assert!(
+        result["routing"]["mailbox_path"].is_string(),
+        "retain the full source result"
+    );
+    if env.is_mock() {
+        assert_eq!(
+            raw_result,
+            captured_tool_result(env, "directory-send"),
+            "the provider and saved transcript retain the same result bytes"
+        );
+    }
+    path
+}
+
+fn assert_cards(cli: &pty_expect::PtySession, timeout: Duration) {
+    let screen = common::expect_screen_settled(
+        cli,
+        |screen| screen.contains("AgentList") && screen.contains("Written to inbox"),
+        timeout,
+        "discovery and delivery cards",
+    );
+    for expected in [
+        "peer  ",
+        UNIFIED_SEND_RECIPIENT,
+        "Send →",
+        "Summary: directory address roundtrip",
+        BODY,
+    ] {
+        assert!(screen.contains(expected), "missing {expected}: {screen}");
+    }
+    assert!(
+        !screen.contains("routing:"),
+        "nested receipt JSON should not be rendered: {screen}"
+    );
+    assert!(
+        !screen.contains("mailbox_path:"),
+        "physical paths should stay in the source result"
+    );
 }
 
 fn complete_turn(cli: &mut pty_expect::PtySession, prompt: &str) {

@@ -86,6 +86,13 @@ session, with size limits and an option to disable them.
 ### Agent communication and hosting
 
 Peer agents discover names with `agent_list` and exchange messages with `send`.
+
+In terminal history, `send` shows the exact recipient, summary, a short message
+preview and the inbox write receipt. `agent_list` shows one row per agent,
+including a separate send address when needed. Only workers with a known state
+are marked active or inactive. Full messages and tool results remain in the
+saved session and model context.
+
 Nexus A2A uses conversations shared by their participants; the
 [storage matrix](docs/design/agent-context-storage-matrix.html#agent-delivery-contract)
 owns identity, directory links, durable delivery, and visibility contracts.

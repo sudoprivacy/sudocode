@@ -164,17 +164,12 @@ fn a_peer_appending_during_a_refusal_moves_tail_but_not_offset() {
     // question this recorder exists to answer.
     let root = TempRoot::new("appending");
     let abort = runtime::HookAbortSignal::default();
-    let handed_over = Arc::new(AtomicUsize::new(0));
 
-    let seen = Arc::clone(&handed_over);
     let poller = runtime::mailbox::spawn_local_poller(
         root.path().to_path_buf(),
         "pinned-receiver".to_string(),
         abort.clone(),
-        move |_envelope: &MailboxEnvelope| {
-            seen.fetch_add(1, Ordering::Release);
-            false
-        },
+        |_envelope: &MailboxEnvelope| false,
     );
 
     let sender = runtime::mailbox::Mailbox::workspace_local(root.path(), "chatty-peer".to_string());
@@ -182,16 +177,26 @@ fn a_peer_appending_during_a_refusal_moves_tail_but_not_offset() {
         .send(envelope("chatty-peer", "pinned-receiver", "first"))
         .expect("send first");
 
+    let recorded_tail = || {
+        runtime::mailbox::delivery_events()
+            .into_iter()
+            .filter(|e| e.peer == "chatty-peer")
+            .filter_map(|e| e.tail)
+            .max()
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while handed_over.load(Ordering::Acquire) < 1 && std::time::Instant::now() < deadline {
+    // The consumer runs before the tail records its refusal. A counter inside
+    // that callback cannot establish that the delivery record is visible.
+    let tail_before = loop {
+        if let Some(tail) = recorded_tail() {
+            break tail;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no stall was recorded for the first message"
+        );
         std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    let tail_before = runtime::mailbox::delivery_events()
-        .into_iter()
-        .filter(|e| e.peer == "chatty-peer")
-        .filter_map(|e| e.tail)
-        .max()
-        .expect("a stall was recorded for the first message");
+    };
 
     // Append while the consumer is still refusing.
     sender
@@ -206,12 +211,7 @@ fn a_peer_appending_during_a_refusal_moves_tail_but_not_offset() {
     let mut tail_after = tail_before;
     while tail_after <= tail_before && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        tail_after = runtime::mailbox::delivery_events()
-            .into_iter()
-            .filter(|e| e.peer == "chatty-peer")
-            .filter_map(|e| e.tail)
-            .max()
-            .unwrap_or(tail_before);
+        tail_after = recorded_tail().unwrap_or(tail_before);
     }
     abort.abort();
     let _ = poller.join();

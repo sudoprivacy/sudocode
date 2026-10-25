@@ -881,6 +881,8 @@ pub struct ReaderRegister {
     /// is free. Deliberately NOT the agent name: two instances of the SAME
     /// agent are exactly what this has to tell apart.
     #[serde(default)]
+    /// The claim that failed to advance, empty when no reader was held (see
+    /// [`DeliveryStall::ClaimFailed`]).
     pub holder: String,
     /// Legacy diagnostic deadline; the backend lock controls ownership.
     #[serde(default)]
@@ -1705,6 +1707,182 @@ fn receive_while_seated(
 }
 /// One conversation's tail: hold the reader seat, park on the transcript,
 /// deliver, commit.
+/// Why a delivery attempt left the reader where it was.
+///
+/// Recorded because the interesting case was previously invisible. Three of
+/// these only reached an `eprintln!` on a stderr nobody captures, and
+/// [`DeliveryStall::ConsumerRefused`] — the one that actually re-hands a batch
+/// to a consumer and so produces duplicate deliveries — was logged nowhere at
+/// all. Six agents then had to argue from inference about whether a repeat was
+/// transport or a peer saying something twice, which is the distinction
+/// [`MailboxEnvelope::timestamp`] is documented to settle but which nothing
+/// persisted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryStall {
+    /// The consumer did not accept every message in the batch, so the whole
+    /// batch is re-read from the same offset. This is the DESIGNED
+    /// at-least-once boundary, not a fault — it is recorded so that a repeat
+    /// can be attributed instead of guessed at.
+    ///
+    /// Recorded only when the lease was still valid, so this really is the
+    /// consumer's refusal. The batch test is
+    /// `msgs.iter().all(|m| reader.is_valid() && sink(m))`, which also goes
+    /// false when the lease lapses mid-batch; attributing that to the consumer
+    /// would blame the wrong cause for exactly the repeats this record exists
+    /// to explain — and the "not a fault" note above would then be asserted
+    /// about a fault. That case is [`DeliveryStall::LeaseLost`].
+    ConsumerRefused,
+    /// The lease went invalid part-way through the batch, so the handover was
+    /// abandoned and the batch is re-read. Distinct from
+    /// [`DeliveryStall::ConsumerRefused`] because this one IS a fault, and
+    /// because a repeat caused by it has a different remedy.
+    LeaseLost,
+    /// The batch was accepted but `commit` refused to store the new offset, so
+    /// the accepted work will be handed over again.
+    CommitRefused,
+    /// The reader could not be claimed at all.
+    ClaimFailed,
+    /// Reading the conversation failed.
+    PollFailed,
+}
+
+/// One delivery attempt that did not advance a reader.
+///
+/// Carries only what attributes the stall — peer, holder, offset — and never
+/// message bodies: the transcript already holds those, and a diagnostic has no
+/// business copying them.
+#[derive(Debug, Clone)]
+pub struct DeliveryEvent {
+    pub peer: String,
+    pub holder: String,
+    /// The offset that did NOT advance, or `None` when no reader was held and
+    /// there is no offset to report.
+    ///
+    /// `Option` for the same reason as `tail`: offset **0** is a real and common
+    /// value — the start of a conversation, which the integration tests assert
+    /// on — so a zero standing for "unknown" would be indistinguishable from a
+    /// genuine stall at the first frame. [`DeliveryStall::ClaimFailed`] happens
+    /// before a reader exists, so it has no offset rather than an invented one.
+    pub offset: Option<u64>,
+    /// End of the transcript as of the poll that observed this stall, or `None`
+    /// when no poll succeeded and nothing beyond the cursor is known.
+    ///
+    /// This is the field that makes the record self-sufficient. `offset` alone
+    /// cannot tell a re-hand from a peer speaking again: while a consumer keeps
+    /// refusing, the offset stays put in BOTH cases, so both look identical on
+    /// `offset` and `repeats`. `tail` separates them — it is unchanged when the
+    /// same frames are handed over again, and larger when the peer appended
+    /// something new.
+    ///
+    /// `Option` rather than a sentinel because `Some(tail) == Some(offset)`
+    /// already means something definite — the reader is caught up, nothing
+    /// pending. Encoding "unknown" the same way would make "no backlog" and
+    /// "could not see the backlog" indistinguishable, which is the exact
+    /// ambiguity this field exists to remove. A type keeps them apart for every
+    /// reader; a doc comment only helps the ones who read it.
+    pub tail: Option<u64>,
+    pub stall: DeliveryStall,
+    /// Why the lease stopped being trusted, when that is what stopped this
+    /// delivery.
+    ///
+    /// - [`DeliveryStall::LeaseLost`]: always `Some`. The lease records its
+    ///   loss before it reads invalid, so a `LeaseLost` with `None` here is a
+    ///   bug, not a missing measurement.
+    /// - [`DeliveryStall::CommitRefused`]: `Some` when the commit was refused
+    ///   because the lease was lost — the renewal ahead of the write returned
+    ///   an error, answered "not held", or answered too late — and `None` when
+    ///   the lease held and the register write itself failed. One window is not
+    ///   told apart: a write failure coinciding with the worker losing the lease
+    ///   in the instant after the commit's own renewal succeeded would show the
+    ///   worker's loss. That takes two independent failures inside one commit.
+    /// - Every other stall: `None` **by construction**, not by observation. A
+    ///   consumer refusal is classified at the moment it happens, and the lease
+    ///   may lapse a moment later; attaching that later loss would give the
+    ///   refusal a cause it did not have — the misattribution `stall` exists to
+    ///   prevent.
+    pub loss: Option<LeaseLoss>,
+    /// Consecutive stalls at the current `offset` within one reader claim.
+    ///
+    /// Reset when a batch is accepted, and started afresh when the reader is
+    /// re-acquired — so it never carries a stale count across a claim or back
+    /// to an earlier offset.
+    pub repeats: u32,
+    pub at_ms: u64,
+}
+
+/// Bounded so a long-lived agent cannot accumulate these without limit.
+const DELIVERY_EVENT_CAP: usize = 256;
+
+/// A bounded record of delivery stalls.
+///
+/// A type rather than loose statics so it can be exercised in isolation: the
+/// process-wide instance is just one of these, and a test gets its own instead
+/// of racing its peers through shared state.
+#[derive(Default)]
+struct DeliveryLog {
+    events: std::sync::Mutex<std::collections::VecDeque<DeliveryEvent>>,
+}
+
+impl DeliveryLog {
+    /// Infallible and side-effect-free with respect to delivery: recording must
+    /// never influence whether a batch is acknowledged.
+    fn record(&self, event: DeliveryEvent) {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if events.len() == DELIVERY_EVENT_CAP {
+            events.pop_front();
+        }
+        events.push_back(event);
+    }
+
+    fn events(&self) -> Vec<DeliveryEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+fn global_delivery_log() -> &'static DeliveryLog {
+    static LOG: std::sync::OnceLock<DeliveryLog> = std::sync::OnceLock::new();
+    LOG.get_or_init(DeliveryLog::default)
+}
+
+fn record_delivery_stall(
+    peer: &str,
+    holder: &str,
+    offset: Option<u64>,
+    tail: Option<u64>,
+    stall: DeliveryStall,
+    loss: Option<LeaseLoss>,
+    repeats: u32,
+) {
+    global_delivery_log().record(DeliveryEvent {
+        peer: peer.to_string(),
+        holder: holder.to_string(),
+        offset,
+        tail,
+        stall,
+        loss,
+        repeats,
+        at_ms: now_ms(),
+    });
+}
+
+/// Delivery stalls observed by this process, oldest first.
+///
+/// Process-scoped by design: the question being answered is "what is happening
+/// on this receiver", and draining to disk from the tail thread would add a new
+/// failure mode to the delivery path for a diagnostic's sake.
+#[must_use]
+pub fn delivery_events() -> Vec<DeliveryEvent> {
+    global_delivery_log().events()
+}
+
 fn spawn_conversation_tail(
     mailbox: Arc<Mailbox>,
     peer: String,
@@ -1725,30 +1903,96 @@ fn spawn_conversation_tail(
                     }
                     Err(e) => {
                         eprintln!("[{label}] claiming reader for {peer}: {e}");
+                        record_delivery_stall(
+                            &peer,
+                            "",
+                            None,
+                            None,
+                            DeliveryStall::ClaimFailed,
+                            None,
+                            0,
+                        );
                         sleep_unless_aborted(&abort, block_ms.max(1));
                         continue;
                     }
                 };
                 let mut retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
+                let mut stall_repeats = 0_u32;
                 while !abort.is_aborted() && reader.is_valid() {
                     let (msgs, next) =
                         match mailbox.poll_conversation(&peer, reader.offset, block_ms) {
                             Ok(batch) => batch,
                             Err(e) => {
                                 eprintln!("[{label}] polling conversation with {peer}: {e}");
+                                record_delivery_stall(
+                                    &peer,
+                                    reader.cursor.holder(),
+                                    Some(reader.offset),
+                                    None,
+                                    DeliveryStall::PollFailed,
+                                    None,
+                                    0,
+                                );
                                 sleep_unless_aborted(&abort, block_ms.max(1));
                                 continue;
                             }
                         };
-                    if msgs.iter().all(|m| reader.is_valid() && sink(m)) {
+                    let mut lease_lost = false;
+                    if msgs.iter().all(|m| {
+                        // Record which step failed as it happens. Asking
+                        // `is_valid()` again afterwards would be a second
+                        // question with a window between: a sink that refused
+                        // under a held lease, followed by the lease lapsing
+                        // before the check, would be filed as `LeaseLost` when
+                        // the consumer was the actual cause.
+                        if !reader.is_valid() {
+                            lease_lost = true;
+                            return false;
+                        }
+                        sink(m)
+                    }) {
                         retry_delay_ms = DELIVERY_RETRY_INITIAL_MS;
+                        stall_repeats = 0;
                         if next > reader.offset {
                             if let Err(e) = reader.commit(next) {
                                 eprintln!("[{label}] committing reader for {peer}: {e}");
+                                record_delivery_stall(
+                                    &peer,
+                                    reader.cursor.holder(),
+                                    Some(reader.offset),
+                                    Some(next),
+                                    DeliveryStall::CommitRefused,
+                                    reader.lease.loss(),
+                                    0,
+                                );
                                 break;
                             }
                         }
                     } else {
+                        // The batch is re-read from this same offset, so every
+                        // message in it is handed over again. Recorded: this is
+                        // the path that produces a byte-identical redelivery,
+                        // and it used to leave no trace whatsoever.
+                        if !msgs.is_empty() {
+                            stall_repeats = stall_repeats.saturating_add(1);
+                            // Which step actually failed, captured above rather
+                            // than re-derived here. Only a lost lease carries
+                            // the lease's loss; see `DeliveryEvent::loss`.
+                            let (stall, loss) = if lease_lost {
+                                (DeliveryStall::LeaseLost, reader.lease.loss())
+                            } else {
+                                (DeliveryStall::ConsumerRefused, None)
+                            };
+                            record_delivery_stall(
+                                &peer,
+                                reader.cursor.holder(),
+                                Some(reader.offset),
+                                Some(next),
+                                stall,
+                                loss,
+                                stall_repeats,
+                            );
+                        }
                         sleep_unless_aborted(&abort, retry_delay_ms);
                         retry_delay_ms = retry_delay_ms.saturating_mul(2).min(READER_RENEW_MS);
                     }

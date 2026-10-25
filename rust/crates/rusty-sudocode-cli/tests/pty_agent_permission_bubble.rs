@@ -5,7 +5,7 @@ mod common;
 mod wire_requests;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common::TestEnv;
@@ -27,6 +27,10 @@ fn agent_input(model: &str, agent: &str, prompt: &str) -> Value {
     })
 }
 
+fn agent_call_prompt(input: &Value, follow_up: &str) -> String {
+    format!("Call the Agent tool with exactly this input object, without adding or overriding fields: {input}. {follow_up}")
+}
+
 fn requests(directory: &Path) -> Vec<Value> {
     std::fs::read_dir(directory)
         .unwrap()
@@ -34,6 +38,30 @@ fn requests(directory: &Path) -> Vec<Value> {
         .filter(|path| wire_requests::is_inference_request_dump(path))
         .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
         .collect()
+}
+
+fn completed_invoice_report(directory: &Path) -> PathBuf {
+    let reports: BTreeSet<_> = requests(directory)
+        .iter()
+        .flat_map(wire_requests::request_tool_blocks)
+        .filter_map(|block| {
+            if block["type"] != "tool_result" {
+                return None;
+            }
+            let result: Value = serde_json::from_str(block["content"].as_str()?).ok()?;
+            if result["name"] != INVOICE_AGENT || result["status"] != "completed" {
+                return None;
+            }
+            Some(PathBuf::from(result["outputFile"].as_str()?))
+        })
+        .collect();
+    assert_eq!(reports.len(), 1, "one completed invoice report on the wire");
+    let report = reports.into_iter().next().unwrap();
+    assert!(
+        report.is_file(),
+        "Agent returned a missing report: {report:?}"
+    );
+    report
 }
 
 #[test]
@@ -122,7 +150,10 @@ print(result)
     let command_words = shell_words::split(&command).unwrap();
     let child_prompt = format!("Use the bash tool to run exactly this command once, with no other commands or retries: {command}. Report its actual output.");
     let execution = agent_input(&model, INVOICE_AGENT, &child_prompt);
-    let prompt = format!("Call the Agent tool with exactly this input object, without adding or overriding fields: {execution}. Wait for the child and report its actual output.");
+    let prompt = agent_call_prompt(
+        &execution,
+        "Wait for the child and report its actual output.",
+    );
     let marker = common::turn_status_marker(&cli);
     cli.send(&prompt).unwrap();
     common::expect_screen(
@@ -164,22 +195,38 @@ print(result)
         saved.contains(&nonce) && saved.contains(&subtotal.to_string()),
         "approved child did not persist the actual result: {saved}"
     );
+    let mut expected_report = None;
     if verify_report {
         // Its own turn: asked to chain both Agent calls in one turn, a live
         // model sometimes answered from the first child's result and never
         // made the second call. Whether it chains steps unprompted is not
         // what this workflow is about; reading the saved report without
         // re-running the invoice is.
-        let read = serde_json::json!({"path": "OUTPUT_FILE"});
+        // Resolve the returned outputFile in the fixture, keeping the explicit
+        // workspace-relative Windows read input without model substitution.
+        let report = completed_invoice_report(&captured).canonicalize().unwrap();
+        let workspace = env.workspace_root().canonicalize().unwrap();
+        let relative = Path::new(".")
+            .join(
+                report
+                    .strip_prefix(&workspace)
+                    .expect("report is in the workspace"),
+            )
+            .to_string_lossy()
+            .replace('\\', "/");
+        expected_report = Some(report);
+        let read = serde_json::json!({"path": relative});
         let verification = agent_input(
             &model,
             "Explore",
             &format!("Call read_file exactly once with exactly this input object: {read}. Copy the supplied relative path unchanged, including its leading './' and forward slashes. Return the actual invoice output. Only read this report: do not run commands or create another report."),
         );
         let marker = common::turn_status_marker(&cli);
-        // Both agents receive an explicit read input so a Windows child does
-        // not reinterpret the returned report as a drive-rooted path.
-        cli.send(&format!("The Agent call above saved its report at the outputFile path in its returned result. Express that same report as a workspace-relative path beginning with ./.sudocode-agents/ and using forward slashes. Call the Agent tool with this exact input object, replacing only OUTPUT_FILE with that workspace-relative report path: {verification}. Report that verified output.")).unwrap();
+        cli.send(&agent_call_prompt(
+            &verification,
+            "Wait for the child. Report that verified output.",
+        ))
+        .unwrap();
         common::expect_screen(
             &cli,
             |s| {
@@ -291,8 +338,14 @@ print(result)
                             is_report || is_fixture,
                             "child read outside the invoice fixture"
                         );
-                        let contents = std::fs::read_to_string(actual).unwrap();
+                        let contents = std::fs::read_to_string(&actual).unwrap();
                         if is_report {
+                            if let Some(expected) = &expected_report {
+                                assert_eq!(
+                                    &actual, expected,
+                                    "the verification child must read the first child's actual report"
+                                );
+                            }
                             assert!(
                                 contents.contains(&nonce)
                                     && contents.contains(&subtotal.to_string())

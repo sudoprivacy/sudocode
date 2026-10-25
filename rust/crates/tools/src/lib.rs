@@ -1931,9 +1931,20 @@ fn execute_tool_with_enforcer(
             // A watch runs arbitrary shell, so it is gated exactly like bash.
             let classified_mode = classify_bash_permission(&monitor_input.command);
             maybe_enforce_permission_check_with_mode(enforcer, name, input, classified_mode)?;
+            // Scoped to this tool call exactly like `bash`: the launcher calls
+            // `prepare_terminal`, which REQUIRES the tool identity to register
+            // the terminal in the completion journal. Without `for_tool` the
+            // launch fails outright ("terminal tool identity missing") in any
+            // session that has a journal bound — so a watch has to carry the
+            // same identity a background command does.
             run_monitor(
                 monitor_input,
-                ctx.and_then(|ctx| ctx.background_tasks.as_ref()),
+                ctx.and_then(|ctx| {
+                    ctx.background_tasks.as_ref().map(|tasks| {
+                        tasks.for_tool(ctx.assistant_message_id(), ctx.tool_use_id.as_deref())
+                    })
+                })
+                .as_ref(),
             )
         }
         "read_file" => {

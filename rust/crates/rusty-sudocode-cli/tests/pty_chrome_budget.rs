@@ -11,7 +11,7 @@ struct DraftWriterGate(std::path::PathBuf);
 impl Drop for DraftWriterGate {
     fn drop(&mut self) {
         // A failed assertion must also let the waiting shell finish.
-        let _ = std::fs::write(&self.0, "");
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -61,7 +61,8 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
         ],
     );
     // Drop before the PTY, including while an assertion is unwinding.
-    let writer_gate = DraftWriterGate(env.workspace_root().join("draft-go"));
+    let writer_gate = DraftWriterGate(env.workspace_root().join("draft-held"));
+    std::fs::write(&writer_gate.0, "").unwrap();
     common::expect_screen_settled(
         &sess,
         |s| s.contains("BudgetTask2") && s.contains('❯'),
@@ -74,7 +75,7 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
     // Hold the shell after redirection creates the file. Existence alone
     // cannot establish that the restored command has finished writing it.
     let command = format!(
-        "! : > draft.txt; while [ ! -f draft-go ]; do sleep 0.01; done; \
+        "! : > draft.txt; while [ -f draft-held ]; do sleep 0.01; done; \
          echo {payload} > draft.txt; printf 'DraftDone%s' '-marker'"
     );
     sess.send(&format!("\x1b[200~{command}\x1b[201~")).unwrap();

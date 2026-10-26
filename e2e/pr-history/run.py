@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise current-main and preserved-history checks against actual Git repos."""
+"""Exercise merge-provenance and conflict-marker checks against actual Git repos."""
 
 import os
 from pathlib import Path
@@ -23,8 +23,8 @@ def main():
             git("add", name)
             git("commit", "-m", "Change " + name)
 
-        def expect(label, success, error=None):
-            result = subprocess.run([sys.executable, str(GATE), "main", "HEAD"], cwd=root, env=env, capture_output=True, text=True)
+        def expect(label, success, error=None, base="main", head="HEAD"):
+            result = subprocess.run([sys.executable, str(GATE), base, head], cwd=root, env=env, capture_output=True, text=True)
             if (result.returncode == 0) != success:
                 raise AssertionError(label + "\n" + result.stdout + result.stderr)
             if error is not None and error not in result.stderr:
@@ -48,7 +48,7 @@ def main():
         git("switch", "main")
         commit("shared.txt", "main change\n")
         git("switch", "feature")
-        expect("stale PR rejected", False, "PR is behind main")
+        expect("PR behind main accepted; the merge queue integrates it", True)
         main_commit = git("rev-parse", "main").stdout.strip()
         assert git("merge", "main", "-m", "Merge main", check=False).returncode != 0
         (root / "shared.txt").write_text("feature change\nmain change\n")
@@ -71,7 +71,7 @@ def main():
         git("switch", "main")
         commit("next-main.txt", "main advances again\n")
         git("switch", "feature")
-        expect("new main changes require integration", False, "PR is behind main")
+        expect("PR behind main again accepted", True)
         git("merge", "main", "-m", "Merge main again")
         expect("another main integration accepted", True)
         git("merge-base", "--is-ancestor", feature_commit, "HEAD")
@@ -83,6 +83,48 @@ def main():
         git("merge", "--no-ff", "additional-feature", "-m", "Merge additional feature")
         expect("additional preserved branch history accepted", True)
         git("merge-base", "--is-ancestor", additional_commit, "HEAD")
+
+        # Another PR lands work on main in a file this PR never edits.
+        git("switch", "main")
+        commit("other.txt", "another PR's work\n")
+        # Integrating main, the merge resolution rewrites that file — the
+        # silent-revert shape this gate exists for.
+        git("switch", "-c", "reverting", "feature")
+        git("merge", "--no-commit", "main")
+        (root / "other.txt").write_text("stale copy\n")
+        git("add", "other.txt")
+        git("commit", "-m", "Merge main")
+        expect("merge that rewrites a file the PR never edits rejected", False, "  other.txt\n")
+        # The queue tests the PR merged onto main's tip, as GitHub builds a group.
+        git("switch", "-c", "queue-group", "main")
+        git("merge", "--no-ff", "reverting", "-m", "Merge queue group")
+        expect("merge queue group with the same rewrite rejected", False, "  other.txt\n", base="main", head="HEAD")
+
+        # Hiding an edit in a merge is caught even in a file the PR does edit.
+        git("switch", "-c", "hiding", "feature")
+        commit("feature-only.txt", "the PR's own file\n")
+        git("switch", "main")
+        commit("unrelated.txt", "main moves on\n")
+        git("switch", "hiding")
+        git("merge", "--no-commit", "main")
+        (root / "feature-only.txt").write_text("edited inside the merge\n")
+        git("add", "feature-only.txt")
+        git("commit", "-m", "Merge main")
+        expect("edit hidden in a merge of a file the PR edits rejected", False, "  feature-only.txt\n")
+
+        # A pushed merge cannot be rewritten; declaring the edit makes it visible.
+        git("switch", "reverting")
+        git("commit", "--allow-empty", "-m", "Declare merge adaptation", "-m", "Merge-adapts: other.txt")
+        expect("declared merge adaptation accepted", True)
+
+        # The same edit as its own commit is visible and allowed.
+        git("switch", "-c", "adapting", "feature")
+        git("merge", "main", "-m", "Merge main")
+        commit("other.txt", "intended follow-up\n")
+        expect("same edit in its own commit accepted", True)
+        git("switch", "main")
+        git("merge", "--no-ff", "adapting", "-m", "Queue group")
+        expect("clean merge queue group accepted", True, base="main~1", head="HEAD")
 
 
 if __name__ == "__main__":

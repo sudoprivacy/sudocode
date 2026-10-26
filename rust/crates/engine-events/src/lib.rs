@@ -37,6 +37,7 @@
 pub use runtime::background_tasks::{
     BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
 };
+pub use runtime::turn_input::{InputDelivery, InputSource, InputView, TurnInput};
 pub use runtime::{
     // Prompt-cache + auto-compaction telemetry (AssistantEvent::PromptCache,
     // TurnSummary::auto_compaction).
@@ -240,6 +241,10 @@ pub struct TurnComplete {
 /// — `PartialEq` is all any consumer (tests included) needs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
+    /// Persisted into this turn, rather than merely accepted by its input channel.
+    InputCommitted(InputView),
+    /// Not consumed: return ownership to the submitting surface.
+    InputDeferred(Vec<runtime::turn_input::TurnInput>),
     CommandResult {
         id: u64,
         result: Result<serde_json::Value, String>,
@@ -402,6 +407,10 @@ pub enum EngineCommand {
     /// The reply is a [`EngineEvent::CommandResult`] with this request ID.
     RuntimeStatus {
         request_id: u64,
+    },
+    /// Soft steering; never cancels a tool or adds interruption guidance.
+    Steer {
+        inputs: Vec<runtime::turn_input::TurnInput>,
     },
     CancelSubagent {
         request_id: u64,

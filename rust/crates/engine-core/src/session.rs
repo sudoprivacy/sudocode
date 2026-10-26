@@ -140,6 +140,11 @@ pub trait EngineDelegate: Send + Sync + 'static {
     /// not acquire the session mutex held by the work being cancelled.
     fn abort_signal(&self) -> HookAbortSignal;
 
+    /// Must remain accessible while `run_turn` owns the session lock.
+    fn turn_input_inbox(&self) -> Option<runtime::turn_input::TurnInputInbox> {
+        None
+    }
+
     /// One registry owned by the engine session, shared by every turn driver.
     fn background_tasks(&self) -> Option<runtime::background_tasks::BackgroundTasks> {
         None
@@ -362,6 +367,9 @@ async fn drive(
             EngineCommand::RuntimeStatus { request_id } => {
                 handle_runtime_status(request_id, &tasks, &evt_tx);
             }
+            EngineCommand::Steer { inputs } => {
+                let _ = evt_tx.send(EngineEvent::InputDeferred(inputs));
+            }
             EngineCommand::Completion { id, action } => handle_completion(id, action, &evt_tx),
             EngineCommand::CancelSubagent {
                 request_id,
@@ -577,6 +585,10 @@ async fn run_one_turn(
 
     let abort = delegate.abort_signal();
     abort.reset();
+    let inbox = delegate.turn_input_inbox();
+    if let Some(inbox) = &inbox {
+        inbox.begin();
+    }
     let _ = evt_tx.send(EngineEvent::TurnStarted { label });
     let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
 
@@ -601,6 +613,15 @@ async fn run_one_turn(
         tokio::select! {
             biased;
             cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
+                Some(EngineCommand::Steer { inputs }) => {
+                    let refused = match &inbox {
+                        Some(inbox) => inbox.admit(inputs).err(),
+                        None => Some(inputs),
+                    };
+                    if let Some(inputs) = refused {
+                        let _ = evt_tx.send(EngineEvent::InputDeferred(inputs));
+                    }
+                }
                 Some(EngineCommand::PermissionAnswer { id, decision }) => {
                     if let Some(PendingAnswer::Permission(tx)) = table.take(id) {
                         let _ = tx.send(decision);
@@ -640,6 +661,10 @@ async fn run_one_turn(
             () = evt_tx.completions.delivery_changed() => evt_tx.completions.deliver(evt_tx),
             result = &mut handle => {
                 table.cancel_all(evt_tx);
+                if let Some(inbox) = &inbox {
+                    let unapplied = inbox.finish();
+                    if !unapplied.is_empty() { let _ = evt_tx.send(EngineEvent::InputDeferred(unapplied)); }
+                }
                 match result {
                     Ok(Ok(complete)) => {
                         let _ = evt_tx.send(EngineEvent::TurnComplete(complete));
@@ -731,6 +756,9 @@ async fn run_direct_tool(
                     if let Some(PendingAnswer::Permission(tx)) = table.take(id) {
                         let _ = tx.send(decision);
                     }
+                }
+                Some(EngineCommand::Steer { inputs }) => {
+                    let _ = evt_tx.send(EngineEvent::InputDeferred(inputs));
                 }
                 Some(EngineCommand::DirectTool { request_id, .. }) => refuse_busy(request_id, evt_tx),
                 Some(EngineCommand::BackgroundTask { action }) => handle_background_task(action, tasks, evt_tx),
@@ -867,6 +895,9 @@ impl SubagentRelay {
 }
 
 impl RuntimeObserver for ObserverAdapter {
+    fn on_input_committed(&mut self, input: &runtime::turn_input::InputView) {
+        let _ = self.tx.send(EngineEvent::InputCommitted(input.clone()));
+    }
     fn on_compaction(&mut self, event: &runtime::CompactionProgress) {
         let _ = self.tx.send(EngineEvent::Compaction(event.clone()));
     }

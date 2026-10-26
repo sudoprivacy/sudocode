@@ -57,6 +57,7 @@ fn send_to(
     auth: &str,
 ) -> Result<(), String> {
     mailbox(client, from_agent, auth).send(MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
         from: from_agent.to_string(),
         to: to_agent.to_string(),
         body: body.to_string(),

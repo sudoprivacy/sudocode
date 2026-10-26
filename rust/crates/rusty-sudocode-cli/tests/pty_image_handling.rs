@@ -359,6 +359,198 @@ fn missing_cli_image_fails_before_model_request() {
     }
 }
 
+struct ReleaseImageTool(std::path::PathBuf);
+
+impl Drop for ReleaseImageTool {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.0, "release");
+    }
+}
+
+fn start_image_tool(env: &TestEnv) -> pty_expect::PtySession {
+    use serde_json::json;
+
+    fs::write(
+        env.workspace_root().join("image-wait.sh"),
+        "printf started > image-tool-started; while test ! -f image-tool-release; do sleep 0.1; done; printf 'IMAGE_TOOL_RESULT\\n'",
+    )
+    .unwrap();
+    let mut session = env.spawn_with_env(
+        &[
+            "--permission-mode",
+            "danger-full-access",
+            "--allowedTools",
+            "Bash",
+        ],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    session.resize(60, 160).unwrap();
+    common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "image test input");
+    let prompt = if env.is_mock() {
+        format!(
+            "PARITY_SCENARIO:tool_concurrency TOOL_BATCH:{}",
+            json!([{"id":"image-held-tool", "name":"Bash", "input":{"command":"sh image-wait.sh", "timeout":common::LIVE_TURN_BUDGET.as_millis()*3}}]),
+        )
+    } else {
+        "Run sh image-wait.sh exactly once in the foreground. Do not create image-tool-release. When it completes, follow the latest user message without using more tools.".into()
+    };
+    session
+        .send(&format!("\x1b[200~{prompt}\x1b[201~"))
+        .unwrap();
+    common::expect_screen(
+        &session,
+        |view| !common::input_line_of(view).is_empty(),
+        common::DEFAULT_TIMEOUT,
+        "initial image test request",
+    );
+    session.send("\r").unwrap();
+    common::expect_screen(
+        &session,
+        |_| env.workspace_root().join("image-tool-started").exists(),
+        common::LIVE_TURN_BUDGET,
+        "image test tool is running",
+    );
+    session
+}
+
+fn steering_image_reference(queue_before_flush: bool) {
+    use base64::Engine as _;
+
+    let env = TestEnv::new(if queue_before_flush {
+        "image-queue-flush"
+    } else {
+        "image-enter-steer"
+    });
+    let image = env.workspace_root().join("image fixture.png");
+    write_fixture_png(&image);
+    let expected = base64::engine::general_purpose::STANDARD.encode(fs::read(&image).unwrap());
+    let release = env.workspace_root().join("image-tool-release");
+    let _release = ReleaseImageTool(release.clone());
+    let mut session = start_image_tool(&env);
+    let input =
+        "Describe this image in one short English sentence: @\"image fixture.png\" @\"image fixture.png\"";
+    session.send(&format!("\x1b[200~{input}\x1b[201~")).unwrap();
+    common::expect_input_line(
+        &session,
+        input,
+        common::DEFAULT_TIMEOUT,
+        "image steering draft",
+    );
+    session
+        .send(if queue_before_flush { "\t" } else { "\r" })
+        .unwrap();
+    if queue_before_flush {
+        common::expect_screen(
+            &session,
+            |view| view.contains("queued:"),
+            common::DEFAULT_TIMEOUT,
+            "image explicitly queued",
+        );
+        session.send("\x1b").unwrap();
+    }
+    common::expect_screen(
+        &session,
+        |view| view.contains("steering:"),
+        common::DEFAULT_TIMEOUT,
+        "image steered during the original tool",
+    );
+    fs::write(&release, "release").unwrap();
+    common::expect_screen(
+        &session,
+        |view| {
+            view.contains("IMAGE_TOOL_RESULT")
+                && view.contains("ctx ")
+                && !view.contains("steering:")
+        },
+        common::LIVE_TURN_BUDGET,
+        "image follow-up completes without cancelling the original tool",
+    );
+    if env.is_mock() {
+        assert_eq!(env.captured_message_count(), 2);
+        let content = captured_blocks(&env).pop().unwrap();
+        let images: Vec<_> = content
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["type"] == "image")
+            .collect();
+        assert_eq!(
+            images.len(),
+            1,
+            "steering must attach native pixels once: {content}"
+        );
+        assert_eq!(images[0]["source"]["data"], expected);
+    } else {
+        common::expect_screen(
+            &session,
+            |view| {
+                view.split(|c: char| !c.is_ascii_alphabetic()).any(|word| {
+                    ["red", "cyan", "rectangle", "circle", "yellow"]
+                        .iter()
+                        .any(|expected| word.eq_ignore_ascii_case(expected))
+                })
+            },
+            common::LIVE_TURN_BUDGET,
+            "the live model describes the actual pixels without Read",
+        );
+    }
+    session.render(|screen| assert!(!screen.contents().contains("Cancelled")));
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+}
+
+#[test]
+fn steering_image_on_enter_preserves_native_pixels() {
+    steering_image_reference(false);
+}
+
+#[test]
+fn steering_image_on_queue_flush_preserves_native_pixels() {
+    steering_image_reference(true);
+}
+
+#[test]
+fn steering_image_rejects_text_only_models_before_another_provider_request() {
+    let env = TestEnv::new("steering-image-text-only");
+    if !env.is_mock() {
+        return; // The capability override belongs to the deterministic provider fixture.
+    }
+    mark_model_text_only(&env);
+    write_fixture_png(&env.workspace_root().join("image fixture.png"));
+    let release = env.workspace_root().join("image-tool-release");
+    let _release = ReleaseImageTool(release.clone());
+    let mut session = start_image_tool(&env);
+    let input = "Describe @\"image fixture.png\"";
+    session.send(&format!("\x1b[200~{input}\x1b[201~")).unwrap();
+    common::expect_input_line(
+        &session,
+        input,
+        common::DEFAULT_TIMEOUT,
+        "text-only image draft",
+    );
+    session.send("\r").unwrap();
+    common::expect_screen(
+        &session,
+        |view| view.contains("steering:"),
+        common::DEFAULT_TIMEOUT,
+        "text-only image is staged",
+    );
+    fs::write(&release, "release").unwrap();
+    common::expect_screen(
+        &session,
+        |view| view.contains("does not support image input"),
+        common::DEFAULT_TIMEOUT,
+        "steering shares initial-input capability rejection",
+    );
+    session.send("/exit\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+    assert_eq!(
+        env.captured_message_count(),
+        1,
+        "an unsupported image must not reach the provider"
+    );
+}
+
 #[path = "common/openai_compat_mock.rs"]
 mod image_vlm_mock;
 

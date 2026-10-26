@@ -124,6 +124,12 @@ pub fn repl_a2a_prompt_section(self_id: &str) -> String {
 /// messaging (local JSONL + nexus DT_STREAM A2A).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailboxEnvelope {
+    /// Scheduling intent; it never grants permission to cancel the recipient.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::turn_input::InputDelivery::is_steer"
+    )]
+    pub delivery: crate::turn_input::InputDelivery,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub from: String,
     #[serde(default)]

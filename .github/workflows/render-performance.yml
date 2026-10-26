@@ -7,6 +7,9 @@ on:
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
+  # The queue does not re-measure: it carries each queued PR's own gate result
+  # onto the group commit (job `queue`).
+  merge_group:
   workflow_dispatch:
     inputs:
       profile:
@@ -36,6 +39,7 @@ concurrency:
 jobs:
   contract:
     name: Rendering policy live PR contract
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -108,6 +112,50 @@ jobs:
           name: rendering-policy
           path: selected-policy
           if-no-files-found: error
+
+  queue:
+    name: Carry rendering gate into merge queue
+    if: github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.merge_group.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require every queued PR's own gate to have passed
+        uses: actions/github-script@v7
+        env:
+          BASE: ${{ github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.merge_group.head_sha }}
+        with:
+          script: |
+            const { execFileSync } = require('child_process');
+            const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
+            // Each first-parent merge in the group brings one PR; its second
+            // parent is that PR's head, where the PR's gate posted its status.
+            const merges = git('rev-list', '--first-parent', '--merges', `${process.env.BASE}..${process.env.HEAD}`)
+              .split('\n').filter(Boolean);
+            const heads = merges.map(merge => git('rev-parse', `${merge}^2`));
+            const failed = [];
+            for (const sha of heads) {
+              const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+                ...context.repo, ref: sha, per_page: 100,
+              });
+              const latest = statuses.find(status => status.context === 'render performance');
+              if (latest?.state !== 'success') failed.push(`${sha.slice(0, 8)}: ${latest?.state ?? 'missing'}`);
+            }
+            const ok = heads.length > 0 && failed.length === 0;
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha: process.env.HEAD,
+              context: 'render performance', state: ok ? 'success' : 'failure',
+              description: ok ? `All ${heads.length} queued PR gates passed` : `Not passed: ${failed.join(', ') || 'no PR merges in group'}`.slice(0, 140),
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+            if (!ok) core.setFailed(`render performance not passed for queued PR heads: ${failed.join(', ') || 'none found'}`);
 
   measure:
     name: Release rendering A/A and A/B

@@ -150,6 +150,7 @@ fn spawn_receiver(env: &TestEnv) -> pty_expect::PtySession {
 fn send_message(outbox: &Mailbox, body: &str) {
     outbox
         .send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: SENDER.into(),
             to: AGENT.into(),
             body: body.to_string(),

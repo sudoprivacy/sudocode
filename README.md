@@ -88,7 +88,10 @@ session, with size limits and an option to disable them.
 Peer agents discover names with `agent_list` and exchange messages with `send`.
 
 In terminal history, `send` shows the exact recipient, summary, a short message
-preview and the inbox write receipt. `agent_list` shows one row per agent,
+preview and a `Sent to inbox` receipt in the title. Long recipient addresses
+wrap without a duplicate `To:` line; `Summary:` labels the supplied summary.
+An inbox receipt confirms the write, not that the recipient has read or acted
+on the message. `agent_list` shows one row per agent,
 including a separate send address when needed. Only workers with a known state
 are marked active or inactive. Full messages and tool results remain in the
 saved session and model context.
@@ -158,6 +161,8 @@ scode doctor
 The [usage guide](docs/usage.md) covers prompt editing, background tasks,
 session recovery, configuration, and output formats. The
 [ACP guide](docs/acp.md) covers transports, permissions, and session controls.
+The [input controls](docs/usage.md#steering-queueing-and-cancellation) distinguish
+steering current work, queueing the next turn, flushing, and cancellation.
 
 ## Build and contribute
 

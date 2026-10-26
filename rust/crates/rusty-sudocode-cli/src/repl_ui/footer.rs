@@ -9,7 +9,13 @@ use crossterm::style::ContentStyle;
 use engine_core::{Tip, TipPriority};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Hash)]
+pub(super) struct FooterHints<'a> {
+    pub transient: Option<&'a str>,
+    pub controls: Option<&'a str>,
+}
+
+#[derive(Clone, Default, Hash)]
 pub(super) struct FooterTips {
     model: BTreeMap<TipPriority, Tip>,
     cache: Option<Tip>,
@@ -39,14 +45,18 @@ impl FooterTips {
         tasks: &TaskBrowser,
         submitted: bool,
         active: bool,
-        native_hint: Option<&str>,
+        hints: FooterHints<'_>,
         width: usize,
     ) -> StyledText {
-        let native = native_hint.map(|message| Tip {
+        let native = hints.transient.map(|message| Tip {
             priority: TipPriority::Urgent,
             message: StyledText::from_ansi(message)
                 .text
                 .replace(['\n', '\r', '\t'], " "),
+        });
+        let control = hints.controls.map(|message| Tip {
+            priority: TipPriority::Normal,
+            message: message.to_string(),
         });
         let ordinary = Tip {
             priority: TipPriority::Normal,
@@ -66,8 +76,9 @@ impl FooterTips {
                     (_, cache) => cache,
                 }
             })
-            .or((!active).then_some(&ordinary))
             .filter(|tip| !active || tip.priority == TipPriority::Urgent)
+            .or(control.as_ref())
+            .or((!active).then_some(&ordinary))
             .filter(|tip| tasks.focus == TaskFocus::Input || tip.priority == TipPriority::Urgent);
 
         let mut base = truncate_to_width(&format!("  ⏵⏵ {permission}"), width);

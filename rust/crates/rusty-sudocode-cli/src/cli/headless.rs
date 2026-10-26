@@ -302,7 +302,7 @@ pub(crate) fn run(options: HeadlessOptions) -> Result<(), Error> {
                     "session_id":session, "model":cli.lifecycle.current_model(), "partial_messages":false}),
                 )?;
             }
-            let blocks = runtime::image_input::prompt_blocks(&prompt, &runtime::StdFsBackend)?;
+            let blocks = runtime::image_input::prompt_blocks(prompt, &runtime::StdFsBackend)?;
             cli.engine_handle.commands.send(EngineCommand::Prompt {
                 blocks,
                 context: None,

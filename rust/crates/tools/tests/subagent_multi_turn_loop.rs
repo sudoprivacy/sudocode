@@ -60,6 +60,7 @@ fn unique_workspace(label: &str) -> std::path::PathBuf {
 
 fn envelope(kind: &str, from: &str, text: &str) -> MailboxEnvelope {
     MailboxEnvelope {
+        delivery: runtime::turn_input::InputDelivery::Steer,
         from: from.to_string(),
         to: String::new(), // filled by Mailbox::send
         body: text.to_string(),

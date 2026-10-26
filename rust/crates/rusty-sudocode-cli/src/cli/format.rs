@@ -885,7 +885,11 @@ pub(crate) fn tool_card_content(
     match ToolKind::from_name(name) {
         Some(ToolKind::Bash) => shell_card("Bash", input, output),
         Some(ToolKind::PowerShell) => shell_card("PowerShell", input, output),
-        Some(ToolKind::Send) => a2a::send_card(input, output, status),
+        Some(ToolKind::Send) => {
+            let mut content = a2a::send_card(input, output, status);
+            content.wrap_header = true;
+            content
+        }
         Some(ToolKind::AgentList) => a2a::agent_list_card(input, output, status),
         Some(ToolKind::Read) => read_card(input, output, status),
         Some(ToolKind::Write) => write_card(input, output, status),
@@ -952,8 +956,10 @@ pub(crate) enum ToolStatus {
 /// body) and inherit the unified look automatically.
 #[derive(Debug)]
 pub(crate) struct ToolCardContent {
-    /// Unabridged identity; layout fits it to one physical row at paint time.
+    /// Unabridged identity; layout fits it to the terminal at paint time.
     pub header: String,
+    /// Wrap identities that must stay exact instead of clipping their title.
+    wrap_header: bool,
     /// Optional multi-line body, already styled/highlighted, with **no**
     /// leading prefix — `render_tool_card` owns the frame.
     pub body: Option<String>,
@@ -966,6 +972,7 @@ impl ToolCardContent {
     fn header_only(header: String) -> Self {
         Self {
             header,
+            wrap_header: false,
             body: None,
             command: None,
         }
@@ -974,6 +981,7 @@ impl ToolCardContent {
     fn new(header: String, body: String) -> Self {
         Self {
             header,
+            wrap_header: false,
             body: Some(body),
             command: None,
         }
@@ -1018,10 +1026,19 @@ pub(crate) fn render_tool_card_with_width(
         .as_ref()
         .filter(|command| is_truncated || command.contains(['\n', '\r', '\t']))
         .map(|command| command_body_preamble(command, term_width));
+    let header_rows = content
+        .wrap_header
+        .then(|| wrap_ansi_to_width(&header, left_frame::header_width(term_width).max(1)));
+    let title = header_rows
+        .as_ref()
+        .and_then(|rows| rows.first())
+        .map_or(header.as_str(), String::as_str);
     left_frame::render(
-        &header,
-        command
+        title,
+        header_rows
             .iter()
+            .flat_map(|rows| rows.iter().skip(1))
+            .chain(command.iter())
             .chain(content.body.iter())
             .map(String::as_str),
         term_width,
@@ -1056,16 +1073,7 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
             None
         } else {
             let removed = ansi_fg(theme().diff_removed);
-            let target = if ToolKind::from_name(name) == Some(ToolKind::Send) {
-                in_val
-                    .get("to")
-                    .and_then(serde_json::Value::as_str)
-                    .map(|to| format!("To: {to}\n"))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            Some(format!("{target}{removed}{summary}{RESET}"))
+            Some(format!("{removed}{summary}{RESET}"))
         };
     }
     if let (Some(feedback), false) = (hook_feedback, is_error) {

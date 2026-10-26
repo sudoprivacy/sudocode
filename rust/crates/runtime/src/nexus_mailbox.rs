@@ -320,6 +320,7 @@ mod tests {
     #[test]
     fn envelope_round_trips_via_unified_type() {
         let env = MailboxEnvelope {
+            delivery: crate::turn_input::InputDelivery::Steer,
             from: "operator".into(),
             to: "win-ai".into(),
             body: "hi".into(),

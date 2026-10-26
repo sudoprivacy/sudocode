@@ -1722,6 +1722,10 @@ pub fn mvp_tool_specs() -> Vec<ToolSpec> {
             input_schema: with_task_template(json!({
                 "type": "object",
                 "properties": {
+                    "delivery": {
+                        "type": "string", "enum": ["steer", "queue"],
+                        "description": "Interactive recipient: steer (default) offers this message within its current task; queue waits for its next turn. Other hosts deliver at their turn boundary. Neither cancels work or requires a change of direction."
+                    },
                     "to": {
                         "type": "string",
                         "description": "Recipient: agent name, pid, or \"*\" for broadcast."
@@ -3143,7 +3147,7 @@ fn resolve_sender(input: &SendMessageInput, mailbox: &runtime::mailbox::Mailbox)
 fn write_envelope(
     mailbox: &runtime::mailbox::Mailbox,
     recipient: &str,
-    from: &str,
+    input: &SendMessageInput,
     text: &str,
     summary: Option<&str>,
     kind: &str,
@@ -3151,7 +3155,8 @@ fn write_envelope(
 ) -> Result<PathBuf, String> {
     let recipient_sanitized = sanitize_recipient(recipient);
     let envelope = MailboxEnvelope {
-        from: from.to_string(),
+        delivery: input.delivery,
+        from: resolve_sender(input, mailbox),
         to: recipient.to_string(),
         body: text.to_string(),
         summary: summary.map(str::to_string),
@@ -3297,7 +3302,7 @@ fn run_send_message(
                 write_envelope(
                     &mailbox,
                     r,
-                    &sender,
+                    &input,
                     text,
                     summary,
                     mailbox_kinds::MESSAGE,
@@ -3327,7 +3332,7 @@ fn run_send_message(
         let path = write_envelope(
             &mailbox,
             &input.to,
-            &sender,
+            &input,
             text,
             input.summary.as_deref(),
             mailbox_kinds::MESSAGE,
@@ -3373,7 +3378,7 @@ fn run_send_message(
             write_envelope(
                 &mailbox,
                 &input.to,
-                &sender,
+                &input,
                 &body,
                 None,
                 mailbox_kinds::SHUTDOWN_REQUEST,
@@ -3424,7 +3429,7 @@ fn run_send_message(
             write_envelope(
                 &mailbox,
                 &input.to,
-                &sender,
+                &input,
                 &body,
                 None,
                 mailbox_kinds::SHUTDOWN_RESPONSE,
@@ -3458,7 +3463,7 @@ fn run_send_message(
             write_envelope(
                 &mailbox,
                 &input.to,
-                &sender,
+                &input,
                 &body,
                 None,
                 mailbox_kinds::PLAN_APPROVAL_RESPONSE,
@@ -4652,6 +4657,8 @@ struct CronDeleteInput {
 // fork-compatible error messages verbatim.
 #[derive(Debug, Deserialize)]
 struct SendMessageInput {
+    #[serde(default)]
+    delivery: runtime::turn_input::InputDelivery,
     to: String,
     message: Value,
     #[serde(default)]

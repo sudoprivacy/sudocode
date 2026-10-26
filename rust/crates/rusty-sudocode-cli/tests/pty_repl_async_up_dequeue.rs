@@ -95,7 +95,7 @@ fn up_arrow_on_empty_buffer_dequeues_last_queued_input() {
     // submit_during_turn queues it (queue mode) and returns Queued. The
     // input thread's rustyline is now idle waiting for the next line, and
     // the marker text should NOT execute as its own turn.
-    sess.send(&format!("{MARKER}\r"))
+    sess.send(&format!("{MARKER}\t"))
         .expect("queue marker during running turn");
 
     // Give rustyline + the input thread a beat to process + hand off. 200 ms

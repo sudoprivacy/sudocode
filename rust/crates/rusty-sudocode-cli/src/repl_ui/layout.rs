@@ -31,6 +31,16 @@ impl Measurements {
         if content.text.is_empty() {
             return 0;
         }
+        // UTF-8 bytes bound the painted columns from above (the adapter
+        // removes tabs/CR). A fitting logical line needs no temporary canvas.
+        // Wider or multiline text still uses the actual iocraft primitive.
+        if content.text.len() <= self.width.max(1)
+            && !content.text.contains([
+                '\n', '\r', '\u{000b}', '\u{000c}', '\u{0085}', '\u{2028}', '\u{2029}',
+            ])
+        {
+            return 1;
+        }
         // Attributes affect appearance, not text wrapping or row count.
         if let Some((rows, used)) = self.rows.get_mut(&content.text) {
             *used = true;

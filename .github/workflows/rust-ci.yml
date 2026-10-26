@@ -63,6 +63,9 @@ on:
       - scripts/cache_metrics.py
       - spec/cache_metrics.json
       - spec/prompt_cache_observations.json
+  # The merge queue tests the group that will become main: no path filter,
+  # every required check reports.
+  merge_group:
   workflow_dispatch:
     inputs:
       render_performance:

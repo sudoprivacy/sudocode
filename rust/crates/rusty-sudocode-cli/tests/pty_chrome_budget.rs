@@ -122,7 +122,11 @@ fn short_window_folds_todos_and_restores_the_entire_draft() {
     sess.send("\r").unwrap();
     let result = env.workspace_root().join("draft.txt");
     let deadline = std::time::Instant::now() + common::DEFAULT_TIMEOUT;
-    while !result.exists() && std::time::Instant::now() < deadline {
+    // Shell redirection creates the file before echo writes it. Observe the
+    // completed bytes, rather than racing the producer at file creation.
+    while !std::fs::read_to_string(&result).is_ok_and(|text| text.trim() == payload)
+        && std::time::Instant::now() < deadline
+    {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     assert_eq!(
@@ -165,7 +169,7 @@ fn undersized_picker_cannot_confirm_an_unseen_selection() {
     sess.resize(6, 80).unwrap();
     common::expect_screen_settled(
         &sess,
-        |s| s.contains("Enlarge terminal to review"),
+        |s| s.contains("Enlarge terminal to review; Ctrl+C cancels"),
         common::DEFAULT_TIMEOUT,
         "size warning",
     );

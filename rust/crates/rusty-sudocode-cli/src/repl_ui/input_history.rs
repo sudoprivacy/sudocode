@@ -49,7 +49,14 @@ impl InputHistory {
                     if let Some(value) = self.dequeue.as_ref().and_then(|hook| hook()) {
                         if let Ok(mut pending) = self.pending.lock() {
                             pending.retain(|item| {
-                                !matches!(item, PendingItem::QueuedMessage { is_human: true, .. })
+                                !matches!(
+                                    item,
+                                    PendingItem::Input {
+                                        is_human: true,
+                                        delivery: engine_events::InputDelivery::Queue,
+                                        ..
+                                    }
+                                )
                             });
                         }
                         return Some(at_end(value));

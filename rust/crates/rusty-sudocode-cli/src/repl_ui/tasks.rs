@@ -11,7 +11,7 @@ use engine_events::{
 };
 use std::{collections::BTreeMap, time::Instant};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(super) enum TaskFocus {
     #[default]
     Input,

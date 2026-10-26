@@ -52,6 +52,43 @@ typing share the editor's current buffer and cursor, even in one key burst;
 no redraw is required between them. On an empty draft, `Up` recalls queued
 human messages before history, leaving inbound peer messages queued.
 
+## Steering, queueing and cancellation
+
+These controls apply to the default asynchronous REPL. Starting with
+`SUDOCODE_INTERRUPT_QUEUE_MODE=off` selects the legacy synchronous REPL,
+which retains turn-boundary delivery.
+
+While the model or tools are working:
+
+| Key | Behavior |
+| --- | --- |
+| Enter | Offer the message within the current task. |
+| Tab | Queue the message for the next turn; slash command completion keeps Tab. |
+| Esc with pending messages | Flush the entire queue into the current task. |
+| Esc without pending messages, or Ctrl+C | Cancel the current turn. Ctrl+C always cancels. |
+
+Steering adds ordinary input to the conversation, without an instruction to
+abandon the original task. The model can use a suggestion or treat it as FYI.
+Sampling yields at replayable text or before a tool is admitted. Consecutive
+thinking blocks remain complete and unchanged. Already admitted tools finish
+and their results reach the model before the new input.
+Flush preserves the unsent draft and does not add an interruption marker.
+Cancelling with Esc also keeps the unsent draft; Ctrl+C clears it.
+
+The pending area distinguishes `queued` from `steering`. A steering message
+stays visible until it enters the conversation. `Up` recalls explicitly queued
+human input, keeping peer messages and accepted steering out of the editor.
+Cancellation preserves unapplied messages without automatically restarting
+work; Enter or Esc resumes that retained queue. A second Ctrl+C within 800 ms
+exits. Session management commands require an idle turn and return immediately
+when work is active.
+
+For an interactive peer, `send` accepts `delivery: "steer"` (default) or
+`delivery: "queue"`. Peer provenance and message bodies remain intact. Other
+hosts deliver at their turn boundaries. Delivery intent never grants a peer
+permission to cancel the human's task; the existing structured subagent
+shutdown request remains a separate control operation.
+
 ## Global and project directories
 
 All native config paths resolve through `runtime::config`. The same roots own
@@ -377,8 +414,9 @@ same editor, preserving the complete text and cursor.
 The choice controls stay visible while the document is read in native history
 or the pager. If the terminal is too small to show those controls
 safely, an enlargement warning replaces the panel; confirmation and hidden
-edits are disabled, but Esc/Ctrl-C can still cancel. Resizing does not answer a
-question, alter the saved plan, or clear conversation history.
+edits are disabled. Ctrl+C can still cancel; Esc follows the pending-message
+controls described above. Resizing does not answer a question, alter the saved
+plan, or clear conversation history.
 
 `write_plan` saves the complete Markdown document, including Context,
 Constraints, and Acceptance Criteria, before presenting it for review. The
@@ -398,14 +436,16 @@ conversation. The current input draft is retained. For UI that fits within
 the viewport, resize clears only the live UI from its retained start position,
 without clearing the preceding conversation or purging terminal scrollback.
 
-While a turn is running, messages you submit wait in the staging area.
+While a turn is running, Enter steers the current task and Tab queues a message
+for the next turn. Pending messages stay visible in the staging area until
+consumed, with `queued` and `steering` labels indicating their delivery state.
 Each queued preview uses a muted label and normal-intensity message text;
 narrow windows shorten the label and clip the preview, not the queued text.
 Press ↑ on an empty input to bring all queued human messages back for editing,
 joined in their original submit order. Their staging entries disappear;
 peer/A2A messages remain queued. The cursor starts at the end of the recalled
-text, and further arrow presses use normal cursor navigation. Submitting it
-queues the edited text again. On an empty input with no queued human message,
+text, and further arrow presses use normal cursor navigation. Enter steers with
+the edited text; Tab queues it again. On an empty input with no queued human message,
 ↑ recalls prompt history.
 
 A line starting with `!` runs the rest as a shell command instead of

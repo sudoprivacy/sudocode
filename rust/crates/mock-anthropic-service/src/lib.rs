@@ -578,8 +578,9 @@ async fn handle_connection(
         if calls.iter().any(|call| call.stream_wait_for.is_some()) {
             socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await?;
             let body = build_stream_body(&request, scenario);
-            let mut tool_starts = 0;
-            let mut current_tool = None;
+            let thinking_count = calls.first().map_or(0, |call| call.stream_thinking.len());
+            let tool_offset = thinking_count + usize::from(concurrency_prelude(&calls).is_some());
+            let postlude_index = tool_offset + calls.len();
             let mut text_waited = false;
             for chunk in body.split_inclusive("\n\n") {
                 socket.write_all(chunk.as_bytes()).await?;
@@ -587,40 +588,47 @@ async fn handle_connection(
                     .lines()
                     .find_map(|line| line.strip_prefix("data: "))
                     .and_then(|data| serde_json::from_str::<Value>(data).ok());
-                // Text blocks own no tool gate. Match the actual emitted tool
-                // identity instead of counting every content_block_stop.
-                if let Some(event) = event
+                let index = event
                     .as_ref()
-                    .filter(|event| event["type"] == "content_block_start")
+                    .and_then(|event| event["index"].as_u64())
+                    .and_then(|index| usize::try_from(index).ok());
+                let event_type = event.as_ref().and_then(|event| event["type"].as_str());
+                let delta_type = event
+                    .as_ref()
+                    .and_then(|event| event["delta"]["type"].as_str());
+                let call = index
+                    .and_then(|index| index.checked_sub(tool_offset))
+                    .and_then(|index| calls.get(index));
+                let waiting_call = if event_type == Some("content_block_delta")
+                    && delta_type == Some("text_delta")
+                    && index == Some(postlude_index)
+                    && !text_waited
                 {
-                    current_tool = (event["content_block"]["type"] == "tool_use")
-                        .then(|| {
-                            calls.iter().position(|call| {
-                                event["content_block"]["id"].as_str() == Some(call.id.as_str())
-                            })
-                        })
-                        .flatten();
-                    tool_starts += usize::from(current_tool.is_some());
-                }
-                let is_postlude_delta = tool_starts == calls.len()
-                    && event.as_ref().is_some_and(|event| {
-                        event["type"] == "content_block_delta"
-                            && event["delta"]["type"] == "text_delta"
-                    });
-                let waiting_call = if is_postlude_delta && !text_waited {
                     text_waited = true;
                     calls
                         .iter()
                         .find(|call| !call.stream_text_chunks.is_empty())
-                } else if chunk.starts_with("event: content_block_stop\n") {
-                    current_tool
-                        .and_then(|index| calls.get(index))
-                        .filter(|call| call.stream_text_chunks.is_empty())
+                } else if event_type == Some("content_block_stop")
+                    && index == Some(0)
+                    && thinking_count > 0
+                {
+                    calls
+                        .first()
+                        .filter(|call| call.stream_pause_at == "thinking")
+                } else if event_type == Some("content_block_delta")
+                    && delta_type == Some("input_json_delta")
+                {
+                    call.filter(|call| call.stream_pause_at == "arguments")
+                } else if event_type == Some("content_block_stop") {
+                    call.filter(|call| {
+                        call.stream_pause_at == "tool_stop" && call.stream_text_chunks.is_empty()
+                    })
                 } else {
                     None
                 };
                 if let Some(call) = waiting_call {
                     if let Some(path) = &call.stream_wait_for {
+                        std::fs::write(format!("{path}.ready"), "ready")?;
                         wait_for_fixture_release(path).await?;
                         if call.stream_fail_after {
                             return Ok(());
@@ -820,9 +828,12 @@ fn find_header_end(bytes: &[u8]) -> Option<usize> {
 }
 
 struct ConcurrencyCall {
-    stream_prelude: Option<String>,
     stream_wait_for: Option<String>,
     stream_fail_after: bool,
+    stream_pause_at: String,
+    stream_thinking: Vec<(String, String)>,
+    stream_prelude: Option<String>,
+    // These chunks follow the tool-use blocks; introductory text uses prelude.
     stream_text_chunks: Vec<String>,
     id: String,
     name: String,
@@ -850,9 +861,28 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
         .expect("tool_concurrency requires TOOL_BATCH JSON")
         .into_iter()
         .map(|call| ConcurrencyCall {
-            stream_prelude: call["stream_prelude"].as_str().map(str::to_string),
             stream_wait_for: call["stream_wait_for"].as_str().map(str::to_string),
             stream_fail_after: call["stream_fail_after"].as_bool().unwrap_or(false),
+            stream_pause_at: call["stream_pause_at"]
+                .as_str()
+                .unwrap_or("tool_stop")
+                .into(),
+            stream_thinking: call["stream_thinking"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|block| {
+                    (
+                        block["thinking"].as_str().unwrap().into(),
+                        block["signature"].as_str().unwrap().into(),
+                    )
+                })
+                .collect(),
+            // Normalize the earlier fixture spelling at the boundary.
+            stream_prelude: call["stream_prelude"]
+                .as_str()
+                .or_else(|| call["stream_text_prelude"].as_str())
+                .map(str::to_owned),
             // File-backed chunks keep response markers out of the echoed prompt.
             stream_text_chunks: call["stream_text_chunks_path"].as_str().map_or_else(
                 || {
@@ -875,6 +905,11 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
             input: call["input"].clone(),
         })
         .collect()
+}
+
+#[inline]
+fn concurrency_prelude(calls: &[ConcurrencyCall]) -> Option<&str> {
+    calls.iter().find_map(|call| call.stream_prelude.as_deref())
 }
 
 fn concurrency_batch_complete(request: &MessageRequest) -> bool {
@@ -1698,20 +1733,17 @@ fn build_stream_body(request: &MessageRequest, scenario: Scenario) -> String {
                         partial_json_chunks: chunks,
                     })
                     .collect();
-                let prelude: String = calls
-                    .iter()
-                    .filter_map(|call| call.stream_prelude.as_deref())
-                    .collect();
                 let text_chunks: Vec<_> = calls
                     .iter()
                     .flat_map(|call| &call.stream_text_chunks)
                     .map(String::as_str)
                     .collect();
-                tool_uses_sse_with_text(
+                tool_uses_sse_with_blocks(
                     &uses,
                     12,
-                    (!prelude.is_empty()).then_some(prelude.as_str()),
+                    concurrency_prelude(&calls),
                     &text_chunks,
+                    &calls[0].stream_thinking,
                 )
             }
             true => final_text_sse("Concurrency batch done."),
@@ -3711,6 +3743,16 @@ fn tool_uses_sse_with_text(
     prelude: Option<&str>,
     postlude: &[&str],
 ) -> String {
+    tool_uses_sse_with_blocks(tool_uses, input_tokens, prelude, postlude, &[])
+}
+
+fn tool_uses_sse_with_blocks(
+    tool_uses: &[ToolUseSse<'_>],
+    input_tokens: u32,
+    prelude: Option<&str>,
+    postlude: &[&str],
+    thinking: &[(String, String)],
+) -> String {
     let mut body = String::new();
     let message_id = tool_uses.first().map_or_else(
         || "msg_tool_use".to_string(),
@@ -3733,11 +3775,12 @@ fn tool_uses_sse_with_text(
             }
         }),
     );
+    append_thinking_sse(&mut body, thinking);
     if let Some(text) = prelude {
-        append_text_sse(&mut body, 0, &[text]);
+        append_text_sse(&mut body, thinking.len(), &[text]);
     }
     for (index, tool_use) in tool_uses.iter().enumerate() {
-        let index = index + usize::from(prelude.is_some());
+        let index = index + thinking.len() + usize::from(prelude.is_some());
         append_sse(
             &mut body,
             "content_block_start",
@@ -3775,7 +3818,7 @@ fn tool_uses_sse_with_text(
     if !postlude.is_empty() {
         append_text_sse(
             &mut body,
-            tool_uses.len() + usize::from(prelude.is_some()),
+            tool_uses.len() + thinking.len() + usize::from(prelude.is_some()),
             postlude,
         );
     }
@@ -3790,6 +3833,40 @@ fn tool_uses_sse_with_text(
     );
     append_sse(&mut body, "message_stop", json!({"type": "message_stop"}));
     body
+}
+
+fn append_thinking_sse(body: &mut String, thinking: &[(String, String)]) {
+    for (index, (text, signature)) in thinking.iter().enumerate() {
+        append_sse(
+            body,
+            "content_block_start",
+            json!({
+                "type":"content_block_start", "index":index,
+                "content_block":{"type":"thinking", "thinking":"", "signature":null}
+            }),
+        );
+        append_sse(
+            body,
+            "content_block_delta",
+            json!({
+                "type":"content_block_delta", "index":index,
+                "delta":{"type":"thinking_delta", "thinking":text}
+            }),
+        );
+        append_sse(
+            body,
+            "content_block_delta",
+            json!({
+                "type":"content_block_delta", "index":index,
+                "delta":{"type":"signature_delta", "signature":signature}
+            }),
+        );
+        append_sse(
+            body,
+            "content_block_stop",
+            json!({"type":"content_block_stop", "index":index}),
+        );
+    }
 }
 
 fn append_text_sse(body: &mut String, index: usize, chunks: &[&str]) {

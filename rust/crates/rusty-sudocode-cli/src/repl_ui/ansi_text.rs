@@ -142,9 +142,11 @@ mod tests {
         for is_human in [true, false] {
             for width in [100, 78] {
                 let overlay = super::super::render_pending_overlay(
-                    &[super::super::PendingItem::QueuedMessage {
+                    &[super::super::PendingItem::Input {
                         display: "StyleQueuedMarker".into(),
                         is_human,
+                        id: 0,
+                        delivery: engine_events::InputDelivery::Queue,
                     }],
                     40,
                     width,

@@ -61,6 +61,7 @@ fn pair() -> (Mailbox, Mailbox) {
     );
     sender
         .send(runtime::agent_mailbox::MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: "sender".into(),
             to: "receiver".into(),
             body: "durable delivery".into(),

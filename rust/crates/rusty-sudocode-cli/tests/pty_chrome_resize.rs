@@ -98,6 +98,7 @@ fn queued_peer_preview_resizes_and_flushes_its_complete_body_once() {
                 if let Some(receiver) = receiver {
                     return Mailbox::workspace_local(&pair, "mac-ai".into()).send(
                         MailboxEnvelope {
+                            delivery: engine_events::InputDelivery::Queue,
                             from: "mac-ai".into(),
                             to: receiver.file_name().unwrap().to_string_lossy().into_owned(),
                             body,

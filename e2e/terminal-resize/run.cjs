@@ -40,6 +40,8 @@ async function queuedPeer() {
     && line.includes(config.firstLine)) && text.includes('❯ draft-中文'), started);
   child.write('\x15');
   await frame(text => !text.includes('draft-中文'));
+  child.write('\x03');
+  await frame(text => text.includes('Cancelled'));
   child.write('\x1b');
   // The status counts assistant responses, including tool continuations. A
   // live peer acknowledgment may legitimately use send before its final reply.

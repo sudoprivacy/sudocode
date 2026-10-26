@@ -37,14 +37,14 @@ fn add(session: &mut Session, id: &str, name: &str, input: &Value, output: &Valu
         .unwrap();
 }
 
-fn replay(env: &TestEnv, source: &Session, marker: &str, check: impl Fn(&str)) {
+fn replay(env: &TestEnv, source: &Session, marker: &str, widths: &[u16], check: impl Fn(&str)) {
     // Historical JSON is still supported. The real delivery journey also
     // exercises the current append log, so both restoration formats are covered.
     let path = env.workspace_root().join("a2a-history.json");
     std::fs::write(&path, source.to_json().unwrap().render()).unwrap();
     let original = Session::load_from_path(&path).unwrap().messages().to_vec();
     for mode in ["off", "queue"] {
-        for width in [52, 120] {
+        for &width in widths {
             let mut cli = env.spawn_with_env(
                 &[
                     "--resume",
@@ -129,7 +129,7 @@ fn send_replay_keeps_receipts_addresses_errors_and_bounded_previews() {
     add(
         &mut source,
         "structured",
-        "send",
+        "Send",
         &json!({"to":"worker-42","message":{"type":"plan_approval_response","approve":false,
             "feedback":"Please include the missing validation.","request_id":"plan-42"}}),
         &json!({"success":true,"request_id":"plan-42"}),
@@ -151,12 +151,13 @@ fn send_replay_keeps_receipts_addresses_errors_and_bounded_previews() {
         &json!({"future_receipt":"UNFAMILIAR-RESULT-RETAINED"}),
         false,
     );
-    replay(&env, &source, "Recorded unfamiliar.", |screen| {
+    let widths = &[32, 52, 120];
+    replay(&env, &source, "Recorded unfamiliar.", widths, |screen| {
         for expected in [
             "Send →",
             address,
             "Summary: 验证结果摘要",
-            "Written to inbox",
+            "Sent to inbox",
             "Third preview line.",
             "full output preserved in session",
             "No recipients · no inboxes written",
@@ -173,6 +174,21 @@ fn send_replay_keeps_receipts_addresses_errors_and_bounded_previews() {
         }
         assert!(!screen.contains("HIDDEN-TAIL-ONLY-IN-SESSION"));
         assert!(!screen.contains("HIDDEN-MAILBOX-PATH"));
+        assert!(
+            !screen.contains("To: "),
+            "recipient is already in the title"
+        );
+        assert_eq!(
+            screen.matches(address).count(),
+            2,
+            "success and error each show the complete address once: {screen}"
+        );
+        assert!(
+            screen.contains(&format!(
+                "Send → {address} · Sent to inboxSummary: 验证结果摘要"
+            )),
+            "the receipt belongs to the title, before the labeled summary: {screen}"
+        );
     });
 }
 
@@ -223,7 +239,8 @@ fn agent_list_replay_distinguishes_unknown_liveness_empty_and_truncated_lists() 
         &json!("Agent enumeration unavailable"),
         true,
     );
-    replay(&env, &source, "Recorded list-error.", |screen| {
+    let widths = &[52, 120];
+    replay(&env, &source, "Recorded list-error.", widths, |screen| {
         for expected in [
             "AgentList · 3 agents",
             "peer  peer-未知状态",

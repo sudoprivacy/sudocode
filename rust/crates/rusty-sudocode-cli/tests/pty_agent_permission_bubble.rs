@@ -170,13 +170,16 @@ print(result)
         // made the second call. Whether it chains steps unprompted is not
         // what this workflow is about; reading the saved report without
         // re-running the invoice is.
+        let read = serde_json::json!({"path": "OUTPUT_FILE"});
         let verification = agent_input(
             &model,
             "Explore",
-            "Read exactly OUTPUT_FILE and return the actual invoice output. Only read this report: do not run commands or create another report.",
+            &format!("Call read_file exactly once with exactly this input object: {read}. Copy the supplied relative path unchanged, including its leading './' and forward slashes. Return the actual invoice output. Only read this report: do not run commands or create another report."),
         );
         let marker = common::turn_status_marker(&cli);
-        cli.send(&format!("The Agent call above saved its report at the outputFile path in its returned result. Call the Agent tool with this exact input object, replacing only OUTPUT_FILE with that actual outputFile path: {verification}. Report that verified output.")).unwrap();
+        // Both agents receive an explicit read input so a Windows child does
+        // not reinterpret the returned report as a drive-rooted path.
+        cli.send(&format!("The Agent call above saved its report at the outputFile path in its returned result. Express that same report as a workspace-relative path beginning with ./.sudocode-agents/ and using forward slashes. Call the Agent tool with this exact input object, replacing only OUTPUT_FILE with that workspace-relative report path: {verification}. Report that verified output.")).unwrap();
         common::expect_screen(
             &cli,
             |s| {
@@ -267,7 +270,9 @@ print(result)
                         } else {
                             env.workspace_root().join(path)
                         };
-                        let actual = path.canonicalize().expect("report file must exist");
+                        let actual = path.canonicalize().unwrap_or_else(|error| {
+                            panic!("report file {path:?} must exist: {error}")
+                        });
                         let reports = env
                             .workspace_root()
                             .join(".sudocode-agents")

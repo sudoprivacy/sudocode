@@ -17,6 +17,8 @@
 mod common;
 #[path = "support/node_home.rs"]
 mod node_home;
+#[path = "support/sync_input.rs"]
+mod sync_input;
 
 use std::time::{Duration, Instant};
 
@@ -57,6 +59,7 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
     let pair_root = local_pair_root_in(env.config_home());
     Mailbox::workspace_local(&pair_root, PEER.to_string())
         .send(MailboxEnvelope {
+            delivery: runtime::turn_input::InputDelivery::Steer,
             from: PEER.to_string(),
             to: AGENT.to_string(),
             body: "for the sync REPL PARITY_SCENARIO:single_turn_text".to_string(),
@@ -122,12 +125,10 @@ fn the_next_instance_receives_a_message_the_crashed_one_left_unrun() {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    // A durable read position can advance before the input row is rearmed.
-    // Reuse the shared turn/ready gate before asking for a fresh receiver report.
     let ready_deadline = Instant::now() + BUDGET;
-    common::expect_turn_complete_after(&second, &turn_marker, BUDGET, "redelivered peer turn");
-    common::expect_input_line_cleared(
+    sync_input::expect_prompt_after_turn(
         &second,
+        &turn_marker,
         ready_deadline.saturating_duration_since(Instant::now()),
         "status at the rearmed prompt",
     );

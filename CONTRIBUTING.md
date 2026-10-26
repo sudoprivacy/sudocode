@@ -682,17 +682,31 @@ Reviewers may push small fixups directly to your branch (formatting,
 typos) unless the PR description opts out. Larger changes go through
 review comments.
 
-Once approved, a maintainer merges with **`--merge`** (not squash)
-to preserve the feature-branch commit history. The "Verify PR history"
-CI check requires your branch to include the latest `main`. Update with
-`git fetch origin`, `git merge origin/main`, resolve any conflicts, and
-`git push`. Preserve the existing commits and their authors; do not rebase
-or squash already-published history. The check examines the actual PR head,
-accepts merge commits, rejects new conflict markers, and runs for every PR
-regardless of changed paths. Its implementation is
-[`check_pr_history.py`](.github/scripts/check_pr_history.py).
-Strict branch protection also requires the PR to remain up to date
-and pass the required CI checks before merging, including for admins.
+Once approved, land it with **`gh pr merge <n> --merge`** (not squash,
+not `--admin`). That adds the PR to the merge queue: GitHub merges it onto
+the latest `main` (plus any PRs queued ahead), runs the required checks on
+that result, and merges it into `main` as a merge commit only when they
+pass. A PR does not need to be up to date with `main` to enter the queue,
+so don't merge `main` into your branch just to catch up — merge `main` only
+to resolve a real conflict. Preserve the existing commits and their
+authors; do not rebase or squash already-published history.
+
+When you do merge `main`, the merge commit must not quietly change files
+your PR does not otherwise edit. Agents resolving merge-from-main conflicts
+have silently reverted other PRs' work this way. If you need to adapt code
+to something new on `main`, make that edit in its own commit after the
+merge. If a merge that already went out did adapt something, declare it on
+any commit with a `Merge-adapts: <path>` trailer (for example,
+`git commit --allow-empty -m 'Declare merge adaptation' -m 'Merge-adapts: <path>'`).
+
+The "Verify PR history" check enforces this on the PR and again on the
+merge-queue group. For each merge commit it recomputes Git's own merge of
+the two parents; a file may differ from that result only if it conflicted
+or is declared. It also rejects new conflict markers. (nexi-lab/nexus's
+`check_merge_history.py` enforces the same rule.) It
+runs for every PR regardless of changed paths. Its implementation is
+[`check_pr_history.py`](.github/scripts/check_pr_history.py). The required
+CI checks must pass before merging, including for admins.
 
 ## Reporting bugs & requesting features
 

@@ -11,3 +11,7 @@ rules apply to every contributor by default, not just to Claude.
 This file remains as a thin pointer because Claude Code reads it on
 startup by convention; the pointer ensures the agent finds the
 canonical doc.
+
+## Landing a PR
+
+`main` lands through a merge queue. Land with `gh pr merge <n> --merge --auto`; direct and `--admin` merges are refused by design. Don't update a branch just to catch up with `main`. If landing looks blocked, never delete, disable or edit the merge-queue ruleset or the branch protection: they guarantee every commit on `main` passed CI. Tell the user instead. Details: [Pull request guidelines](./CONTRIBUTING.md#pull-request-guidelines).

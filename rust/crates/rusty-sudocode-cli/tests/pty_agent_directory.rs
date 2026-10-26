@@ -178,7 +178,8 @@ fn assert_cards(cli: &pty_expect::PtySession, timeout: Duration) {
 
 fn complete_turn(cli: &mut pty_expect::PtySession, prompt: &str) {
     let before = common::turn_status_marker(cli);
-    cli.send(&format!("\x1b[200~{prompt}\x1b[201~")).unwrap();
+    // This journey enters text; bracketed paste can read the desktop image clipboard.
+    cli.send(prompt).unwrap();
     common::expect_input_line(
         cli,
         &prompt[..prompt.len().min(60)],

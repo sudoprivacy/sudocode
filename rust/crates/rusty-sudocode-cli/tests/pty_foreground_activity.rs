@@ -198,7 +198,7 @@ fn question_owns_the_status_until_answered_then_running_resumes() {
             .into()
     };
     submit(&mut session, &prompt);
-    common::expect_screen(
+    common::expect_screen_rows(
         &session,
         |view| {
             common::input_and_footer_of(view).is_some_and(|input| {

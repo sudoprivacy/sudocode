@@ -198,6 +198,19 @@ description: One-line summary of what this skill does
 而那句才是模型据以选择的依据。描述按发现顺序恢复，因此项目级先于用户级，
 用户级先于插件。
 
+### 原生工具的调用上下文
+
+原生 `tools` 从 stdin 接收 JSON 参数，向 stdout 输出结果。宿主提供
+`SUDOCODE_PLUGIN_ID`、`SUDOCODE_PLUGIN_NAME`、`SUDOCODE_TOOL_NAME` 和
+`SUDOCODE_TOOL_INPUT`。运行时还会把本次真实 `tool_use_id` 作为
+`SUDOCODE_TOOL_CALL_ID` 传给工具，不另造一个命令身份。没有调用上下文的
+直接执行会移除此环境变量，避免继承父进程中残留的值。
+
+远程操作适配器可以用调用 ID 加自己的委托命名空间关联同一次操作，并在
+结果不明时查询收据。这个环境变量不是 Agent 身份认证或权限凭据。需要
+关联 ID 的工具遇到缺失值应拒绝执行，不能重新生成 ID 后重发可能已经完成
+的操作。既有工具发现、权限检查和审批路径保持不变。
+
 ### 2.5 MCP servers
 
 `mcpServers` 指向的 `.mcp.json`：

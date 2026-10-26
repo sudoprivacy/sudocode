@@ -658,6 +658,10 @@ fn prose_preview_preserves_markdown_context_during_tool_completion() {
         let mut call = bash("early", &fifo_read("early.fifo"));
         call["stream_wait_for"] = json!(gate);
         call["stream_text_chunks_path"] = json!(source_path);
+        let prelude = if is_fence { "Prelude ready.\n\n" } else { "" };
+        if !prelude.is_empty() {
+            call["stream_text_prelude"] = json!(prelude);
+        }
         let mut sess = env.spawn_with_env(
             &["--permission-mode", "danger-full-access"],
             &[
@@ -675,7 +679,7 @@ fn prose_preview_preserves_markdown_context_during_tool_completion() {
         );
         send_batch(&env, &mut sess, &[call]);
         // The counter confirms that the renderer consumed the source delta.
-        let counter = format!("↓ {} tokens", source.len() / 4);
+        let counter = format!("↓ {} tokens", (prelude.len() + source.len()) / 4);
         common::expect_screen(
             &sess,
             |s| s.contains(&counter),
@@ -743,6 +747,7 @@ fn completed_tool_runs_and_renders_while_provider_stream_is_open() {
     let env = TestEnv::new_mock("parallel-stream-dispatch");
     fifo(&env, "early.fifo");
     let mut call = bash("early", &fifo_read("early.fifo"));
+    call["stream_text_prelude"] = json!("Prelude ready.\n\n");
     let gate = env.workspace_root().join("finish-stream");
     call["stream_wait_for"] = json!(gate);
     let sess = start(&env, &[call], "10");

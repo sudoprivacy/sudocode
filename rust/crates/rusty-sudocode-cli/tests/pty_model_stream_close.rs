@@ -44,6 +44,7 @@ enum ResponseKind {
     AlwaysHeartbeat,
     HeartbeatAfterOverload,
     ToolThenHeartbeat,
+    ToolThenEmptyThenComplete,
     NativePartial,
     ChatPartial,
     ResponsesPartial,
@@ -175,7 +176,8 @@ impl StreamProvider {
                 ) || (matches!(
                     kind,
                     ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
-                ) && index == 0);
+                ) && index == 0)
+                    || (matches!(kind, ResponseKind::ToolThenEmptyThenComplete) && index == 1);
                 let mut body = refusal_body(kind).unwrap_or_else(|| {
                     response_body(!matches!(kind, ResponseKind::Interrupted), empty)
                 });
@@ -1320,6 +1322,16 @@ fn check_response(kind: ResponseKind) {
             },
             "only a response with no usable content should be regenerated, once"
         );
+        if matches!(
+            kind,
+            ResponseKind::EmptyThenComplete | ResponseKind::EmptyThinkingThenComplete
+        ) {
+            let bodies = provider.bodies.lock().unwrap();
+            assert_eq!(
+                bodies[0], bodies[1],
+                "an empty response retries the original complete wire request"
+            );
+        }
     } else if matches!(
         kind,
         ResponseKind::InvalidRequestWithStatusDigits | ResponseKind::MissingModel
@@ -1582,6 +1594,7 @@ fn liveness_response(
             | ResponseKind::AlwaysHeartbeat
             | ResponseKind::HeartbeatAfterOverload
             | ResponseKind::ToolThenHeartbeat
+            | ResponseKind::ToolThenEmptyThenComplete
             | ResponseKind::NativePartial
             | ResponseKind::ChatPartial
             | ResponseKind::ResponsesPartial
@@ -1593,12 +1606,20 @@ fn liveness_response(
     if !is_live {
         return false;
     }
+    if matches!(kind, ResponseKind::ToolThenEmptyThenComplete) && index > 0 {
+        // The normal response fixture sends one terminal empty response and
+        // then a final answer, after the first request's real tool execution.
+        return false;
+    }
     if matches!(kind, ResponseKind::HeartbeatAfterOverload) && index == 0 {
         let body = r#"{"error":{"type":"overloaded_error","message":"temporarily overloaded"}}"#;
         let _ = write!(socket, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         return true;
     }
-    let tool_turn = matches!(kind, ResponseKind::ToolThenHeartbeat) && index == 0;
+    let tool_turn = matches!(
+        kind,
+        ResponseKind::ToolThenHeartbeat | ResponseKind::ToolThenEmptyThenComplete
+    ) && index == 0;
     let partial = matches!(
         kind,
         ResponseKind::NativePartial | ResponseKind::ChatPartial | ResponseKind::ResponsesPartial
@@ -1717,7 +1738,10 @@ fn check_liveness(
     let provider = StreamProvider::new(kind);
     configure_peer(&env, &provider, kind);
     let log = env.workspace_root().join("stream-events.jsonl");
-    let is_tool = matches!(kind, ResponseKind::ToolThenHeartbeat);
+    let is_tool = matches!(
+        kind,
+        ResponseKind::ToolThenHeartbeat | ResponseKind::ToolThenEmptyThenComplete
+    );
     let interactive = matches!(
         kind,
         ResponseKind::NativeHeartbeat
@@ -1823,7 +1847,48 @@ fn check_liveness(
         "complete liveness result",
     );
     let bodies = provider.bodies.lock().unwrap();
-    if expected_requests > 1 {
+    if matches!(kind, ResponseKind::ToolThenEmptyThenComplete) {
+        assert_eq!(bodies.len(), 3);
+        assert!(bodies[1]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()));
+        assert!(bodies[2]["tools"].is_null());
+        assert!(bodies[2]["tool_choice"].is_null());
+        let mut expected = bodies[1].clone();
+        expected.as_object_mut().unwrap().remove("tools");
+        expected.as_object_mut().unwrap().remove("tool_choice");
+        // With no tool prefix, the provider makes the static system block
+        // global; this is the same cache policy as the original fallback.
+        assert!(expected["system"][0]["cache_control"]
+            .get("scope")
+            .is_none());
+        expected["system"][0]["cache_control"]["scope"] = json!("global");
+        let history = expected["messages"].as_array_mut().unwrap();
+        let breakpoint = history.last_mut().unwrap()["content"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("cache_control")
+            .expect("the original final message has its cache breakpoint");
+        let messages = bodies[2]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), history.len() + 1);
+        let final_prompt = messages.last().unwrap();
+        assert_eq!(final_prompt["role"], "user");
+        let blocks = final_prompt["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["cache_control"], breakpoint);
+        let text = blocks[0]["text"].as_str().unwrap();
+        assert!(text.starts_with("The previous tool execution is complete."));
+        assert!(text.contains("Do not call tools."));
+        history.push(final_prompt.clone());
+        assert_eq!(
+            expected, bodies[2],
+            "only tools, the appended final prompt and the existing cache-boundary policy change"
+        );
+    } else if expected_requests > 1 {
         let first = usize::from(is_tool);
         assert!(
             bodies[first..].iter().all(|body| body == &bodies[first]),
@@ -1911,6 +1976,11 @@ fn active_provider_events_outlive_the_idle_timeout() {
 #[test]
 fn completed_tool_survives_an_empty_continuation_replay() {
     check_liveness(ResponseKind::ToolThenHeartbeat, "2", 3, true);
+}
+
+#[test]
+fn empty_tool_continuation_reuses_history_and_finalizes_without_reexecuting_tool() {
+    check_liveness(ResponseKind::ToolThenEmptyThenComplete, "2", 3, true);
 }
 
 #[test]

@@ -11,7 +11,7 @@
 //! assert on timing it would otherwise have to guess.
 
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use runtime::fs_backend::{
@@ -32,11 +32,32 @@ pub enum Fault {
     /// INJECTED: the next this-many renewals of a conversation reader's lock
     /// (not the seat) fail at once with an I/O error and never reach the node.
     ReaderRenewFails(u32),
+    /// INJECTED, one shot: the next renewal of a conversation reader's lock is
+    /// held before it reaches the node until [`Probe::release_reader_renewal`]
+    /// (or [`HOLD_CAP`]), then really goes to the node. The renewal is in
+    /// flight, neither failed nor answered, for as long as the test wants.
+    ReaderRenewHeld,
+    /// INJECTED, one shot: the next write of a conversation reader's register
+    /// first fails ONE renewal of that reader's lock (as `ReaderRenewFails(1)`),
+    /// waits until the renewal worker has hit it, then fails itself with an
+    /// I/O error without reaching the node. The lease is lost while the write
+    /// is in flight, and the write is what fails.
+    ReaderRegisterWriteFailsAfterLeaseLoss,
     /// INJECTED: this process cannot reach the node at all. Every call fails at
     /// once, and a lock dropped meanwhile is never released on the node, so the
     /// node can only expire it by its own TTL.
     Partitioned,
 }
+
+/// The longest [`Fault::ReaderRenewHeld`] holds a renewal if the test never
+/// releases it, so a failed test cannot hang on the hold.
+pub const HOLD_CAP: Duration = Duration::from_secs(120);
+
+/// How long [`Fault::ReaderRegisterWriteFailsAfterLeaseLoss`] waits after the
+/// failed renewal before failing the write: the worker marks the lease lost on
+/// its own thread a few instructions after its renewal returns, which is when
+/// the probe sees it.
+const LOSS_SETTLE: Duration = Duration::from_millis(300);
 
 /// How one seat renewal ended, as the lease code saw it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +104,12 @@ pub struct Probe {
     /// Locks dropped while partitioned. Held, not released, so the node keeps
     /// them until their TTL runs out.
     leaked: Mutex<Vec<Arc<dyn FsLock>>>,
+    /// When the [`Fault::ReaderRenewHeld`] renewal was requested, and whether
+    /// the test has released it.
+    held_since: Mutex<Option<Instant>>,
+    hold_released: (Mutex<bool>, Condvar),
+    /// When [`Fault::ReaderRegisterWriteFailsAfterLeaseLoss`] failed its write.
+    register_write_failed: Mutex<Option<Instant>>,
 }
 
 impl Probe {
@@ -93,6 +120,9 @@ impl Probe {
             reader: Mutex::new(Vec::new()),
             reader_claim_delay: Mutex::new(None),
             leaked: Mutex::new(Vec::new()),
+            held_since: Mutex::new(None),
+            hold_released: (Mutex::new(false), Condvar::new()),
+            register_write_failed: Mutex::new(None),
         })
     }
 
@@ -139,6 +169,57 @@ impl Probe {
             }
             _ => false,
         }
+    }
+
+    /// Consume the one-shot held renewal, if armed.
+    fn take_reader_hold(&self) -> bool {
+        let mut fault = self.fault.lock().unwrap();
+        if *fault == Fault::ReaderRenewHeld {
+            *fault = Fault::None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Hold the calling renewal until the test releases it, or [`HOLD_CAP`].
+    fn hold_reader_renewal(&self, requested: Instant) {
+        *self.held_since.lock().unwrap() = Some(requested);
+        let (released, wake) = &self.hold_released;
+        let released = released.lock().unwrap();
+        let _ = wake
+            .wait_timeout_while(released, HOLD_CAP, |released| !*released)
+            .unwrap();
+    }
+
+    /// When the held renewal was requested, once a renewal has been held.
+    pub fn reader_hold_started(&self) -> Option<Instant> {
+        *self.held_since.lock().unwrap()
+    }
+
+    /// Let the held renewal go on to the node. Idempotent, and safe to call
+    /// when nothing is held, so a test's cleanup can always call it.
+    pub fn release_reader_renewal(&self) {
+        let (released, wake) = &self.hold_released;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+    }
+
+    /// Consume the one-shot register write failure, if armed, arming the one
+    /// failed renewal it waits for.
+    fn take_register_write_failure(&self) -> bool {
+        let mut fault = self.fault.lock().unwrap();
+        if *fault == Fault::ReaderRegisterWriteFailsAfterLeaseLoss {
+            *fault = Fault::ReaderRenewFails(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// When the armed register write failed, once it has.
+    pub fn register_write_failed_at(&self) -> Option<Instant> {
+        *self.register_write_failed.lock().unwrap()
     }
 
     fn record(&self, seat: bool, event: LockEvent) {
@@ -239,6 +320,13 @@ fn is_seat(path: &str) -> bool {
     path.ends_with("/receiver.lock")
 }
 
+fn is_reader_register(path: &str) -> bool {
+    path.contains("/readers/")
+        && !std::path::Path::new(path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("lock"))
+}
+
 struct FaultyLock {
     inner: Option<Arc<dyn FsLock>>,
     probe: Arc<Probe>,
@@ -261,6 +349,9 @@ impl FsLock for FaultyLock {
                 }),
             );
             return Err(injected("renewal"));
+        }
+        if !self.seat && self.probe.take_reader_hold() {
+            self.probe.hold_reader_renewal(requested);
         }
         let result = self.inner.as_ref().expect("lock held").renew();
         if self.seat {
@@ -324,6 +415,28 @@ impl FaultyBackend {
             Ok(())
         }
     }
+
+    /// [`Fault::ReaderRegisterWriteFailsAfterLeaseLoss`], for any write of a
+    /// reader's register.
+    fn register_write(&self, path: &str) -> io::Result<()> {
+        if !is_reader_register(path) || !self.probe.take_register_write_failure() {
+            return Ok(());
+        }
+        let armed = Instant::now();
+        let deadline = armed + Duration::from_secs(30);
+        while Instant::now() < deadline
+            && !self
+                .probe
+                .reader_renewals()
+                .iter()
+                .any(|r| r.requested >= armed && r.outcome == Outcome::Injected)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(LOSS_SETTLE);
+        *self.probe.register_write_failed.lock().unwrap() = Some(Instant::now());
+        Err(injected("reader register write"))
+    }
 }
 
 impl FsBackend for FaultyBackend {
@@ -362,6 +475,7 @@ impl FsBackend for FaultyBackend {
         data: &[u8],
     ) -> io::Result<WriteOutcome> {
         self.reachable()?;
+        self.register_write(path)?;
         self.inner.write_if_version(path, expected, data)
     }
     fn read(&self, path: &str) -> io::Result<Vec<u8>> {
@@ -370,6 +484,7 @@ impl FsBackend for FaultyBackend {
     }
     fn write(&self, path: &str, data: &[u8]) -> io::Result<()> {
         self.reachable()?;
+        self.register_write(path)?;
         self.inner.write(path, data)
     }
     fn append(&self, path: &str, data: &[u8]) -> io::Result<()> {
@@ -414,6 +529,7 @@ impl FsBackend for FaultyBackend {
     }
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
         self.reachable()?;
+        self.register_write(path)?;
         self.inner.write_atomic(path, data)
     }
     fn create_append_log(&self, path: &str, retention: u64) -> io::Result<()> {

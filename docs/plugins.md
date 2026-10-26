@@ -210,6 +210,23 @@ makes a skill selectable. Descriptions are restored in discovery order,
 so project roots keep theirs before user roots, and user roots before
 plugin roots.
 
+### Native tool invocation context
+
+Native `tools` entries receive JSON arguments on stdin and return their text
+result on stdout. The host supplies `SUDOCODE_PLUGIN_ID`,
+`SUDOCODE_PLUGIN_NAME`, `SUDOCODE_TOOL_NAME` and `SUDOCODE_TOOL_INPUT`.
+Runtime dispatch also supplies `SUDOCODE_TOOL_CALL_ID`, using the existing
+per-call `tool_use_id`; it does not allocate a second command identity.
+Direct/context-free dispatch removes that variable from the child's environment
+instead of inheriting a stale value from a parent process.
+
+A remote-effect adapter can use the call ID with its own delegation namespace
+to correlate one command and query an uncertain result. It must not treat this
+environment variable as authenticated Agent identity or an authorization grant.
+An adapter that requires correlation should refuse a missing ID rather than
+generate a replacement ID and potentially resend an already completed effect.
+Tool discovery and the existing host permission/approval policy are unchanged.
+
 ### 2.5 MCP servers
 
 The path under `mcpServers` points to a `.mcp.json`:

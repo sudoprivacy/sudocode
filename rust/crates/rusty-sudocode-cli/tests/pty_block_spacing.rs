@@ -396,9 +396,9 @@ fn repeated_file_read_has_one_frame_per_saved_command() {
     let config = env.workspace_root().join(".nexus/sudocode");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(config.join("settings.json"), r#"{"thinking":false}"#).unwrap();
-    let gate = env.workspace_root().join("continue-file-batch");
+    let gate = env.workspace_root().join("finish-file-batch");
     let batch = serde_json::json!([
-        {"id":"spacing_one", "name":"bash", "input":{"command":"cat spacing-one.txt"}, "stream_prelude":"Spacing intro.\n\n"},
+        {"id":"spacing_one", "name":"bash", "input":{"command":"cat spacing-one.txt"}, "stream_text_prelude":"Spacing intro.\n\n"},
         {"id":"spacing_two", "name":"bash", "input":{"command":"cat spacing-two.txt"}, "stream_wait_for":gate},
         {"id":"spacing_one_again", "name":"bash", "input":{"command":"cat spacing-one.txt"}},
     ]);
@@ -416,15 +416,15 @@ fn repeated_file_read_has_one_frame_per_saved_command() {
     );
     let marker = common::turn_status_marker(&sess);
     sess.send("\r").unwrap();
-    // The provider emits the intro before tool calls, then holds back the
-    // repeated read until both earlier commands have actually returned.
+    // Complete two real reads while the provider is paused. A postlude used as
+    // an intro would now deterministically follow their frames.
     common::expect_screen(
         &sess,
-        |s| s.contains("ONE_END") && s.contains("TWO_END"),
+        |screen| screen.contains("ONE_END") && screen.contains("TWO_END"),
         common::DEFAULT_TIMEOUT,
-        "first file reads finish before the remaining tool is streamed",
+        "two file results render before the provider finishes its batch",
     );
-    std::fs::write(&gate, "continue").unwrap();
+    std::fs::write(gate, "continue").unwrap();
     common::expect_turn_complete_after(
         &sess,
         &marker,

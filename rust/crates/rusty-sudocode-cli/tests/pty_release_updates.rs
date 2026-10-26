@@ -241,7 +241,12 @@ fn selecting_update_installs_the_checked_archive_and_restarts_with_original_argu
     let record = root.join("restart arguments.txt");
     let mut child = spawn_installed(&env, &installed, &mirror.base, &["--model", "sonnet"]);
     child.expect("Update available:").unwrap_or_else(|error| {
-        panic!("update prompt: {error}\n{}", child.render(screen_contents))
+        panic!(
+            "update selection: {error}; requests={}; cache={:?}\n{}",
+            mirror.requests.load(Ordering::SeqCst),
+            std::fs::read_to_string(&cache),
+            child.render(screen_contents)
+        )
     });
     child.send("\r").unwrap();
     child.expect("checksum verified").unwrap();
@@ -404,7 +409,13 @@ fn opt_out_skips_startup_network_but_explicit_check_works_on_every_platform() {
     assert_eq!(child.expect_eof().unwrap(), 0);
     assert_eq!(mirror.requests.load(Ordering::SeqCst), 0);
     let mut check = env.spawn_with_env(&["update", "--check"], &options);
-    check.expect("v999.0.0").unwrap();
+    check.expect("v999.0.0").unwrap_or_else(|error| {
+        panic!(
+            "explicit check: {error}; requests={}\n{}",
+            mirror.requests.load(Ordering::SeqCst),
+            check.render(screen_contents)
+        )
+    });
     check.expect("update available").unwrap();
     assert_eq!(check.expect_eof().unwrap(), 0);
     assert_eq!(mirror.requests.load(Ordering::SeqCst), 1);

@@ -202,20 +202,17 @@ print(result)
         // made the second call. Whether it chains steps unprompted is not
         // what this workflow is about; reading the saved report without
         // re-running the invoice is.
-        // Resolve the returned outputFile in the fixture, keeping the explicit
-        // workspace-relative Windows read input without model substitution.
+        // The returned outputFile is the source of truth. Resolve it in the
+        // fixture rather than asking the model to substitute a placeholder.
         let report = completed_invoice_report(&captured).canonicalize().unwrap();
         let workspace = env.workspace_root().canonicalize().unwrap();
-        let relative = Path::new(".")
-            .join(
-                report
-                    .strip_prefix(&workspace)
-                    .expect("report is in the workspace"),
-            )
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = report
+            .strip_prefix(&workspace)
+            .expect("the completed report belongs to this fixture workspace");
+        let read = serde_json::json!({
+            "path": format!("./{}", relative.to_string_lossy().replace('\\', "/")),
+        });
         expected_report = Some(report);
-        let read = serde_json::json!({"path": relative});
         let verification = agent_input(
             &model,
             "Explore",

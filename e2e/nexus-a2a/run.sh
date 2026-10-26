@@ -194,6 +194,13 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
   --test acp_a2a_receive live_session_close_releases_an_acquired_receiver_seat_before_reply \
   -- --ignored --nocapture
 
+echo "== [deterministic] a real receiver lease handoff preserves terminal drafts =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" \
+  NEXUS_A2A_TEST_RECEIVER_CREDENTIAL="$(authon_mint "receiver-draft-probe")" \
+  cargo_in_workspace test --manifest-path "$RUST_DIR/Cargo.toml" -q -p rusty-sudocode-cli \
+  --test pty_node_record live_node_lease_loss_preserves_editable_draft \
+  -- --ignored --exact --test-threads=1 --nocapture
+
 echo "== [deterministic] direct ACP uses no model; pause and lost reply use real mTLS =="
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   NEXUS_A2A_TEST_DIRECT_CREDENTIAL="$(authon_mint "direct-acp-probe")" \
@@ -239,6 +246,14 @@ NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
 NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
   "${CARGO_TEST[@]}" live_refusal_under_a_held_lease_is_recorded_as_consumer_refused -- --ignored --nocapture
 
+# A lease whose renewal never answers lapses on its own (INJECTED: the renewal
+# is held in flight), and its stall carries the lapse; a commit refused by its
+# register write (INJECTED, with the lease lost meanwhile) carries no lease loss.
+echo "== [deterministic] a stall carries the loss that caused it, captured when it happened =="
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_stall_from_a_lapsed_lease_is_recorded_as_lease_lost_with_its_age -- --ignored --nocapture
+NEXUS_A2A_TEST_ENDPOINT="$ENDPOINT" NEXUS_A2A_TEST_CERT_DIR="$CLIENT_BUNDLE" \
+  "${CARGO_TEST[@]}" live_commit_refused_by_its_register_write_records_no_lease_loss -- --ignored --nocapture
 # The receiver seat trusts only fresh renewals: a late reply, a partition and a
 # slow-but-successful renewal are injected by the test-only wrapper; the node's
 # TTL is what any takeover waits on.

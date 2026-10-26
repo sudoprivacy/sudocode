@@ -28,6 +28,7 @@ const INBOX_WAIT_MS: u64 = 500;
 /// A configured node session for one agent. Connectivity is established by IO.
 pub struct Node {
     config: Config,
+    fs: Arc<dyn runtime::FsBackend>,
     mailbox: Arc<Mailbox>,
 }
 
@@ -119,27 +120,41 @@ pub fn node(agent: &str) -> Result<Option<Arc<Node>>, String> {
     if let Some(decided) = nodes.get(agent) {
         return Ok(decided.clone());
     }
-    let decided = match Config::from_node_record(agent)? {
-        None => None,
-        Some(config) => {
-            let client = config.connect()?;
-            // Cert-only auth: the client cert IS the authorization (the node
-            // derives identity from its SAN), so no per-request token is sent.
-            // That transport is a server-verified credential, so the backend
-            // takes the mTLS (trusted-local) shape — the fail-closed
-            // `from_arc` is for references the server never sees.
-            let backend = NexusVfsFsBackend::from_arc_mtls(client, String::new(), "root");
-            let mailbox = Arc::new(Mailbox::daemon_absolute(
-                Arc::new(backend),
-                config.agent.clone(),
-            ));
-            Some(Arc::new(Node { config, mailbox }))
-        }
-    };
+    let decided =
+        match Config::from_node_record(agent)? {
+            None => None,
+            Some(config) => {
+                let client = config.connect()?;
+                // Cert-only auth: the client cert IS the authorization (the node
+                // derives identity from its SAN), so no per-request token is sent.
+                // That transport is a server-verified credential, so the backend
+                // takes the mTLS (trusted-local) shape — the fail-closed
+                // `from_arc` is for references the server never sees.
+                let backend: Arc<dyn runtime::FsBackend> = Arc::new(
+                    NexusVfsFsBackend::from_arc_mtls(client, String::new(), "root"),
+                );
+                let mailbox = Arc::new(Mailbox::daemon_absolute(
+                    Arc::clone(&backend),
+                    config.agent.clone(),
+                ));
+                Some(Arc::new(Node {
+                    config,
+                    fs: backend,
+                    mailbox,
+                }))
+            }
+        };
     nodes.insert(agent.to_string(), decided.clone());
     Ok(decided)
 }
 impl Node {
+    /// The same authenticated node filesystem used by this agent's mailbox.
+    /// Model prompt writes must reach that node's mounts and native hooks.
+    #[must_use]
+    pub fn fs(&self) -> Arc<dyn runtime::FsBackend> {
+        Arc::clone(&self.fs)
+    }
+
     #[must_use]
     pub fn mailbox(&self) -> Arc<Mailbox> {
         Arc::clone(&self.mailbox)
@@ -177,5 +192,6 @@ pub fn status(agent: &str) -> runtime::mailbox::PeerStatus {
         cursor: runtime::mailbox::cursor_guarantee(agent)
             .map_or("none", runtime::cursor_fence::CursorGuarantee::as_str),
         error,
+        last_receiver_error: runtime::mailbox::last_receiver_error(agent),
     }
 }

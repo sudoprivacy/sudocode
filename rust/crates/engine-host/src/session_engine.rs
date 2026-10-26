@@ -1292,6 +1292,9 @@ impl engine_core::EngineDelegate for SessionEngine {
 
     fn close(&self) {
         self.background_tasks.shutdown();
+        // Observers can retain task handles after their work stops. Retire the
+        // shared journal binding before releasing the session's writer.
+        let _ = self.background_tasks.clone().with_completion(None);
         let session = self.lock_session();
         let path = session.handle.path.clone();
         if session.runtime.ensure_session_persistence_allowed().is_ok() {

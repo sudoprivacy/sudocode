@@ -1030,7 +1030,10 @@ impl GlobalToolRegistry {
             .iter()
             .find(|tool| tool.definition().name == name)
             .ok_or_else(|| format!("unsupported tool: {name}"))?
-            .execute(input)
+            .execute_with_call_id(
+                input,
+                ctx.and_then(|context| context.tool_use_id.as_deref()),
+            )
             .map_err(|error| error.to_string())
     }
 

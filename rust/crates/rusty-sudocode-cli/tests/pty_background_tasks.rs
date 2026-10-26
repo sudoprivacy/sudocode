@@ -1,5 +1,7 @@
 //! Background task discovery, inspection and control through the real terminal.
 mod common;
+#[path = "support/wire_requests.rs"]
+mod wire_requests;
 
 use common::TestEnv;
 use pty_expect::PtySession;
@@ -32,20 +34,9 @@ fn task_env(label: &str) -> (TestEnv, ReleaseOnDrop) {
 }
 
 fn expect_input_ready(session: &PtySession, budget: Duration, context: &str) {
-    common::expect_screen_settled(
+    common::expect_screen_rows_settled(
         session,
-        |_| {
-            session.render(|screen| {
-                // contents() joins soft-wrapped rows. At 80 columns the input
-                // can otherwise appear to contain the following rule/footer.
-                let rows = screen
-                    .raw()
-                    .rows(0, screen.raw().size().1)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                rows.contains('\u{276f}') && common::input_line_of(&rows).is_empty()
-            })
-        },
+        |rows| rows.contains('\u{276f}') && common::input_line_of(rows).is_empty(),
         budget,
         context,
     );
@@ -479,7 +470,7 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
             json!({"id":"question","name":"AskUserQuestion","input":{"questions":[{"id":"choice","header":"Choice","question":"Select the second answer","options":[{"label":"First","value":"First","description":"First option"},{"label":"Second","value":"Second","description":"Second option"}],"multiSelect":false}]}}),
         ],
     );
-    common::expect_screen(
+    common::expect_screen_rows_settled(
         &session,
         |view| {
             view.lines()
@@ -491,33 +482,49 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
     );
     screen(&session, "1 terminal");
     let before = common::turn_status_marker(&session);
-    session.send("\x1b[B\r").unwrap();
-    common::expect_turn_complete_after(
+    session.send("\x1b[B").unwrap();
+    common::expect_screen_rows_settled(
         &session,
-        &before,
+        |view| {
+            view.lines()
+                .any(|line| line.trim_start().starts_with("> [2] Second"))
+        },
         Duration::from_secs(90),
-        "selected question answer committed and parent completed",
+        "second answer selected before confirming",
     );
+    session.send("\r").unwrap();
+    expect_parent_complete(&session, &before);
     if env.is_mock() {
-        let bodies = env.captured_message_bodies();
+        let results: Vec<Value> = env
+            .captured_message_bodies()
+            .iter()
+            .flat_map(|body| {
+                wire_requests::request_tool_blocks(&serde_json::from_str(body).unwrap())
+            })
+            .filter(|block| block["type"] == "tool_result" && block["tool_use_id"] == "question")
+            .map(|block| {
+                assert_ne!(block["is_error"], true, "question failed: {block}");
+                let content = &block["content"];
+                let text = content.as_str().map(str::to_owned).unwrap_or_else(|| {
+                    content
+                        .as_array()
+                        .expect("question text blocks")
+                        .iter()
+                        .map(|part| part["text"].as_str().expect("question text"))
+                        .collect::<Vec<_>>()
+                        .join("")
+                });
+                serde_json::from_str(&text).expect("question result JSON")
+            })
+            .collect();
         assert!(
-            bodies.iter().any(|body| {
-                let request: Value = serde_json::from_str(body).unwrap();
-                request["messages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|message| {
-                        message["content"].as_array().is_some_and(|blocks| {
-                            blocks.iter().any(|block| {
-                                block["type"] == "tool_result"
-                                    && block["tool_use_id"] == "question"
-                                    && block["content"].to_string().contains("Second")
-                            })
-                        })
-                    })
-            }),
-            "actual selected answer must reach provider"
+            !results.is_empty()
+                && results.iter().all(|result| {
+                    result["answers"][0]["value"] == "Second"
+                        && result["answers"][0]["label"] == "Second"
+                }),
+            "actual selected answer must reach provider: question_results={results:?}; screen={}",
+            common::screen_tail(&session, 5000)
         );
     }
     open(&mut session);

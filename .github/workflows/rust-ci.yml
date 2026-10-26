@@ -209,8 +209,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
+        os: [ubuntu-latest, windows-latest]
+    steps: &test_workspace_steps
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
@@ -223,6 +223,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+      - name: Widen the Windows ephemeral port range
+        # The PTY steps run back to back on one VM, and every mock server binds
+        # 127.0.0.1:0. Ports left in TIME_WAIT accumulate across steps until
+        # Windows' default 16,384-port dynamic range runs out, and bind fails
+        # with WSAENOBUFS (10055) in whichever test happens to be next — as it
+        # did in a merge-queue group, ejecting an unrelated PR. Raise the
+        # ceiling once for the job rather than retrying binds in every test.
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          netsh int ipv4 set dynamicport tcp start=10000 num=55535
+          netsh int ipv4 show dynamicport tcp
       - name: PTY native bracketed paste
         # Run the complete input journey on the actual OS PTY, including
         # ConPTY. A platform exclusion cannot count as Windows acceptance.
@@ -264,6 +276,18 @@ jobs:
           RUST_TEST_NOCAPTURE: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: cargo test --workspace --features engine-acp/mailbox
 
+  test-workspace-macos:
+    # macOS is the scarcest runner pool (about 5 slots shared by every
+    # sudoprivacy repo). It runs in the merge queue and on main, never on a
+    # pull request: nothing reaches main without passing it on the exact
+    # merge commit, and the queue cannot be bypassed. On a pull request the
+    # job is skipped by `if`, which still reports the required check (as
+    # skipped) without allocating a runner. Same steps as `test-workspace`.
+    if: ${{ !inputs.render_performance && !inputs.live_only && github.event_name != 'pull_request' }}
+    name: cargo test --workspace (macos-latest)
+    runs-on: macos-latest
+    steps: *test_workspace_steps
+
   terminal-resize:
     if: *standard_ci
     name: Real terminal resize (${{ matrix.os }})
@@ -272,7 +296,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -301,6 +325,11 @@ jobs:
         working-directory: .
         shell: pwsh
         run: python e2e/terminal-resize/setup_windows.py "$env:RUNNER_TEMP/scode-terminal-host"
+      - name: Verify bounded downloads and checksum rejection with the real archive
+        if: runner.os == 'Windows'
+        working-directory: .
+        shell: pwsh
+        run: python e2e/terminal-resize/check_windows_setup.py "$env:RUNNER_TEMP/scode-terminal-host/host.zip"
       - name: Select the Windows terminal runtime
         if: runner.os == 'Windows'
         shell: pwsh
@@ -554,7 +583,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -597,8 +626,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
+        os: [ubuntu-latest, windows-latest]
+    steps: &clippy_workspace_steps
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -608,6 +637,18 @@ jobs:
           workspaces: rust -> target
       - name: Run workspace clippy
         run: cargo clippy --workspace
+
+  clippy-workspace-macos:
+    # macOS is the scarcest runner pool (about 5 slots shared by every
+    # sudoprivacy repo). It runs in the merge queue and on main, never on a
+    # pull request: nothing reaches main without passing it on the exact
+    # merge commit, and the queue cannot be bypassed. On a pull request the
+    # job is skipped by `if`, which still reports the required check (as
+    # skipped) without allocating a runner. Same steps as `clippy-workspace`.
+    if: ${{ !inputs.render_performance && !inputs.live_only && github.event_name != 'pull_request' }}
+    name: cargo clippy --workspace (macos-latest)
+    runs-on: macos-latest
+    steps: *clippy_workspace_steps
 
   live-api-smoke:
     name: Live API smoke test

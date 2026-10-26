@@ -52,6 +52,17 @@ fn screen_contents(screen: &pty_expect::Screen<'_>) -> String {
     screen.contents()
 }
 
+/// Preserve physical row boundaries for assertions about inline UI layout.
+/// `contents()` joins soft-wrapped rows, including a full-width rule followed
+/// by a question header in ConPTY. Transcript assertions still use that view.
+fn screen_rows(screen: &pty_expect::Screen<'_>) -> String {
+    screen
+        .raw()
+        .rows(0, screen.raw().size().1)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Find a persisted session transcript below a fixture's session store.
 pub fn find_session_transcript(dir: &std::path::Path) -> Option<PathBuf> {
     for entry in fs::read_dir(dir).ok()? {
@@ -86,12 +97,14 @@ pub fn find_session_transcript(dir: &std::path::Path) -> Option<PathBuf> {
 /// Inert on Linux and macOS, where the variables mean nothing.
 const MSYS_ARGV_PASSTHROUGH: &str = "export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*';";
 
-/// Default PTY-test timeout for `expect` operations.
-/// Readiness allowance for platforms with expensive cold process startup.
-/// Windows PTY setup and macOS validation of large debug images can exceed
-/// ten seconds before interactive code runs. Quantitative startup and input
-/// latency gates keep their independent measurement policies.
-#[cfg(any(windows, target_os = "macos"))]
+/// Watchdog for functional PTY operations, not a performance threshold.
+/// Fresh macOS executables can spend over 16 seconds before entering `main`,
+/// including the replacement image in self-update. Performance gates measure
+/// startup and input latency separately; their thresholds remain unchanged.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Windows cold launches can also include executable scanning.
+#[cfg(windows)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 #[cfg(not(any(windows, target_os = "macos")))]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -101,7 +114,7 @@ pub const LIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A wait, never shorter than this platform's floor.
 ///
-/// [`DEFAULT_TIMEOUT`] accounts for the platform's cold process startup,
+/// [`DEFAULT_TIMEOUT`] accounts for platform-specific process startup delays,
 /// and a test that hardcodes fewer seconds silently opts out of it — the
 /// calibration is there precisely for the runner it then fails on. Of the four
 /// `pty_resume` tests, the two asking for 10s and 5s were the two that failed on
@@ -159,9 +172,30 @@ pub fn expect_screen<F>(sess: &PtySession, pred: F, budget: Duration, context: &
 where
     F: Fn(&str) -> bool,
 {
+    expect_screen_view(sess, pred, budget, context, screen_contents)
+}
+
+/// Wait for a layout predicate without joining soft-wrapped physical rows.
+pub fn expect_screen_rows<F>(sess: &PtySession, pred: F, budget: Duration, context: &str) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    expect_screen_view(sess, pred, budget, context, screen_rows)
+}
+
+fn expect_screen_view<F>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     let deadline = Instant::now() + at_least(budget);
     loop {
-        let screen = sess.render(screen_contents);
+        let screen = sess.render(contents);
         if pred(&screen) {
             return screen;
         }
@@ -192,12 +226,38 @@ pub fn expect_screen_settled<F>(
 where
     F: Fn(&str) -> bool,
 {
+    expect_screen_settled_view(sess, pred, budget, context, screen_contents)
+}
+
+/// Wait for stable physical rows with the same deadline and settling contract.
+pub fn expect_screen_rows_settled<F>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
+    expect_screen_settled_view(sess, pred, budget, context, screen_rows)
+}
+
+fn expect_screen_settled_view<F>(
+    sess: &PtySession,
+    pred: F,
+    budget: Duration,
+    context: &str,
+    contents: fn(&pty_expect::Screen<'_>) -> String,
+) -> String
+where
+    F: Fn(&str) -> bool,
+{
     let deadline = Instant::now() + at_least(budget);
     let mut previous: Option<String> = None;
     let mut stable = 0u32;
     let mut satisfied = false;
     loop {
-        let screen = sess.render(screen_contents);
+        let screen = sess.render(contents);
         if pred(&screen) {
             satisfied = true;
             if previous.as_deref() == Some(screen.as_str()) {

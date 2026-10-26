@@ -1401,7 +1401,7 @@ pub(crate) const DIFF_PREVIEW_CONTEXT_LINES: usize = 3;
 pub(crate) fn write_card(
     input: &serde_json::Value,
     output: Option<&serde_json::Value>,
-    _status: ToolStatus,
+    status: ToolStatus,
 ) -> ToolCardContent {
     let Some(output) = output else {
         // Staging: identity from input (path + content line count).
@@ -1415,7 +1415,14 @@ pub(crate) fn write_card(
             tool_label("Write")
         );
         header.push_str(&identity_annotation(input));
-        return ToolCardContent::header_only(header);
+        return match input
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|content| format_old_new_diff("", content, language_token_from_path(&path)))
+        {
+            Some(preview) => ToolCardContent::new(header, preview),
+            None => ToolCardContent::header_only(header),
+        };
     };
     // Path is authoritative in `input`; the body (type/content/originalFile)
     // comes from the result envelope.
@@ -1427,6 +1434,36 @@ pub(crate) fn write_card(
             p
         }
     };
+    if status != ToolStatus::Error
+        && output
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+    {
+        // Oversized results are opaque persisted-output records. Keep source
+        // visible without reading the spill or pretending the file has zero
+        // lines. Live input includes hook rewrites from ToolStarted; replay
+        // uses the recorded request. Label its provenance in both paths.
+        if let Some(source) = input.get("content").and_then(serde_json::Value::as_str) {
+            let mut header = format!(
+                "✏️ {} {path} {DIM}({} input lines){RESET}",
+                tool_label("Write completed"),
+                source.lines().count()
+            );
+            header.push_str(&identity_annotation(input));
+            let notice = if output
+                .as_str()
+                .is_some_and(|text| text.starts_with("<persisted-output "))
+            {
+                "Input preview · complete tool result preserved in session"
+            } else {
+                "Input preview · structured file result unavailable"
+            };
+            let preview = format_old_new_diff("", source, language_token_from_path(&path))
+                .unwrap_or_default();
+            return ToolCardContent::new(header, format!("{DIM}{notice}{RESET}\n{preview}"));
+        }
+    }
     let kind = output
         .get("type")
         .and_then(|value| value.as_str())
@@ -1437,7 +1474,13 @@ pub(crate) fn write_card(
         .unwrap_or_default();
     let new_line_count = new_content.lines().count();
     let original = output.get("originalFile").and_then(|value| value.as_str());
-    let verb = if kind == "create" { "Wrote" } else { "Updated" };
+    let verb = if status == ToolStatus::Error {
+        "Write failed"
+    } else if kind == "create" {
+        "Wrote"
+    } else {
+        "Updated"
+    };
     let label = tool_label(verb);
     let mut header = match original {
         Some(prev) if kind != "create" => {
@@ -1466,7 +1509,10 @@ pub(crate) fn write_card(
             Some(preview) => ToolCardContent::new(header, preview),
             None => ToolCardContent::header_only(header),
         },
-        _ => ToolCardContent::header_only(header),
+        _ => match format_old_new_diff("", new_content, language_token_from_path(&path)) {
+            Some(preview) => ToolCardContent::new(header, preview),
+            None => ToolCardContent::header_only(header),
+        },
     }
 }
 
@@ -1505,7 +1551,7 @@ pub(crate) fn format_full_replace_diff_preview(
         old_changed,
         new_changed,
         &old_lines,
-        head,
+        head.saturating_sub(DIFF_PREVIEW_CONTEXT_LINES),
         edit_start_line,
         language,
     ))
@@ -1565,6 +1611,8 @@ pub(crate) fn edit_card(
 
     let verb = if status == ToolStatus::Running {
         "Editing"
+    } else if status == ToolStatus::Error {
+        "Edit failed"
     } else {
         "Edited"
     };
@@ -1587,10 +1635,18 @@ fn format_old_new_diff(old_value: &str, new_value: &str, language: &str) -> Opti
     Some(
         render_colored_diff(
             &[],
-            &old_value.lines().collect::<Vec<_>>(),
-            &new_value.lines().collect::<Vec<_>>(),
+            &old_value
+                .lines()
+                .take(DIFF_PREVIEW_MAX_BODY_LINES + 1)
+                .collect::<Vec<_>>(),
+            &new_value
+                .lines()
+                .take(DIFF_PREVIEW_MAX_BODY_LINES + 1)
+                .collect::<Vec<_>>(),
             &[],
             language,
+            1,
+            (old_value.lines().count(), new_value.lines().count()),
         )
         .join("\n"),
     )
@@ -1687,6 +1743,8 @@ fn render_diff_window(
         new_body,
         post_context,
         language,
+        pre_context_start + 1,
+        (old_body.len(), new_body.len()),
     ));
     out.join("\n")
 }
@@ -1699,6 +1757,8 @@ fn render_colored_diff(
     new: &[&str],
     post: &[&str],
     language: &str,
+    first_line: usize,
+    totals: (usize, usize),
 ) -> Vec<String> {
     let count = |body: &[&str]| {
         if body.len() > DIFF_PREVIEW_MAX_BODY_LINES {
@@ -1716,19 +1776,51 @@ fn render_colored_diff(
         .chain(new[..new_count].iter().map(|line| ('+', *line)))
         .chain(post.iter().map(|line| (' ', *line)))
         .collect();
-    let mut rendered = crate::render::diff_colors::render_rows(&rows, language, " ");
+    let numbers = (first_line..first_line + pre.len())
+        .chain(first_line + pre.len()..first_line + pre.len() + old_count)
+        .chain(first_line + pre.len()..first_line + pre.len() + new_count)
+        .chain(first_line + pre.len() + totals.1..first_line + pre.len() + totals.1 + post.len())
+        .collect::<Vec<_>>();
+    // Bound source work before highlighting, including pathological long lines.
+    let mut remaining = TOOL_OUTPUT_DISPLAY_MAX_CHARS;
+    let mut truncated = false;
+    let clipped = rows
+        .iter()
+        .map(|(sign, text)| {
+            use unicode_segmentation::UnicodeSegmentation;
+            let limit = remaining.min(TOOL_OUTPUT_DISPLAY_MAX_LINE_CHARS);
+            let mut used = 0;
+            let mut end = 0;
+            for (offset, grapheme) in text.grapheme_indices(true) {
+                let count = grapheme.chars().count();
+                if used + count > limit {
+                    break;
+                }
+                used += count;
+                end = offset + grapheme.len();
+            }
+            remaining = remaining.saturating_sub(used);
+            truncated |= end < text.len();
+            (*sign, &text[..end])
+        })
+        .collect::<Vec<_>>();
+    let mut rendered =
+        crate::render::diff_colors::render_numbered_rows(&clipped, language, &numbers);
     // Insert from the end so the earlier row offsets remain valid.
-    if new_count < new.len() {
+    if new_count < totals.1 {
         rendered.insert(
             pre.len() + old_count + new_count,
-            format!("{DIM}+ … +{} more lines{RESET}", new.len() - new_count),
+            format!("{DIM}+ … +{} more lines{RESET}", totals.1 - new_count),
         );
     }
-    if old_count < old.len() {
+    if old_count < totals.0 {
         rendered.insert(
             pre.len() + old_count,
-            format!("{DIM}- … +{} more lines{RESET}", old.len() - old_count),
+            format!("{DIM}- … +{} more lines{RESET}", totals.0 - old_count),
         );
+    }
+    if truncated {
+        rendered.push(DISPLAY_TRUNCATION_NOTICE.to_string());
     }
     rendered
 }
@@ -3922,8 +4014,8 @@ mod tests {
         assert!(plain.contains("Edited src/main.rs"), "{plain}");
         // Diff preview survives — the +/- lines come from oldString/newString
         // against originalFile, which only parse if we stripped the suffix.
-        assert!(plain.contains("- alpha"), "{plain}");
-        assert!(plain.contains("+ omega"), "{plain}");
+        assert!(plain.contains("-alpha"), "{plain}");
+        assert!(plain.contains("+omega"), "{plain}");
         // Hook feedback should still be rendered, but as a separate line.
         assert!(plain.contains("Hook feedback:"), "{plain}");
         assert!(plain.contains("formatter clean"), "{plain}");
@@ -3941,8 +4033,8 @@ mod tests {
         assert!(plain.contains("  line 2"), "{plain}");
         assert!(plain.contains("  line 3"), "{plain}");
         // The change itself.
-        assert!(plain.contains("- old line"), "{plain}");
-        assert!(plain.contains("+ new line"), "{plain}");
+        assert!(plain.contains("-old line"), "{plain}");
+        assert!(plain.contains("+new line"), "{plain}");
         // Three lines of post-context.
         assert!(plain.contains("  line 5"), "{plain}");
         assert!(plain.contains("  line 6"), "{plain}");
@@ -3963,11 +4055,11 @@ mod tests {
         let preview = format_edit_diff_preview(&original, &old_str, &new_str, "").unwrap();
         let plain = strip_ansi(&preview);
         // Body collapses at DIFF_PREVIEW_MAX_BODY_LINES (8) per side.
-        assert!(plain.contains("- old1"), "{plain}");
-        assert!(plain.contains("- old7"), "{plain}");
-        assert!(!plain.contains("- old8"), "{plain}");
+        assert!(plain.contains("-old1"), "{plain}");
+        assert!(plain.contains("-old7"), "{plain}");
+        assert!(!plain.contains("-old8"), "{plain}");
         assert!(plain.contains("- … +13 more lines"), "{plain}");
-        assert!(plain.contains("+ new1"), "{plain}");
+        assert!(plain.contains("+new1"), "{plain}");
         assert!(plain.contains("+ … +13 more lines"), "{plain}");
     }
 
@@ -3997,8 +4089,8 @@ mod tests {
         assert!(plain.contains("@@ -5,1 +5,1 @@"), "{plain}");
         // The `-`/`+` rows show the full affected line with indentation,
         // not the bare fragment.
-        assert!(plain.contains("-     old_function();"), "{plain}");
-        assert!(plain.contains("+     new_function();"), "{plain}");
+        assert!(plain.contains("5 -    old_function();"), "{plain}");
+        assert!(plain.contains("5 +    new_function();"), "{plain}");
         // The full line must NOT also appear as a dim context row above
         // the change.
         let context_dup = "  \x1b[0m";
@@ -4044,12 +4136,12 @@ mod tests {
         // 4 new lines, was 3, delta +1.
         assert!(plain.contains("(4 lines, was 3 +1)"), "{plain}");
         // Diff body should show the changed middle line.
-        assert!(plain.contains("- x"), "{plain}");
-        assert!(plain.contains("+ b"), "{plain}");
+        assert!(plain.contains("2 -x"), "{plain}");
+        assert!(plain.contains("2 +b"), "{plain}");
     }
 
     #[test]
-    fn format_write_result_create_skips_delta_and_diff() {
+    fn format_write_result_create_keeps_line_count_without_delta() {
         let json = serde_json::json!({
             "type": "create",
             "filePath": "new.txt",
@@ -4166,11 +4258,11 @@ mod tests {
         let content = tool_card_content("edit_file", &input, None, ToolStatus::Running);
         let plain = strip_ansi(&render_tool_card(&content, ToolStatus::Running));
         assert!(plain.contains("Editing src/main.rs"), "{plain}");
-        assert!(plain.contains("- line one"), "{plain}");
-        assert!(plain.contains("- line two"), "{plain}");
-        assert!(plain.contains("- line three"), "{plain}");
-        assert!(plain.contains("+ new one"), "{plain}");
-        assert!(plain.contains("+ new two"), "{plain}");
+        assert!(plain.contains("1 -line one"), "{plain}");
+        assert!(plain.contains("2 -line two"), "{plain}");
+        assert!(plain.contains("3 -line three"), "{plain}");
+        assert!(plain.contains("1 +new one"), "{plain}");
+        assert!(plain.contains("2 +new two"), "{plain}");
     }
 
     #[test]

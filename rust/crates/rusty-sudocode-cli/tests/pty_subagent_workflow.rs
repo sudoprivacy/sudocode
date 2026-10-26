@@ -1,7 +1,15 @@
 //! Exercise the interactive parent → preset → file tools → parent result chain.
 mod common;
+#[path = "support/wire_requests.rs"]
+#[allow(dead_code)]
+mod wire_requests;
 
-use std::{fs, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Write,
+    time::Duration,
+};
 
 use common::TestEnv;
 use serde_json::Value;
@@ -35,6 +43,107 @@ enum Workflow {
     AutoBackground,
     BusyParent,
     Natural,
+}
+
+#[test]
+fn parallel_agents_preserve_active_staging_and_publish_results() {
+    let env = TestEnv::new_mock("parallel-agent-publication");
+    let evidence = format!(
+        "CHILD_EVIDENCE_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    fs::write(env.workspace_root().join("evidence.txt"), &evidence).unwrap();
+    let store = env.workspace_root().join(".sudocode-agents");
+    fs::create_dir_all(&store).unwrap();
+    let active = store.join("active-upload.tmp");
+    let mut staging = fs::File::create(&active).unwrap();
+    staging.write_all(b"active producer").unwrap();
+
+    let batch: Vec<_> = (0..3)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("publication-{index}"),
+                "name": "agent_spawn",
+                "input": {
+                    "description": format!("read evidence {index}"),
+                    "subagent_type": "Explore",
+                    "model": "claude-sonnet",
+                    "auth_mode": "api-key",
+                    "run_in_background": false,
+                    "prompt": "PARITY_SCENARIO:subagent_workflow_child Read evidence.txt and return its actual contents.",
+                },
+            })
+        })
+        .collect();
+    let mut parent = env.spawn_with_env(
+        &["--permission-mode", "read-only"],
+        &[("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue")],
+    );
+    common::expect_input_line_cleared(&parent, Duration::from_secs(15), "ready");
+    let before = common::turn_status_marker(&parent);
+    let prompt = env.prompt(
+        &format!(
+            "Run these synchronous agents. TOOL_BATCH:{}",
+            serde_json::to_string(&batch).unwrap()
+        ),
+        "tool_concurrency",
+    );
+    parent.send(&format!("{prompt}\r")).unwrap();
+    common::expect_turn_complete_after(
+        &parent,
+        &before,
+        Duration::from_secs(180),
+        "parallel children completed",
+    );
+    parent.send("/exit\r").unwrap();
+    assert_eq!(parent.expect_eof().unwrap(), 0);
+
+    // This producer owns an open staging file throughout the agent launches.
+    // Launch-time directory cleanup must not unlink its in-flight publication.
+    staging.write_all(b" completed").unwrap();
+    drop(staging);
+    let published = store.join("published-upload.json");
+    fs::rename(&active, &published).expect("active staging survives parallel agent launches");
+    assert_eq!(fs::read(&published).unwrap(), b"active producer completed");
+
+    let outputs = manifests(&env);
+    assert_eq!(outputs.len(), 3, "all three children published a manifest");
+    for output in outputs {
+        assert_eq!(output["status"], "completed", "{output}");
+        assert!(output["result"].as_str().unwrap().contains(&evidence));
+        assert!(fs::read_to_string(output["outputFile"].as_str().unwrap())
+            .unwrap()
+            .contains(&evidence));
+    }
+    let mut starts = BTreeSet::new();
+    let mut results = BTreeMap::new();
+    for body in env.captured_message_bodies() {
+        let request: Value = serde_json::from_str(&body).unwrap();
+        for block in wire_requests::request_tool_blocks(&request) {
+            if block["type"] == "tool_use"
+                && tools::canonicalize_tool_name(block["name"].as_str().unwrap()) == "agent_spawn"
+            {
+                starts.insert(block["id"].as_str().unwrap().to_owned());
+            }
+            if block["type"] == "tool_result" {
+                results.insert(block["tool_use_id"].as_str().unwrap().to_owned(), block);
+            }
+        }
+    }
+    assert_eq!(
+        starts.len(),
+        3,
+        "no failed spawn may cause a fourth attempt"
+    );
+    for id in starts {
+        let result = results.get(&id).expect("each child returned to the parent");
+        assert_ne!(result["is_error"], true, "{result}");
+        let output: Value = serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+        assert_eq!(output["status"], "completed");
+    }
 }
 
 #[test]

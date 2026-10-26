@@ -234,6 +234,20 @@ fn every_method_takes_the_host_spelling() {
         fs.read_to_string(&at("atomic.txt")).expect("read atomic"),
         "atomic\n"
     );
+    let mut opened = std::fs::File::open(at("atomic.txt")).expect("open committed snapshot");
+    fs.write_atomic(&at("atomic.txt"), b"replacement publication\n")
+        .expect("replace atomic");
+    let mut previous = String::new();
+    std::io::Read::read_to_string(&mut opened, &mut previous).expect("read previous snapshot");
+    assert_eq!(
+        previous, "atomic\n",
+        "publication must not truncate an existing reader"
+    );
+    assert_eq!(
+        fs.read_to_string(&at("atomic.txt"))
+            .expect("read replacement"),
+        "replacement publication\n"
+    );
 
     // Directories, renames, removals.
     fs.create_dir_all(&at("sub/deeper"))

@@ -1,4 +1,4 @@
-/// Read tool history from the actual wire format, preserving IDs and errors.
+/// Normalize provider tool history, preserving IDs, errors and result text.
 pub fn request_tool_blocks(request: &serde_json::Value) -> Vec<serde_json::Value> {
     use serde_json::{json, Value};
     let mut blocks = Vec::new();
@@ -8,7 +8,19 @@ pub fn request_tool_blocks(request: &serde_json::Value) -> Vec<serde_json::Value
                 content
                     .iter()
                     .filter(|b| matches!(b["type"].as_str(), Some("tool_use" | "tool_result")))
-                    .cloned(),
+                    .cloned()
+                    .map(|mut block| {
+                        if block["type"] == "tool_result" {
+                            if let Some(content) = block["content"].as_array() {
+                                let text = content
+                                    .iter()
+                                    .filter_map(|part| part["text"].as_str())
+                                    .collect::<String>();
+                                block["content"] = Value::String(text);
+                            }
+                        }
+                        block
+                    }),
             );
         }
         for call in message["tool_calls"].as_array().into_iter().flatten() {

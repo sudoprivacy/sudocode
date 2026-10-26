@@ -56,6 +56,19 @@ impl FsLock for HostLock {
     }
 }
 
+fn atomic_temp_path(path: &str) -> String {
+    format!("{path}.tmp.{}", uuid::Uuid::new_v4())
+}
+
+fn write_atomic_staged<F: FsBackend + ?Sized>(fs: &F, path: &str, data: &[u8]) -> io::Result<()> {
+    let temp = atomic_temp_path(path);
+    let result = fs.write(&temp, data).and_then(|()| fs.rename(&temp, path));
+    if result.is_err() {
+        let _ = fs.delete(&temp);
+    }
+    result
+}
+
 /// What the storage returned for one committed version of a path. Opaque:
 /// callers compare tokens for equality and hand them back, never interpret
 /// them as a content generation or a metadata version.
@@ -234,9 +247,7 @@ pub trait FsBackend: Send + Sync + 'static {
 
     /// Atomic write: write to a temporary file then rename into place.
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        let temp = format!("{path}.tmp.{}", std::process::id());
-        self.write(&temp, data)?;
-        self.rename(&temp, path)
+        write_atomic_staged(self, path, data)
     }
 
     /// Create `path` as an append-only log, ready for [`FsBackend::append`].
@@ -1020,7 +1031,7 @@ impl FsBackend for StdFsBackend {
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
         use std::io::Write;
 
-        let temp = format!("{path}.tmp.{}", uuid::Uuid::new_v4());
+        let temp = atomic_temp_path(path);
         let result = (|| {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -1991,8 +2002,14 @@ impl<K: KernelConvenience + KernelFsAccess + Send + Sync + 'static> FsBackend
     }
 
     fn write_atomic(&self, path: &str, data: &[u8]) -> io::Result<()> {
-        // Kernel sys_write is atomic per call — no temp file needed.
-        self.write(path, data)
+        if matches!(&self.path_view, KernelPathView::Virtual) {
+            // Virtual objects publish in one kernel write. The local connector
+            // overwrites host files in place, so host spellings need a rename
+            // to retain atomic visibility for native readers as well.
+            self.write(path, data)
+        } else {
+            write_atomic_staged(self, path, data)
+        }
     }
 
     fn working_root(&self) -> io::Result<String> {

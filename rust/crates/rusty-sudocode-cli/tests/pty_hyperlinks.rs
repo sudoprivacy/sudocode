@@ -11,7 +11,10 @@ fn document() -> String {
     let mut text = String::from(
         "## LinkHeading\n\n[PR #891](https://github.com/sudoprivacy/sudocode/pull/891) PlainAfter\n\n\
          [**DragStart** 中文界 e\u{301} 👩🏽‍💻 wrapping words wrapping words wrapping words wrapping words wrapping words DragEnd](https://example.com/drag)\n\n\
-         | Name | Destination |\n| --- | --- |\n| TableLink | [中文👩🏽‍💻](https://example.com/table) |\n\n\
+         | Name | Destination | Notes | Details | State |\n| --- | --- | --- | --- | --- |\n\
+         | TableLink | [中文👩🏽‍💻](https://example.com/table) | A readable explanatory sentence with enough words to exercise narrow table records and preserve their complete content. | Another readable explanatory sentence that must wrap beside the notes without turning both columns into narrow strips. | Ready |\n\
+         | SecondRow | second destination | A second readable explanatory sentence with enough words to exercise narrow table records and preserve their complete content. | Another second readable explanatory sentence that must wrap beside the notes without turning both columns into narrow strips. | Done |\n\n\
+         ```rust\nfn gui_code() {\n    let message = \"GuiCodeStart\n中文 multiline string state\nGuiCodeEnd\";\n}\n```\n\n\
          - [ListStart 中文界 👩🏽‍💻 wrapping words wrapping words wrapping words wrapping words wrapping words ListEnd](https://example.com/list)\n\n\
          [UnsafeLink](javascript:alert) [FileLink](file:///tmp/not-opened)\n\n",
     );
@@ -146,13 +149,16 @@ fn browser_terminal_links_and_interaction() {
             "chunk_chars": 60, "delay_ms": 30,
         }),
     );
-    let question = env.prompt(&format!("TOOL_BATCH:{}", json!([{
+    let written = "fn main() {\n    let message = \"WriteDragStart 中文界 e\u{301} 👩🏽‍💻 wrapping words wrapping words wrapping words wrapping words WriteDragEnd\";\n}\n";
+    let question = env.tool_batch_prompt(&json!([{
+        "id":"links-file", "name":"write_file", "input":{"path":"browser-preview.rs", "content":written},
+    }, {
         "id":"links-question", "name":"AskUserQuestion", "input": {
             "title":"Links", "question":"Continue the review?",
             "description":"Review [QuestionLink](https://example.com/question) then choose.",
             "options":["Continue", "Stop"],
         },
-    }])), "tool_concurrency");
+    }]));
     let output = common::terminal_host::run(
         &env,
         &[
@@ -170,7 +176,12 @@ fn browser_terminal_links_and_interaction() {
             "prompt":prose, "question":question, "cols":80, "rows":38,
             "report":std::env::var("SCODE_GUI_REPORT").ok(),
             "expectLinks":std::env::var("SCODE_GUI_EXPECT_LINKS").as_deref() != Ok("0"),
+            "expectFilePreview":std::env::var("SCODE_GUI_EXPECT_LINKS").as_deref() != Ok("0"),
         }),
     );
     common::terminal_host::assert_success(&output);
+    assert_eq!(
+        std::fs::read_to_string(env.workspace_root().join("browser-preview.rs")).unwrap(),
+        written
+    );
 }

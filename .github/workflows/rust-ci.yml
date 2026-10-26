@@ -354,6 +354,11 @@ jobs:
           SCODE_TEST_BACKEND: mock
           SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
         run: cargo test -p rusty-sudocode-cli --test pty_prose_preview -- --ignored --nocapture
+      - name: Preserve incremental code colors and history through real resize
+        env:
+          SCODE_TEST_BACKEND: mock
+          SCODE_TERMINAL_LOG_DIR: ${{ runner.temp }}/scode-resize-logs
+        run: cargo test -p rusty-sudocode-cli --test pty_streaming_code -- --ignored --nocapture
       - name: Answer palette queries through the ready Unix terminal peer
         if: runner.os != 'Windows'
         env:

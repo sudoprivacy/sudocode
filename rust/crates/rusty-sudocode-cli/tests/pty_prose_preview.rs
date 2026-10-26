@@ -166,7 +166,10 @@ fn preview_continues_after_a_stable_paragraph() {
 
 #[test]
 fn ambiguous_grapheme_width_uses_complete_block_fallback() {
-    let mut documents = vec!["WidthStart 👩🏽‍💻 ordinary words WidthDone".to_string()];
+    let mut documents = vec![
+        "WidthStart 👩🏽‍💻 ordinary words WidthDone".to_string(),
+        "WidthStart ｶﾞﾊﾟtail ordinary words WidthDone".to_string(),
+    ];
     if cfg!(windows) {
         documents.push(format!(
             "WidthStart 中文 e\u{301} {} WidthDone",
@@ -489,33 +492,18 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
             saved.save_to_path(&saved_path).unwrap();
             args.extend(["--resume", saved_path.to_str().unwrap()]);
         }
-        // Acceptance owns its scenario entry point; the shared terminal
-        // observer and performance measurement fixtures remain unchanged.
-        let log_root = std::env::var_os("SCODE_TERMINAL_LOG_DIR")
-            .map_or_else(
-                || env.workspace_root().join("terminal-logs"),
-                std::path::PathBuf::from,
-            )
-            .join(scenario);
-        std::fs::create_dir_all(&log_root).unwrap();
-        let config = serde_json::json!({
-            "binary": common::scode_bin(), "args": args, "scenario": scenario,
-            "root": env.workspace_root(), "configHome": env.config_home(),
-            "todos": env.workspace_root().join("todos.json"), "logRoot": log_root,
-            "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
-            "cols": cols, "rows": 40, "prompt": prompt,
-            "draft": format!("{HANDOFF_DRAFT}👩🏽‍💻"),
-        });
         let script =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/terminal/prose.cjs");
-        let output = std::process::Command::new(
-            std::env::var_os("SCODE_TERMINAL_HOST").unwrap_or_else(|| "node".into()),
-        )
-        .arg(script)
-        .arg(config.to_string())
-        .env("ELECTRON_RUN_AS_NODE", "1")
-        .output()
-        .expect("start the pinned real terminal host; see e2e/terminal-resize/README.md");
+        let output = common::terminal_host::run_script(
+            &env,
+            &args,
+            scenario,
+            serde_json::json!({
+                "cols": cols, "rows": 40, "prompt": prompt,
+                "draft": format!("{HANDOFF_DRAFT}👩🏽‍💻"),
+            }),
+            &script,
+        );
         common::terminal_host::assert_success(&output);
     }
 }

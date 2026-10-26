@@ -4,6 +4,18 @@ use serde_json::{json, Value};
 use std::{path::PathBuf, process::Output};
 
 pub fn run(env: &TestEnv, args: &[&str], scenario: &str, extra: Value) -> Output {
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../e2e/terminal-resize/run.cjs");
+    run_script(env, args, scenario, extra, &script)
+}
+
+pub fn run_script(
+    env: &TestEnv,
+    args: &[&str],
+    scenario: &str,
+    extra: Value,
+    script: &std::path::Path,
+) -> Output {
     let log_root = std::env::var_os("SCODE_TERMINAL_LOG_DIR")
         .map_or_else(|| env.workspace_root().join("terminal-logs"), PathBuf::from)
         .join(scenario);
@@ -20,8 +32,6 @@ pub fn run(env: &TestEnv, args: &[&str], scenario: &str, extra: Value) -> Output
     config.as_object_mut().unwrap().extend(fields);
     let manifest = env.workspace_root().join("terminal.json");
     std::fs::write(&manifest, serde_json::to_vec(&config).unwrap()).unwrap();
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../e2e/terminal-resize/run.cjs");
     std::process::Command::new(
         std::env::var_os("SCODE_TERMINAL_HOST").unwrap_or_else(|| "node".into()),
     )

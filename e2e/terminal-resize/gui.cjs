@@ -153,9 +153,9 @@ async function run(config) {
       assert(!output.includes('\x1b]8;;file:'), 'file destination promoted');
       assert(!output.includes(`\x1b]8;;https://example.com/${'x'.repeat(40)}`), 'oversized destination emitted');
     }
-    async function drag(count) {
-      const start = await reveal('DragStart');
-      const end = await page.evaluate(() => fixture.locate('DragEnd'));
+    async function drag(count, startLabel = 'DragStart', endLabel = 'DragEnd', last = false, screenshot = 'selection.png') {
+      const start = await reveal(startLabel, last);
+      const end = await page.evaluate(({ label, last }) => fixture.locate(label, last), { label: endLabel, last });
       const a = await point(start, 'start');
       const beforeDrag = await page.evaluate(() => fixture.activated.length);
       const dragSamples = [];
@@ -178,10 +178,10 @@ async function run(config) {
       }
       await page.mouse.up();
       const selected = await page.evaluate(() => fixture.terminal.getSelection());
-      assert(selected.startsWith('DragStart') && selected.endsWith('DragEnd'), `selection: ${selected}`);
+      assert(selected.startsWith(startLabel) && selected.endsWith(endLabel), `selection: ${selected}`);
       assert(selected.includes('👩🏽‍💻') && selected.includes('中文界') && selected.includes('é'), 'drag broke Unicode');
       assert(!selected.includes('\x1b') && !selected.includes('https://'), 'selection contains hidden metadata');
-      fs.writeFileSync(path.join(config.logRoot, 'selection.png'), pixels);
+      fs.writeFileSync(path.join(config.logRoot, screenshot), pixels);
       assert.equal(await page.evaluate(() => fixture.activated.length), beforeDrag, 'drag activated a link');
       return { selected, samples: dragSamples };
     }
@@ -289,6 +289,14 @@ async function run(config) {
     report.metrics.scode_rss_growth_mib = Math.max(0, after.scode.rss_mib - baseline.scode.rss_mib);
     report.metrics.terminal_rss_growth_mib = Math.max(0, after.terminal_rss_mib - baseline.terminal_rss_mib);
     report.metrics.wire_kib = wireBytes / 1024;
+    // Extra feature acceptance follows the paired measurement window: an older
+    // baseline has no Write body to drag, so candidate-only gestures must not
+    // contaminate CPU/RSS or input/drag regression comparisons.
+    if (config.expectFilePreview) {
+      report.file_preview = await drag(3, 'WriteDragStart', 'WriteDragEnd', true, 'file-selection.png');
+      report.file_preview.excluded_from_resource_window = true;
+      await page.evaluate(() => { fixture.terminal.clearSelection(); fixture.terminal.scrollToBottom(); fixture.terminal.focus(); });
+    }
     report.selected = selection.selected;
     report.status = 'passed';
     child.write('\x15');

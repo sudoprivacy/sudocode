@@ -853,10 +853,20 @@ fn concurrency_calls(request: &MessageRequest) -> Vec<ConcurrencyCall> {
                 return None;
             };
             let (_, batch) = text.split_once("TOOL_BATCH:")?;
-            serde_json::Deserializer::from_str(batch)
-                .into_iter::<Vec<Value>>()
+            let value = serde_json::Deserializer::from_str(batch)
+                .into_iter::<Value>()
                 .next()?
-                .ok()
+                .ok()?;
+            if let Some(path) = value.get("calls_path").and_then(Value::as_str) {
+                Some(
+                    serde_json::from_str::<Vec<Value>>(
+                        &std::fs::read_to_string(path).expect("tool batch fixture file"),
+                    )
+                    .expect("tool batch fixture JSON"),
+                )
+            } else {
+                serde_json::from_value::<Vec<Value>>(value).ok()
+            }
         })
         .expect("tool_concurrency requires TOOL_BATCH JSON")
         .into_iter()

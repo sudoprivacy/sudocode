@@ -4,7 +4,7 @@ exclude = ["vendor/command-group", "vendor/codex-mermaid"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.37"
+version = "0.2.38"
 edition = "2021"
 license = "MIT"
 publish = false

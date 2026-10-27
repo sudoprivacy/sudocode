@@ -1925,7 +1925,7 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
         |screen| {
             screen
                 .rsplit_once('─')
-                .is_some_and(|(_, footer)| footer.contains("Cache TTL: consider 1h"))
+                .is_some_and(|(_, footer)| footer.contains("Cache TTL: 1h ≈"))
         },
         WAIT,
         "boundary advice in the shared footer",
@@ -2076,6 +2076,202 @@ fn ttl_advisor_is_opt_in_and_marks_retried_or_restarted_streams() {
     }
 }
 
+/// Ten old rows ten minutes apart, which make the advisor's next boundary
+/// decision suggest 1h. Written before the boundary, so it sees no future.
+fn seed_ttl_history(directory: &std::path::Path) {
+    let rows = cache_rows(directory);
+    let template = rows.last().unwrap();
+    let start = template["observation"]["request_started_ms"]
+        .as_u64()
+        .unwrap();
+    let mut history = String::new();
+    for index in 0..10u64 {
+        let mut row = template.clone();
+        row["gateway_request_id"] = json!(format!("fixture-{index}"));
+        row["provider_request_id"] = Value::Null;
+        let at = start - (11 - index) * 600_000;
+        row["observation"]["request_started_ms"] = json!(at);
+        row["observation"]["response_started_ms"] = json!(at + 1);
+        row["observation"]["response_completed_ms"] = json!(at + 2);
+        row["observation"]["client_prefix_compatible"] = json!(true);
+        row["cache_creation_input_tokens"] = json!(100_000);
+        row["cache_read_input_tokens"] = json!(0);
+        writeln!(history, "{row}").unwrap();
+    }
+    for row in rows {
+        writeln!(history, "{row}").unwrap();
+    }
+    std::fs::write(directory.join("requests.jsonl"), history).unwrap();
+}
+
+fn compact(cli: &mut PtySession, why: &str) {
+    cli.send("/compact\r").unwrap();
+    cli.expect("Messages removed").unwrap();
+    common::expect_input_line_cleared(cli, WAIT, why);
+}
+
+fn footer_shows(cli: &PtySession, text: &str, why: &str) {
+    common::expect_screen(
+        cli,
+        |screen| {
+            screen
+                .rsplit_once('─')
+                .is_some_and(|(_, footer)| footer.contains(text))
+        },
+        WAIT,
+        why,
+    );
+}
+
+/// Whether every request sent since `from` asked for 1h.
+fn sent_1h_since(capture: &Capture, from: usize) -> Vec<bool> {
+    capture
+        .bodies()
+        .iter()
+        .skip(from)
+        .map(|body| body.to_string().contains("\"ttl\":\"1h\""))
+        .collect()
+}
+
+fn saved_ttl(env: &TestEnv) -> Value {
+    let text = std::fs::read_to_string(env.config_home().join("sudocode.json")).unwrap();
+    serde_json::from_str::<Value>(&text).unwrap()["cache_ttl_1h"].clone()
+}
+
+/// The TTL panel saves a choice, and the wire follows it at the cheapest
+/// moment: a switch to 1h waits for a cold prefix (here, a compaction), a
+/// switch to 5m or a forced 1h reaches the next request, and auto removes the
+/// saved value. The fake server's cache is not measured; only what is sent.
+#[test]
+fn ttl_panel_switches_when_cheapest_and_saves_the_choice() {
+    let env = TestEnv::new_mock("ttl-switch");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let id = Session::load_from_path(&path).unwrap().session_id;
+    let directory = env.config_home().join("cache/prompt-cache").join(id);
+    let enabled = [
+        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+    ];
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    turn(&mut cli, "First observed request.");
+    seed_ttl_history(&directory);
+    compact(&mut cli, "first compaction");
+    // The first request after a compaction rewrites the prefix anyway; this
+    // one makes the new context's prefix warm before the switch is chosen.
+    turn(&mut cli, "Warm up the new context.");
+    footer_shows(&cli, "Cache TTL: 1h ≈", "advice in the footer");
+
+    // ↓ from an empty prompt reaches the tip; Enter opens the panel on the
+    // suggested row; Enter applies and saves it.
+    cli.send("\x1b[B").unwrap();
+    footer_shows(&cli, "Enter to review", "focused tip");
+    cli.send("\r").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| screen.contains("Prompt cache TTL") && screen.contains("advisor: 1h"),
+        WAIT,
+        "TTL panel",
+    );
+    cli.send("\r").unwrap();
+    cli.expect("Saved · 1h from the next cold start").unwrap();
+    assert_eq!(saved_ttl(&env), json!(true));
+
+    // Warm: the prefix was just used at 5m, so a 1h request would rewrite it.
+    let from = capture.bodies().len();
+    turn(&mut cli, "A warm turn keeps 5m.");
+    let warm = sent_1h_since(&capture, from);
+    assert!(
+        !warm.is_empty() && warm.iter().all(|one_hour| !one_hour),
+        "{warm:?}"
+    );
+
+    // A compaction rewrites the prefix anyway: the switch lands right after it.
+    compact(&mut cli, "second compaction");
+    let from = capture.bodies().len();
+    turn(&mut cli, "The first turn of the new context.");
+    let cold = sent_1h_since(&capture, from);
+    assert!(
+        !cold.is_empty() && cold.iter().all(|one_hour| *one_hour),
+        "{cold:?}"
+    );
+
+    // 5m keeps the cache, so it applies to the next request.
+    cli.send("/cache ttl 5m\r").unwrap();
+    cli.expect("Saved · 5m from the next request").unwrap();
+    assert_eq!(saved_ttl(&env), json!(false));
+    let from = capture.bodies().len();
+    turn(&mut cli, "Back on 5m.");
+    let down = sent_1h_since(&capture, from);
+    assert!(
+        !down.is_empty() && down.iter().all(|one_hour| !one_hour),
+        "{down:?}"
+    );
+
+    // `n` in the panel forces 1h onto the next request, warm or not.
+    footer_shows(&cli, "Cache TTL: 1h ≈", "advice again after 5m");
+    cli.send("\x1b[B").unwrap();
+    footer_shows(&cli, "Enter to review", "focused tip again");
+    cli.send("\r").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| screen.contains("Prompt cache TTL"),
+        WAIT,
+        "panel again",
+    );
+    cli.send("n").unwrap();
+    cli.expect("Saved · 1h from the next request").unwrap();
+    let from = capture.bodies().len();
+    turn(&mut cli, "Forced 1h.");
+    let forced = sent_1h_since(&capture, from);
+    assert!(
+        !forced.is_empty() && forced.iter().all(|one_hour| *one_hour),
+        "{forced:?}"
+    );
+
+    // auto removes the saved value; the auth mode decides again.
+    cli.send("/cache ttl auto\r").unwrap();
+    cli.expect("Saved · auto").unwrap();
+    assert_eq!(saved_ttl(&env), Value::Null);
+    exit(&mut cli);
+}
+/// A saved 1h reaches a restarted session at the next cold point too: the
+/// client is built from the setting, but the first request after a quick
+/// restart still reads the prefix the previous process left warm at 5m.
+#[test]
+fn a_saved_1h_waits_for_a_cold_prefix_after_a_restart() {
+    let env = TestEnv::new_mock("ttl-restart");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let enabled = [
+        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+    ];
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    turn(&mut cli, "Warm the prefix at 5m.");
+    cli.send("/cache ttl 1h\r").unwrap();
+    cli.expect("Saved · 1h from the next cold start").unwrap();
+    exit(&mut cli);
+    assert_eq!(saved_ttl(&env), json!(true));
+
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let from = capture.bodies().len();
+    turn(&mut cli, "A quick restart finds the prefix warm.");
+    let warm = sent_1h_since(&capture, from);
+    assert!(
+        !warm.is_empty() && warm.iter().all(|one_hour| !one_hour),
+        "{warm:?}"
+    );
+    compact(&mut cli, "compaction after the restart");
+    let from = capture.bodies().len();
+    turn(&mut cli, "Cold after the compaction.");
+    let cold = sent_1h_since(&capture, from);
+    assert!(
+        !cold.is_empty() && cold.iter().all(|one_hour| *one_hour),
+        "{cold:?}"
+    );
+    exit(&mut cli);
+}
 fn exit(cli: &mut PtySession) {
     cli.send("/exit\r").unwrap();
     assert_eq!(cli.expect_eof().unwrap(), 0);

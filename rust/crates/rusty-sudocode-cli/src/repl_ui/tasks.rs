@@ -6,6 +6,8 @@ use crate::render::{
     text_layout::{display_width, truncate_to_width, wrap_line},
     theme, RESET,
 };
+use engine_core::cache_advisor::{ttl_label, TtlAdvice};
+use engine_core::cache_ttl::TtlChoice;
 use engine_events::{
     BackgroundTask, BackgroundTaskEvent, BackgroundTaskKind, BackgroundTaskStatus,
 };
@@ -15,10 +17,18 @@ use std::{collections::BTreeMap, time::Instant};
 pub(super) enum TaskFocus {
     #[default]
     Input,
+    /// The footer's background-task label.
     Footer,
     List,
     Detail,
+    /// The footer's actionable cache-TTL tip.
+    Tip,
+    /// The cache-TTL panel opened from that tip.
+    Ttl,
 }
+
+/// Rows of the cache-TTL panel, top to bottom.
+const TTL_CHOICES: [TtlChoice; 3] = [TtlChoice::OneHour, TtlChoice::FiveMinutes, TtlChoice::Auto];
 
 struct Entry {
     task: BackgroundTask,
@@ -38,6 +48,10 @@ pub(super) struct TaskBrowser {
     pub focus: TaskFocus,
     selected: Option<String>,
     scroll: usize,
+    /// The advice behind the cache-TTL tip, and whether the tip offers a switch.
+    ttl_advice: Option<TtlAdvice>,
+    tip_actionable: bool,
+    ttl_row: usize,
 }
 
 impl TaskBrowser {
@@ -153,7 +167,75 @@ impl TaskBrowser {
     }
     #[inline]
     pub fn is_panel(&self) -> bool {
-        matches!(self.focus, TaskFocus::List | TaskFocus::Detail)
+        matches!(
+            self.focus,
+            TaskFocus::List | TaskFocus::Detail | TaskFocus::Ttl
+        )
+    }
+
+    /// The cache-TTL advice and whether its tip is a footer stop.
+    pub fn set_cache_advice(&mut self, advice: Option<TtlAdvice>, actionable: bool) {
+        self.tip_actionable = actionable && advice.is_some();
+        self.ttl_advice = advice;
+        self.clamp();
+    }
+
+    /// Whether ↓ from an empty prompt has anything in the footer to reach.
+    pub fn has_footer_stop(&self) -> bool {
+        self.has_tasks() || self.tip_actionable
+    }
+
+    /// Focus the first footer stop: the task label, else the tip.
+    pub fn focus_footer(&mut self) {
+        if self.has_tasks() {
+            self.focus = TaskFocus::Footer;
+        } else if self.tip_actionable {
+            self.focus = TaskFocus::Tip;
+        }
+    }
+
+    /// ←/→ between the footer's stops.
+    pub fn move_footer_stop(&mut self, right: bool) {
+        match (self.focus, right) {
+            (TaskFocus::Footer, true) if self.tip_actionable => self.focus = TaskFocus::Tip,
+            (TaskFocus::Tip, false) if self.has_tasks() => self.focus = TaskFocus::Footer,
+            _ => {}
+        }
+    }
+
+    /// Open the cache-TTL panel on the suggested row.
+    pub fn open_ttl(&mut self) {
+        let Some(advice) = &self.ttl_advice else {
+            return;
+        };
+        let suggested = if advice.suggested_seconds == 3600 {
+            TtlChoice::OneHour
+        } else {
+            TtlChoice::FiveMinutes
+        };
+        self.ttl_row = TTL_CHOICES
+            .iter()
+            .position(|choice| *choice == suggested)
+            .unwrap_or(0);
+        self.focus = TaskFocus::Ttl;
+    }
+
+    /// Leave the panel for the tip it was opened from.
+    pub fn close_ttl(&mut self) {
+        self.focus = TaskFocus::Tip;
+        self.clamp();
+    }
+
+    pub fn move_ttl(&mut self, down: bool) {
+        self.ttl_row = if down {
+            (self.ttl_row + 1).min(TTL_CHOICES.len() - 1)
+        } else {
+            self.ttl_row.saturating_sub(1)
+        };
+    }
+
+    pub fn ttl_choice(&self) -> TtlChoice {
+        TTL_CHOICES[self.ttl_row.min(TTL_CHOICES.len() - 1)]
     }
     pub fn shows_running_detail(&self) -> bool {
         self.focus == TaskFocus::Detail
@@ -181,6 +263,11 @@ impl TaskBrowser {
             self.selected = self.rows.first().cloned();
         }
         if !self.has_tasks() && self.focus == TaskFocus::Footer {
+            self.close();
+        }
+        if !self.tip_actionable && self.focus == TaskFocus::Tip
+            || self.ttl_advice.is_none() && self.focus == TaskFocus::Ttl
+        {
             self.close();
         }
     }
@@ -243,6 +330,9 @@ impl TaskBrowser {
 
     /// Project inside InputSlot's allocation, not an independent terminal budget.
     pub fn panel(&mut self, width: usize, max_rows: usize) -> String {
+        if self.focus == TaskFocus::Ttl {
+            return self.ttl_panel(width);
+        }
         let mut lines = vec![format!(
             "{}Background tasks{RESET}",
             ansi_fg(theme().primary)
@@ -384,6 +474,87 @@ impl TaskBrowser {
             .map(|line| truncate_to_width(&line, width))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+impl TaskBrowser {
+    /// The cache-TTL choices with what each one does and costs, from the
+    /// advisor's saved decision. Reference prices, not an invoice.
+    fn ttl_panel(&self, width: usize) -> String {
+        let Some(advice) = &self.ttl_advice else {
+            return String::new();
+        };
+        let muted = theme().muted_fg();
+        let mut lines = vec![format!(
+            "{}Prompt cache TTL{RESET}{muted} · now {}{}{RESET}",
+            ansi_fg(theme().primary),
+            ttl_label(advice.effective_seconds),
+            advice.pending.map_or(String::new(), |pending| format!(
+                " · pending {}",
+                choice_label(pending.choice)
+            )),
+        )];
+        if advice.has_saving {
+            lines.push(format!(
+                "{muted}  advisor: {} ≈ {:.0}% cheaper over the last {} requests (${:.2} at 5m vs ${:.2} at 1h, reference prices){RESET}",
+                ttl_label(advice.suggested_seconds),
+                advice.saving_pct(),
+                advice.rows,
+                advice.fixed_5m_usd,
+                advice.fixed_1h_usd,
+            ));
+        }
+        for (row, choice) in TTL_CHOICES.iter().enumerate() {
+            let focused = row == self.ttl_row;
+            let marker = ChoiceText::new(theme(), crate::render::ColorSupport::detect(), focused)
+                .prefix(if focused { "❯" } else { " " });
+            let detail = match choice {
+                TtlChoice::OneHour if advice.effective_seconds == 3600 => "current".to_owned(),
+                TtlChoice::OneHour => {
+                    let cost = match (advice.switch_now_usd, advice.switch_cold_usd) {
+                        (Some(now), Some(cold)) if advice.cached_tokens > 0 => format!(
+                            " · switching now rewrites {} cached tokens once (~${now:.2}; ~${cold:.2} when cold)",
+                            tokens(advice.cached_tokens)
+                        ),
+                        _ => String::new(),
+                    };
+                    format!("at the next cold start (idle past the TTL, compact, resume){cost}")
+                }
+                TtlChoice::FiveMinutes if advice.effective_seconds == 300 => "current".to_owned(),
+                TtlChoice::FiveMinutes => "from the next request · keeps the cache".to_owned(),
+                TtlChoice::Auto => {
+                    "the auth mode decides: 1h on a subscription, 5m on an API key".to_owned()
+                }
+            };
+            lines.push(format!(
+                "{marker} {:<4} {muted}{detail}{RESET}",
+                choice_label(*choice)
+            ));
+        }
+        lines.push(format!(
+            "{muted}↑/↓ select · Enter apply and save · n apply now · Esc back{RESET}"
+        ));
+        lines
+            .into_iter()
+            .map(|line| truncate_to_width(&line, width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn choice_label(choice: TtlChoice) -> &'static str {
+    match choice {
+        TtlChoice::OneHour => "1h",
+        TtlChoice::FiveMinutes => "5m",
+        TtlChoice::Auto => "auto",
+    }
+}
+
+fn tokens(count: u64) -> String {
+    if count >= 1000 {
+        format!("{}k", count / 1000)
+    } else {
+        count.to_string()
     }
 }
 

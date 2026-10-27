@@ -141,6 +141,48 @@ impl From<OAuthTokenSet> for AuthSource {
     }
 }
 
+/// The prompt-cache TTL a client asks for, shared by every clone of it, and
+/// the auth mode's default it started from.
+#[derive(Debug, Clone)]
+pub struct CacheTtl {
+    current: Arc<AtomicBool>,
+    default_one_hour: bool,
+}
+
+impl CacheTtl {
+    #[must_use]
+    pub fn new(one_hour: bool) -> Self {
+        Self {
+            current: Arc::new(AtomicBool::new(one_hour)),
+            default_one_hour: one_hour,
+        }
+    }
+
+    #[must_use]
+    pub fn one_hour(&self) -> bool {
+        self.current.load(Ordering::Acquire)
+    }
+
+    pub fn set_one_hour(&self, one_hour: bool) {
+        self.current.store(one_hour, Ordering::Release);
+    }
+
+    /// What the auth mode picks when no setting overrides it.
+    #[must_use]
+    pub fn default_one_hour(&self) -> bool {
+        self.default_one_hour
+    }
+
+    #[must_use]
+    pub fn seconds(&self) -> u32 {
+        if self.one_hour() {
+            3600
+        } else {
+            300
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AnthropicClient {
     http: HttpTransport,
@@ -155,20 +197,21 @@ pub struct AnthropicClient {
     /// block. Required for OAuth subscription tokens where the server gates
     /// access by checking the first system block for an exact match.
     oauth_system_prefix: bool,
-    /// Ask Anthropic to hold cached prefixes for an hour instead of the
-    /// five-minute default.
+    /// The prompt-cache TTL every `cache_control` block of a request asks for.
     ///
-    /// Matches Claude Code, which sets `ttl: "1h"` for subscribers and leaves
-    /// metered API keys on the 5m default (`should1hCacheTTL`): a subscription
-    /// pays for a cache write out of its rate-limit window, where re-creating
-    /// a prefix costs far more than holding it, while a metered key pays 2x
-    /// base for a 1h write against 1.25x for a 5m one.
+    /// The default follows Claude Code: 1h for subscribers, 5m for metered
+    /// keys. A subscription pays for a cache write out of its rate-limit
+    /// window, where re-creating a prefix costs far more than holding it, while
+    /// a metered key pays 2x base for a 1h write against 1.25x for a 5m one.
     ///
-    /// Resolved once at construction and never re-read. Claude Code latches it
-    /// the same way and says why: flipping the TTL mid-session changes the
-    /// `cache_control` block itself, which busts the very prefix it is meant
-    /// to keep — "~20K tokens per flip" in their note.
-    cache_ttl_1h: bool,
+    /// Read once per request, so a change reaches the next request and never
+    /// splits one. Changing it is not free in one direction, measured against
+    /// the API: a request that adds content and asks for 1h on a prefix cached
+    /// at 5m rewrites the whole prefix at the 1h write price, because a 1h entry
+    /// cannot extend a 5m one. Going from 1h to 5m keeps the cached prefix, and
+    /// so does a TTL change on unchanged content. When to switch is the
+    /// engine's decision (`engine_client`), not this client's.
+    cache_ttl: CacheTtl,
     /// Set once this base URL has answered `/v1/messages/count_tokens` with a
     /// status that means the endpoint is not there.
     ///
@@ -195,7 +238,7 @@ impl AnthropicClient {
             oauth_system_prefix: false,
             // A bare API key is metered per token: a 1h write bills 2x base
             // against 1.25x for 5m, so the longer hold has to be asked for.
-            cache_ttl_1h: false,
+            cache_ttl: CacheTtl::new(false),
             count_tokens_unsupported: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -211,12 +254,14 @@ impl AnthropicClient {
     /// client through here and nowhere else, so there is one place to look for
     /// why a request carries the TTL it does.
     ///
-    /// Set it before the first request or not at all: the value is part of
-    /// every `cache_control` block, so changing it between turns rewrites the
-    /// cached prefix and throws away what it was holding.
+    /// This sets the starting value. A live change goes through
+    /// [`AnthropicClient::cache_ttl`], which every clone of this client shares.
     #[must_use]
     pub fn with_cache_ttl_1h(mut self, enabled: bool) -> Self {
-        self.cache_ttl_1h = enabled;
+        self.cache_ttl = CacheTtl {
+            current: Arc::new(AtomicBool::new(enabled)),
+            default_one_hour: self.cache_ttl.default_one_hour,
+        };
         self
     }
 
@@ -230,7 +275,13 @@ impl AnthropicClient {
     /// already paid to create.
     #[must_use]
     pub fn cache_ttl_1h(&self) -> bool {
-        self.cache_ttl_1h
+        self.cache_ttl.one_hour()
+    }
+
+    /// The live TTL this client and its clones read on each request.
+    #[must_use]
+    pub fn cache_ttl(&self) -> &CacheTtl {
+        &self.cache_ttl
     }
 
     #[must_use]
@@ -271,7 +322,7 @@ impl AnthropicClient {
             last_prompt_cache_record: Arc::new(Mutex::new(None)),
             cache_diagnostics: CacheDiagnostics::default(),
             oauth_system_prefix: is_subscription,
-            cache_ttl_1h: is_subscription,
+            cache_ttl: CacheTtl::new(is_subscription),
             count_tokens_unsupported: Arc::new(AtomicBool::new(false)),
         };
         if is_subscription {
@@ -639,7 +690,7 @@ impl AnthropicClient {
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let mut body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut body, request);
-        apply_cache_hints(&mut body, request, self.cache_ttl_1h);
+        apply_cache_hints(&mut body, request, self.cache_ttl.one_hour());
         apply_request_metadata(&mut body, request);
         self.prepend_oauth_system_prefix(&mut body);
         let diagnose_cache = cache_diagnostics_enabled();
@@ -818,7 +869,7 @@ impl AnthropicClient {
         );
         let mut request_body = self.request_profile.render_json_body(request)?;
         strip_unsupported_beta_body_fields(&mut request_body, request);
-        apply_cache_hints(&mut request_body, request, self.cache_ttl_1h);
+        apply_cache_hints(&mut request_body, request, self.cache_ttl.one_hour());
         apply_request_metadata(&mut request_body, request);
         self.prepend_oauth_system_prefix(&mut request_body);
         dump_request_body("count_tokens", &request_body);
@@ -2884,14 +2935,17 @@ mod tests {
             Some(crate::providers::AuthMode::Subscription),
         );
         assert!(
-            subscription.cache_ttl_1h,
+            subscription.cache_ttl_1h(),
             "subscription should hold cached prefixes for an hour"
         );
 
         let api_key = AnthropicClient::new("sk-ant-api03-key");
-        assert!(!api_key.cache_ttl_1h, "metered key stays on the 5m default");
+        assert!(
+            !api_key.cache_ttl_1h(),
+            "metered key stays on the 5m default"
+        );
 
-        assert!(!subscription.clone().with_cache_ttl_1h(false).cache_ttl_1h);
+        assert!(!subscription.clone().with_cache_ttl_1h(false).cache_ttl_1h());
     }
 
     #[test]

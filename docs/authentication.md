@@ -115,6 +115,8 @@ for the next event; executing a tool does not consume that idle interval.
 
 A stalled or disconnected stream can be replayed once before any provider
 event has been delivered. This uses the original request and shares the
-HTTP retry budget. After an event has been delivered, a transport failure
-is surfaced without automatic replay, preserving partial output and usage.
-Compaction retains its own global retry and usage budget.
+HTTP retry budget. After an event has been delivered, the request is never
+replayed: its output, usage and any tools that ran are kept. The turn instead
+continues from the saved partial reply and tool results, as if the user had
+asked it to continue, up to 3 times per turn; after that the failure is
+surfaced. Compaction retains its own global retry and usage budget.

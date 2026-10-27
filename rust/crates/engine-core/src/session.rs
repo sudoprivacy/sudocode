@@ -355,12 +355,24 @@ async fn drive(
 
     let mut shutdown = ShutdownReason::Disconnected;
     loop {
-        let cmd = tokio::select! {
-            cmd = tcmd_rx.recv() => { let Some(cmd) = cmd else { break; }; cmd },
-            () = evt_tx.completions.delivery_changed() => { evt_tx.completions.deliver(&evt_tx); continue; }
+        // A control already in the channel precedes an automatically resumed batch.
+        let cmd = if let Ok(command) = tcmd_rx.try_recv() {
+            command
+        } else if let Some((command, state)) = evt_tx.inputs.next_prompt() {
+            let _ = evt_tx.send(EngineEvent::InputState(state));
+            command
+        } else {
+            tokio::select! {
+                cmd = tcmd_rx.recv() => { let Some(cmd) = cmd else { break; }; cmd },
+                () = evt_tx.completions.delivery_changed() => { evt_tx.completions.deliver(&evt_tx); continue; }
+                () = evt_tx.inputs.changed() => { continue; }
+            }
         };
         let tasks = delegate.background_tasks().unwrap_or_default();
         match cmd {
+            EngineCommand::Input { id, action } => {
+                handle_input(delegate.as_ref(), id, action, &evt_tx);
+            }
             EngineCommand::Steer { inputs } => {
                 let _ = evt_tx.send(EngineEvent::InputDeferred(inputs));
             }
@@ -429,7 +441,12 @@ async fn drive(
             }
             // Cancellation also reaches a lifecycle operation, such as manual
             // compaction, that holds the session's shared abort signal.
-            EngineCommand::Cancel => delegate.abort_signal().abort(),
+            EngineCommand::Cancel => {
+                if let Some(state) = evt_tx.inputs.cancel() {
+                    let _ = evt_tx.send(EngineEvent::InputState(state));
+                }
+                delegate.abort_signal().abort();
+            }
             EngineCommand::PermissionAnswer { .. } | EngineCommand::QuestionAnswer { .. } => {}
             EngineCommand::Close => {
                 shutdown = ShutdownReason::ExplicitClose;
@@ -504,10 +521,55 @@ fn handle_background_task(
     }
 }
 
+/// Handle delivery without acquiring the execution/session mutex.
+fn handle_input(
+    delegate: &dyn EngineDelegate,
+    id: u64,
+    action: engine_events::InputAction,
+    sink: &EventSink,
+) -> bool {
+    let result = if matches!(
+        action,
+        engine_events::InputAction::Submit { .. }
+            | engine_events::InputAction::Flush
+            | engine_events::InputAction::FlushOrCancel
+    ) && delegate.tool_control().1
+    {
+        Err("Tool execution is paused by the user".to_owned())
+    } else {
+        sink.inputs
+            .action(action, delegate.turn_input_inbox().as_ref())
+    };
+    let (result, cancelled) = match result {
+        Ok((receipt, state, cancelled)) => {
+            if cancelled {
+                delegate.abort_signal().abort();
+            }
+            if let Some(state) = state {
+                let _ = sink.send(EngineEvent::InputState(state));
+            }
+            if sink.inputs.watch_background() {
+                if let Some(tasks) = delegate.background_tasks() {
+                    handle_background_task(
+                        engine_events::BackgroundTaskAction::Watch,
+                        &tasks,
+                        sink,
+                    );
+                }
+            }
+            (Ok(receipt), cancelled)
+        }
+        Err(error) => (Err(error), false),
+    };
+    let _ = sink.send(EngineEvent::CommandResult { id, result });
+    cancelled
+}
+
 struct TurnInput {
     blocks: Vec<ContentBlock>,
     management: Option<(String, engine_events::ManagementContext)>,
     image_policy: engine_events::ImageInputPolicy,
+    input_views: Vec<engine_events::InputView>,
 }
 
 impl TurnInput {
@@ -531,6 +593,9 @@ impl TurnInput {
                 blocks,
                 management,
                 image_policy,
+                input_views: context
+                    .as_ref()
+                    .map_or_else(Vec::new, |context| context.input_views.clone()),
             },
             context,
         )
@@ -576,20 +641,22 @@ async fn run_one_turn(
     let _ = evt_tx.send(EngineEvent::TurnStarted { label });
     let _ = evt_tx.send(EngineEvent::State(EngineState::Running));
 
-    let delegate = delegate.clone();
+    let worker = delegate.clone();
     let turn_tx = evt_tx.clone();
     let turn_table = table.clone();
     let subagents = subagents.clone();
     let turn_tasks = tasks.clone();
     let mut handle = tokio::task::spawn_blocking(move || {
+        let mut input = input;
         let mut observer = ObserverAdapter::with_sink(turn_tx.clone())
             .with_subagent_relay(subagents)
             .with_background_tasks(turn_tasks);
+        observer.initial_inputs = std::mem::take(&mut input.input_views);
         let mut prompter = PrompterAdapter {
             tx: turn_tx,
             table: turn_table,
         };
-        execute_input(delegate.as_ref(), input, &mut observer, &mut prompter)
+        execute_input(worker.as_ref(), input, &mut observer, &mut prompter)
     });
 
     let mut shutdown = None;
@@ -597,6 +664,11 @@ async fn run_one_turn(
         tokio::select! {
             biased;
             cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
+                Some(EngineCommand::Input { id, action }) => {
+                    if handle_input(delegate.as_ref(), id, action, evt_tx) {
+                        table.cancel_all();
+                    }
+                }
                 Some(EngineCommand::Steer { inputs }) => {
                     let refused = match &inbox {
                         Some(inbox) => inbox.admit(inputs).err(),
@@ -633,6 +705,9 @@ async fn run_one_turn(
                 // Cancel aborts the in-flight turn; it then
                 // finishes (cancelled) and we fall through to the `result` arm.
                 Some(EngineCommand::Cancel) => {
+                    if let Some(state) = evt_tx.inputs.cancel() {
+                        let _ = evt_tx.send(EngineEvent::InputState(state));
+                    }
                     abort.abort();
                     table.cancel_all();
                 }
@@ -734,6 +809,9 @@ async fn run_direct_tool(
         tokio::select! {
             biased;
             cmd = tcmd_rx.recv(), if shutdown.is_none() => match cmd {
+                Some(EngineCommand::Input { id, action }) => {
+                    if handle_input(delegate.as_ref(), id, action, evt_tx) { table.cancel_all(); }
+                }
                 Some(EngineCommand::PermissionAnswer { id, decision }) => {
                     if let Some(PendingAnswer::Permission(tx)) = table.take(id) {
                         let _ = tx.send(decision);
@@ -756,6 +834,9 @@ async fn run_direct_tool(
                     table.cancel_all();
                 }
                 Some(EngineCommand::Cancel) => {
+                    if let Some(state) = evt_tx.inputs.cancel() {
+                        let _ = evt_tx.send(EngineEvent::InputState(state));
+                    }
                     abort.abort();
                     table.cancel_all();
                 }
@@ -832,6 +913,7 @@ struct ObserverAdapter {
     tx: EventSink,
     subagents: Option<SubagentRelay>,
     tasks: runtime::background_tasks::BackgroundTasks,
+    initial_inputs: Vec<engine_events::InputView>,
 }
 
 impl ObserverAdapter {
@@ -840,6 +922,7 @@ impl ObserverAdapter {
             tasks: runtime::background_tasks::BackgroundTasks::default(),
             tx,
             subagents: None,
+            initial_inputs: Vec::new(),
         }
     }
 
@@ -876,6 +959,11 @@ impl SubagentRelay {
 }
 
 impl RuntimeObserver for ObserverAdapter {
+    fn on_prompt_committed(&mut self) {
+        for input in std::mem::take(&mut self.initial_inputs) {
+            let _ = self.tx.send(EngineEvent::InputCommitted(input));
+        }
+    }
     fn on_input_committed(&mut self, input: &runtime::turn_input::InputView) {
         let _ = self.tx.send(EngineEvent::InputCommitted(input.clone()));
     }

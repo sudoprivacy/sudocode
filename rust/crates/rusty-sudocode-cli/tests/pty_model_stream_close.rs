@@ -48,6 +48,10 @@ enum ResponseKind {
     NativePartial,
     ChatPartial,
     ResponsesPartial,
+    NativeDropThenContinue,
+    ChatDropThenContinue,
+    ResponsesDropThenContinue,
+    ToolThenDrop,
     NativeSlow,
     ChatSlow,
     ResponsesSlow,
@@ -70,13 +74,25 @@ impl ResponseKind {
             | Self::ChatAnnotations
             | Self::HeartbeatAfterOverload
             | Self::ChatPartial
+            | Self::ChatDropThenContinue
             | Self::ChatSlow => Some("openai-completions"),
             Self::ResponsesDoneKeepAlive
             | Self::ResponsesHeartbeat
             | Self::ResponsesPartial
+            | Self::ResponsesDropThenContinue
             | Self::ResponsesSlow => Some("openai-responses"),
             _ => None,
         }
+    }
+
+    const fn drops_once(self) -> bool {
+        matches!(
+            self,
+            Self::NativeDropThenContinue
+                | Self::ChatDropThenContinue
+                | Self::ResponsesDropThenContinue
+                | Self::ToolThenDrop
+        )
     }
 
     const fn is_refused(self) -> bool {
@@ -1598,6 +1614,10 @@ fn liveness_response(
             | ResponseKind::NativePartial
             | ResponseKind::ChatPartial
             | ResponseKind::ResponsesPartial
+            | ResponseKind::NativeDropThenContinue
+            | ResponseKind::ChatDropThenContinue
+            | ResponseKind::ResponsesDropThenContinue
+            | ResponseKind::ToolThenDrop
             | ResponseKind::NativeSlow
             | ResponseKind::ChatSlow
             | ResponseKind::ResponsesSlow
@@ -1620,10 +1640,19 @@ fn liveness_response(
         kind,
         ResponseKind::ToolThenHeartbeat | ResponseKind::ToolThenEmptyThenComplete
     ) && index == 0;
+    // These drop mid-response on the first request only; later requests are
+    // the continuation and complete with different text.
+    let drops_once = kind.drops_once();
+    let tool_then_drop = matches!(kind, ResponseKind::ToolThenDrop) && index == 0;
     let partial = matches!(
         kind,
         ResponseKind::NativePartial | ResponseKind::ChatPartial | ResponseKind::ResponsesPartial
-    );
+    ) || (drops_once && index == 0);
+    let texts = if drops_once && index > 0 {
+        ["CONTINUED_", "AFTER_", "DROP"]
+    } else {
+        ["STREAM_", "BODY_", "VERIFIED"]
+    };
     let slow = matches!(
         kind,
         ResponseKind::NativeSlow | ResponseKind::ChatSlow | ResponseKind::ResponsesSlow
@@ -1647,7 +1676,7 @@ fn liveness_response(
     let mut deltas = Vec::new();
     match kind.api_format() {
         Some("openai-completions") => {
-            for text in ["STREAM_", "BODY_", "VERIFIED"] {
+            for text in texts {
                 deltas.push(format!(
                     "data: {}\n\n",
                     json!({"id":"chat","choices":[{"delta":{"content":text}}]})
@@ -1658,7 +1687,7 @@ fn liveness_response(
         Some("openai-responses") => {
             prefix =
                 "event: response.created\ndata: {\"id\":\"live\",\"model\":\"sonnet\"}\n\n".into();
-            for text in ["STREAM_", "BODY_", "VERIFIED"] {
+            for text in texts {
                 deltas.push(format!(
                     "event: response.output_text.delta\ndata: {}\n\n",
                     json!({"delta":text})
@@ -1668,7 +1697,7 @@ fn liveness_response(
         }
         _ => {
             prefix = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"live\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"sonnet\",\"content\":[],\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".into();
-            for text in ["STREAM_", "BODY_", "VERIFIED"] {
+            for text in texts {
                 deltas.push(format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}})));
             }
             tail = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":8}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".into();
@@ -1680,6 +1709,20 @@ fn liveness_response(
         prefix.push_str(&format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json!({"command":"sleep 3; echo once >> once.txt"}).to_string()}})));
         tail = tail.replace("end_turn", "tool_use");
         deltas.clear();
+    }
+    if tool_then_drop {
+        // A complete tool call, then text that is cut off mid-response.
+        prefix = prefix[..prefix.find("event: content_block_start").unwrap()].to_owned();
+        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"once\",\"name\":\"bash\",\"input\":{}}}\n\n");
+        prefix.push_str(&format!("event: content_block_delta\ndata: {}\n\n", json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":json!({"command":"echo once >> once.txt"}).to_string()}})));
+        prefix.push_str(
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        );
+        prefix.push_str("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n");
+        deltas = deltas
+            .iter()
+            .map(|delta| delta.replace("\"index\":0", "\"index\":1"))
+            .collect();
     }
     let body = format!("{prefix}{}{tail}", deltas.join(""));
     let length = if heartbeat || partial {
@@ -1740,8 +1783,15 @@ fn check_liveness(
     let log = env.workspace_root().join("stream-events.jsonl");
     let is_tool = matches!(
         kind,
-        ResponseKind::ToolThenHeartbeat | ResponseKind::ToolThenEmptyThenComplete
+        ResponseKind::ToolThenHeartbeat
+            | ResponseKind::ToolThenEmptyThenComplete
+            | ResponseKind::ToolThenDrop
     );
+    let always_drops = matches!(
+        kind,
+        ResponseKind::NativePartial | ResponseKind::ChatPartial | ResponseKind::ResponsesPartial
+    );
+    let continues = always_drops || kind.drops_once();
     let interactive = matches!(
         kind,
         ResponseKind::NativeHeartbeat
@@ -1752,6 +1802,9 @@ fn check_liveness(
             | ResponseKind::NativePartial
             | ResponseKind::ChatPartial
             | ResponseKind::ResponsesPartial
+            | ResponseKind::NativeDropThenContinue
+            | ResponseKind::ChatDropThenContinue
+            | ResponseKind::ResponsesDropThenContinue
     );
     let mut args = vec![
         "--permission-mode",
@@ -1834,7 +1887,9 @@ fn check_liveness(
         |s| {
             common::screen_contains(
                 s,
-                if is_success {
+                if kind.drops_once() {
+                    "CONTINUED_AFTER_DROP"
+                } else if is_success {
                     "STREAM_BODY_VERIFIED"
                 } else if interactive {
                     "automatic replay disabled"
@@ -1888,6 +1943,21 @@ fn check_liveness(
             expected, bodies[2],
             "only tools, the appended final prompt and the existing cache-boundary policy change"
         );
+    } else if continues {
+        // A continuation is a new request built from the saved partial
+        // reply, never a resend of the request whose stream dropped.
+        assert_ne!(bodies[0], bodies[1], "a continuation is never a resend");
+        let continued = bodies[1].to_string();
+        assert!(
+            continued.contains("STREAM_BODY_VERIFIED"),
+            "the continuation carries the partial reply: {continued}"
+        );
+        if !is_tool {
+            assert!(
+                continued.contains("cut off by a connection error"),
+                "the model is told to continue: {continued}"
+            );
+        }
     } else if expected_requests > 1 {
         let first = usize::from(is_tool);
         assert!(
@@ -1909,18 +1979,25 @@ fn check_liveness(
                 .as_array()
                 .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"))));
     }
-    if matches!(
-        kind,
-        ResponseKind::NativePartial | ResponseKind::ChatPartial | ResponseKind::ResponsesPartial
-    ) {
+    if always_drops {
+        assert!(
+            common::screen_contains(&screen, "continuing (3/3)"),
+            "{screen}"
+        );
         assert!(common::screen_contains(
             &screen,
             "automatic replay disabled"
         ));
+    }
+    if kind.drops_once() && interactive {
+        assert!(
+            common::screen_contains(&screen, "continuing (1/3)"),
+            "{screen}"
+        );
         assert_eq!(
             screen.matches("STREAM_BODY_VERIFIED").count(),
             1,
-            "partial output is not repeated"
+            "partial output is not repeated: {screen}"
         );
     }
     if matches!(kind, ResponseKind::HeartbeatAfterOverload) {
@@ -1952,13 +2029,31 @@ fn heartbeat_only_streams_replay_before_the_first_provider_event() {
 }
 
 #[test]
-fn partial_provider_output_is_not_replayed() {
+fn dropped_stream_continues_from_the_partial_reply() {
+    for kind in [
+        ResponseKind::NativeDropThenContinue,
+        ResponseKind::ChatDropThenContinue,
+        ResponseKind::ResponsesDropThenContinue,
+    ] {
+        check_liveness(kind, "2", 2, true);
+    }
+}
+
+#[test]
+fn completed_tool_is_not_rerun_when_the_stream_drops_after_it() {
+    // The stream must drop after the tool finishes; an unfinished tool is
+    // cancelled instead. Leave the tool ample time on a loaded runner.
+    check_liveness(ResponseKind::ToolThenDrop, "8", 2, true);
+}
+
+#[test]
+fn repeated_stream_drops_stop_after_bounded_continuations() {
     for kind in [
         ResponseKind::NativePartial,
         ResponseKind::ChatPartial,
         ResponseKind::ResponsesPartial,
     ] {
-        check_liveness(kind, "2", 1, false);
+        check_liveness(kind, "2", 4, false);
     }
 }
 

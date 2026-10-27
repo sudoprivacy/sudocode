@@ -11,7 +11,7 @@
 //! assert on timing it would otherwise have to guess.
 
 use std::io;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use runtime::fs_backend::{
@@ -80,16 +80,35 @@ pub struct Renewal {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct Release {
+    pub requested: Instant,
+    pub returned: Instant,
+    pub reached_node: bool,
+}
+
+/// Hold completion observation after the real lock has been released.
+/// Dropping the gate also unblocks the releasing thread on assertion failure.
+pub struct ReleaseGate {
+    released: mpsc::Receiver<()>,
+    _finish: mpsc::Sender<()>,
+}
+
+impl ReleaseGate {
+    pub fn wait_until_released(&self, within: Duration) {
+        self.released
+            .recv_timeout(within)
+            .expect("the real seat release to finish before its observation is unblocked");
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub enum LockEvent {
     Acquired(Instant),
-    /// `at` is when the release was requested. The node frees the lock no
+    /// `requested` is when the release was requested. The node frees the lock no
     /// earlier, so any grant it makes afterwards is stamped no earlier than
     /// this: stamping when the release returned could put a competitor's grant
     /// before it.
-    Released {
-        at: Instant,
-        reached_node: bool,
-    },
+    Released(Release),
     Renewed(Renewal),
 }
 
@@ -101,6 +120,7 @@ pub struct Probe {
     /// INJECTED, one shot: hold the next claim of a conversation reader's lock
     /// this long before it reaches the node.
     reader_claim_delay: Mutex<Option<Duration>>,
+    seat_release_gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     /// Locks dropped while partitioned. Held, not released, so the node keeps
     /// them until their TTL runs out.
     leaked: Mutex<Vec<Arc<dyn FsLock>>>,
@@ -119,6 +139,7 @@ impl Probe {
             seat: Mutex::new(Vec::new()),
             reader: Mutex::new(Vec::new()),
             reader_claim_delay: Mutex::new(None),
+            seat_release_gate: Mutex::new(None),
             leaked: Mutex::new(Vec::new()),
             held_since: Mutex::new(None),
             hold_released: (Mutex::new(false), Condvar::new()),
@@ -153,6 +174,19 @@ impl Probe {
     /// Arm a one-shot INJECTED delay on the next reader lock claim.
     pub fn delay_next_reader_claim(&self, delay: Duration) {
         *self.reader_claim_delay.lock().unwrap() = Some(delay);
+    }
+
+    /// Arm a one-shot completion gate without delaying the real node release.
+    pub fn hold_next_seat_release(&self) -> ReleaseGate {
+        let (released_tx, released) = mpsc::channel();
+        let (finish, finish_rx) = mpsc::channel();
+        let mut gate = self.seat_release_gate.lock().unwrap();
+        assert!(gate.is_none(), "a seat release gate is already armed");
+        *gate = Some((released_tx, finish_rx));
+        ReleaseGate {
+            released,
+            _finish: finish,
+        }
     }
 
     /// Consume one armed reader renewal failure, if any.
@@ -246,7 +280,7 @@ impl Probe {
             .count();
         let released = events
             .iter()
-            .filter(|e| matches!(e, LockEvent::Released { .. }))
+            .filter(|e| matches!(e, LockEvent::Released(_)))
             .count();
         acquired > released
     }
@@ -261,11 +295,11 @@ impl Probe {
             .collect()
     }
 
-    pub fn releases(&self) -> Vec<(Instant, bool)> {
+    pub fn releases(&self) -> Vec<Release> {
         self.seat_events()
             .into_iter()
             .filter_map(|e| match e {
-                LockEvent::Released { at, reached_node } => Some((at, reached_node)),
+                LockEvent::Released(release) => Some(release),
                 _ => None,
             })
             .collect()
@@ -281,11 +315,11 @@ impl Probe {
             .collect()
     }
 
-    pub fn reader_releases(&self) -> Vec<(Instant, bool)> {
+    pub fn reader_releases(&self) -> Vec<Release> {
         self.reader_events()
             .into_iter()
             .filter_map(|e| match e {
-                LockEvent::Released { at, reached_node } => Some((at, reached_node)),
+                LockEvent::Released(release) => Some(release),
                 _ => None,
             })
             .collect()
@@ -384,15 +418,25 @@ impl Drop for FaultyLock {
         let reached_node = !self.probe.partitioned();
         if reached_node {
             drop(inner);
+            let gate = if self.seat {
+                self.probe.seat_release_gate.lock().unwrap().take()
+            } else {
+                None
+            };
+            if let Some((released, finish)) = gate {
+                let _ = released.send(());
+                let _ = finish.recv();
+            }
         } else {
             self.probe.leaked.lock().unwrap().push(inner);
         }
         self.probe.record(
             self.seat,
-            LockEvent::Released {
-                at: requested,
+            LockEvent::Released(Release {
+                requested,
+                returned: Instant::now(),
                 reached_node,
-            },
+            }),
         );
     }
 }

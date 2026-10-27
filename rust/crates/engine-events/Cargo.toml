@@ -18,6 +18,7 @@ publish.workspace = true
 # engine-events` edge would form a cycle.
 runtime = { path = "../runtime" }
 serde_json = { workspace = true }
+serde = { version = "1", features = ["derive"] }
 
 [lints]
 workspace = true

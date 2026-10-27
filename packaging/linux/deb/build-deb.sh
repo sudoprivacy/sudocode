@@ -101,6 +101,7 @@ install -m 0755 "$SCRIPT_DIR/postinst" "$pkg/DEBIAN/postinst"
 install -m 0755 "$SCRIPT_DIR/prerm" "$pkg/DEBIAN/prerm"
 install -m 0755 "$BINARY" "$pkg/usr/bin/scode"
 install -m 0755 "$SCRIPT_DIR/scode-setup" "$pkg/usr/lib/scode/scode-setup"
+install -m 0644 "$ROOT/THIRD_PARTY_NOTICES.txt" "$pkg/usr/share/doc/scode/THIRD_PARTY_NOTICES.txt"
 cat > "$pkg/usr/bin/scode-setup" <<'EOF'
 #!/usr/bin/env sh
 exec /usr/lib/scode/scode-setup "$@"

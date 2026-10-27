@@ -41,7 +41,7 @@ pub use prompt_cache::{
 };
 pub use providers::anthropic::{
     is_anthropic_api_key, is_claude_code_oauth_token, is_proxy_auth_token, AnthropicClient,
-    AnthropicClient as ApiClient, AuthSource, DEFAULT_BASE_URL,
+    AnthropicClient as ApiClient, AuthSource, CacheTtl, DEFAULT_BASE_URL,
 };
 pub use providers::codex::{CodexClient, DEFAULT_CODEX_BASE_URL};
 pub use providers::gemini::GeminiClient;

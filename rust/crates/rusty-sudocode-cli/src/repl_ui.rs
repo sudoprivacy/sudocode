@@ -388,7 +388,7 @@ pub enum UiCommand {
     ClearQuestion,
     SetTurnResult(Arc<StyledText>),
     SetTip(engine_core::Tip),
-    SetCacheTip(Option<engine_core::Tip>),
+    SetCacheTip(CacheTip),
     BeginTurn,
     /// Update the `TodoSlot` panel with the current todo list.
     UpdateTodos(Vec<runtime::Todo>),
@@ -469,7 +469,7 @@ impl UiCommandSender {
         let _ = self.tx.send(UiCommand::BeginTurn);
     }
 
-    pub(crate) fn set_cache_tip(&self, tip: Option<engine_core::Tip>) {
+    pub(crate) fn set_cache_tip(&self, tip: CacheTip) {
         let _ = self.tx.send(UiCommand::SetCacheTip(tip));
     }
 
@@ -598,6 +598,43 @@ fn apply_paste_to_buffer(
     }
 }
 
+/// Placeholders a `paste_store` entry can stand behind: a collapsed text paste
+/// (`[Pasted text #N ...]`) and a pasted image (`[Image #N]`, whose entry is the
+/// image's `@` reference).
+const PASTE_PLACEHOLDER_PREFIXES: [&str; 2] = ["[Pasted text #", "[Image #"];
+
+/// The earliest placeholder prefix in `text` and its offset.
+fn next_paste_placeholder(text: &str) -> Option<(usize, &'static str)> {
+    PASTE_PLACEHOLDER_PREFIXES
+        .iter()
+        .filter_map(|prefix| text.find(prefix).map(|at| (at, *prefix)))
+        .min_by_key(|(at, _)| *at)
+}
+
+/// Insert an `[Image #N]` placeholder for the pasted image at `cursor`. It
+/// expands to the image's `@` reference on submit, through the same store and
+/// expansion as a collapsed text paste.
+fn insert_image_placeholder(
+    current: &str,
+    cursor: usize,
+    path: &std::path::Path,
+    next_id: &mut u32,
+    store: &mut std::collections::HashMap<u32, String>,
+) -> TextInputEdit {
+    let id = *next_id;
+    *next_id += 1;
+    store.insert(id, crate::clipboard_image::reference(path));
+    let before = &current[..cursor];
+    let insertion = format!(
+        "{}[Image #{id}] ",
+        crate::clipboard_image::separator_before(before)
+    );
+    TextInputEdit {
+        value: format!("{before}{insertion}{}", &current[cursor..]),
+        cursor_offset: cursor + insertion.len(),
+    }
+}
+
 /// Core expansion engine shared by plain and display variants.
 ///
 /// Scans left to right and copies each placeholder's replacement into a fresh
@@ -613,13 +650,12 @@ fn expand_paste_inner(
     store: &std::collections::HashMap<u32, String>,
     wrap: Option<(&str, &str)>,
 ) -> String {
-    if store.is_empty() || !input.contains("[Pasted text #") {
+    if store.is_empty() || next_paste_placeholder(input).is_none() {
         return input.to_string();
     }
-    let placeholder_prefix = "[Pasted text #";
     let mut result = String::with_capacity(input.len());
     let mut rest = input;
-    while let Some(rel_start) = rest.find(placeholder_prefix) {
+    while let Some((rel_start, placeholder_prefix)) = next_paste_placeholder(rest) {
         result.push_str(&rest[..rel_start]);
         let after_prefix = &rest[rel_start + placeholder_prefix.len()..];
 
@@ -656,7 +692,7 @@ fn expand_paste_inner(
     result
 }
 
-/// Replace all `[Pasted text #N ...]` placeholders with the real text (plain).
+/// Replace all paste placeholders with their real text (plain).
 fn expand_paste_placeholders(
     input: &str,
     store: &std::collections::HashMap<u32, String>,
@@ -943,6 +979,15 @@ impl Write for OutputSender {
     }
 }
 
+/// The cache-TTL footer tip, the advice behind it, and whether the tip offers
+/// a switch (a footer stop that opens the TTL panel).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CacheTip {
+    pub tip: Option<engine_core::Tip>,
+    pub advice: Option<engine_core::cache_advisor::TtlAdvice>,
+    pub actionable: bool,
+}
+
 /// Events from the iocraft UI to the coordinator thread.
 #[derive(Debug, PartialEq, Eq)]
 pub enum InputEvent {
@@ -962,6 +1007,11 @@ pub enum InputEvent {
     /// Inspect the frozen review without answering it.
     InspectDocument(String),
     StopBackgroundTask(String),
+    /// A prompt-cache TTL chosen in the TTL panel.
+    SetCacheTtl {
+        choice: engine_core::cache_ttl::TtlChoice,
+        force_now: bool,
+    },
     /// Esc flushes pending input, or cancels when none is pending.
     Abort,
     /// Ctrl+C always cancels, even with pending input.
@@ -1468,14 +1518,31 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             (TaskFocus::Footer, KeyCode::Char(_)) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
                                 browser.close();
                             }
+                            (TaskFocus::Footer | TaskFocus::Tip, KeyCode::Left | KeyCode::Right) => {
+                                browser.move_footer_stop(code == KeyCode::Right);
+                            }
+                            (TaskFocus::Tip, KeyCode::Enter | KeyCode::Down) => browser.open_ttl(),
+                            (TaskFocus::Tip, KeyCode::Esc | KeyCode::Up) => browser.close(),
+                            (TaskFocus::Tip, KeyCode::Char(_)) if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                                browser.close();
+                            }
+                            (TaskFocus::Ttl, KeyCode::Up | KeyCode::Down) => browser.move_ttl(code == KeyCode::Down),
+                            (TaskFocus::Ttl, KeyCode::Esc) => browser.close_ttl(),
+                            (TaskFocus::Ttl, KeyCode::Enter | KeyCode::Char('n')) => {
+                                let _ = input_tx_for_events.send(InputEvent::SetCacheTtl {
+                                    choice: browser.ttl_choice(),
+                                    force_now: code == KeyCode::Char('n'),
+                                });
+                                browser.close();
+                            }
                             _ => {}
                         }
                         frame.set(frame.get().wrapping_add(1));
                         return;
                     }
-                    if code == KeyCode::Down && browser.has_tasks() && history_cursor.get().is_none()
+                    if code == KeyCode::Down && browser.has_footer_stop() && history_cursor.get().is_none()
                         && input_value.read().is_empty() {
-                        browser.focus = TaskFocus::Footer;
+                        browser.focus_footer();
                         frame.set(frame.get().wrapping_add(1));
                         return;
                     }
@@ -1936,7 +2003,14 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                         }
                         Ok(UiCommand::SetTip(tip)) => footer_tips.write().set(tip),
-                        Ok(UiCommand::SetCacheTip(tip)) => footer_tips.write().cache(tip),
+                        Ok(UiCommand::SetCacheTip(view)) => {
+                            footer_tips.write().cache(view.tip);
+                            tasks_for_future
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .set_cache_advice(view.advice, view.actionable);
+                            frame.set(frame.get().wrapping_add(1));
+                        }
                         Ok(UiCommand::BeginTurn) => footer_tips.write().begin_turn(),
                         Ok(UiCommand::SetTurnResult(text)) => {
                             turn_result.set(Some(text));
@@ -2486,7 +2560,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
                         _ => false,
                     };
-                    if browser.focus == TaskFocus::Footer && edits_draft {
+                    if matches!(browser.focus, TaskFocus::Footer | TaskFocus::Tip) && edits_draft {
                         browser.close();
                     }
                     if !reviewable || browser.focus != TaskFocus::Input
@@ -2531,6 +2605,52 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         TerminalEvent::Key(KeyEvent { code, modifiers, .. })
                             if *code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) =>
                             Some(TextInputEdit { value: String::new(), cursor_offset: 0 }),
+                        // Image paste: an empty bracketed paste (Cmd+V on macOS
+                        // with only an image on the clipboard), or Ctrl+V/Alt+V.
+                        TerminalEvent::Paste(pasted) if pasted.is_empty() => {
+                            match crate::clipboard_image::read_image_for_paste() {
+                                Ok(Some(path)) => {
+                                    let mut id = next_paste_id.get();
+                                    let edit = insert_image_placeholder(current, cursor, &path, &mut id, &mut paste_store.write());
+                                    next_paste_id.set(id);
+                                    Some(edit)
+                                }
+                                Ok(None) => None,
+                                Err(error) => {
+                                    footer_tips.write().set(engine_core::Tip {
+                                        priority: engine_core::TipPriority::Normal,
+                                        message: format!("Could not read the clipboard: {error}"),
+                                    });
+                                    None
+                                }
+                            }
+                        }
+                        TerminalEvent::Key(KeyEvent { code: KeyCode::Char(key), modifiers, kind, .. })
+                            if key.eq_ignore_ascii_case(&'v')
+                                && modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                                && *kind != KeyEventKind::Release => {
+                            let unchanged = TextInputEdit { value: current.to_string(), cursor_offset: cursor };
+                            if crate::clipboard_image::is_held_repeat(current) {
+                                return Some(unchanged);
+                            }
+                            let message = match crate::clipboard_image::read_image() {
+                                Ok(Some(path)) => {
+                                    let mut id = next_paste_id.get();
+                                    let edit = insert_image_placeholder(current, cursor, &path, &mut id, &mut paste_store.write());
+                                    next_paste_id.set(id);
+                                    crate::clipboard_image::note_paste_key(&edit.value);
+                                    return Some(edit);
+                                }
+                                Ok(None) => crate::clipboard_image::NO_IMAGE_NOTICE.to_string(),
+                                Err(error) => format!("Could not read the clipboard: {error}"),
+                            };
+                            crate::clipboard_image::note_paste_key(current);
+                            footer_tips.write().set(engine_core::Tip {
+                                priority: engine_core::TipPriority::Normal,
+                                message,
+                            });
+                            Some(unchanged)
+                        }
                         TerminalEvent::Paste(pasted) => {
                             let mut id = next_paste_id.get();
                             let mut store = paste_store.write();
@@ -2549,7 +2669,7 @@ fn ReplApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         View(width: 2, flex_shrink: 0.0) { Text(content: prompt_label) }
                         TextInput(
                             value: val,
-                            has_focus: reviewable && matches!(task_focus, TaskFocus::Input | TaskFocus::Footer),
+                            has_focus: reviewable && matches!(task_focus, TaskFocus::Input | TaskFocus::Footer | TaskFocus::Tip),
                             multiline: true,
                             auto_grow: false,
                             on_edit: Some(on_edit),

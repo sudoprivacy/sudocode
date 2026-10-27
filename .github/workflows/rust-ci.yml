@@ -243,6 +243,11 @@ jobs:
         run: |
           netsh int ipv4 set dynamicport tcp start=10000 num=55535
           netsh int ipv4 show dynamicport tcp
+      - name: Pinned Codex Mermaid upstream tests
+        # The pinned upstream crate has a standalone lockfile and is excluded
+        # from workspace membership. Keep its original suite in every OS gate.
+        # This step shares the existing cache and adds no separate CI job.
+        run: cargo test --locked --manifest-path vendor/codex-mermaid/Cargo.toml --target-dir target
       - name: PTY native bracketed paste
         # Run the complete input journey on the actual OS PTY, including
         # ConPTY. A platform exclusion cannot count as Windows acceptance.

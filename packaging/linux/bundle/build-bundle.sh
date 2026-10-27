@@ -93,6 +93,7 @@ mkdir -p "$bundle_dir" "$OUTPUT"
 
 install -m 0755 "$BINARY" "$bundle_dir/scode"
 install -m 0755 "$ROOT/packaging/linux/deb/scode-setup" "$bundle_dir/scode-setup"
+install -m 0644 "$ROOT/THIRD_PARTY_NOTICES.txt" "$bundle_dir/THIRD_PARTY_NOTICES.txt"
 
 if [ -f "$ROOT/docs/linux-bundle-install.zh-CN.md" ]; then
   install -m 0644 "$ROOT/docs/linux-bundle-install.zh-CN.md" "$bundle_dir/README-install.zh-CN.md"
@@ -115,9 +116,9 @@ EOF
 (
   cd "$bundle_dir"
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum scode scode-setup README-install.zh-CN.md VERSION > SHA256SUMS.txt
+    sha256sum scode scode-setup README-install.zh-CN.md VERSION THIRD_PARTY_NOTICES.txt > SHA256SUMS.txt
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 scode scode-setup README-install.zh-CN.md VERSION > SHA256SUMS.txt
+    shasum -a 256 scode scode-setup README-install.zh-CN.md VERSION THIRD_PARTY_NOTICES.txt > SHA256SUMS.txt
   else
     printf 'sha256sum or shasum is required\n' >&2
     exit 2

@@ -472,10 +472,19 @@ fn task_updates_do_not_take_keyboard_ownership_from_questions() {
     );
     common::expect_screen_rows_settled(
         &session,
-        |view| {
-            view.lines()
-                .any(|line| line.starts_with("1/1") && line.contains("Select the second answer"))
-                && view.contains("[2] Second")
+        |_view| {
+            session.render(|screen| {
+                // ConPTY can mark the full-width rule above the question as
+                // wrapped. Inspect physical rows so contents() cannot join it
+                // to the header and hide the visible line boundary.
+                let rows = screen
+                    .raw()
+                    .rows(0, screen.raw().size().1)
+                    .collect::<Vec<_>>();
+                rows.iter().any(|line| {
+                    line.starts_with("1/1") && line.contains("Select the second answer")
+                }) && rows.iter().any(|line| line.contains("[2] Second"))
+            })
         },
         Duration::from_secs(90),
         "actual question options, rather than the echoed prompt",

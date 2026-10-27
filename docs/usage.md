@@ -317,6 +317,23 @@ combining sequences whose widths legacy console hosts cannot reliably preserve;
 the original Unicode text is retained without normalization. A clipped paragraph or an
 unusually long result summary can still change its visible position.
 
+Completed `mermaid` fences render as terminal diagrams through the same Markdown
+path for streamed answers, replay and Markdown prompts. The renderer reuses
+Codex's pinned native engine; no browser, JavaScript runtime or external process
+is needed. Diagram borders use the existing theme and `NO_COLOR` remains supported.
+
+Use compact flowcharts, sequence diagrams, flat state diagrams, class diagrams
+or ER diagrams. Prefer `flowchart TD` on narrow terminals. See the upstream
+[supported syntax and limits](../rust/vendor/codex-mermaid/README.md): this is a
+bounded subset rather than full Mermaid support. Unfinished fences stay source;
+unsupported syntax or diagrams that cannot fit show a reason and the original
+source. Control characters in source fallback display as escapes. The persisted
+Markdown stays unchanged, and replay renders against its current terminal width;
+diagrams already committed to native scrollback do not reflow on resize.
+
+The default system prompt advertises when a diagram helps and how to stay within
+this subset. Explicit system-prompt replacement still replaces those defaults.
+
 The live UI retains the existing formatter colors and supported text styles:
 tool-card borders show status without extra icons: muted while waiting for
 hooks, approval, or an execution slot; amber while running; the code theme's
@@ -891,9 +908,19 @@ scode --model <vision-model> 'Describe @/absolute/path/screenshot.png'
 scode --model <vision-model> 'Describe @"screenshots/home page.png"'
 ```
 
-The synchronous REPL also submits clipboard images pasted alongside a text
-prompt. Image bytes are validated and preflighted before being sent; a missing
-or invalid referenced image produces an error rather than a text-only request.
+In the REPL, paste a clipboard image with **Alt+V**, with **Ctrl+V** where the
+terminal passes it through, or with the terminal's own paste (Cmd+V on macOS)
+when the clipboard holds only an image. On Windows Terminal, Ctrl+V is the
+terminal's text paste, so use Alt+V there. The image shows as `[Image #N]` in
+the default REPL and as its `@"path"` reference in the classic synchronous REPL,
+and it is attached on submit exactly like a typed reference: a copied image file
+is referenced where it is, and pasted image data is stored in the image cache
+first. For scripts and tests, `SUDOCODE_CLIPBOARD_IMAGE=<file>` stands in for
+the system clipboard, which is then never read: the clipboard holds only the
+image in that file, or no image when the file is not one.
+
+Image bytes are validated and preflighted before being sent; a missing or
+invalid referenced image produces an error rather than a text-only request.
 Repeated references to the same spelling of a path attach it once per prompt.
 
 Agents can inspect images using `Read` (`read_file`). For example, after the

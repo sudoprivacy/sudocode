@@ -213,6 +213,10 @@ impl EngineDelegate for DeferredDelegate {
     fn background_tasks(&self) -> Option<runtime::background_tasks::BackgroundTasks> {
         self.get().ok()?.background_tasks()
     }
+
+    fn turn_input_inbox(&self) -> Option<runtime::turn_input::TurnInputInbox> {
+        self.get().ok()?.turn_input_inbox()
+    }
     fn set_model(&self, model: &str) -> Result<(String, Vec<String>), String> {
         self.get()?.set_model(model)
     }

@@ -89,6 +89,7 @@ jobs:
           mkdir -p "dist/scode-linux-x64"
           cp "target/x86_64-unknown-linux-musl/release/scode" "dist/scode-linux-x64/scode"
           cp "../README.md" "dist/scode-linux-x64/README.md"
+          cp "../THIRD_PARTY_NOTICES.txt" "dist/scode-linux-x64/THIRD_PARTY_NOTICES.txt"
           chmod +x "dist/scode-linux-x64/scode"
 
       - name: Archive release payload (tar.gz)
@@ -174,6 +175,7 @@ jobs:
           mkdir -p "dist/${{ matrix.package_dir }}"
           cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
           cp "../README.md" "dist/${{ matrix.package_dir }}/README.md"
+          cp "../THIRD_PARTY_NOTICES.txt" "dist/${{ matrix.package_dir }}/THIRD_PARTY_NOTICES.txt"
           if [[ "${{ runner.os }}" != "Windows" ]]; then
             chmod +x "dist/${{ matrix.package_dir }}/${{ matrix.bin }}"
           fi

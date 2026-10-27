@@ -16,6 +16,7 @@ mod background_completion;
 mod bash_mode;
 mod cancel;
 mod cli;
+mod clipboard_image;
 mod init;
 mod input;
 mod input_chrome;
@@ -2168,6 +2169,27 @@ fn run_resume_command(
                 })),
             })
         }
+        SlashCommand::CacheTtl { value, .. } => {
+            // No live client here: a value can only become the saved default.
+            let message = match value.as_deref() {
+                Some(value) => {
+                    let pinned = match value {
+                        "1h" => Some(true),
+                        "5m" => Some(false),
+                        _ => None,
+                    };
+                    runtime::ConfigLoader::default_for(env::current_dir().unwrap_or_default())
+                        .save_cache_ttl_1h(pinned)?;
+                    format!("Saved · {value} as the prompt cache TTL for new sessions")
+                }
+                None => "The prompt cache TTL is shown in a running session: /cache ttl".to_owned(),
+            };
+            Ok(ResumeCommandOutcome {
+                session: session.clone(),
+                message: Some(message),
+                json: None,
+            })
+        }
         SlashCommand::History { count } => {
             let limit = parse_history_count(count.as_deref())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
@@ -2430,15 +2452,9 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                 print!("\x1b[J");
                 let _ = io::stdout().flush();
                 let trimmed = input.trim().to_string();
-                *cli.pending_images.borrow_mut() = editor
-                    .borrow_mut()
-                    .take_images()
-                    .into_values()
-                    .map(|(data, mime_type)| runtime::ContentBlock::Image { data, mime_type })
-                    .collect();
                 // An empty line only comes back while peer messages wait: the
                 // user handing the prompt back so they run, at the loop's top.
-                if trimmed.is_empty() && cli.pending_images.borrow().is_empty() {
+                if trimmed.is_empty() {
                     continue;
                 }
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {
@@ -3418,6 +3434,71 @@ fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
     output.print_block(rendered);
 }
 
+/// The footer's cache-TTL tip and whether it offers a switch.
+fn cache_tip(session_id: &str, model: &str) -> repl_ui::CacheTip {
+    let advice = engine_core::cache_advisor::ttl_advice(session_id, model);
+    let actionable = advice.as_ref().is_some_and(|advice| {
+        advice.pending.is_none()
+            && advice.has_saving
+            && advice.suggested_seconds != advice.effective_seconds
+    });
+    repl_ui::CacheTip {
+        tip: engine_core::cache_advisor::session_tip(session_id, model),
+        advice,
+        actionable,
+    }
+}
+
+/// Choose this session's prompt-cache TTL and save it as the default. Returns
+/// the one-line notice saying when it takes effect.
+fn apply_cache_ttl(
+    session_id: &str,
+    choice: engine_core::cache_ttl::TtlChoice,
+    force_now: bool,
+) -> String {
+    use engine_core::cache_ttl::TtlChoice;
+    engine_core::cache_ttl::choose(session_id, choice, force_now);
+    let saved = runtime::ConfigLoader::default_for(env::current_dir().unwrap_or_default())
+        .save_cache_ttl_1h(match choice {
+            TtlChoice::OneHour => Some(true),
+            TtlChoice::FiveMinutes => Some(false),
+            TtlChoice::Auto => None,
+        });
+    let when = match (choice, force_now) {
+        (TtlChoice::OneHour, false) => {
+            "1h from the next cold start (idle past the TTL, compact, resume)"
+        }
+        (TtlChoice::OneHour, true) => "1h from the next request (rewrites the cached prefix once)",
+        (TtlChoice::FiveMinutes, _) => "5m from the next request",
+        (TtlChoice::Auto, _) => {
+            "auto: the auth mode decides (1h on a subscription, 5m on an API key)"
+        }
+    };
+    match saved {
+        Ok(_) => format!("Saved · {when}"),
+        Err(error) => format!("Applied to this session · could not save: {error}"),
+    }
+}
+
+/// `Prompt cache TTL: …` for `/cache` and `/cache ttl`.
+fn cache_ttl_status(session_id: &str) -> String {
+    use engine_core::cache_ttl::TtlChoice;
+    let status = engine_core::cache_ttl::status(session_id);
+    let now = status
+        .effective_seconds
+        .map_or("not sent yet", engine_core::cache_advisor::ttl_label);
+    let pending = status.pending.map_or(String::new(), |pending| {
+        let (label, when) = match (pending.choice, pending.force_now) {
+            (TtlChoice::OneHour, false) => ("1h", "at the next cold start"),
+            (TtlChoice::OneHour, true) => ("1h", "from the next request"),
+            (TtlChoice::FiveMinutes, _) => ("5m", "from the next request"),
+            (TtlChoice::Auto, _) => ("auto", "from the next suitable request"),
+        };
+        format!(" · pending {label} {when}")
+    });
+    format!("Prompt cache TTL: {now}{pending}")
+}
+
 fn run_repl_iocraft_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
@@ -3438,6 +3519,8 @@ fn run_repl_iocraft_dispatch(
         }
     };
     let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
+    // The TTL panel applies a choice without the LiveCli lock a turn holds.
+    let ttl_lifecycle = Arc::clone(&cli.lifecycle);
     // On resume, seed the status line with the session's running totals so the
     // ChromeSlot shows the previous result. Fresh-session guidance belongs
     // to the shared footer, leaving the upper status area empty until needed.
@@ -3849,6 +3932,12 @@ fn run_repl_iocraft_dispatch(
                     let _ = commands.send(EngineCommand::BackgroundTask {
                         action: engine_events::BackgroundTaskAction::Stop { id },
                     });
+                }
+                repl_ui::InputEvent::SetCacheTtl { choice, force_now } => {
+                    let session_id = ttl_lifecycle.session_handle().id;
+                    repl_output.println(&apply_cache_ttl(&session_id, choice, force_now));
+                    repl_ui_cmd
+                        .set_cache_tip(cache_tip(&session_id, &ttl_lifecycle.current_model()));
                 }
                 repl_ui::InputEvent::InspectDocument(document) => {
                     // The turn owns LiveCli while awaiting its answer. Pager
@@ -4348,7 +4437,6 @@ fn spawn_iocraft_turn(
 /// (audit finding B). It physically cannot drive a turn except through
 /// `engine_handle` (no `EngineDelegate`), and cannot reach into the runtime.
 struct LiveCli {
-    pending_images: RefCell<Vec<runtime::ContentBlock>>,
     /// The turn seam: `commands.send(Prompt/Cancel/PermissionAnswer/…)`,
     /// `events.recv()`. The ONLY way turns cross.
     engine_handle: EngineHandle,
@@ -4712,7 +4800,6 @@ impl LiveCli {
         }
 
         Ok(Self {
-            pending_images: RefCell::new(Vec::new()),
             engine_handle,
             lifecycle,
             prompt_history: Vec::new(),
@@ -4929,8 +5016,7 @@ impl LiveCli {
         // the call regardless of whether a `ui` overlay is present.
         let mut renderer =
             render.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
-        let mut blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
-        blocks.append(&mut self.pending_images.borrow_mut());
+        let blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
         self.engine_handle.commands.send(EngineCommand::Prompt {
             blocks,
             context: None,
@@ -5223,8 +5309,8 @@ impl LiveCli {
     }
 
     /// Read the engine's frozen recommendation without copying pricing logic.
-    fn cache_ttl_tip(&self) -> Option<engine_core::Tip> {
-        engine_core::cache_advisor::session_tip(
+    fn cache_ttl_tip(&self) -> repl_ui::CacheTip {
+        cache_tip(
             &self.lifecycle.session_handle().id,
             &self.lifecycle.current_model(),
         )
@@ -5691,6 +5777,22 @@ impl LiveCli {
                 let session = self.lifecycle.session_snapshot();
                 let usage = UsageTracker::from_session(&session).cumulative_usage();
                 self.out_println(format_cost_report(usage));
+                self.out_println(cache_ttl_status(&self.lifecycle.session_handle().id));
+                false
+            }
+            SlashCommand::CacheTtl { value, now } => {
+                use engine_core::cache_ttl::TtlChoice;
+                let session_id = self.lifecycle.session_handle().id;
+                let choice = match value.as_deref() {
+                    Some("1h") => Some(TtlChoice::OneHour),
+                    Some("5m") => Some(TtlChoice::FiveMinutes),
+                    Some("auto") => Some(TtlChoice::Auto),
+                    _ => None,
+                };
+                match choice {
+                    Some(choice) => self.out_println(apply_cache_ttl(&session_id, choice, now)),
+                    None => self.out_println(cache_ttl_status(&session_id)),
+                }
                 false
             }
             SlashCommand::Context { action } => {

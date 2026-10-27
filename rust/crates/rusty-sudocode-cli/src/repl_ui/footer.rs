@@ -66,6 +66,12 @@ impl FooterTips {
                 "Type /help for commands · Tab completes /commands".into()
             },
         };
+        // A focused cache tip is the footer's selection and says how to act on it.
+        let tip_focused = tasks.focus == TaskFocus::Tip;
+        let focused = self.cache.as_ref().filter(|_| tip_focused).map(|tip| Tip {
+            priority: TipPriority::Important,
+            message: format!("{} · Enter to review", tip.message),
+        });
         let selected = native
             .as_ref()
             .or_else(|| {
@@ -80,6 +86,7 @@ impl FooterTips {
             .or(control.as_ref())
             .or((!active).then_some(&ordinary))
             .filter(|tip| tasks.focus == TaskFocus::Input || tip.priority == TipPriority::Urgent);
+        let selected = focused.as_ref().or(selected);
 
         let mut base = truncate_to_width(&format!("  ⏵⏵ {permission}"), width);
         let mut task = tasks.footer_label(false);
@@ -145,7 +152,11 @@ impl FooterTips {
                 TipPriority::Important => palette.primary,
                 TipPriority::Normal => palette.muted,
             };
-            result.push(style(color), &text);
+            if tip_focused {
+                result.push(palette.selection_style(support), &text);
+            } else {
+                result.push(style(color), &text);
+            }
         }
         result
     }

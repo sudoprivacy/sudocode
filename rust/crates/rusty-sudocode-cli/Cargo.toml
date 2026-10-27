@@ -10,6 +10,7 @@ name = "scode"
 path = "src/main.rs"
 
 [dependencies]
+codex-mermaid.workspace = true
 process-text = { path = "../process-text" }
 arboard = { version = "3", features = ["image-data"] }
 async-trait = "0.1"

@@ -2,14 +2,11 @@
 mod common;
 
 use common::TestEnv;
+use pty_expect::PtySession;
 use serde_json::json;
 use unicode_width::UnicodeWidthStr;
 
-fn write_preview(light: bool, no_color: bool) {
-    let env = TestEnv::new("file-previews");
-    let content =
-        "fn main() {\n    let message = \"PreviewWrite中文\";\n    println!(\"{message}\");\n}\n";
-    let root = env.workspace_root();
+fn install_write_gate(root: &std::path::Path) {
     let config = root.join(".nexus/sudocode");
     std::fs::create_dir_all(&config).unwrap();
     let hook = if cfg!(windows) {
@@ -22,6 +19,14 @@ fn write_preview(light: bool, no_color: bool) {
         json!({"hooks":{"PreToolUse":[hook]}}).to_string(),
     )
     .unwrap();
+}
+
+fn write_preview(light: bool, no_color: bool) {
+    let env = TestEnv::new("file-previews");
+    let content =
+        "fn main() {\n    let message = \"PreviewWrite中文\";\n    println!(\"{message}\");\n}\n";
+    let root = env.workspace_root();
+    install_write_gate(root);
     let mut session = env.spawn_with_env(
         &[
             "--permission-mode",
@@ -108,6 +113,14 @@ fn write_preview(light: bool, no_color: bool) {
         common::DEFAULT_TIMEOUT,
         "completed preview preserves draft",
     );
+    assert_added_source_colors(&session, light, no_color);
+    session.send("\x15/exit").unwrap();
+    common::expect_input_line(&session, "/exit", common::DEFAULT_TIMEOUT, "exit preview");
+    session.send("\r").unwrap();
+    assert_eq!(session.expect_eof().unwrap(), 0);
+}
+
+fn assert_added_source_colors(session: &PtySession, light: bool, no_color: bool) {
     let reference: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/codex_default_colors.json")).unwrap();
     session.render(|screen| {
@@ -149,10 +162,6 @@ fn write_preview(light: bool, no_color: bool) {
             }
         );
     });
-    session.send("\x15/exit").unwrap();
-    common::expect_input_line(&session, "/exit", common::DEFAULT_TIMEOUT, "exit preview");
-    session.send("\r").unwrap();
-    assert_eq!(session.expect_eof().unwrap(), 0);
 }
 
 #[test]
@@ -166,6 +175,21 @@ fn light_write_preview_matches_edit_colors_and_preserves_draft() {
 #[test]
 fn colorless_write_keeps_numbered_source() {
     write_preview(false, true);
+}
+
+fn send_tool_batch(session: &mut PtySession, prompt: &str, context: &str) {
+    let marker = common::turn_status_marker(session);
+    session
+        .send(&format!("\x1b[200~{prompt}\x1b[201~"))
+        .unwrap();
+    common::expect_input_line(
+        session,
+        "TOOL_BATCH:",
+        common::DEFAULT_TIMEOUT,
+        "tool fixture prompt consumed",
+    );
+    session.send("\r").unwrap();
+    common::expect_turn_complete_after(session, &marker, common::DEFAULT_TIMEOUT, context);
 }
 
 #[test]
@@ -187,24 +211,14 @@ fn markdown_source_and_long_file_preview_are_bounded() {
     let mut session = env.spawn(&["--permission-mode", "danger-full-access"]);
     session.resize(100, 90).unwrap();
     common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "bounded write prompt");
-    let marker = common::turn_status_marker(&session);
     let prompt = env.tool_batch_prompt(&calls);
-    session
-        .send(&format!("\x1b[200~{prompt}\x1b[201~"))
-        .unwrap();
-    common::expect_screen(
-        &session,
-        |screen| screen.contains("TOOL_BATCH:"),
-        common::DEFAULT_TIMEOUT,
-        "tool fixture prompt consumed",
-    );
-    session.send("\r").unwrap();
-    common::expect_turn_complete_after(
-        &session,
-        &marker,
-        common::DEFAULT_TIMEOUT,
-        "bounded file writes",
-    );
+    // Preparing another turn must not rewrite the earlier prompt's tool input.
+    let followup_source = "fn next_preview() {}\n";
+    let followup = env.tool_batch_prompt(&json!([{
+        "id":"followup-write", "name":"write_file",
+        "input":{"path":"followup.rs", "content":followup_source}
+    }]));
+    send_tool_batch(&mut session, &prompt, "bounded file writes");
     session.render(|screen| {
         let text = screen.contents();
         assert!(
@@ -245,6 +259,12 @@ fn markdown_source_and_long_file_preview_are_bounded() {
         b""
     );
     assert!(env.workspace_root().join("not-a-file").is_dir());
+    send_tool_batch(&mut session, &followup, "followup file write");
+    assert_eq!(
+        std::fs::read_to_string(env.workspace_root().join("followup.rs")).unwrap(),
+        followup_source
+    );
+    session.render(|screen| assert!(screen.contents().contains("next_preview")));
     session.send("/exit").unwrap();
     common::expect_input_line(
         &session,

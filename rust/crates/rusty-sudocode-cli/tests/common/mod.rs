@@ -734,12 +734,16 @@ impl TestEnv {
 
     /// Keep a provider's large tool arguments out of the human input editor.
     /// The mock still sends the complete arguments over the actual SSE transport.
+    /// Each prompt owns an immutable snapshot, including queued or replayed turns.
     pub fn tool_batch_prompt(&self, calls: &serde_json::Value) -> String {
         assert!(
             self.is_mock(),
             "tool batch fixture requires the protocol provider"
         );
-        let path = self.workspace_root().join("tool-batch.json");
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = self
+            .workspace_root()
+            .join(format!("tool-batch-{counter}.json"));
         std::fs::write(&path, serde_json::to_vec(calls).unwrap()).unwrap();
         self.prompt(
             &format!("TOOL_BATCH:{}", serde_json::json!({"calls_path":path})),

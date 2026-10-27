@@ -897,7 +897,7 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
                 assert!(update["content"]["text"]
                     .as_str()
                     .unwrap()
-                    .contains(&format!("Summary: {SUMMARY}")));
+                    .contains(&format!("summary=\"{SUMMARY}\"")));
                 saw_summary = true;
             }
             if update["sessionUpdate"] == "agent_message_chunk" {
@@ -929,7 +929,7 @@ async fn live_peer_summary_reaches_model_client_and_saved_session() {
         .iter()
         .flat_map(|message| &message.blocks)
         .any(|block| matches!(block, runtime::ContentBlock::Text { text }
-            if text.contains(&format!("Summary: {SUMMARY}")))));
+            if text.contains(&format!("summary=\"{SUMMARY}\"")))));
     client.shutdown().await;
     workspace.cleanup();
 }

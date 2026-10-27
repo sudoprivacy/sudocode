@@ -2820,7 +2820,7 @@ fn run_pending_peer_turns(
 ) {
     while let Ok((message, receipt)) = pending.try_recv() {
         waiting.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-        let prompt = tools::compose_next_turn_from_envelopes(&[message]);
+        let prompt = runtime::agent_mailbox::compose_next_turn_from_envelopes(&[message]);
         println!(
             "{}",
             cli::received::render_prompt(
@@ -3863,7 +3863,8 @@ fn run_repl_iocraft_dispatch(
                 let (prompt, display, kind, ack) = match event {
                     CoordinatorEvent::PeerMessage(msg, ack) => {
                         delivery = msg.delivery;
-                        let prompt = tools::compose_next_turn_from_envelopes(&[msg]);
+                        let prompt =
+                            runtime::agent_mailbox::compose_next_turn_from_envelopes(&[msg]);
                         (
                             prompt.clone(),
                             prompt,

@@ -60,7 +60,6 @@ pub(crate) struct SessionDriver {
     input_turn: AtomicU64,
     native_input: AtomicBool,
     input_state: tokio::sync::watch::Sender<Option<engine_core::engine_events::InputState>>,
-    peer_events: tokio::sync::broadcast::Sender<EngineEvent>,
     hosted_factory: Mutex<Option<Weak<dyn crate::acp_sdk_server::HostedSessionFactory>>>,
 }
 
@@ -91,7 +90,6 @@ impl SessionDriver {
             input_turn: AtomicU64::new(0),
             native_input: AtomicBool::new(false),
             input_state: tokio::sync::watch::channel(None).0,
-            peer_events: tokio::sync::broadcast::channel(256).0,
             hosted_factory: Mutex::new(None),
         });
         let (tx, mut rx) = unbounded_channel();
@@ -137,9 +135,6 @@ impl SessionDriver {
             {
                 factory.state_changed(*state, None);
             }
-        }
-        if self.peer_events.receiver_count() > 0 {
-            let _ = self.peer_events.send(event.clone());
         }
         if self.answer_interaction(session_id, &event) {
             return;
@@ -462,10 +457,6 @@ impl SessionDriver {
         &self,
     ) -> tokio::sync::watch::Receiver<Option<engine_core::engine_events::InputState>> {
         self.input_state.subscribe()
-    }
-
-    pub(crate) fn peer_events(&self) -> tokio::sync::broadcast::Receiver<EngineEvent> {
-        self.peer_events.subscribe()
     }
 
     /// Atomically fence automatic input before host lifecycle operations.

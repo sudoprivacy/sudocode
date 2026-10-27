@@ -123,6 +123,82 @@ fn multiline_code_stream_matches_final_colors_and_keeps_draft() {
 }
 
 #[test]
+fn specialized_fences_wait_for_the_canonical_renderer() {
+    let document = "SpecialFenceBefore.\n\n```mermaid title=preview\nflowchart TD\nA[PartialDiagramNode] --> B[回复]\n";
+    for no_color in [false, true] {
+        let env = TestEnv::new_mock("specialized-fence-preview");
+        let mut session = env.spawn_with_env(
+            &[],
+            &[
+                ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+                ("TERM", "xterm-256color"),
+                ("COLORTERM", "truecolor"),
+                ("NO_COLOR", if no_color { "1" } else { "" }),
+            ],
+        );
+        session.resize(70, 100).unwrap();
+        common::expect_input_line_cleared(&session, common::DEFAULT_TIMEOUT, "diagram prompt");
+        let marker = common::turn_status_marker(&session);
+        let prompt = common::terminal_host::prose_prompt(
+            &env,
+            document,
+            json!({"chunk_chars":1,"delay_ms":2}),
+        );
+        session.send(&prompt).unwrap();
+        let complete_prompt = prompt.split_whitespace().collect::<String>();
+        common::expect_screen(
+            &session,
+            |screen| {
+                screen
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains(&complete_prompt)
+            },
+            common::DEFAULT_TIMEOUT,
+            "complete diagram prompt",
+        );
+        session.send("\r").unwrap();
+        // The footer acknowledges consumption in the real UI; the provider's
+        // ready file alone would race the pending deltas and painting thread.
+        let counter = format!("↓ {} tokens", document.len() / 4);
+        let screen = common::expect_screen(
+            &session,
+            |screen| screen.contains(&counter) && screen.contains("SpecialFenceBefore."),
+            common::DEFAULT_TIMEOUT,
+            "open specialized fence consumed",
+        );
+        assert!(
+            !screen.contains("flowchart TD") && !screen.contains("PartialDiagramNode"),
+            "specialized fences must retain canonical presentation while open: {screen}"
+        );
+        session.send("diagram-draft").unwrap();
+        common::expect_input_line(
+            &session,
+            "diagram-draft",
+            common::DEFAULT_TIMEOUT,
+            "draft while diagram waits",
+        );
+        std::fs::write(env.workspace_root().join("prose-release"), "release").unwrap();
+        common::expect_turn_complete_with_input(
+            &session,
+            &marker,
+            "diagram-draft",
+            common::DEFAULT_TIMEOUT,
+            "unfinished diagram canonical fallback",
+        );
+        session.render(|screen| {
+            let text = screen.contents();
+            assert_eq!(text.matches("flowchart TD").count(), 1, "{text}");
+            assert_eq!(text.matches("PartialDiagramNode").count(), 1, "{text}");
+        });
+        session.send("\x15/exit").unwrap();
+        common::expect_input_line(&session, "/exit", common::DEFAULT_TIMEOUT, "diagram exit");
+        session.send("\r").unwrap();
+        assert_eq!(session.expect_eof().unwrap(), 0);
+    }
+}
+
+#[test]
 #[ignore = "requires the pinned real terminal host; run explicitly for rendering acceptance"]
 fn real_terminal_open_code_resize_and_handoff_do_not_duplicate_history() {
     for scenario in ["code_resize", "code_queued_resize"] {

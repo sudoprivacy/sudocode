@@ -311,7 +311,7 @@ at most 8 KiB of source and fits around the input; longer paragraphs freeze
 their preview until finalization, which still retains the entire response.
 Complete code lines retain syntax parser state across deltas; the unfinished
 last line stays literal until its newline arrives. Finalization uses the same
-highlighter as replay. Nested/indented fences, tables, lists, headings and emoji with ambiguous terminal widths use
+highlighter as replay. Nested/indented fences, Mermaid diagrams, tables, lists, headings and emoji with ambiguous terminal widths use
 the existing complete-block rendering path. On Windows, this also applies to
 combining sequences whose widths legacy console hosts cannot reliably preserve;
 the original Unicode text is retained without normalization. A clipped paragraph or an

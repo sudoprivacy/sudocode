@@ -1068,48 +1068,53 @@ impl TerminalRenderer {
         state: &RenderState,
         output: &mut String,
     ) {
-        if mermaid::is_mermaid(code_language) {
-            let prefix = format!(
-                "{}{}",
-                "> ".repeat(state.quote),
-                " ".repeat(state.item_content_col)
-            );
-            let width = state.max_width.saturating_sub(visible_width(&prefix));
-            let rendered = state
-                .code_block_complete
-                .then(|| mermaid::render(code_buffer, width, &self.color_theme));
-            let block = match rendered {
-                Some(Ok(diagram)) => diagram,
-                result => {
-                    let mut fallback = String::new();
-                    if let Some(Err(error)) = result {
-                        let notice = format!("Mermaid source shown: {error}.");
-                        for line in text_layout::wrap_ansi_with_indent(&notice, width.max(1), 0) {
-                            let _ = writeln!(fallback, "{}", line.with(self.color_theme.border));
+        match fence_presentation(code_language) {
+            FencePresentation::Mermaid => {
+                let prefix = format!(
+                    "{}{}",
+                    "> ".repeat(state.quote),
+                    " ".repeat(state.item_content_col)
+                );
+                let width = state.max_width.saturating_sub(visible_width(&prefix));
+                let rendered = state
+                    .code_block_complete
+                    .then(|| mermaid::render(code_buffer, width, &self.color_theme));
+                let block = match rendered {
+                    Some(Ok(diagram)) => diagram,
+                    result => {
+                        let mut fallback = String::new();
+                        if let Some(Err(error)) = result {
+                            let notice = format!("Mermaid source shown: {error}.");
+                            for line in text_layout::wrap_ansi_with_indent(&notice, width.max(1), 0)
+                            {
+                                let _ =
+                                    writeln!(fallback, "{}", line.with(self.color_theme.border));
+                            }
                         }
+                        fallback.push_str(
+                            &self.highlight_code(&mermaid::safe_source(code_buffer), code_language),
+                        );
+                        fallback
                     }
-                    fallback.push_str(
-                        &self.highlight_code(&mermaid::safe_source(code_buffer), code_language),
-                    );
-                    fallback
+                };
+                if !prefix.is_empty()
+                    && output.ends_with(&prefix)
+                    && output.rsplit('\n').next() == Some(prefix.as_str())
+                {
+                    output.truncate(output.len() - prefix.len());
                 }
-            };
-            if !prefix.is_empty()
-                && output.ends_with(&prefix)
-                && output.rsplit('\n').next() == Some(prefix.as_str())
-            {
-                output.truncate(output.len() - prefix.len());
+                if !output.is_empty() && !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                for line in block.lines() {
+                    output.push_str(&prefix);
+                    output.push_str(line);
+                    output.push('\n');
+                }
             }
-            if !output.is_empty() && !output.ends_with('\n') {
-                output.push('\n');
+            FencePresentation::Source => {
+                output.push_str(&self.highlight_code(code_buffer, code_language));
             }
-            for line in block.lines() {
-                output.push_str(&prefix);
-                output.push_str(line);
-                output.push('\n');
-            }
-        } else {
-            output.push_str(&self.highlight_code(code_buffer, code_language));
         }
         if !output.ends_with('\n') {
             output.push('\n');
@@ -1405,6 +1410,22 @@ fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
     }
 
     mermaid::stream_boundary(markdown, last_boundary)
+}
+
+/// Shared presentation choice for canonical blocks and disposable live previews.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FencePresentation {
+    Source,
+    Mermaid,
+}
+
+#[inline]
+fn fence_presentation(info: &str) -> FencePresentation {
+    if mermaid::is_mermaid(info) {
+        FencePresentation::Mermaid
+    } else {
+        FencePresentation::Source
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3,8 +3,9 @@
 
 use super::{
     code_theme::{self, StreamingCodeHighlighter},
+    fence_presentation,
     styled_text::StyledText,
-    TerminalRenderer,
+    FencePresentation, TerminalRenderer,
 };
 use crossterm::style::ContentStyle;
 
@@ -30,11 +31,15 @@ impl CodePreview {
         {
             return None;
         }
+        let language = opener[marker.length..].trim();
+        if fence_presentation(language) != FencePresentation::Source {
+            return None;
+        }
         if self.opener != opener || self.complete_bytes > body.len() {
             *self = Self::default();
             self.opener = opener.to_string();
             self.parser = Some(StreamingCodeHighlighter::new(
-                opener[marker.length..].trim(),
+                language,
                 renderer.color_theme.light_background,
                 renderer.color_support,
             ));

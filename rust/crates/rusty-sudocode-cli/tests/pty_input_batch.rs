@@ -195,12 +195,27 @@ fn completed_turn_identity_survives_wrapping_and_advances_after_the_next_turn() 
     common::expect_input_line_cleared(&session, env.timeout(), "first turn ready");
     let first = common::turn_status_marker(&session);
     assert!(!first.is_empty());
-    let before = session.render(|screen| common::turn_status_line(&screen.contents()));
+    // ConPTY logical contents join soft-wrapped rows. Physical rows prove
+    // layout reflow; the logical marker below still identifies the same turn.
+    let narrow_rule = "─".repeat(80);
+    let before = common::expect_screen_rows_settled(
+        &session,
+        |screen| {
+            screen.lines().any(|line| line.trim() == narrow_rule) && screen.contains("· turn 1")
+        },
+        env.timeout(),
+        "completed status at the narrow width",
+    );
+    let before = common::turn_status_line(&before);
 
     session.resize(24, 120).unwrap();
-    let screen = common::expect_screen_settled(
+    let screen = common::expect_screen_rows_settled(
         &session,
-        |screen| screen.contains(&"─".repeat(120)) && screen.contains("· turn 1"),
+        |screen| {
+            screen.contains(&"─".repeat(120))
+                && screen.contains("· turn 1")
+                && common::turn_status_line(screen) != before
+        },
         env.timeout(),
         "completed status repainted at the new width",
     );

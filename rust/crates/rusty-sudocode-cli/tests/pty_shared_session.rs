@@ -193,12 +193,17 @@ fn resume_pairs_reused_tool_ids_with_their_own_assistant_chain() {
 }
 
 fn wait_for_file(path: &std::path::Path) {
+    wait_for_file_with_diagnostics(path, String::new);
+}
+
+fn wait_for_file_with_diagnostics(path: &std::path::Path, diagnostics: impl Fn() -> String) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while !path.exists() {
         assert!(
             Instant::now() < deadline,
-            "provider did not reach barrier {}",
-            path.display()
+            "provider did not reach barrier {}\n{}",
+            path.display(),
+            diagnostics()
         );
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -332,7 +337,17 @@ fn run_two_cli_contexts(is_second_started_late: bool, is_legacy_seed: bool) {
         "second prompt entered",
     );
     second.send("\r").unwrap();
-    wait_for_file(&second_ready);
+    wait_for_file_with_diagnostics(&second_ready, || {
+        let durable = fs::read_to_string(&transcript).unwrap_or_default();
+        format!(
+            "first recorded: {}; second recorded: {}; dumped files: {}\nFirst CLI:\n{}\nSecond CLI:\n{}",
+            durable.contains("FIRST_CONTEXT_PROMPT"),
+            durable.contains("SECOND_CONTEXT_PROMPT"),
+            fs::read_dir(&dump).map(|entries| entries.count()).unwrap_or_default(),
+            first.render(|screen| screen.contents()),
+            second.render(|screen| screen.contents()),
+        )
+    });
     let waiting = fs::read_to_string(&transcript).unwrap();
     assert!(waiting.contains("FIRST_CONTEXT_PROMPT") && waiting.contains("SECOND_CONTEXT_PROMPT"));
     assert!(!waiting.contains("FIRST_CONTEXT_DONE") && !waiting.contains("SECOND_CONTEXT_DONE"));

@@ -31,6 +31,14 @@ pub fn root() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".nexus-vfs"))
 }
 
+pub(crate) fn owner_root(explicit: Option<&Path>) -> Result<PathBuf> {
+    match explicit {
+        Some(path) if path.is_absolute() => Ok(path.to_path_buf()),
+        Some(_) => Err("Local Box owner root must be absolute".into()),
+        None => root(),
+    }
+}
+
 pub fn version() -> String {
     manifest()
         .expect("valid embedded artifact manifest")

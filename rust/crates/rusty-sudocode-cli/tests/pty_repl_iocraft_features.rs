@@ -270,7 +270,7 @@ fn iocraft_repl_ctrlc_hint_auto_dismisses() {
     wait_for_no_row_containing(&mut sess, HINT, Duration::from_secs(15));
 }
 
-/// Thinking activity renders in the `StatusSlot` during a turn.
+/// Model activity renders in the `StatusSlot` during a turn.
 /// Verifies the spinner shows the model name during streaming.
 /// This is the foundation test for the TurnPhase ChromeSlot — it
 /// confirms that phase-based rendering works end-to-end.
@@ -309,11 +309,12 @@ fn iocraft_repl_thinking_activity_renders() {
     sess.send("What is 2+2? Answer only the number.\r")
         .expect("send prompt");
 
-    // The spinner should show "Thinking" during the turn.
-    sess.expect("Thinking").unwrap_or_else(|e| {
-        let screen = sess.render(|s| s.contents());
-        panic!("Thinking activity should render in StatusSlot: {e}\nPTY:\n{screen}");
-    });
+    // Model work may precede actual thinking deltas during the turn.
+    sess.expect("Working\\.\\.\\.|Thinking\\.\\.\\.")
+        .unwrap_or_else(|e| {
+            let screen = sess.render(|s| s.contents());
+            panic!("Model activity should render in StatusSlot: {e}\nPTY:\n{screen}");
+        });
 
     // Wait for response and reprompt.
     sess.expect("❯").unwrap_or_else(|e| {

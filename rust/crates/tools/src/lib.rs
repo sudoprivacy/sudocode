@@ -287,6 +287,7 @@ use runtime::{
     cron_registry::CronRegistry,
     current_workspace_root, dedupe_superseded_commit_events, edit_file, glob_search,
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
+    plan_store::compose_task_framing,
     read_file,
     summary_compression::compress_summary_text,
     todo_store::TodoStore,
@@ -2422,6 +2423,10 @@ pub struct AgentListRow {
     pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_updated_at: Option<String>,
 }
 
 /// Collect the addressable agents this session can reach, plus the workers it
@@ -2455,12 +2460,25 @@ pub fn collect_agent_list(
         .iter()
         .filter_map(|(id, runtime)| runtime.mailbox_root.as_ref().map(|_| id.clone()))
         .collect();
-    Ok(merge_agent_list(
-        &peers,
-        subagents,
-        &active_tasks,
-        active_only,
-    ))
+    let mut rows = merge_agent_list(&peers, subagents, &active_tasks, active_only);
+    if runtime::experiments::is_enabled(runtime::experiments::Experiment::PeerDescriptions) {
+        for row in rows.iter_mut().filter(|row| row.kind == "peer") {
+            match mailbox
+                .description_store(&row.name)
+                .and_then(|store| store.read())
+            {
+                Ok(Some(description)) => {
+                    row.description = Some(description.description);
+                    row.description_updated_at = Some(description.updated_at);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, agent = %row.name, "peer description unavailable")
+                }
+            }
+        }
+    }
+    Ok(rows)
 }
 
 /// Pure core of [`collect_agent_list`], sources injected so it is testable
@@ -2491,6 +2509,8 @@ pub fn merge_agent_list(
                 kind: "peer".to_string(),
                 task_id: None,
                 role: None,
+                description: None,
+                description_updated_at: None,
             });
     }
 
@@ -2509,6 +2529,8 @@ pub fn merge_agent_list(
                 kind: "subagent".to_string(),
                 task_id: Some(snap.agent_id.clone()),
                 role,
+                description: None,
+                description_updated_at: None,
             });
     }
 
@@ -4179,17 +4201,6 @@ fn with_task_template(mut schema: serde_json::Value, required: bool) -> serde_js
     schema
 }
 
-/// Compose the shared task-framing sections into a markdown block, prepended to
-/// a plan body or a handed-off task prompt so both carry the same structure.
-fn compose_task_framing(context: &str, constraints: &str, acceptance: &str) -> String {
-    format!(
-        "## Context\n{}\n\n## Constraints\n{}\n\n## Acceptance Criteria\n{}\n",
-        context.trim(),
-        constraints.trim(),
-        acceptance.trim(),
-    )
-}
-
 /// Like [`compose_task_framing`] but for the optional `send` path: returns
 /// `None` when none of the three fields carry content (a plain chat message),
 /// so only a genuine task hand-off gets the framing block. Empty fields are
@@ -4217,14 +4228,19 @@ fn run_write_plan(input: WritePlanInput, fs: &Arc<dyn FsBackend>) -> Result<Stri
     }
     // The plan file is the SSOT — always structured: the three framing sections
     // (enforced as required params) then the plan body.
-    let framing = compose_task_framing(&input.context, &input.constraints, &input.acceptance);
-    let document = format!("{framing}\n{content}\n");
+    let document = runtime::plan_store::compose_document(
+        &input.context,
+        &input.constraints,
+        &input.acceptance,
+        content,
+    );
     let path = runtime::plan_store::write_plan(&document, fs)?;
-    to_pretty_json(json!({
-        "ok": true,
-        "planFile": path.display().to_string(),
-        "message": "Plan saved.",
-    }))
+    serde_json::to_string_pretty(&runtime::plan_store::PlanReviewResult::new(
+        runtime::plan_store::PlanReviewStatus::DraftSaved,
+        path.display().to_string(),
+        "Plan saved.".into(),
+    ))
+    .map_err(|error| error.to_string())
 }
 
 fn run_structured_output(input: StructuredOutputInput) -> Result<String, String> {

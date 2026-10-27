@@ -432,6 +432,27 @@ impl Mailbox {
         &self.self_id
     }
 
+    /// The persistent description in this mailbox's actual agent namespace.
+    pub fn description_store(
+        &self,
+        agent: &str,
+    ) -> std::io::Result<crate::agent_description::DescriptionStore> {
+        if agent.is_empty() || agent == "." || agent == ".." || agent.contains(['/', '\\', '\0']) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid agent name",
+            ));
+        }
+        Ok(crate::agent_description::DescriptionStore::new(
+            Arc::clone(&self.backend),
+            format!(
+                "{}/{agent}/{}",
+                self.convention.agents_dir(),
+                crate::agent_description::DESCRIPTION_FILE
+            ),
+        ))
+    }
+
     /// Read-only binding of this exact mailbox, before any A2A IO.
     #[must_use]
     pub fn binding(&self) -> crate::external_a2a::MailboxBinding {

@@ -771,11 +771,14 @@ pub(crate) fn build_runtime_with_plugin_state(
     // Hand the dispatcher this session's peer mailbox, so a recipient name means
     // the same destination to the `send` tool, to a sub-agent reporting back,
     // and to the receiver tailing its own inbox.
-    if let Some(mailbox) = host
+    let mailbox = host
         .mailbox
         .clone()
-        .or_else(|| peer.as_ref().map(crate::peer::Peer::mailbox))
-    {
+        .or_else(|| peer.as_ref().map(crate::peer::Peer::mailbox));
+    let description_store = mailbox
+        .as_ref()
+        .map(|mailbox| mailbox.description_store(mailbox.self_id()));
+    if let Some(mailbox) = mailbox {
         tool_executor.set_mailbox(mailbox);
     }
     let session_tracer = client.session_tracer().cloned();
@@ -789,6 +792,13 @@ pub(crate) fn build_runtime_with_plugin_state(
     )
     .with_session_known_date(runtime::today_local())
     .with_session_known_model(config.model.clone());
+    if runtime::experiments::is_enabled(runtime::experiments::Experiment::PeerDescriptions) {
+        match description_store {
+            Some(Ok(store)) => runtime.set_agent_description_store(store),
+            Some(Err(error)) => tracing::warn!(%error, "peer description store unavailable"),
+            None => {}
+        }
+    }
     // Runtime maintenance and provider requests must share the session's
     // existing local trace sink, including signed-history recovery notices.
     if let Some(tracer) = session_tracer {

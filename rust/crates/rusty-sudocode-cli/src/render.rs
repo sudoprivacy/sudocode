@@ -16,6 +16,7 @@ pub(crate) mod diff_colors;
 mod hyperlink;
 pub(crate) mod layout_policy;
 pub(crate) mod left_frame;
+mod mermaid;
 pub(crate) mod output;
 pub(crate) mod spinner_progress;
 use spinner_progress::SpinnerProgress;
@@ -335,7 +336,7 @@ impl SpinnerHandle {
                 if !paused {
                     let thinking = is_thinking.load(Ordering::SeqCst);
                     let current_label = if thinking {
-                        activity::REASONING_LABEL
+                        activity::THINKING_LABEL
                     } else {
                         &label
                     };
@@ -491,6 +492,7 @@ const TOP_LEVEL_LIST_INDENT: usize = 2;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RenderState {
+    code_block_complete: bool,
     emphasis: usize,
     strong: usize,
     strikethrough: usize,
@@ -642,6 +644,55 @@ impl TerminalRenderer {
         }
     }
 
+    /// Both REPLs and the document inspector present the exact saved source.
+    /// Plan framing reuses the normal Markdown engine and transcript frame.
+    #[must_use]
+    pub(crate) fn render_question_document(
+        &self,
+        content: &runtime::PromptText,
+        presentation: &runtime::QuestionPresentation,
+        width: usize,
+    ) -> String {
+        match presentation {
+            runtime::QuestionPresentation::Question => {
+                let rendered = self.render_prompt_text(content, width);
+                let mut text = String::new();
+                rendered.write_ansi(0..rendered.text.len(), &mut text);
+                text
+            }
+            runtime::QuestionPresentation::PlanReview { plan_file } => {
+                self.render_plan_document(content, plan_file, "awaiting review", width)
+            }
+        }
+    }
+
+    /// A complete review document in history, shared by live review and resume.
+    #[must_use]
+    pub(crate) fn render_plan_document(
+        &self,
+        content: &runtime::PromptText,
+        plan_file: &str,
+        state: &str,
+        width: usize,
+    ) -> String {
+        let rendered = self.render_prompt_text(content, left_frame::body_width(width));
+        let mut text = String::new();
+        rendered.write_ansi(0..rendered.text.len(), &mut text);
+        let path = format!("File: {plan_file}");
+        format!(
+            "\n{}\n",
+            left_frame::render(
+                &format!("Plan · {state}"),
+                [path.as_str(), "", text.as_str()]
+                    .into_iter()
+                    .skip(if plan_file.is_empty() { 2 } else { 0 }),
+                width,
+                theme().tool_borders().running,
+                true,
+            )
+        )
+    }
+
     #[must_use]
     pub(crate) fn render_markdown_with_width(&self, markdown: &str, width: usize) -> String {
         let normalized = normalize_nested_fences(markdown);
@@ -653,8 +704,25 @@ impl TerminalRenderer {
         let mut code_language = String::new();
         let mut code_buffer = String::new();
         let mut in_code_block = false;
+        let mut code_range = 0..0;
+        let mut code_content_end = 0;
 
         for (event, range) in Parser::new_ext(&normalized, Options::all()).into_offset_iter() {
+            match &event {
+                Event::Start(Tag::CodeBlock(_)) => {
+                    code_range = range.clone();
+                    code_content_end = range.start;
+                }
+                Event::Text(_) if in_code_block => code_content_end = range.end,
+                Event::End(TagEnd::CodeBlock) => {
+                    state.code_block_complete = mermaid::has_closing_fence(
+                        &normalized,
+                        code_range.clone(),
+                        code_content_end,
+                    );
+                }
+                _ => {}
+            }
             // Decide top-level list binding from the SOURCE, not from the
             // rendered output: pulldown-cmark emits identical events for
             // "Label\n- a" and "Label\n\n- a", but the byte offset lets us
@@ -816,7 +884,7 @@ impl TerminalRenderer {
                 code_buffer.clear();
             }
             Event::End(TagEnd::CodeBlock) => {
-                self.finish_code_block(code_buffer, code_language, output);
+                self.finish_code_block(code_buffer, code_language, state, output);
                 *in_code_block = false;
                 code_language.clear();
                 code_buffer.clear();
@@ -1026,8 +1094,56 @@ impl TerminalRenderer {
         }
     }
 
-    fn finish_code_block(&self, code_buffer: &str, code_language: &str, output: &mut String) {
-        output.push_str(&self.highlight_code(code_buffer, code_language));
+    fn finish_code_block(
+        &self,
+        code_buffer: &str,
+        code_language: &str,
+        state: &RenderState,
+        output: &mut String,
+    ) {
+        if mermaid::is_mermaid(code_language) {
+            let prefix = format!(
+                "{}{}",
+                "> ".repeat(state.quote),
+                " ".repeat(state.item_content_col)
+            );
+            let width = state.max_width.saturating_sub(visible_width(&prefix));
+            let rendered = state
+                .code_block_complete
+                .then(|| mermaid::render(code_buffer, width, &self.color_theme));
+            let block = match rendered {
+                Some(Ok(diagram)) => diagram,
+                result => {
+                    let mut fallback = String::new();
+                    if let Some(Err(error)) = result {
+                        let notice = format!("Mermaid source shown: {error}.");
+                        for line in text_layout::wrap_ansi_with_indent(&notice, width.max(1), 0) {
+                            let _ = writeln!(fallback, "{}", line.with(self.color_theme.border));
+                        }
+                    }
+                    fallback.push_str(
+                        &self.highlight_code(&mermaid::safe_source(code_buffer), code_language),
+                    );
+                    fallback
+                }
+            };
+            if !prefix.is_empty()
+                && output.ends_with(&prefix)
+                && output.rsplit('\n').next() == Some(prefix.as_str())
+            {
+                output.truncate(output.len() - prefix.len());
+            }
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            for line in block.lines() {
+                output.push_str(&prefix);
+                output.push_str(line);
+                output.push('\n');
+            }
+        } else {
+            output.push_str(&self.highlight_code(code_buffer, code_language));
+        }
         if !output.ends_with('\n') {
             output.push('\n');
         }
@@ -1392,7 +1508,7 @@ fn find_stream_safe_boundary(markdown: &str) -> Option<usize> {
         }
     }
 
-    last_boundary
+    mermaid::stream_boundary(markdown, last_boundary)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

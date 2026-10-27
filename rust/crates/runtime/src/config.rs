@@ -550,6 +550,53 @@ impl ConfigLoader {
         &self.config_home
     }
 
+    /// Save the prompt-cache TTL in the global `sudocode.json`: `Some` pins
+    /// `cache_ttl_1h`, `None` removes it so the auth mode decides again.
+    ///
+    /// Read, edited and replaced under the config lock, so agents saving at
+    /// the same time do not drop each other's edits.
+    pub fn save_cache_ttl_1h(&self, value: Option<bool>) -> Result<PathBuf, ConfigError> {
+        use crate::fs_backend::FsBackend as _;
+
+        std::fs::create_dir_all(&self.config_home)?;
+        let path = self.config_home.join("sudocode.json");
+        let _guard = ConfigFileLock::acquire(&path)?;
+        let mut root = match std::fs::read_to_string(&path) {
+            Ok(text) if text.trim().is_empty() => serde_json::Map::new(),
+            Ok(text) => match serde_json::from_str::<SerdeValue>(&text) {
+                Ok(SerdeValue::Object(root)) => root,
+                Ok(_) => {
+                    return Err(ConfigError::Parse(format!(
+                        "{}: top-level value must be a JSON object",
+                        path.display()
+                    )))
+                }
+                Err(error) => {
+                    return Err(ConfigError::Parse(format!("{}: {error}", path.display())))
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+            Err(error) => return Err(ConfigError::Io(error)),
+        };
+        match value {
+            Some(one_hour) => {
+                root.insert("cache_ttl_1h".to_owned(), SerdeValue::Bool(one_hour));
+            }
+            None => {
+                root.remove("cache_ttl_1h");
+            }
+        }
+        let serialized = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&SerdeValue::Object(root))
+                .map_err(|error| ConfigError::Parse(error.to_string()))?
+        );
+        crate::fs_backend::StdFsBackend
+            .write_atomic(&path.to_string_lossy(), serialized.as_bytes())
+            .map_err(ConfigError::Io)?;
+        Ok(path)
+    }
+
     /// Project root shared by settings, memory, and installed CLI packages.
     #[inline]
     #[must_use]

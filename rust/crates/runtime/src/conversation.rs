@@ -77,6 +77,16 @@ const EMPTY_POST_TOOL_DELIVERABLE_REMINDER: &str = "\
 The previous model response was empty after a tool completed. The user requested a file deliverable, but the current turn has not produced a matching final file yet. Continue the same task now: create or execute whatever is needed to produce the requested file, then verify it exists before ending the turn.
 </system-reminder>";
 
+const STREAM_INTERRUPTED_REMINDER: &str = "\
+<system-reminder>
+Your previous response was cut off by a connection error before it finished. Continue from where it stopped. Do not repeat what you already wrote.
+</system-reminder>";
+
+/// How many times one turn continues by itself after its model stream drops
+/// mid-response. Each continuation starts from the saved partial reply and
+/// tool results, never from a resend of the failed request.
+const MAX_STREAM_CONTINUATIONS: u32 = 3;
+
 /// Prefix of the user-side date announcement injected on the first turn.
 /// The current date deliberately lives in a content block instead of the
 /// system prompt so the system blocks stay byte-stable across days (the
@@ -432,6 +442,8 @@ pub trait ApiClient: Send {
 /// `engine_events::EngineEvent`s forwards all seven `AssistantEvent` variants,
 /// so every hook below must be forwarded from the loop.
 pub trait RuntimeObserver {
+    /// The initial user blocks, including attachments, reached durable history.
+    fn on_prompt_committed(&mut self) {}
     fn on_input_committed(&mut self, _input: &crate::turn_input::InputView) {}
     /// Non-fatal runtime maintenance notices, forwarded through the engine seam.
     fn on_notice(&mut self, _text: &str) {}
@@ -893,6 +905,9 @@ enum RuntimeErrorKind {
     CompactionPathNotSupported,
     /// A provider completed its response, but its summary cannot be installed.
     InvalidCompactionSummary,
+    /// The provider stream failed after delivering events. The partial reply
+    /// and every tool result are saved, so the turn can continue from them.
+    StreamInterrupted,
     /// The request was rejected — locally by the API client's preflight or
     /// by the provider — because it does not fit the model's context window.
     ContextWindowBlocked,
@@ -960,6 +975,21 @@ impl RuntimeError {
             kind: RuntimeErrorKind::ContextWindowBlocked,
             retryable: false,
         }
+    }
+
+    /// A provider stream that failed after delivering events.
+    #[must_use]
+    pub fn stream_interrupted(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: RuntimeErrorKind::StreamInterrupted,
+            retryable: false,
+        }
+    }
+
+    #[must_use]
+    pub fn is_stream_interrupted(&self) -> bool {
+        self.kind == RuntimeErrorKind::StreamInterrupted
     }
 
     /// Set the transport-retryable classification. Chainable so the api→runtime
@@ -1233,6 +1263,7 @@ pub struct ConversationRuntime<C, T> {
     compaction_source_revision: Option<CompactionSourceRevision>,
     /// An unreadable or changed durable source forbids writing this snapshot.
     session_source_stale: bool,
+    agent_description_store: Option<crate::agent_description::DescriptionStore>,
 }
 
 impl<C, T> ConversationRuntime<C, T>
@@ -1306,11 +1337,35 @@ where
             last_compaction_report: None,
             compaction_source_revision: None,
             session_source_stale: false,
+            agent_description_store: None,
         }
     }
 
     pub fn set_turn_input_inbox(&mut self, inbox: crate::turn_input::TurnInputInbox) {
         self.turn_inputs = inbox;
+    }
+
+    /// Hosts bind regular peer runtimes; delegated child runtimes leave this unset.
+    pub fn set_agent_description_store(
+        &mut self,
+        store: crate::agent_description::DescriptionStore,
+    ) {
+        self.agent_description_store = Some(store);
+    }
+
+    /// Optional metadata never turns a committed checkpoint into a failure.
+    pub fn publish_agent_description(
+        &self,
+        update: Option<&crate::agent_description::DescriptionUpdate>,
+    ) {
+        if !crate::experiments::is_enabled(crate::experiments::Experiment::PeerDescriptions) {
+            return;
+        }
+        if let Some((store, update)) = self.agent_description_store.as_ref().zip(update) {
+            if let Err(error) = store.publish(update) {
+                tracing::warn!(%error, "peer description publication failed; checkpoint remains committed");
+            }
+        }
     }
 
     /// Records the date (`YYYY-MM-DD`) the session should treat as "today".
@@ -1972,6 +2027,9 @@ where
         self.session
             .push_user_blocks(prepared_blocks)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
+        if let Some(observer) = observer.as_deref_mut() {
+            observer.on_prompt_committed();
+        }
         self.compaction_pending_input_tokens = 0;
 
         // Hook workers share the current observer's progress sink, so slow
@@ -1996,6 +2054,7 @@ where
         let mut completed_steps = 0u32;
         let mut final_answer_requested = false;
         let mut retried_empty_post_tool_deliverable = false;
+        let mut stream_continuations = 0u32;
         let mut turn_compactions = 0usize;
         let mut recorded_compaction_budget_exhausted = false;
         let mut overflow_compaction: Option<AutoCompactionEvent> = None;
@@ -2030,7 +2089,10 @@ where
                 let prepared = if input.source == crate::turn_input::InputSource::Human {
                     crate::image_input::prompt_blocks(input.text, self.session.fs_handle().as_ref())
                         .map_err(|error| RuntimeError::new(error.to_string()))
-                        .and_then(|blocks| self.prepare_input_blocks(blocks))
+                        .and_then(|mut blocks| {
+                            blocks.extend(input.attachments);
+                            self.prepare_input_blocks(blocks)
+                        })
                 } else {
                     Ok(vec![ContentBlock::Text { text: input.text }])
                 };
@@ -2368,6 +2430,41 @@ where
             if let Some(error) = response.error {
                 if let Some(path) = self.session.persistence_path() {
                     self.session.save_to_path(path).map_err(|failure| RuntimeError::new(format!("failed to persist interrupted tools: {failure}; provider error: {error}")))?;
+                }
+                // The partial reply and every tool result are saved above, so
+                // continue from them as a user's "continue" would. Never resend
+                // the failed request: its output, usage and tools already ran.
+                if error.is_stream_interrupted()
+                    && stream_continuations < MAX_STREAM_CONTINUATIONS
+                    && !response.cancelled
+                {
+                    stream_continuations += 1;
+                    // The failed response latched the shared abort flag to stop
+                    // its unfinished tools. Those workers hold the old turn
+                    // generation and stay cancelled; clear the flag so the
+                    // continuation runs and a later Esc still stops it.
+                    self.hook_abort_signal.reset();
+                    if let Some(observer) = observer.as_deref_mut() {
+                        // The interrupted reply never received its stop event.
+                        // Close it for observers as it is saved, so the
+                        // continuation is a separate message.
+                        observer.on_message_stop();
+                        observer.on_notice(&format!(
+                            "Model stream dropped mid-response; continuing ({stream_continuations}/{MAX_STREAM_CONTINUATIONS})."
+                        ));
+                    }
+                    for _ in 0..10 {
+                        if self.hook_abort_signal.is_aborted() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    if pending_tool_uses.is_empty() {
+                        self.session
+                            .push_user_text(STREAM_INTERRUPTED_REMINDER)
+                            .map_err(|error| RuntimeError::new(error.to_string()))?;
+                    }
+                    continue;
                 }
                 self.record_turn_failed(iterations, &error);
                 return Err(error);
@@ -2906,7 +3003,23 @@ where
             }
         }
         let config = self.compaction_retention(&frozen, config);
-        let prepared = PreparedCompaction::new(&frozen, config, target, ideal);
+        let description = if crate::experiments::is_enabled(
+            crate::experiments::Experiment::PeerDescriptions,
+        ) {
+            self.agent_description_store.as_ref().and_then(|store| {
+                match store.snapshot(&source.session_id) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(error) => {
+                        tracing::warn!(%error, "peer description unavailable; keeping ordinary checkpoint format");
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+        let prepared =
+            PreparedCompaction::new(&frozen, config, target, ideal).with_description(description);
         if !prepared.has_source() {
             if options.allow_repeat_skip && before <= report.safe_history_budget {
                 report.outcome = CompactionOutcome::Skipped;
@@ -3395,6 +3508,7 @@ where
         let removed = result.removed_message_count;
         let summary_source = result.summary_source;
         self.install_compacted_session(result.compacted_session);
+        self.publish_agent_description(result.agent_description.as_ref());
         self.record_compaction(trigger, removed, before, after, Some(&summary_source));
         Ok(Some(event))
     }

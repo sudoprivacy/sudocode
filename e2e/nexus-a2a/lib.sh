@@ -196,18 +196,23 @@ grpcurl_bin() {
     MINGW*|MSYS*|CYGWIN*) os=windows; suffix=zip ;;
     *) echo "!! no grpcurl and no prebuilt binary for $(uname -s) — install grpcurl and retry" >&2; return 1 ;;
   esac
-  local arch; arch="$(uname -m)"; [ "$arch" = x86_64 ] || [ "$arch" = arm64 ] || arch=x86_64
+  local arch
+  case "$(uname -m)" in
+    aarch64|arm64) arch=arm64 ;;
+    *) arch=x86_64 ;;
+  esac
   mkdir -p "$(dirname "$cache")"
   local url="https://github.com/fullstorydev/grpcurl/releases/download/v${version}/grpcurl_${version}_${os}_${arch}.${suffix}"
-  curl -fsSL --retry 3 -o "$cache.dl" "$url" || { echo "!! could not fetch $url" >&2; return 1; }
+  local download="$cache.dl.$suffix"
+  curl -fsSL --retry 3 -o "$download" "$url" || { echo "!! could not fetch $url" >&2; return 1; }
   if [ "$suffix" = zip ]; then
     # git bash ships GNU tar (no zip); PowerShell's Expand-Archive is always
-    # there and takes Windows paths, hence the cygpath round-trip.
-    powershell -NoProfile -Command "Expand-Archive -LiteralPath '$(cygpath -w "$cache.dl")' -DestinationPath '$(cygpath -w "$(dirname "$cache")")' -Force" \
-      || { echo "!! could not unzip $cache.dl" >&2; return 1; }
-    rm -f "$cache.dl"
+    # there and requires a .zip suffix plus Windows paths.
+    powershell -NoProfile -Command "Expand-Archive -LiteralPath '$(cygpath -w "$download")' -DestinationPath '$(cygpath -w "$(dirname "$cache")")' -Force" \
+      || { echo "!! could not unzip $download" >&2; return 1; }
+    rm -f "$download"
   else
-    tar -xzf "$cache.dl" -C "$(dirname "$cache")" grpcurl && rm -f "$cache.dl"
+    tar -xzf "$download" -C "$(dirname "$cache")" grpcurl && rm -f "$download"
   fi
   chmod +x "$cache"
   printf '%s' "$cache"

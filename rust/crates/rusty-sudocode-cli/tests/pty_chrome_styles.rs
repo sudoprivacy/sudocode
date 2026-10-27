@@ -449,7 +449,7 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     // Neutral quantities keep terminal foreground and weight in every color
     // mode, including NO_COLOR, independent of icon/status semantic colors.
     expect_style(&sess, "1 todos", ("Default", true, false));
-    // Both a persistent info label and the active status slot use the role.
+    // Information icons keep their semantic green; activity uses neutral text.
     expect_style(&sess, "■", (green, false, false));
     let marker = common::turn_status_marker(&sess);
     let prompt = env.prompt(
@@ -462,13 +462,13 @@ fn info_uses_shared_green(light: bool, truecolor: bool, no_color: bool) {
     common::expect_screen(
         &sess,
         |_| {
-            ["Thinking...", "Reasoning..."].iter().any(|label| {
+            ["Working...", "Thinking..."].iter().any(|label| {
                 attributes(&sess, label)
-                    .is_some_and(|(color, bold, dim)| color == green && !bold && !dim)
+                    .is_some_and(|(color, bold, dim)| color == "Default" && !bold && !dim)
             })
         },
         common::LIVE_TURN_BUDGET,
-        "active status uses theme info green",
+        "active status uses terminal foreground independently of info green",
     );
     sess.send("info-draft").unwrap();
     common::expect_input_line(

@@ -870,8 +870,8 @@ const SLASH_COMMAND_SPECS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "cache",
         aliases: &[],
-        summary: "Show prompt cache statistics",
-        argument_hint: None,
+        summary: "Show prompt cache statistics, or choose the prompt cache TTL",
+        argument_hint: Some("[ttl [1h|5m|auto] [--now]]"),
         resume_supported: true,
     },
     SlashCommandSpec {
@@ -1291,6 +1291,11 @@ pub enum SlashCommand {
     Vim,
     Upgrade,
     Stats,
+    /// `/cache ttl [1h|5m|auto] [--now]`: show or choose the prompt-cache TTL.
+    CacheTtl {
+        value: Option<String>,
+        now: bool,
+    },
     Share,
     Feedback,
     Files,
@@ -1620,10 +1625,21 @@ pub fn validate_slash_command_input(
             validate_no_args(command, &args)?;
             SlashCommand::Upgrade
         }
-        "stats" | "tokens" | "cache" => {
+        "stats" | "tokens" => {
             validate_no_args(command, &args)?;
             SlashCommand::Stats
         }
+        "cache" => match args.first().map(|arg| arg.to_ascii_lowercase()).as_deref() {
+            None => SlashCommand::Stats,
+            Some("ttl") => parse_cache_ttl(&args[1..])?,
+            Some(_) => {
+                return Err(command_error(
+                    "Unexpected arguments for /cache.",
+                    "cache",
+                    CACHE_USAGE,
+                ))
+            }
+        },
         "share" => {
             validate_no_args(command, &args)?;
             SlashCommand::Share
@@ -1711,6 +1727,36 @@ pub fn validate_slash_command_input(
         other => SlashCommand::Unknown(other.to_string()),
     }))
 }
+const CACHE_USAGE: &str = "/cache [ttl [1h|5m|auto] [--now]]";
+
+/// `[1h|5m|auto] [--now]` after `/cache ttl`. No value shows the current TTL.
+fn parse_cache_ttl(args: &[&str]) -> Result<SlashCommand, SlashCommandParseError> {
+    let mut value = None;
+    let mut now = false;
+    for arg in args {
+        let arg = arg.to_ascii_lowercase();
+        match arg.as_str() {
+            "--now" if !now => now = true,
+            "1h" | "5m" | "auto" if value.is_none() => value = Some(arg),
+            _ => {
+                return Err(command_error(
+                    &format!("Unexpected argument for /cache ttl: {arg}"),
+                    "cache",
+                    CACHE_USAGE,
+                ))
+            }
+        }
+    }
+    if now && value.is_none() {
+        return Err(command_error(
+            "/cache ttl --now needs a TTL to apply.",
+            "cache",
+            CACHE_USAGE,
+        ));
+    }
+    Ok(SlashCommand::CacheTtl { value, now })
+}
+
 fn validate_no_args(command: &str, args: &[&str]) -> Result<(), SlashCommandParseError> {
     if args.is_empty() {
         return Ok(());
@@ -5026,6 +5072,7 @@ pub fn handle_slash_command(
         | SlashCommand::Vim
         | SlashCommand::Upgrade
         | SlashCommand::Stats
+        | SlashCommand::CacheTtl { .. }
         | SlashCommand::Share
         | SlashCommand::Feedback
         | SlashCommand::Files

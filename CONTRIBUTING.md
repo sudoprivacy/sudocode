@@ -676,7 +676,9 @@ When opening the PR:
 - **Scope:** keep PRs focused on one repo area at a time. Bug fixes
   and unrelated refactors land in separate PRs.
 - **Draft early:** open the PR as a draft for directional feedback
-  before polishing.
+  before polishing. Draft PRs run only the fast checks; the full
+  cross-platform matrix starts when you mark the PR ready (and runs
+  again in the merge queue), so iterate as a draft and mark it ready once.
 
 Reviewers may push small fixups directly to your branch (formatting,
 typos) unless the PR description opts out. Larger changes go through

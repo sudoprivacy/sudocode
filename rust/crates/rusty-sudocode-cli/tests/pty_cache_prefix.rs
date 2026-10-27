@@ -1300,7 +1300,9 @@ fn response_content(request: &Value, number: usize) -> Value {
     let last = request["messages"].as_array().unwrap().last().unwrap()["content"].to_string();
     let searching = !compact && !last.contains("tool_result") && last.contains("discover ");
     let saving = !compact && !last.contains("tool_result") && last.contains("SAVE_GLOBAL_MEMORY");
-    if saving {
+    if !compact && !last.contains("tool_result") && last.contains("LIST_PEER_DESCRIPTIONS") {
+        json!({"type":"tool_use", "id":format!("peer-list-{number}"), "name":"agent_list", "input":{}})
+    } else if saving {
         let system = prompt_text(request);
         let directory = system
             .split("Global memory: `")
@@ -1321,9 +1323,338 @@ fn response_content(request: &Value, number: usize) -> Value {
         json!({"type":"tool_use","id":format!("search_{number}"),"name":"ToolSearch","input":{"query":format!("select:{name}")}})
     } else {
         json!({"type":"text","text": if compact {
-            mock_anthropic_service::CANNED_COMPACTION_SUMMARY.to_string()
+            let checkpoint = if last.contains("PEER_DESCRIPTION_PLAIN_INVALID") {
+                mock_anthropic_service::CANNED_COMPACTION_SUMMARY.replace("<summary>", "").replace("</summary>", "")
+            } else {
+                mock_anthropic_service::CANNED_COMPACTION_SUMMARY.to_owned()
+            };
+            if !last.contains("Optional checkpoint metadata:") || last.contains("PEER_DESCRIPTION_MISSING") {
+                checkpoint
+            } else if last.contains("PEER_DESCRIPTION_INVALID") || last.contains("PEER_DESCRIPTION_PLAIN_INVALID") {
+                format!("{checkpoint}\n<agent-description>{{\"unexpected\":true}}</agent-description>")
+            } else if last.contains("PEER_DESCRIPTION_UNTERMINATED") {
+                format!("{checkpoint}\n<agent-description>broken optional metadata")
+            } else {
+                assert!(last.contains("CURRENT_PEER_WORK"), "description must receive the latest preserved intent");
+                let description = if last.contains("PEER_DESCRIPTION_RAW") {
+                    "Investigating peer discovery"
+                } else {
+                    "\"Investigating peer discovery\""
+                };
+                format!("{checkpoint}\n<agent-description>{description}</agent-description>\n")
+            }
         } else { format!("PREFIX_REPLY_{number}") }})
     }
+}
+
+fn peer_description_settings(env: &TestEnv, agent: &str) {
+    std::fs::write(
+        env.config_home().join("settings.json"),
+        json!({
+            "agentName": agent,
+            "experimental": {"peerDescriptions": true},
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn peer_descriptions_survive_compaction_restart_and_real_discovery_without_changing_prefix() {
+    for raw_metadata in [false, true] {
+        assert_peer_description_lifecycle(raw_metadata);
+    }
+}
+
+fn assert_peer_description_lifecycle(raw_metadata: bool) {
+    let env = TestEnv::new_mock("peer-description-lifecycle");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    peer_description_settings(&env, "description-author");
+    let namespace = runtime::mailbox::local_pair_root_in(env.config_home());
+    let metadata = namespace.join("agents/description-author/description.json");
+    let empty = runtime::mailbox::Mailbox::workspace_local(&namespace, "empty-peer".into());
+    empty.ensure_presence().unwrap();
+    let mut cli = spawn_with_env(
+        &env,
+        &path,
+        &[("SUDOCODE_EXPERIMENT_PEER_DESCRIPTIONS", "0")],
+    );
+    turn(
+        &mut cli,
+        &format!(
+            "CURRENT_PEER_WORK: investigate peer discovery after changing tasks. {}",
+            if raw_metadata {
+                "PEER_DESCRIPTION_RAW"
+            } else {
+                ""
+            }
+        ),
+    );
+    turn(&mut cli, "Continue with this assignment.");
+    assert!(
+        !metadata.exists(),
+        "ordinary turns leave a new peer undescribed"
+    );
+    let ordinary = capture.bodies().pop().unwrap();
+    let original = std::fs::read(&path).unwrap();
+    cli.send("/compact\r").unwrap();
+    cli.expect("Messages removed").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "baseline checkpoint committed");
+    let baseline = capture.bodies().pop().unwrap();
+    exit(&mut cli);
+    assert!(
+        !metadata.exists(),
+        "disabled compaction leaves metadata absent"
+    );
+    std::fs::write(&path, original).unwrap();
+    let mut cli = spawn(&env, &path);
+    cli.send("/compact\r").unwrap();
+    cli.expect("Messages removed").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "peer description committed");
+    let published = std::fs::read(&metadata).unwrap();
+    let description: Value = serde_json::from_slice(&published).unwrap();
+    assert_eq!(description["description"], "Investigating peer discovery");
+    assert!(description["updated_at"].as_str().is_some());
+    let compact = capture.bodies().pop().unwrap();
+    assert_peer_compaction_prefix(&ordinary, &baseline, &compact);
+    turn(&mut cli, "Continue after the description checkpoint.");
+    exit(&mut cli);
+    let saved = Session::load_from_path(&path).unwrap();
+    assert_eq!(description["source_session_id"], saved.session_id);
+    let continuation = checkpoint_text(&saved);
+    assert!(!continuation.contains("agent-description"));
+    assert!(!continuation.contains("Optional checkpoint metadata:"));
+    drop(saved);
+    let mut resumed = spawn(&env, &path);
+    turn(&mut resumed, "Continue after process restart.");
+    exit(&mut resumed);
+    assert_eq!(
+        published,
+        std::fs::read(&metadata).unwrap(),
+        "resume preserves metadata and its actual update time"
+    );
+    for request in capture.bodies() {
+        fixed_prefix(&ordinary, &request);
+        if !request.to_string().contains(COMPACT) {
+            assert!(!request.to_string().contains("<agent-description>"));
+            assert!(!request
+                .to_string()
+                .contains("Optional checkpoint metadata:"));
+        }
+    }
+
+    assert_peer_description_discovery(&env, &capture, &description);
+}
+
+fn assert_peer_compaction_prefix(ordinary: &Value, baseline: &Value, compact: &Value) {
+    fixed_prefix(ordinary, compact);
+    fixed_prefix(baseline, compact);
+    let baseline_messages = baseline["messages"].as_array().unwrap();
+    let compact_messages = compact["messages"].as_array().unwrap();
+    assert_eq!(
+        &baseline_messages[..baseline_messages.len() - 1],
+        &compact_messages[..compact_messages.len() - 1],
+        "enabling descriptions preserves every historical cache marker"
+    );
+    let mut summarized_prefix = compact.clone();
+    let instruction = summarized_prefix["messages"]
+        .as_array_mut()
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(instruction.to_string().contains("CURRENT_PEER_WORK"));
+    assert!(!instruction
+        .to_string()
+        .contains("Output only a <summary> block"));
+    assert!(!instruction
+        .to_string()
+        .contains("plain text: a <summary> block."));
+    assert!(!instruction
+        .to_string()
+        .contains("plain text only — a <summary> block."));
+    history_prefix(&summarized_prefix, ordinary);
+}
+
+fn assert_peer_description_discovery(env: &TestEnv, capture: &Capture, description: &Value) {
+    // A new peer, driven through its real model/tool loop, reads the same namespace.
+    peer_description_settings(env, "description-observer");
+    let mut observer = env.spawn(&["--permission-mode", "read-only"]);
+    observer.resize(60, 160).unwrap();
+    common::expect_input_line_cleared(&observer, WAIT, "description observer ready");
+    turn(&mut observer, "LIST_PEER_DESCRIPTIONS");
+    let listing = capture
+        .bodies()
+        .iter()
+        .rev()
+        .find_map(|request| {
+            request["messages"]
+                .as_array()?
+                .iter()
+                .rev()
+                .find_map(|message| {
+                    message["content"].as_array()?.iter().find_map(|block| {
+                        (block["type"] == "tool_result")
+                            .then(|| block["content"].as_array())
+                            .flatten()
+                            .map(|content| {
+                                content
+                                    .iter()
+                                    .filter_map(|block| block["text"].as_str())
+                                    .collect::<String>()
+                            })
+                            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                            .filter(|value| value["agents"].is_array())
+                    })
+                })
+        })
+        .expect("real agent_list result reaches the provider");
+    let peers = listing["agents"].as_array().unwrap();
+    let author = peers
+        .iter()
+        .find(|row| row["name"] == "description-author")
+        .unwrap();
+    assert_eq!(author["description"], description["description"]);
+    assert_eq!(author["description_updated_at"], description["updated_at"]);
+    assert!(
+        author.get("active").is_none(),
+        "description freshness does not assert runtime liveness"
+    );
+    assert!(peers
+        .iter()
+        .any(|row| row["name"] == "empty-peer" && row.get("description").is_none()));
+    common::expect_screen_settled(
+        &observer,
+        |screen| {
+            screen.contains("Investigating peer discovery") && screen.contains("updated just now")
+        },
+        WAIT,
+        "peer description and age are visible",
+    );
+    exit(&mut observer);
+}
+
+#[test]
+fn optional_peer_metadata_never_causes_a_checkpoint_repair_request() {
+    for mode in ["MISSING", "INVALID", "PLAIN_INVALID", "UNTERMINATED"] {
+        let env = TestEnv::new_mock("peer-description-optional");
+        let capture = Capture::new();
+        let path = fixture(&env, &capture);
+        peer_description_settings(&env, "description-author");
+        let directory = runtime::mailbox::local_pair_root_in(env.config_home())
+            .join("agents/description-author");
+        std::fs::create_dir_all(&directory).unwrap();
+        let metadata = directory.join("description.json");
+        let previous = json!({"description":"Earlier ongoing work", "updated_at":"2026-10-01T00:00:00Z", "source_session_id":"previous-session"}).to_string();
+        std::fs::write(&metadata, &previous).unwrap();
+        let mut cli = spawn(&env, &path);
+        turn(
+            &mut cli,
+            &format!("PEER_DESCRIPTION_{mode}: current assignment changed."),
+        );
+        cli.send("/compact\r").unwrap();
+        cli.expect("Messages removed").unwrap();
+        common::expect_input_line_cleared(
+            &cli,
+            WAIT,
+            "valid checkpoint with optional metadata omitted",
+        );
+        exit(&mut cli);
+        assert_eq!(previous.as_bytes(), std::fs::read(metadata).unwrap());
+        assert_eq!(
+            capture
+                .bodies()
+                .iter()
+                .filter(|request| request.to_string().contains(COMPACT))
+                .count(),
+            1,
+            "optional metadata must not spend another model call"
+        );
+        let saved = Session::load_from_path(&path).unwrap();
+        assert!(!checkpoint_text(&saved).contains("agent-description"));
+    }
+}
+
+#[test]
+fn peer_description_survives_failed_checkpoint_and_pruning_without_a_model_call() {
+    let env = TestEnv::new_mock("peer-description-maintenance");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    peer_description_settings(&env, "description-author");
+    let directory =
+        runtime::mailbox::local_pair_root_in(env.config_home()).join("agents/description-author");
+    std::fs::create_dir_all(&directory).unwrap();
+    let metadata = directory.join("description.json");
+    let previous = json!({"description":"Earlier ongoing work", "updated_at":"2026-10-01T00:00:00Z", "source_session_id":"previous-session"}).to_string();
+    std::fs::write(&metadata, &previous).unwrap();
+    capture
+        .rejections
+        .lock()
+        .unwrap()
+        .push_back("invalid max_tokens recovery-test-rejection".into());
+    let mut cli = spawn(&env, &path);
+    cli.send("/compact\r").unwrap();
+    cli.expect("recovery-test-rejection").unwrap();
+    common::expect_input_line_cleared(&cli, WAIT, "failed checkpoint preserves description");
+    exit(&mut cli);
+    assert_eq!(previous.as_bytes(), std::fs::read(&metadata).unwrap());
+
+    let config_path = env.config_home().join("sudocode.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["models"]["claude-sonnet"]["contextWindow"] = json!(50_000);
+    config["models"]["claude-sonnet"]["maxOutputTokens"] = json!(1024);
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let mut session = Session::load_from_path(&path).unwrap();
+    session
+        .push_message(ConversationMessage::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "large-diagnostic".into(),
+                name: "bash".into(),
+                input: "{}".into(),
+                thought_signature: None,
+            },
+        ]))
+        .unwrap();
+    session
+        .push_message(ConversationMessage::tool_result(
+            "large-diagnostic",
+            "bash",
+            format!("HEAD_DIAGNOSTIC {} TAIL_DIAGNOSTIC", "x".repeat(160_000)),
+            false,
+        ))
+        .unwrap();
+    session.save_to_path(&path).unwrap();
+    drop(session);
+    let count = capture.bodies().len();
+    let mut cli = spawn(&env, &path);
+    turn(
+        &mut cli,
+        "CURRENT_PEER_WORK: continue after pruning diagnostic output.",
+    );
+    exit(&mut cli);
+    let requests = capture.bodies();
+    assert_eq!(requests.len(), count + 1, "pruning adds no summary request");
+    assert!(requests.last().unwrap()["messages"]
+        .to_string()
+        .contains("middle pruned"));
+    assert_eq!(previous.as_bytes(), std::fs::read(metadata).unwrap());
+    let saved = Session::load_from_path(&path).unwrap();
+    assert_eq!(
+        saved.last_compaction_report.unwrap().method.as_deref(),
+        Some("tool_pruning")
+    );
+}
+
+fn checkpoint_text(session: &Session) -> String {
+    session.messages()[0]
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn respond(socket: &mut TcpStream, status: &str, mime: &str, body: &str) {
@@ -1594,7 +1925,7 @@ fn ttl_advisor_records_wire_timing_and_decides_once_after_compact() {
         |screen| {
             screen
                 .rsplit_once('─')
-                .is_some_and(|(_, footer)| footer.contains("Cache TTL: consider 1h"))
+                .is_some_and(|(_, footer)| footer.contains("Cache TTL: 1h ≈"))
         },
         WAIT,
         "boundary advice in the shared footer",
@@ -1745,6 +2076,202 @@ fn ttl_advisor_is_opt_in_and_marks_retried_or_restarted_streams() {
     }
 }
 
+/// Ten old rows ten minutes apart, which make the advisor's next boundary
+/// decision suggest 1h. Written before the boundary, so it sees no future.
+fn seed_ttl_history(directory: &std::path::Path) {
+    let rows = cache_rows(directory);
+    let template = rows.last().unwrap();
+    let start = template["observation"]["request_started_ms"]
+        .as_u64()
+        .unwrap();
+    let mut history = String::new();
+    for index in 0..10u64 {
+        let mut row = template.clone();
+        row["gateway_request_id"] = json!(format!("fixture-{index}"));
+        row["provider_request_id"] = Value::Null;
+        let at = start - (11 - index) * 600_000;
+        row["observation"]["request_started_ms"] = json!(at);
+        row["observation"]["response_started_ms"] = json!(at + 1);
+        row["observation"]["response_completed_ms"] = json!(at + 2);
+        row["observation"]["client_prefix_compatible"] = json!(true);
+        row["cache_creation_input_tokens"] = json!(100_000);
+        row["cache_read_input_tokens"] = json!(0);
+        writeln!(history, "{row}").unwrap();
+    }
+    for row in rows {
+        writeln!(history, "{row}").unwrap();
+    }
+    std::fs::write(directory.join("requests.jsonl"), history).unwrap();
+}
+
+fn compact(cli: &mut PtySession, why: &str) {
+    cli.send("/compact\r").unwrap();
+    cli.expect("Messages removed").unwrap();
+    common::expect_input_line_cleared(cli, WAIT, why);
+}
+
+fn footer_shows(cli: &PtySession, text: &str, why: &str) {
+    common::expect_screen(
+        cli,
+        |screen| {
+            screen
+                .rsplit_once('─')
+                .is_some_and(|(_, footer)| footer.contains(text))
+        },
+        WAIT,
+        why,
+    );
+}
+
+/// Whether every request sent since `from` asked for 1h.
+fn sent_1h_since(capture: &Capture, from: usize) -> Vec<bool> {
+    capture
+        .bodies()
+        .iter()
+        .skip(from)
+        .map(|body| body.to_string().contains("\"ttl\":\"1h\""))
+        .collect()
+}
+
+fn saved_ttl(env: &TestEnv) -> Value {
+    let text = std::fs::read_to_string(env.config_home().join("sudocode.json")).unwrap();
+    serde_json::from_str::<Value>(&text).unwrap()["cache_ttl_1h"].clone()
+}
+
+/// The TTL panel saves a choice, and the wire follows it at the cheapest
+/// moment: a switch to 1h waits for a cold prefix (here, a compaction), a
+/// switch to 5m or a forced 1h reaches the next request, and auto removes the
+/// saved value. The fake server's cache is not measured; only what is sent.
+#[test]
+fn ttl_panel_switches_when_cheapest_and_saves_the_choice() {
+    let env = TestEnv::new_mock("ttl-switch");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let id = Session::load_from_path(&path).unwrap().session_id;
+    let directory = env.config_home().join("cache/prompt-cache").join(id);
+    let enabled = [
+        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+    ];
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    turn(&mut cli, "First observed request.");
+    seed_ttl_history(&directory);
+    compact(&mut cli, "first compaction");
+    // The first request after a compaction rewrites the prefix anyway; this
+    // one makes the new context's prefix warm before the switch is chosen.
+    turn(&mut cli, "Warm up the new context.");
+    footer_shows(&cli, "Cache TTL: 1h ≈", "advice in the footer");
+
+    // ↓ from an empty prompt reaches the tip; Enter opens the panel on the
+    // suggested row; Enter applies and saves it.
+    cli.send("\x1b[B").unwrap();
+    footer_shows(&cli, "Enter to review", "focused tip");
+    cli.send("\r").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| screen.contains("Prompt cache TTL") && screen.contains("advisor: 1h"),
+        WAIT,
+        "TTL panel",
+    );
+    cli.send("\r").unwrap();
+    cli.expect("Saved · 1h from the next cold start").unwrap();
+    assert_eq!(saved_ttl(&env), json!(true));
+
+    // Warm: the prefix was just used at 5m, so a 1h request would rewrite it.
+    let from = capture.bodies().len();
+    turn(&mut cli, "A warm turn keeps 5m.");
+    let warm = sent_1h_since(&capture, from);
+    assert!(
+        !warm.is_empty() && warm.iter().all(|one_hour| !one_hour),
+        "{warm:?}"
+    );
+
+    // A compaction rewrites the prefix anyway: the switch lands right after it.
+    compact(&mut cli, "second compaction");
+    let from = capture.bodies().len();
+    turn(&mut cli, "The first turn of the new context.");
+    let cold = sent_1h_since(&capture, from);
+    assert!(
+        !cold.is_empty() && cold.iter().all(|one_hour| *one_hour),
+        "{cold:?}"
+    );
+
+    // 5m keeps the cache, so it applies to the next request.
+    cli.send("/cache ttl 5m\r").unwrap();
+    cli.expect("Saved · 5m from the next request").unwrap();
+    assert_eq!(saved_ttl(&env), json!(false));
+    let from = capture.bodies().len();
+    turn(&mut cli, "Back on 5m.");
+    let down = sent_1h_since(&capture, from);
+    assert!(
+        !down.is_empty() && down.iter().all(|one_hour| !one_hour),
+        "{down:?}"
+    );
+
+    // `n` in the panel forces 1h onto the next request, warm or not.
+    footer_shows(&cli, "Cache TTL: 1h ≈", "advice again after 5m");
+    cli.send("\x1b[B").unwrap();
+    footer_shows(&cli, "Enter to review", "focused tip again");
+    cli.send("\r").unwrap();
+    common::expect_screen(
+        &cli,
+        |screen| screen.contains("Prompt cache TTL"),
+        WAIT,
+        "panel again",
+    );
+    cli.send("n").unwrap();
+    cli.expect("Saved · 1h from the next request").unwrap();
+    let from = capture.bodies().len();
+    turn(&mut cli, "Forced 1h.");
+    let forced = sent_1h_since(&capture, from);
+    assert!(
+        !forced.is_empty() && forced.iter().all(|one_hour| *one_hour),
+        "{forced:?}"
+    );
+
+    // auto removes the saved value; the auth mode decides again.
+    cli.send("/cache ttl auto\r").unwrap();
+    cli.expect("Saved · auto").unwrap();
+    assert_eq!(saved_ttl(&env), Value::Null);
+    exit(&mut cli);
+}
+/// A saved 1h reaches a restarted session at the next cold point too: the
+/// client is built from the setting, but the first request after a quick
+/// restart still reads the prefix the previous process left warm at 5m.
+#[test]
+fn a_saved_1h_waits_for_a_cold_prefix_after_a_restart() {
+    let env = TestEnv::new_mock("ttl-restart");
+    let capture = Capture::new();
+    let path = fixture(&env, &capture);
+    let enabled = [
+        ("SUDOCODE_EXPERIMENT_CACHE_TTL_ADVISOR", "1"),
+        ("SUDOCODE_INTERRUPT_QUEUE_MODE", "queue"),
+    ];
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    turn(&mut cli, "Warm the prefix at 5m.");
+    cli.send("/cache ttl 1h\r").unwrap();
+    cli.expect("Saved · 1h from the next cold start").unwrap();
+    exit(&mut cli);
+    assert_eq!(saved_ttl(&env), json!(true));
+
+    let mut cli = spawn_with_env(&env, &path, &enabled);
+    let from = capture.bodies().len();
+    turn(&mut cli, "A quick restart finds the prefix warm.");
+    let warm = sent_1h_since(&capture, from);
+    assert!(
+        !warm.is_empty() && warm.iter().all(|one_hour| !one_hour),
+        "{warm:?}"
+    );
+    compact(&mut cli, "compaction after the restart");
+    let from = capture.bodies().len();
+    turn(&mut cli, "Cold after the compaction.");
+    let cold = sent_1h_since(&capture, from);
+    assert!(
+        !cold.is_empty() && cold.iter().all(|one_hour| *one_hour),
+        "{cold:?}"
+    );
+    exit(&mut cli);
+}
 fn exit(cli: &mut PtySession) {
     cli.send("/exit\r").unwrap();
     assert_eq!(cli.expect_eof().unwrap(), 0);

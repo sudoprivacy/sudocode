@@ -22,6 +22,7 @@ on:
     tags:
       - 'nexusd-cohost-v*'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
     paths:
       - .github/workflows/release-nexusd-cohost.yml
@@ -47,6 +48,8 @@ env:
 
 jobs:
   build:
+    # Not on draft PRs; see the heavy-job note in rust-ci.yml.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60

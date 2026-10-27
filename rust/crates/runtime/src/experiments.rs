@@ -45,6 +45,8 @@ pub enum Experiment {
     SharedSessionHistory,
     /// Local TTL recommendations; never changes a request's cache policy.
     CacheTtlAdvisor,
+    /// Publish short persistent peer descriptions with existing compaction calls.
+    PeerDescriptions,
 }
 
 impl Experiment {
@@ -53,6 +55,7 @@ impl Experiment {
         Experiment::McpConfigServers,
         Experiment::SharedSessionHistory,
         Experiment::CacheTtlAdvisor,
+        Experiment::PeerDescriptions,
     ];
 
     /// Key under `"experimental"` in `settings.json` (camelCase, like
@@ -64,6 +67,7 @@ impl Experiment {
             Experiment::McpConfigServers => "mcpConfigServers",
             Experiment::SharedSessionHistory => "sharedSessionHistory",
             Experiment::CacheTtlAdvisor => "cacheTtlAdvisor",
+            Experiment::PeerDescriptions => "peerDescriptions",
         }
     }
 
@@ -75,6 +79,7 @@ impl Experiment {
             Experiment::McpConfigServers => "MCP_CONFIG_SERVERS",
             Experiment::SharedSessionHistory => "SHARED_SESSION_HISTORY",
             Experiment::CacheTtlAdvisor => "CACHE_TTL_ADVISOR",
+            Experiment::PeerDescriptions => "PEER_DESCRIPTIONS",
         }
     }
 
@@ -88,6 +93,7 @@ impl Experiment {
             Experiment::McpConfigServers => Some("SUDOCODE_ENABLE_MCP"),
             Experiment::SharedSessionHistory => None,
             Experiment::CacheTtlAdvisor => None,
+            Experiment::PeerDescriptions => None,
         }
     }
 }

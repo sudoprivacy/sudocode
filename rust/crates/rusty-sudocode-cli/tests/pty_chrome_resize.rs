@@ -1,4 +1,4 @@
-//! Resizing inline chrome must not commit old frames into terminal history.
+//! Resizing or restarting inline chrome must not retain old live frames.
 mod common;
 
 use common::TestEnv;
@@ -53,6 +53,98 @@ fn resize_keeps_one_status_and_todo_without_erasing_history_or_input() {
         assert_eq!(
             env.captured_message_count(),
             0,
+            "resize must not run a turn"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires the pinned real terminal host; CI runs this test explicitly"]
+fn exit_then_resume_does_not_keep_status_or_todos_in_scrollback() {
+    let env = TestEnv::new("resume-tall-chrome");
+    let todos: Vec<_> = (0..11)
+        .map(|i| {
+            serde_json::json!({
+                "content": format!("TransientTodoSentinel{i}"),
+                "activeForm": format!("TransientTodoSentinel{i}"),
+                "status": if i < 7 { "completed" } else if i < 9 { "in_progress" } else { "pending" },
+            })
+        })
+        .collect();
+    let store = env.workspace_root().join("todos.json");
+    std::fs::write(&store, serde_json::to_vec(&todos).unwrap()).unwrap();
+    let mut saved = Session::new().with_workspace_root(env.workspace_root());
+    saved.push_user_text("Earlier saved request").unwrap();
+    let mut previous = ConversationMessage::assistant(vec![ContentBlock::Text {
+        text: "Earlier saved response".into(),
+    }]);
+    previous.usage = Some(TokenUsage {
+        cache_read_input_tokens: 3_400_000_000,
+        ..TokenUsage::default()
+    });
+    saved.push_message(previous).unwrap();
+    saved.push_user_text("Saved resize conversation").unwrap();
+    let mut body = String::new();
+    for i in 0..70 {
+        use std::fmt::Write as _;
+        writeln!(body, "Earlier history line {i}").unwrap();
+    }
+    body.push_str("ResizeHistorySentinel");
+    let mut message = ConversationMessage::assistant(vec![ContentBlock::Text { text: body }]);
+    message.usage = Some(TokenUsage {
+        cache_read_input_tokens: 15_000,
+        cache_creation_input_tokens: 4_095,
+        output_tokens: 900,
+        ..TokenUsage::default()
+    });
+    message.duration_ms = Some(61_000);
+    saved.push_message(message).unwrap();
+    let path = env.workspace_root().join("resize-session.jsonl");
+    saved.save_to_path(&path).unwrap();
+    let prompt = env.prompt(
+        "Reply with exactly ChromeContinueSentinel. Do not call tools.",
+        "single_turn_text",
+    );
+    let expected_reply = if env.is_live() {
+        "ChromeContinueSentinel"
+    } else {
+        "The answer is 4"
+    };
+    let output = run_terminal(
+        &env,
+        &[
+            "--resume",
+            path.to_str().unwrap(),
+            "--permission-mode",
+            "read-only",
+        ],
+        "resume-chrome",
+        serde_json::json!({
+            "todos": store, "prompt": prompt,
+            "expectedReply": expected_reply,
+        }),
+    );
+    common::terminal_host::assert_success(&output);
+    let restored = Session::load_from_path(&path).unwrap();
+    assert_eq!(
+        &restored.messages()[..saved.messages().len()],
+        saved.messages()
+    );
+    let reply = restored.messages().last().expect("persisted reply");
+    assert_eq!(reply.role, runtime::MessageRole::Assistant);
+    let text = reply
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(text.trim(), expected_reply);
+    if env.is_mock() {
+        assert_eq!(
+            env.captured_message_count(),
+            1,
             "resize must not run a turn"
         );
     }
@@ -287,5 +379,36 @@ fn run_terminal(
     };
     let mut arguments = vec!["--auth", auth.as_str(), "--model", model.as_str()];
     arguments.extend_from_slice(args);
-    common::terminal_host::run(env, &arguments, scenario, extra)
+    if scenario != "resume-chrome" {
+        return common::terminal_host::run(env, &arguments, scenario, extra);
+    }
+    // This scenario owns its entry point and reuses the pinned observer;
+    // shared performance workloads and measurement fixtures stay unchanged.
+    let log_root = std::env::var_os("SCODE_TERMINAL_LOG_DIR")
+        .map_or_else(
+            || env.workspace_root().join("terminal-logs"),
+            std::path::PathBuf::from,
+        )
+        .join(scenario);
+    std::fs::create_dir_all(&log_root).unwrap();
+    let mut config = serde_json::json!({
+        "binary": common::scode_bin(), "args": arguments, "scenario": scenario,
+        "root": env.workspace_root(), "configHome": env.config_home(), "logRoot": log_root,
+        "backend": std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
+        "cols": 120, "rows": 24,
+    });
+    config
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/terminal/resume_chrome.cjs");
+    std::process::Command::new(
+        std::env::var_os("SCODE_TERMINAL_HOST").unwrap_or_else(|| "node".into()),
+    )
+    .arg(script)
+    .arg(config.to_string())
+    .env("ELECTRON_RUN_AS_NODE", "1")
+    .output()
+    .expect("start the pinned real terminal host; see e2e/terminal-resize/README.md")
 }

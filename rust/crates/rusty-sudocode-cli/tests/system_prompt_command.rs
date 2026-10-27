@@ -18,7 +18,9 @@ fn run_system_prompt(
     envs: &[(&str, &str)],
     extra_args: &[&str],
 ) -> std::process::Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_scode"));
+    let binary =
+        std::env::var_os("SCODE_TEST_BIN").unwrap_or_else(|| env!("CARGO_BIN_EXE_scode").into());
+    let mut cmd = Command::new(binary);
     cmd.current_dir(cwd);
     for (k, v) in envs {
         cmd.env(k, v);
@@ -89,6 +91,19 @@ fn system_prompt_carries_the_agent_type_catalog() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(text.contains("# Diagrams") && text.contains("fenced `mermaid` block"));
+    for family in [
+        "flowchart",
+        "sequenceDiagram",
+        "stateDiagram-v2",
+        "classDiagram",
+        "erDiagram",
+    ] {
+        assert!(
+            text.contains(family),
+            "missing supported diagram family {family}"
+        );
+    }
 
     assert!(
         text.contains("<available-agent-types>") && text.contains("</available-agent-types>"),

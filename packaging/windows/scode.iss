@@ -58,6 +58,7 @@ Name: "addtopath"; Description: "将安装目录加入 PATH（推荐，新开终
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "scode.exe"; Flags: ignoreversion
+Source: "..\..\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Registry]
 ; Append the install dir to the per-user PATH (HKA resolves to HKCU for a

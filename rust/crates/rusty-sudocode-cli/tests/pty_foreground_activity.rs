@@ -28,15 +28,9 @@ fn running_status(screen: &str) -> bool {
     let line = live_status(screen);
     line.chars().next().is_some_and(|glyph| {
         ('\u{2800}'..='\u{28ff}').contains(&glyph) || ['◐', '◓', '◑', '◒'].contains(&glyph)
-    }) && [
-        "Working...",
-        "Thinking...",
-        "Reasoning...",
-        "Running",
-        "Retry",
-    ]
-    .iter()
-    .any(|label| line.contains(label))
+    }) && ["Working...", "Thinking...", "Running", "Retry"]
+        .iter()
+        .any(|label| line.contains(label))
 }
 
 fn submit(session: &mut PtySession, prompt: &str) {
@@ -345,7 +339,7 @@ fn brand_animation_and_parallel_summary_share_one_status_row() {
             );
         }
         for (text, color) in [
-            ("Running", "Rgb(166, 227, 161)"),
+            ("Running", "Default"),
             ("[claude", "Idx(247)"),
             ("s)", "Idx(247)"),
         ] {

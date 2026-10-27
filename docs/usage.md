@@ -4,6 +4,10 @@ Day-to-day `scode` workflows.
 
 ## Installation and updates
 
+Choose daemon-free execution or shared local services with
+[`scode setup`](shared-services.md). The runtime owner, installation behavior
+and separate collaboration-enrollment boundary are defined there.
+
 Install macOS/Linux with the [installer](../install.sh), or choose a platform
 package from [GitHub Releases](https://github.com/sudoprivacy/sudocode/releases/latest).
 Release builds check for updates in the background when an interactive terminal
@@ -37,6 +41,45 @@ manifest. Both the installer and updater resolve `/latest` once, then download
 from the immutable sibling `vX.Y.Z` directory. A versioned mirror directory pins
 its own version. The publisher verifies the complete mirror before promoting the
 pointer; the client verifies the downloaded archive's SHA-256 before installation.
+
+## Persistent peer descriptions
+
+Enable `experimental.peerDescriptions` in settings to let model-backed
+compaction publish a short description of each peer's ongoing work:
+
+```json
+{"experimental":{"peerDescriptions":true}}
+```
+
+The existing compaction call produces optional description metadata alongside
+its checkpoint. It adds no separate summarizer or repair request. New agents
+have no description until one is published. Tool-output pruning, skipped or
+failed compaction, and ordinary turns preserve the previous description and
+its timestamp. Child agents retain their existing task descriptions.
+
+The source of truth is `/agents/<name>/description.json` in the actual peer
+mailbox namespace. Without a Nexus node, that path is relative to
+`~/.nexus/sudocode/local-mailbox/`. The record contains `description`,
+`updated_at`, and `source_session_id`. It survives process exit and resume;
+resuming an older session does not restore an older description. The owning
+agent publishes only after its checkpoint commits. A description changed
+during compaction is preserved. Native filesystem locks exclude concurrent
+writers; node backends retain their advisory lease guarantee unless they
+provide conditional writes.
+
+`agent_list` reads these records and returns optional `description` and
+`description_updated_at` fields. Terminal cards show the description and its
+age. Missing or unreadable metadata never removes an otherwise reachable peer.
+The timestamp records the last description refresh and does not assert that a
+peer is running. Descriptions persist until replaced or explicitly removed.
+
+Stored descriptions are not injected into ordinary system prompts or compacted
+continuations. Description instructions and a bounded hint of the latest
+preserved user intent are appended only to the existing final compaction
+instruction. Cached system/tool definitions, historical messages, and the
+retained recent tail keep their existing bytes and boundaries. The experiment
+is off by default; disabling it preserves the original request and listing
+shape.
 
 ## Editing a prompt
 
@@ -131,7 +174,9 @@ receiver stops. Hosts can also subscribe to structured tracing. An unchanged
 receiver-seat error is recorded once; retries continue without writing into
 the terminal's input area.
 
-This does not start Nexus or mint an agent credential. A missing record still
+The connection record alone does not start Nexus or mint an agent credential.
+An explicit [local-owner registration](shared-services.md#recover-an-existing-local-box)
+can resume the same locally owned Box after multi-agent selection. A missing record still
 selects the same-machine disk namespace. Record parsing, missing credential
 files and credential identity mismatches still stop startup; a lazy client is
 not proof that TLS authentication will succeed. Changing an already running session
@@ -275,6 +320,23 @@ the existing complete-block rendering path. On Windows, this also applies to
 combining sequences whose widths legacy console hosts cannot reliably preserve;
 the original Unicode text is retained without normalization. A clipped paragraph or an
 unusually long result summary can still change its visible position.
+
+Completed `mermaid` fences render as terminal diagrams through the same Markdown
+path for streamed answers, replay and Markdown prompts. The renderer reuses
+Codex's pinned native engine; no browser, JavaScript runtime or external process
+is needed. Diagram borders use the existing theme and `NO_COLOR` remains supported.
+
+Use compact flowcharts, sequence diagrams, flat state diagrams, class diagrams
+or ER diagrams. Prefer `flowchart TD` on narrow terminals. See the upstream
+[supported syntax and limits](../rust/vendor/codex-mermaid/README.md): this is a
+bounded subset rather than full Mermaid support. Unfinished fences stay source;
+unsupported syntax or diagrams that cannot fit show a reason and the original
+source. Control characters in source fallback display as escapes. The persisted
+Markdown stays unchanged, and replay renders against its current terminal width;
+diagrams already committed to native scrollback do not reflow on resize.
+
+The default system prompt advertises when a diagram helps and how to stay within
+this subset. Explicit system-prompt replacement still replaces those defaults.
 
 The live UI retains the existing formatter colors and supported text styles:
 tool-card borders show status without extra icons: muted while waiting for
@@ -424,6 +486,14 @@ plan, or clear conversation history.
 `write_plan` saves the complete Markdown document, including Context,
 Constraints, and Acceptance Criteria, before presenting it for review. The
 saved document is the source for both the preview and the approved tool result.
+Both REPLs show it in a distinct `Plan · awaiting review` frame with the saved
+file path. Reasoning stays above the review, and the choices stay below it.
+Completed `WritePlan` cards show the review decision and file path rather than
+abbreviated plan arguments. Revision feedback and cancellation are normal
+review outcomes; failures to save or validate a plan remain errors.
+On resume, review documents are reconstructed from their recorded tool inputs
+with the same document composer. A later edit to the current plan file does
+not rewrite an earlier proposal in conversation history.
 If it changes while review is pending, it must be presented again for approval.
 “Clear context & execute” discards exploration messages after the current tool
 exchange completes, then continues execution in the same turn without another
@@ -834,9 +904,19 @@ scode --model <vision-model> 'Describe @/absolute/path/screenshot.png'
 scode --model <vision-model> 'Describe @"screenshots/home page.png"'
 ```
 
-The synchronous REPL also submits clipboard images pasted alongside a text
-prompt. Image bytes are validated and preflighted before being sent; a missing
-or invalid referenced image produces an error rather than a text-only request.
+In the REPL, paste a clipboard image with **Alt+V**, with **Ctrl+V** where the
+terminal passes it through, or with the terminal's own paste (Cmd+V on macOS)
+when the clipboard holds only an image. On Windows Terminal, Ctrl+V is the
+terminal's text paste, so use Alt+V there. The image shows as `[Image #N]` in
+the default REPL and as its `@"path"` reference in the classic synchronous REPL,
+and it is attached on submit exactly like a typed reference: a copied image file
+is referenced where it is, and pasted image data is stored in the image cache
+first. For scripts and tests, `SUDOCODE_CLIPBOARD_IMAGE=<file>` stands in for
+the system clipboard, which is then never read: the clipboard holds only the
+image in that file, or no image when the file is not one.
+
+Image bytes are validated and preflighted before being sent; a missing or
+invalid referenced image produces an error rather than a text-only request.
 Repeated references to the same spelling of a path attach it once per prompt.
 
 Agents can inspect images using `Read` (`read_file`). For example, after the

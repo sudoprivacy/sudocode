@@ -654,6 +654,11 @@ pub(crate) fn print_help_to(out: &mut impl Write) -> io::Result<()> {
         out,
         "      Diagnose local auth, config, workspace, and sandbox health"
     )?;
+    writeln!(out, "  scode setup [--mode local|shared] [--check]")?;
+    writeln!(
+        out,
+        "      Select local execution or prepare shared local services"
+    )?;
     writeln!(out, "  scode login")?;
     writeln!(
         out,

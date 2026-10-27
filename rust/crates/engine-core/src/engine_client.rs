@@ -70,6 +70,25 @@ impl Drop for EngineApiClient {
 }
 
 impl EngineApiClient {
+    /// Let a chosen TTL reach this request when it is cheapest to switch; see
+    /// [`crate::cache_ttl`].
+    fn prepare_cache_ttl(&self) {
+        let Some(ttl) = self.client.cache_ttl() else {
+            return;
+        };
+        let ledger = self
+            .client
+            .cache_advisor_context()
+            .map(|(cache, _, _)| cache.paths().session_dir);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        crate::cache_ttl::before_request(&self.session_id, ttl, ledger.as_deref(), now_ms);
+    }
+
     #[must_use]
     pub fn with_response_archive(mut self, archive: Arc<dyn telemetry::ResponseArchive>) -> Self {
         if let Some(tracer) = self.client.session_tracer().cloned() {
@@ -588,6 +607,7 @@ impl ApiClient for EngineApiClient {
     }
 
     fn cache_context_boundary(&mut self, segment: u64) {
+        crate::cache_ttl::context_boundary(&self.session_id, segment);
         if runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor) {
             if let Some((cache, route, ttl)) = self.client.cache_advisor_context() {
                 cache.set_context_segment(segment);
@@ -620,6 +640,7 @@ impl EngineApiClient {
         request: ApiRequest,
         allow_tools: bool,
     ) -> Result<AssistantEventStream, RuntimeError> {
+        self.prepare_cache_ttl();
         let catalog = self.catalog.clone();
         let request = async {
             let is_post_tool = request_ends_with_tool_result(&request);
@@ -709,6 +730,8 @@ fn runtime_error_from_api(
         RuntimeError::context_window_blocked(message)
     } else if error.is_thinking_replay_rejected() {
         RuntimeError::thinking_replay_rejected(message)
+    } else if error.is_interrupted_stream() {
+        RuntimeError::stream_interrupted(message)
     } else {
         RuntimeError::new(message).retryable(error.is_retryable())
     }

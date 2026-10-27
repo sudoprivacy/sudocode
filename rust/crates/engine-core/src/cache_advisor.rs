@@ -156,6 +156,7 @@ struct Scenario {
     fixed_5m_usd: f64,
     fixed_1h_usd: f64,
     boundary_policy_usd: f64,
+    /// Switches that paid a full rewrite: 5m to 1h while the prefix was warm.
     transition_writes: usize,
 }
 
@@ -215,11 +216,20 @@ fn reusable(previous: &Row, current: &Row) -> Option<(u64, u64)> {
     Some((gap, previous.cached().min(current.cached())))
 }
 
-fn cost(row: &Row, previous: Option<&Row>, ttl: u32, switched: bool, price: &Price) -> f64 {
+/// Cost of `row` sent at `ttl`, when the previous request's prefix was held
+/// for `held` seconds. `rewrite` charges the whole cached input as a write.
+fn cost(
+    row: &Row,
+    previous: Option<&Row>,
+    ttl: u32,
+    held: u32,
+    rewrite: bool,
+    price: &Price,
+) -> f64 {
     let mut read = 0;
-    if !switched {
+    if !rewrite {
         if let Some((gap, prefix)) = previous.and_then(|p| reusable(p, row)) {
-            if gap < u64::from(ttl) * 1000 {
+            if gap < u64::from(held) * 1000 {
                 read = prefix;
             }
             // Preserve a hit actually observed under this same requested TTL,
@@ -272,13 +282,24 @@ fn replay(
         if interval.is_some() {
             result.eligible_intervals += 1;
         }
-        let switched = previous_policy.is_some_and(|p| p != policy);
-        if switched {
-            result.transition_writes += 1;
-        }
-        result.fixed_5m_usd += cost(row, previous, 300, false, price);
-        result.fixed_1h_usd += cost(row, previous, 3600, false, price);
-        result.boundary_policy_usd += cost(row, previous, policy, switched, price);
+        // Measured against the API: a growing request that asks for 1h on a
+        // prefix still warm at 5m rewrites the whole prefix at the 1h price;
+        // one asking for 5m on a 1h prefix keeps reading it. A switch on a
+        // prefix already gone costs nothing extra, it is rewritten anyway.
+        let (held, rewrite) = match previous_policy {
+            Some(before) if before != policy => {
+                let warm = interval.is_some_and(|(gap, _)| gap < u64::from(before) * 1000);
+                let rewrite = policy > before && warm;
+                if rewrite {
+                    result.transition_writes += 1;
+                }
+                (before, rewrite)
+            }
+            _ => (policy, false),
+        };
+        result.fixed_5m_usd += cost(row, previous, 300, 300, false, price);
+        result.fixed_1h_usd += cost(row, previous, 3600, 3600, false, price);
+        result.boundary_policy_usd += cost(row, previous, policy, held, rewrite, price);
         result.rows += 1;
         previous = Some(row);
         previous_policy = Some(policy);
@@ -388,7 +409,7 @@ pub fn report(directory: &Path) -> Value {
         "timing_basis": "request_start", "upstream_ttl": "unknown",
         "cost_basis": table.basis, "price_version": table.version,
         "comparison_kind": "hypothetical_not_causal_or_billed_savings",
-        "assumptions": "append-compatible client prefixes survive on the same upstream; no TTL-boundary jitter; first/context-change/switch charged as full cached-input write",
+        "assumptions": "append-compatible client prefixes survive on the same upstream; no TTL-boundary jitter; first request and context change charged as a full cached-input write; a switch to 1h on a warm prefix rewrites it at the 1h price, a switch to 5m keeps it",
         "coverage": coverage, "max_ledger_bytes": MAX_BYTES, "min_intervals": MIN_INTERVALS,
         "switch_margin": SWITCH_MARGIN,
         "decisions": state.decisions.iter().map(|d| json!({
@@ -401,33 +422,157 @@ pub fn report(directory: &Path) -> Value {
     })
 }
 
-/// The current boundary recommendation, using the same saved decision as stats.
-/// No ledger scan, price calculation, model call or request-policy change.
+/// What the footer and the TTL panel need to offer a switch: the saved
+/// boundary decision, the TTL this session's requests use, and what moving
+/// the cached prefix would cost. No ledger scan beyond the last request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TtlAdvice {
+    pub suggested_seconds: u32,
+    pub effective_seconds: u32,
+    pub pending: Option<crate::cache_ttl::PendingTtl>,
+    /// Whether the decision found a saving, rather than lacking evidence.
+    pub has_saving: bool,
+    pub rows: usize,
+    pub fixed_5m_usd: f64,
+    pub fixed_1h_usd: f64,
+    /// Cached input of the session's last request: the prefix a switch to 1h
+    /// rewrites.
+    pub cached_tokens: u64,
+    /// One-time cost of that rewrite now, while warm, and at a cold point,
+    /// where the prefix is rewritten anyway. Reference prices; `None` for a
+    /// model the price table does not know.
+    pub switch_now_usd: Option<f64>,
+    pub switch_cold_usd: Option<f64>,
+}
+
+impl TtlAdvice {
+    /// The suggested TTL's saving over the other one, as a percentage.
+    #[must_use]
+    pub fn saving_pct(&self) -> f64 {
+        let (chosen, other) = if self.suggested_seconds == 3600 {
+            (self.fixed_1h_usd, self.fixed_5m_usd)
+        } else {
+            (self.fixed_5m_usd, self.fixed_1h_usd)
+        };
+        if other > 0.0 {
+            100.0 * (1.0 - chosen / other)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// `"1h"` or `"5m"`.
+#[must_use]
+pub fn ttl_label(seconds: u32) -> &'static str {
+    if seconds == 3600 {
+        "1h"
+    } else {
+        "5m"
+    }
+}
+
+fn valid_session_id(session_id: &str) -> bool {
+    matches!(
+        Path::new(session_id).components().next(),
+        Some(std::path::Component::Normal(_))
+    ) && Path::new(session_id).components().count() == 1
+}
+
+/// Cached input of the last request in the ledger, read from its tail.
+fn last_cached_tokens(directory: &Path) -> u64 {
+    let Ok(mut file) = File::open(directory.join("requests.jsonl")) else {
+        return 0;
+    };
+    let length = file.metadata().map_or(0, |m| m.len());
+    if file
+        .seek(SeekFrom::Start(length.saturating_sub(16 * 1024)))
+        .is_err()
+    {
+        return 0;
+    }
+    let mut bytes = Vec::new();
+    if file.take(16 * 1024).read_to_end(&mut bytes).is_err() {
+        return 0;
+    }
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let row = serde_json::from_str::<Row>(line).ok()?;
+            (row.observation.is_some() && row.cached() > 0).then(|| row.cached())
+        })
+        .unwrap_or(0)
+}
+
+/// The boundary recommendation against the TTL actually in use, using the same
+/// saved decision as stats. No price calculation beyond the switch cost.
+#[must_use]
+pub fn ttl_advice(session_id: &str, model: &str) -> Option<TtlAdvice> {
+    if !runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor)
+        || !valid_session_id(session_id)
+    {
+        return None;
+    }
+    let directory = crate::cache_root().join(session_id);
+    let decision = state(&directory).decisions.pop()?;
+    if decision.model != model {
+        return None;
+    }
+    let status = crate::cache_ttl::status(session_id);
+    let cached_tokens = last_cached_tokens(&directory);
+    let price = prices().models.get(model);
+    #[allow(clippy::cast_precision_loss)]
+    let tokens = cached_tokens as f64;
+    Some(TtlAdvice {
+        suggested_seconds: decision.suggested_ttl_seconds,
+        effective_seconds: status
+            .effective_seconds
+            .unwrap_or(decision.configured_ttl_seconds),
+        pending: status.pending,
+        has_saving: decision.reason.starts_with("hypothetical_"),
+        rows: decision.training.rows,
+        fixed_5m_usd: decision.training.fixed_5m_usd,
+        fixed_1h_usd: decision.training.fixed_1h_usd,
+        cached_tokens,
+        switch_now_usd: price.map(|p| tokens * (p.write_1h - p.read) / 1_000_000.0),
+        switch_cold_usd: price.map(|p| tokens * (p.write_1h - p.write_5m) / 1_000_000.0),
+    })
+}
+
+/// The footer tip for the current recommendation: a pending switch, or a
+/// suggestion that differs from the TTL in use. `None` otherwise.
 #[must_use]
 pub fn session_tip(session_id: &str, model: &str) -> Option<crate::Tip> {
-    if !runtime::experiments::is_enabled(runtime::experiments::Experiment::CacheTtlAdvisor)
-        || !matches!(
-            Path::new(session_id).components().next(),
-            Some(std::path::Component::Normal(_))
-        )
-        || Path::new(session_id).components().count() != 1
-    {
+    let advice = ttl_advice(session_id, model)?;
+    if let Some(pending) = advice.pending {
+        let message = match pending.choice {
+            crate::cache_ttl::TtlChoice::OneHour if !pending.force_now => {
+                "Cache TTL: 1h at the next cold start".to_owned()
+            }
+            crate::cache_ttl::TtlChoice::OneHour => {
+                "Cache TTL: 1h from the next request".to_owned()
+            }
+            crate::cache_ttl::TtlChoice::FiveMinutes => {
+                "Cache TTL: 5m from the next request".to_owned()
+            }
+            crate::cache_ttl::TtlChoice::Auto => "Cache TTL: auto from the next request".to_owned(),
+        };
+        return Some(crate::Tip {
+            priority: crate::TipPriority::Normal,
+            message,
+        });
+    }
+    if !advice.has_saving || advice.suggested_seconds == advice.effective_seconds {
         return None;
     }
-    let decision = state(&crate::cache_root().join(session_id))
-        .decisions
-        .pop()?;
-    if decision.model != model || decision.suggested_ttl_seconds == decision.configured_ttl_seconds
-    {
-        return None;
-    }
-    let label = |ttl| if ttl == 3600 { "1h" } else { "5m" };
     Some(crate::Tip {
         priority: crate::TipPriority::Important,
         message: format!(
-            "Cache TTL: consider {} (current {}; not applied)",
-            label(decision.suggested_ttl_seconds),
-            label(decision.configured_ttl_seconds)
+            "Cache TTL: {} ≈{:.0}% cheaper (now {})",
+            ttl_label(advice.suggested_seconds),
+            advice.saving_pct(),
+            ttl_label(advice.effective_seconds)
         ),
     })
 }

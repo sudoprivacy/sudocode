@@ -228,6 +228,7 @@ pub(crate) struct EventSink {
     order: Arc<Mutex<()>>,
     state: Arc<Mutex<engine_events::EngineState>>,
     pub(crate) completions: Arc<CompletionState>,
+    pub(crate) inputs: Arc<crate::session_inputs::SessionInputs>,
 }
 
 impl EventSink {
@@ -240,6 +241,7 @@ impl EventSink {
             completions,
             order: Arc::default(),
             state: Arc::new(Mutex::new(engine_events::EngineState::Idle)),
+            inputs: Arc::default(),
         }
     }
 
@@ -247,9 +249,7 @@ impl EventSink {
         &self,
         message: String,
     ) -> Result<(), std::sync::mpsc::SendError<()>> {
-        let tx = self.route()?;
-        tx.send(EngineEvent::PromptRejected { message })
-            .map_err(|_| std::sync::mpsc::SendError(()))?;
+        self.send(EngineEvent::PromptRejected { message })?;
         self.send(EngineEvent::State(engine_events::EngineState::Idle))
     }
 
@@ -286,6 +286,10 @@ impl EventSink {
             EngineEvent::TurnStarted { .. }
                 | EngineEvent::TurnComplete(_)
                 | EngineEvent::TurnFailed { .. }
+                | EngineEvent::PromptRejected { .. }
+                | EngineEvent::InputCommitted(_)
+                | EngineEvent::InputDeferred(_)
+                | EngineEvent::BackgroundTask(_)
                 | EngineEvent::ToolResult { .. }
         ) || matches!(&event, EngineEvent::Subagent(event) if matches!(event.update, SubagentUpdate::Lifecycle(_)))
         {
@@ -293,8 +297,24 @@ impl EventSink {
                 .order
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for event in self.completions.observe(event) {
+            let events = if matches!(event, EngineEvent::BackgroundTask(_)) {
+                vec![event]
+            } else {
+                self.completions.observe(event)
+            };
+            for event in events {
+                let input_state = if matches!(event, EngineEvent::BackgroundTask(_))
+                    && self.completions.journal().is_some()
+                {
+                    None
+                } else {
+                    self.inputs.observe(&event)
+                };
                 tx.send(event).map_err(|_| std::sync::mpsc::SendError(()))?;
+                if let Some(state) = input_state {
+                    tx.send(EngineEvent::InputState(state))
+                        .map_err(|_| std::sync::mpsc::SendError(()))?;
+                }
             }
             Ok(())
         } else {

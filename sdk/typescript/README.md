@@ -124,6 +124,38 @@ namespace; the wrapper does not accept a caller-selected sender.
 
 ## Optional Codex callback adapter and existing-thread migration
 
+The current bridge binds one explicitly configured ACP SID and callback thread.
+It is not a global autojoin entry for arbitrary Codex conversations. The
+[Codex autojoin investigation](../../docs/design/codex-network-autojoin.md)
+records the native startup/context boundaries and acceptance required for that
+mode, including idle-start behavior and authorized Agent enrollment.
+
+`connectCodex({codexArgv, socket?, closeTimeoutMs?, onNotificationError?}, onNotification?)`
+exposes the existing native proxy transport for context inspection. It returns
+`initialized`, `request`, `exited`, `lastNotificationError` and an idempotent
+`close` that waits for its own spawned process, with bounded forced exit. Both
+ACP and native shutdown use the same timeout primitive. This never stops the
+native server; an arbitrary wrapper's other descendants are outside that exit
+receipt. Pass the actual executable, or Node plus a script path, rather than a
+Windows `.cmd` shell wrapper: spawning uses `shell:false`.
+
+Server requests are ignored without responding, even when their IDs overlap
+local pending calls. They belong to the actual frontend, including broadcast
+authentication refresh. Only notifications reach the optional observer. Its
+exceptions/rejections are retained in `lastNotificationError` and sent to the
+optional diagnostic observer without failing requests or printing to stderr.
+The callback below uses this same transport implementation.
+
+Native requests are sent once. `CodexRequestError.outcome` is `not_sent` for a
+local pre-send refusal; once submitted, transport failure is `unknown`. A remote
+JSON-RPC error is retained as `rpcError` with outcome `unknown`: the transport
+does not certify that an arbitrary failed RPC had no side effects. No error or
+active-to-idle race triggers an automatic resend. The helper does not start a
+native server, select an Agent, enroll an
+identity or discover other frontend endpoints. Native notifications are
+observations, not proof of network admission. Close the connection in `finally`
+after a read-only `thread/loaded/list` / `thread/read` inspection.
+
 `codexCallback` is an optional adapter, separate from the ACP transport. It
 connects to the existing native app-server proxy/socket and original loaded
 thread. It steers an active turn or starts an idle turn through the native

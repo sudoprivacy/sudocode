@@ -119,6 +119,53 @@ pub struct PromptContext {
     pub trace_id: String,
     pub expected_context: Option<ContextRef>,
     pub image_policy: ImageInputPolicy,
+    /// Inputs acknowledged only after the initial prompt has been persisted.
+    pub input_views: Vec<InputView>,
+}
+
+/// Delivery control is independent of transport and never inferred from a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputAction {
+    Submit {
+        client_id: String,
+        draft: Option<serde_json::Value>,
+        input: TurnInput,
+        delivery: InputDelivery,
+        context: Option<PromptContext>,
+    },
+    Flush,
+    FlushOrCancel,
+    Recall,
+    Snapshot,
+    /// Fence automatic turns while a host performs an idle lifecycle operation.
+    AcquireLifecycle {
+        token: u64,
+        allow_inputs: bool,
+    },
+    ReleaseLifecycle {
+        token: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInput {
+    pub id: u64,
+    pub client_id: String,
+    pub display: String,
+    pub source: InputSource,
+    pub delivery: InputDelivery,
+}
+
+/// Authoritative projection. Clients render this instead of scheduling inputs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputState {
+    pub revision: u64,
+    pub active_turn_id: Option<u64>,
+    pub running: bool,
+    pub paused: bool,
+    pub pending: Vec<PendingInput>,
 }
 
 /// Build metadata used by session management reports.
@@ -241,6 +288,7 @@ pub struct TurnComplete {
 /// — `PartialEq` is all any consumer (tests included) needs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
+    InputState(InputState),
     /// Persisted into this turn, rather than merely accepted by its input channel.
     InputCommitted(InputView),
     /// Not consumed: return ownership to the submitting surface.
@@ -407,6 +455,10 @@ pub enum EngineCommand {
     /// The reply is a [`EngineEvent::CommandResult`] with this request ID.
     RuntimeStatus {
         request_id: u64,
+    },
+    Input {
+        id: u64,
+        action: InputAction,
     },
     /// Soft steering; never cancels a tool or adds interruption guidance.
     Steer {

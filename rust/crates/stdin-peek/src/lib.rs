@@ -9,6 +9,8 @@
 //!
 //! - [`stdin_is_readable`]: whether stdin has data waiting, consuming nothing.
 //! - [`decode_console_bytes`]: what bytes in the console's code page spell.
+//! - [`prevent_standard_handle_inheritance`]: keep launcher pipes out of a
+//!   background process on Windows.
 //!
 //! # Why stdin readiness
 //!
@@ -30,6 +32,45 @@
 //! knows every code page the system can be set to.
 
 use std::time::Duration;
+
+/// Keep this process's standard handles out of subsequently spawned children.
+///
+/// Explicit child stdio still works: Rust duplicates the selected handles.
+/// The inherit flags stay cleared so a concurrent spawn cannot inherit a
+/// launcher's pipe during a temporary restoration window. No handle is closed.
+#[cfg(windows)]
+pub fn prevent_standard_handle_inheritance() -> std::io::Result<()> {
+    use std::io;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{
+        SetHandleInformation, ERROR_INVALID_HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+
+    for handle in [
+        io::stdin().as_raw_handle(),
+        io::stdout().as_raw_handle(),
+        io::stderr().as_raw_handle(),
+    ] {
+        if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+            continue;
+        }
+        // SAFETY: each handle is borrowed from a live standard stream. This
+        // only clears its inheritance flag; it neither closes nor replaces it.
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_INVALID_HANDLE as i32) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Unix process spawning does not need the Windows inheritance adjustment.
+#[cfg(not(windows))]
+pub fn prevent_standard_handle_inheritance() -> std::io::Result<()> {
+    Ok(())
+}
 
 /// What a readiness peek concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

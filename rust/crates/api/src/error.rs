@@ -41,6 +41,7 @@ const GENERIC_FATAL_WRAPPER_MARKERS: &[&str] = &[
 
 const CONTEXT_WINDOW_ERROR_MARKERS: &[&str] = &[
     "maximum context length",
+    "maximum prompt length",
     "context window",
     "context length",
     "too many tokens",
@@ -128,7 +129,8 @@ pub enum ApiError {
         request_id: Option<String>,
     },
     /// Once events have escaped, automatic replay could repeat user-visible
-    /// output, usage or tool execution. Preserve the underlying failure.
+    /// output, usage or tool execution. Preserve the underlying failure; the
+    /// conversation continues from its saved partial state instead.
     PartialStream {
         source: Box<ApiError>,
         request_id: Option<String>,
@@ -479,6 +481,12 @@ impl ApiError {
             Self::RetriesExhausted { last_error, .. } => last_error.is_context_window_failure(),
             _ => false,
         }
+    }
+
+    /// A transport failure after provider events had already been delivered.
+    #[must_use]
+    pub fn is_interrupted_stream(&self) -> bool {
+        matches!(self, Self::PartialStream { .. })
     }
 
     /// Only explicit pre-stream signature failures permit discarding thinking.

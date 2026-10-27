@@ -34,6 +34,8 @@ on:
       - spec/cache_metrics.json
       - spec/prompt_cache_observations.json
   pull_request:
+    # `ready_for_review` starts the full run when a draft is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
     paths:
@@ -203,7 +205,13 @@ jobs:
         run: diff -u --strip-trailing-cr .nexus-protocol-source/proto/nexus/grpc/vfs/vfs.proto rust/crates/nexus-vfs-client/proto/nexus/grpc/vfs/vfs.proto
 
   test-workspace:
-    if: *standard_ci
+    # Heavy jobs skip draft PRs: agents iterate on drafts, and every push
+    # cancelled a run that had already spent its runner time. A skipped matrix
+    # job never expands its name, so the per-OS required checks stay "expected"
+    # on a draft instead of reporting success. Marking the PR ready runs them
+    # on the same commit, and the merge queue runs them again on the commit
+    # that becomes main.
+    if: &full_ci ${{ !inputs.render_performance && !inputs.live_only && !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: cargo test --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -235,6 +243,11 @@ jobs:
         run: |
           netsh int ipv4 set dynamicport tcp start=10000 num=55535
           netsh int ipv4 show dynamicport tcp
+      - name: Pinned Codex Mermaid upstream tests
+        # The pinned upstream crate has a standalone lockfile and is excluded
+        # from workspace membership. Keep its original suite in every OS gate.
+        # This step shares the existing cache and adds no separate CI job.
+        run: cargo test --locked --manifest-path vendor/codex-mermaid/Cargo.toml --target-dir target
       - name: PTY native bracketed paste
         # Run the complete input journey on the actual OS PTY, including
         # ConPTY. A platform exclusion cannot count as Windows acceptance.
@@ -289,7 +302,7 @@ jobs:
     steps: *test_workspace_steps
 
   terminal-resize:
-    if: *standard_ci
+    if: *full_ci
     name: Real terminal resize (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
@@ -366,7 +379,7 @@ jobs:
           if-no-files-found: warn
 
   a2a-live:
-    if: *standard_ci
+    if: *full_ci
     needs: one-nexus-vfs-pin
     name: nexus-A2A live (real daemon)
     runs-on: ubuntu-latest
@@ -577,7 +590,7 @@ jobs:
           echo "vendored vfs.proto matches pinned nexus-vfs $NEXUS_PROTO_COMMIT"
 
   bench-compile:
-    if: *standard_ci
+    if: *full_ci
     name: cargo bench --no-run (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -620,7 +633,7 @@ jobs:
           if-no-files-found: warn
 
   clippy-workspace:
-    if: *standard_ci
+    if: *full_ci
     name: cargo clippy --workspace (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -783,6 +796,7 @@ jobs:
           cargo test -p rusty-sudocode-cli --test pty_headless -- --test-threads=1 --nocapture
           SCODE_LIVE_AUTH_PROFILE=sudorouter-azure SCODE_LIVE_MODEL=deepseek-v3.2-azure cargo test -p rusty-sudocode-cli --test pty_azure_inline_reasoning azure_live_file_roundtrip_has_a_final_answer -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_model_flag_priority configured_model_reads_updated_file_after_resume -- --test-threads=1 --nocapture
+          cargo test -p rusty-sudocode-cli --test pty_offline_delivery persisted_message_is_consumed_when_the_receiver_first_starts -- --exact --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_a2a_overlay queued_and_offline_messages_survive_receiver_restart -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_a2a_overlay pending_batch_and_two_runtimes_share_one_durable_reader -- --test-threads=1 --nocapture
           cargo test -p rusty-sudocode-cli --test pty_shared_session live_independent_runtimes_preserve_tools_and_outputs_in_one_session -- --ignored --exact --test-threads=1 --nocapture

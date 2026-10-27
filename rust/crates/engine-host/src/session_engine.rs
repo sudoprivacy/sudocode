@@ -889,6 +889,9 @@ impl SessionEngine {
             .runtime
             .install_compacted_session(result.compacted_session.clone());
         session.runtime.mark_compaction_committed(result);
+        session
+            .runtime
+            .publish_agent_description(result.agent_description.as_ref());
         Ok(())
     }
 

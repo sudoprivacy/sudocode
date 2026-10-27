@@ -170,6 +170,14 @@ pub(super) fn agent_list_card(
         if address != name {
             let _ = write!(row, " · send_to={address}");
         }
+        if let Some(description) = string(agent, "description") {
+            let _ = write!(row, " · {}", truncate_for_summary(description, 160));
+            if let Some(age) = string(agent, "description_updated_at")
+                .and_then(runtime::agent_description::relative_age)
+            {
+                let _ = write!(row, " · updated {age}");
+            }
+        }
         if let Some(active) = agent.get("active").and_then(Value::as_bool) {
             row.push_str(if active { " · active" } else { " · inactive" });
         }

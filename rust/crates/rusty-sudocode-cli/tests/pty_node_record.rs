@@ -139,10 +139,20 @@ fn an_offline_node_does_not_block_startup_or_resume() {
         node_home::write_untrusted_credential(&agents, SESSION_AGENT);
         let home = home_with_record(&env, &record("127.0.0.1:1", &agents));
         let home = home.to_string_lossy();
+        // A saved multi-agent choice must keep this Box rather than provision a
+        // second service when the configured one is temporarily unreachable.
+        std::fs::write(
+            env.config_home().join("runtime-profile.json"),
+            r#"{"schemaVersion":1,"mode":"shared"}"#,
+        )
+        .unwrap();
+        let services = env.workspace_root().join("unexpected-services");
+        let services_env = services.to_string_lossy();
         let vars = [
             ("HOME", home.as_ref()),
             ("USERPROFILE", home.as_ref()),
             ("SUDOCODE_INTERRUPT_QUEUE_MODE", mode),
+            ("SCODE_SERVICE_ROOT", services_env.as_ref()),
             ("PAGER", ""),
         ];
         let prompt = env.prompt("Reply with exactly OFFLINE_NODE_REPLY.", "single_turn_text");
@@ -188,6 +198,10 @@ fn an_offline_node_does_not_block_startup_or_resume() {
         resumed.send("/exit\r").expect("exit resumed session");
         assert_eq!(resumed.expect_eof().expect("resumed session exits"), 0);
         assert_no_disk_namespace(&env);
+        assert!(
+            !services.exists(),
+            "offline Box must not start another Nexus"
+        );
     }
 }
 

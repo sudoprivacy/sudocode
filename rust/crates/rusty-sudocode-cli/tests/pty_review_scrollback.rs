@@ -8,7 +8,12 @@ use std::process::Command;
 #[test]
 #[ignore = "requires the pinned real terminal host; explicitly run in rendering acceptance"]
 fn real_terminal_long_reviews_preserve_scrollback_and_reading_position() {
-    for kind in ["plan", "question"] {
+    for (kind, no_color) in [
+        ("plan", false),
+        ("question", false),
+        ("plan", true),
+        ("question", true),
+    ] {
         let env = TestEnv::new("review-scrollback");
         let saved_path = env.workspace_root().join("saved-review-session.jsonl");
         let mut saved = runtime::Session::new().with_workspace_root(env.workspace_root());
@@ -24,7 +29,7 @@ fn real_terminal_long_reviews_preserve_scrollback_and_reading_position() {
             .unwrap();
         saved.save_to_path(&saved_path).unwrap();
         let document = format!(
-            "# Full review document\n\n{}",
+            "# Full review document\n\n`src/main.rs`\n\n{}",
             (0..80)
                 .map(|i| format!(
                     "- **ReviewLine{i:03}**: preserve 中文 and exact e\u{301} source."
@@ -70,7 +75,10 @@ fn real_terminal_long_reviews_preserve_scrollback_and_reading_position() {
                 || env.workspace_root().join("terminal-logs"),
                 std::path::PathBuf::from,
             )
-            .join(format!("review-{kind}"));
+            .join(format!(
+                "review-{kind}{}",
+                if no_color { "-no-color" } else { "" }
+            ));
         let auth = if env.is_live() {
             std::env::var("SCODE_LIVE_AUTH_MODE").unwrap_or_else(|_| "proxy".into())
         } else {
@@ -81,6 +89,8 @@ fn real_terminal_long_reviews_preserve_scrollback_and_reading_position() {
         } else {
             "sonnet".into()
         };
+        // The shared terminal host clears NO_COLOR. Select the same NoColor
+        // renderer through TERM here; pty_plan_markdown tests the env override.
         let config = json!({
             "binary":common::scode_bin(),
             "args":["--auth",auth,"--model",model,"--permission-mode","workspace-write","--allowedTools","write_plan,AskUserQuestion","--resume",saved_path],
@@ -88,8 +98,12 @@ fn real_terminal_long_reviews_preserve_scrollback_and_reading_position() {
             "todos":env.workspace_root().join("todos.json"), "logRoot":log_root,
             "backend":std::env::var("SCODE_CONPTY_BACKEND").unwrap_or_else(|_| "bundled".into()),
             "cols":120, "rows":40, "prompt":prompt, "kind":kind,
-            "expected":80, "isLive":env.is_live(),
-            "env":{"SUDOCODE_PLAN_FILE":env.workspace_root().join("review-plan.md")}
+            "expected":80, "isLive":env.is_live(), "isNoColor":no_color,
+            "env":{
+                "SUDOCODE_PLAN_FILE":env.workspace_root().join("review-plan.md"),
+                "TERM":if no_color { "dumb" } else { "xterm-256color" },
+                "COLORTERM":"truecolor", "COLORFGBG":"15;0"
+            }
         });
         let script =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/terminal/review.cjs");

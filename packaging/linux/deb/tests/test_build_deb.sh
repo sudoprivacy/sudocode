@@ -37,6 +37,7 @@ for arch in amd64 arm64; do
   test -x "$TMP/package-root/usr/bin/scode"
   test -x "$TMP/package-root/usr/bin/scode-setup"
   test -x "$TMP/package-root/usr/lib/scode/scode-setup"
+  test -f "$TMP/package-root/usr/share/doc/scode/THIRD_PARTY_NOTICES.txt"
   grep -q 'Package: scode' "$TMP/package-root/DEBIAN/control"
   grep -q 'Version: 0.1.12' "$TMP/package-root/DEBIAN/control"
 

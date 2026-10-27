@@ -544,6 +544,7 @@ impl EngineEventRenderer {
             EngineEvent::PermissionDenied { .. }
             | EngineEvent::TurnStarted { .. }
             | EngineEvent::State(_)
+            | EngineEvent::InputState(_)
             | EngineEvent::ModelResolved { .. }
             | EngineEvent::Usage(_)
             | EngineEvent::PromptCache(_)

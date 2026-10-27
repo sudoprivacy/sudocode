@@ -195,6 +195,17 @@ enum Cmd {
     Login,
     /// Log out from the service
     Logout,
+    /// Choose local execution or prepare Sudocode's shared local services
+    Setup {
+        #[arg(long, value_enum, conflicts_with = "check")]
+        mode: Option<super::setup::RuntimeMode>,
+        /// Save an absolute registered Box owner root independently of frontend services
+        #[arg(long)]
+        owner_root: Option<PathBuf>,
+        /// Inspect preferences and services without installing or starting them
+        #[arg(long)]
+        check: bool,
+    },
     /// Update scode to the latest release and restart
     Update {
         /// Pin a release tag (e.g. v0.1.27); defaults to the latest release
@@ -302,13 +313,33 @@ enum AcpSub {
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum ServiceSub {
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub(crate) enum ServiceSub {
     /// Serve capabilities on a newline-delimited process channel
     Stdio,
     /// Run the OS-user service supervisor
     #[command(hide = true)]
     Daemon,
+    /// Register explicit local ownership of an existing authenticated Box; start nothing
+    RegisterLocalBox {
+        /// Absolute path to the operator's pinned resume-only declaration
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        owner_root: Option<PathBuf>,
+    },
+    /// Stop only this explicitly owned shared Box after coordinating all users
+    StopLocalBox {
+        #[arg(long)]
+        owner_root: Option<PathBuf>,
+        #[arg(long)]
+        node_id: String,
+        #[arg(long)]
+        binary_sha256: String,
+        /// Confirm the coordinated shared outage; this is process termination
+        #[arg(long, required = true)]
+        acknowledge_shared_outage: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -317,8 +348,14 @@ enum ServiceSub {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CliAction {
+    Setup {
+        mode: Option<super::setup::RuntimeMode>,
+        owner_root: Option<PathBuf>,
+        check: bool,
+        output_format: CliOutputFormat,
+    },
     Service {
-        is_daemon: bool,
+        action: ServiceSub,
     },
     Headless(super::headless::HeadlessOptions),
     DumpManifests {
@@ -467,6 +504,7 @@ impl CliAction {
                 | CliAction::Logout
                 | CliAction::Update { .. }
                 | CliAction::Service { .. }
+                | CliAction::Setup { .. }
         )
     }
 }
@@ -727,9 +765,17 @@ fn convert_cli_to_action(cli: Cli) -> Result<CliAction, String> {
                 yes,
             }),
             Cmd::Logout => Ok(CliAction::Logout),
-            Cmd::Service { action } => Ok(CliAction::Service {
-                is_daemon: matches!(action, ServiceSub::Daemon),
+            Cmd::Setup {
+                mode,
+                owner_root,
+                check,
+            } => Ok(CliAction::Setup {
+                mode,
+                owner_root,
+                check,
+                output_format,
             }),
+            Cmd::Service { action } => Ok(CliAction::Service { action }),
             Cmd::Export { session, output } => Ok(CliAction::Export {
                 session_reference: session,
                 output_path: output,

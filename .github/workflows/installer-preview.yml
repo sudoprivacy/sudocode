@@ -76,6 +76,7 @@ jobs:
           pkgroot="$(mktemp -d)/root"
           mkdir -p "$pkgroot"
           cp "target/release/${{ matrix.bin }}" "$pkgroot/scode"
+          cp "../THIRD_PARTY_NOTICES.txt" "$pkgroot/scode-third-party-notices.txt"
           chmod +x "$pkgroot/scode"
           # Bundle the interactive config wizard alongside the binary.
           cp "../packaging/macos/scode-setup.sh" "$pkgroot/scode-setup"

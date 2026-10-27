@@ -35,12 +35,58 @@ pub fn node_record_path() -> Option<PathBuf> {
 /// The fields of the node record `scode` reads. The record also names the
 /// node's deployment role and zone, which are the node owner's concern.
 #[derive(Debug, serde::Deserialize)]
-struct NodeRecord {
+pub struct NodeRecord {
     version: u32,
     /// `host:port`, dialled over mTLS.
     endpoint: String,
     /// Absolute directory holding one credential bundle per agent name.
     agents_dir: String,
+}
+
+impl NodeRecord {
+    /// Read the machine's configured Box without selecting an Agent or dialing it.
+    /// A present but unusable record is an error, never permission to create a
+    /// replacement service. Agent credentials are checked by `Config` later.
+    pub fn load() -> Result<Option<Self>, String> {
+        let Some(path) = node_record_path() else {
+            return Ok(None);
+        };
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("read node record {}: {error}", path.display())),
+        };
+        let record: Self = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse node record {}: {e}", path.display()))?;
+        if record.version != NODE_RECORD_VERSION {
+            return Err(format!(
+                "node record {} is version {}; this scode reads version {NODE_RECORD_VERSION}",
+                path.display(),
+                record.version
+            ));
+        }
+        if record.endpoint.contains("://") {
+            return Err(format!(
+                "node record {}: endpoint must be host:port without a scheme, got {}",
+                path.display(),
+                record.endpoint
+            ));
+        }
+        if !Path::new(&record.agents_dir).is_absolute() {
+            return Err(format!(
+                "node record {}: agents_dir must be an absolute path, got {}",
+                path.display(),
+                record.agents_dir
+            ));
+        }
+        Ok(Some(record))
+    }
+
+    /// Configured mTLS target; this alone does not prove Agent authentication.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
 }
 
 /// Resolved TLS material paths for an mTLS dial (all three mandatory - the
@@ -146,38 +192,10 @@ impl Config {
     /// with a scheme or a relative `agents_dir`; or `agent` has no credential
     /// there, or the credential belongs to another agent.
     pub fn from_node_record(agent: &str) -> Result<Option<Self>, String> {
-        let Some(path) = node_record_path() else {
+        let Some(record) = NodeRecord::load()? else {
             return Ok(None);
         };
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(format!("read node record {}: {error}", path.display())),
-        };
-        let record: NodeRecord = serde_json::from_str(&raw)
-            .map_err(|e| format!("parse node record {}: {e}", path.display()))?;
-        if record.version != NODE_RECORD_VERSION {
-            return Err(format!(
-                "node record {} is version {}; this scode reads version {NODE_RECORD_VERSION}",
-                path.display(),
-                record.version
-            ));
-        }
-        if record.endpoint.contains("://") {
-            return Err(format!(
-                "node record {}: endpoint must be host:port without a scheme, got {}",
-                path.display(),
-                record.endpoint
-            ));
-        }
         let agents_dir = Path::new(&record.agents_dir);
-        if !agents_dir.is_absolute() {
-            return Err(format!(
-                "node record {}: agents_dir must be an absolute path, got {}",
-                path.display(),
-                record.agents_dir
-            ));
-        }
         let bundle = agents_dir.join(agent);
         if !bundle.join(AgentCredential::MANIFEST).is_file() {
             return Err(format!(

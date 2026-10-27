@@ -27,6 +27,7 @@ pub(crate) fn build_config_tree_handler(
 ) -> SlashSelectionHandler {
     let items = vec!["settings.json".to_string(), "sudocode.json".to_string()];
     let question = QuestionPromptView {
+        presentation: runtime::QuestionPresentation::Question,
         title: Some("Config".to_string()),
         description: Some("Select config file to browse".into()),
         index: 0,
@@ -138,6 +139,7 @@ fn show_schema_level(
     };
 
     let question = QuestionPromptView {
+        presentation: runtime::QuestionPresentation::Question,
         title: Some("Config".to_string()),
         description: Some(title_path.into()),
         index: 0,
@@ -271,6 +273,7 @@ fn handle_leaf_edit(
                 })
                 .collect();
             let question = QuestionPromptView {
+                presentation: runtime::QuestionPresentation::Question,
                 title: Some("Config".to_string()),
                 description: Some(
                     format!(
@@ -334,6 +337,7 @@ fn handle_leaf_edit(
                 })
                 .collect();
             let question = QuestionPromptView {
+                presentation: runtime::QuestionPresentation::Question,
                 title: Some("Config".to_string()),
                 description: Some(
                     format!(

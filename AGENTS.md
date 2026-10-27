@@ -14,4 +14,4 @@ canonical doc.
 
 ## Landing a PR
 
-`main` lands through a merge queue. Land with `gh pr merge <n> --merge --auto`; direct and `--admin` merges are refused by design. Don't update a branch just to catch up with `main`. If landing looks blocked, never delete, disable or edit the merge-queue ruleset or the branch protection: they guarantee every commit on `main` passed CI. Tell the user instead. Details: [Pull request guidelines](./CONTRIBUTING.md#pull-request-guidelines).
+`main` lands through a merge queue. Land with `gh pr merge <n> --merge --auto`; direct and `--admin` merges are refused by design. Don't update a branch just to catch up with `main`. Open PRs as drafts while iterating and mark them ready once: heavy CI runs only on ready PRs and in the queue. If landing looks blocked, never delete, disable or edit the merge-queue ruleset or the branch protection: they guarantee every commit on `main` passed CI. Tell the user instead. Details: [Pull request guidelines](./CONTRIBUTING.md#pull-request-guidelines).

@@ -7357,6 +7357,7 @@ const timer = setInterval(() => {
             .contains("session_writer_busy"),
         "{rejected}"
     );
+    let journals = find_session_transcript(&workspace.root, &sid).with_extension("completions");
     for label in ["B1", "A2", "A1"] {
         let client = if label == "B1" {
             &mut second
@@ -7385,6 +7386,34 @@ const timer = setInterval(() => {
                 "completionId":event["params"]["completionId"],"disposition":"stored"
             }}))
             .await;
+        // Flushing the response does not wait for the transport task to commit
+        // its receipt. Observe this exact ACK before replay or process shutdown.
+        timeout(SUBAGENT_EVENTS_WAIT, async {
+            loop {
+                let is_stored = fs::read_dir(&journals).unwrap().any(|entry| {
+                    let path = entry.unwrap().path();
+                    if path.extension().is_none_or(|extension| extension != "json") {
+                        return false;
+                    }
+                    let saved: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                    saved["sources"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .any(|source| {
+                            source["payload"]["completionId"] == event["params"]["completionId"]
+                                && source["ack"] == "stored"
+                                && source["settled"] == true
+                        })
+                });
+                if is_stored {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completion ACK must be durable before replay and process shutdown");
     }
     for (client, expected) in [(&mut first, 2), (&mut second, 1)] {
         let (_, status) = client

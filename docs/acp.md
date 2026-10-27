@@ -49,7 +49,7 @@ behind your own auth proxy.
 One `scode acp` process serves **many sessions**. Requests are ordered per
 session and independent across sessions:
 
-- Requests on the **same** session (`session/prompt`, `session/setModel`,
+- Legacy requests on the **same** session (`session/prompt`, `session/setModel`,
   `session/setPermissionMode`, `session/close`) run strictly one at a time,
   in arrival order. Two prompts sent to one session never interleave.
 - Requests on **different** sessions run concurrently. In particular, a
@@ -73,6 +73,63 @@ does not imply that independent tools have stopped. Likewise, `ready` does not
 imply that the session's background tasks have finished; their shared task
 registry owns that lifecycle. These states follow operation and prompt events,
 not output silence or spinner timing.
+
+### Session-owned input delivery
+
+Hosts check `initialize.result._meta.sudocode.inputDelivery.version == 1`
+before using `_sudocode/session/input`. This extension shares the CLI's input
+coordinator in `engine-core`; hosts forward intent and project state instead
+of maintaining another turn scheduler. Unsupported agents keep the ordinary
+`session/prompt` path.
+
+Every request includes `sessionId` and an `action`:
+
+| Action | Behavior |
+| --- | --- |
+| `submit` | Supply a unique `clientId`, ACP text/image `content`, and `delivery: "steer"` or `"queue"`. Optional `display` is the queue preview; optional `draft` is opaque editor metadata returned on recall. |
+| `flush` | Make pending input eligible at the next safe model boundary without cancelling the current tool. |
+| `flush_or_cancel` | Flush pending input; if there is none, cancel the active turn. |
+| `recall` | Return all still-queued human inputs in FIFO order, including content and draft metadata. Peer and task notifications remain queued. |
+| `snapshot` | Return the current queue projection without starting a turn. |
+
+`steer` allows delivery at the next model boundary within the active turn.
+`queue` waits for the current turn to end. These actions do not interrupt a
+running tool to inject text. Idle input starts a new turn automatically.
+Cancellation through `session/cancel` always remains available and pauses
+unapplied input; an explicit human steer or flush resumes delivery. Delivery
+does not add a mandatory instruction to abandon the model's existing work.
+
+Replies carry `state`, with a monotonic `revision`, nullable `activeTurnId`,
+`running`, `paused`, and `pending`. Each pending item has an engine-assigned
+`id`, `clientId`, `display`, `source` (`human`, `peer`, `background`, or
+`subagent`), and delivery intent. Submission replies also carry `id`; recall
+replies carry `recalled`; flush replies carry `cancelled`.
+
+`_sudocode/session/input_update` notifications contain `sessionId` and `update`:
+
+- `state` publishes the revisioned projection. Ignore older snapshots, including
+  those in delayed request replies.
+- `committed` identifies the input whose content entered conversation history.
+  Admission alone is not consumption; hosts add user transcript bubbles here.
+- `turn_complete` carries the turn ID, stop reason, usage and cumulative usage.
+- `error` reports a failed automatic turn.
+
+Normal ACP streaming, permission and question interactions still apply,
+including turns started by background completion or peer input. Active native
+turns reject destructive lifecycle changes such as session reload or model
+switching while leaving queue controls and cancellation responsive. Legacy
+clients receive no input-delivery notifications until they use this extension.
+
+Pending drafts and request deduplication live in session memory. A snapshot can
+restore a host's view while the engine survives; it is not recovery after engine
+exit. On connection loss or an unknown admission outcome, inspect current state
+before retrying. Clear request correlation and revision state when the upstream
+session is replaced so replies from the old session cannot restore stale input.
+
+The wire types live in `engine-acp/src/input_control.rs`; scheduling and ownership
+live in `engine-core/src/session_inputs.rs` and `input_queue.rs`. Acceptance runs
+through `cargo test -p rusty-sudocode-cli --test pty_host_input_queue`; setting
+`SCODE_TEST_BACKEND=live` exercises the same workflows with the configured model.
 
 ### Human takeover of tools
 

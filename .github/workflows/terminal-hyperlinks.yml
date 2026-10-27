@@ -2,6 +2,7 @@ name: Browser terminal interaction
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
     paths: ['rust/**', 'e2e/terminal-resize/**', '.github/workflows/**']
   workflow_dispatch:
@@ -15,6 +16,8 @@ concurrency:
 
 jobs:
   browser:
+    # Not on draft PRs; see the heavy-job note in rust-ci.yml.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: Painted terminal links, selection and release A/B
     runs-on: ubuntu-24.04
     timeout-minutes: 120

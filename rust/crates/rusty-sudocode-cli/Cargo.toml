@@ -10,6 +10,7 @@ name = "scode"
 path = "src/main.rs"
 
 [dependencies]
+codex-mermaid.workspace = true
 process-text = { path = "../process-text" }
 arboard = { version = "3", features = ["image-data"] }
 async-trait = "0.1"
@@ -26,7 +27,7 @@ engine-host = { path = "../engine-host" }
 crossterm = "0.28"
 futures = "0.3"
 indicatif = "0.17"
-iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "a43bc2a9dfc30e636bdadc9582da9e39f91f5018" }
+iocraft = { git = "https://github.com/sudoprivacy/iocraft.git", rev = "4d11b67981ebc10e7b54d9c3175da728aaf4b4ba" }
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 pulldown-cmark = "0.13"
 rustyline = "15"

@@ -1,0 +1,23 @@
+syntax = "proto3";
+package nexus.raft;
+
+// Read-only harness subset of the pinned Nexus transport.proto, as in the
+// existing session-mint harness. Missing native fields/RPCs fail acceptance.
+service ZoneApiService {
+  rpc GetClusterInfo(GetClusterInfoRequest) returns (GetClusterInfoResponse);
+}
+message GetClusterInfoRequest { string zone_id = 1; }
+message GetClusterInfoResponse {
+  uint64 node_id = 1;
+  uint64 leader_id = 2;
+  uint64 term = 3;
+  ClusterConfig config = 4;
+  bool is_leader = 5;
+  optional string leader_address = 6;
+}
+message ClusterConfig {
+  repeated NodeInfo voters = 1;
+  repeated NodeInfo learners = 2;
+  repeated NodeInfo witnesses = 3;
+}
+message NodeInfo { uint64 id = 1; string address = 2; int32 role = 3; }

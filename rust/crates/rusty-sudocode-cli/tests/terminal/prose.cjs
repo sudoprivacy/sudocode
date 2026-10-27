@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 
 exports.run = async function run(host, config) {
   const { child, terminal, snapshot, viewport, settle, frame, resize, onPresentation } = host;
-  const hasSavedHistory = ['prose_resize', 'prose_finish_resize'].includes(config.scenario);
+  const hasSavedHistory = ['prose_resize', 'prose_queued_resize', 'prose_finish_resize'].includes(config.scenario);
 function normalizedProse(text) {
   // This fixture's URI suffix depends on terminal capabilities. Dedicated
   // hyperlink acceptance checks the destination; retain all visible prose here.
@@ -72,6 +72,25 @@ async function resizeWithInput(cols, rows, suffix) {
     child.write(suffix);
   });
 }
+async function resizeWithQueuedFrame(cols, rows, suffix) {
+  let isIntercepted = false;
+  const listener = child.onData(data => {
+    if (isIntercepted || !data.includes('\x1b[?2026h')) return;
+    isIntercepted = true;
+    // The shared observer has queued this old-size frame in xterm, whose
+    // asynchronous parser has not consumed it yet. Reproduce a frontend
+    // resize overtaking already emitted output, after every OS preflight.
+    assert.equal(terminal.cols, 60);
+    resize(cols, rows);
+  });
+  try {
+    await presentInput(cols, () => {
+      draft += suffix;
+      child.write(suffix);
+    });
+    assert(isIntercepted, 'the old-size frame was not intercepted');
+  } finally { listener.dispose(); }
+}
 async function prosePreview() {
   await settle(text => text.includes('❯'));
   child.write(config.prompt + '\r');
@@ -93,9 +112,11 @@ async function prosePreview() {
     console.log('SCODE_XTERM_PROSE_PASS');
     return;
   }
-  if (config.scenario === 'prose_resize') {
+  if (['prose_resize', 'prose_queued_resize'].includes(config.scenario)) {
     for (const [cols, rows, suffix] of [[60,40,'a'], [40,12,'b'], [120,40,'c'], [48,40,'d'], [120,40,'e']]) {
-      await resizeWithInput(cols, rows, suffix);
+      if (config.scenario === 'prose_queued_resize' && cols === 40)
+        await resizeWithQueuedFrame(cols, rows, suffix);
+      else await resizeWithInput(cols, rows, suffix);
       // Preview may be clipped in a tiny window; durable earlier history must survive.
       for (let i = 0; i < 70; i++)
         assert(snapshot().includes(`Earlier history line ${i}`), `lost history ${i}`);

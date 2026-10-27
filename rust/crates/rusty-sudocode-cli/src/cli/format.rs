@@ -1,6 +1,7 @@
 //! Pure formatting and report functions extracted from `main.rs`.
 
 mod a2a;
+mod plan;
 
 use std::fmt::Write as _;
 
@@ -142,6 +143,13 @@ pub(crate) fn render_message(
                     // (`""` if the call is missing, e.g. a truncated session) —
                     // the same pairing the live render engine does.
                     let input = tool_inputs.take(tool_use_id);
+                    if ToolKind::from_name(tool_name) == Some(ToolKind::WritePlan) {
+                        if let Some(document) = plan::replay(&input, output, renderer, term_width) {
+                            crate::render::layout_policy::LayoutPolicy::append_block(
+                                &mut out, &document,
+                            );
+                        }
+                    }
                     crate::render::layout_policy::LayoutPolicy::append_block(
                         &mut out,
                         &format_tool_result(tool_name, &input, output, *is_error),
@@ -726,6 +734,7 @@ pub(crate) enum ToolKind {
     ReadToolOutput,
     Send,
     AgentList,
+    WritePlan,
 }
 
 impl ToolKind {
@@ -745,6 +754,7 @@ impl ToolKind {
             Self::ReadToolOutput => "ReadToolOutput",
             Self::Send => "Send",
             Self::AgentList => "AgentList",
+            Self::WritePlan => "WritePlan",
         }
     }
 
@@ -773,6 +783,7 @@ impl ToolKind {
             "read_tool_output" => Some(Self::ReadToolOutput),
             "send" | "Send" => Some(Self::Send),
             "agent_list" | "AgentList" => Some(Self::AgentList),
+            "write_plan" | "WritePlan" => Some(Self::WritePlan),
             _ => None,
         }
     }
@@ -801,6 +812,7 @@ pub(crate) fn describe_tool_progress(name: &str, input: &str) -> String {
                 .unwrap_or("?")
         ),
         Some(ToolKind::AgentList) => "listing agents".to_string(),
+        Some(ToolKind::WritePlan) => "preparing plan review".to_string(),
         Some(ToolKind::Read) => format!("reading {}", extract_tool_path(&parsed)),
         Some(ToolKind::Write) => format!("writing {}", extract_tool_path(&parsed)),
         Some(ToolKind::Edit) => format!("editing {}", extract_tool_path(&parsed)),
@@ -891,6 +903,7 @@ pub(crate) fn tool_card_content(
             content
         }
         Some(ToolKind::AgentList) => a2a::agent_list_card(input, output, status),
+        Some(ToolKind::WritePlan) => plan::card(output, status),
         Some(ToolKind::Read) => read_card(input, output, status),
         Some(ToolKind::Write) => write_card(input, output, status),
         Some(ToolKind::Edit) => edit_card(input, output, status),
@@ -947,6 +960,8 @@ pub(crate) enum ToolStatus {
     Ok,
     /// Failed / denied / cancelled — red frame.
     Error,
+    /// A normal review decision that requests no execution.
+    Review,
 }
 
 /// The *semantic* content of a tool card, free of any frame, prefix, or
@@ -1017,6 +1032,7 @@ pub(crate) fn render_tool_card_with_width(
         ToolStatus::Running => colors.running,
         ToolStatus::Ok => colors.success,
         ToolStatus::Error => colors.error,
+        ToolStatus::Review => colors.queued,
     };
     // Keep the full identity cached so a running card reveals more on resize.
     let header = content.header.replace(['\n', '\r', '\t'], " ");
@@ -1063,6 +1079,11 @@ pub(crate) fn format_tool_result(name: &str, input: &str, output: &str, is_error
     let in_val: serde_json::Value = serde_json::from_str(input).unwrap_or(serde_json::Value::Null);
     let out_val: serde_json::Value =
         serde_json::from_str(payload).unwrap_or(serde_json::Value::String(payload.to_string()));
+    let status = if ToolKind::from_name(name) == Some(ToolKind::WritePlan) && !is_error {
+        plan::status(&out_val, status)
+    } else {
+        status
+    };
     let mut content = tool_card_content(name, &in_val, Some(&out_val), status);
     if is_error {
         // The extractor's success body (if any) is meaningless on failure;

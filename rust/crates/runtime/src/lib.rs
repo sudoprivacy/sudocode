@@ -5,6 +5,7 @@
 //! that drives interactive and one-shot turns.
 
 pub mod agent_color;
+pub mod agent_description;
 pub mod agent_mailbox;
 pub mod agent_types;
 pub mod background_tasks;
@@ -210,7 +211,7 @@ pub use permissions::{
     PermissionContext, PermissionMode, PermissionOutcome, PermissionOverride, PermissionPolicy,
     PermissionPromptDecision, PermissionPromptSink, PermissionPrompter, PermissionRequest,
     PromptQueue, PromptReply, PromptText, QuestionField, QuestionKind, QuestionOption,
-    QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
+    QuestionPresentation, QuestionPromptAnswer, QuestionPromptRequest, QuestionPrompter,
 };
 pub use plugin_lifecycle::{
     DegradedMode, DiscoveryResult, PluginHealthcheck, PluginLifecycle, PluginLifecycleEvent,

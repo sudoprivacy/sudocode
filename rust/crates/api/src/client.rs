@@ -106,9 +106,8 @@ impl ProviderClient {
                 let mut client = AnthropicClient::from_auth_with_mode(auth, mode)
                     .with_base_url(resolved.base_url.clone());
                 // `sudocode.json: cache_ttl_1h` overrides the default the auth
-                // mode picked. Applied here, once, before any request: the TTL
-                // is part of every `cache_control` block, so a value that moved
-                // between turns would rewrite the prefix it was holding.
+                // mode picked. This is the starting value; the engine may switch
+                // it later through the client's shared `CacheTtl`.
                 if let Some(ttl_1h) = resolved.cache_ttl_1h {
                     client = client.with_cache_ttl_1h(ttl_1h);
                 }
@@ -265,8 +264,17 @@ impl ProviderClient {
         Some((
             cache,
             client.cache_advisor_route_key(),
-            if client.cache_ttl_1h() { 3600 } else { 300 },
+            client.cache_ttl().seconds(),
         ))
+    }
+
+    /// The live prompt-cache TTL, for providers that send one.
+    #[must_use]
+    pub fn cache_ttl(&self) -> Option<&crate::CacheTtl> {
+        match self {
+            Self::Anthropic(client) => Some(client.cache_ttl()),
+            _ => None,
+        }
     }
 
     #[must_use]

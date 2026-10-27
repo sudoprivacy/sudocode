@@ -2,6 +2,7 @@ name: Shared services E2E
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
     paths:
       - 'rust/**'
@@ -17,6 +18,8 @@ concurrency:
 
 jobs:
   services:
+    # Not on draft PRs; see the heavy-job note in rust-ci.yml.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft) }}
     name: Shared services (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -44,6 +47,17 @@ jobs:
           if [ "$RUNNER_OS" = 'Windows' ]; then SUFFIX='.exe'; fi
           python e2e/shared-services/run.py --scode "rust/target/debug/scode${SUFFIX}" \
             --artifacts "${{ runner.temp }}/scode-services-evidence"
+      - name: Resume an explicitly owned authenticated Box through the real CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          source e2e/nexus-a2a/lib.sh
+          SUFFIX=''
+          if [ "$RUNNER_OS" = 'Windows' ]; then SUFFIX='.exe'; fi
+          GRPCURL="$(grpcurl_bin)"
+          python e2e/shared-services/existing_box.py --scode "rust/target/debug/scode${SUFFIX}" \
+            --grpcurl "$(native_path "$GRPCURL")" \
+            --artifacts "${{ runner.temp }}/scode-services-evidence/existing-box"
       - name: Preserve service startup failure logs
         if: failure()
         uses: actions/upload-artifact@v4

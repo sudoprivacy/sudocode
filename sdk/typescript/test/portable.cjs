@@ -22,8 +22,9 @@ try {
   fs.writeFileSync(consumer, `import { connectScode } from '@sudocode/acp/scodeAcp';
 import { sendScodeMessage } from '@sudocode/acp/scodeA2a';
 import { runScodeMcp } from '@sudocode/acp/mcp';
+import { connectCodex } from '@sudocode/acp';
 import { forwardScodeToCodex } from '@sudocode/acp/codexCallback';
-void [connectScode, sendScodeMessage, runScodeMcp, forwardScodeToCodex];
+void [connectScode, sendScodeMessage, runScodeMcp, connectCodex, forwardScodeToCodex];
 `);
   run(process.execPath, [path.join(root, 'node_modules/typescript/bin/tsc'),
     '--noEmit', '--strict', '--skipLibCheck', '--module', 'commonjs', '--moduleResolution', 'node',
@@ -48,6 +49,7 @@ void [connectScode, sendScodeMessage, runScodeMcp, forwardScodeToCodex];
   }
   const output = run(process.execPath, [path.join(root, 'dist/testing/mcpIntegration.cjs'), entry]);
   process.stdout.write(output);
+  process.stdout.write(run(process.execPath, [path.join(root, 'dist/testing/codexConnectionIntegration.cjs'), path.join(modules, '@sudocode/acp/dist/index.cjs')]));
   fs.appendFileSync(path.join(modules, '@sudocode/acp/dist/index.cjs'), '\n');
   assert.throws(() => run(process.execPath, [entry, '--verify'], { stdio: 'pipe' }), /integrity mismatch/);
   console.log(`PASS portable package: offline install, source ${packed.sourceCommit}, exclusive config, stdio calls and corruption refusal`);

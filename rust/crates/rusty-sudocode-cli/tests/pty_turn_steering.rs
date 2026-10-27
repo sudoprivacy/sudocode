@@ -950,11 +950,11 @@ fn pre_admission_boundary(pause_at: &str) {
         common::DEFAULT_TIMEOUT,
         "provider boundary is held open",
     );
-    // A server-side write is not client consumption. Reasoning activity
+    // A server-side write is not client consumption. Thinking activity
     // confirms the client has entered thinking; its text may be folded in UI.
     common::expect_screen(
         &session,
-        |view| view.contains("Reasoning"),
+        |view| view.contains("Thinking..."),
         common::DEFAULT_TIMEOUT,
         "client entered thinking before steering",
     );

@@ -16,6 +16,7 @@ mod background_completion;
 mod bash_mode;
 mod cancel;
 mod cli;
+mod clipboard_image;
 mod init;
 mod input;
 mod input_chrome;
@@ -845,6 +846,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let is_interactive_session = matches!(&action, CliAction::Repl { .. })
         || matches!(&action, CliAction::ResumeSession { commands, output_format: CliOutputFormat::Text, .. } if commands.is_empty());
     if is_interactive_session {
+        cli::setup::startup_prompt(matches!(&action, CliAction::Repl { .. }))?;
         cli::update::startup_prompt()?;
     }
     // Informational commands (help, version, config, login, logout) are
@@ -852,11 +854,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // If an ensure_authenticated() call is ever added below this point it
     // MUST be guarded by `if !action.is_informational()`.
     match action {
-        CliAction::Service { is_daemon } => {
-            let result = if is_daemon {
-                service_host::run_daemon()
-            } else {
-                service_host::run_stdio()
+        CliAction::Setup {
+            mode,
+            owner_root,
+            check,
+            output_format,
+        } => cli::setup::run(mode, owner_root, check, output_format)?,
+        CliAction::Service { action } => {
+            use cli::args::ServiceSub;
+            let result = match action {
+                ServiceSub::Daemon => service_host::run_daemon(),
+                ServiceSub::Stdio => service_host::run_stdio(),
+                ServiceSub::RegisterLocalBox { config, owner_root } => {
+                    service_host::register_local_box(&config, owner_root.as_deref())
+                        .map(|result| println!("{result}"))
+                }
+                ServiceSub::StopLocalBox {
+                    node_id,
+                    binary_sha256,
+                    owner_root,
+                    acknowledge_shared_outage: true,
+                } => {
+                    let owner_root = match owner_root {
+                        Some(root) => Some(root),
+                        None => cli::setup::selected_owner_root()?,
+                    };
+                    service_host::stop_local_box(&node_id, &binary_sha256, owner_root.as_deref())
+                        .map(|result| println!("{result}"))
+                }
+                ServiceSub::StopLocalBox { .. } => {
+                    return Err("A shared Box stop requires explicit outage acknowledgement".into())
+                }
             };
             result.map_err(|error| error as Box<dyn std::error::Error>)?;
         }
@@ -2168,6 +2196,27 @@ fn run_resume_command(
                 })),
             })
         }
+        SlashCommand::CacheTtl { value, .. } => {
+            // No live client here: a value can only become the saved default.
+            let message = match value.as_deref() {
+                Some(value) => {
+                    let pinned = match value {
+                        "1h" => Some(true),
+                        "5m" => Some(false),
+                        _ => None,
+                    };
+                    runtime::ConfigLoader::default_for(env::current_dir().unwrap_or_default())
+                        .save_cache_ttl_1h(pinned)?;
+                    format!("Saved · {value} as the prompt cache TTL for new sessions")
+                }
+                None => "The prompt cache TTL is shown in a running session: /cache ttl".to_owned(),
+            };
+            Ok(ResumeCommandOutcome {
+                session: session.clone(),
+                message: Some(message),
+                json: None,
+            })
+        }
         SlashCommand::History { count } => {
             let limit = parse_history_count(count.as_deref())
                 .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
@@ -2430,15 +2479,9 @@ fn run_repl_loop(mut cli: LiveCli) -> Result<(), Box<dyn std::error::Error>> {
                 print!("\x1b[J");
                 let _ = io::stdout().flush();
                 let trimmed = input.trim().to_string();
-                *cli.pending_images.borrow_mut() = editor
-                    .borrow_mut()
-                    .take_images()
-                    .into_values()
-                    .map(|(data, mime_type)| runtime::ContentBlock::Image { data, mime_type })
-                    .collect();
                 // An empty line only comes back while peer messages wait: the
                 // user handing the prompt back so they run, at the loop's top.
-                if trimmed.is_empty() && cli.pending_images.borrow().is_empty() {
+                if trimmed.is_empty() {
                     continue;
                 }
                 if matches!(trimmed.as_str(), "/exit" | "/quit") {
@@ -2850,6 +2893,7 @@ fn show_effort_selection(
     Some(show_slash_selection(
         ui,
         repl_ui::QuestionPromptView {
+            presentation: runtime::QuestionPresentation::Question,
             title: Some("Reasoning effort".to_string()),
             description: Some(
                 format!(
@@ -2918,6 +2962,7 @@ impl IocraftQuestionPrompter {
     fn show_field(&self, request: &runtime::QuestionPromptRequest, index: usize) {
         let field = &request.fields[index];
         self.ui.show_question(repl_ui::QuestionPromptView {
+            presentation: request.presentation.clone(),
             title: request.title.clone(),
             description: request.description.clone(),
             index,
@@ -3042,6 +3087,7 @@ impl runtime::PermissionPrompter for IocraftQuestionPrompter {
         request: &runtime::PermissionRequest,
     ) -> runtime::PromptReply<runtime::PermissionPromptDecision> {
         let question = runtime::QuestionPromptRequest {
+            presentation: runtime::QuestionPresentation::Question,
             title: Some(format!("Approve {}?", request.tool_name)),
             description: Some(
                 format!(
@@ -3418,6 +3464,71 @@ fn echo_peer_to_scrollback(output: &repl_ui::OutputSender, prompt: &str) {
     output.print_block(rendered);
 }
 
+/// The footer's cache-TTL tip and whether it offers a switch.
+fn cache_tip(session_id: &str, model: &str) -> repl_ui::CacheTip {
+    let advice = engine_core::cache_advisor::ttl_advice(session_id, model);
+    let actionable = advice.as_ref().is_some_and(|advice| {
+        advice.pending.is_none()
+            && advice.has_saving
+            && advice.suggested_seconds != advice.effective_seconds
+    });
+    repl_ui::CacheTip {
+        tip: engine_core::cache_advisor::session_tip(session_id, model),
+        advice,
+        actionable,
+    }
+}
+
+/// Choose this session's prompt-cache TTL and save it as the default. Returns
+/// the one-line notice saying when it takes effect.
+fn apply_cache_ttl(
+    session_id: &str,
+    choice: engine_core::cache_ttl::TtlChoice,
+    force_now: bool,
+) -> String {
+    use engine_core::cache_ttl::TtlChoice;
+    engine_core::cache_ttl::choose(session_id, choice, force_now);
+    let saved = runtime::ConfigLoader::default_for(env::current_dir().unwrap_or_default())
+        .save_cache_ttl_1h(match choice {
+            TtlChoice::OneHour => Some(true),
+            TtlChoice::FiveMinutes => Some(false),
+            TtlChoice::Auto => None,
+        });
+    let when = match (choice, force_now) {
+        (TtlChoice::OneHour, false) => {
+            "1h from the next cold start (idle past the TTL, compact, resume)"
+        }
+        (TtlChoice::OneHour, true) => "1h from the next request (rewrites the cached prefix once)",
+        (TtlChoice::FiveMinutes, _) => "5m from the next request",
+        (TtlChoice::Auto, _) => {
+            "auto: the auth mode decides (1h on a subscription, 5m on an API key)"
+        }
+    };
+    match saved {
+        Ok(_) => format!("Saved · {when}"),
+        Err(error) => format!("Applied to this session · could not save: {error}"),
+    }
+}
+
+/// `Prompt cache TTL: …` for `/cache` and `/cache ttl`.
+fn cache_ttl_status(session_id: &str) -> String {
+    use engine_core::cache_ttl::TtlChoice;
+    let status = engine_core::cache_ttl::status(session_id);
+    let now = status
+        .effective_seconds
+        .map_or("not sent yet", engine_core::cache_advisor::ttl_label);
+    let pending = status.pending.map_or(String::new(), |pending| {
+        let (label, when) = match (pending.choice, pending.force_now) {
+            (TtlChoice::OneHour, false) => ("1h", "at the next cold start"),
+            (TtlChoice::OneHour, true) => ("1h", "from the next request"),
+            (TtlChoice::FiveMinutes, _) => ("5m", "from the next request"),
+            (TtlChoice::Auto, _) => ("auto", "from the next suitable request"),
+        };
+        format!(" · pending {label} {when}")
+    });
+    format!("Prompt cache TTL: {now}{pending}")
+}
+
 fn run_repl_iocraft_dispatch(
     mut cli: LiveCli,
     mode: input_queue::QueueMode,
@@ -3438,6 +3549,8 @@ fn run_repl_iocraft_dispatch(
         }
     };
     let permission_label = cli.lifecycle.current_permission_mode().as_str().to_string();
+    // The TTL panel applies a choice without the LiveCli lock a turn holds.
+    let ttl_lifecycle = Arc::clone(&cli.lifecycle);
     // On resume, seed the status line with the session's running totals so the
     // ChromeSlot shows the previous result. Fresh-session guidance belongs
     // to the shared footer, leaving the upper status area empty until needed.
@@ -3478,7 +3591,7 @@ fn run_repl_iocraft_dispatch(
     let repl = repl_ui::spawn_repl_ui(&permission_label, &banner, seed_todos, Some(dequeue_hook));
     let (repl_output, repl_ui_cmd, input_rx, repl_spinner, repl_join) = repl.split();
     if let Some(status) = resume_status {
-        repl_ui_cmd.set_turn_result(&status);
+        repl_ui_cmd.set_turn_result(&status, cli.lifecycle.usage_snapshot().turns());
     }
     repl_ui_cmd.set_cache_tip(cli.cache_ttl_tip());
     let pending_question_answer: PendingQuestionAnswer = Arc::new(Mutex::new(None));
@@ -3850,6 +3963,12 @@ fn run_repl_iocraft_dispatch(
                         action: engine_events::BackgroundTaskAction::Stop { id },
                     });
                 }
+                repl_ui::InputEvent::SetCacheTtl { choice, force_now } => {
+                    let session_id = ttl_lifecycle.session_handle().id;
+                    repl_output.println(&apply_cache_ttl(&session_id, choice, force_now));
+                    repl_ui_cmd
+                        .set_cache_tip(cache_tip(&session_id, &ttl_lifecycle.current_model()));
+                }
                 repl_ui::InputEvent::InspectDocument(document) => {
                     // The turn owns LiveCli while awaiting its answer. Pager
                     // inspection needs only terminal ownership, never that lock
@@ -3966,6 +4085,7 @@ fn run_repl_iocraft_dispatch(
                             pending_slash_selection = Some(show_slash_selection(
                                 &repl_ui_cmd,
                                 repl_ui::QuestionPromptView {
+                                    presentation: runtime::QuestionPresentation::Question,
                                     title: Some("Model".to_string()),
                                     description: Some(format!("Current: {current}").into()),
                                     index: 0,
@@ -4080,7 +4200,10 @@ fn run_repl_iocraft_dispatch(
                             }
                             if refresh_context {
                                 if let Some(status) = cli_lock.resume_status_line() {
-                                    repl_ui_cmd.set_turn_result(&status);
+                                    repl_ui_cmd.set_turn_result(
+                                        &status,
+                                        cli_lock.lifecycle.usage_snapshot().turns(),
+                                    );
                                 }
                             }
                             if refresh_context
@@ -4348,7 +4471,6 @@ fn spawn_iocraft_turn(
 /// (audit finding B). It physically cannot drive a turn except through
 /// `engine_handle` (no `EngineDelegate`), and cannot reach into the runtime.
 struct LiveCli {
-    pending_images: RefCell<Vec<runtime::ContentBlock>>,
     /// The turn seam: `commands.send(Prompt/Cancel/PermissionAnswer/…)`,
     /// `events.recv()`. The ONLY way turns cross.
     engine_handle: EngineHandle,
@@ -4544,24 +4666,34 @@ impl runtime::QuestionPrompter for CliQuestionPrompter {
         &mut self,
         request: &runtime::QuestionPromptRequest,
     ) -> Result<Vec<runtime::QuestionPromptAnswer>, String> {
-        if let Some(title) = &request.title {
+        let is_plan = matches!(
+            request.presentation,
+            runtime::QuestionPresentation::PlanReview { .. }
+        );
+        if let Some(title) = request.title.as_ref().filter(|_| !is_plan) {
             println!();
             println!("{title}");
         }
         if let Some(description) = &request.description {
-            let rendered = TerminalRenderer::new().render_prompt_text(
+            let text = TerminalRenderer::new().render_question_document(
                 description,
-                render::query_terminal_width().saturating_sub(2),
+                &request.presentation,
+                render::query_terminal_width().saturating_sub(if is_plan { 0 } else { 2 }),
             );
-            let mut text = String::new();
-            rendered.write_ansi(0..rendered.text.len(), &mut text);
-            for line in text.lines() {
-                println!("  {line}");
+            if is_plan {
+                println!("{text}");
+            } else {
+                for line in text.lines() {
+                    println!("  {line}");
+                }
             }
         }
         let mut answers = Vec::new();
         for field in &request.fields {
-            if !field.prompt.is_empty() && request.title.as_deref() != Some(field.prompt.as_str()) {
+            if is_plan
+                || (!field.prompt.is_empty()
+                    && request.title.as_deref() != Some(field.prompt.as_str()))
+            {
                 println!();
                 println!("{}", field.prompt);
             }
@@ -4712,7 +4844,6 @@ impl LiveCli {
         }
 
         Ok(Self {
-            pending_images: RefCell::new(Vec::new()),
             engine_handle,
             lifecycle,
             prompt_history: Vec::new(),
@@ -4929,8 +5060,7 @@ impl LiveCli {
         // the call regardless of whether a `ui` overlay is present.
         let mut renderer =
             render.then(|| EngineEventRenderer::new(spinner_ref.cloned(), output.cloned()));
-        let mut blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
-        blocks.append(&mut self.pending_images.borrow_mut());
+        let blocks = runtime::image_input::prompt_blocks(input, &runtime::StdFsBackend)?;
         self.engine_handle.commands.send(EngineCommand::Prompt {
             blocks,
             context: None,
@@ -5156,7 +5286,7 @@ impl LiveCli {
         let token_budget = crate::render::parse_token_budget(input);
         let model = self.lifecycle.current_model();
         let mut spinner = SpinnerHandle::new(
-            render::activity::THINKING_LABEL,
+            render::activity::WORKING_LABEL,
             Some(model.as_str()),
             TerminalRenderer::new().color_theme(),
             token_budget,
@@ -5223,8 +5353,8 @@ impl LiveCli {
     }
 
     /// Read the engine's frozen recommendation without copying pricing logic.
-    fn cache_ttl_tip(&self) -> Option<engine_core::Tip> {
-        engine_core::cache_advisor::session_tip(
+    fn cache_ttl_tip(&self) -> repl_ui::CacheTip {
+        cache_tip(
             &self.lifecycle.session_handle().id,
             &self.lifecycle.current_model(),
         )
@@ -5285,9 +5415,9 @@ impl LiveCli {
             // ChromeSlot already renders it above the separator, and printing
             // it again duplicated the line in the terminal history.
             (Some(ui), Some(_)) => {
-                ui.set_turn_result(&line);
+                ui.set_turn_result(&line, turns);
             }
-            (Some(ui), None) => ui.set_turn_result(&line),
+            (Some(ui), None) => ui.set_turn_result(&line, turns),
             (None, Some(out)) => out.println(&line.to_string()),
             (None, None) => self.out_println(line.to_string()),
         }
@@ -5691,6 +5821,22 @@ impl LiveCli {
                 let session = self.lifecycle.session_snapshot();
                 let usage = UsageTracker::from_session(&session).cumulative_usage();
                 self.out_println(format_cost_report(usage));
+                self.out_println(cache_ttl_status(&self.lifecycle.session_handle().id));
+                false
+            }
+            SlashCommand::CacheTtl { value, now } => {
+                use engine_core::cache_ttl::TtlChoice;
+                let session_id = self.lifecycle.session_handle().id;
+                let choice = match value.as_deref() {
+                    Some("1h") => Some(TtlChoice::OneHour),
+                    Some("5m") => Some(TtlChoice::FiveMinutes),
+                    Some("auto") => Some(TtlChoice::Auto),
+                    _ => None,
+                };
+                match choice {
+                    Some(choice) => self.out_println(apply_cache_ttl(&session_id, choice, now)),
+                    None => self.out_println(cache_ttl_status(&session_id)),
+                }
                 false
             }
             SlashCommand::Context { action } => {

@@ -23,7 +23,8 @@ impl InputDelivery {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InputSource {
     Human,
     Peer,
@@ -37,6 +38,8 @@ pub struct TurnInput {
     pub text: String,
     pub display: String,
     pub source: InputSource,
+    /// Native image blocks travel with the input through queueing and steering.
+    pub attachments: Vec<crate::ContentBlock>,
 }
 
 /// Identity and display projection; expanded prompt content stays with its owner.

@@ -452,6 +452,7 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
         ("prose_wide", 120),
         ("prose_narrow", 48),
         ("prose_resize", 120),
+        ("prose_queued_resize", 120),
         ("prose_finish_resize", 120),
     ] {
         let env = TestEnv::new_mock(scenario);
@@ -465,7 +466,10 @@ fn real_terminal_handoff_and_resize_preserve_native_history() {
             "read-only",
         ];
         let saved_path = env.workspace_root().join("saved.jsonl");
-        if matches!(scenario, "prose_resize" | "prose_finish_resize") {
+        if matches!(
+            scenario,
+            "prose_resize" | "prose_queued_resize" | "prose_finish_resize"
+        ) {
             let mut saved = runtime::Session::new().with_workspace_root(env.workspace_root());
             saved.push_user_text("Saved conversation").unwrap();
             let mut body = String::new();

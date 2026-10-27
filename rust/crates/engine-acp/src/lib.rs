@@ -10,6 +10,7 @@ pub mod acp_sdk_server;
 pub mod acp_stdio_server;
 #[cfg(feature = "websocket")]
 pub mod acp_ws_server;
+mod input_control;
 #[cfg(feature = "mailbox")]
 pub mod managed_agent;
 mod session_driver;

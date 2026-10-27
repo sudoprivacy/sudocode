@@ -233,7 +233,12 @@ fn run_print_turn(env: &TestEnv, transcript: &std::path::Path, marker: &str) {
         ],
         &variables,
     );
-    cli.expect("The answer is 4").expect("resumed model answer");
+    cli.expect("The answer is 4").unwrap_or_else(|error| {
+        panic!(
+            "resumed model answer: {error:?}\n{}",
+            cli.render(|screen| screen.contents())
+        )
+    });
     assert_eq!(cli.expect_eof().unwrap(), 0);
 }
 

@@ -1370,7 +1370,7 @@ fn check_liveness_with_provider(
     observed.assert_liveness_completion(&bodies, is_tool, always_drops, interactive);
 }
 
-/// Reset only after real visible output and, when present, durable tool completion.
+/// Disconnect after visible output, or durable tool completion in print mode.
 fn release_body_disconnect(
     cli: &mut pty_expect::PtySession,
     env: &TestEnv,
@@ -1385,8 +1385,13 @@ fn release_body_disconnect(
     common::expect_screen(
         cli,
         |screen| {
-            common::screen_contains(screen, "STREAM_BODY_VERIFIED")
-                && (!is_tool || has_completed_liveness_tool(env))
+            if is_tool {
+                // Print mode publishes its final answer only. The saved tool
+                // result proves admission before the deliberately lost body.
+                has_completed_liveness_tool(env)
+            } else {
+                common::screen_contains(screen, "STREAM_BODY_VERIFIED")
+            }
         },
         budget,
         "real response admitted before connection disconnect",
@@ -1432,6 +1437,7 @@ fn http_body_disconnects_continue_saved_output_without_reexecuting_completed_too
             ResponseKind::ResponsesDropThenContinue,
             ResponseKind::ToolThenDrop,
         ] {
+            eprintln!("body disconnect: failure={failure:?}, kind={kind:?}");
             let env = TestEnv::new_mock("stream-disconnect");
             let provider = StreamProvider::disconnecting(kind, failure);
             check_liveness_with_provider(kind, "8", 2, true, &env, &provider);
